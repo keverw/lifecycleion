@@ -41,6 +41,36 @@ describe('adoptPromise', () => {
     expect(await settle(adoptPromise(promise))).toBe('constructor exploded');
   });
 
+  test('rejects, not hangs, for a non-constructor constructor with a no-op then', async () => {
+    // Resolved, so the limit - a rejection left unhandled - does not fire here.
+    const promise: object = Promise.resolve(1);
+    Object.defineProperty(promise, 'constructor', { value: 1 });
+    Object.defineProperty(promise, 'then', { value: () => undefined });
+
+    const outcome = await Promise.race([
+      settle(adoptPromise(promise)),
+      new Promise<string>((resolve) => {
+        setTimeout(() => {
+          resolve('hung');
+        }, 50);
+      }),
+    ]);
+
+    expect(outcome).not.toBe('hung');
+    expect(outcome).not.toBe('resolved');
+  });
+
+  test('adopts a promise-prototype fake with its own then as a thenable', async () => {
+    const fake: object = Object.create(Promise.prototype) as object;
+    Object.defineProperty(fake, 'then', {
+      value: (resolve: (value: number) => void): void => {
+        resolve(4);
+      },
+    });
+
+    expect(await adoptPromise<unknown>(fake)).toBe(4);
+  });
+
   test('adopts a non-promise thenable through its then', async () => {
     const thenable = {
       then: (resolve: (value: number) => void): void => {

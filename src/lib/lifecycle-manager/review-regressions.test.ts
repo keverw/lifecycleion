@@ -2912,7 +2912,7 @@ describe('LifecycleManager - review regressions', () => {
     expect(manager.getComponentNames()).toEqual(['a']);
   });
 
-  test('a registry that keeps moving under a registration refuses it', async () => {
+  test('a registration survives lazy wiring that registers a helper when read', async () => {
     const { logger, manager } = setup();
     const a = new Plain(logger, 'a');
     await manager.registerComponent(a);
@@ -2928,6 +2928,34 @@ describe('LifecycleManager - review regressions', () => {
       return [];
     };
 
+    const result = await manager.registerComponent(new Plain(logger, 'x'));
+
+    expect(result.success).toBe(true);
+    expect(manager.getComponentNames()).toContain('x');
+  });
+
+  test('a registry that every read keeps growing refuses the registration', async () => {
+    const { logger, manager } = setup();
+    let isInside = false;
+    let count = 0;
+
+    // Each link's read registers the next link, whose read registers the next.
+    class Link extends Plain {
+      public override getDependencies(): string[] {
+        if (!isInside) {
+          isInside = true;
+          void manager.registerComponent(new Link(logger, `link-${count++}`));
+          isInside = false;
+        }
+
+        return [];
+      }
+    }
+
+    isInside = true;
+    await manager.registerComponent(new Link(logger, 'first'));
+    isInside = false;
+
     const { reports, release } = claimReports();
     let result;
 
@@ -2937,10 +2965,9 @@ describe('LifecycleManager - review regressions', () => {
       release();
     }
 
-    expect(result.success).toBe(false);
     expect(result.code).toBe('unknown_error');
+    expect(result.reason).toContain('kept changing');
     expect(manager.getComponentNames()).not.toContain('x');
-    expect(result.reason).toContain('registration refused');
     expect(hasReport(reports, 'lifecycle-manager registerComponent')).toBe(
       true,
     );
@@ -2985,5 +3012,108 @@ describe('LifecycleManager - review regressions', () => {
 
     expect(result.success).toBe(true);
     expect(manager.getComponentNames()).toEqual(['x']);
+  });
+
+  test('an optional answer does not carry over to an instance that replaced it', async () => {
+    const { logger, manager } = setup();
+    const optionalCache = new Plain(logger, 'cache');
+    optionalCache.isOptional = (): boolean => true;
+    await manager.registerComponent(optionalCache);
+    const api = new Plain(logger, 'api', ['cache']);
+    await manager.registerComponent(api);
+    let hasSwapped = false;
+    Object.defineProperty(api, 'startupTimeoutMS', {
+      get: (): number => {
+        // Swapped for a required instance under the same name, after the optional
+        // one's answer was read.
+        if (!hasSwapped) {
+          hasSwapped = true;
+          void manager.unregisterComponent('cache');
+          void manager.registerComponent(new Plain(logger, 'cache'));
+        }
+
+        return 1_000;
+      },
+    });
+
+    const result = await manager.startComponent('api');
+
+    expect(result.code).toBe('dependency_not_running');
+    expect(manager.isComponentRunning('api')).toBe(false);
+  });
+
+  test('validateDependencies() checks the registry as it is once its reads settle', async () => {
+    const { logger, manager } = setup();
+    const x = new Plain(logger, 'x');
+    await manager.registerComponent(x);
+    await manager.registerComponent(new Plain(logger, 'db'));
+    await manager.registerComponent(new Plain(logger, 'api', ['db']));
+    let hasReentered = false;
+    x.getDependencies = (): string[] => {
+      if (!hasReentered) {
+        hasReentered = true;
+        void manager.unregisterComponent('db');
+      }
+
+      return [];
+    };
+
+    const result = manager.validateDependencies();
+
+    expect(manager.getComponentNames()).toEqual(['x', 'api']);
+    expect(result.valid).toBe(false);
+    expect(result.missingDependencies).toEqual([
+      {
+        componentName: 'api',
+        componentIsOptional: false,
+        missingDependency: 'db',
+      },
+    ]);
+  });
+
+  test('a registration made while dependents are listed does not list one twice', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a', ['db']);
+    await manager.registerComponent(new Plain(logger, 'db'));
+    await manager.registerComponent(a);
+    let hasReentered = false;
+    a.getDependencies = (): string[] => {
+      if (!hasReentered) {
+        hasReentered = true;
+        void manager.insertComponentAt(new Plain(logger, 'z'), 'start');
+      }
+
+      return ['db'];
+    };
+
+    const dependents = (
+      manager as unknown as { getDependents: (name: string) => string[] }
+    ).getDependents('db');
+
+    expect(dependents).toEqual(['a']);
+  });
+
+  test('a throwing _isRegisteredWithManager() still emits registration-rejected', async () => {
+    const { logger, manager } = setup();
+    const c = new Plain(logger, 'c');
+    c._isRegisteredWithManager = (): never => {
+      throw new Error('isRegistered exploded');
+    };
+    const rejected: unknown[] = [];
+    manager.on('component:registration-rejected', (event) => {
+      rejected.push(event);
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.registerComponent(c);
+    } finally {
+      release();
+    }
+
+    expect(result.code).toBe('unknown_error');
+    expect(rejected).toHaveLength(1);
   });
 });

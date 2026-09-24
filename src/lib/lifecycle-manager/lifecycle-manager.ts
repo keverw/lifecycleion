@@ -158,6 +158,13 @@ interface ShutdownPassOptions {
  */
 const MAX_DECLARED_DEPENDENCIES = 10_000;
 
+/**
+ * How many rounds of reads `LifecycleManager.readRegistryDependencies()` makes before it
+ * gives up on a registry that every read changes. Each round reads only the components
+ * registered by the round before, so ordinary lazy wiring settles in one or two.
+ */
+const MAX_REGISTRY_READ_ROUNDS = 16;
+
 /** One read of a component's `getDependencies()`; see `LifecycleManager.tryReadDependencies()`. */
 type DependencyRead =
   { dependencies: string[]; invalidEntry?: TypeError } | { error: unknown };
@@ -314,10 +321,6 @@ export class LifecycleManager
   // Each registered component's name, read once when it is committed to the registry.
   // See {@link nameOf}.
   private readonly registeredNames = new WeakMap<BaseComponent, string>();
-  // Bumped on every change to `this.components`, so a registration can tell whether the
-  // registry moved under it while it ran the caller's code. See
-  // `registerNamedComponent()`.
-  private registryVersion = 0;
   // How deep the manager is inside escalation handling - `onForceShutdown` and the
   // escalation events it emits. A shutdown request made from in there continues the
   // cycle being handled rather than starting one. See `acceptShutdownPass()`.
@@ -839,9 +842,10 @@ export class LifecycleManager
           ? 'dependency_cycle'
           : 'unknown_error';
 
-      // A cycle is the caller's configuration, answered by its code; anything else is a
-      // component breaking its contract - a throwing getter - and is reported on the
-      // global channel, as every other `unknown_error` is.
+      // A cycle is the caller's configuration, answered by its code; anything else is
+      // unplanned - dependency lists are read tolerantly here, so not a broken
+      // `getDependencies()`, which fails only that component's own start - and is
+      // reported on the global channel, as every other `unknown_error` is.
       if (code === 'unknown_error') {
         reportCallbackError('lifecycle-manager getStartupOrder', error);
       }
@@ -901,20 +905,53 @@ export class LifecycleManager
       dependencies: string[];
     }> = [];
 
-    // Over a copy: the reads run the component's code, which can register or unregister
-    // re-entrantly and shift the live registry under the loop.
-    for (const component of [...this.components]) {
-      const name = this.nameOf(component);
+    // Read until the reads stop changing the registry, as registration reads it: they
+    // run components' code, which can register or unregister re-entrantly, and a check
+    // over the registry as it was when the loop began listed components that were gone
+    // and missed ones that had arrived - `valid: true` for a registry whose startup then
+    // failed. The graph is the live registry once the reads settle.
+    const reads = new Map<
+      BaseComponent,
+      { isOptional: boolean; read: DependencyRead }
+    >();
 
-      // The one rule startup applies, through the one helper: a throw is reported once
-      // and read as required.
-      const isOptional = this.isComponentOptional(component);
-      // Reported once per registration, like every other read of it: the failure is in
-      // the result already, and a caller polling this would flood the channel.
-      const read = this.readDependenciesReported(
-        component,
-        'validateDependencies',
+    // The last round only checks for components left unread; it reads none.
+    for (let round = 0; round <= MAX_REGISTRY_READ_ROUNDS; round++) {
+      const unread = this.components.filter(
+        (component) => !reads.has(component),
       );
+
+      if (unread.length === 0 || round === MAX_REGISTRY_READ_ROUNDS) {
+        break;
+      }
+
+      for (const component of unread) {
+        reads.set(component, {
+          // The one rule startup applies, through the one helper: a throw is reported
+          // once and read as required.
+          isOptional: this.isComponentOptional(component),
+          // Reported once per registration, like every other read of it: the failure
+          // is in the result already, and a caller polling this would flood the channel.
+          read: this.readDependenciesReported(
+            component,
+            'validateDependencies',
+          ),
+        });
+      }
+    }
+
+    for (const component of this.components) {
+      const name = this.nameOf(component);
+      // Only missing for a registry that every read kept changing: nothing is known
+      // about the component, which is no basis for "valid".
+      const { isOptional, read } = reads.get(component) ?? {
+        isOptional: false,
+        read: {
+          error: new Error(
+            'The registry kept changing while dependencies were being validated',
+          ),
+        },
+      };
 
       if (!('dependencies' in read) || read.invalidEntry !== undefined) {
         unreadableDependencies.push({
@@ -2451,7 +2488,6 @@ export class LifecycleManager
 
     // Remove from registry
     this.components = this.components.filter((c) => this.nameOf(c) !== name);
-    this.registryVersion++;
 
     // Clean up state - the manager's own maps first, all of them, so the component is
     // either fully registered or fully gone. The component's hooks run after, contained:
@@ -3621,12 +3657,7 @@ export class LifecycleManager
 
     // Teardown may outlive the bulk shutdown latch. Do not enter a health hook
     // while either stop phase is still using the component.
-    const state = this.componentStates.get(name);
-    if (
-      !this.isComponentRunning(name) ||
-      state === 'stopping' ||
-      state === 'force-stopping'
-    ) {
+    if (!this.isComponentUp(name)) {
       const isStalled = this.stalledComponents.has(name);
       return {
         name,
@@ -3854,67 +3885,38 @@ export class LifecycleManager
       );
     }
 
-    return this.registerNamedComponent(
-      component,
-      componentName,
-      position,
-      targetComponentName,
-      isInsertAction,
-      _options,
-      false,
-    );
-  }
+    // Read again once the reads below are done: they can register the name.
+    let registrationIndexBefore = this.getComponentIndex(componentName);
 
-  /**
-   * Registration, once the name is read. Every check it makes runs before the commit,
-   * but so does the caller's code - the logger, `_isRegisteredWithManager()`, and every
-   * component's `getDependencies()` - which can register, unregister, start a bulk
-   * startup or begin a shutdown re-entrantly. Committing on checks made before that
-   * registered a second component under a taken name, inserted at a stale index, and
-   * trusted a cycle check made against a registry that had since changed. So the
-   * registry, shutdown and startup state are compared again right before the commit,
-   * and a registration that finds them moved runs its checks once more from the top. A
-   * registry that moves under that second run too is refused as a broken contract, the
-   * way a throwing `getName()` is, rather than retried without end.
-   */
-  private async registerNamedComponent(
-    component: BaseComponent,
-    componentName: string,
-    position: InsertPosition,
-    targetComponentName: string | undefined,
-    isInsertAction: boolean,
-    _options: RegisterOptions | undefined,
-    isRetry: boolean,
-  ): Promise<InsertComponentAtResult> {
-    const registryVersionAtStart = this.registryVersion;
-    const wasStartingAtStart = this.isStarting;
-    // A shutdown that began meanwhile counts too: this run passed the shutdown check
-    // before it began.
-    const hasStateMoved = (): boolean =>
-      this.registryVersion !== registryVersionAtStart ||
-      this.isStarting !== wasStartingAtStart ||
-      this.isShuttingDown;
-    // The checks from the top once more; a second move is a refusal. See above.
-    const retry = (): Promise<InsertComponentAtResult> => {
-      if (isRetry) {
+    try {
+      // Everything of the caller's code registration needs is read first - whether the
+      // instance says it is registered, its own dependency list, and every registered
+      // component's list - and every check that decides the registration runs after,
+      // synchronously, up to the commit. Those reads can register, unregister, start a
+      // bulk startup or begin a shutdown re-entrantly; checks made before them committed
+      // a second component under a taken name, inserted at a stale index, and trusted a
+      // cycle check made against a registry that had since changed. A refusal may still
+      // log and emit its event - it returns straight after.
+      // Strict: a `getDependencies()` that throws, or reports an implausible length,
+      // refuses the registration - once the checks ahead of it have passed, as before. A
+      // non-string entry does not - its own start fails on it - but is reported once the
+      // registration commits: a refused one must not spend the report the next
+      // registration makes.
+      const candidateRead = this.tryReadDependencies(component);
+      const dependencySnapshot = this.readRegistryDependencies('registration');
+      // Last, so a read above that registered this instance elsewhere is seen.
+      const isRegisteredWithAManager = component._isRegisteredWithManager();
+      registrationIndexBefore = this.getComponentIndex(componentName);
+
+      // A registry that kept changing under the reads above - each read registering
+      // another component whose own list then had to be read - is refused as a broken
+      // contract, the way a throwing `getName()` is.
+      if (dependencySnapshot === null) {
         throw new Error(
-          `The registry changed again while "${componentName}" was being registered; registration refused`,
+          `The registry kept changing while "${componentName}" was being registered; registration refused`,
         );
       }
 
-      return this.registerNamedComponent(
-        component,
-        componentName,
-        position,
-        targetComponentName,
-        isInsertAction,
-        _options,
-        true,
-      );
-    };
-    const registrationIndexBefore = this.getComponentIndex(componentName);
-
-    try {
       if (!this.isInsertPosition(position)) {
         this.logger.entity(componentName).warn('Invalid insertion position', {
           params: { position },
@@ -3974,7 +3976,12 @@ export class LifecycleManager
 
       // Block registration during startup if this component would be a dependency
       // for any already-registered component (would break dependency ordering)
-      if (this.isRequiredDependencyDuringStartup(componentName)) {
+      if (
+        this.isRequiredDependencyDuringStartup(
+          componentName,
+          dependencySnapshot,
+        )
+      ) {
         this.logger
           .entity(componentName)
           .warn(
@@ -4006,8 +4013,9 @@ export class LifecycleManager
         });
       }
 
-      // Check if component instance is already registered
-      if (component._isRegisteredWithManager()) {
+      // Check if component instance is already registered - here, by the instance's own
+      // answer, or with this manager since that answer was read
+      if (isRegisteredWithAManager || this.hasComponentInstance(component)) {
         const isRegisteredHere = this.hasComponentInstance(component);
         const message = isRegisteredHere
           ? LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE
@@ -4097,7 +4105,11 @@ export class LifecycleManager
         let startupOrder: string[];
 
         try {
-          startupOrder = this.getStartupOrderInternal();
+          startupOrder = this.getStartupOrderInternal(
+            undefined,
+            undefined,
+            dependencySnapshot,
+          );
         } catch (error) {
           // Defensive: This should never happen in normal operation since we validate
           // cycles before registration. However, if this.components somehow contains
@@ -4137,14 +4149,11 @@ export class LifecycleManager
       // Compute dependency order *before* committing registration mutations.
       // This avoids leaving the registry/state maps inconsistent if a dependency
       // cycle is detected.
-      const nextComponents = [...this.components];
-      nextComponents.splice(insertIndex, 0, component);
-
-      // The candidate's list read strictly, once: a `getDependencies()` that throws, or
-      // reports an implausible length, refuses it at the door. A non-string entry does
-      // not - its own start fails on it - but is reported once the registration commits:
-      // a refused one must not spend the report the next registration makes.
-      const candidateRead = this.tryReadDependencies(component);
+      const nextComponents = [
+        ...this.components.slice(0, insertIndex),
+        component,
+        ...this.components.slice(insertIndex),
+      ];
 
       if (!('dependencies' in candidateRead)) {
         throw candidateRead.error;
@@ -4153,17 +4162,16 @@ export class LifecycleManager
       let startupOrder: string[];
 
       try {
-        startupOrder = this.getStartupOrderInternal(nextComponents, {
-          component,
-          name: componentName,
-          dependencies: candidateRead.dependencies,
-        });
+        startupOrder = this.getStartupOrderInternal(
+          nextComponents,
+          {
+            component,
+            name: componentName,
+            dependencies: candidateRead.dependencies,
+          },
+          dependencySnapshot,
+        );
       } catch (error) {
-        // A cycle found in a registry that has since moved may no longer be one.
-        if (error instanceof DependencyCycleError && hasStateMoved()) {
-          return await retry();
-        }
-
         if (error instanceof DependencyCycleError) {
           this.logger
             .entity(componentName)
@@ -4206,12 +4214,6 @@ export class LifecycleManager
       // An instance registered before keeps its old recorded name after unregistering,
       // for work still in flight; a rollback below puts that back rather than dropping
       // it.
-      // Last check before the commit; see the method's note. Nothing between here and
-      // the splice below runs the caller's code.
-      if (hasStateMoved()) {
-        return await retry();
-      }
-
       const previousRecordedName = this.registeredNames.get(component);
       // What the report-once marks held before this attempt, so a rollback clears only
       // marks it made itself.
@@ -4220,8 +4222,9 @@ export class LifecycleManager
       const wasOptionalReported =
         this.reportedOptionalReadFailures.has(component);
 
-      this.components.splice(insertIndex, 0, component);
-      this.registryVersion++;
+      // A new array rather than a splice, as unregister does: a loop over the registry
+      // that a re-entrant registration lands in keeps walking the array it started on.
+      this.components = nextComponents;
       this.registeredNames.set(component, componentName);
       this.componentStates.set(componentName, 'registered');
       this.componentTimestamps.set(componentName, {
@@ -4269,7 +4272,6 @@ export class LifecycleManager
         this.components = this.components.filter(
           (registered) => registered !== component,
         );
-        this.registryVersion++;
         if (previousRecordedName === undefined) {
           this.registeredNames.delete(component);
         } else {
@@ -5860,12 +5862,12 @@ export class LifecycleManager
   }
 
   /**
-   * Whether a dependency is up for a dependent to start on: running, and not on its way
-   * down. A stopping dependency stays running until its stop settles, and that stop
-   * already checked for running dependents - a dependent started under it ran on a
-   * stopped dependency.
+   * Whether a component is up: running, and not on its way down. A stopping component
+   * stays in `runningComponents` until its stop settles. A dependent must not start on
+   * one - that stop already checked for running dependents, so the dependent ran on a
+   * stopped dependency - and a health check must not call into one mid-stop.
    */
-  private isDependencyUp(name: string): boolean {
+  private isComponentUp(name: string): boolean {
     const state = this.componentStates.get(name);
 
     return (
@@ -6077,8 +6079,10 @@ export class LifecycleManager
 
     // Read only where it decides something: a dependency that is not up, and only
     // without the override, which ignores the answer. One that stops after this read
-    // has no answer and is held to required below - the conservative reading.
-    const optionalDependencies = new Set<string>();
+    // has no answer and is held to required below - the conservative reading. Kept by
+    // instance: the answer is that instance's, and one that has since been replaced
+    // under its name answered nothing.
+    const optionalDependencies = new Map<string, BaseComponent>();
 
     if (!flags.allowNonRunningDependencies) {
       for (const dependencyName of ownDependencies.dependencies) {
@@ -6086,10 +6090,10 @@ export class LifecycleManager
 
         if (
           dependency !== undefined &&
-          !this.isDependencyUp(dependencyName) &&
+          !this.isComponentUp(dependencyName) &&
           this.isComponentOptional(dependency)
         ) {
-          optionalDependencies.add(dependencyName);
+          optionalDependencies.set(dependencyName, dependency);
         }
       }
     }
@@ -6118,7 +6122,9 @@ export class LifecycleManager
     const skippedDependencyWarnings: string[] = [];
 
     for (const dependencyName of ownDependencies.dependencies) {
-      if (this.getComponent(dependencyName) === undefined) {
+      const dependency = this.getComponent(dependencyName);
+
+      if (dependency === undefined) {
         return {
           success: false,
           componentName: name,
@@ -6128,7 +6134,7 @@ export class LifecycleManager
         };
       }
 
-      if (this.isDependencyUp(dependencyName)) {
+      if (this.isComponentUp(dependencyName)) {
         continue;
       }
 
@@ -6140,7 +6146,7 @@ export class LifecycleManager
         continue;
       }
 
-      if (optionalDependencies.has(dependencyName)) {
+      if (optionalDependencies.get(dependencyName) === dependency) {
         // Optional dependencies never block startup
         skippedDependencyWarnings.push(
           `Starting with non-running optional dependency "${dependencyName}"`,
@@ -7458,7 +7464,11 @@ export class LifecycleManager
    * @param componentName - Component name to check
    * @returns true if this component would be a required dependency
    */
-  private isRequiredDependencyDuringStartup(componentName: string): boolean {
+  private isRequiredDependencyDuringStartup(
+    componentName: string,
+    // Registration's lists, read before its checks; see `readRegistryDependencies()`.
+    dependencySnapshot: ReadonlyMap<BaseComponent, string[]>,
+  ): boolean {
     // Not before the startup's loop has begun - a `signals-attached` listener
     // registering it: the loop computes its order after this, and starts it in turn.
     if (!this.isStarting || this.activeBulkStartup === null) {
@@ -7469,7 +7479,7 @@ export class LifecycleManager
     // Guarded, for the reason `getDependents()` guards it: another component's getter
     // must not fail this registration.
     return this.components.some((c) =>
-      this.readDependencies(c, 'registration').includes(componentName),
+      (dependencySnapshot.get(c) ?? []).includes(componentName),
     );
   }
 
@@ -8446,6 +8456,44 @@ export class LifecycleManager
   }
 
   /**
+   * Every registered component's dependency list, read tolerantly, until reading stops
+   * changing the registry: a read that registers another component has that one's list
+   * read too. The registry itself is the live one afterwards - a component unregistered
+   * meanwhile is simply not in it - and every component in it has a list here, so the
+   * checks that use these run none of the caller's code. `null` when the registry was
+   * still changing after `MAX_REGISTRY_READ_ROUNDS` rounds of reads.
+   */
+  private readRegistryDependencies(
+    context: string,
+  ): Map<BaseComponent, string[]> | null {
+    const dependencySnapshot = new Map<BaseComponent, string[]>();
+
+    // The last round only checks for components left unread; it reads none.
+    for (let round = 0; round <= MAX_REGISTRY_READ_ROUNDS; round++) {
+      const unread = this.components.filter(
+        (component) => !dependencySnapshot.has(component),
+      );
+
+      if (unread.length === 0) {
+        return dependencySnapshot;
+      }
+
+      if (round === MAX_REGISTRY_READ_ROUNDS) {
+        break;
+      }
+
+      for (const component of unread) {
+        dependencySnapshot.set(
+          component,
+          this.readDependencies(component, context),
+        );
+      }
+    }
+
+    return null;
+  }
+
+  /**
    * Dependency-aware startup order.
    *
    * - Only registered components are included.
@@ -8461,13 +8509,9 @@ export class LifecycleManager
       name: string;
       dependencies: string[];
     },
+    // Lists registration already read, so ordering runs none of the caller's code.
+    dependencySnapshot?: ReadonlyMap<BaseComponent, string[]>,
   ): string[] {
-    // A copy, walked in step with `names`: the reads below run components' code, and a
-    // registration made from inside one spliced the live registry under the loop - every
-    // later component's edges went to its neighbour's name, or to `undefined`, and a
-    // bulk startup failed on a cycle that was not there.
-    components = [...components];
-
     // Each name is resolved once, here. A registration candidate is not recorded yet, so
     // it is named by the value registration already read from it rather than asked
     // again - a second `getName()` could answer differently, or throw.
@@ -8497,7 +8541,8 @@ export class LifecycleManager
       const dependencies =
         component === candidate?.component
           ? candidate.dependencies
-          : this.readDependencies(component, 'ordering');
+          : (dependencySnapshot?.get(component) ??
+            this.readDependencies(component, 'ordering'));
 
       for (const dep of dependencies) {
         if (!regIndex.has(dep)) {
