@@ -2190,7 +2190,7 @@ describe('LifecycleManager - review regressions', () => {
     expect(manager.getComponentStatus('a')?.state).toBe('stopped');
   });
 
-  test('validateDependencies flags non-string dependency entries and a throwing isOptional', async () => {
+  test('validateDependencies flags non-string dependency entries, and reads a throwing isOptional as required', async () => {
     const { logger, manager } = setup();
     const a = new Plain(logger, 'a');
     const b = new Plain(logger, 'b');
@@ -2212,9 +2212,9 @@ describe('LifecycleManager - review regressions', () => {
 
     expect(result.valid).toBe(false);
     expect(
-      result.unreadableDependencies.map((entry) => entry.componentName).sort(),
-    ).toEqual(['a', 'b']);
-    expect(result.summary.totalUnreadableDependencies).toBe(2);
+      result.unreadableDependencies.map((entry) => entry.componentName),
+    ).toEqual(['a']);
+    expect(result.summary.totalUnreadableDependencies).toBe(1);
   });
 
   test('a dependency list reporting an implausible length is rejected, not iterated', async () => {
@@ -2603,5 +2603,205 @@ describe('LifecycleManager - review regressions', () => {
         (report as Error).message.includes('dependencies of hostile'),
       ),
     ).toHaveLength(1);
+  });
+
+  test('a start re-entered from its own getDependencies() runs start() once', async () => {
+    const { logger, manager } = setup();
+    const c = new Plain(logger, 'c');
+    let startCalls = 0;
+    let hasReentered = false;
+    let innerStart: Promise<unknown> | undefined;
+    c.start = async (): Promise<void> => {
+      startCalls++;
+      await sleep(5);
+    };
+    await manager.registerComponent(c);
+    c.getDependencies = (): string[] => {
+      if (!hasReentered) {
+        hasReentered = true;
+        innerStart = manager.startComponent('c');
+      }
+
+      return [];
+    };
+
+    const outer = await manager.startComponent('c');
+    const inner = (await innerStart) as { success: boolean; code?: string };
+
+    // Whichever claims first starts it; the other is refused as starting.
+    expect(startCalls).toBe(1);
+    expect([outer.success, inner.success].sort()).toEqual([false, true]);
+    expect([outer.code, inner.code]).toContain('component_already_starting');
+  });
+
+  test('a start whose component was unregistered by its own getDependencies() is refused', async () => {
+    const { logger, manager } = setup();
+    const c = new Plain(logger, 'c');
+    let startCalls = 0;
+    c.start = (): Promise<void> => {
+      startCalls++;
+
+      return Promise.resolve();
+    };
+    await manager.registerComponent(c);
+    c.getDependencies = (): string[] => {
+      void manager.unregisterComponent('c');
+
+      return [];
+    };
+
+    const result = await manager.startComponent('c');
+
+    expect(result.code).toBe('component_not_found');
+    expect(startCalls).toBe(0);
+  });
+
+  test("a registration refused as a cycle does not spend the next registration's report", async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a', ['b']));
+    const b = new Plain(logger, 'b');
+    b.getDependencies = (): string[] => ['a', 5 as unknown as string];
+
+    const { reports, release } = claimReports();
+
+    const reportsOfB = (): number =>
+      reports.filter((report) =>
+        (report as Error).message.includes('dependencies of b'),
+      ).length;
+
+    try {
+      expect((await manager.registerComponent(b)).code).toBe(
+        'dependency_cycle',
+      );
+      expect(reportsOfB()).toBe(0);
+
+      await manager.unregisterComponent('a');
+      expect((await manager.registerComponent(b)).success).toBe(true);
+      expect(reportsOfB()).toBe(1);
+    } finally {
+      release();
+    }
+  });
+
+  test('validateDependencies() reads a throwing isOptional() as required, as startup does', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    a.isOptional = (): never => {
+      throw new Error('isOptional exploded');
+    };
+    await manager.registerComponent(a);
+
+    const { reports, release } = claimReports();
+    let result;
+
+    try {
+      result = manager.validateDependencies();
+      manager.validateDependencies();
+    } finally {
+      release();
+    }
+
+    expect(result.valid).toBe(true);
+    expect(result.unreadableDependencies).toHaveLength(0);
+    expect(
+      reports.filter((report) =>
+        (report as Error).message.includes('isOptional of a'),
+      ),
+    ).toHaveLength(1);
+    expect((await manager.startAllComponents()).success).toBe(true);
+  });
+
+  test("allowNonRunningDependencies does not read a dependency's isOptional()", async () => {
+    const { logger, manager } = setup();
+    const db = new Plain(logger, 'db');
+    let isOptionalCalls = 0;
+    db.isOptional = (): boolean => {
+      isOptionalCalls++;
+      throw new Error('isOptional exploded');
+    };
+    await manager.registerComponent(db);
+    await manager.registerComponent(new Plain(logger, 'api', ['db']));
+    isOptionalCalls = 0;
+
+    const { reports, release } = claimReports();
+
+    try {
+      const result = await manager.startComponent('api', {
+        allowNonRunningDependencies: true,
+      });
+      expect(result.success).toBe(true);
+    } finally {
+      release();
+    }
+
+    expect(isOptionalCalls).toBe(0);
+    expect(reports).toHaveLength(0);
+  });
+
+  test('a bulk startup reads each dependency list once in its loop, shared with the start', async () => {
+    const { logger, manager } = setup();
+    const api = new Plain(logger, 'api');
+    await manager.registerComponent(api);
+    let reads = 0;
+    api.getDependencies = (): string[] => {
+      reads++;
+
+      return [];
+    };
+
+    expect((await manager.startAllComponents()).success).toBe(true);
+    // One for the startup order, one for the loop - the start reuses the loop's.
+    expect(reads).toBe(2);
+  });
+
+  test('a start reads each of its options once', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'c'));
+    const reads: Record<string, number> = {};
+    const options = {};
+
+    for (const key of [
+      'allowDuringBulkStartup',
+      'forceStalled',
+      'allowNonRunningDependencies',
+    ]) {
+      Object.defineProperty(options, key, {
+        get: (): boolean => {
+          reads[key] = (reads[key] ?? 0) + 1;
+
+          return false;
+        },
+      });
+    }
+
+    expect((await manager.startComponent('c', options)).success).toBe(true);
+    expect(Object.values(reads).every((count) => count <= 1)).toBe(true);
+  });
+
+  test('a start whose component was replaced by its own getDependencies() is refused', async () => {
+    const { logger, manager } = setup();
+    const c = new Plain(logger, 'c');
+    const replacement = new Plain(logger, 'c');
+    let startCalls = 0;
+    const countStart = (): Promise<void> => {
+      startCalls++;
+
+      return Promise.resolve();
+    };
+    c.start = countStart;
+    replacement.start = countStart;
+    await manager.registerComponent(c);
+    c.getDependencies = (): string[] => {
+      void manager.unregisterComponent('c');
+      void manager.registerComponent(replacement);
+
+      return [];
+    };
+
+    const result = await manager.startComponent('c');
+
+    expect(manager.getComponentInstance('c')).toBe(replacement);
+    expect(result.code).toBe('component_not_found');
+    expect(startCalls).toBe(0);
   });
 });

@@ -158,6 +158,10 @@ interface ShutdownPassOptions {
  */
 const MAX_DECLARED_DEPENDENCIES = 10_000;
 
+/** One read of a component's `getDependencies()`; see `LifecycleManager.tryReadDependencies()`. */
+type DependencyRead =
+  { dependencies: string[]; invalidEntry?: TypeError } | { error: unknown };
+
 /**
  * A shutdown pass that has been accepted and is running.
  *
@@ -879,8 +883,10 @@ export class LifecycleManager
     // Each component read once, guarded: the reads run its own code, and one whose
     // `getDependencies()` or `isOptional()` threw made this - documented as not
     // throwing - throw to its caller. A component whose dependencies cannot be read is
-    // reported, listed in `unreadableDependencies`, and makes the result invalid: startup
-    // reads the same getter and fails on it, so "valid" would be a promise it cannot keep.
+    // reported, listed in `unreadableDependencies`, and makes the result invalid: its own
+    // start fails on the same list, so "valid" would be a promise it cannot keep. An
+    // `isOptional()` that throws does not: startup reads it as required and starts the
+    // component normally, so validation answers the same.
     const unreadableDependencies: Array<{
       componentName: string;
       error: Error;
@@ -894,29 +900,9 @@ export class LifecycleManager
     for (const component of this.components) {
       const name = this.nameOf(component);
 
-      let isOptional = false;
-      let isUnreadable = false;
-
-      try {
-        // The same rule startup applies: see `isComponentOptional()`.
-        isOptional = component.isOptional() === true;
-      } catch (error) {
-        isUnreadable = true;
-        // Startup reads it too, unguarded, and fails on it: invalid, like an unreadable
-        // dependency list.
-        if (!this.reportedOptionalReadFailures.has(component)) {
-          this.reportedOptionalReadFailures.add(component);
-          reportCallbackError(
-            `lifecycle-manager validateDependencies isOptional of ${name}`,
-            error,
-          );
-        }
-        unreadableDependencies.push({
-          componentName: name,
-          error: toError(error),
-        });
-      }
-
+      // The one rule startup applies, through the one helper: a throw is reported once
+      // and read as required.
+      const isOptional = this.isComponentOptional(component);
       const read = this.tryReadDependencies(component);
       const readFailure =
         'dependencies' in read ? read.invalidEntry : read.error;
@@ -930,14 +916,10 @@ export class LifecycleManager
           readFailure,
         );
 
-        // One entry per component, as the field is documented: one whose `isOptional()`
-        // already failed keeps that first error, and is counted once.
-        if (!isUnreadable) {
-          unreadableDependencies.push({
-            componentName: name,
-            error: toError(readFailure),
-          });
-        }
+        unreadableDependencies.push({
+          componentName: name,
+          error: toError(readFailure),
+        });
       }
 
       graph.push({
@@ -2912,8 +2894,28 @@ export class LifecycleManager
           }
 
           // Check if any required dependency failed or was skipped
-          // Tolerant here: the component's own start below fails it on a broken list.
-          const dependencies = this.readDependencies(component, 'startup');
+          // Read once, and handed to the component's own start below: the skip check
+          // and that start then act on the same list, and the component's code runs
+          // once for both. Tolerant here - its valid entries still decide the skip - and
+          // the start fails it on a broken list; reported now in case it is skipped.
+          const dependencyRead = this.tryReadDependencies(component);
+
+          if (!('dependencies' in dependencyRead)) {
+            this.reportDependencyReadFailureOnce(
+              component,
+              'startup',
+              dependencyRead.error,
+            );
+          } else if (dependencyRead.invalidEntry !== undefined) {
+            this.reportDependencyReadFailureOnce(
+              component,
+              'startup',
+              dependencyRead.invalidEntry,
+            );
+          }
+
+          const dependencies =
+            'dependencies' in dependencyRead ? dependencyRead.dependencies : [];
           let shouldSkip = false;
           let skipReason = '';
 
@@ -2982,6 +2984,7 @@ export class LifecycleManager
             },
             // The same context an auto-start that joins this startup gets.
             bulkStartup.deadlineContext,
+            dependencyRead,
           );
 
           if (this.shutdownToken !== shutdownTokenAtBulkStart) {
@@ -4087,12 +4090,17 @@ export class LifecycleManager
       nextComponents.splice(insertIndex, 0, component);
 
       let startupOrder: string[];
+      const orderCandidate: {
+        component: BaseComponent;
+        name: string;
+        invalidEntry?: TypeError;
+      } = { component, name: componentName };
 
       try {
-        startupOrder = this.getStartupOrderInternal(nextComponents, {
-          component,
-          name: componentName,
-        });
+        startupOrder = this.getStartupOrderInternal(
+          nextComponents,
+          orderCandidate,
+        );
       } catch (error) {
         if (error instanceof DependencyCycleError) {
           this.logger
@@ -4205,7 +4213,25 @@ export class LifecycleManager
           'lifecycle-manager registration rollback',
         );
 
+        // "Reported once per registration": this one never happened, so a report made
+        // under it - by the hook's own code reading the component - does not count
+        // against the next.
+        this.reportedDependencyReadFailures.delete(component);
+        this.reportedOptionalReadFailures.delete(component);
+
         throw error;
+      }
+
+      // Only now: a registration refused above - a dependency cycle, a failed hook - used
+      // to have spent this component's one report, leaving the registration that
+      // followed silent about the same broken list.
+      if (orderCandidate.invalidEntry !== undefined) {
+        this.reportDependencyReadFailureOnce(
+          component,
+          'registration',
+          orderCandidate.invalidEntry,
+          componentName,
+        );
       }
 
       // Check if manual position was respected for logging
@@ -5520,9 +5546,7 @@ export class LifecycleManager
   }
 
   /** {@link readDependencies} without the report, for a caller that records the failure. */
-  private tryReadDependencies(
-    component: BaseComponent,
-  ): { dependencies: string[]; invalidEntry?: TypeError } | { error: unknown } {
+  private tryReadDependencies(component: BaseComponent): DependencyRead {
     try {
       const dependencies: unknown = component.getDependencies();
 
@@ -5665,6 +5689,9 @@ export class LifecycleManager
       onTimeout: () => void;
       hasExpired: () => boolean;
     },
+    // The bulk loop's read of the component's list, so its skip check and this start act
+    // on the same one - and the component's code runs once for both.
+    preReadDependencies?: DependencyRead,
   ): Promise<ComponentOperationResult> {
     const claim = Symbol(name);
 
@@ -5677,6 +5704,7 @@ export class LifecycleManager
           options,
           bulkStartup,
           claim,
+          preReadDependencies,
         );
       } catch (error) {
         // Nothing below touches the component unless this attempt claimed it - and still
@@ -5736,21 +5764,18 @@ export class LifecycleManager
   }
 
   /**
-   * The start itself, under `startComponentInternal()`'s net - bypasses bulk operation checks
-   * Used by both startComponent() and startAllComponents()
+   * Every check a start makes before it may claim the component, none of which runs the
+   * component's code. Made twice by an attempt: before it reads the component's
+   * dependency list, timeout and abort handler, and again right before it claims - those
+   * reads run the component's code, which can start, stop, unregister or shut down
+   * re-entrantly, and a start that trusted the first answer ran `start()` twice.
    */
-  private async startComponentAttempt(
+  private checkStartPreconditions(
     name: string,
     options: StartComponentOptions | undefined,
-    bulkStartup:
-      | {
-          deadline: number;
-          onTimeout: () => void;
-          hasExpired: () => boolean;
-        }
-      | undefined,
-    claim: symbol,
-  ): Promise<ComponentOperationResult> {
+  ):
+    | ComponentOperationResult
+    | { component: BaseComponent; currentState: ComponentState | undefined } {
     // A timed-out bulk start owns the component until it settles and cleanup ends.
     if (this.pendingBulkStartupCleanup.has(name)) {
       return {
@@ -5791,9 +5816,6 @@ export class LifecycleManager
         code: 'startup_in_progress',
       };
     }
-
-    const allowNonRunningDependencies =
-      options?.allowNonRunningDependencies === true;
 
     const component = this.getComponent(name);
 
@@ -5854,10 +5876,52 @@ export class LifecycleManager
       };
     }
 
+    return { component, currentState };
+  }
+
+  /**
+   * The start itself, under `startComponentInternal()`'s net - bypasses bulk operation checks
+   * Used by both startComponent() and startAllComponents()
+   */
+  private async startComponentAttempt(
+    name: string,
+    options: StartComponentOptions | undefined,
+    bulkStartup:
+      | {
+          deadline: number;
+          onTimeout: () => void;
+          hasExpired: () => boolean;
+        }
+      | undefined,
+    claim: symbol,
+    preReadDependencies: DependencyRead | undefined,
+  ): Promise<ComponentOperationResult> {
+    // Each option read once, here: the checks below run twice, and a caller's getter that
+    // answered differently the second time - `forceStalled` true for the stalled check,
+    // false where a forced start retires the stalled run's late stop - split the start.
+    const flags: StartComponentOptions = {
+      allowDuringBulkStartup: options?.allowDuringBulkStartup === true,
+      forceStalled: options?.forceStalled === true,
+      allowNonRunningDependencies:
+        options?.allowNonRunningDependencies === true,
+    };
+
+    // A refusal is a result; anything else is the component, clear to proceed.
+    const preconditions = this.checkStartPreconditions(name, flags);
+
+    if ('success' in preconditions) {
+      return preconditions;
+    }
+
+    const { component } = preconditions;
+    const allowNonRunningDependencies =
+      flags.allowNonRunningDependencies === true;
+
     // Its own list read strictly: a broken one fails this start as `missing_dependency`,
     // naming the component, rather than being read as fewer dependencies than it
     // declares. Reported once per registration, as other reads of it are.
-    const ownDependencies = this.tryReadDependencies(component);
+    const ownDependencies =
+      preReadDependencies ?? this.tryReadDependencies(component);
 
     if (
       !('dependencies' in ownDependencies) ||
@@ -5899,8 +5963,6 @@ export class LifecycleManager
       }
 
       if (!this.isComponentRunning(dependencyName)) {
-        const isDependencyOptional = this.isComponentOptional(dependency);
-
         // Check if we can skip this dependency
         if (allowNonRunningDependencies) {
           // Explicit override - allow skipping both optional and required dependencies
@@ -5912,7 +5974,9 @@ export class LifecycleManager
           continue;
         }
 
-        if (isDependencyOptional) {
+        // Read only here, where it decides something: under the override above the
+        // answer was unused, but a throw still spent the dependency's one report.
+        if (this.isComponentOptional(dependency)) {
           // Optional dependencies never block startup
           this.logger
             .entity(name)
@@ -5950,7 +6014,29 @@ export class LifecycleManager
       component,
       'onStartupAborted',
     );
-    const stateBeforeStart = currentState;
+
+    // Every check again, now that nothing more of the component's code runs before the
+    // claim: the reads above - its dependency list, its dependencies' `isOptional()`, its
+    // timeout and abort handler - can start, stop, unregister or shut down re-entrantly.
+    // A start that trusted the first answer found the component `starting` under a
+    // re-entrant start of its own and ran `start()` a second time.
+    const recheck = this.checkStartPreconditions(name, flags);
+
+    if ('success' in recheck) {
+      return recheck;
+    }
+
+    if (recheck.component !== component) {
+      // Unregistered and replaced by another instance under the same name.
+      return {
+        success: false,
+        componentName: name,
+        reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND,
+        code: 'component_not_found',
+      };
+    }
+
+    const stateBeforeStart = recheck.currentState;
     const restoreStateBeforeStart = (): void => {
       this.restoreComponentState(name, stateBeforeStart);
     };
@@ -6193,7 +6279,7 @@ export class LifecycleManager
       this.runningComponents.add(name);
       this.componentErrors.set(name, null);
       this.stalledComponents.delete(name); // Clear stalled state if component was previously stalled
-      if (shouldForceStalled) {
+      if (flags.forceStalled === true) {
         // A successful forceStalled start creates a new run. Any late stop
         // promise from the previous stalled run must no longer own state.
         this.issueStopAttemptToken(name);
@@ -8237,7 +8323,13 @@ export class LifecycleManager
    */
   private getStartupOrderInternal(
     components: BaseComponent[] = this.components,
-    candidate?: { component: BaseComponent; name: string },
+    // `invalidEntry` is written back rather than reported: the registration may still be
+    // refused, and the report belongs to one that commits.
+    candidate?: {
+      component: BaseComponent;
+      name: string;
+      invalidEntry?: TypeError;
+    },
   ): string[] {
     // Each name is resolved once, here. A registration candidate is not recorded yet, so
     // it is named by the value registration already read from it rather than asked
@@ -8276,15 +8368,9 @@ export class LifecycleManager
         }
 
         // A non-string entry does not refuse the registration - the component's own
-        // start fails on it - but it is reported now rather than first found later.
-        if (read.invalidEntry !== undefined) {
-          this.reportDependencyReadFailureOnce(
-            component,
-            'registration',
-            read.invalidEntry,
-            candidate.name,
-          );
-        }
+        // start fails on it - but registration reports it once committed, rather than
+        // it first being found later.
+        candidate.invalidEntry = read.invalidEntry;
 
         dependencies = read.dependencies;
       } else {

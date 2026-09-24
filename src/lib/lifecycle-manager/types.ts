@@ -1017,8 +1017,9 @@ export interface DependencyValidationResult {
 
   /**
    * Components whose `getDependencies()` threw, did not return an array, or returned a
-   * non-string entry, or whose `isOptional()` threw. Startup reads the same getters and
-   * fails on such a component, so any entry here makes `valid` false.
+   * non-string entry. The component's own start fails on the same list, so any entry
+   * here makes `valid` false. An `isOptional()` that throws is not listed: it is reported
+   * and read as required, as startup reads it.
    */
   unreadableDependencies: Array<{
     componentName: string;

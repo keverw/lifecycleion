@@ -27,6 +27,9 @@ describe('adoptPromise', () => {
     expect(await settle(adoptPromise(promise))).toBe('real rejection');
   });
 
+  // Pins the documented limit: nothing can attach a reaction to such a promise, so the
+  // result rejects with the getter's error. Resolved here, since a rejected one would be
+  // left unhandled - which is the limit.
   test('rejects rather than throws for a throwing constructor getter', async () => {
     const promise: object = Promise.resolve(1);
     Object.defineProperty(promise, 'constructor', {

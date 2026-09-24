@@ -12,6 +12,15 @@
  * A non-promise thenable is adopted the standard way, through its `then`; one that never
  * calls back never settles, which no caller can do anything about. A `then` - or a native
  * promise's `constructor` getter - that throws rejects the result rather than throwing.
+ *
+ * Known limit: a native promise whose `constructor` getter throws cannot be adopted
+ * without modifying it. Every way the language offers to attach a reaction to one -
+ * `then`, `await`, `Promise.resolve()`, the combinators - reads `constructor` first, so
+ * the result rejects with the getter's error, and a rejection of the promise itself is
+ * left unhandled. Shadowing the getter for the call would get past it in some shapes,
+ * but not a non-configurable own getter or a frozen promise, and this never writes to
+ * the value it is handed. Such a promise's failure is still reported - as an unhandled
+ * rejection rather than through the caller.
  */
 export function adoptPromise<T>(
   value: T | PromiseLike<T>,
