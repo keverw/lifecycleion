@@ -2468,6 +2468,19 @@ describe('FileSink - entries refused at the door', () => {
       });
     }
 
+    // And past construction, which Bun finishes a tick after `'open'`: from then on
+    // `destroy()` closes the descriptor synchronously and nulls `fd`, so `pending` reads
+    // `true` again inside the handler's own teardown. Emitted straight after `'open'`, the
+    // teardown was still deferred and the classification came out right by luck; under load
+    // the open completed during `flush()`, the stream was past construction by the time
+    // this emitted, and it came out `'setup'`. The steady state every run, since that is
+    // where a real `ENOSPC` lands.
+    await new Promise<void>((resolve) => {
+      setImmediate(resolve);
+    });
+
+    expect(stream?.pending).toBe(false);
+
     stream?.emit('error', new Error('ENOSPC: no space left on device'));
 
     expect(failures).toHaveLength(1);
