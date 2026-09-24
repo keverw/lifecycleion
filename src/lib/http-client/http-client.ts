@@ -80,7 +80,7 @@ import type { CookieJar } from './cookie-jar';
 // original value retained on cause for consumers of the normalized error.
 import { isErrorValue, toError as normalizeError } from '../to-error';
 import { readUnknownMember as readObjectMember } from '../internal/read-member';
-import { isPromise } from '../is-promise';
+import { adoptPromise, isAdoptable } from '../internal/adopt-promise';
 
 type RemoveFn = () => void;
 
@@ -3503,12 +3503,14 @@ function adoptRequestBodySettled(
   // `_buildResponse` - and out of a request that had already succeeded - turning a `200`
   // into a synthetic failed status-0 response over a field documented as advisory.
   // An unusable value is treated as absent, which is what "no adapter reported an upload
-  // outcome" already means. `Promise.resolve` reads `.then` once more below, but the
-  // specification has it reject the promise on a throwing read rather than throw.
+  // outcome" already means. `isAdoptable()` and `adoptPromise()`, not `isPromise()` and
+  // `Promise.resolve()`: a native promise whose own `then` is not a function failed the
+  // one - its rejection then unhandled - and one with its own no-op `then` never settled
+  // through the other. `adoptPromise()` rejects rather than throws on a bad read.
   let isThenable = false;
 
   try {
-    isThenable = isPromise(settled);
+    isThenable = isAdoptable(settled);
   } catch {
     return undefined;
   }
@@ -3517,7 +3519,7 @@ function adoptRequestBodySettled(
     return undefined;
   }
 
-  return Promise.resolve(settled).then(
+  return adoptPromise(settled).then(
     (value) => (value === undefined ? undefined : normalizeError(value)),
     (error: unknown) => normalizeError(error),
   );

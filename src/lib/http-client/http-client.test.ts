@@ -38,6 +38,8 @@ import type {
   RequestInterceptorContext,
   SubClientConfig,
 } from './types';
+import { hostileRejections } from '../internal/hostile-promise-test-utils';
+import { sleep } from '../sleep';
 
 let server: TestServer;
 const originalFetch = globalThis.fetch;
@@ -527,6 +529,36 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(response.body).toEqual({ ok: true });
     expect(await response.requestBodySettled).toBeInstanceOf(Error);
   });
+
+  test.each(hostileRejections)(
+    'adopts a `requestBodySettled` rejected promise with %s',
+    async (_label, make) => {
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+          Promise.resolve({
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+            body: new TextEncoder().encode('{"ok":true}'),
+            requestBodySettled: make(new Error('upload blew up')),
+          }),
+      };
+
+      const response = await new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+      })
+        .post('/upload')
+        .send<{ ok: boolean }>();
+      const settled = await Promise.race([
+        response.requestBodySettled,
+        sleep(200).then(() => 'hung' as const),
+      ]);
+
+      expect(settled).toBeInstanceOf(Error);
+      expect((settled as Error).message).toContain('upload blew up');
+    },
+  );
 
   test('adopts a rejecting `requestBodySettled` from an adapter that resolves', async () => {
     // `HTTPAdapter` is a public extension point, and the resolve path handed the adapter's

@@ -2,6 +2,7 @@ import Router from 'find-my-way';
 import { guardProgressCallback } from '../internal/progress';
 import qs from 'qs';
 import { sleep } from '../../sleep';
+import { adoptPromise } from '../../internal/adopt-promise';
 import { REDIRECT_STATUS_CODES } from '../consts';
 import {
   isPlainJSONBodyObject,
@@ -800,8 +801,11 @@ function awaitAbortable<T>(
   value: T | Promise<T>,
   signal: AbortSignal | undefined,
 ): Promise<T> {
+  // `adoptPromise()`, not `Promise.resolve()`, for a handler's promise here and below:
+  // `Promise.resolve()` hands a native promise back with its own `then`, and a no-op one
+  // hung the request.
   if (!signal) {
-    return Promise.resolve(value);
+    return adoptPromise(value);
   }
 
   if (signal.aborted) {
@@ -818,7 +822,7 @@ function awaitAbortable<T>(
 
     signal.addEventListener('abort', onAbort, { once: true });
 
-    Promise.resolve(value).then(
+    adoptPromise(value).then(
       (result) => {
         signal.removeEventListener('abort', onAbort);
         resolve(result);

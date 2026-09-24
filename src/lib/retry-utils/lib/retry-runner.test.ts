@@ -20,6 +20,7 @@ import {
   RetryUtilsErrRunnerNotRunning,
 } from './retry-utils-errors';
 import { MAX_TIMER_MS } from '../../internal/timer-limits';
+import { hostileRejections } from '../../internal/hostile-promise-test-utils';
 
 interface CustomResult {
   message: string;
@@ -1087,4 +1088,31 @@ describe('RetryRunner', () => {
       expect(runner.retryTimeRemaining).toBe(-1);
     });
   });
+});
+
+describe('RetryRunner - an operation returning a hostile rejected promise', () => {
+  test.each(hostileRejections)(
+    'one with %s fails the attempt',
+    async (_label, make) => {
+      // The failure is reported; kept out of the run output.
+      muteConsoleError();
+      const runner = new RetryRunner(
+        { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 1 },
+        () => make(new Error('operation rejected')),
+      );
+
+      try {
+        const outcome = await Promise.race([
+          runner.run(true).then(() => 'settled'),
+          sleep(200).then(() => 'hung'),
+        ]);
+
+        expect(outcome).toBe('settled');
+        expect(runner.lastError).toBeInstanceOf(Error);
+        expect((runner.lastError as Error).message).toBe('operation rejected');
+      } finally {
+        restoreConsoleError();
+      }
+    },
+  );
 });
