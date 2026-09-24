@@ -2280,4 +2280,127 @@ describe('LifecycleManager - review regressions', () => {
       ),
     ).toBe(true);
   });
+
+  test(
+    'an infinite-length dependency list fails registration instead of hanging',
+    async () => {
+      const { logger, manager } = setup();
+      const hostile = new Plain(logger, 'hostile');
+      hostile.getDependencies = (): string[] =>
+        new Proxy<string[]>([], {
+          get: (target, property, receiver): unknown =>
+            property === 'length'
+              ? Number.POSITIVE_INFINITY
+              : Reflect.get(target, property, receiver),
+        });
+
+      const { release } = claimReports();
+      let registration;
+
+      try {
+        registration = await manager.registerComponent(hostile);
+      } finally {
+        release();
+      }
+
+      expect(registration.success).toBe(false);
+      expect(registration.code).toBe('unknown_error');
+    },
+    { timeout: 2000 },
+  );
+
+  test('a throwing _clearUnexpectedStopHandler does not derail a stop', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+    a._clearUnexpectedStopHandler = (): never => {
+      throw new Error('hook exploded');
+    };
+
+    const { release } = claimReports();
+    let stop;
+
+    try {
+      stop = await manager.stopComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(stop.success).toBe(true);
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+  });
+
+  test('a component with several unreadable getters is listed once', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    await manager.registerComponent(a);
+    a.isOptional = (): never => {
+      throw new Error('isOptional exploded');
+    };
+    a.getDependencies = (): never => {
+      throw new Error('getDependencies exploded');
+    };
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = manager.validateDependencies();
+    } finally {
+      release();
+    }
+
+    expect(result.unreadableDependencies).toHaveLength(1);
+    expect(result.summary.totalUnreadableDependencies).toBe(1);
+  });
+
+  test('a broken getDependencies() is reported once, not on every read', async () => {
+    const { logger, manager } = setup();
+    const hostile = new Plain(logger, 'hostile');
+    await manager.registerComponent(hostile);
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startAllComponents();
+    hostile.getDependencies = (): never => {
+      throw new Error('getDependencies exploded');
+    };
+
+    const { reports, release } = claimReports();
+
+    try {
+      for (let index = 0; index < 3; index++) {
+        await manager.stopComponent('a');
+        await manager.startComponent('a');
+      }
+    } finally {
+      release();
+    }
+
+    expect(
+      reports.filter((report) =>
+        (report as Error).message.includes('dependencies of hostile'),
+      ),
+    ).toHaveLength(1);
+  });
+
+  test('a signal handler is called with its component, not through its own bind', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    const receivers: unknown[] = [];
+    const onReload = function (this: unknown): void {
+      receivers.push(this);
+    };
+    Object.defineProperty(onReload, 'bind', {
+      value: (): (() => void) => () => {
+        receivers.push('hijacked');
+      },
+    });
+    (a as unknown as { onReload: () => void }).onReload = onReload;
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+
+    await manager.triggerReload();
+
+    expect(receivers).toEqual([a]);
+  });
 });

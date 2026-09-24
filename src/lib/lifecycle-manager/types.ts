@@ -912,8 +912,8 @@ export interface RegistrationResultBase extends BaseOperationResult {
 
   /**
    * Whether auto-start was attempted after registration. Also `true` for one refused
-   * before `start()` ran - the bulk startup it would have joined was already rolling back
-   * or past its deadline - with `startResult` saying why.
+   * before `start()` ran - the bulk startup it would have joined was already rolling
+   * back - with `startResult` saying why.
    */
   autoStartAttempted?: boolean;
 

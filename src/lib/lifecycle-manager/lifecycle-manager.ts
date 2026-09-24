@@ -153,6 +153,12 @@ interface ShutdownPassOptions {
 }
 
 /**
+ * The most dependencies one component's `getDependencies()` is read for. See
+ * `LifecycleManager.tryReadDependencies()`.
+ */
+const MAX_DECLARED_DEPENDENCIES = 10_000;
+
+/**
  * A shutdown pass that has been accepted and is running.
  *
  * "A shutdown was requested while this pass was running" is a property of the pass, not of
@@ -160,12 +166,6 @@ interface ShutdownPassOptions {
  * pass - a `restartAllComponents()` stop phase - reads its own. The two have the same
  * lifetime by construction, so there is no window to open, close, or hand over.
  */
-/**
- * The most dependencies one component's `getDependencies()` is read for. See
- * `LifecycleManager.tryReadDependencies()`.
- */
-const MAX_DECLARED_DEPENDENCIES = 10_000;
-
 interface ShutdownPass {
   /**
    * Set when a shutdown request lands while this pass is running, so the restart that
@@ -276,6 +276,10 @@ export class LifecycleManager
   // Cleared once that loop has its order - they are in it - and reported if the startup
   // ends before then, since nothing will start them.
   private deferredAutoStartNames = new Set<string>();
+  // Components whose broken `getDependencies()` was already reported; see
+  // `readDependencies()`.
+  private readonly reportedDependencyReadFailures =
+    new WeakSet<BaseComponent>();
   private activeBulkStartup: {
     readonly started: string[];
     // Set as its rollback begins: the rollback works from the list as it stood then,
@@ -914,10 +918,17 @@ export class LifecycleManager
           `lifecycle-manager validateDependencies dependencies of ${name}`,
           readFailure,
         );
-        unreadableDependencies.push({
-          componentName: name,
-          error: toError(readFailure),
-        });
+
+        // One entry per component, as the field is documented: one whose `isOptional()`
+        // already failed keeps that first error, and is counted once.
+        if (
+          !unreadableDependencies.some((entry) => entry.componentName === name)
+        ) {
+          unreadableDependencies.push({
+            componentName: name,
+            error: toError(readFailure),
+          });
+        }
       }
 
       graph.push({
@@ -2468,14 +2479,7 @@ export class LifecycleManager
     // overwrites the entry when it commits.
     this.updateStartedFlag();
 
-    try {
-      component._clearUnexpectedStopHandler();
-    } catch (error) {
-      reportCallbackError(
-        'lifecycle-manager unregister _clearUnexpectedStopHandler',
-        error,
-      );
-    }
+    this.clearUnexpectedStopHandler(component, 'unregister');
 
     this.markComponentUnregistered(component, 'lifecycle-manager unregister');
 
@@ -2896,7 +2900,7 @@ export class LifecycleManager
           }
 
           // Check if any required dependency failed or was skipped
-          const dependencies = component.getDependencies();
+          const dependencies = this.readOwnDependencies(component);
           let shouldSkip = false;
           let skipReason = '';
 
@@ -4257,26 +4261,18 @@ export class LifecycleManager
               code: 'startup_rolled_back',
               status: this.getComponentStatus(componentName),
             };
-          } else if (
-            joinedDeadline !== undefined &&
-            (joinedDeadline.hasExpired() ||
-              Date.now() >= joinedDeadline.deadline)
-          ) {
-            // Past the startup's deadline already: `start()` would get a budget of a
-            // millisecond or so and be aborted at once, only to be cleaned up later.
-            startResult = {
-              success: false,
-              componentName,
-              reason:
-                'The bulk startup this auto-start would join has already timed out',
-              code: 'component_startup_timeout',
-              status: this.getComponentStatus(componentName),
-            };
           } else {
             startResult = await this.startComponentInternal(
               componentName,
               { allowDuringBulkStartup: true },
-              joinedDeadline === undefined
+              // Not held to a deadline that has already passed: the startup has
+              // timed out and is returning partial results, and a component started
+              // now would get a budget of a millisecond or so, only to be aborted and
+              // cleaned up. It starts on its own timeout, as a start after that startup
+              // would.
+              joinedDeadline === undefined ||
+                joinedDeadline.hasExpired() ||
+                Date.now() >= joinedDeadline.deadline
                 ? undefined
                 : {
                     // Held to the startup's budget even if that startup returns
@@ -5433,7 +5429,8 @@ export class LifecycleManager
    * reported on the global channel and read as declaring none.
    *
    * Not for a component's own start or for startup ordering: there a broken
-   * `getDependencies()` fails that operation, which is the right answer.
+   * `getDependencies()` fails that operation, which is the right answer - see
+   * {@link readOwnDependencies}.
    */
   private readDependencies(
     component: BaseComponent,
@@ -5450,13 +5447,40 @@ export class LifecycleManager
       return read.dependencies;
     }
 
-    // Labelled only here: this runs for every component on every stop and unregister.
-    reportCallbackError(
-      `lifecycle-manager ${context} dependencies of ${this.nameOf(component)}`,
-      'dependencies' in read ? read.invalidEntry : read.error,
-    );
+    // Reported once per instance, and labelled only then: this runs for every component
+    // on every stop, restart and unregister, and recursively in a shutdown pass, so a
+    // report per read flooded the channel with the same failure.
+    if (!this.reportedDependencyReadFailures.has(component)) {
+      this.reportedDependencyReadFailures.add(component);
+      reportCallbackError(
+        `lifecycle-manager ${context} dependencies of ${this.nameOf(component)}`,
+        'dependencies' in read ? read.invalidEntry : read.error,
+      );
+    }
 
     return 'dependencies' in read ? read.dependencies : [];
+  }
+
+  /**
+   * A component's declared dependencies for an operation that must fail when they are
+   * broken - its own start, or startup ordering - rather than read them as none. Read
+   * through the same guarded, bounded reader as {@link readDependencies}, and throws what
+   * it found wrong: iterated raw, a proxy reporting `length: Infinity` blocked the event
+   * loop, and `validateDependencies()` could call valid what startup refused, or the
+   * other way round.
+   */
+  private readOwnDependencies(component: BaseComponent): string[] {
+    const read = this.tryReadDependencies(component);
+
+    if (!('dependencies' in read)) {
+      throw read.error;
+    }
+
+    if (read.invalidEntry !== undefined) {
+      throw read.invalidEntry;
+    }
+
+    return read.dependencies;
   }
 
   /** {@link readDependencies} without the report, for a caller that records the failure. */
@@ -5758,7 +5782,7 @@ export class LifecycleManager
     }
 
     // Ensure dependencies are registered and running before starting.
-    for (const dependencyName of component.getDependencies()) {
+    for (const dependencyName of this.readOwnDependencies(component)) {
       const dependency = this.getComponent(dependencyName);
       if (!dependency) {
         return {
@@ -6015,7 +6039,7 @@ export class LifecycleManager
         this.componentStates.get(name) === 'stopped' &&
         !this.runningComponents.has(name)
       ) {
-        component._clearUnexpectedStopHandler();
+        this.clearUnexpectedStopHandler(component, 'start');
         const error =
           this.componentErrors.get(name) ??
           new Error(`Component "${name}" stopped unexpectedly during startup`);
@@ -6176,14 +6200,7 @@ export class LifecycleManager
       // start net, which restored the state from before the start - `registered`, not
       // `starting-timed-out` - lost the timeout result and its event, and left a late
       // `start()` that nothing would stop.
-      try {
-        component._clearUnexpectedStopHandler();
-      } catch (clearError) {
-        reportCallbackError(
-          'lifecycle-manager start _clearUnexpectedStopHandler',
-          clearError,
-        );
-      }
+      this.clearUnexpectedStopHandler(component, 'start');
 
       const err = toError(error);
 
@@ -6706,7 +6723,7 @@ export class LifecycleManager
 
     // Set state to stopping — clear the unexpected-stop handler before any async
     // work so a concurrent reportUnexpectedStop() call has no effect from here on.
-    component._clearUnexpectedStopHandler();
+    this.clearUnexpectedStopHandler(component, 'stop');
     this.claimComponent(name, 'stopping', claim);
     this.logger.entity(name).info('Graceful shutdown started');
     this.lifecycleEvents.componentStopping(name);
@@ -6868,7 +6885,7 @@ export class LifecycleManager
 
     // Already cleared when a graceful phase ran; a `forceImmediate` stop clears it here,
     // after the reads above, so a getter that throws leaves it in place.
-    component._clearUnexpectedStopHandler();
+    this.clearUnexpectedStopHandler(component, 'force stop');
     this.claimComponent(name, 'force-stopping', claim);
     this.logger.entity(name).info('Force shutdown started', {
       params: {
@@ -7592,6 +7609,26 @@ export class LifecycleManager
   }
 
   /**
+   * Clear a component's unexpected-stop handler, contained. The hook is overridable, and
+   * one that throws must not derail the operation clearing it: from a stop, it escaped
+   * before the stop had claimed the component, so the stop net - which acts only through a
+   * claim - left it `running` with the stop answered `unknown_error`.
+   */
+  private clearUnexpectedStopHandler(
+    component: BaseComponent,
+    context: string,
+  ): void {
+    try {
+      component._clearUnexpectedStopHandler();
+    } catch (error) {
+      reportCallbackError(
+        `lifecycle-manager ${context} _clearUnexpectedStopHandler`,
+        error,
+      );
+    }
+  }
+
+  /**
    * Tell a component it is no longer registered. Its own `_markUnregistered()` first, so
    * an override that extends it still runs; if that throws, the two fields it would have
    * cleared are cleared directly. Left set, the instance believed it was still
@@ -8151,7 +8188,7 @@ export class LifecycleManager
     // Build edges: dependency -> dependent (only when dependency is registered)
     for (const [index, component] of components.entries()) {
       const dependent = names[index];
-      for (const dep of component.getDependencies()) {
+      for (const dep of this.readOwnDependencies(component)) {
         if (!regIndex.has(dep)) {
           continue;
         }
@@ -9221,9 +9258,9 @@ export class LifecycleManager
    */
   private async runSignalBroadcast(descriptor: {
     signal: 'reload' | 'info' | 'debug';
-    pickHandler: (
-      component: BaseComponent,
-    ) => (() => Promise<void> | void) | undefined;
+    // The handler as read off the component, unbound: it is called with the component
+    // as its receiver through `Reflect.apply`, never through its own `bind`.
+    pickHandler: (component: BaseComponent) => unknown;
     startupLog: string;
     timeoutLog: string;
     errorLog: string;
@@ -9257,7 +9294,7 @@ export class LifecycleManager
       // properties, so they are read here, per component: one that throws becomes that
       // component's `error` entry, before any `*-started` event for it, rather than
       // ending the broadcast for every component after it.
-      let handler: (() => unknown) | undefined;
+      let handler: unknown;
       let timeoutMS = 0;
 
       try {
@@ -9265,7 +9302,7 @@ export class LifecycleManager
 
         // Only when there is a handler to time: a component without one answers
         // `no_handler`, whatever its timeout getter would have done.
-        if (handler) {
+        if (typeof handler === 'function') {
           timeoutMS = component.signalTimeoutMS;
         }
       } catch (error) {
@@ -9285,7 +9322,7 @@ export class LifecycleManager
         continue;
       }
 
-      if (!handler) {
+      if (typeof handler !== 'function') {
         results.push({
           name,
           called: false,
@@ -9313,7 +9350,7 @@ export class LifecycleManager
       const timeoutResult = { timedOut: true } as const;
 
       try {
-        const handlerResult = handler();
+        const handlerResult: unknown = Reflect.apply(handler, component, []);
         // Adopted, not raced as it is: see `adoptPromise()`.
         const handlerPromise = adoptPromise(handlerResult);
 
@@ -9415,7 +9452,7 @@ export class LifecycleManager
   private async broadcastReload(): Promise<SignalBroadcastResult> {
     return this.runSignalBroadcast({
       signal: 'reload',
-      pickHandler: (component) => component.onReload?.bind(component),
+      pickHandler: (component) => Reflect.get(component, 'onReload'),
       startupLog:
         'Reload during startup: only reloading already-started components',
       timeoutLog: 'Reload handler timed out',
@@ -9436,7 +9473,7 @@ export class LifecycleManager
   private async broadcastInfo(): Promise<SignalBroadcastResult> {
     return this.runSignalBroadcast({
       signal: 'info',
-      pickHandler: (component) => component.onInfo?.bind(component),
+      pickHandler: (component) => Reflect.get(component, 'onInfo'),
       startupLog:
         'Info during startup: only notifying already-started components',
       timeoutLog: 'Info handler timed out',
@@ -9457,7 +9494,7 @@ export class LifecycleManager
   private async broadcastDebug(): Promise<SignalBroadcastResult> {
     return this.runSignalBroadcast({
       signal: 'debug',
-      pickHandler: (component) => component.onDebug?.bind(component),
+      pickHandler: (component) => Reflect.get(component, 'onDebug'),
       startupLog:
         'Debug during startup: only notifying already-started components',
       timeoutLog: 'Debug handler timed out',

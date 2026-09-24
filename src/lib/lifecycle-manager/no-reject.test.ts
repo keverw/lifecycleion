@@ -1406,11 +1406,12 @@ describe('LifecycleManager - public methods never reject', () => {
     await manager.registerComponent(component);
     await manager.startAllComponents();
 
-    (
-      component as unknown as { _clearUnexpectedStopHandler: () => void }
-    )._clearUnexpectedStopHandler = (): never => {
-      throw new Error('hook exploded');
-    };
+    // Read before the stop claims the component.
+    Object.defineProperty(component, 'shutdownGracefulTimeoutMS', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
 
     const { release } = claimReports();
     let result;
