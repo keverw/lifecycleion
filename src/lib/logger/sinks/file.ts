@@ -1534,6 +1534,14 @@ export class FileSink implements LogSink {
       this.currentLogFile = currentLogFile;
 
       stream.on('error', (streamError: unknown) => {
+        // Read once, on arrival, before anything below destroys the stream. `pending` is
+        // `fd === null`, and Bun's `destroy()` on a stream that has finished constructing
+        // closes the descriptor synchronously and nulls `fd` on the way - so read after
+        // `destroyStream()`, a stream that had been open for a while answered "still
+        // opening", and a disk filling under a live descriptor was reported as `'setup'`
+        // and cleared `isInitialized` instead of counting a failed write.
+        const wasStillOpening = stream.pending;
+
         // The stream that failed, not whatever is current. A rotation replaces this
         // stream, and the one it replaced can still deliver its error afterwards -
         // ungated, that late error destroyed the *live* stream, failing whatever write
@@ -1554,7 +1562,7 @@ export class FileSink implements LogSink {
           // successful open still answered `{ isInitialized: true }`. Only when nothing has
           // taken this stream's place - a rotation replaces it with a live one, and that
           // sink is initialized.
-          if (stream.pending && this.logFileStream === undefined) {
+          if (wasStillOpening && this.logFileStream === undefined) {
             this.isInitialized = false;
           }
 
@@ -1589,10 +1597,10 @@ export class FileSink implements LogSink {
         // for `EACCES`, `EISDIR` or `EMFILE`, it emits, and `'write'` is documented as the
         // one kind that means an entry is at risk: a destination that could never be opened
         // is about no entry at all.
-        const kind: SinkFailureKind = stream.pending ? 'setup' : 'write';
+        const kind: SinkFailureKind = wasStillOpening ? 'setup' : 'write';
 
         const failure = new FileSinkError(
-          stream.pending
+          wasStillOpening
             ? `Failed to setup log file: ${currentLogFile}`
             : 'Log file stream failed',
           toError(streamError),
