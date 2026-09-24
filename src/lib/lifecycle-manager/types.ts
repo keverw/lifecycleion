@@ -910,7 +910,11 @@ export interface RegistrationResultBase extends BaseOperationResult {
   /** Whether registration occurred during startup */
   duringStartup?: boolean;
 
-  /** Whether auto-start was attempted after registration */
+  /**
+   * Whether auto-start was attempted after registration. Also `true` for one refused
+   * before `start()` ran - the bulk startup it would have joined was already rolling back
+   * or past its deadline - with `startResult` saying why.
+   */
   autoStartAttempted?: boolean;
 
   /**
@@ -1012,8 +1016,9 @@ export interface DependencyValidationResult {
   circularCycles: string[][];
 
   /**
-   * Components whose `getDependencies()` threw or did not return an array. Startup reads
-   * the same getter and fails on such a component, so any entry here makes `valid` false.
+   * Components whose `getDependencies()` threw, did not return an array, or returned a
+   * non-string entry, or whose `isOptional()` threw. Startup reads the same getters and
+   * fails on such a component, so any entry here makes `valid` false.
    */
   unreadableDependencies: Array<{
     componentName: string;
@@ -1030,6 +1035,8 @@ export interface DependencyValidationResult {
     optionalMissingDependencies: number;
     /** Total number of circular dependency cycles detected */
     totalCircularCycles: number;
+    /** Number of `unreadableDependencies` entries */
+    totalUnreadableDependencies: number;
   };
 }
 

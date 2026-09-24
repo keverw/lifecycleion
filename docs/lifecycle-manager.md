@@ -2033,12 +2033,13 @@ interface DependencyValidationResult {
     missingDependency: string;
   }>;
   circularCycles: string[][];
-  unreadableDependencies: Array<{ componentName: string; error: Error }>; // getDependencies() threw or returned a non-array
+  unreadableDependencies: Array<{ componentName: string; error: Error }>; // getDependencies() threw or returned a non-array or non-string entry, or isOptional() threw
   summary: {
     totalMissingDependencies: number; // Total number of missing dependencies across all components
     requiredMissingDependencies: number; // Missing dependencies on required components (blocks startup)
     optionalMissingDependencies: number; // Missing dependencies on optional components (degrades functionality)
     totalCircularCycles: number; // Number of circular dependency cycles detected
+    totalUnreadableDependencies: number; // Number of unreadableDependencies entries
   };
 }
 ```

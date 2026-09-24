@@ -160,6 +160,12 @@ interface ShutdownPassOptions {
  * pass - a `restartAllComponents()` stop phase - reads its own. The two have the same
  * lifetime by construction, so there is no window to open, close, or hand over.
  */
+/**
+ * The most dependencies one component's `getDependencies()` is read for. See
+ * `LifecycleManager.tryReadDependencies()`.
+ */
+const MAX_DECLARED_DEPENDENCIES = 10_000;
+
 interface ShutdownPass {
   /**
    * Set when a shutdown request lands while this pass is running, so the restart that
@@ -266,6 +272,10 @@ export class LifecycleManager
   private autoAttachedSignalsDuringStartup = false;
   // The running bulk startup's started list, or `null` outside one. See
   // `startAllComponentsOperation()`.
+  // Auto-starts left to a bulk startup that had taken its latch but not begun its loop.
+  // Cleared once that loop has its order - they are in it - and reported if the startup
+  // ends before then, since nothing will start them.
+  private deferredAutoStartNames = new Set<string>();
   private activeBulkStartup: {
     readonly started: string[];
     // Set as its rollback begins: the rollback works from the list as it stood then,
@@ -883,22 +893,30 @@ export class LifecycleManager
       try {
         isOptional = component.isOptional() === true;
       } catch (error) {
+        // Startup reads it too, unguarded, and fails on it: invalid, like an unreadable
+        // dependency list.
         reportCallbackError(
           `lifecycle-manager validateDependencies isOptional of ${name}`,
           error,
         );
+        unreadableDependencies.push({
+          componentName: name,
+          error: toError(error),
+        });
       }
 
       const read = this.tryReadDependencies(component);
+      const readFailure =
+        'dependencies' in read ? read.invalidEntry : read.error;
 
-      if (!('dependencies' in read)) {
+      if (readFailure !== undefined) {
         reportCallbackError(
           `lifecycle-manager validateDependencies dependencies of ${name}`,
-          read.error,
+          readFailure,
         );
         unreadableDependencies.push({
           componentName: name,
-          error: toError(read.error),
+          error: toError(readFailure),
         });
       }
 
@@ -973,6 +991,7 @@ export class LifecycleManager
         requiredMissingDependencies,
         optionalMissingDependencies,
         totalCircularCycles: circularCycles.length,
+        totalUnreadableDependencies: unreadableDependencies.length,
       },
     };
   }
@@ -1624,18 +1643,14 @@ export class LifecycleManager
       const err = toError(error);
 
       reportCallbackError('lifecycle-manager sendMessageToComponent', error);
-      // Logged and announced as a handler that failed is - `message-sent` first, so a
-      // listener counting messages in flight stays paired - and counted as a failure.
+      // Logged and announced as a failure, but without `message-sent`: nothing was sent -
+      // the result says `sent: false` - and the event must not say otherwise. This is the
+      // one `message-failed` with no `message-sent` before it; see its event docs.
       this.logger
         .entity(componentName)
         .error(LIFECYCLE_MANAGER_LOG_MESSAGE_HANDLER_FAILED, {
           params: { error: err, from },
         });
-      this.lifecycleEvents.componentMessageSent({
-        componentName,
-        from,
-        payload,
-      });
       this.lifecycleEvents.componentMessageFailed(componentName, from, err, {
         timedOut: false,
         code: 'error',
@@ -2443,6 +2458,7 @@ export class LifecycleManager
     this.componentStartAttemptTokens.delete(name);
     this.componentStopAttemptTokens.delete(name);
     this.pendingForceStopWaiters.delete(name);
+    this.deferredAutoStartNames.delete(name);
     this.stalledComponents.delete(name);
     this.runningComponents.delete(name);
     this.componentClaims.delete(name);
@@ -2722,6 +2738,7 @@ export class LifecycleManager
       }
 
       this.autoAttachedSignalsDuringStartup = false;
+      this.abandonDeferredAutoStarts('refused: a shutdown started');
 
       return this.refusedStartupResult(
         'shutdown_in_progress',
@@ -2810,6 +2827,8 @@ export class LifecycleManager
 
         try {
           startupOrder = this.getStartupOrderInternal();
+          // In the order now, so this loop starts them.
+          this.deferredAutoStartNames.clear();
         } catch (error) {
           const err = toError(error);
           const code =
@@ -3319,6 +3338,7 @@ export class LifecycleManager
 
         this.autoAttachedSignalsDuringStartup = false;
         this.activeBulkStartup = null;
+        this.abandonDeferredAutoStarts('failed before starting components');
         this.unexpectedStopsDuringStartup.clear();
       }
     };
@@ -4213,6 +4233,7 @@ export class LifecycleManager
             .entity(componentName)
             .info('AutoStart: left to the bulk startup about to run');
           isAutoStartDeferred = true;
+          this.deferredAutoStartNames.add(componentName);
         } else if (this.isStarting) {
           // Manager is currently starting - allow during bulk startup
           this.logger
@@ -5425,23 +5446,23 @@ export class LifecycleManager
     // the guard - `Array.isArray` itself throws for a revoked proxy.
     const read = this.tryReadDependencies(component);
 
-    if ('dependencies' in read) {
+    if ('dependencies' in read && read.invalidEntry === undefined) {
       return read.dependencies;
     }
 
     // Labelled only here: this runs for every component on every stop and unregister.
     reportCallbackError(
       `lifecycle-manager ${context} dependencies of ${this.nameOf(component)}`,
-      read.error,
+      'dependencies' in read ? read.invalidEntry : read.error,
     );
 
-    return [];
+    return 'dependencies' in read ? read.dependencies : [];
   }
 
   /** {@link readDependencies} without the report, for a caller that records the failure. */
   private tryReadDependencies(
     component: BaseComponent,
-  ): { dependencies: string[] } | { error: unknown } {
+  ): { dependencies: string[]; invalidEntry?: TypeError } | { error: unknown } {
     try {
       const dependencies: unknown = component.getDependencies();
 
@@ -5449,15 +5470,42 @@ export class LifecycleManager
         const copy: string[] = [];
         const length = Number(Reflect.get(dependencies, 'length'));
 
+        // Bounded before the loop: a proxy passes `Array.isArray` and can report any
+        // `length` - `Infinity` would block the event loop in the copy below, with no
+        // timeout to rescue it. Far more dependencies than any component declares is a
+        // broken list, not one to read.
+        if (
+          !Number.isInteger(length) ||
+          length < 0 ||
+          length > MAX_DECLARED_DEPENDENCIES
+        ) {
+          return {
+            error: new TypeError(
+              `getDependencies() returned an implausible length: ${String(length)}`,
+            ),
+          };
+        }
+
+        let invalidEntry: TypeError | undefined;
+
         for (let index = 0; index < length; index++) {
           const dependency: unknown = Reflect.get(dependencies, index);
 
           if (typeof dependency === 'string') {
             copy.push(dependency);
+          } else {
+            // Kept out of the copy, but not silently: startup iterates the raw list and
+            // fails on such an entry - `Missing dependency "undefined"` - so every
+            // caller hears about it.
+            invalidEntry ??= new TypeError(
+              `getDependencies() returned a non-string entry: ${String(dependency)}`,
+            );
           }
         }
 
-        return { dependencies: copy };
+        return invalidEntry === undefined
+          ? { dependencies: copy }
+          : { dependencies: copy, invalidEntry };
       }
 
       return {
@@ -7570,6 +7618,28 @@ export class LifecycleManager
         reportCallbackError(label, clearError);
       }
     }
+  }
+
+  /**
+   * Warn about auto-starts left to a bulk startup that ended before its loop could start
+   * them. Their registration already answered `autoStartDeferred: true`, and nothing else
+   * will start them, so this is the one place that says so.
+   */
+  private abandonDeferredAutoStarts(reason: string): void {
+    if (this.deferredAutoStartNames.size === 0) {
+      return;
+    }
+
+    this.logger.warn(
+      'Bulk startup {{reason}}; deferred auto-starts were not attempted',
+      {
+        params: {
+          reason,
+          components: Array.from(this.deferredAutoStartNames),
+        },
+      },
+    );
+    this.deferredAutoStartNames.clear();
   }
 
   /**

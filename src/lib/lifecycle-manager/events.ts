@@ -40,6 +40,11 @@ export interface LifecycleManagerEventMap {
     from: string | null;
     payload: unknown;
   };
+  /**
+   * Follows `component:message-sent` for a handler that threw, rejected, or timed out.
+   * The one exception: an `onMessage` getter that throws fails the call before anything is
+   * sent, so this arrives alone, with `handlerImplemented: false`.
+   */
   'component:message-failed': {
     componentName: string;
     from: string | null;

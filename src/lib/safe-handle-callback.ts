@@ -273,12 +273,13 @@ export async function safeHandleCallbackAndWait<T>(
   // `typeof`, for the reason `runCallbackSafely()` gives.
   if (typeof callback === 'function') {
     try {
-      // We need to cast callback to the appropriate function type now
-      const result = (callback as (...args: unknown[]) => unknown)(...args);
+      // `Reflect.apply` and `adoptPromise()`, as `runCallbackSafely()` calls and adopts:
+      // one path for how an untrusted callback is invoked and how its promise is read.
+      const result: unknown = Reflect.apply(callback, undefined, args);
 
       if (isPromise(result)) {
         // Wait for the async callback to complete
-        const value = await (result as Promise<T>);
+        const value = await adoptPromise<T>(result as PromiseLike<T>);
 
         return { success: true, value };
       } else {

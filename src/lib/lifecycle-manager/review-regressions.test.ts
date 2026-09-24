@@ -1,5 +1,8 @@
 import { describe, test, expect } from 'bun:test';
 import { sleep } from '../sleep';
+import { Logger } from '../logger';
+import { ArraySink } from '../logger/sinks/array';
+import { LifecycleManager } from './lifecycle-manager';
 import {
   claimReports,
   deferred,
@@ -2038,13 +2041,9 @@ describe('LifecycleManager - review regressions', () => {
       release();
     }
 
-    // Each failure is paired with its opening event.
-    expect(failed).toEqual([
-      'health-started',
-      'health',
-      'message-sent',
-      'message',
-    ]);
+    // The health check is paired with its opening event. The message never went out,
+    // so it has no `message-sent` - matching its `sent: false` result.
+    expect(failed).toEqual(['health-started', 'health', 'message']);
   });
 
   test('a stop that settles just after its timeout is recorded as a late stop, not a permanent stall', async () => {
@@ -2189,5 +2188,96 @@ describe('LifecycleManager - review regressions', () => {
     // The floating stop still cleared the stall.
     expect(manager.getStalledComponentNames()).toEqual([]);
     expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+  });
+
+  test('validateDependencies flags non-string dependency entries and a throwing isOptional', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    const b = new Plain(logger, 'b');
+    await manager.registerComponent(a);
+    await manager.registerComponent(b);
+    a.getDependencies = (): string[] => ['b', undefined as unknown as string];
+    b.isOptional = (): never => {
+      throw new Error('isOptional exploded');
+    };
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = manager.validateDependencies();
+    } finally {
+      release();
+    }
+
+    expect(result.valid).toBe(false);
+    expect(
+      result.unreadableDependencies.map((entry) => entry.componentName).sort(),
+    ).toEqual(['a', 'b']);
+    expect(result.summary.totalUnreadableDependencies).toBe(2);
+  });
+
+  test('a dependency list reporting an implausible length is rejected, not iterated', async () => {
+    const { logger, manager } = setup();
+    const hostile = new Plain(logger, 'hostile');
+    await manager.registerComponent(hostile);
+    hostile.getDependencies = (): string[] =>
+      new Proxy<string[]>([], {
+        get: (target, property, receiver): unknown =>
+          property === 'length'
+            ? Number.POSITIVE_INFINITY
+            : Reflect.get(target, property, receiver),
+      });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = manager.validateDependencies();
+    } finally {
+      release();
+    }
+
+    expect(result.valid).toBe(false);
+    expect(result.unreadableDependencies[0]?.componentName).toBe('hostile');
+  });
+
+  test('a deferred auto-start whose startup is refused is warned about', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      attachSignalsBeforeStartup: true,
+    });
+    manager.attachSignals = (): void => {
+      fakeAttachedSignals(manager);
+      (
+        manager as unknown as {
+          lifecycleEvents: { lifecycleManagerSignalsAttached: () => void };
+        }
+      ).lifecycleEvents.lifecycleManagerSignalsAttached();
+    };
+    await manager.registerComponent(new Plain(logger, 'a'));
+
+    const pending: Promise<unknown>[] = [];
+    manager.once('lifecycle-manager:signals-attached', () => {
+      pending.push(
+        manager.registerComponent(new Plain(logger, 'late'), {
+          autoStart: true,
+        }),
+      );
+      pending.push(manager.stopAllComponents());
+    });
+
+    const startup = await manager.startAllComponents();
+    await Promise.all(pending);
+
+    expect(startup.code).toBe('shutdown_in_progress');
+    expect(
+      sink.logs.some((log) =>
+        log.message.includes('deferred auto-starts were not attempted'),
+      ),
+    ).toBe(true);
   });
 });
