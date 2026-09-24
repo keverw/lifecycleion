@@ -3705,4 +3705,25 @@ describe('LifecycleManager - review regressions', () => {
     expect(manager.isComponentRunning('auto')).toBe(true);
     expect(manager.isComponentRunning('plain')).toBe(true);
   });
+
+  test('a successful registration reports its own instance, not one under its name', async () => {
+    const { logger, manager } = setup();
+    const c = new Plain(logger, 'c');
+    const replacement = new Plain(logger, 'c');
+    // Stands in for the component being unregistered and another registered under its
+    // name while its auto-start finished - which a real unregister cannot do mid-start.
+    manager.once('component:started', () => {
+      (manager as unknown as { components: Plain[] }).components = [
+        replacement,
+      ];
+    });
+
+    const result = await manager.insertComponentAt(c, 'end', undefined, {
+      autoStart: true,
+    });
+
+    expect(result.success).toBe(true);
+    expect(result.registrationIndexAfter).toBeNull();
+    expect(result.actualPosition).toBeUndefined();
+  });
 });
