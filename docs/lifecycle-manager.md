@@ -556,6 +556,7 @@ interface RegisterComponentResult {
   startupOrder: string[];
   duringStartup?: boolean; // true if registered during bulk startup
   autoStartAttempted?: boolean; // true if auto-start was attempted
+  autoStartDeferred?: boolean; // true if left to a bulk startup that had not begun its loop
   autoStartSucceeded?: boolean; // true if auto-start succeeded
   startResult?: ComponentOperationResult; // result of auto-start (if attempted)
 }
@@ -2563,6 +2564,7 @@ type ComponentOperationFailureCode =
   | 'component_shutdown_timeout'
   | 'restart_stop_failed'
   | 'restart_start_failed'
+  | 'startup_rolled_back' // an auto-start whose bulk startup rolled back; stopped again
   | 'signal_attach_failed'
   | 'unknown_error';
 

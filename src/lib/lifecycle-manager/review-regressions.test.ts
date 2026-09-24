@@ -1683,9 +1683,12 @@ describe('LifecycleManager - review regressions', () => {
     });
 
     const startup = await manager.startAllComponents();
-    await Promise.all(registrations);
+    const [registration] = (await Promise.all(registrations)) as Array<{
+      startResult?: { code?: string };
+    }>;
 
     expect(startup.success).toBe(false);
+    expect(registration.startResult?.code).toBe('startup_rolled_back');
     expect(manager.getRunningComponentNames()).toEqual([]);
     expect(lateStopCalls).toBe(1);
   });
@@ -1902,7 +1905,9 @@ describe('LifecycleManager - review regressions', () => {
     }
 
     expect(result.missingDependencies).toHaveLength(1);
-    expect(hasReport(reports, 'validateDependencies hostile')).toBe(true);
+    expect(
+      hasReport(reports, 'validateDependencies dependencies of hostile'),
+    ).toBe(true);
   });
 
   test('an auto-start registered from signals-attached is left to the bulk startup', async () => {
@@ -1931,8 +1936,13 @@ describe('LifecycleManager - review regressions', () => {
     });
 
     const startup = await manager.startAllComponents();
-    await Promise.all(registrations);
+    const [registration] = (await Promise.all(registrations)) as Array<{
+      autoStartAttempted?: boolean;
+      autoStartDeferred?: boolean;
+    }>;
 
+    expect(registration.autoStartAttempted).toBe(false);
+    expect(registration.autoStartDeferred).toBe(true);
     expect(startup.success).toBe(true);
     expect(startCalls).toBe(1);
     expect(manager.isComponentRunning('y')).toBe(true);
@@ -1955,5 +1965,58 @@ describe('LifecycleManager - review regressions', () => {
 
     expect(report.healthy).toBe(true);
     expect(report.code).not.toBe('error');
+  });
+
+  test('a getDependencies() returning undefined is read as none, not thrown on', async () => {
+    const { logger, manager } = setup();
+    const broken = new Plain(logger, 'broken');
+    await manager.registerComponent(broken);
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startAllComponents();
+    broken.getDependencies = (): string[] => undefined as unknown as string[];
+
+    const { release } = claimReports();
+
+    try {
+      expect(() => manager.validateDependencies()).not.toThrow();
+      expect((await manager.stopComponent('a')).success).toBe(true);
+    } finally {
+      release();
+    }
+  });
+
+  test('a throwing healthCheck or onMessage getter still emits the failed event', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+    for (const hook of ['healthCheck', 'onMessage']) {
+      Object.defineProperty(a, hook, {
+        get: (): never => {
+          throw new Error(`${hook} getter exploded`);
+        },
+      });
+    }
+
+    const failed: string[] = [];
+    manager.on('component:health-check-failed', () => {
+      failed.push('health');
+    });
+    manager.on('component:message-failed', () => {
+      failed.push('message');
+    });
+
+    const { release } = claimReports();
+
+    try {
+      expect((await manager.checkComponentHealth('a')).code).toBe('error');
+      expect((await manager.sendMessageToComponent('a', 'hi')).code).toBe(
+        'error',
+      );
+    } finally {
+      release();
+    }
+
+    expect(failed).toEqual(['health', 'message']);
   });
 });

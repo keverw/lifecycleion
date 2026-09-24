@@ -229,6 +229,9 @@ export type ComponentOperationFailureCode =
   | 'restart_stop_failed'
   | 'restart_start_failed'
   | 'signal_attach_failed'
+  // An auto-start that joined a bulk startup which then rolled back: it was started,
+  // and stopped again with the rest.
+  | 'startup_rolled_back'
   | 'unknown_error';
 
 /**
@@ -909,6 +912,15 @@ export interface RegistrationResultBase extends BaseOperationResult {
 
   /** Whether auto-start was attempted after registration */
   autoStartAttempted?: boolean;
+
+  /**
+   * `true` when `autoStart` was requested while a bulk startup held its latch but had not
+   * begun starting components - from a `signals-attached` listener, say. The component
+   * is left to that startup rather than started here, so `autoStartAttempted` is `false`;
+   * whether it starts is that startup's result to say. One refused or failed before its
+   * loop - a shutdown started meanwhile - never starts it.
+   */
+  autoStartDeferred?: boolean;
 
   /** Whether auto-start succeeded (only present when autoStartAttempted is true) */
   autoStartSucceeded?: boolean;
