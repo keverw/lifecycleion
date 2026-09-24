@@ -101,6 +101,8 @@ export interface LifecycleManagerEventMap {
     targetFound?: boolean;
     duringStartup?: boolean;
     autoStartAttempted?: boolean;
+    /** Left to the bulk startup about to run; see `RegistrationResultBase`. */
+    autoStartDeferred?: boolean;
     autoStartSucceeded?: boolean;
   };
   'lifecycle-manager:shutdown-initiated': {
@@ -376,6 +378,8 @@ export class LifecycleManagerEvents {
     targetFound?: boolean;
     duringStartup?: boolean;
     autoStartAttempted?: boolean;
+    /** Left to the bulk startup about to run; see `RegistrationResultBase`. */
+    autoStartDeferred?: boolean;
     autoStartSucceeded?: boolean;
   }): void {
     this.emit('component:registered', input);

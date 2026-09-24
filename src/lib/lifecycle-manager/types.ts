@@ -994,7 +994,7 @@ export interface InsertComponentAtResult extends RegistrationResultBase {
  * flag affects startup behavior, not whether dependencies must exist.
  */
 export interface DependencyValidationResult {
-  /** True if all dependencies are valid (no circular cycles, no missing dependencies) */
+  /** True if all dependencies are valid (no circular cycles, no missing or unreadable dependencies) */
   valid: boolean;
 
   /** Missing dependencies: components that depend on non-registered components */
@@ -1010,6 +1010,15 @@ export interface DependencyValidationResult {
    * Each cycle is an array of component names forming a circle (e.g., ['A', 'B', 'C'] means A→B→C→A).
    */
   circularCycles: string[][];
+
+  /**
+   * Components whose `getDependencies()` threw or did not return an array. Startup reads
+   * the same getter and fails on such a component, so any entry here makes `valid` false.
+   */
+  unreadableDependencies: Array<{
+    componentName: string;
+    error: Error;
+  }>;
 
   /** Summary counts for quick overview */
   summary: {

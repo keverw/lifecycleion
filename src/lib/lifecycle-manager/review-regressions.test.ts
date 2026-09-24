@@ -1905,6 +1905,11 @@ describe('LifecycleManager - review regressions', () => {
     }
 
     expect(result.missingDependencies).toHaveLength(1);
+    // Startup would fail on it, so the graph is not valid.
+    expect(result.valid).toBe(false);
+    expect(
+      result.unreadableDependencies.map((entry) => entry.componentName),
+    ).toEqual(['hostile']);
     expect(
       hasReport(reports, 'validateDependencies dependencies of hostile'),
     ).toBe(true);
@@ -1929,6 +1934,15 @@ describe('LifecycleManager - review regressions', () => {
     await manager.registerComponent(new Plain(logger, 'a'));
 
     const registrations: Promise<unknown>[] = [];
+    const registeredEvents: Array<{ autoStartDeferred?: boolean }> = [];
+    manager.on(
+      'component:registered',
+      (event: { name: string; autoStartDeferred?: boolean }) => {
+        if (event.name === 'y') {
+          registeredEvents.push(event);
+        }
+      },
+    );
     manager.once('lifecycle-manager:signals-attached', () => {
       registrations.push(
         manager.insertComponentAt(y, 'start', undefined, { autoStart: true }),
@@ -1943,6 +1957,7 @@ describe('LifecycleManager - review regressions', () => {
 
     expect(registration.autoStartAttempted).toBe(false);
     expect(registration.autoStartDeferred).toBe(true);
+    expect(registeredEvents[0]?.autoStartDeferred).toBe(true);
     expect(startup.success).toBe(true);
     expect(startCalls).toBe(1);
     expect(manager.isComponentRunning('y')).toBe(true);
@@ -1999,8 +2014,14 @@ describe('LifecycleManager - review regressions', () => {
     }
 
     const failed: string[] = [];
+    manager.on('component:health-check-started', () => {
+      failed.push('health-started');
+    });
     manager.on('component:health-check-failed', () => {
       failed.push('health');
+    });
+    manager.on('component:message-sent', () => {
+      failed.push('message-sent');
     });
     manager.on('component:message-failed', () => {
       failed.push('message');
@@ -2017,6 +2038,156 @@ describe('LifecycleManager - review regressions', () => {
       release();
     }
 
-    expect(failed).toEqual(['health', 'message']);
+    // Each failure is paired with its opening event.
+    expect(failed).toEqual([
+      'health-started',
+      'health',
+      'message-sent',
+      'message',
+    ]);
+  });
+
+  test('a stop that settles just after its timeout is recorded as a late stop, not a permanent stall', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    let release: (() => void) | null = null;
+    a.stop = (): Promise<void> =>
+      new Promise<void>((resolve) => {
+        release = resolve;
+      });
+    (a as unknown as { onShutdownForce: undefined }).onShutdownForce =
+      undefined;
+    // Released on a later timer than the timeout's own rejection.
+    (
+      a as unknown as { onGracefulStopTimeout: () => void }
+    ).onGracefulStopTimeout = (): void => {
+      setTimeout(() => release?.(), 1);
+    };
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+
+    await manager.stopComponent('a', { timeout: 10 });
+    await sleep(20);
+
+    expect(manager.getStalledComponentNames()).toEqual([]);
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+  });
+
+  test('dependencies with hostile array behaviour are copied inside the guard', async () => {
+    const { logger, manager } = setup();
+    const hostile = new Plain(logger, 'hostile');
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.registerComponent(hostile);
+    await manager.startAllComponents();
+
+    class HostileArray extends Array<string> {
+      public override includes(): boolean {
+        throw new Error('includes exploded');
+      }
+    }
+
+    hostile.getDependencies = (): string[] => HostileArray.from(['a']);
+
+    const { release } = claimReports();
+
+    try {
+      expect(() => manager.validateDependencies()).not.toThrow();
+      // `hostile` depends on `a`, so stopping `a` is refused - not crashed.
+      const stop = await manager.stopComponent('a');
+      expect(stop.code).toBe('has_running_dependents');
+    } finally {
+      release();
+    }
+  });
+
+  test('an auto-start does not join a bulk startup that is rolling back', async () => {
+    const { logger, manager } = setup();
+    const c = new Plain(logger, 'c');
+    const cStop = deferred();
+    // `a` fails, so the startup rolls back `c` - slowly.
+    c.stop = (): Promise<void> => cStop.promise;
+    const a = new Plain(logger, 'a');
+    a.start = (): Promise<void> => Promise.reject(new Error('a failed'));
+    await manager.registerComponent(c);
+    await manager.registerComponent(a);
+
+    let lateStarts = 0;
+    const late = new Plain(logger, 'late');
+    late.start = (): Promise<void> => {
+      lateStarts++;
+      return Promise.resolve();
+    };
+    const registrations: Promise<unknown>[] = [];
+    manager.once('component:startup-rollback', () => {
+      registrations.push(manager.registerComponent(late, { autoStart: true }));
+    });
+
+    const startup = manager.startAllComponents();
+    await sleep(10);
+    cStop.resolve();
+    await startup;
+    const [registration] = (await Promise.all(registrations)) as Array<{
+      startResult?: { code?: string };
+    }>;
+
+    expect(registration.startResult?.code).toBe('startup_rolled_back');
+    expect(lateStarts).toBe(0);
+  });
+
+  test('a required dependency registered before the bulk loop begins is accepted', async () => {
+    const { logger, manager } = setup({ attachSignalsBeforeStartup: true });
+    manager.attachSignals = (): void => {
+      fakeAttachedSignals(manager);
+      (
+        manager as unknown as {
+          lifecycleEvents: { lifecycleManagerSignalsAttached: () => void };
+        }
+      ).lifecycleEvents.lifecycleManagerSignalsAttached();
+    };
+    await manager.registerComponent(new Plain(logger, 'api', ['db']));
+
+    const registrations: Promise<{ success: boolean }>[] = [];
+    manager.once('lifecycle-manager:signals-attached', () => {
+      registrations.push(manager.registerComponent(new Plain(logger, 'db')));
+    });
+
+    const startup = await manager.startAllComponents();
+    const [registration] = await Promise.all(registrations);
+
+    expect(registration.success).toBe(true);
+    expect(startup.success).toBe(true);
+    expect(manager.getRunningComponentNames().sort()).toEqual(['api', 'db']);
+  });
+
+  test('a stalled retry decides its token bump from the same read it calls', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    const stopGate = deferred();
+    a.stop = (): Promise<void> => stopGate.promise;
+    (a as unknown as { onShutdownForce: undefined }).onShutdownForce =
+      undefined;
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+
+    const { release } = claimReports();
+
+    try {
+      await manager.stopComponent('a', { timeout: 10 });
+      expect(manager.getComponentStatus('a')?.state).toBe('stalled');
+
+      // A truthy non-function: no handler will run, so the retry must not bump the
+      // token and orphan the floating `stop()`.
+      (a as unknown as { onShutdownForce: unknown }).onShutdownForce = 'yes';
+      await manager.stopAllComponents();
+
+      stopGate.resolve();
+      await sleep(10);
+    } finally {
+      release();
+    }
+
+    // The floating stop still cleared the stall.
+    expect(manager.getStalledComponentNames()).toEqual([]);
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
   });
 });

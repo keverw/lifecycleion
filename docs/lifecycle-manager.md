@@ -2033,6 +2033,7 @@ interface DependencyValidationResult {
     missingDependency: string;
   }>;
   circularCycles: string[][];
+  unreadableDependencies: Array<{ componentName: string; error: Error }>; // getDependencies() threw or returned a non-array
   summary: {
     totalMissingDependencies: number; // Total number of missing dependencies across all components
     requiredMissingDependencies: number; // Missing dependencies on required components (blocks startup)
