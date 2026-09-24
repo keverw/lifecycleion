@@ -1748,6 +1748,23 @@ export class LifecycleManager
           'Message handler failed after it had already timed out',
           { from },
         );
+        // Paired with `message-sent`, as a handler that threw or rejected is: the event
+        // carries `timedOut` for exactly this, but nothing emitted it.
+        this.lifecycleEvents.componentMessageFailed(
+          componentName,
+          from,
+          new Error(
+            `Message handler timed out after ${String(toTimerDelayMS(timeoutMS))}ms`,
+          ),
+          {
+            timedOut: true,
+            code: 'timeout',
+            componentFound: true,
+            componentRunning: isRunning,
+            handlerImplemented: true,
+            data: undefined,
+          },
+        );
         return {
           sent: true,
           componentFound: true,
@@ -2841,9 +2858,35 @@ export class LifecycleManager
       try {
         // Get startup order (topological sort)
         let startupOrder: string[];
+        // Every list read once, here, and used both for the order and by the loop below:
+        // read again there, a list that answered differently put a component ahead of a
+        // dependency it then failed on, and rolled the whole startup back.
+        const startupReads = new Map<BaseComponent, DependencyRead>();
 
         try {
-          startupOrder = this.getStartupOrderInternal();
+          // The registry as the startup finds it. A component one of these reads
+          // registers is not ordered here: it joins this startup through its own
+          // registration - started there if it asked to be - and ordering it too had
+          // this loop start it a second time, fail on it, and roll everything back.
+          const componentsToOrder = this.components;
+
+          for (const component of componentsToOrder) {
+            startupReads.set(
+              component,
+              this.readDependenciesReported(component, 'startup'),
+            );
+          }
+
+          startupOrder = this.getStartupOrderInternal(
+            componentsToOrder,
+            undefined,
+            new Map(
+              Array.from(startupReads, ([component, read]) => [
+                component,
+                'dependencies' in read ? read.dependencies : [],
+              ]),
+            ),
+          );
           // In the order now, so this loop starts them.
           this.deferredAutoStartNames.clear();
         } catch (error) {
@@ -2913,14 +2956,13 @@ export class LifecycleManager
           }
 
           // Check if any required dependency failed or was skipped
-          // Read once, and handed to the component's own start below: the skip check
-          // and that start then act on the same list, and the component's code runs
-          // once for both. Tolerant here - its valid entries still decide the skip - and
-          // the start fails it on a broken list; reported now in case it is skipped.
-          const dependencyRead = this.readDependenciesReported(
-            component,
-            'startup',
-          );
+          // The list the order was computed from, handed to the component's own start
+          // below too: the order, the skip check and that start all act on one read.
+          // Tolerant here - its valid entries still decide the skip - and the start
+          // fails it on a broken list; reported when read, in case it is skipped.
+          const dependencyRead =
+            startupReads.get(component) ??
+            this.readDependenciesReported(component, 'startup');
 
           const dependencies =
             'dependencies' in dependencyRead ? dependencyRead.dependencies : [];
@@ -3866,6 +3908,13 @@ export class LifecycleManager
 
     // Read again once the reads below are done: they can register the name.
     let registrationIndexBefore = this.getComponentIndex(componentName);
+    // What a committed registration has done so far, for a failure after the commit to
+    // report rather than contradict: a caller told `autoStartAttempted: false` for an
+    // auto-start that ran could start the component a second time.
+    let committedStartupOrder: string[] = [];
+    let isCommittedTargetFound: boolean | undefined;
+    let didAutoStartAttempt = false;
+    let startResult: ComponentOperationResult | undefined;
 
     try {
       // Everything of the caller's code registration needs is read first - whether the
@@ -3880,32 +3929,63 @@ export class LifecycleManager
       // The checks that need none of the caller's code come first: a registration they
       // refuse reads nothing - no component's `getDependencies()` during a shutdown that
       // may be tearing them down - and answers with its own code, not with whatever
-      // the reads would have made of it. They are made again below, in order.
-      const isRefusedWithoutReads =
-        !this.isInsertPosition(position) || this.isShuttingDown;
-      // Read first and again last, and either answer counts: first, so a component it
-      // registers is read with the rest; last, so a read that registered this instance
-      // with another manager is seen. What that last read registers is read in turn.
-      let isRegisteredWithAManager =
-        !isRefusedWithoutReads && component._isRegisteredWithManager();
+      // the reads would have made of it. Asked again before each read, since any read
+      // can begin a shutdown; the checks below refuse once one has.
+      const canRead = (): boolean =>
+        this.isInsertPosition(position) && !this.isShuttingDown;
+      let isRegisteredWithAManager = false;
       // Strict: a `getDependencies()` that throws, or reports an implausible length,
       // refuses the registration - once the checks ahead of it have passed, as before. A
       // non-string entry does not - its own start fails on it - but is reported once the
       // registration commits: a refused one must not spend the report the next
       // registration makes.
-      const candidateRead: DependencyRead = isRefusedWithoutReads
-        ? { dependencies: [] }
-        : this.tryReadDependencies(component);
+      let candidateRead: DependencyRead = { dependencies: [] };
       const readRegistered = (registered: BaseComponent): string[] =>
         this.readDependencies(registered, 'registration');
-      let registryRead = isRefusedWithoutReads
-        ? { reads: new Map<BaseComponent, string[]>(), isSettled: true }
-        : this.readRegistry(readRegistered);
+      let registryRead = {
+        reads: new Map<BaseComponent, string[]>(),
+        isSettled: true,
+      };
 
-      if (!isRefusedWithoutReads && registryRead.isSettled) {
+      if (canRead()) {
+        // Read first, so a component it registers is read with the rest.
+        isRegisteredWithAManager = component._isRegisteredWithManager();
+      }
+
+      if (canRead()) {
+        candidateRead = this.tryReadDependencies(component);
+      }
+
+      // The registry's lists and the instance's answer, alternately, until neither
+      // brings anything new: a list read can register this instance with another
+      // manager, and asking about that can register components whose lists are then
+      // unread. Either answer of the instance's counts.
+      for (let round = 0; canRead(); round++) {
+        registryRead = this.readRegistry(
+          readRegistered,
+          registryRead.reads,
+          canRead,
+        );
+
+        if (!registryRead.isSettled || !canRead()) {
+          break;
+        }
+
         isRegisteredWithAManager =
           component._isRegisteredWithManager() || isRegisteredWithAManager;
-        registryRead = this.readRegistry(readRegistered, registryRead.reads);
+
+        if (
+          this.components.every((registered) =>
+            registryRead.reads.has(registered),
+          )
+        ) {
+          break;
+        }
+
+        if (round === MAX_REGISTRY_READ_ROUNDS) {
+          registryRead = { reads: registryRead.reads, isSettled: false };
+          break;
+        }
       }
 
       const dependencySnapshot = registryRead.reads;
@@ -3913,8 +3993,9 @@ export class LifecycleManager
 
       // A registry that kept changing under the reads above - each read registering
       // another component whose own list then had to be read - is refused as a broken
-      // contract, the way a throwing `getName()` is.
-      if (!registryRead.isSettled) {
+      // contract, the way a throwing `getName()` is. Reads cut short by a shutdown are
+      // not: the shutdown check below refuses those.
+      if (!registryRead.isSettled && !this.isShuttingDown) {
         throw new Error(
           `The registry kept changing while "${componentName}" was being registered; registration refused`,
         );
@@ -4333,6 +4414,8 @@ export class LifecycleManager
         position === 'before' || position === 'after'
           ? this.getComponentIndex(targetComponentName ?? '') !== null
           : undefined;
+      committedStartupOrder = startupOrder;
+      isCommittedTargetFound = isTargetFound;
 
       if (isInsertAction) {
         this.logger.entity(componentName).info('Component inserted', {
@@ -4346,11 +4429,7 @@ export class LifecycleManager
 
       // Determine if auto-start will be attempted
       const shouldAutoStart = _options?.autoStart === true;
-      let didAutoStartAttempt = false;
       let isAutoStartDeferred = false;
-
-      // Handle AutoStart if requested and capture result
-      let startResult: ComponentOperationResult | undefined;
 
       if (shouldAutoStart) {
         // Bulk startup first: `isStarted` turns true as soon as its first component is
@@ -4391,6 +4470,7 @@ export class LifecycleManager
               status: this.getComponentStatus(componentName),
             };
           } else {
+            didAutoStartAttempt = true;
             startResult = await this.startComponentInternal(
               componentName,
               { allowDuringBulkStartup: true },
@@ -4458,15 +4538,15 @@ export class LifecycleManager
           this.logger
             .entity(componentName)
             .info('AutoStart: starting component (manager is running)');
-          startResult = await this.startComponentInternal(componentName);
           didAutoStartAttempt = true;
+          startResult = await this.startComponentInternal(componentName);
         } else {
           // Manager is not running - attempt to start just this component
           this.logger
             .entity(componentName)
             .info('AutoStart: starting component (manager not running)');
-          startResult = await this.startComponentInternal(componentName);
           didAutoStartAttempt = true;
+          startResult = await this.startComponentInternal(componentName);
         }
       }
 
@@ -4582,11 +4662,15 @@ export class LifecycleManager
           action: isInsertAction ? 'insert' : 'register',
           registrationIndexBefore,
           registrationIndexAfter: registrationIndexNow,
-          startupOrder: [],
+          startupOrder: committedStartupOrder,
           requestedPosition: isInsertAction
             ? { position, targetComponentName }
             : undefined,
           duringStartup: this.isStarting,
+          autoStartAttempted: didAutoStartAttempt,
+          ...(didAutoStartAttempt
+            ? { autoStartSucceeded: startResult?.success === true }
+            : {}),
         });
       } else {
         this.lifecycleEvents.componentRegistrationRejected({
@@ -4624,14 +4708,22 @@ export class LifecycleManager
         registrationIndexAfter: isRegistered
           ? registrationIndexNow
           : registrationIndexBefore,
-        startupOrder: [],
+        // A committed registration reports what it did before the failure: the order it
+        // computed, the target it found, and an auto-start it ran.
+        startupOrder: isRegistered ? committedStartupOrder : [],
         requestedPosition: { position, targetComponentName },
         manualPositionRespected: false,
-        targetFound:
-          position === 'before' || position === 'after' ? false : undefined,
+        targetFound: isRegistered
+          ? isCommittedTargetFound
+          : position === 'before' || position === 'after'
+            ? false
+            : undefined,
         duringStartup: this.isStarting,
-        autoStartAttempted: false,
-        startResult: undefined,
+        autoStartAttempted: isRegistered && didAutoStartAttempt,
+        ...(isRegistered && didAutoStartAttempt
+          ? { autoStartSucceeded: startResult?.success === true }
+          : {}),
+        startResult: isRegistered ? startResult : undefined,
       };
     }
   }
@@ -8468,6 +8560,8 @@ export class LifecycleManager
     read: (component: BaseComponent) => T,
     // Answers already read, to continue from: only components missing here are read.
     reads: Map<BaseComponent, T> = new Map(),
+    // Asked before each read; once it answers `false` the reads stop, unsettled.
+    canContinue: () => boolean = () => true,
   ): {
     reads: Map<BaseComponent, T>;
     isSettled: boolean;
@@ -8486,6 +8580,10 @@ export class LifecycleManager
       }
 
       for (const component of unread) {
+        if (!canContinue()) {
+          return { reads, isSettled: false };
+        }
+
         reads.set(component, read(component));
       }
     }

@@ -2738,7 +2738,7 @@ describe('LifecycleManager - review regressions', () => {
     expect(reports).toHaveLength(0);
   });
 
-  test('a bulk startup reads each dependency list once in its loop, shared with the start', async () => {
+  test('a bulk startup reads each dependency list once, for its order, loop and start', async () => {
     const { logger, manager } = setup();
     const api = new Plain(logger, 'api');
     await manager.registerComponent(api);
@@ -2750,8 +2750,8 @@ describe('LifecycleManager - review regressions', () => {
     };
 
     expect((await manager.startAllComponents()).success).toBe(true);
-    // One for the startup order, one for the loop - the start reuses the loop's.
-    expect(reads).toBe(2);
+    // One read, shared by the startup order, the loop's skip check and the start.
+    expect(reads).toBe(1);
   });
 
   test('a start reads each of its options once', async () => {
@@ -3193,5 +3193,161 @@ describe('LifecycleManager - review regressions', () => {
 
     expect(result.code).toBe('duplicate_instance');
     expect(manager.getComponentNames()).toEqual([]);
+  });
+
+  test('a list that answers differently per read cannot split the order from the start', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.registerComponent(new Plain(logger, 'b'));
+    const c = new Plain(logger, 'c');
+    // First in the registry, so the order puts it right after its first answer.
+    await manager.insertComponentAt(c, 'start');
+    let reads = 0;
+    c.getDependencies = (): string[] => (reads++ === 0 ? ['a'] : ['b']);
+
+    expect((await manager.startAllComponents()).success).toBe(true);
+  });
+
+  test('a message handler that times out emits message-failed', async () => {
+    const { logger, manager } = setup({ messageTimeoutMS: 20 });
+    const c = new Plain(logger, 'c');
+    (c as unknown as { onMessage: () => Promise<void> }).onMessage = () =>
+      new Promise<void>(() => {});
+    await manager.registerComponent(c);
+    await manager.startComponent('c');
+    const failures: unknown[] = [];
+    manager.on('component:message-failed', (event: unknown) => {
+      failures.push(event);
+    });
+
+    const result = await manager.sendMessageToComponent('c', 'ping');
+
+    expect(result.code).toBe('timeout');
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ timedOut: true, code: 'timeout' });
+  });
+
+  test('a failure after the commit reports the auto-start that ran', async () => {
+    const { logger, manager } = setup();
+    const c = new Plain(logger, 'c');
+    let startCalls = 0;
+    c.start = (): Promise<void> => {
+      startCalls++;
+
+      return Promise.resolve();
+    };
+    await manager.registerComponent(new Plain(logger, 'first'));
+    // Describing the position for the success result crashes, after the auto-start ran.
+    manager.once('component:started', () => {
+      (manager as unknown as { nameOfAt: () => never }).nameOfAt =
+        (): never => {
+          throw new Error('crash after commit');
+        };
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.registerComponent(c, { autoStart: true });
+    } finally {
+      release();
+    }
+
+    expect(startCalls).toBe(1);
+    expect(result.registered).toBe(true);
+    expect(result.autoStartAttempted).toBe(true);
+  });
+
+  test('an instance registered elsewhere by a list read after its last answer is refused', async () => {
+    const { logger, manager } = setup();
+    const other = setup().manager;
+    let hasFired = false;
+    const helper = new Plain(logger, 'helper');
+    let calls = 0;
+
+    class Candidate extends Plain {
+      public override _isRegisteredWithManager(): boolean {
+        // The second answer registers a helper, whose list is read after it.
+        if (calls++ === 1) {
+          void manager.registerComponent(helper);
+        }
+
+        return super._isRegisteredWithManager();
+      }
+    }
+
+    const candidate = new Candidate(logger, 'candidate');
+    helper.getDependencies = (): string[] => {
+      // Once the helper is registered: its read registers the candidate elsewhere.
+      if (!hasFired && manager.getComponentNames().includes('helper')) {
+        hasFired = true;
+        void other.registerComponent(candidate);
+      }
+
+      return [];
+    };
+
+    const result = await manager.registerComponent(candidate);
+
+    expect(hasFired).toBe(true);
+    expect(result.code).toBe('duplicate_instance');
+    expect(manager.getComponentNames()).not.toContain('candidate');
+  });
+
+  test('registration stops reading lists once a read begins a shutdown', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    const b = new Plain(logger, 'b');
+    await manager.registerComponent(a);
+    await manager.registerComponent(b);
+    await manager.startAllComponents();
+    let shutdown: Promise<unknown> | undefined;
+    a.getDependencies = (): string[] => {
+      if (new Error().stack?.includes('readRegistry') === true) {
+        shutdown ??= manager.stopAllComponents();
+      }
+
+      return [];
+    };
+    let registrationReadsOfB = 0;
+    b.getDependencies = (): string[] => {
+      if (new Error().stack?.includes('readRegistry') === true) {
+        registrationReadsOfB++;
+      }
+
+      return [];
+    };
+
+    const result = await manager.registerComponent(new Plain(logger, 'x'));
+    await shutdown;
+
+    expect(result.code).toBe('shutdown_in_progress');
+    expect(registrationReadsOfB).toBe(0);
+  });
+
+  test('a component auto-started by a list read during a bulk startup does not fail it', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    await manager.registerComponent(a);
+    let registration: Promise<{ success: boolean }> | undefined;
+    let hasRegistered = false;
+    a.getDependencies = (): string[] => {
+      // Flagged before the call: the registration reads this list too.
+      if (!hasRegistered) {
+        hasRegistered = true;
+        registration = manager.registerComponent(new Plain(logger, 'helper'), {
+          autoStart: true,
+        });
+      }
+
+      return [];
+    };
+
+    const startup = await manager.startAllComponents();
+
+    expect(startup.success).toBe(true);
+    expect((await registration)?.success).toBe(true);
+    expect(manager.isComponentRunning('helper')).toBe(true);
   });
 });

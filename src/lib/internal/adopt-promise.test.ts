@@ -94,6 +94,25 @@ describe('adoptPromise', () => {
     expect(isOwnThenCalled).toBe(false);
   });
 
+  test('rejects for a promise from another realm with a throwing constructor getter', async () => {
+    const { runInNewContext } = await import('node:vm');
+    const promise = runInNewContext('Promise.resolve(1)') as object;
+    let isOwnThenCalled = false;
+    void Object.defineProperty(promise, 'then', {
+      value: (): void => {
+        isOwnThenCalled = true;
+      },
+    });
+    Object.defineProperty(promise, 'constructor', {
+      get: (): never => {
+        throw new Error('constructor exploded');
+      },
+    });
+
+    expect(await settle(adoptPromise(promise))).toBe('constructor exploded');
+    expect(isOwnThenCalled).toBe(false);
+  });
+
   test('adopts a non-promise thenable through its then', async () => {
     const thenable = {
       then: (resolve: (value: number) => void): void => {

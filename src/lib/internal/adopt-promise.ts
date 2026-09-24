@@ -40,14 +40,26 @@ function inheritsFromPromise(value: unknown): boolean {
  * the promise itself is left unhandled. Shadowing the property for the call would get
  * past it in some shapes, but not a non-configurable own property or a frozen promise,
  * and this never writes to the value it is handed. Such a promise's failure is still
- * reported - as an unhandled rejection rather than through the caller. (A native promise
- * from another realm with a broken `constructor` is not recognized as one, and is
- * adopted through its own `then`.)
+ * reported - as an unhandled rejection rather than through the caller. A native promise
+ * from another realm - an iframe, a `vm` context - fares the same: the intrinsic accepts
+ * it, since its check is the internal slot, not the prototype, and a broken `constructor`
+ * throws there and again in `Promise.resolve()`, which rejects the result.
  */
 export function adoptPromise<T>(
   value: T | PromiseLike<T>,
 ): Promise<Awaited<T>> {
   return new Promise<Awaited<T>>((resolve, reject) => {
+    // A primitive - what most hooks return, synchronously - cannot be a promise or a
+    // thenable, so it skips the intrinsic's throw and catch, and the stack it builds.
+    if (
+      value === null ||
+      (typeof value !== 'object' && typeof value !== 'function')
+    ) {
+      resolve(value as Awaited<T>);
+
+      return;
+    }
+
     // A native promise is read directly, before `Promise.resolve()` gets a say:
     // `Promise.resolve()` only hands one back unchanged when its `constructor` is
     // `Promise`, so one carrying its own `constructor` was wrapped instead - and the
