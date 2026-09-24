@@ -1,4 +1,5 @@
 import { matchesFilter } from './utils';
+import { adoptPromise } from '../internal/adopt-promise';
 import type {
   RequestInterceptorFilter,
   RequestInterceptor,
@@ -66,7 +67,10 @@ export class RequestInterceptorManager {
         continue;
       }
 
-      const result = await fn(current, phase, context);
+      // Adopted, not awaited as it is: an interceptor is caller code, and one returning
+      // a native promise with its own `constructor` and a no-op `then` hung the
+      // request. See `adoptPromise()`.
+      const result = await adoptPromise(fn(current, phase, context));
 
       // null is shorthand for { cancel: true } with no reason
       if (result === null) {

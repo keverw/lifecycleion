@@ -113,6 +113,57 @@ describe('adoptPromise', () => {
     expect(isOwnThenCalled).toBe(false);
   });
 
+  test("follows a Promise subclass's own then, as await does", async () => {
+    // A lazy promise: its work starts only when `then` is called. Read through the
+    // intrinsic, the work never ran and the result was `undefined`.
+    class Lazy<T> extends Promise<T> {
+      public static get [Symbol.species](): PromiseConstructor {
+        return Promise;
+      }
+
+      #executor: (resolve: (value: T) => void) => void;
+      #promise?: Promise<T>;
+
+      constructor(executor: (resolve: (value: T) => void) => void) {
+        super((resolve) => {
+          resolve(undefined as T);
+        });
+        this.#executor = executor;
+      }
+
+      public override then<A = T, B = never>(
+        onFulfilled?: ((value: T) => A | PromiseLike<A>) | null,
+        onRejected?: ((reason: unknown) => B | PromiseLike<B>) | null,
+      ): Promise<A | B> {
+        this.#promise ??= new Promise<T>(this.#executor);
+
+        return this.#promise.then(onFulfilled, onRejected);
+      }
+    }
+
+    const lazy = new Lazy<string>((resolve) => {
+      setTimeout(() => {
+        resolve('value');
+      }, 5);
+    });
+
+    expect(await adoptPromise(lazy)).toBe('value');
+  });
+
+  test('follows a proxy around a promise through its then', async () => {
+    const proxy = new Proxy(Promise.resolve(42), {
+      get(target, key): unknown {
+        const member: unknown = Reflect.get(target, key);
+
+        return typeof member === 'function'
+          ? (member as (...args: unknown[]) => unknown).bind(target)
+          : member;
+      },
+    });
+
+    expect(await adoptPromise(proxy)).toBe(42);
+  });
+
   test('adopts a non-promise thenable through its then', async () => {
     const thenable = {
       then: (resolve: (value: number) => void): void => {

@@ -531,6 +531,57 @@ describe('HTTPClient — basic HTTP methods', () => {
   });
 
   test.each(hostileRejections)(
+    'fails, not hangs, on an adapter send rejecting with %s',
+    async (_label, make) => {
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (): Promise<AdapterResponse> =>
+          make(new Error('adapter rejected')),
+      };
+
+      const outcome = await Promise.race([
+        new HTTPClient({ adapter, baseURL: 'http://example.test' })
+          .get('/x')
+          .send(),
+        sleep(200).then(() => 'hung' as const),
+      ]);
+
+      expect(outcome).not.toBe('hung');
+      expect((outcome as { isFailed: boolean }).isFailed).toBe(true);
+    },
+  );
+
+  test.each(hostileRejections)(
+    'fails, not hangs, on a request interceptor rejecting with %s',
+    async (_label, make) => {
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (): Promise<AdapterResponse> =>
+          Promise.resolve({
+            status: 200,
+            headers: {},
+            body: new Uint8Array(),
+          }),
+      };
+      const client = new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+      });
+      client.addRequestInterceptor(() =>
+        make(new Error('interceptor rejected')),
+      );
+
+      const outcome = await Promise.race([
+        client.get('/x').send(),
+        sleep(200).then(() => 'hung' as const),
+      ]);
+
+      expect(outcome).not.toBe('hung');
+      expect((outcome as { isFailed: boolean }).isFailed).toBe(true);
+    },
+  );
+
+  test.each(hostileRejections)(
     'adopts a `requestBodySettled` rejected promise with %s',
     async (_label, make) => {
       const adapter: HTTPAdapter = {

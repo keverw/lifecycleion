@@ -169,6 +169,22 @@ type DependencyRead =
   { dependencies: string[]; invalidEntry?: TypeError } | { error: unknown };
 
 /**
+ * The list a read yields, tolerantly: its string entries, or none for a read that
+ * failed. Also takes a list already unwrapped, or nothing.
+ */
+function dependenciesOf(read: DependencyRead | string[] | undefined): string[] {
+  if (read === undefined) {
+    return [];
+  }
+
+  if (Array.isArray(read)) {
+    return read;
+  }
+
+  return 'dependencies' in read ? read.dependencies : [];
+}
+
+/**
  * A shutdown pass that has been accepted and is running.
  *
  * "A shutdown was requested while this pass was running" is a property of the pass, not of
@@ -297,6 +313,11 @@ export class LifecycleManager
     // Set as its rollback begins: the rollback works from the list as it stood then,
     // so an auto-start that lands afterwards has to stop itself.
     isRollingBack: boolean;
+    // True while it reads the registry's dependency lists to compute its order. A
+    // component a read registers then is ordered with the rest - its auto-start left to
+    // the loop, as one registered before the loop is - rather than started at once,
+    // ahead of dependencies the loop has not started yet.
+    isOrdering: boolean;
     // Its deadline, for an auto-start that joins it: held to the same budget, and
     // cleaned up as its own late starts are when it overruns.
     readonly deadlineContext:
@@ -2819,6 +2840,7 @@ export class LifecycleManager
     const bulkStartup = {
       started: startedComponents,
       isRollingBack: false,
+      isOrdering: true,
       deadlineContext:
         deadline === undefined
           ? undefined
@@ -2863,44 +2885,42 @@ export class LifecycleManager
         const startupReads = new Map<BaseComponent, DependencyRead>();
 
         try {
-          // The registry as the startup finds it. A component one of these reads
-          // registers is not ordered here: it joins this startup through its own
-          // registration - started there if it asked to be - and ordering it too had
-          // this loop start it a second time, fail on it, and roll everything back.
-          const componentsToOrder = this.components;
+          // Every component's list, including those of components the reads themselves
+          // register: those are ordered with the rest - their auto-starts deferred to
+          // this loop while `isOrdering` holds - rather than left out, or started ahead
+          // of dependencies this loop had not started yet. Any read can begin a
+          // shutdown; the lists left are then not read under it - their components may
+          // be tearing down - and the startup is over, without going on to clear the
+          // deferred auto-starts as if it would start them.
+          const hasShutdownBegun = (): boolean =>
+            this.isShuttingDown ||
+            this.shutdownToken !== shutdownTokenAtBulkStart;
+          const registryRead = this.readRegistry(
+            (component) => this.readDependenciesReported(component, 'startup'),
+            startupReads,
+            () => !hasShutdownBegun(),
+          );
 
-          for (const component of componentsToOrder) {
-            startupReads.set(
-              component,
-              this.readDependenciesReported(component, 'startup'),
+          if (hasShutdownBegun()) {
+            this.logger.warn(
+              'Shutdown signal received during startup, aborting',
             );
 
-            // Any read can begin a shutdown - the last one included, which must not
-            // go on to clear the deferred auto-starts as if this startup would start
-            // them. The lists left are not read under it, since their components may
-            // be tearing down, and the startup is over.
-            if (
-              this.isShuttingDown ||
-              this.shutdownToken !== shutdownTokenAtBulkStart
-            ) {
-              this.logger.warn(
-                'Shutdown signal received during startup, aborting',
-              );
+            return abortedByShutdown();
+          }
 
-              return abortedByShutdown();
-            }
+          if (!registryRead.isSettled) {
+            throw new Error(
+              'The registry kept changing while the startup order was being read',
+            );
           }
 
           startupOrder = this.getStartupOrderInternal(
-            componentsToOrder,
+            this.components,
             undefined,
-            new Map(
-              Array.from(startupReads, ([component, read]) => [
-                component,
-                'dependencies' in read ? read.dependencies : [],
-              ]),
-            ),
+            startupReads,
           );
+          bulkStartup.isOrdering = false;
           // In the order now, so this loop starts them.
           this.deferredAutoStartNames.clear();
         } catch (error) {
@@ -2988,8 +3008,7 @@ export class LifecycleManager
             );
           }
 
-          const dependencies =
-            'dependencies' in dependencyRead ? dependencyRead.dependencies : [];
+          const dependencies = dependenciesOf(dependencyRead);
           let shouldSkip = false;
           let skipReason = '';
 
@@ -3935,12 +3954,17 @@ export class LifecycleManager
     // What a committed registration has done so far, for a failure after the commit to
     // report rather than contradict: a caller told `autoStartAttempted: false` for an
     // auto-start that ran could start the component a second time.
-    let committed:
-      | Pick<
-          InsertComponentAtResult,
-          'startupOrder' | 'manualPositionRespected' | 'targetFound'
-        >
-      | undefined;
+    // Set by this registration's own commit, not inferred from the registry: a
+    // re-entrant registration of the same instance - from its own `getDependencies()` -
+    // can put it there while this one goes on to fail before committing anything.
+    let hasCommitted = false;
+    // Filled in as each part is known, so a failure part-way reports what was.
+    const committed: Partial<
+      Pick<
+        InsertComponentAtResult,
+        'startupOrder' | 'manualPositionRespected' | 'targetFound'
+      >
+    > = {};
     let didAutoStartAttempt = false;
     let isAutoStartDeferred = false;
     let startResult: ComponentOperationResult | undefined;
@@ -4322,6 +4346,8 @@ export class LifecycleManager
       // A new array rather than a splice, as unregister does: a loop over the registry
       // that a re-entrant registration lands in keeps walking the array it started on.
       this.components = nextComponents;
+      hasCommitted = true;
+      committed.startupOrder = startupOrder;
       this.registeredNames.set(component, componentName);
       this.componentStates.set(componentName, 'registered');
       this.componentTimestamps.set(componentName, {
@@ -4369,6 +4395,8 @@ export class LifecycleManager
         this.components = this.components.filter(
           (registered) => registered !== component,
         );
+        // Rolled back, so this registration did not commit after all.
+        hasCommitted = false;
         if (previousRecordedName === undefined) {
           this.registeredNames.delete(component);
         } else {
@@ -4429,11 +4457,8 @@ export class LifecycleManager
         position === 'before' || position === 'after'
           ? this.getComponentIndex(targetComponentName ?? '') !== null
           : undefined;
-      committed = {
-        startupOrder,
-        manualPositionRespected: isManualPositionRespected,
-        targetFound: isTargetFound,
-      };
+      committed.manualPositionRespected = isManualPositionRespected;
+      committed.targetFound = isTargetFound;
 
       if (isInsertAction) {
         this.logger.entity(componentName).info('Component inserted', {
@@ -4452,7 +4477,10 @@ export class LifecycleManager
         // Bulk startup first: `isStarted` turns true as soon as its first component is
         // running, and a start without `allowDuringBulkStartup` is refused with
         // `startup_in_progress` for the rest of it.
-        if (this.isStarting && this.activeBulkStartup === null) {
+        if (
+          this.isStarting &&
+          (this.activeBulkStartup === null || this.activeBulkStartup.isOrdering)
+        ) {
           // A bulk startup that has taken its latch but not begun its loop - an
           // `attachSignalsBeforeStartup` listener on `signals-attached` registering this.
           // The loop about to run reads the registry after this and starts it in order;
@@ -4573,8 +4601,11 @@ export class LifecycleManager
         : undefined;
 
       // Where it is now, not where it landed: an auto-start can register or remove
-      // components around it.
-      const registrationIndexNow = this.getComponentIndex(componentName);
+      // components around it. By instance, as the failure path reads it: one unregistered
+      // and replaced under its name by a listener must not be described as the other.
+      const indexOfComponent = this.components.indexOf(component);
+      const registrationIndexNow =
+        indexOfComponent === -1 ? null : indexOfComponent;
       const actualPosition =
         this.describeRegistryPosition(registrationIndexNow);
 
@@ -4638,19 +4669,20 @@ export class LifecycleManager
       // Read back from the registry rather than assumed: a throw after the commit - from
       // an auto-start, say - leaves the component registered, and both the event and the
       // result must say so.
-      const registrationIndexNow = this.components.indexOf(component);
-      const isRegistered = registrationIndexNow !== -1;
+      const indexOfComponent = this.components.indexOf(component);
+      const registrationIndexNow =
+        indexOfComponent === -1 ? null : indexOfComponent;
+      const isRegistered = hasCommitted;
       // What a committed registration reports - where it is, the order it computed,
       // the target it found, and an auto-start it attempted or left to the bulk
       // startup - on both the event and the result, built once so they cannot drift.
       const committedReport = isRegistered
         ? {
-            startupOrder: committed?.startupOrder ?? [],
+            startupOrder: committed.startupOrder ?? [],
             actualPosition: this.describeRegistryPosition(registrationIndexNow),
-            manualPositionRespected:
-              committed?.manualPositionRespected ?? false,
+            manualPositionRespected: committed.manualPositionRespected ?? false,
             targetFound:
-              committed !== undefined
+              'targetFound' in committed
                 ? committed.targetFound
                 : position === 'before' || position === 'after'
                   ? false
@@ -7610,7 +7642,12 @@ export class LifecycleManager
   ): boolean {
     // Not before the startup's loop has begun - a `signals-attached` listener
     // registering it: the loop computes its order after this, and starts it in turn.
-    if (!this.isStarting || this.activeBulkStartup === null) {
+    // Nor while it reads the registry to compute that order: this one is read with it.
+    if (
+      !this.isStarting ||
+      this.activeBulkStartup === null ||
+      this.activeBulkStartup.isOrdering
+    ) {
       return false;
     }
 
@@ -8668,8 +8705,9 @@ export class LifecycleManager
       name: string;
       dependencies: string[];
     },
-    // Lists registration already read, so ordering runs none of the caller's code.
-    dependencySnapshot?: ReadonlyMap<BaseComponent, string[]>,
+    // Lists already read - by registration, or a bulk startup's reads - so ordering
+    // runs none of the caller's code.
+    dependencySnapshot?: ReadonlyMap<BaseComponent, string[] | DependencyRead>,
   ): string[] {
     // Each name is resolved once, here. A registration candidate is not recorded yet, so
     // it is named by the value registration already read from it rather than asked
@@ -8703,7 +8741,7 @@ export class LifecycleManager
         component === candidate?.component
           ? candidate.dependencies
           : dependencySnapshot !== undefined
-            ? (dependencySnapshot.get(component) ?? [])
+            ? dependenciesOf(dependencySnapshot.get(component))
             : this.readDependencies(component, 'ordering');
 
       for (const dep of dependencies) {

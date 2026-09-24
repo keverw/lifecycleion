@@ -1825,52 +1825,59 @@ export class BaseHTTPClient {
       uploadActivity.at = Date.now();
 
       try {
-        const rawAdapterResponse = await this._adapter.send({
-          requestURL: sentRequest.requestURL,
-          method: sentRequest.method,
-          headers: { ...sentRequest.headers },
-          body: sentRequest.body ?? null,
-          signal: attemptSignal,
-          // Forward the builder's streaming factory to each adapter attempt.
-          // NodeAdapter invokes it only for a 200 response, letting the caller
-          // create attempt-local writable state when a retry happens.
-          streamResponse: options.streamResponse,
-          // attemptNumber and requestID are passed so NodeAdapter can populate
-          // StreamResponseInfo without the adapter needing to track attempt state
-          // itself.
-          attemptNumber,
-          requestID: requestID,
-          // The origin the caller addressed, so an adapter can tell a redirect hop to
-          // another host from the request it was configured for. See
-          // `AdapterRequest.initialURL`.
-          initialURL: credentialScope.url,
-          // Always handed over for a bodied request, whether or not the caller asked for
-          // progress: the stamp is what lets the wait on `requestBodySettled` tell an
-          // upload that is still moving from one that has stalled. A bodiless request
-          // has no upload to watch, so the adapter is told nothing it was not told before.
-          onUploadProgress:
-            onUploadProgress || (sentRequest.body ?? null) !== null
-              ? (e) => {
-                  uploadActivity.at = Date.now();
+        // Adopted, not awaited as it is: `HTTPAdapter` is a public extension point, and
+        // an adapter answering with a native promise carrying its own `constructor` and
+        // a no-op `then` hung the request, its rejection unhandled. See `adoptPromise()`.
+        const rawAdapterResponse = await adoptPromise(
+          this._adapter.send({
+            requestURL: sentRequest.requestURL,
+            method: sentRequest.method,
+            headers: { ...sentRequest.headers },
+            body: sentRequest.body ?? null,
+            signal: attemptSignal,
+            // Forward the builder's streaming factory to each adapter attempt.
+            // NodeAdapter invokes it only for a 200 response, letting the caller
+            // create attempt-local writable state when a retry happens.
+            streamResponse: options.streamResponse,
+            // attemptNumber and requestID are passed so NodeAdapter can populate
+            // StreamResponseInfo without the adapter needing to track attempt state
+            // itself.
+            attemptNumber,
+            requestID: requestID,
+            // The origin the caller addressed, so an adapter can tell a redirect hop to
+            // another host from the request it was configured for. See
+            // `AdapterRequest.initialURL`.
+            initialURL: credentialScope.url,
+            // Always handed over for a bodied request, whether or not the caller asked for
+            // progress: the stamp is what lets the wait on `requestBodySettled` tell an
+            // upload that is still moving from one that has stalled. A bodiless request
+            // has no upload to watch, so the adapter is told nothing it was not told before.
+            onUploadProgress:
+              onUploadProgress || (sentRequest.body ?? null) !== null
+                ? (e) => {
+                    uploadActivity.at = Date.now();
 
-                  // Returned, so a caller's `async` hook that rejects still reaches the
-                  // adapter's guard as a promise and is reported, not dropped here.
-                  return onUploadProgress?.({
+                    // Returned, so a caller's `async` hook that rejects still reaches the
+                    // adapter's guard as a promise and is reported, not dropped here.
+                    return onUploadProgress?.({
+                      ...e,
+                      attemptNumber,
+                      ...(hopContext
+                        ? { hopNumber: hopContext.hopNumber }
+                        : {}),
+                    });
+                  }
+                : undefined,
+            onDownloadProgress: onDownloadProgress
+              ? (e) =>
+                  onDownloadProgress({
                     ...e,
                     attemptNumber,
                     ...(hopContext ? { hopNumber: hopContext.hopNumber } : {}),
-                  });
-                }
+                  })
               : undefined,
-          onDownloadProgress: onDownloadProgress
-            ? (e) =>
-                onDownloadProgress({
-                  ...e,
-                  attemptNumber,
-                  ...(hopContext ? { hopNumber: hopContext.hopNumber } : {}),
-                })
-            : undefined,
-        });
+          }),
+        );
 
         const adapterResponse: AdapterResponse = {
           ...rawAdapterResponse,

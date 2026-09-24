@@ -3607,4 +3607,102 @@ describe('LifecycleManager - review regressions', () => {
       ),
     ).toBe(true);
   });
+
+  test('a registration that fails before its own commit does not claim a re-entrant one', async () => {
+    const { logger, manager } = setup();
+    let calls = 0;
+
+    class Candidate extends Plain {
+      public override _isRegisteredWithManager(): boolean {
+        // The outer registration's ask, after the inner one committed.
+        if (++calls === 2) {
+          throw new Error('isRegistered exploded');
+        }
+
+        return super._isRegisteredWithManager();
+      }
+    }
+
+    const c = new Candidate(logger, 'c');
+    let hasReentered = false;
+    c.getDependencies = (): string[] => {
+      if (!hasReentered) {
+        hasReentered = true;
+        void manager.registerComponent(c);
+      }
+
+      return [];
+    };
+    const registered: unknown[] = [];
+    manager.on('component:registered', (event: { name: string }) => {
+      if (event.name === 'c') {
+        registered.push(event);
+      }
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.registerComponent(c);
+    } finally {
+      release();
+    }
+
+    expect(manager.getComponentNames()).toEqual(['c']);
+    expect(result.success).toBe(false);
+    expect(result.registered).toBe(false);
+    expect(registered).toHaveLength(1);
+  });
+
+  test('a failure right after the commit still reports the order it computed', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    (
+      manager as unknown as { isManualPositionRespected: () => never }
+    ).isManualPositionRespected = (): never => {
+      throw new Error('crash after commit');
+    };
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.registerComponent(new Plain(logger, 'c', ['a']));
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.registered).toBe(true);
+    expect(result.startupOrder).toEqual(['a', 'c']);
+  });
+
+  test('components registered by the startup order reads are ordered and started', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    await manager.registerComponent(a);
+    let hasRegistered = false;
+    a.getDependencies = (): string[] => {
+      if (
+        !hasRegistered &&
+        new Error().stack?.includes('startAllComponents') === true
+      ) {
+        hasRegistered = true;
+        void manager.registerComponent(new Plain(logger, 'auto', ['a']), {
+          autoStart: true,
+        });
+        void manager.registerComponent(new Plain(logger, 'plain', ['a']));
+      }
+
+      return [];
+    };
+
+    const startup = await manager.startAllComponents();
+
+    expect(startup.success).toBe(true);
+    expect(startup.startedComponents).toEqual(['a', 'auto', 'plain']);
+    expect(manager.isComponentRunning('auto')).toBe(true);
+    expect(manager.isComponentRunning('plain')).toBe(true);
+  });
 });
