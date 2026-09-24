@@ -278,6 +278,17 @@ export class LifecycleManager
     // Set as its rollback begins: the rollback works from the list as it stood then,
     // so an auto-start that lands afterwards has to stop itself.
     isRollingBack: boolean;
+    // Set once it has returned: its result - `started` included - is the caller's then.
+    hasEnded: boolean;
+    // Its deadline, for an auto-start that joins it: held to the same budget, and
+    // cleaned up as its own late starts are when it overruns.
+    readonly deadlineContext:
+      | {
+          deadline: number;
+          onTimeout: () => void;
+          hasExpired: () => boolean;
+        }
+      | undefined;
   } | null = null;
   private isStarted = false;
   // Unique token used to detect shutdowns that happened during async start().
@@ -2714,7 +2725,19 @@ export class LifecycleManager
     // which rolls back too - neither stops the same component twice nor skips the ones
     // it had not reached.
     const rolledBackNames = new Set<string>();
-    const bulkStartup = { started: startedComponents, isRollingBack: false };
+    const bulkStartup = {
+      started: startedComponents,
+      isRollingBack: false,
+      hasEnded: false,
+      deadlineContext:
+        deadline === undefined
+          ? undefined
+          : {
+              deadline,
+              onTimeout: expireStartup,
+              hasExpired: () => hasTimedOut,
+            },
+    };
     const rollBackOnce = async (names: string[]): Promise<void> => {
       bulkStartup.isRollingBack = true;
       await this.rollbackStartup(names, rolledBackNames);
@@ -3213,6 +3236,8 @@ export class LifecycleManager
         // rather than left to the public safety net, which cannot see what this startup
         // had already started: rolled back like any other failed startup, so a failure
         // never leaves a partial set running behind a result that says otherwise.
+        const crashError = toError(error);
+
         clearTimeout(timeoutHandle);
         reportCallbackError('lifecycle-manager startAllComponents', error);
 
@@ -3227,15 +3252,14 @@ export class LifecycleManager
 
         return {
           ...this.crashedStartupResult(
-            toError(error),
-            `startAllComponents() failed unexpectedly: ${describeError(error)}`,
+            crashError,
+            `startAllComponents() failed unexpectedly: ${describeError(crashError)}`,
             Date.now() - startTime,
           ),
           // Whatever the rollback could not stop, so the result matches the registry.
           startedComponents: this.stillRunning(startedComponents),
           failedOptionalComponents,
           skippedDueToDependency: Array.from(skippedDueToDependency),
-          error: toError(error),
         };
       } finally {
         // Release the deadline callback when startup settles so it cannot report
@@ -3259,6 +3283,7 @@ export class LifecycleManager
         }
 
         this.autoAttachedSignalsDuringStartup = false;
+        bulkStartup.hasEnded = true;
         this.activeBulkStartup = null;
         this.unexpectedStopsDuringStartup.clear();
       }
@@ -4120,9 +4145,11 @@ export class LifecycleManager
           // if any - is not it.
           const bulkStartup = this.activeBulkStartup;
 
-          startResult = await this.startComponentInternal(componentName, {
-            allowDuringBulkStartup: true,
-          });
+          startResult = await this.startComponentInternal(
+            componentName,
+            { allowDuringBulkStartup: true },
+            bulkStartup?.deadlineContext,
+          );
           didAutoStartAttempt = true;
 
           // Part of that startup: a later failure rolls it back with the rest -
@@ -4149,7 +4176,10 @@ export class LifecycleManager
                 code: 'startup_in_progress',
                 status: this.getComponentStatus(componentName),
               };
-            } else if (!bulkStartup.started.includes(componentName)) {
+            } else if (
+              !bulkStartup.hasEnded &&
+              !bulkStartup.started.includes(componentName)
+            ) {
               bulkStartup.started.push(componentName);
             }
           }
@@ -5862,7 +5892,11 @@ export class LifecycleManager
       // start rolled back for a failed attach is still counted as running while it is
       // stopped again, and a start finishing in that window came up without handlers.
       // `autoAttachSignals()` is a no-op when they are already attached.
-      if (this.attachSignalsOnStart) {
+      //
+      // Only if it is still up: this runs after `component:started`, and a listener
+      // there may have had it report an unexpected stop - whose detach check found
+      // nothing attached yet. Attaching now would leave handlers on an idle manager.
+      if (this.attachSignalsOnStart && this.runningComponents.has(name)) {
         const signalAttach = this.autoAttachSignals('first component start');
 
         if (signalAttach.outcome === 'failed') {
@@ -8332,11 +8366,6 @@ export class LifecycleManager
   }
 
   /**
-   * The `ShutdownResult` for a shutdown call that crashed before any pass could report its
-   * own result - so nothing stopped that this call knows of. A pass that dies reports
-   * itself from inside `runShutdownPass()` instead, with what it did stop.
-   */
-  /**
    * The `StartupResult` for a startup that failed unexpectedly - crashed, or skipped
    * because the shutdown it followed did - carrying the error. A bulk startup's own crash
    * spreads it and adds what it had started.
@@ -8352,6 +8381,11 @@ export class LifecycleManager
     };
   }
 
+  /**
+   * The `ShutdownResult` for a shutdown call that crashed before any pass could report its
+   * own result - so nothing stopped that this call knows of. A pass that dies reports
+   * itself from inside `runShutdownPass()` instead, with what it did stop.
+   */
   private crashedShutdownResult(error: Error, reason: string): ShutdownResult {
     return {
       success: false,
@@ -8997,10 +9031,15 @@ export class LifecycleManager
   }): Promise<SignalBroadcastResult> {
     const results: ComponentSignalResult[] = [];
 
-    const canDispatch = (component: BaseComponent): boolean =>
-      this.getComponent(this.nameOf(component)) === component &&
-      this.componentStates.get(this.nameOf(component)) === 'running' &&
-      this.runningComponents.has(this.nameOf(component));
+    const canDispatch = (component: BaseComponent): boolean => {
+      const name = this.nameOf(component);
+
+      return (
+        this.getComponent(name) === component &&
+        this.componentStates.get(name) === 'running' &&
+        this.runningComponents.has(name)
+      );
+    };
     const targets = this.components.filter(canDispatch);
 
     if (this.isStarting) {

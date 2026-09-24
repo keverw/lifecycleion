@@ -1824,4 +1824,61 @@ describe('LifecycleManager - review regressions', () => {
     expect(result.code).toBe('sent');
     expect(result.data).toBe('pong');
   });
+
+  test('an auto-start joining a bulk startup is held to its deadline', async () => {
+    const { logger, manager } = setup();
+    const b = new Plain(logger, 'b');
+    b.start = (): Promise<void> => sleep(45);
+    const late = new Plain(logger, 'late');
+    late.start = (): Promise<void> => sleep(60);
+    let lateStopCalls = 0;
+    late.stop = (): Promise<void> => {
+      lateStopCalls++;
+      return Promise.resolve();
+    };
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.registerComponent(b);
+
+    const registrations: Promise<unknown>[] = [];
+    manager.once('component:started', () => {
+      registrations.push(manager.registerComponent(late, { autoStart: true }));
+    });
+
+    const startup = await manager.startAllComponents({ timeoutMS: 30 });
+    const startedAtReturn = [...startup.startedComponents];
+    await Promise.all(registrations);
+    // Past `late`'s own start, so its late cleanup has run.
+    await sleep(80);
+
+    expect(startup.code).toBe('startup_timeout');
+    // Timed out with the rest, and cleaned up when it finished late.
+    expect(manager.isComponentRunning('late')).toBe(false);
+    expect(lateStopCalls).toBe(1);
+    expect(startup.startedComponents).toEqual(startedAtReturn);
+  });
+
+  test('a component that stops from its started listener does not get signals attached', async () => {
+    const { logger, manager } = setup({
+      attachSignalsOnStart: true,
+      detachSignalsOnStop: true,
+    });
+    const signals = fakeSignals(manager);
+
+    class Reporter extends Plain {
+      public crash(): boolean {
+        return this.reportUnexpectedStop(new Error('crashed'));
+      }
+    }
+
+    const a = new Reporter(logger, 'a');
+    await manager.registerComponent(a);
+    manager.once('component:started', () => {
+      a.crash();
+    });
+
+    await manager.startComponent('a');
+
+    expect(manager.isComponentRunning('a')).toBe(false);
+    expect(signals.isAttached()).toBe(false);
+  });
 });
