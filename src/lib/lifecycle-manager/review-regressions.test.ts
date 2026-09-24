@@ -3781,9 +3781,8 @@ describe('LifecycleManager - review regressions', () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new Plain(logger, 'a'));
     await manager.startAllComponents();
-    // After the auto-start, the success path's event throws, so the catch is entered;
-    // describing the position there throws too, into the safety net.
-    crashFirstRegisteredEvent(manager, 'c');
+    // After the auto-start, describing the position throws - on the success path, which
+    // enters the catch, and again in the catch, which throws into the safety net.
     manager.once('component:started', () => {
       (
         manager as unknown as { describeRegistryPosition: () => never }
