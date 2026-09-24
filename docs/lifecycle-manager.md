@@ -1010,6 +1010,10 @@ interface StartComponentOptions {
   // Normally blocked to prevent race conditions with dependency ordering.
   // Only needed for dynamic mid-startup registration. Most users never need this option.
 }
+// A dependency counts as running only while it is up: one that is stopping or
+// force-stopping is not, and a start on it fails with 'dependency_not_running' unless
+// the dependency is optional or allowNonRunningDependencies is set. A dependency that
+// goes down while the start reads the component's own getters is held to required.
 
 interface StopComponentOptions {
   forceImmediate?: boolean; // Skip graceful phase, go straight to force

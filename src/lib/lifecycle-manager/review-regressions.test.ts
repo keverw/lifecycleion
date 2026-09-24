@@ -2804,4 +2804,66 @@ describe('LifecycleManager - review regressions', () => {
     expect(result.code).toBe('component_not_found');
     expect(startCalls).toBe(0);
   });
+
+  test('a registration made from inside a dependency read does not corrupt the order', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    await manager.registerComponent(a);
+    await manager.registerComponent(new Plain(logger, 'b', ['a']));
+    let hasRegistered = false;
+    a.getDependencies = (): string[] => {
+      if (!hasRegistered) {
+        hasRegistered = true;
+        void manager.insertComponentAt(new Plain(logger, 'z'), 'start');
+        void manager.registerComponent(new Plain(logger, 'y'));
+      }
+
+      return [];
+    };
+
+    const order = manager.getStartupOrder();
+
+    expect(order.success).toBe(true);
+    expect(order.startupOrder).toEqual(['a', 'b']);
+  });
+
+  test('a dependency that is stopping does not count as running for a start', async () => {
+    const { logger, manager } = setup();
+    const db = new Plain(logger, 'db');
+    const stopGate = deferred();
+    db.stop = (): Promise<void> => stopGate.promise;
+    await manager.registerComponent(db);
+    await manager.registerComponent(new Plain(logger, 'api', ['db']));
+    await manager.startComponent('db');
+
+    const stopping = manager.stopComponent('db');
+    const result = await manager.startComponent('api');
+    stopGate.resolve();
+    await stopping;
+
+    expect(result.code).toBe('dependency_not_running');
+    expect(manager.isComponentRunning('api')).toBe(false);
+  });
+
+  test('a dependency stopped by a getter read before the claim blocks the start', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'db'));
+    const api = new Plain(logger, 'api', ['db']);
+    await manager.registerComponent(api);
+    await manager.startComponent('db');
+    let stopping: Promise<unknown> | undefined;
+    Object.defineProperty(api, 'startupTimeoutMS', {
+      get: (): number => {
+        stopping ??= manager.stopComponent('db');
+
+        return 1_000;
+      },
+    });
+
+    const result = await manager.startComponent('api');
+    await stopping;
+
+    expect(result.code).toBe('dependency_not_running');
+    expect(manager.isComponentRunning('api')).toBe(false);
+  });
 });
