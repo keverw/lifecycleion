@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { muteConsoleError, restoreConsoleError } from './console-test-utils';
 import { createFormatReporter } from './format-reporter';
+import { hostileRejections } from './hostile-promise-test-utils';
 
 describe('createFormatReporter follows an async handler', () => {
   // Sink-owned failure callbacks are followed when they return a promise,
@@ -91,4 +92,33 @@ describe('createFormatReporter follows an async handler', () => {
     expect(captured[0]).toContain('the failure handler also rejected');
     expect(captured[0]).toContain('then-only rejection');
   });
+});
+
+describe('createFormatReporter follows a hostile rejected promise', () => {
+  let captured: string[];
+
+  beforeEach(() => {
+    captured = muteConsoleError();
+  });
+
+  afterEach(() => {
+    restoreConsoleError();
+  });
+
+  test.each(hostileRejections)(
+    'a handler returning one with %s lands on the console rung',
+    async (_label, make) => {
+      const report = createFormatReporter(
+        'render',
+        // eslint-disable-next-line @typescript-eslint/no-misused-promises -- the handler returning a promise is the subject of this test
+        () => make(new Error('the handler rejected')),
+      );
+
+      report(new Error('the original failure'), 'items.0');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(captured.length).toBe(1);
+      expect(captured[0]).toContain('the handler rejected');
+    },
+  );
 });

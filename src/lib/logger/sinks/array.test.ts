@@ -7,6 +7,7 @@ import {
   muteConsoleError,
   restoreConsoleError,
 } from '../../internal/console-test-utils';
+import { hostileRejections } from '../../internal/hostile-promise-test-utils';
 
 describe('ArraySink', () => {
   test('should store log entries', () => {
@@ -944,4 +945,89 @@ test('does not mark an array truncated when its final element exactly spends the
   const stored = sink.logs[0]?.redactedParams?.['items'] as unknown[];
   expect(stored).toHaveLength(items.length);
   expect(stored[stored.length - 1]).toBe(7);
+});
+
+describe('ArraySink - a hostile rejected promise from onFormatError', () => {
+  test.each(hostileRejections)(
+    'one with %s reaches the console rung and lowers the guard',
+    async (_label, make) => {
+      const captured = muteConsoleError();
+      let calls = 0;
+      const sink = new ArraySink({
+        transformer: () => {
+          throw new Error('transformer boom');
+        },
+        onFormatError: () => {
+          calls++;
+
+          return make(new Error('handler rejected')) as unknown as void;
+        },
+      });
+
+      try {
+        sink.write({
+          timestamp: Date.now(),
+          type: 'info',
+          template: 'first',
+          message: 'first',
+        });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        sink.write({
+          timestamp: Date.now(),
+          type: 'info',
+          template: 'second',
+          message: 'second',
+        });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        // Settled, so the guard came down and the second failure was reported too.
+        expect(calls).toBe(2);
+        expect(captured.some((line) => line.includes('handler rejected'))).toBe(
+          true,
+        );
+      } finally {
+        restoreConsoleError();
+      }
+    },
+  );
+});
+
+test('ArraySink - an onFormatError result with a throwing then getter lowers the guard', () => {
+  const captured = muteConsoleError();
+  let calls = 0;
+  const sink = new ArraySink({
+    transformer: () => {
+      throw new Error('transformer boom');
+    },
+    onFormatError: () => {
+      calls++;
+      const result = {};
+      Object.defineProperty(result, 'then', {
+        get: (): never => {
+          throw new Error('then getter exploded');
+        },
+      });
+
+      return result as unknown as void;
+    },
+  });
+
+  try {
+    for (const message of ['first', 'second']) {
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: message,
+        message,
+      });
+    }
+
+    // The first report's guard came down, so the second failure was reported too.
+    expect(calls).toBe(2);
+    expect(captured.some((line) => line.includes('then getter exploded'))).toBe(
+      true,
+    );
+  } finally {
+    restoreConsoleError();
+  }
 });

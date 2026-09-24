@@ -1,5 +1,5 @@
 import { describeError, toError } from '../to-error';
-import { isPromise } from '../is-promise';
+import { adoptPromise, isAdoptable } from './adopt-promise';
 import { reportToConsole } from './report-to-console';
 import { reportToHost } from './report-to-host';
 
@@ -59,8 +59,12 @@ export function reportThroughHandler(
       // application, from the one function whose contract is that reporting a failure may
       // never raise one. Followed, it lands on the console rung like any other broken
       // handler.
-      if (isPromise(result)) {
-        Promise.resolve(result)
+      // `isAdoptable()` and `adoptPromise()`, not `isPromise()` and `Promise.resolve()`:
+      // a native promise whose own `then` is not a function failed the one, and one with
+      // its own no-op `then` swallowed the rejection through the other - unhandled
+      // either way. See `adoptPromise()`.
+      if (isAdoptable(result)) {
+        adoptPromise(result)
           .catch((handlerError: unknown) => {
             reportToConsole(
               `${line()} (the failure handler also rejected: ${describeError(handlerError)})`,

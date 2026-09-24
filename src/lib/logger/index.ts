@@ -8,7 +8,7 @@ import {
 import { CurlyBrackets } from '../curly-brackets';
 import { MAX_RENDER_LENGTH } from '../internal/render-budget';
 import { isNumber } from '../is-number';
-import { isPromise } from '../is-promise';
+import { adoptPromise, isAdoptable } from '../internal/adopt-promise';
 import { describeError, isErrorValue, toError } from '../to-error';
 import { readMember, readUnknownMember } from '../internal/read-member';
 import { reportToConsole } from '../internal/report-to-console';
@@ -1255,14 +1255,16 @@ export class Logger extends EventEmitter {
       try {
         const result = sink.write(entry);
         // Handle async errors from sinks that return promises
-        if (isPromise(result)) {
-          // Adopted through `Promise.resolve` rather than called on directly. `isPromise`
-          // is a then-check, which is the right check - a sink may return any thenable -
-          // but a thenable is not required to have `.catch`. Calling it on one that does
-          // not threw a `TypeError` here, which the outer `catch` then reported as *the
-          // sink's* failure while the real rejection went unhandled: a write error
-          // replaced by a wrong error, and a process-level unhandled rejection beside it.
-          Promise.resolve(result).catch((error: unknown) => {
+        if (isAdoptable(result)) {
+          // Adopted rather than called on directly. A sink may return any thenable, but
+          // a thenable is not required to have `.catch`: calling it on one that does not
+          // threw a `TypeError` here, which the outer `catch` then reported as *the
+          // sink's* failure while the real rejection went unhandled. Through
+          // `adoptPromise()` rather than `Promise.resolve()`, which hands a native promise
+          // back with its own `then` - a no-op one swallowed the rejection - and
+          // `isAdoptable()` rather than `isPromise()`, which missed a native promise whose
+          // own `then` is not a function. See `adoptPromise()`.
+          adoptPromise(result).catch((error: unknown) => {
             this.handleSinkError(error, 'write', sink);
           });
         }
@@ -1489,8 +1491,9 @@ export class Logger extends EventEmitter {
               ? sink.write(entry)
               : writeDiagnostic(diagnostic);
 
-          if (isPromise(result)) {
-            void Promise.resolve(result).catch((deliveryError: unknown) => {
+          // Adopted, for the reasons the write path above gives.
+          if (isAdoptable(result)) {
+            void adoptPromise(result).catch((deliveryError: unknown) => {
               reportToConsole(
                 `${diagnostic.message} (diagnostic sink also rejected: ${describeError(deliveryError)})`,
               );
