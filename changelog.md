@@ -220,6 +220,10 @@
   provisional bookkeeping release reservations, and hooks that start shutdown cause
   registration to roll back with `shutdown_in_progress`. `before`/`after` insertion
   targets must be committed. Registry reads now reuse a maintained committed array.
+  Registration also rechecks hook-started bulk startup before publication and updates
+  `duringStartup`; dependencies required by that pass are refused. Insertions stay
+  adjacent to committed targets across provisional entries, and value/message error
+  fallbacks exclude provisional components from `componentFound`.
 
 - Graceful and force component stops recheck registration and stop eligibility after reading
   caller-owned timeout and abort-hook properties. A getter that starts another stop

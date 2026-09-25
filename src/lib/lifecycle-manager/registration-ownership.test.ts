@@ -294,3 +294,178 @@ test('registration rolls back when its hook starts shutdown', async () => {
   component._markRegistered = (): void => {};
   expect((await manager.registerComponent(component)).registered).toBe(true);
 });
+
+for (const hook of ['_markRegistered', 'lifecycle'] as const) {
+  test(`${hook} cannot publish a dependency into a startup it began`, async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'peer', ['a']));
+    const component = new Plain(logger, 'a');
+    let bulk: ReturnType<typeof manager.startAllComponents> | undefined;
+    const begin = (): void => {
+      bulk = manager.startAllComponents();
+    };
+    if (hook === '_markRegistered') {
+      component._markRegistered = begin;
+    } else {
+      Object.defineProperty(component, 'lifecycle', { set: begin });
+    }
+    const result = await manager.registerComponent(component);
+    await bulk;
+    expect(result.code).toBe('startup_in_progress');
+    expect(result.registered).toBe(false);
+    expect(manager.hasComponent('a')).toBe(false);
+  });
+}
+
+test('registration reports startup begun by its hook even without dependents', async () => {
+  const { logger, manager } = setup();
+  const peer = new Plain(logger, 'peer');
+  const gate = deferred();
+  peer.start = (): Promise<void> => gate.promise;
+  await manager.registerComponent(peer);
+  const component = new Plain(logger, 'a');
+  let bulk: ReturnType<typeof manager.startAllComponents> | undefined;
+  component._markRegistered = (): void => {
+    bulk = manager.startAllComponents();
+  };
+  try {
+    const result = await manager.registerComponent(component);
+    expect(result.registered).toBe(true);
+    expect(result.duringStartup).toBe(true);
+  } finally {
+    gate.resolve();
+    await bulk;
+    await manager.stopAllComponents();
+  }
+});
+
+test('after placement stays adjacent across an interleaved provisional entry', async () => {
+  const { logger, manager } = setup();
+  await manager.registerComponent(new Plain(logger, 'a'));
+  await manager.registerComponent(new Plain(logger, 'b'));
+  const provisional = new Plain(logger, 'p');
+  let inserted: ReturnType<typeof manager.insertComponentAt> | undefined;
+  provisional._markRegistered = (): void => {
+    inserted = manager.insertComponentAt(new Plain(logger, 'x'), 'after', 'a');
+  };
+  await manager.insertComponentAt(provisional, 'after', 'a');
+  expect((await inserted)?.registered).toBe(true);
+  expect(manager.getComponentNames()).toEqual(['a', 'x', 'p', 'b']);
+});
+
+test('a value fallback does not report a provisional component as found', async () => {
+  const { logger, manager } = setup();
+  const { release } = claimReports();
+  const component = new Plain(logger, 'a');
+  let result: ReturnType<typeof manager.getValue> | undefined;
+  component._markRegistered = (): void => {
+    result = manager.getValue('a', 'key', {
+      get includeStopped(): boolean {
+        throw new Error('bad option');
+      },
+    });
+  };
+  try {
+    await manager.registerComponent(component);
+    expect(result?.code).toBe('error');
+    expect(result?.componentFound).toBe(false);
+  } finally {
+    release();
+  }
+});
+
+test('a provisional name is reserved but is not an insertion target', async () => {
+  const { logger, manager } = setup();
+  const component = new Plain(logger, 'a');
+  let duplicate: ReturnType<typeof manager.registerComponent> | undefined;
+  let inserted: ReturnType<typeof manager.insertComponentAt> | undefined;
+  component._markRegistered = (): void => {
+    duplicate = manager.registerComponent(new Plain(logger, 'a'));
+    inserted = manager.insertComponentAt(new Plain(logger, 'b'), 'after', 'a');
+  };
+  await manager.registerComponent(component);
+  expect((await duplicate)?.code).toBe('duplicate_name');
+  expect((await inserted)?.code).toBe('target_not_found');
+});
+
+for (const shouldRegisterPeer of [true, false]) {
+  test(`post-hook startup check uses the pass snapshot for a ${shouldRegisterPeer ? 'new' : 'changed'} dependent`, async () => {
+    const { logger, manager } = setup();
+    const peer = new Plain(logger, 'peer');
+    if (!shouldRegisterPeer) {
+      await manager.registerComponent(peer);
+    }
+    const component = new Plain(logger, 'a');
+    let registered: ReturnType<typeof manager.registerComponent> | undefined;
+    let bulk: ReturnType<typeof manager.startAllComponents> | undefined;
+    component._markRegistered = (): void => {
+      peer.getDependencies = (): string[] => ['a'];
+      if (shouldRegisterPeer) {
+        registered = manager.registerComponent(peer);
+      }
+      bulk = manager.startAllComponents();
+    };
+    const result = await manager.registerComponent(component);
+    await Promise.all([registered, bulk]);
+    expect(result.code).toBe('startup_in_progress');
+    expect(result.registered).toBe(false);
+    expect(manager.hasComponent('a')).toBe(false);
+  });
+}
+
+test('post-hook check includes a dependent committed after bulk ordering', async () => {
+  const { logger, manager } = setup();
+  const peer = new Plain(logger, 'peer');
+  const gate = deferred();
+  peer.start = (): Promise<void> => gate.promise;
+  await manager.registerComponent(peer);
+  const component = new Plain(logger, 'a');
+  let bulk: ReturnType<typeof manager.startAllComponents> | undefined;
+  let dependent: ReturnType<typeof manager.registerComponent> | undefined;
+  component._markRegistered = (): void => {
+    bulk = manager.startAllComponents();
+    dependent = manager.registerComponent(
+      new Plain(logger, 'dependent', ['a']),
+      { autoStart: true },
+    );
+  };
+  try {
+    const result = await manager.registerComponent(component);
+    expect(result.code).toBe('startup_in_progress');
+    expect(result.registered).toBe(false);
+  } finally {
+    gate.resolve();
+    await Promise.all([bulk, dependent]);
+    await manager.stopAllComponents();
+  }
+});
+
+test('post-hook check uses dependencies changed by a joined registration hook', async () => {
+  const { logger, manager } = setup();
+  const peer = new Plain(logger, 'peer');
+  const gate = deferred();
+  peer.start = (): Promise<void> => gate.promise;
+  await manager.registerComponent(peer);
+  const component = new Plain(logger, 'a');
+  let bulk: ReturnType<typeof manager.startAllComponents> | undefined;
+  let dependent: ReturnType<typeof manager.registerComponent> | undefined;
+  const dependentComponent = new Plain(logger, 'dependent');
+  dependentComponent._markRegistered = (): void => {
+    dependentComponent.getDependencies = (): string[] => ['a'];
+  };
+  component._markRegistered = (): void => {
+    bulk = manager.startAllComponents();
+    dependent = manager.registerComponent(dependentComponent, {
+      autoStart: true,
+    });
+  };
+  try {
+    const result = await manager.registerComponent(component);
+    expect(result.code).toBe('startup_in_progress');
+    expect(result.registered).toBe(false);
+  } finally {
+    gate.resolve();
+    await Promise.all([bulk, dependent]);
+    await manager.stopAllComponents();
+  }
+});

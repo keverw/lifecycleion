@@ -998,13 +998,21 @@ reserved for registration validation, so hooks cannot unregister and re-register
 same instance or reuse its name. Nested registrations of other components remain
 supported, with dependency-cycle checks including provisional reservations. Insertion
 with `before` or `after` requires a committed target; targeting a provisional component
-returns `target_not_found`. Registration results and events report startup order using
+returns `target_not_found`, while a duplicate reserved name still returns
+`duplicate_name`: reservation prevents conflicts but does not make the component a
+published target. Placement next to a committed target stays adjacent in the reserved
+order even when another registration is pending. Registration results and events report startup order using
 committed names only, excluding any enclosing registration that may still roll back.
 
 Successful hooks publish the registration before queued notifications are delivered.
 Any failure during provisional bookkeeping or hooks rolls back only that entry. A hook
 that starts an active shutdown also prevents publication and returns
-`shutdown_in_progress`. Rollback does not announce an unregistration or
+`shutdown_in_progress`. A hook that begins bulk startup is rechecked before publication:
+using the pass's dependency snapshot plus registrations committed while it runs. If this
+component is a dependency needed by that pass, registration rolls back with
+`startup_in_progress`. Otherwise it may commit, and `duringStartup` reflects the startup
+that the hook began. Error fallbacks for values and messages report component presence
+from the committed registry, not provisional state maps. Rollback does not announce an unregistration or
 orphan resources from a nested start. A bulk startup invoked by a hook operates on
 committed components; the new component can be started after registration, or use the
 existing `autoStart` registration option.

@@ -446,6 +446,9 @@ export class LifecycleManager
   // `startAllComponentsOperation()`.
   private activeBulkStartup: {
     readonly started: string[];
+    // The lists this pass actually used. Registration hooks can start the pass after
+    // changing dependencies; rechecks must not use their earlier registration reads.
+    readonly dependencyReads: Map<BaseComponent, DependencyRead>;
     // Set as its rollback begins: the rollback works from the list as it stood then,
     // so an auto-start that lands afterwards has to stop itself.
     isRollingBack: boolean;
@@ -2369,7 +2372,7 @@ export class LifecycleManager
       return {
         found: false,
         value: undefined,
-        componentFound: this.componentStates.has(componentName),
+        componentFound: this.isNameRegistered(componentName),
         componentRunning: this.runningComponents.has(componentName),
         handlerImplemented: false,
         requestedBy: from,
@@ -2396,7 +2399,7 @@ export class LifecycleManager
       () => this.sendMessageInternal(componentName, payload, from, options),
       (error) => ({
         sent: false,
-        componentFound: this.componentStates.has(componentName),
+        componentFound: this.isNameRegistered(componentName),
         componentRunning: this.runningComponents.has(componentName),
         handlerImplemented: false,
         data: undefined,
@@ -2652,7 +2655,7 @@ export class LifecycleManager
         (c) => this.nameOf(c) !== name,
       );
 
-      this.components = this.components.filter((c) => this.nameOf(c) !== name);
+      this.publishRegistry();
 
       // Clean up state - the manager's own maps first, all of them, so the component is
       // either fully registered or fully gone. The component's hooks run after, contained:
@@ -2990,6 +2993,7 @@ export class LifecycleManager
     const rolledBackNames = new Set<string>();
     const bulkStartup = {
       started: startedComponents,
+      dependencyReads: new Map<BaseComponent, DependencyRead>(),
       isRollingBack: false,
       isOrdering: true,
       deadlineContext:
@@ -3033,7 +3037,7 @@ export class LifecycleManager
         // Every list read once, here, and used both for the order and by the loop below:
         // read again there, a list that answered differently put a component ahead of a
         // dependency it then failed on, and rolled the whole startup back.
-        const startupReads = new Map<BaseComponent, DependencyRead>();
+        const startupReads = bulkStartup.dependencyReads;
 
         try {
           // Every component's list, including those of components the reads themselves
@@ -4320,20 +4324,10 @@ export class LifecycleManager
       // Compute dependency order *before* committing registration mutations.
       // This avoids leaving the registry/state maps inconsistent if a dependency
       // cycle is detected.
-      const reservedInsertIndex =
-        position === 'start'
-          ? 0
-          : position === 'end'
-            ? this.componentEntries.length
-            : this.componentEntries.indexOf(this.components[insertIndex]);
-      const at =
-        reservedInsertIndex < 0
-          ? this.componentEntries.length
-          : reservedInsertIndex;
       const nextComponents = [
-        ...this.componentEntries.slice(0, at),
+        ...this.componentEntries.slice(0, insertIndex),
         component,
-        ...this.componentEntries.slice(at),
+        ...this.componentEntries.slice(insertIndex),
       ];
 
       if (!('dependencies' in candidateRead)) {
@@ -4383,10 +4377,11 @@ export class LifecycleManager
       const wasOptionalReported =
         this.reportedOptionalReadFailures.has(component);
 
-      const shutdownDuringRegistration = new Error(
-        'Shutdown began during registration',
+      const registrationInterrupted = new Error(
+        'Bulk operation interrupted registration',
       );
-      let wasShutdownInterrupted = false;
+      let interruptionCode:
+        'shutdown_in_progress' | 'startup_in_progress' | undefined;
       this.withTransition(() => {
         try {
           // A new array rather than a splice, as unregister does: a loop over the registry
@@ -4439,11 +4434,28 @@ export class LifecycleManager
           component._markRegistered();
           // A hook may start shutdown while this entry is invisible to that pass.
           // It must not publish a new component into the pass after its snapshot.
+          progress.wasDuringStartup = this.isStarting;
           if (this.isShuttingDown) {
-            wasShutdownInterrupted = true;
-            throw shutdownDuringRegistration;
+            interruptionCode = 'shutdown_in_progress';
+            throw registrationInterrupted;
+          }
+          // Startup can also begin inside either hook. Its order excludes this
+          // provisional entry, so publishing a dependency needed by that pass would
+          // contradict the same ordering rule checked before calling the hooks.
+          if (
+            this.isRequiredDependencyDuringStartup(
+              componentName,
+              dependencySnapshot,
+            )
+          ) {
+            interruptionCode = 'startup_in_progress';
+            throw registrationInterrupted;
           }
           progress.hasCommitted = true;
+          // A hook may commit another component after an active pass has taken its
+          // order snapshot. Retain that registration's checked dependency read too,
+          // so an enclosing provisional registration cannot miss this new dependent.
+          this.activeBulkStartup?.dependencyReads.set(component, candidateRead);
         } catch (error) {
           this.componentEntries = this.componentEntries.filter(
             (registered) => registered !== component,
@@ -4486,7 +4498,7 @@ export class LifecycleManager
             this.reportedOptionalReadFailures.delete(component);
           }
 
-          if (error !== shutdownDuringRegistration) {
+          if (error !== registrationInterrupted) {
             throw error;
           }
         } finally {
@@ -4494,17 +4506,18 @@ export class LifecycleManager
           // Publish only after hooks succeed (or rebuild after rollback), before
           // notifications flush. Nested commits and unregisters remain in the live
           // entries; never restore the stale array captured before calling hooks.
-          this.components = this.componentEntries.filter(
-            (entry) => !this.pendingRegistrations.has(entry),
-          );
+          this.publishRegistry();
         }
       });
-      if (wasShutdownInterrupted) {
+      if (interruptionCode !== undefined) {
         return this.refuseRegistration({
           ...refusal,
-          code: 'shutdown_in_progress',
-          message: LIFECYCLE_MANAGER_MESSAGE_REGISTER_SHUTDOWN_IN_PROGRESS,
-          logLine: 'Cannot commit component registration during shutdown',
+          code: interruptionCode,
+          message:
+            interruptionCode === 'shutdown_in_progress'
+              ? LIFECYCLE_MANAGER_MESSAGE_REGISTER_SHUTDOWN_IN_PROGRESS
+              : LIFECYCLE_MANAGER_MESSAGE_REGISTER_REQUIRED_DEPENDENCY_DURING_STARTUP,
+          logLine: 'Cannot commit component registration during bulk operation',
         });
       }
       // The full order above validates reserved entries for cycles. Results and
@@ -6469,6 +6482,15 @@ export class LifecycleManager
       return recheck;
     }
 
+    // Only after confirming this attempt may proceed: a dependency getter can
+    // start a newer attempt, whose read a refused outer attempt must not overwrite.
+    // Auto-starts joining an already ordered pass read their own dependencies.
+    // Keep the read actually used by that attempt, which may differ from registration
+    // if its hook changed the list. Enclosing registration rechecks use this map too.
+    if (flags.allowDuringBulkStartup) {
+      this.activeBulkStartup?.dependencyReads.set(component, ownDependencies);
+    }
+
     const skippedDependencyWarnings: string[] = [];
 
     for (const dependencyName of ownDependencies.dependencies) {
@@ -7910,7 +7932,10 @@ export class LifecycleManager
     // Guarded, for the reason `getDependents()` guards it: another component's getter
     // must not fail this registration.
     return this.components.some((c) =>
-      dependenciesOf(dependencySnapshot.get(c)).includes(componentName),
+      dependenciesOf(
+        this.activeBulkStartup?.dependencyReads.get(c) ??
+          dependencySnapshot.get(c),
+      ).includes(componentName),
     );
   }
 
@@ -9001,6 +9026,13 @@ export class LifecycleManager
     );
   }
 
+  /** Publish the live committed subset after registry mutations, without caller code. */
+  private publishRegistry(): void {
+    this.components = this.componentEntries.filter(
+      (component) => !this.pendingRegistrations.has(component),
+    );
+  }
+
   private getInsertIndex(
     position: InsertPosition,
     targetComponentName?: string,
@@ -9008,15 +9040,19 @@ export class LifecycleManager
     if (position === 'start') {
       return 0;
     } else if (position === 'end') {
-      return this.components.length;
+      return this.componentEntries.length;
     } else if (position !== 'before' && position !== 'after') {
       return null;
     }
 
-    const targetIdx = this.getComponentIndex(targetComponentName ?? '');
-    if (targetIdx === null) {
+    // Targets must be published, but placement is adjacent to that exact instance
+    // in the reserved order. Translating through its next committed neighbour would
+    // put an "after" insertion beyond an interleaved provisional component.
+    const target = this.getComponent(targetComponentName ?? '');
+    if (target === undefined) {
       return null;
     }
+    const targetIdx = this.componentEntries.indexOf(target);
     if (position === 'before') {
       return targetIdx;
     } else {
