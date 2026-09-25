@@ -176,6 +176,14 @@ type DependencyRead =
  */
 interface RegistrationProgress {
   hasCommitted: boolean;
+  // What the commit computed, filled in as each part is known, so a failure part-way
+  // reports what was.
+  committed: Partial<
+    Pick<
+      InsertComponentAtResult,
+      'startupOrder' | 'manualPositionRespected' | 'targetFound'
+    >
+  >;
   didAutoStartAttempt: boolean;
   isAutoStartDeferred: boolean;
   startResult: ComponentOperationResult | undefined;
@@ -184,6 +192,7 @@ interface RegistrationProgress {
 function newRegistrationProgress(): RegistrationProgress {
   return {
     hasCommitted: false,
+    committed: {},
     didAutoStartAttempt: false,
     isAutoStartDeferred: false,
     startResult: undefined,
@@ -191,19 +200,52 @@ function newRegistrationProgress(): RegistrationProgress {
 }
 
 /**
- * The list a read yields, tolerantly: its string entries, or none for a read that
- * failed. Also takes a list already unwrapped, or nothing.
+ * What a committed registration reports - where it is, the order it computed, the
+ * target it found, and an auto-start it attempted or left to a bulk startup - on its
+ * event and its result, from both the registration's own catch and the safety net
+ * above it: built once, so the two cannot drift. A part the failure came before is
+ * reported as a refusal would report it.
  */
-function dependenciesOf(read: DependencyRead | string[] | undefined): string[] {
-  if (read === undefined) {
-    return [];
-  }
+function committedRegistrationReport(
+  progress: RegistrationProgress,
+  position: InsertPosition,
+  actualPosition: InsertComponentAtResult['actualPosition'],
+): Pick<
+  InsertComponentAtResult,
+  | 'startupOrder'
+  | 'actualPosition'
+  | 'manualPositionRespected'
+  | 'targetFound'
+  | 'autoStartAttempted'
+  | 'autoStartDeferred'
+  | 'autoStartSucceeded'
+> {
+  const { committed } = progress;
 
-  if (Array.isArray(read)) {
-    return read;
-  }
+  return {
+    startupOrder: committed.startupOrder ?? [],
+    actualPosition,
+    manualPositionRespected: committed.manualPositionRespected ?? false,
+    targetFound:
+      'targetFound' in committed
+        ? committed.targetFound
+        : position === 'before' || position === 'after'
+          ? false
+          : undefined,
+    autoStartAttempted: progress.didAutoStartAttempt,
+    ...(progress.isAutoStartDeferred ? { autoStartDeferred: true } : {}),
+    ...(progress.didAutoStartAttempt
+      ? { autoStartSucceeded: progress.startResult?.success === true }
+      : {}),
+  };
+}
 
-  return 'dependencies' in read ? read.dependencies : [];
+/**
+ * The list a read yields, tolerantly: its string entries, or none for a read that
+ * failed - or for a component with no read.
+ */
+function dependenciesOf(read: DependencyRead | undefined): string[] {
+  return read !== undefined && 'dependencies' in read ? read.dependencies : [];
 }
 
 /**
@@ -2327,6 +2369,57 @@ export class LifecycleManager
         ),
       (error, reason) => {
         const registrationIndex = this.components.indexOf(component);
+        // Only this call's own entry: an instance a re-entrant registration put there
+        // is not where this one landed.
+        const registrationIndexAfter =
+          progress.hasCommitted && registrationIndex !== -1
+            ? registrationIndex
+            : null;
+        const componentName = this.readComponentNameSafely(component);
+        let committedReport:
+          ReturnType<typeof committedRegistrationReport> | undefined;
+
+        // A committed registration is reported as the registration's own catch reports
+        // it - the same builder - and announced, since anyone tracking the registry
+        // would otherwise never hear of a component that is in it, and may be running.
+        // Guarded: this net must answer, and the catch it stands in for just threw.
+        if (progress.hasCommitted) {
+          let actualPosition: InsertComponentAtResult['actualPosition'];
+
+          try {
+            actualPosition = this.describeRegistryPosition(
+              registrationIndexAfter,
+            );
+          } catch {
+            actualPosition = undefined;
+          }
+
+          committedReport = committedRegistrationReport(
+            progress,
+            position,
+            actualPosition,
+          );
+
+          try {
+            this.lifecycleEvents.componentRegistered({
+              name: componentName,
+              index: registrationIndexAfter,
+              action: isInsertAction ? 'insert' : 'register',
+              registrationIndexBefore: null,
+              registrationIndexAfter,
+              requestedPosition: isInsertAction
+                ? { position, targetComponentName }
+                : undefined,
+              duringStartup: this.isStarting,
+              ...committedReport,
+            });
+          } catch (eventError) {
+            reportCallbackError(
+              'lifecycle-manager registerComponent event',
+              eventError,
+            );
+          }
+        }
 
         return {
           action: 'insert',
@@ -2335,42 +2428,24 @@ export class LifecycleManager
           // not registry membership, which a re-entrant registration of the same
           // instance can produce while this one committed nothing.
           registered: progress.hasCommitted,
-          componentName: this.readComponentNameSafely(component),
+          componentName,
           reason,
           code: 'unknown_error',
           error,
           // Unknown: reading it means asking the component for its name, which may be
           // what threw.
           registrationIndexBefore: null,
-          // Only this call's own entry: an instance a re-entrant registration put there
-          // is not where this one landed.
-          registrationIndexAfter:
-            progress.hasCommitted && registrationIndex !== -1
-              ? registrationIndex
-              : null,
-          startupOrder: [],
+          registrationIndexAfter,
           requestedPosition: { position, targetComponentName },
-          manualPositionRespected: false,
-          targetFound:
-            position === 'before' || position === 'after' ? false : undefined,
           duringStartup: this.isStarting,
-          // What this call's auto-start did, as the registration's own catch reports it:
-          // told `false` for one that ran, a caller could start the component again.
-          ...(progress.hasCommitted
-            ? {
-                autoStartAttempted: progress.didAutoStartAttempt,
-                ...(progress.isAutoStartDeferred
-                  ? { autoStartDeferred: true }
-                  : {}),
-                ...(progress.didAutoStartAttempt
-                  ? {
-                      autoStartSucceeded:
-                        progress.startResult?.success === true,
-                    }
-                  : {}),
-                startResult: progress.startResult,
-              }
-            : { autoStartAttempted: false, startResult: undefined }),
+          ...(committedReport ?? {
+            startupOrder: [],
+            manualPositionRespected: false,
+            targetFound:
+              position === 'before' || position === 'after' ? false : undefined,
+            autoStartAttempted: false,
+          }),
+          startResult: progress.hasCommitted ? progress.startResult : undefined,
         };
       },
     );
@@ -4009,14 +4084,7 @@ export class LifecycleManager
     // from the registry, since a re-entrant registration of the same instance - from its
     // own `getDependencies()` - can put it there while this one goes on to fail before
     // committing anything.
-    //
-    // Filled in as each part is known, so a failure part-way reports what was.
-    const committed: Partial<
-      Pick<
-        InsertComponentAtResult,
-        'startupOrder' | 'manualPositionRespected' | 'targetFound'
-      >
-    > = {};
+    const { committed } = progress;
 
     try {
       // Everything of the caller's code registration needs is read first - whether the
@@ -4042,10 +4110,11 @@ export class LifecycleManager
       // registration commits: a refused one must not spend the report the next
       // registration makes.
       let candidateRead: DependencyRead = { dependencies: [] };
-      const readRegistered = (registered: BaseComponent): string[] =>
-        this.readDependencies(registered, 'registration');
+      // Kept as reads, as a bulk startup keeps them: one snapshot type for ordering.
+      const readRegistered = (registered: BaseComponent): DependencyRead =>
+        this.readDependenciesReported(registered, 'registration');
       let registryRead = {
-        reads: new Map<BaseComponent, string[]>(),
+        reads: new Map<BaseComponent, DependencyRead>(),
         isSettled: true,
       };
 
@@ -4728,28 +4797,14 @@ export class LifecycleManager
       const registrationIndexNow =
         indexOfComponent === -1 ? null : indexOfComponent;
       const isRegistered = progress.hasCommitted;
-      // What a committed registration reports - where it is, the order it computed,
-      // the target it found, and an auto-start it attempted or left to the bulk
-      // startup - on both the event and the result, built once so they cannot drift.
+      // What a committed registration reports, on both the event and the result; see
+      // `committedRegistrationReport()`.
       const committedReport = isRegistered
-        ? {
-            startupOrder: committed.startupOrder ?? [],
-            actualPosition: this.describeRegistryPosition(registrationIndexNow),
-            manualPositionRespected: committed.manualPositionRespected ?? false,
-            targetFound:
-              'targetFound' in committed
-                ? committed.targetFound
-                : position === 'before' || position === 'after'
-                  ? false
-                  : undefined,
-            autoStartAttempted: progress.didAutoStartAttempt,
-            ...(progress.isAutoStartDeferred
-              ? { autoStartDeferred: true }
-              : {}),
-            ...(progress.didAutoStartAttempt
-              ? { autoStartSucceeded: progress.startResult?.success === true }
-              : {}),
-          }
+        ? committedRegistrationReport(
+            progress,
+            position,
+            this.describeRegistryPosition(registrationIndexNow),
+          )
         : undefined;
 
       if (committedReport !== undefined) {
@@ -7695,7 +7750,7 @@ export class LifecycleManager
   private isRequiredDependencyDuringStartup(
     componentName: string,
     // Registration's lists, read before its checks; see `readRegistry()`.
-    dependencySnapshot: ReadonlyMap<BaseComponent, string[]>,
+    dependencySnapshot: ReadonlyMap<BaseComponent, DependencyRead>,
   ): boolean {
     // Not before the startup's loop has begun - a `signals-attached` listener
     // registering it: the loop computes its order after this, and starts it in turn.
@@ -7712,7 +7767,7 @@ export class LifecycleManager
     // Guarded, for the reason `getDependents()` guards it: another component's getter
     // must not fail this registration.
     return this.components.some((c) =>
-      (dependencySnapshot.get(c) ?? []).includes(componentName),
+      dependenciesOf(dependencySnapshot.get(c)).includes(componentName),
     );
   }
 
@@ -8764,7 +8819,7 @@ export class LifecycleManager
     },
     // Lists already read - by registration, or a bulk startup's reads - so ordering
     // runs none of the caller's code.
-    dependencySnapshot?: ReadonlyMap<BaseComponent, string[] | DependencyRead>,
+    dependencySnapshot?: ReadonlyMap<BaseComponent, DependencyRead>,
   ): string[] {
     // Each name is resolved once, here. A registration candidate is not recorded yet, so
     // it is named by the value registration already read from it rather than asked

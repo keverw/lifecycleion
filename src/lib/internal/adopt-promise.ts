@@ -69,7 +69,15 @@ function hasOwnThen(value: object): boolean {
  * fake. No check tells the two apart without reading the value's own properties, which is
  * what the broken promise breaks.
  *
- * Known limit: such a broken native promise cannot be adopted without modifying it.
+ * Known limit: a `then` that comes from the value's prototype chain is trusted, so a
+ * native promise whose chain supplies a no-op one - a subclass that overrides `then`
+ * with one, or a promise given such a prototype - never settles, and its rejection goes
+ * unhandled, exactly as `await` would leave it. Telling that apart from a lazy promise
+ * that starts its work in `then` would mean second-guessing the class, which is the
+ * value's own behaviour to define.
+ *
+ * Known limit: a broken native promise - one whose `constructor` misbehaves - cannot be
+ * adopted without modifying it.
  * Every way the language offers to attach a reaction to one - `then`, `await`,
  * `Promise.resolve()`, the combinators - reads `constructor` first, so a rejection of
  * the promise itself is left unhandled. Shadowing the property for the call would get
@@ -96,7 +104,9 @@ export function adoptPromise<T>(
     }
 
     // Only an own `then` is bypassed, so only then is the intrinsic tried - which also
-    // spares every plain object a thrown and caught `TypeError`, and its stack.
+    // spares an object without one a thrown and caught `TypeError`, and its stack. A
+    // plain thenable, whose `then` is usually its own, still pays it: the intrinsic has
+    // to be tried first, for a native promise from another realm with an own `then`.
     if (hasOwnThen(value)) {
       try {
         // eslint-disable-next-line @typescript-eslint/unbound-method

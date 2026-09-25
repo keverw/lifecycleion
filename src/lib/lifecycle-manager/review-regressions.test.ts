@@ -3809,4 +3809,51 @@ describe('LifecycleManager - review regressions', () => {
     expect(result.autoStartSucceeded).toBe(true);
     expect(result.startResult?.success).toBe(true);
   });
+
+  test('the safety net announces a committed registration and reports what it computed', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startAllComponents();
+    const registered: Array<{ name: string; targetFound?: boolean }> = [];
+    manager.on(
+      'component:registered',
+      (event: { name: string; targetFound?: boolean }) => {
+        registered.push(event);
+      },
+    );
+    // Describing the position throws - on the success path, which enters the catch,
+    // and again in the catch, which throws into the safety net.
+    manager.once('component:started', () => {
+      (
+        manager as unknown as { describeRegistryPosition: () => never }
+      ).describeRegistryPosition = (): never => {
+        throw new Error('catch exploded');
+      };
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.insertComponentAt(
+        new Plain(logger, 'c'),
+        'after',
+        'a',
+        { autoStart: true },
+      );
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.registered).toBe(true);
+    expect(result.startupOrder).toEqual(['a', 'c']);
+    expect(result.targetFound).toBe(true);
+    expect(result.manualPositionRespected).toBe(true);
+    expect(result.registrationIndexAfter).toBe(1);
+    expect(registered.filter((event) => event.name === 'c')).toHaveLength(1);
+    expect(registered.find((event) => event.name === 'c')?.targetFound).toBe(
+      true,
+    );
+  });
 });
