@@ -3180,7 +3180,7 @@ describe('LifecycleManager - review regressions', () => {
     expect(result?.code).toBe('startup_in_progress');
   });
 
-  test("a registration refused during a shutdown reads no component's list for its checks", async () => {
+  test("a registration refused during a shutdown reads no component's list", async () => {
     const { logger, manager } = setup();
     const a = new Plain(logger, 'a');
     const stopGate = deferred();
@@ -3210,8 +3210,9 @@ describe('LifecycleManager - review regressions', () => {
 
     expect(result.code).toBe('shutdown_in_progress');
     expect(candidateReads).toBe(0);
-    // One read, for the startup order the refusal result reports - not a snapshot too.
-    expect(registeredReads).toBe(1);
+    // None at all - not even for the startup order the refusal result reports, which
+    // comes from what registration read: nothing, during a shutdown.
+    expect(registeredReads).toBe(0);
   });
 
   test('an instance registered with another manager by its own read is refused', async () => {

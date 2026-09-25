@@ -80,35 +80,10 @@ export function reportThroughHandler(
   };
 
   if (invoke !== undefined) {
+    let result: unknown;
+
     try {
-      const result: unknown = invoke();
-
-      // A handler is free to be `async` - the named-pipe docs show one - and a rejected
-      // promise sails straight past a `try`/`catch`. Unfollowed, that is an unhandled
-      // rejection raised out of an error path, which under Node's default
-      // `--unhandled-rejections=throw` ends the process: a logging failure taking down the
-      // application, from the one function whose contract is that reporting a failure may
-      // never raise one. Followed, it lands on the console rung like any other broken
-      // handler.
-      // `isAdoptable()` and `adoptPromise()`, not `isPromise()` and `Promise.resolve()`:
-      // a native promise whose own `then` is not a function failed the one, and one with
-      // its own no-op `then` swallowed the rejection through the other - unhandled
-      // either way. See `adoptPromise()`.
-      if (isAdoptable(result)) {
-        adoptPromise(result)
-          .catch((handlerError: unknown) => {
-            reportToConsole(
-              `${safeLine()} (the failure handler also rejected: ${describeError(handlerError)})`,
-            );
-          })
-          .finally(settle);
-
-        return;
-      }
-
-      settle();
-
-      return;
+      result = invoke();
     } catch (handlerError) {
       // Both failures, not one. The handler's own throw is the news - it means the channel
       // the caller chose is broken and every later report will be lost the same way - but
@@ -121,11 +96,53 @@ export function reportThroughHandler(
       reportToConsole(
         `${safeLine()} (the failure handler also threw: ${describeError(handlerError)})`,
       );
-
       settle();
 
       return;
     }
+
+    // Classified apart from the call: the handler ran and delivered its report, so a
+    // `then` getter on what it returned that throws is not the handler throwing - it
+    // was reported as though it were, repeating the report under the wrong label.
+    let isResultAdoptable: boolean;
+
+    try {
+      isResultAdoptable = isAdoptable(result);
+    } catch (thenError) {
+      reportToConsole(
+        `A failure handler returned a value whose then could not be read: ${describeError(thenError)}`,
+      );
+      settle();
+
+      return;
+    }
+
+    // A handler is free to be `async` - the named-pipe docs show one - and a rejected
+    // promise sails straight past a `try`/`catch`. Unfollowed, that is an unhandled
+    // rejection raised out of an error path, which under Node's default
+    // `--unhandled-rejections=throw` ends the process: a logging failure taking down the
+    // application, from the one function whose contract is that reporting a failure may
+    // never raise one. Followed, it lands on the console rung like any other broken
+    // handler.
+    // `isAdoptable()` and `adoptPromise()`, not `isPromise()` and `Promise.resolve()`:
+    // a native promise whose own `then` is not a function failed the one, and one with
+    // its own no-op `then` swallowed the rejection through the other - unhandled
+    // either way. See `adoptPromise()`.
+    if (isResultAdoptable) {
+      adoptPromise(result)
+        .catch((handlerError: unknown) => {
+          reportToConsole(
+            `${safeLine()} (the failure handler also rejected: ${describeError(handlerError)})`,
+          );
+        })
+        .finally(settle);
+
+      return;
+    }
+
+    settle();
+
+    return;
   }
 
   reportToConsole(safeLine());

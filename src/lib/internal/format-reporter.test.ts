@@ -192,4 +192,23 @@ describe('reportThroughHandler with a line that throws', () => {
       true,
     );
   });
+
+  test('a handler result whose then getter throws is not reported as the handler throwing', () => {
+    const result = {};
+    Object.defineProperty(result, 'then', {
+      get: (): never => {
+        throw new Error('then getter exploded');
+      },
+    });
+
+    reportThroughHandler(
+      () => result,
+      () => 'a report',
+    );
+
+    expect(captured.some((line) => line.includes('also threw'))).toBe(false);
+    expect(
+      captured.filter((line) => line.includes('then getter exploded')),
+    ).toHaveLength(1);
+  });
 });

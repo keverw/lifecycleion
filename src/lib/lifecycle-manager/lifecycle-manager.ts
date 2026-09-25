@@ -2870,13 +2870,13 @@ export class LifecycleManager
       : null;
 
     if (bulkSignalAttach?.outcome === 'failed') {
-      this.isStarting = false;
-      this.autoAttachedSignalsDuringStartup = false;
       // The attach's own failure report ran caller code - a logger sink - that may have
       // registered an auto-start and left it to this startup, which will not run.
-      this.abandonDeferredAutoStarts(
-        'refused: process signals could not be attached',
-      );
+      this.releaseStartupLatch({
+        didAutoAttachSignals: false,
+        detachReason: 'refused bulk startup',
+        abandonReason: 'refused: process signals could not be attached',
+      });
 
       return {
         ...this.refusedStartupResult(
@@ -2900,14 +2900,11 @@ export class LifecycleManager
       this.isShuttingDown ||
       this.shutdownToken !== shutdownTokenAtBulkStart
     ) {
-      this.isStarting = false;
-
-      if (didAutoAttachSignalsForBulkStartup) {
-        this.detachSignalsIfIdle('refused bulk startup');
-      }
-
-      this.autoAttachedSignalsDuringStartup = false;
-      this.abandonDeferredAutoStarts('refused: a shutdown started');
+      this.releaseStartupLatch({
+        didAutoAttachSignals: didAutoAttachSignalsForBulkStartup,
+        detachReason: 'refused bulk startup',
+        abandonReason: 'refused: a shutdown started',
+      });
 
       return this.refusedStartupResult(
         'shutdown_in_progress',
@@ -3555,29 +3552,41 @@ export class LifecycleManager
           clearTimeout(timeoutHandle);
         }
 
-        this.isStarting = false;
-
-        // Handlers this startup attached come off if it leaves nothing running. Any
-        // detach deferred while it held `isStarting` - a rollback's stops, a clean
-        // shutdown pass that ran during it - runs now.
-        if (
-          didAutoAttachSignalsForBulkStartup ||
-          this.autoAttachedSignalsDuringStartup
-        ) {
-          this.detachSignalsIfIdle('failed bulk startup');
-        } else {
-          this.runDeferredSignalDetach('bulk startup');
-        }
-
-        this.autoAttachedSignalsDuringStartup = false;
-        this.activeBulkStartup = null;
-        this.abandonDeferredAutoStarts('failed before starting components');
+        this.releaseStartupLatch({
+          didAutoAttachSignals: didAutoAttachSignalsForBulkStartup,
+          detachReason: 'failed bulk startup',
+          abandonReason: 'failed before starting components',
+        });
         this.unexpectedStopsDuringStartup.clear();
       }
     };
     // Component starts already race against the bulk deadline. Await their bookkeeping
     // and our finally block before exposing the result to a caller that may retry.
     return operation();
+  }
+
+  /**
+   * Everything a bulk startup releases as it ends, from whichever exit: the latch, the
+   * signal handlers it attached if it leaves nothing running - or any detach deferred
+   * while it held the latch - the startup record, and auto-starts left to it that it
+   * never reached. One place, so an early exit cannot forget a step the others take.
+   */
+  private releaseStartupLatch(input: {
+    didAutoAttachSignals: boolean;
+    detachReason: string;
+    abandonReason: string;
+  }): void {
+    this.isStarting = false;
+
+    if (input.didAutoAttachSignals || this.autoAttachedSignalsDuringStartup) {
+      this.detachSignalsIfIdle(input.detachReason);
+    } else {
+      this.runDeferredSignalDetach('bulk startup');
+    }
+
+    this.autoAttachedSignalsDuringStartup = false;
+    this.activeBulkStartup = null;
+    this.abandonDeferredAutoStarts(input.abandonReason);
   }
 
   private async stopAllComponentsOperation(
@@ -4152,58 +4161,34 @@ export class LifecycleManager
         );
       }
 
+      // What every refusal below shares; see `refuseRegistration()`.
+      const refusal = {
+        progress,
+        componentName,
+        registrationIndexBefore,
+        position,
+        targetComponentName,
+        isInsertAction,
+        dependencySnapshot,
+      };
+
       if (!this.isInsertPosition(position)) {
-        this.logger.entity(componentName).warn('Invalid insertion position', {
-          params: { position },
-        });
-
-        this.emitRegistrationRejected({
-          progress,
-          name: componentName,
-          reason: 'invalid_position',
-          message: `Invalid insert position: "${String(position)}". Expected one of: start, end, before, after.`,
-          registrationIndexBefore,
-          isInsertAction,
-          position,
-          targetComponentName,
-        });
-
-        return this.buildInsertResultFailure({
-          componentName,
-          position,
-          targetComponentName,
-          registrationIndexBefore,
+        return this.refuseRegistration({
+          ...refusal,
           code: 'invalid_position',
-          reason: `Invalid insert position: "${String(position)}". Expected one of: start, end, before, after.`,
-          targetFound: undefined,
+          message: `Invalid insert position: "${String(position)}". Expected one of: start, end, before, after.`,
+          logLine: 'Invalid insertion position',
+          logParams: { position },
         });
       }
 
       // Block registration during shutdown
       if (this.isShuttingDown) {
-        this.logger
-          .entity(componentName)
-          .warn('Cannot register component during shutdown');
-
-        this.emitRegistrationRejected({
-          progress,
-          name: componentName,
-          reason: 'shutdown_in_progress',
-          message: LIFECYCLE_MANAGER_MESSAGE_REGISTER_SHUTDOWN_IN_PROGRESS,
-          registrationIndexBefore,
-          isInsertAction,
-          position,
-          targetComponentName,
-        });
-
-        return this.buildInsertResultFailure({
-          componentName,
-          position,
-          targetComponentName,
-          registrationIndexBefore,
+        return this.refuseRegistration({
+          ...refusal,
           code: 'shutdown_in_progress',
-          reason: LIFECYCLE_MANAGER_MESSAGE_REGISTER_SHUTDOWN_IN_PROGRESS,
-          targetFound: undefined,
+          message: LIFECYCLE_MANAGER_MESSAGE_REGISTER_SHUTDOWN_IN_PROGRESS,
+          logLine: 'Cannot register component during shutdown',
         });
       }
 
@@ -4215,33 +4200,13 @@ export class LifecycleManager
           dependencySnapshot,
         )
       ) {
-        this.logger
-          .entity(componentName)
-          .warn(
-            'Cannot register component during startup - it is a required dependency for other components',
-          );
-
-        this.emitRegistrationRejected({
-          progress,
-          name: componentName,
-          reason: 'startup_in_progress',
+        return this.refuseRegistration({
+          ...refusal,
+          code: 'startup_in_progress',
           message:
             LIFECYCLE_MANAGER_MESSAGE_REGISTER_REQUIRED_DEPENDENCY_DURING_STARTUP,
-          registrationIndexBefore,
-          isInsertAction,
-          position,
-          targetComponentName,
-        });
-
-        return this.buildInsertResultFailure({
-          componentName,
-          position,
-          targetComponentName,
-          registrationIndexBefore,
-          code: 'startup_in_progress',
-          reason:
-            LIFECYCLE_MANAGER_MESSAGE_REGISTER_REQUIRED_DEPENDENCY_DURING_STARTUP,
-          targetFound: undefined,
+          logLine:
+            'Cannot register component during startup - it is a required dependency for other components',
         });
       }
 
@@ -4253,92 +4218,36 @@ export class LifecycleManager
           ? LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE
           : LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE_EXTERNAL;
 
-        this.logger
-          .entity(componentName)
-          .warn(
-            isRegisteredHere
-              ? 'Component instance already registered'
-              : 'Component instance already registered with another lifecycle manager',
-          );
-
-        this.emitRegistrationRejected({
-          progress,
-          name: componentName,
-          reason: 'duplicate_instance',
-          message,
-          registrationIndexBefore,
-          isInsertAction,
-          position,
-          targetComponentName,
-        });
-
-        return this.buildInsertResultFailure({
-          componentName,
-          position,
-          targetComponentName,
-          registrationIndexBefore,
+        return this.refuseRegistration({
+          ...refusal,
           code: 'duplicate_instance',
-          reason: message,
-          targetFound: undefined,
+          message,
+          logLine: isRegisteredHere
+            ? 'Component instance already registered'
+            : 'Component instance already registered with another lifecycle manager',
         });
       }
 
       // Check if component name is already registered
       if (registrationIndexBefore !== null) {
-        this.logger
-          .entity(componentName)
-          .warn('Component with this name already registered');
-        this.emitRegistrationRejected({
-          progress,
-          name: componentName,
-          reason: 'duplicate_name',
-          message: `Component "${componentName}" is already registered.`,
-          registrationIndexBefore,
-          isInsertAction,
-          position,
-          targetComponentName,
-        });
-
-        return this.buildInsertResultFailure({
-          componentName,
-          position,
-          targetComponentName,
-          registrationIndexBefore,
+        return this.refuseRegistration({
+          ...refusal,
           code: 'duplicate_name',
-          reason: `Component "${componentName}" is already registered.`,
-          targetFound: undefined,
+          message: `Component "${componentName}" is already registered.`,
+          logLine: 'Component with this name already registered',
         });
       }
 
       // Get the insertion index for the component
       const insertIndex = this.getInsertIndex(position, targetComponentName);
       if (insertIndex === null) {
-        this.logger.entity(componentName).warn('Target component not found', {
-          params: { target: targetComponentName },
-        });
-        this.emitRegistrationRejected({
-          progress,
-          name: componentName,
-          reason: 'target_not_found',
-          target: targetComponentName,
-          message: `Target component "${targetComponentName ?? ''}" not found in registry.`,
-          registrationIndexBefore,
-          registrationIndexAfter: null,
-          targetFound: false,
-          isInsertAction,
-          position,
-          targetComponentName,
-        });
-
-        // Its startup order read afresh, as every refusal's is: this one has already
-        // emitted its event, whose listeners may have changed the registry since.
-        return this.buildInsertResultFailure({
-          componentName,
-          position,
-          targetComponentName,
-          registrationIndexBefore,
+        return this.refuseRegistration({
+          ...refusal,
           code: 'target_not_found',
-          reason: `Target component "${targetComponentName ?? ''}" not found in registry.`,
+          message: `Target component "${targetComponentName ?? ''}" not found in registry.`,
+          logLine: 'Target component not found',
+          logParams: { target: targetComponentName },
+          target: targetComponentName,
           targetFound: false,
         });
       }
@@ -4370,31 +4279,13 @@ export class LifecycleManager
         );
       } catch (error) {
         if (error instanceof DependencyCycleError) {
-          this.logger
-            .entity(componentName)
-            .warn('Registration rejected due to dependency cycle', {
-              params: { cycle: error.additionalInfo.cycle },
-            });
-          this.emitRegistrationRejected({
-            progress,
-            name: componentName,
-            reason: 'dependency_cycle',
-            cycle: error.additionalInfo.cycle,
-            message: error.message,
-            registrationIndexBefore,
-            targetFound: positionHasTarget(position) ? true : undefined,
-            isInsertAction,
-            position,
-            targetComponentName,
-          });
-
-          return this.buildInsertResultFailure({
-            componentName,
-            position,
-            targetComponentName,
-            registrationIndexBefore,
+          return this.refuseRegistration({
+            ...refusal,
             code: 'dependency_cycle',
-            reason: error.message,
+            message: error.message,
+            logLine: 'Registration rejected due to dependency cycle',
+            logParams: { cycle: error.additionalInfo.cycle },
+            cycle: error.additionalInfo.cycle,
             error,
             targetFound: positionHasTarget(position) ? true : undefined,
           });
@@ -8651,45 +8542,60 @@ export class LifecycleManager
     }
   }
 
-  private buildRegisterResultFailure(input: {
+  /**
+   * Refuse a registration: log it, announce it with `component:registration-rejected`,
+   * and answer with the refused result - one input for all three, so the event and the
+   * result cannot disagree. `targetFound` goes on the event only when given.
+   */
+  private refuseRegistration(input: {
+    progress: RegistrationProgress;
     componentName: string;
     registrationIndexBefore: number | null;
+    position: InsertPosition;
+    targetComponentName: string | undefined;
+    isInsertAction: boolean;
+    dependencySnapshot: ReadonlyMap<BaseComponent, DependencyRead>;
     code: RegistrationFailureCode;
-    reason: string;
+    message: string;
+    logLine: string;
+    logParams?: Record<string, unknown>;
+    target?: string;
+    cycle?: string[];
     error?: Error;
-  }): RegisterComponentResult {
-    let startupOrder: string[];
-
-    try {
-      startupOrder = this.getStartupOrderInternal();
-    } catch (error) {
-      // Defensive: This should never happen in normal operation since we validate
-      // cycles before registration. However, if this.components somehow contains
-      // a cycle (e.g., due to internal bugs or direct mutations), we must not
-      // throw from an error handler. Return empty array to fail gracefully.
-      const err = toError(error);
-
-      this.logger.warn(
-        'Failed to compute startup order in error handler: {{error.message}}',
-        {
-          params: { error: err },
-        },
+    targetFound?: boolean;
+  }): InsertComponentAtResult {
+    this.logger
+      .entity(input.componentName)
+      .warn(
+        input.logLine,
+        input.logParams === undefined ? undefined : { params: input.logParams },
       );
 
-      startupOrder = [];
-    }
-    return {
-      action: 'register',
-      success: false,
-      registered: false,
-      componentName: input.componentName,
-      reason: input.reason,
-      code: input.code,
-      error: input.error,
+    this.emitRegistrationRejected({
+      progress: input.progress,
+      name: input.componentName,
+      reason: input.code,
+      message: input.message,
       registrationIndexBefore: input.registrationIndexBefore,
-      registrationIndexAfter: input.registrationIndexBefore,
-      startupOrder,
-    };
+      ...('target' in input ? { target: input.target } : {}),
+      ...(input.cycle !== undefined ? { cycle: input.cycle } : {}),
+      ...('targetFound' in input ? { targetFound: input.targetFound } : {}),
+      isInsertAction: input.isInsertAction,
+      position: input.position,
+      targetComponentName: input.targetComponentName,
+    });
+
+    return this.buildInsertResultFailure({
+      componentName: input.componentName,
+      position: input.position,
+      targetComponentName: input.targetComponentName,
+      registrationIndexBefore: input.registrationIndexBefore,
+      code: input.code,
+      reason: input.message,
+      error: input.error,
+      targetFound: input.targetFound,
+      dependencySnapshot: input.dependencySnapshot,
+    });
   }
 
   private buildInsertResultFailure(input: {
@@ -8701,11 +8607,20 @@ export class LifecycleManager
     reason: string;
     error?: Error;
     targetFound?: boolean;
+    // The lists the registration already read - none, for one refused before reading
+    // any - so building a refusal runs no caller code. Reading them here ran every
+    // component's `getDependencies()` for a refusal made during a shutdown, and a read
+    // that registered again was refused the same way, recursing.
+    dependencySnapshot: ReadonlyMap<BaseComponent, DependencyRead>;
   }): InsertComponentAtResult {
     let startupOrder: string[];
 
     try {
-      startupOrder = this.getStartupOrderInternal();
+      startupOrder = this.getStartupOrderInternal(
+        undefined,
+        undefined,
+        input.dependencySnapshot,
+      );
     } catch (error) {
       // Defensive: This should never happen in normal operation since we validate
       // cycles before registration. However, if this.components somehow contains
@@ -8951,10 +8866,19 @@ export class LifecycleManager
 
     const order: string[] = [];
     while (available.size > 0) {
-      // Stable pick: lowest registration index
-      const next = [...available].sort((a, b) => {
-        return (regIndex.get(a) ?? 0) - (regIndex.get(b) ?? 0);
-      })[0];
+      // Stable pick: lowest registration index. Scanned rather than sorted - a sort per
+      // step made ordering O(n² log n), and it runs on every registration.
+      let next = '';
+      let nextIndex = Infinity;
+
+      for (const candidateName of available) {
+        const index = regIndex.get(candidateName) ?? 0;
+
+        if (index < nextIndex) {
+          next = candidateName;
+          nextIndex = index;
+        }
+      }
 
       available.delete(next);
       order.push(next);
@@ -8969,7 +8893,8 @@ export class LifecycleManager
     }
 
     if (order.length !== names.length) {
-      const remaining = names.filter((n) => !order.includes(n));
+      const ordered = new Set(order);
+      const remaining = names.filter((n) => !ordered.has(n));
       const cycle = this.findDependencyCycle(adjacency);
       throw new DependencyCycleError({
         cycle: cycle.length > 0 ? cycle : remaining,

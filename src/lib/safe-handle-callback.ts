@@ -204,19 +204,15 @@ export function runCallbackSafely(
     if (isAdoptable(result)) {
       // Fire-and-forget: a rejection is reported, never awaited.
       //
-      // Adopted through `Promise.resolve` rather than calling `result.catch` directly, as
-      // `ArraySink` does and for the same reason: `isAdoptable` accepts any thenable, and a
-      // `then`-only one has no `catch`. Calling it threw a `TypeError` that the
-      // surrounding `catch` reported *in place of* the real failure - and because `then`
-      // was never called, the callback's actual rejection was dropped and went nowhere.
-      // Every untrusted-callback surface funnels through here: `safeHandleCallback`,
-      // `EventEmitter`, `ProcessSignalManager`, `LRUCache.onChange`,
-      // `PromiseProtectedResolver`.
-      //
-      // And through `adoptPromise()` rather than `.catch`: `Promise.resolve` hands a
-      // native promise back unchanged, own properties included, and `.catch` calls
-      // `this.then` - so a promise carrying its own no-op `then` swallowed its
-      // rejection, which then went unhandled.
+      // Adopted through `adoptPromise()`, as `ArraySink` and the logger adopt theirs,
+      // rather than calling `result.catch` directly: `isAdoptable` accepts any thenable,
+      // and a `then`-only one has no `catch` - calling it threw a `TypeError` that the
+      // surrounding `catch` reported *in place of* the real failure, and the callback's
+      // actual rejection went nowhere. Nor through `Promise.resolve()`, which hands a
+      // native promise back with its own properties, so a no-op own `then` swallowed
+      // the rejection. Every untrusted-callback surface funnels through here:
+      // `safeHandleCallback`, `EventEmitter`, `ProcessSignalManager`,
+      // `LRUCache.onChange`, `PromiseProtectedResolver`.
       void adoptPromise(result).then(undefined, safeOnError);
     }
   } catch (error) {
