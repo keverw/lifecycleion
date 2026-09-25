@@ -835,7 +835,8 @@ describe('LifecycleManager - BaseComponent', () => {
       expect(result.targetFound).toBe(false);
       expect(result.componentName).toBe('api');
       expect(result.startupOrder).toEqual([]);
-      expect(result.manualPositionRespected).toBe(false);
+      // A refusal never applied a position; it is unknown, not dependency-reordered.
+      expect(result.manualPositionRespected).toBeUndefined();
       expect(rejectedPayload?.reason).toBe('target_not_found');
       expect(rejectedPayload?.target).toBe('missing');
       expect(rejectedPayload?.targetFound).toBe(false);
@@ -859,7 +860,8 @@ describe('LifecycleManager - BaseComponent', () => {
       expect(result.code).toBe('invalid_position');
       expect(result.componentName).toBe('api');
       expect(result.startupOrder).toEqual([]);
-      expect(result.manualPositionRespected).toBe(false);
+      // A refusal never applied a position; it is unknown, not dependency-reordered.
+      expect(result.manualPositionRespected).toBeUndefined();
       expect(result.requestedPosition.position).toBe('weird');
       expect(rejectedPayload?.reason).toBe('invalid_position');
       expect(rejectedPayload?.requestedPosition?.position).toBe('weird');

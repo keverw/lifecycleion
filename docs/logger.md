@@ -1690,7 +1690,9 @@ interface BeforeExitResult {
 A sink that returns successfully but whose return value has a throwing `then` getter
 produces a terminal console report identifying the unreadable return value. This is
 not reported as a sink invocation failure, and an already-delivered diagnostic is not
-repeated. Actual sink throws and asynchronous rejections retain their normal handling.
+repeated. The report identifies the sink by its one-based position in the applicable
+sink list. Sink close methods are read once and their results use the same guarded
+adoption, including native promises with overwritten own `then` properties. Actual sink throws and asynchronous rejections retain their normal handling.
 
 A sink whose `write()` or `close()` throws or rejects produces a logger diagnostic with
 `kind: 'sink'`, the normalized failure in `error`, the failing `sink`, and `context` set

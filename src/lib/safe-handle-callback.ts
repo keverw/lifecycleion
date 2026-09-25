@@ -1,9 +1,14 @@
+import { reportToConsole } from './internal/report-to-console';
 import { errorToString } from './error-to-string';
-import { toError } from './to-error';
+import { describeError, toError } from './to-error';
 import { DOUBLE_EOL } from './constants';
 import { installGlobalEventTarget } from './global-event-target';
 import { reportToHost } from './internal/report-to-host';
-import { adoptPromise, isAdoptable } from './internal/adopt-promise';
+import {
+  adoptPromise,
+  isAdoptable,
+  adoptResult,
+} from './internal/adopt-promise';
 import { reportThroughHandler } from './internal/failure-reporter';
 
 // Node.js has a global `ErrorEvent` constructor (Node 25+) but does not make `globalThis`
@@ -175,36 +180,29 @@ function invokeCallbackSafely(
     return;
   }
 
+  let result: unknown;
   try {
     // `Reflect.apply` so an extracted method can still be given its receiver - and not
     // `callback.apply(...)`, which reads `apply` off the untrusted callback itself: one
     // with its own `apply` property would run that instead. With `thisArg` omitted this
     // is the same bare call as before.
-    const result: unknown = Reflect.apply(
+    result = Reflect.apply(
       callback as (...args: unknown[]) => unknown,
       thisArg,
       args,
     );
-
-    if (isAdoptable(result)) {
-      // Fire-and-forget: a rejection is reported, never awaited.
-      //
-      // Adopted through `adoptPromise()`, as `ArraySink` and the logger adopt theirs,
-      // rather than calling `result.catch` directly: `isAdoptable` accepts any thenable,
-      // and a `then`-only one has no `catch` - calling it threw a `TypeError` that the
-      // surrounding `catch` reported *in place of* the real failure, and the callback's
-      // actual rejection went nowhere. Nor through `Promise.resolve()`, which hands a
-      // native promise back with its own properties, so a no-op own `then` swallowed
-      // the rejection. Every untrusted-callback surface funnels through here:
-      // `safeHandleCallback`, `EventEmitter`, `ProcessSignalManager`,
-      // `LRUCache.onChange`, `PromiseProtectedResolver`.
-      void adoptPromise(result).then(undefined, (error: unknown) => {
-        reportToOnError(callbackName, error, onError);
-      });
-    }
   } catch (error) {
     reportToOnError(callbackName, error, onError);
+    return;
   }
+  const pending = adoptResult(result, (thenError) => {
+    reportToConsole(
+      `Callback ${callbackName} returned a value whose then could not be read: ${describeError(thenError)}`,
+    );
+  });
+  void pending?.catch((error: unknown) => {
+    reportToOnError(callbackName, error, onError);
+  });
 }
 
 /**

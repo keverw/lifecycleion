@@ -631,7 +631,7 @@ interface InsertComponentAtResult {
 - `actualPosition` - Where it actually ended up after dependency resolution, read when the call returns. Present when the component is still registered then - not when a listener removed it again during its auto-start
   - `index` - The registry array index (0-based)
   - `description` - Human-readable position like `"at start"`, `"at end"`, `"after database, before api"`, or `"only component"`
-- `manualPositionRespected` - `true` if the explicit position was honored, `false` if dependency ordering forced a different position, and `undefined` when startup order is unavailable
+- `manualPositionRespected` - `true` if the explicit position was honored, `false` if dependency ordering forced a different position, and `undefined` when startup order is unavailable or insertion was refused
 - `targetFound` - For 'before'/'after' positions, indicates if the reference component was found (always `undefined` for 'start'/'end')
 
 **Example:**
@@ -1013,7 +1013,9 @@ Successful hooks publish the registration before queued notifications are delive
 Lifecycle state maps are written only after the hooks and commit checks succeed.
 A hook failure or a partial publication failure rolls back only that entry. Its name
 and instance remain reserved until the overridable unregistration hook has returned,
-so rollback cannot silently replace the rejected registration. A hook
+so rollback cannot silently replace the rejected registration. Entries being rolled
+back are excluded from nested dependency reads and cycle checks while their names
+and instances remain reserved. A hook
 that starts an active shutdown also prevents publication and returns
 `shutdown_in_progress`. A hook that begins bulk startup is rechecked before publication:
 using the pass's dependency snapshot plus separate metadata for registrations committed

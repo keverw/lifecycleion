@@ -1210,3 +1210,28 @@ describe('CallbackResult narrowing', () => {
     }
   });
 });
+
+it('a callback with an unreadable return does not invoke its error handler', () => {
+  let errorCalls = 0;
+  const captured = muteConsoleError();
+  try {
+    runCallbackSafely(
+      'delivered',
+      () => ({
+        get then(): never {
+          throw new Error('return getter');
+        },
+      }),
+      [],
+      () => {
+        errorCalls++;
+      },
+    );
+    expect(errorCalls).toBe(0);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('Callback delivered returned a value');
+    expect(captured[0]).toContain('then could not be read');
+  } finally {
+    restoreConsoleError();
+  }
+});

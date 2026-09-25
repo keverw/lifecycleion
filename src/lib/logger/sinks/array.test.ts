@@ -1024,6 +1024,12 @@ test('ArraySink - an onFormatError result with a throwing then getter lowers the
 
     // The first report's guard came down, so the second failure was reported too.
     expect(calls).toBe(2);
+    expect(captured).toHaveLength(2);
+    for (const line of captured) {
+      expect(line).toContain('returned a value whose then could not be read');
+      expect(line).not.toContain('transformer boom');
+      expect(line).not.toContain('handler also threw');
+    }
     expect(captured.some((line) => line.includes('then getter exploded'))).toBe(
       true,
     );

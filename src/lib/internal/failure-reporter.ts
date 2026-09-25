@@ -1,5 +1,5 @@
 import { describeError, toError } from '../to-error';
-import { adoptPromise, isAdoptable } from './adopt-promise';
+import { adoptResult } from './adopt-promise';
 import { reportToConsole } from './report-to-console';
 import { reportToHost } from './report-to-host';
 
@@ -113,40 +113,17 @@ export function reportThroughHandler(
       return;
     }
 
-    // Classified apart from the call: the handler ran and delivered its report, so a
-    // `then` getter on what it returned that throws is not the handler throwing - it
-    // was reported as though it were, repeating the report under the wrong label.
-    let isResultAdoptable: boolean;
-
-    try {
-      isResultAdoptable = isAdoptable(result);
-    } catch (thenError) {
+    const pending = adoptResult(result, (thenError) => {
       reportToConsole(
         `A failure handler${handlerName === undefined ? '' : ` (${handlerName})`} returned a value whose then could not be read: ${describeError(thenError)}`,
       );
-      settle();
-
-      return;
-    }
-
-    // A handler is free to be `async` - the named-pipe docs show one - and a rejected
-    // promise sails straight past a `try`/`catch`. Unfollowed, that is an unhandled
-    // rejection raised out of an error path, which under Node's default
-    // `--unhandled-rejections=throw` ends the process: a logging failure taking down the
-    // application, from the one function whose contract is that reporting a failure may
-    // never raise one. Followed, it lands on the console rung like any other broken
-    // handler.
-    // `isAdoptable()` and `adoptPromise()`, not `isPromise()` and `Promise.resolve()`:
-    // a native promise whose own `then` is not a function failed the one, and one with
-    // its own no-op `then` swallowed the rejection through the other - unhandled
-    // either way. See `adoptPromise()`.
-    if (isResultAdoptable) {
-      adoptPromise(result)
+    });
+    if (pending !== undefined) {
+      void pending
         .catch((handlerError: unknown) => {
           reportToConsole(withHandlerFailure('rejected', handlerError));
         })
         .finally(settle);
-
       return;
     }
 

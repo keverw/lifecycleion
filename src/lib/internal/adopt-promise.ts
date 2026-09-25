@@ -165,3 +165,23 @@ export function adoptPromise<T>(
     ]);
   });
 }
+
+/**
+ * Classify a completed callback's return separately from invoking that callback.
+ * An unreadable then is a return-contract failure, not evidence that the callback
+ * threw or failed to deliver. Callers supply a guarded terminal reporter and decide
+ * how to handle actual async rejection. Undefined means no async work remains.
+ */
+export function adoptResult(
+  result: unknown,
+  onUnreadable: (error: unknown) => void,
+): Promise<unknown> | undefined {
+  let shouldAdopt: boolean;
+  try {
+    shouldAdopt = isAdoptable(result);
+  } catch (error) {
+    onUnreadable(error);
+    return undefined;
+  }
+  return shouldAdopt ? adoptPromise(result) : undefined;
+}

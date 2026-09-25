@@ -1,10 +1,12 @@
+import { reportToConsole } from '../../internal/report-to-console';
+import { describeError } from '../../to-error';
 import {
   defineEntry,
   describeContainer,
   namedArrayKeys,
 } from '../../internal/container-entries';
 import { isPlainContainer } from '../../internal/is-plain-container';
-import { adoptPromise, isAdoptable } from '../../internal/adopt-promise';
+import { adoptResult } from '../../internal/adopt-promise';
 import { MAX_REDACTION_ENTRIES } from '../../internal/redact-paths';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
 import {
@@ -447,27 +449,12 @@ export class ArraySink implements LogSink {
         throw handlerError;
       }
 
-      let isResultAdoptable: boolean;
-
-      try {
-        isResultAdoptable = isAdoptable(result);
-      } catch (thenError) {
-        // A `then` getter that throws is the handler's failure too, answered the same
-        // way: the guard comes down first, or this sink went silent for good.
-        this.formatReportsInFlight--;
-
-        throw thenError;
-      }
-
-      if (isResultAdoptable) {
-        // Adopted rather than settled through `result.finally`, as the logger does: a
-        // thenable need not have `finally` - nor the `catch` the reporter calls on what
-        // this returns, which is why the adopted promise is what goes back rather than
-        // the handler's own object. A rejection still travels on to the reporter through
-        // it; the side chain here only lowers the guard either way. `adoptPromise()` and
-        // `isAdoptable()` for the reasons the logger's write path gives.
-        const settled = adoptPromise(result);
-
+      const settled = adoptResult(result, (thenError) => {
+        reportToConsole(
+          `ArraySink onFormatError returned a value whose then could not be read: ${describeError(thenError)}`,
+        );
+      });
+      if (settled !== undefined) {
         void settled.then(
           () => {
             this.formatReportsInFlight--;
@@ -482,7 +469,9 @@ export class ArraySink implements LogSink {
 
       this.formatReportsInFlight--;
 
-      return result;
+      // Classification already handled any malformed return; do not send that
+      // object back through the outer reporter and read its then a second time.
+      return undefined;
     };
   }
 }

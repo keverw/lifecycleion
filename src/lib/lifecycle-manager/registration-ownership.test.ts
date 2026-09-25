@@ -700,3 +700,46 @@ for (const shouldReuseInstance of [true, false]) {
     }
   });
 }
+
+test('rollback reservations do not contribute dependency reads to cleanup registrations', async () => {
+  const { logger, manager } = setup();
+  const { release } = claimReports();
+  const component = new Plain(logger, 'a');
+  let isRollingBack = false;
+  let rollbackReads = 0;
+  component.getDependencies = (): string[] => {
+    if (isRollingBack) {
+      rollbackReads++;
+    }
+    return [];
+  };
+  component._markRegistered = (): never => {
+    throw new Error('registration failed');
+  };
+  const unmark = component._markUnregistered.bind(component);
+  let nested: ReturnType<typeof manager.registerComponent> | undefined;
+  component._markUnregistered = (): void => {
+    unmark();
+    isRollingBack = true;
+    nested = manager.registerComponent(new Plain(logger, 'b'));
+  };
+  try {
+    await manager.registerComponent(component);
+    expect((await nested)?.registered).toBe(true);
+    expect(rollbackReads).toBe(0);
+    expect(manager.getComponentNames()).toEqual(['b']);
+  } finally {
+    release();
+  }
+});
+
+test('a refused insertion does not claim its position was reordered', async () => {
+  const { logger, manager } = setup();
+  const result = await manager.insertComponentAt(
+    new Plain(logger, 'a'),
+    'after',
+    'missing',
+  );
+  expect(result.code).toBe('target_not_found');
+  expect(result.manualPositionRespected).toBeUndefined();
+});

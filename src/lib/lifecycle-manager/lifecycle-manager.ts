@@ -268,7 +268,7 @@ function committedRegistrationReport(
   if (!progress.hasCommitted) {
     return {
       startupOrder: [],
-      manualPositionRespected: false,
+      manualPositionRespected: undefined,
       targetFound: defaultTargetFound(position),
       autoStartAttempted: false,
     };
@@ -487,6 +487,9 @@ export class LifecycleManager
   // registration back. Never let start() acquire resources for an uncommitted entry:
   // rollback would remove the only manager record capable of stopping them.
   private readonly pendingRegistrations = new Set<BaseComponent>();
+  // Rollback still reserves names and instances, but its component must no longer
+  // contribute dependency reads or cycle edges to registrations made by cleanup hooks.
+  private readonly rollingBackRegistrations = new Set<BaseComponent>();
   // Successful registrations retain their validated read for reports and checks of
   // components committed by nested hooks, without probing caller getters again.
   private readonly committedDependencyReads = new WeakMap<
@@ -4214,7 +4217,10 @@ export class LifecycleManager
             isRegisteredWithAManager =
               component._isRegisteredWithManager() || isRegisteredWithAManager;
           },
-          () => this.componentEntries,
+          () =>
+            this.componentEntries.filter(
+              (entry) => !this.rollingBackRegistrations.has(entry),
+            ),
         );
       }
 
@@ -4339,7 +4345,9 @@ export class LifecycleManager
 
       try {
         startupOrder = this.getStartupOrderInternal(
-          nextComponents,
+          nextComponents.filter(
+            (entry) => !this.rollingBackRegistrations.has(entry),
+          ),
           {
             component,
             name: componentName,
@@ -4385,6 +4393,7 @@ export class LifecycleManager
       // this attempt. Keep the reservation until finally so rollback hooks cannot
       // claim its name while cleanup is still in progress.
       const rollBack = (): void => {
+        this.rollingBackRegistrations.add(component);
         // Rolled back, so this registration did not commit after all.
         progress.hasCommitted = false;
         if (previousGeneration === undefined) {
@@ -4505,6 +4514,7 @@ export class LifecycleManager
           throw error;
         } finally {
           this.pendingRegistrations.delete(component);
+          this.rollingBackRegistrations.delete(component);
           // Publish only after hooks succeed (or rebuild after rollback), before
           // notifications flush. Nested commits and unregisters remain in the live
           // entries; never restore the stale array captured before calling hooks.
@@ -4965,7 +4975,7 @@ export class LifecycleManager
               targetComponentName: input.targetComponentName,
             }
           : undefined,
-        manualPositionRespected: false,
+        manualPositionRespected: undefined,
         ...('targetFound' in input ? { targetFound: input.targetFound } : {}),
       });
       // Once queued: a payload builder that throws leaves it unannounced for the
@@ -9071,7 +9081,7 @@ export class LifecycleManager
         position: input.position,
         targetComponentName: input.targetComponentName,
       },
-      manualPositionRespected: false,
+      manualPositionRespected: undefined,
       targetFound: input.targetFound,
       duringStartup: this.isStarting,
       autoStartAttempted: false,

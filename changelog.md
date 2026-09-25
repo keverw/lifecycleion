@@ -211,6 +211,18 @@
 
 ## Unreleased
 
+- **BREAKING (TypeScript):** `InsertComponentAtResult.manualPositionRespected` is
+  optional. It is `undefined` for refusals and unavailable ordering, `false` only for
+  a known position changed by dependency ordering. Strict consumers must handle the
+  unknown case.
+- Callback and sink return classification now share a helper. Throwing `then` getters
+  are reported separately from invocation failures, including ArraySink format-error
+  handlers and fire-and-forget callbacks. `Logger.close()` adopts hostile native
+  promises and reads each close method once; unreadable sink returns identify the
+  destination by its one-based position.
+- Rollback reservations no longer contribute dependency reads or cycle edges to
+  registrations made by cleanup hooks, while name/instance reservations remain held.
+
 - Registration rollback retains name and instance reservations through its cleanup
   hook. An unavailable startup order now reports `manualPositionRespected: undefined`
   rather than claiming the requested placement was not respected. Startup dependency
