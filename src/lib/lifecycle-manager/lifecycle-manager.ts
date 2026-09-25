@@ -416,6 +416,21 @@ export class LifecycleManager
   // it - and reported if the startup ends before then, since nothing will start them.
   // Only ever non-empty while `isStarting` holds, which also refuses every unregister.
   private deferredAutoStartNames = new Set<string>();
+  // Which registration of each instance is current: a number taken from
+  // `registrationCount` each time one commits. A registry read records it per answer, so
+  // an instance unregistered and registered again after its read - possibly answering
+  // differently now - is read again rather than answered from before. See
+  // `isReadCurrent()`.
+  private registrationCount = 0;
+  private readonly registrationGenerations = new WeakMap<
+    BaseComponent,
+    number
+  >();
+  // The generation each answer in a `readRegistry()` map was read at, keyed by that map.
+  private readonly readGenerations = new WeakMap<
+    ReadonlyMap<BaseComponent, unknown>,
+    Map<BaseComponent, number | undefined>
+  >();
   // Components whose broken `getDependencies()` was already reported; see
   // `readDependencies()`.
   private readonly reportedDependencyReadFailures =
@@ -4317,6 +4332,7 @@ export class LifecycleManager
       // for work still in flight; a rollback below puts that back rather than dropping
       // it.
       const previousRecordedName = this.registeredNames.get(component);
+      const previousGeneration = this.registrationGenerations.get(component);
       // What the report-once marks held before this attempt, so a rollback clears only
       // marks it made itself.
       const wasDependencyReported =
@@ -4327,6 +4343,7 @@ export class LifecycleManager
       // A new array rather than a splice, as unregister does: a loop over the registry
       // that a re-entrant registration lands in keeps walking the array it started on.
       this.components = nextComponents;
+      this.registrationGenerations.set(component, ++this.registrationCount);
       progress.hasCommitted = true;
       progress.wasDuringStartup = this.isStarting;
       committed.startupOrder = startupOrder;
@@ -4379,6 +4396,11 @@ export class LifecycleManager
         );
         // Rolled back, so this registration did not commit after all.
         progress.hasCommitted = false;
+        if (previousGeneration === undefined) {
+          this.registrationGenerations.delete(component);
+        } else {
+          this.registrationGenerations.set(component, previousGeneration);
+        }
         if (previousRecordedName === undefined) {
           this.registeredNames.delete(component);
         } else {
@@ -8655,7 +8677,7 @@ export class LifecycleManager
       // reported an order that ignored them. Empty, rather than an order that is not the
       // startup order - on the result and on `registration-rejected` alike.
       const isSnapshotComplete = this.components.every((component) =>
-        input.dependencySnapshot.has(component),
+        this.isReadCurrent(input.dependencySnapshot, component),
       );
 
       startupOrder = isSnapshotComplete
@@ -8773,12 +8795,29 @@ export class LifecycleManager
   }
 
   /**
+   * Whether `reads` holds an answer from `component`'s current registration - not one
+   * read before it was unregistered and registered again.
+   */
+  private isReadCurrent(
+    reads: ReadonlyMap<BaseComponent, unknown>,
+    component: BaseComponent,
+  ): boolean {
+    return (
+      reads.has(component) &&
+      this.readGenerations.get(reads)?.get(component) ===
+        this.registrationGenerations.get(component)
+    );
+  }
+
+  /**
    * `read` applied to every registered component, until reading stops changing the
    * registry: a read that registers another component has that one read too. The
    * registry itself is the live one afterwards - a component unregistered meanwhile is
-   * simply not in it - and, once `isSettled`, every component in it has an answer here,
-   * so the checks that use them run none of the caller's code. Not settled when the
-   * registry was still growing after `MAX_REGISTRY_READ_ROUNDS` rounds of reads.
+   * simply not in it - and, once `isSettled`, every component in it has a current answer
+   * here, so the checks that use them run none of the caller's code. One unregistered
+   * and registered again after its read is read again: its answer was for a
+   * registration that is gone. Not settled when the registry was still growing after
+   * `MAX_REGISTRY_READ_ROUNDS` rounds of reads.
    */
   private readRegistry<T>(
     read: (component: BaseComponent) => T,
@@ -8796,9 +8835,18 @@ export class LifecycleManager
     // Whether the round before read anything: `onSettled` is for what the reads may
     // have changed, and a registry that was already read has nothing new to ask about.
     let didRead = false;
+    let generations = this.readGenerations.get(reads);
+
+    if (generations === undefined) {
+      generations = new Map();
+      this.readGenerations.set(reads, generations);
+    }
+
+    const isUnread = (component: BaseComponent): boolean =>
+      !this.isReadCurrent(reads, component);
 
     for (let round = 0; ; round++) {
-      let unread = this.components.filter((component) => !reads.has(component));
+      let unread = this.components.filter(isUnread);
 
       if (
         unread.length === 0 &&
@@ -8808,7 +8856,7 @@ export class LifecycleManager
       ) {
         didRead = false;
         onSettled();
-        unread = this.components.filter((component) => !reads.has(component));
+        unread = this.components.filter(isUnread);
       }
 
       if (unread.length === 0) {
@@ -8824,7 +8872,10 @@ export class LifecycleManager
           return { reads, isSettled: false };
         }
 
+        // Taken before the read, which may itself register the instance again.
+        const generation = this.registrationGenerations.get(component);
         reads.set(component, read(component));
+        generations.set(component, generation);
         didRead = true;
       }
     }

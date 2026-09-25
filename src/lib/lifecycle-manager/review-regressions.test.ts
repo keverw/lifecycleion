@@ -4196,4 +4196,40 @@ describe('LifecycleManager - review regressions', () => {
     expect(refused.startupOrder).toEqual(['b', 'a']);
     expect(events[0]?.startupOrder).toEqual(['b', 'a']);
   });
+
+  test('a component registered again after its list was read is read again', async () => {
+    const { logger, manager } = setup();
+    const b = new Plain(logger, 'b');
+    const a = new Plain(logger, 'a');
+    await manager.registerComponent(b);
+    await manager.registerComponent(a);
+    let bDependencies: string[] = [];
+    b.getDependencies = (): string[] => bDependencies;
+    let reRegistration: Promise<unknown> | undefined;
+    let isArmed = false;
+    // Read after `b`: unregisters it and registers it again, now depending on `a`.
+    a.getDependencies = (): string[] => {
+      if (isArmed) {
+        // Disarmed first: the registration below reads this list again, re-entrantly.
+        isArmed = false;
+        void manager.unregisterComponent('b');
+        bDependencies = ['a'];
+        reRegistration = manager.insertComponentAt(b, 'start');
+      }
+
+      return [];
+    };
+
+    isArmed = true;
+    const refused = await manager.insertComponentAt(
+      new Plain(logger, 'c'),
+      'after',
+      'missing',
+    );
+    await reRegistration;
+
+    expect(manager.getComponentNames()).toEqual(['b', 'a']);
+    // Not [b, a]: that is the order from the list `b` had before it was registered again.
+    expect(refused.startupOrder).toEqual(['a', 'b']);
+  });
 });
