@@ -2310,6 +2310,32 @@ class ApiComponent extends BaseComponent {
 
 The LifecycleManager emits events for monitoring and observability. All events are typed via `LifecycleManagerEvents`.
 
+Manager-generated events are queued during synchronous state transitions and delivered
+when the outermost transition finishes, before control returns from that transition.
+Transitions include registry commits/removals and result publication, component state
+updates (including late and unexpected stops), startup-latch release, signal attachment
+and detachment, and shutdown acceptance, result publication, and escalation bookkeeping.
+An asynchronous operation consists of separate synchronous transitions: the manager
+never holds this queue across an `await` or waits for a listener's promise.
+
+Events retain FIFO emission order and listener registration order. If a listener starts
+another transition, its events go behind those already queued; they cannot interrupt the
+remaining listeners of the current event. A failed transition still delivers events
+already queued, and listener throws/rejections remain contained. These are notifications
+of changes that happened, not a transaction log that disappears on failure. Earlier
+listeners can change live state, so use the event payload for the originating snapshot
+and status getters for the current state.
+
+**Timing compatibility:** listeners now see completed bookkeeping instead of intermediate
+writes. This is an observable change for code that relied on re-entering halfway through
+a transition. For example, `signals-detached` sees the stopped timestamp already recorded;
+an expiry event raised while accepting shutdown sees the accepted pass; and
+`shutdown-completed` sees escalation already settled, while retaining the shutdown latch
+until its listeners finish. A `signals-attached` listener during startup still finds a
+startup/claim in progress and can request shutdown before startup proceeds. Standalone
+events at stable dispatch boundaries still run synchronously. Logs and component hooks
+remain synchronous, so their existing re-entry guards are still required.
+
 ### Subscribing to Events
 
 ```typescript

@@ -531,6 +531,9 @@ export class LifecycleManager
     broadcastDebug: () => Promise<SignalBroadcastResult>,
   ) => void | Promise<void>;
   private readonly lifecycleEvents: LifecycleManagerEvents;
+  private transitionDepth = 0;
+  private isFlushingEvents = false;
+  private readonly pendingEvents: Array<() => void> = [];
 
   constructor(options: LifecycleManagerOptions & { logger: Logger }) {
     super();
@@ -1337,51 +1340,53 @@ export class LifecycleManager
    * Idempotent - calling multiple times has no effect.
    */
   public attachSignals(): void {
-    // A new attach supersedes a detach that was still waiting to run.
-    this.isSignalDetachDeferred = false;
+    return this.withTransition(() => {
+      // A new attach supersedes a detach that was still waiting to run.
+      this.isSignalDetachDeferred = false;
 
-    // Check if already attached (not just if instance exists)
-    if (this.processSignalManager?.getStatus().isAttached) {
-      return; // Already attached
-    }
+      // Check if already attached (not just if instance exists)
+      if (this.processSignalManager?.getStatus().isAttached) {
+        return; // Already attached
+      }
 
-    // Create instance if it doesn't exist
-    if (!this.processSignalManager) {
-      this.processSignalManager = new ProcessSignalManager({
-        onShutdownRequested: (method: ShutdownSignal) => {
-          this.handleShutdownRequest(method);
-        },
-        // Note: Signal-triggered handlers are fire-and-forget by design.
-        // Node.js signal handlers (process.on) cannot return values, so these
-        // async handlers execute but their return values are not accessible.
-        // Use triggerReload(), triggerInfo(), triggerDebug() for programmatic
-        // access to results.
-        // Settled like `triggerReload()` and friends, so a signal-driven broadcast
-        // resolves under this manager's own label rather than relying on
-        // `ProcessSignalManager` to catch its rejection.
-        onReloadRequested: () =>
-          this.settleOperation(
-            'reload signal',
-            () => this.handleReloadRequest('signal'),
-            (error) => this.crashedSignalBroadcastResult('reload', error),
-          ),
-        onInfoRequested: () =>
-          this.settleOperation(
-            'info signal',
-            () => this.handleInfoRequest('signal'),
-            (error) => this.crashedSignalBroadcastResult('info', error),
-          ),
-        onDebugRequested: () =>
-          this.settleOperation(
-            'debug signal',
-            () => this.handleDebugRequest('signal'),
-            (error) => this.crashedSignalBroadcastResult('debug', error),
-          ),
-      });
-    }
+      // Create instance if it doesn't exist
+      if (!this.processSignalManager) {
+        this.processSignalManager = new ProcessSignalManager({
+          onShutdownRequested: (method: ShutdownSignal) => {
+            this.handleShutdownRequest(method);
+          },
+          // Note: Signal-triggered handlers are fire-and-forget by design.
+          // Node.js signal handlers (process.on) cannot return values, so these
+          // async handlers execute but their return values are not accessible.
+          // Use triggerReload(), triggerInfo(), triggerDebug() for programmatic
+          // access to results.
+          // Settled like `triggerReload()` and friends, so a signal-driven broadcast
+          // resolves under this manager's own label rather than relying on
+          // `ProcessSignalManager` to catch its rejection.
+          onReloadRequested: () =>
+            this.settleOperation(
+              'reload signal',
+              () => this.handleReloadRequest('signal'),
+              (error) => this.crashedSignalBroadcastResult('reload', error),
+            ),
+          onInfoRequested: () =>
+            this.settleOperation(
+              'info signal',
+              () => this.handleInfoRequest('signal'),
+              (error) => this.crashedSignalBroadcastResult('info', error),
+            ),
+          onDebugRequested: () =>
+            this.settleOperation(
+              'debug signal',
+              () => this.handleDebugRequest('signal'),
+              (error) => this.crashedSignalBroadcastResult('debug', error),
+            ),
+        });
+      }
 
-    this.processSignalManager.attach();
-    this.lifecycleEvents.lifecycleManagerSignalsAttached();
+      this.processSignalManager.attach();
+      this.lifecycleEvents.lifecycleManagerSignalsAttached();
+    });
   }
 
   /**
@@ -1389,12 +1394,14 @@ export class LifecycleManager
    * Idempotent - calling multiple times has no effect.
    */
   public detachSignals(): void {
-    if (!this.processSignalManager?.getStatus().isAttached) {
-      return; // Not attached
-    }
+    return this.withTransition(() => {
+      if (!this.processSignalManager?.getStatus().isAttached) {
+        return; // Not attached
+      }
 
-    this.processSignalManager.detach();
-    this.lifecycleEvents.lifecycleManagerSignalsDetached();
+      this.processSignalManager.detach();
+      this.lifecycleEvents.lifecycleManagerSignalsDetached();
+    });
   }
 
   /**
@@ -2628,50 +2635,52 @@ export class LifecycleManager
       }
     }
 
-    // Remove from registry
-    this.components = this.components.filter((c) => this.nameOf(c) !== name);
+    return this.withTransition(() => {
+      // Remove from registry
+      this.components = this.components.filter((c) => this.nameOf(c) !== name);
 
-    // Clean up state - the manager's own maps first, all of them, so the component is
-    // either fully registered or fully gone. The component's hooks run after, contained:
-    // they can be overridden, and one that threw used to leave the component out of the
-    // registry but still in every state map.
-    this.componentStates.delete(name);
-    this.componentTimestamps.delete(name);
-    this.componentErrors.delete(name);
-    this.componentUnexpectedStopHadError.delete(name);
-    this.componentStartAttemptTokens.delete(name);
-    this.componentStopAttemptTokens.delete(name);
-    this.pendingForceStopWaiters.delete(name);
-    // A later registration of the same instance reports a broken list afresh.
-    this.reportedDependencyReadFailures.delete(component);
-    this.reportedOptionalReadFailures.delete(component);
-    this.stalledComponents.delete(name);
-    this.runningComponents.delete(name);
-    this.componentClaims.delete(name);
-    // `registeredNames` keeps this entry: work still in flight - a broadcast that
-    // captured the instance, a late-stop monitor - can still name it without asking the
-    // component. A later registration of the same instance reads its name fresh and
-    // overwrites the entry when it commits.
-    this.updateStartedFlag();
+      // Clean up state - the manager's own maps first, all of them, so the component is
+      // either fully registered or fully gone. The component's hooks run after, contained:
+      // they can be overridden, and one that threw used to leave the component out of the
+      // registry but still in every state map.
+      this.componentStates.delete(name);
+      this.componentTimestamps.delete(name);
+      this.componentErrors.delete(name);
+      this.componentUnexpectedStopHadError.delete(name);
+      this.componentStartAttemptTokens.delete(name);
+      this.componentStopAttemptTokens.delete(name);
+      this.pendingForceStopWaiters.delete(name);
+      // A later registration of the same instance reports a broken list afresh.
+      this.reportedDependencyReadFailures.delete(component);
+      this.reportedOptionalReadFailures.delete(component);
+      this.stalledComponents.delete(name);
+      this.runningComponents.delete(name);
+      this.componentClaims.delete(name);
+      // `registeredNames` keeps this entry: work still in flight - a broadcast that
+      // captured the instance, a late-stop monitor - can still name it without asking the
+      // component. A later registration of the same instance reads its name fresh and
+      // overwrites the entry when it commits.
+      this.updateStartedFlag();
 
-    this.clearUnexpectedStopHandler(component, 'unregister');
+      this.clearUnexpectedStopHandler(component, 'unregister');
 
-    this.markComponentUnregistered(component, 'lifecycle-manager unregister');
+      this.markComponentUnregistered(component, 'lifecycle-manager unregister');
 
-    this.detachSignalsAfterLastStop(
-      'last component unregistered',
-      'Auto-detached process signals on last component unregistered',
-    );
+      this.detachSignalsAfterLastStop(
+        'last component unregistered',
+        'Auto-detached process signals on last component unregistered',
+      );
 
-    this.logger.entity(name).info('Component unregistered');
-    this.lifecycleEvents.componentUnregistered(name, false);
+      this.logger.entity(name).info('Component unregistered');
+      this.lifecycleEvents.componentUnregistered(name, false);
 
-    return {
-      success: true,
-      componentName: name,
-      wasStopped: progress.wasStopped,
-      wasRegistered: true,
-    };
+      return {
+        success: true,
+        componentName: name,
+        wasStopped: progress.wasStopped,
+        wasRegistered: true,
+      };
+    });
   }
 
   /**
@@ -3586,9 +3595,8 @@ export class LifecycleManager
    * never reached. One place, so an early exit cannot forget a step the others take.
    *
    * Every piece of this startup's state is cleared before any caller code runs. The
-   * detach logs through the caller's sinks and emits `signals-detached`, and a listener
-   * there may start the next startup - which runs synchronously up to its first `await`
-   * and installs its own record. Cleared after, that record was wiped out from under it:
+   * detach logs through the caller's sinks, which may start the next startup. That
+   * startup runs synchronously up to its first `await` and installs its own record. Cleared after, that record was wiped out from under it:
    * `isStarting` true with no `activeBulkStartup`, so every auto-start registered for the
    * rest of it was deferred, never started, and left out of its rollback.
    */
@@ -3597,28 +3605,30 @@ export class LifecycleManager
     detachReason: string;
     abandonReason: string;
   }): void {
-    const shouldDetach =
-      input.didAutoAttachSignals || this.autoAttachedSignalsDuringStartup;
-    const abandonedAutoStarts = Array.from(this.deferredAutoStartNames);
+    return this.withTransition(() => {
+      const shouldDetach =
+        input.didAutoAttachSignals || this.autoAttachedSignalsDuringStartup;
+      const abandonedAutoStarts = Array.from(this.deferredAutoStartNames);
 
-    // `isStarting` first of all: the detach below defers while it is set.
-    this.isStarting = false;
-    this.autoAttachedSignalsDuringStartup = false;
-    this.activeBulkStartup = null;
-    this.deferredAutoStartNames.clear();
-    this.unexpectedStopsDuringStartup.clear();
+      // `isStarting` first of all: the detach below defers while it is set.
+      this.isStarting = false;
+      this.autoAttachedSignalsDuringStartup = false;
+      this.activeBulkStartup = null;
+      this.deferredAutoStartNames.clear();
+      this.unexpectedStopsDuringStartup.clear();
 
-    if (shouldDetach) {
-      this.detachSignalsIfIdle(input.detachReason);
-    } else {
-      this.runDeferredSignalDetach('bulk startup');
-    }
+      if (shouldDetach) {
+        this.detachSignalsIfIdle(input.detachReason);
+      } else {
+        this.runDeferredSignalDetach('bulk startup');
+      }
 
-    // Not while a startup started from the detach is running: it reads the whole
-    // registry, so these are in its order, and it is the one that starts them.
-    if (!this.isStarting) {
-      this.warnAbandonedAutoStarts(abandonedAutoStarts, input.abandonReason);
-    }
+      // Not while a startup started from the detach is running: it reads the whole
+      // registry, so these are in its order, and it is the one that starts them.
+      if (!this.isStarting) {
+        this.warnAbandonedAutoStarts(abandonedAutoStarts, input.abandonReason);
+      }
+    });
   }
 
   private async stopAllComponentsOperation(
@@ -4340,101 +4350,102 @@ export class LifecycleManager
       const wasOptionalReported =
         this.reportedOptionalReadFailures.has(component);
 
-      // A new array rather than a splice, as unregister does: a loop over the registry
-      // that a re-entrant registration lands in keeps walking the array it started on.
-      this.components = nextComponents;
-      this.registrationGenerations.set(component, ++this.registrationCount);
-      progress.hasCommitted = true;
-      progress.wasDuringStartup = this.isStarting;
-      committed.startupOrder = startupOrder;
-      this.registeredNames.set(component, componentName);
-      this.componentStates.set(componentName, 'registered');
-      this.componentTimestamps.set(componentName, {
-        startedAt: null,
-        stoppedAt: null,
+      this.withTransition(() => {
+        // A new array rather than a splice, as unregister does: a loop over the registry
+        // that a re-entrant registration lands in keeps walking the array it started on.
+        this.components = nextComponents;
+        this.registrationGenerations.set(component, ++this.registrationCount);
+        progress.hasCommitted = true;
+        progress.wasDuringStartup = this.isStarting;
+        committed.startupOrder = startupOrder;
+        this.registeredNames.set(component, componentName);
+        this.componentStates.set(componentName, 'registered');
+        this.componentTimestamps.set(componentName, {
+          startedAt: null,
+          stoppedAt: null,
+        });
+        this.componentErrors.set(componentName, null);
+        this.componentUnexpectedStopHadError.delete(componentName);
+        this.componentStartAttemptTokens.set(componentName, ulid());
+
+        // Create callbacks for component-scoped lifecycle
+        const internalCallbacks: LifecycleInternalCallbacks = {
+          sendMessageInternal: (
+            compName: string,
+            payload: unknown,
+            from: string | null,
+            options?: SendMessageOptions,
+          ) => this.sendMessageSettled(compName, payload, from, options),
+          broadcastMessageInternal: (
+            payload: unknown,
+            from: string | null,
+            opts?: BroadcastOptions,
+          ) => this.broadcastMessageSettled(payload, from, opts),
+          getValueInternal: <T = unknown>(
+            compName: string,
+            key: string,
+            from: string | null,
+            options?: GetValueOptions,
+          ) => this.getValueSettled<T>(compName, key, from, options),
+        };
+
+        // The component's side of the registration. It can be overridden, so a throw here
+        // rolls the commit above back out - all or nothing, as unregister is - and the
+        // registration fails as unregistered.
+        try {
+          (
+            component as unknown as { lifecycle: ComponentLifecycleRef }
+          ).lifecycle = new ComponentLifecycle(
+            this,
+            componentName,
+            internalCallbacks,
+          );
+          component._markRegistered();
+        } catch (error) {
+          this.components = this.components.filter(
+            (registered) => registered !== component,
+          );
+          // Rolled back, so this registration did not commit after all.
+          progress.hasCommitted = false;
+          if (previousGeneration === undefined) {
+            this.registrationGenerations.delete(component);
+          } else {
+            this.registrationGenerations.set(component, previousGeneration);
+          }
+          if (previousRecordedName === undefined) {
+            this.registeredNames.delete(component);
+          } else {
+            this.registeredNames.set(component, previousRecordedName);
+          }
+
+          this.componentStates.delete(componentName);
+          this.componentTimestamps.delete(componentName);
+          this.componentErrors.delete(componentName);
+          this.componentStartAttemptTokens.delete(componentName);
+
+          // The component's side too: a hook that marked it registered before throwing
+          // would otherwise leave it believing it is, and its next registration refused as
+          // `duplicate_instance`.
+          this.markComponentUnregistered(
+            component,
+            'lifecycle-manager registration rollback',
+          );
+
+          // "Reported once per registration": this one never happened, so a report made
+          // under it - by the hook's own code reading the component - does not count
+          // against the next. Only such a report: a mark that was already there stays, or
+          // a caller retrying a failing registration would be told the same thing each
+          // time.
+          if (!wasDependencyReported) {
+            this.reportedDependencyReadFailures.delete(component);
+          }
+          if (!wasOptionalReported) {
+            this.reportedOptionalReadFailures.delete(component);
+          }
+
+          throw error;
+        }
       });
-      this.componentErrors.set(componentName, null);
-      this.componentUnexpectedStopHadError.delete(componentName);
-      this.componentStartAttemptTokens.set(componentName, ulid());
-
-      // Create callbacks for component-scoped lifecycle
-      const internalCallbacks: LifecycleInternalCallbacks = {
-        sendMessageInternal: (
-          compName: string,
-          payload: unknown,
-          from: string | null,
-          options?: SendMessageOptions,
-        ) => this.sendMessageSettled(compName, payload, from, options),
-        broadcastMessageInternal: (
-          payload: unknown,
-          from: string | null,
-          opts?: BroadcastOptions,
-        ) => this.broadcastMessageSettled(payload, from, opts),
-        getValueInternal: <T = unknown>(
-          compName: string,
-          key: string,
-          from: string | null,
-          options?: GetValueOptions,
-        ) => this.getValueSettled<T>(compName, key, from, options),
-      };
-
-      // The component's side of the registration. It can be overridden, so a throw here
-      // rolls the commit above back out - all or nothing, as unregister is - and the
-      // registration fails as unregistered.
-      try {
-        (
-          component as unknown as { lifecycle: ComponentLifecycleRef }
-        ).lifecycle = new ComponentLifecycle(
-          this,
-          componentName,
-          internalCallbacks,
-        );
-        component._markRegistered();
-      } catch (error) {
-        this.components = this.components.filter(
-          (registered) => registered !== component,
-        );
-        // Rolled back, so this registration did not commit after all.
-        progress.hasCommitted = false;
-        if (previousGeneration === undefined) {
-          this.registrationGenerations.delete(component);
-        } else {
-          this.registrationGenerations.set(component, previousGeneration);
-        }
-        if (previousRecordedName === undefined) {
-          this.registeredNames.delete(component);
-        } else {
-          this.registeredNames.set(component, previousRecordedName);
-        }
-
-        this.componentStates.delete(componentName);
-        this.componentTimestamps.delete(componentName);
-        this.componentErrors.delete(componentName);
-        this.componentStartAttemptTokens.delete(componentName);
-
-        // The component's side too: a hook that marked it registered before throwing
-        // would otherwise leave it believing it is, and its next registration refused as
-        // `duplicate_instance`.
-        this.markComponentUnregistered(
-          component,
-          'lifecycle-manager registration rollback',
-        );
-
-        // "Reported once per registration": this one never happened, so a report made
-        // under it - by the hook's own code reading the component - does not count
-        // against the next. Only such a report: a mark that was already there stays, or
-        // a caller retrying a failing registration would be told the same thing each
-        // time.
-        if (!wasDependencyReported) {
-          this.reportedDependencyReadFailures.delete(component);
-        }
-        if (!wasOptionalReported) {
-          this.reportedOptionalReadFailures.delete(component);
-        }
-
-        throw error;
-      }
-
       // Only now: a registration refused above - a dependency cycle, a failed hook - used
       // to have spent this component's one report, leaving the registration that
       // followed silent about the same broken list.
@@ -4679,115 +4690,120 @@ export class LifecycleManager
     registrationIndexBefore: number | null;
     progress: RegistrationProgress;
   }): InsertComponentAtResult {
-    const { componentName, position, progress } = input;
-    const err = toError(input.error);
-    // A step that throws is reported and skipped, never allowed to replace the answer.
-    const contain = (step: string, run: () => void): void => {
-      try {
-        run();
-      } catch (stepError) {
-        reportCallbackError(
-          `lifecycle-manager registerComponent ${step}`,
-          stepError,
-        );
-      }
-    };
-    let cycle: string[] | undefined;
+    return this.withTransition(() => {
+      const { componentName, position, progress } = input;
+      const err = toError(input.error);
+      // A step that throws is reported and skipped, never allowed to replace the answer.
+      const contain = (step: string, run: () => void): void => {
+        try {
+          run();
+        } catch (stepError) {
+          reportCallbackError(
+            `lifecycle-manager registerComponent ${step}`,
+            stepError,
+          );
+        }
+      };
+      let cycle: string[] | undefined;
 
-    contain('cycle', () => {
-      if (err instanceof DependencyCycleError) {
-        cycle = err.additionalInfo.cycle;
-      }
-    });
-
-    const code: RegistrationFailureCode =
-      cycle !== undefined ? 'dependency_cycle' : 'unknown_error';
-
-    // Reported for the reason `getStartupOrder()` reports it; a cycle is the caller's
-    // configuration, answered by the result.
-    if (code === 'unknown_error' && !input.isErrorReported) {
-      reportCallbackError('lifecycle-manager registerComponent', input.error);
-    }
-
-    contain('log', () => {
-      this.logger
-        .entity(componentName)
-        .error('Registration failed with unexpected error: {{error.message}}', {
-          params: { error: err },
-        });
-    });
-
-    // `registered` is whether this call added the component, as on success: a throw
-    // after the commit - from an auto-start, say - leaves it added, and both the event
-    // and the result must say so. Where it is now is read back from the registry, and
-    // is `null` if a listener has removed it since.
-    const isRegistered = progress.hasCommitted;
-    const indexOfComponent = this.components.indexOf(input.component);
-    const registrationIndexNow =
-      isRegistered && indexOfComponent !== -1 ? indexOfComponent : null;
-    let actualPosition: InsertComponentAtResult['actualPosition'];
-
-    contain('position', () => {
-      actualPosition = this.describeRegistryPosition(registrationIndexNow);
-    });
-
-    const report = committedRegistrationReport(
-      progress,
-      position,
-      actualPosition,
-    );
-    const reason = input.reason ?? describeError(err);
-
-    if (!progress.isAnnounced) {
-      contain('event', () => {
-        if (isRegistered) {
-          this.emitCommittedRegistration({
-            progress,
-            componentName,
-            index: registrationIndexNow,
-            isInsertAction: input.isInsertAction,
-            position,
-            targetComponentName: input.targetComponentName,
-            report,
-          });
-        } else {
-          this.emitRegistrationRejected({
-            progress,
-            name: componentName,
-            reason: code,
-            message: reason,
-            registrationIndexBefore: input.registrationIndexBefore,
-            startupOrder: [],
-            targetFound: defaultTargetFound(position),
-            ...(cycle !== undefined ? { cycle } : {}),
-            isInsertAction: input.isInsertAction,
-            position,
-            targetComponentName: input.targetComponentName,
-          });
+      contain('cycle', () => {
+        if (err instanceof DependencyCycleError) {
+          cycle = err.additionalInfo.cycle;
         }
       });
-    }
 
-    return {
-      action: 'insert',
-      success: false,
-      registered: isRegistered,
-      componentName,
-      reason,
-      code,
-      error: err,
-      registrationIndexBefore: input.registrationIndexBefore,
-      registrationIndexAfter: isRegistered
-        ? registrationIndexNow
-        : input.registrationIndexBefore,
-      requestedPosition: {
+      const code: RegistrationFailureCode =
+        cycle !== undefined ? 'dependency_cycle' : 'unknown_error';
+
+      // Reported for the reason `getStartupOrder()` reports it; a cycle is the caller's
+      // configuration, answered by the result.
+      if (code === 'unknown_error' && !input.isErrorReported) {
+        reportCallbackError('lifecycle-manager registerComponent', input.error);
+      }
+
+      contain('log', () => {
+        this.logger
+          .entity(componentName)
+          .error(
+            'Registration failed with unexpected error: {{error.message}}',
+            {
+              params: { error: err },
+            },
+          );
+      });
+
+      // `registered` is whether this call added the component, as on success: a throw
+      // after the commit - from an auto-start, say - leaves it added, and both the event
+      // and the result must say so. Where it is now is read back from the registry, and
+      // is `null` if a listener has removed it since.
+      const isRegistered = progress.hasCommitted;
+      const indexOfComponent = this.components.indexOf(input.component);
+      const registrationIndexNow =
+        isRegistered && indexOfComponent !== -1 ? indexOfComponent : null;
+      let actualPosition: InsertComponentAtResult['actualPosition'];
+
+      contain('position', () => {
+        actualPosition = this.describeRegistryPosition(registrationIndexNow);
+      });
+
+      const report = committedRegistrationReport(
+        progress,
         position,
-        targetComponentName: input.targetComponentName,
-      },
-      duringStartup: this.isStarting,
-      ...report,
-      startResult: isRegistered ? progress.startResult : undefined,
-    };
+        actualPosition,
+      );
+      const reason = input.reason ?? describeError(err);
+
+      if (!progress.isAnnounced) {
+        contain('event', () => {
+          if (isRegistered) {
+            this.emitCommittedRegistration({
+              progress,
+              componentName,
+              index: registrationIndexNow,
+              isInsertAction: input.isInsertAction,
+              position,
+              targetComponentName: input.targetComponentName,
+              report,
+            });
+          } else {
+            this.emitRegistrationRejected({
+              progress,
+              name: componentName,
+              reason: code,
+              message: reason,
+              registrationIndexBefore: input.registrationIndexBefore,
+              startupOrder: [],
+              targetFound: defaultTargetFound(position),
+              ...(cycle !== undefined ? { cycle } : {}),
+              isInsertAction: input.isInsertAction,
+              position,
+              targetComponentName: input.targetComponentName,
+            });
+          }
+        });
+      }
+
+      return {
+        action: 'insert',
+        success: false,
+        registered: isRegistered,
+        componentName,
+        reason,
+        code,
+        error: err,
+        registrationIndexBefore: input.registrationIndexBefore,
+        registrationIndexAfter: isRegistered
+          ? registrationIndexNow
+          : input.registrationIndexBefore,
+        requestedPosition: {
+          position,
+          targetComponentName: input.targetComponentName,
+        },
+        duringStartup: this.isStarting,
+        ...report,
+        startResult: isRegistered ? progress.startResult : undefined,
+      };
+    });
   }
 
   /**
@@ -4811,32 +4827,35 @@ export class LifecycleManager
     position: InsertPosition;
     targetComponentName: string | undefined;
   }): void {
-    this.lifecycleEvents.componentRegistrationRejected({
-      name: input.name,
-      reason: input.reason,
-      ...('target' in input ? { target: input.target } : {}),
-      ...(input.cycle !== undefined ? { cycle: input.cycle } : {}),
-      message: input.message,
-      registrationIndexBefore: input.registrationIndexBefore,
-      registrationIndexAfter:
-        'registrationIndexAfter' in input
-          ? input.registrationIndexAfter
-          : input.registrationIndexBefore,
-      ...(input.startupOrder !== undefined
-        ? { startupOrder: input.startupOrder }
-        : {}),
-      requestedPosition: input.isInsertAction
-        ? {
-            position: input.position,
-            targetComponentName: input.targetComponentName,
-          }
-        : undefined,
-      manualPositionRespected: false,
-      ...('targetFound' in input ? { targetFound: input.targetFound } : {}),
+    return this.withTransition(() => {
+      this.lifecycleEvents.componentRegistrationRejected({
+        name: input.name,
+        reason: input.reason,
+        ...('target' in input ? { target: input.target } : {}),
+        ...(input.cycle !== undefined ? { cycle: input.cycle } : {}),
+        message: input.message,
+        registrationIndexBefore: input.registrationIndexBefore,
+        registrationIndexAfter:
+          'registrationIndexAfter' in input
+            ? input.registrationIndexAfter
+            : input.registrationIndexBefore,
+        ...(input.startupOrder !== undefined
+          ? { startupOrder: input.startupOrder }
+          : {}),
+        requestedPosition: input.isInsertAction
+          ? {
+              position: input.position,
+              targetComponentName: input.targetComponentName,
+            }
+          : undefined,
+        manualPositionRespected: false,
+        ...('targetFound' in input ? { targetFound: input.targetFound } : {}),
+      });
+      // Once queued: a payload builder that throws leaves it unannounced for the
+      // failure path to announce. Delivery waits until this flag is consistent,
+      // and listener failures cannot cause a duplicate announcement.
+      input.progress.isAnnounced = true;
     });
-    // Once it has gone out: an emit that throws leaves it unannounced, for the
-    // failure path to announce - which makes one attempt, so never twice.
-    input.progress.isAnnounced = true;
   }
 
   /**
@@ -4855,23 +4874,26 @@ export class LifecycleManager
     targetComponentName: string | undefined;
     report: ReturnType<typeof committedRegistrationReport>;
   }): void {
-    this.lifecycleEvents.componentRegistered({
-      name: input.componentName,
-      index: input.index,
-      action: input.isInsertAction ? 'insert' : 'register',
-      registrationIndexBefore: null,
-      registrationIndexAfter: input.index,
-      requestedPosition: input.isInsertAction
-        ? {
-            position: input.position,
-            targetComponentName: input.targetComponentName,
-          }
-        : undefined,
-      ...input.report,
+    return this.withTransition(() => {
+      this.lifecycleEvents.componentRegistered({
+        name: input.componentName,
+        index: input.index,
+        action: input.isInsertAction ? 'insert' : 'register',
+        registrationIndexBefore: null,
+        registrationIndexAfter: input.index,
+        requestedPosition: input.isInsertAction
+          ? {
+              position: input.position,
+              targetComponentName: input.targetComponentName,
+            }
+          : undefined,
+        ...input.report,
+      });
+      // Once queued: a payload builder that throws leaves it unannounced for the
+      // failure path to announce. Delivery waits until this flag is consistent,
+      // and listener failures cannot cause a duplicate announcement.
+      input.progress.isAnnounced = true;
     });
-    // Once it has gone out: an emit that throws leaves it unannounced, for the
-    // failure path to announce - which makes one attempt, so never twice.
-    input.progress.isAnnounced = true;
   }
 
   /**
@@ -4947,123 +4969,125 @@ export class LifecycleManager
     options: StopAllOptions | undefined,
     isRequestToStayDown: boolean,
   ): ShutdownPassAcceptance {
-    // Reject if already shutting down - before reading `options`: they are the caller's,
-    // and a getter that threw there skipped this refusal, so a request to stay down
-    // was never recorded on the running pass and a restart started everything again.
-    if (this.isShuttingDown) {
-      this.logger.warn(
-        'Cannot stop all components: shutdown already in progress',
-        {
-          params: { method },
-        },
-      );
+    return this.withTransition(() => {
+      // Reject if already shutting down - before reading `options`: they are the caller's,
+      // and a getter that threw there skipped this refusal, so a request to stay down
+      // was never recorded on the running pass and a restart started everything again.
+      if (this.isShuttingDown) {
+        this.logger.warn(
+          'Cannot stop all components: shutdown already in progress',
+          {
+            params: { method },
+          },
+        );
 
-      return this.refuseShutdownPass(isRequestToStayDown);
-    }
+        return this.refuseShutdownPass(isRequestToStayDown);
+      }
 
-    const passOptions: ShutdownPassOptions = {
-      // The one place a pass's options meet the manager's `shutdownOptions` defaults:
-      // callers pass only their own overrides.
-      timeoutMS: toTimerDelayMS(
-        options?.timeoutMS ?? this.shutdownOptions?.timeoutMS ?? 30000,
-      ),
-      retryStalled:
-        options?.retryStalled ?? this.shutdownOptions?.retryStalled ?? true,
-      haltOnStall:
-        options?.haltOnStall ?? this.shutdownOptions?.haltOnStall ?? true,
-    };
+      const passOptions: ShutdownPassOptions = {
+        // The one place a pass's options meet the manager's `shutdownOptions` defaults:
+        // callers pass only their own overrides.
+        timeoutMS: toTimerDelayMS(
+          options?.timeoutMS ?? this.shutdownOptions?.timeoutMS ?? 30000,
+        ),
+        retryStalled:
+          options?.retryStalled ?? this.shutdownOptions?.retryStalled ?? true,
+        haltOnStall:
+          options?.haltOnStall ?? this.shutdownOptions?.haltOnStall ?? true,
+      };
 
-    this.normalizeRepeatedShutdownRequestStateArmedStatus();
+      this.normalizeRepeatedShutdownRequestStateArmedStatus();
 
-    const repeatedShutdownPolicy = this.repeatedShutdownRequestPolicy;
-    const isManualRetryWhileArmed =
-      repeatedShutdownPolicy !== undefined &&
-      method === 'manual' &&
-      this.repeatedShutdownRequestState.firstRequestAt !== null &&
-      this.repeatedShutdownRequestState.remainsArmedUntil !== null;
+      const repeatedShutdownPolicy = this.repeatedShutdownRequestPolicy;
+      const isManualRetryWhileArmed =
+        repeatedShutdownPolicy !== undefined &&
+        method === 'manual' &&
+        this.repeatedShutdownRequestState.firstRequestAt !== null &&
+        this.repeatedShutdownRequestState.remainsArmedUntil !== null;
 
-    // Taken before the bookkeeping below, not after it, and unconditionally: this request
-    // is the one about to start a pass, so the window is spent on it either way. Doing it
-    // first is what makes the spending atomic - the counting a line down can reach
-    // `onForceShutdown`, and a shutdown request made from inside that callback must find
-    // no armed window to count itself against. It is a continuation of this request, not a
-    // second operator press.
-    const consumedArmedUntil = this.consumeRepeatedShutdownArmedWindow();
+      // Taken before the bookkeeping below, not after it, and unconditionally: this request
+      // is the one about to start a pass, so the window is spent on it either way. Doing it
+      // first is what makes the spending atomic - the counting a line down can reach
+      // `onForceShutdown`, and a shutdown request made from inside that callback must find
+      // no armed window to count itself against. It is a continuation of this request, not a
+      // second operator press.
+      const consumedArmedUntil = this.consumeRepeatedShutdownArmedWindow();
 
-    // A manual request that did not come through an armed window, and is not being made
-    // from inside escalation handling, starts a cycle of its own. Any state still left
-    // from an earlier one is finished: a failed pass whose arming was disabled
-    // (`armedAfterFailureMS` <= 0), or one whose force had already fired, keeps its
-    // state with nothing to expire it. Inherited, a restart's or a manual stop's pass
-    // counted presses against that old cycle - and with `hasTriggeredForceShutdown` still
-    // set, force could never fire for it. Signals need no such step: they reseed when
-    // not armed before they get here.
-    //
-    // Not while a shutdown is running: expiring a lapsed window just above emits
-    // `shutdown-escalation-expired`, and a listener that starts a shutdown from there
-    // seeds a live cycle this request must not wipe. It is refused a few lines down.
-    if (
-      method === 'manual' &&
-      consumedArmedUntil === null &&
-      this.escalationHandlingDepth === 0 &&
-      !this.isShuttingDown &&
-      this.repeatedShutdownRequestState.firstRequestAt !== null
-    ) {
-      this.resetRepeatedShutdownRequestState();
-    }
-
-    // Only a request to stay down is an operator's retry. A restart's stop phase does not
-    // advance the escalation count - it would force-kill a process it was asked to
-    // restart - and does not clear it as a request either. It is still a shutdown pass,
-    // so its outcome settles escalation as any pass's does: a clean stop resets it, a
-    // failed one re-arms it with the count carried over.
-    if (isManualRetryWhileArmed && isRequestToStayDown) {
-      if (repeatedShutdownPolicy.countManualRetriesTowardEscalation) {
-        this.handleRepeatedShutdownRequest(method, consumedArmedUntil);
-      } else {
+      // A manual request that did not come through an armed window, and is not being made
+      // from inside escalation handling, starts a cycle of its own. Any state still left
+      // from an earlier one is finished: a failed pass whose arming was disabled
+      // (`armedAfterFailureMS` <= 0), or one whose force had already fired, keeps its
+      // state with nothing to expire it. Inherited, a restart's or a manual stop's pass
+      // counted presses against that old cycle - and with `hasTriggeredForceShutdown` still
+      // set, force could never fire for it. Signals need no such step: they reseed when
+      // not armed before they get here.
+      //
+      // Not while a shutdown is running: expiring a lapsed window just above emits
+      // `shutdown-escalation-expired`, and a listener that starts a shutdown from there
+      // seeds a live cycle this request must not wipe. It is refused a few lines down.
+      if (
+        method === 'manual' &&
+        consumedArmedUntil === null &&
+        this.escalationHandlingDepth === 0 &&
+        !this.isShuttingDown &&
+        this.repeatedShutdownRequestState.firstRequestAt !== null
+      ) {
         this.resetRepeatedShutdownRequestState();
       }
-    }
 
-    // The bookkeeping above runs user code before the latch is taken: an expiring armed
-    // window emits `shutdown-escalation-expired`, and a counted manual retry can reach
-    // `onForceShutdown` and `shutdown-escalation-forced`. A listener or callback that
-    // starts its own shutdown from there - `stopAllComponents()` inside
-    // `onForceShutdown` is the realistic case - gets a pass that finds no latch, announces itself and
-    // starts stopping, and control then returns here. Refuse rather than run a second
-    // pass concurrently with it: the nested pass is the shutdown this call asked for,
-    // which is exactly what `already_in_progress` says. That nested acceptance counts
-    // nothing, because the armed window was consumed above before any of this ran. The
-    // latch is deliberately not taken earlier instead - `handleRepeatedShutdownRequest()`
-    // reads `isShuttingDown` for its log line and for `ForceShutdownContext.isShuttingDown`,
-    // and both would then describe a pass that has not started.
-    if (this.isShuttingDown) {
-      this.logger.warn(
-        'Cannot stop all components: a shutdown started while this request was being processed',
-        {
-          params: { method },
-        },
-      );
+      // Only a request to stay down is an operator's retry. A restart's stop phase does not
+      // advance the escalation count - it would force-kill a process it was asked to
+      // restart - and does not clear it as a request either. It is still a shutdown pass,
+      // so its outcome settles escalation as any pass's does: a clean stop resets it, a
+      // failed one re-arms it with the count carried over.
+      if (isManualRetryWhileArmed && isRequestToStayDown) {
+        if (repeatedShutdownPolicy.countManualRetriesTowardEscalation) {
+          this.handleRepeatedShutdownRequest(method, consumedArmedUntil);
+        } else {
+          this.resetRepeatedShutdownRequestState();
+        }
+      }
 
-      return this.refuseShutdownPass(isRequestToStayDown);
-    }
+      // The bookkeeping above runs user code before the latch is taken: an expiring armed
+      // window emits `shutdown-escalation-expired`, and a counted manual retry can reach
+      // `onForceShutdown` and `shutdown-escalation-forced`. A listener or callback that
+      // starts its own shutdown from there - `stopAllComponents()` inside
+      // `onForceShutdown` is the realistic case - gets a pass that finds no latch, announces itself and
+      // starts stopping, and control then returns here. Refuse rather than run a second
+      // pass concurrently with it: the nested pass is the shutdown this call asked for,
+      // which is exactly what `already_in_progress` says. That nested acceptance counts
+      // nothing, because the armed window was consumed above before any of this ran. The
+      // latch is deliberately not taken earlier instead - `handleRepeatedShutdownRequest()`
+      // reads `isShuttingDown` for its log line and for `ForceShutdownContext.isShuttingDown`,
+      // and both would then describe a pass that has not started.
+      if (this.isShuttingDown) {
+        this.logger.warn(
+          'Cannot stop all components: a shutdown started while this request was being processed',
+          {
+            params: { method },
+          },
+        );
 
-    const pass: ShutdownPass = {
-      shutdownRequested: false,
-      isRestartStopPhase: !isRequestToStayDown,
-    };
+        return this.refuseShutdownPass(isRequestToStayDown);
+      }
 
-    if (isRequestToStayDown) {
-      this.stayDownPassCount++;
-    }
+      const pass: ShutdownPass = {
+        shutdownRequested: false,
+        isRestartStopPhase: !isRequestToStayDown,
+      };
 
-    // An async method, but it runs synchronously up to its first `await`, which is well
-    // past the latch: the caller this returns to already sees a shutdown in progress.
-    return {
-      accepted: true,
-      pass,
-      promise: this.runShutdownPass(method, passOptions, pass),
-    };
+      if (isRequestToStayDown) {
+        this.stayDownPassCount++;
+      }
+
+      // An async method, but it runs synchronously up to its first `await`, which is well
+      // past the latch: the caller this returns to already sees a shutdown in progress.
+      return {
+        accepted: true,
+        pass,
+        promise: this.runShutdownPass(method, passOptions, pass),
+      };
+    });
   }
 
   /**
@@ -5474,39 +5498,41 @@ export class LifecycleManager
             : {}),
       };
 
-      // Store for getLastShutdownResult() - useful for debugging and metrics
-      this.lastShutdownResult = result;
+      return this.withTransition(() => {
+        // Store for getLastShutdownResult() - useful for debugging and metrics
+        this.lastShutdownResult = result;
 
-      // "Completed" means the manager finished waiting and a shutdown result
-      // snapshot exists, not necessarily that every component stopped cleanly.
-      // Callers must inspect success / stalledComponents / timedOut to decide
-      // what to do next.
-      completedResult = result;
+        // "Completed" means the manager finished waiting and a shutdown result
+        // snapshot exists, not necessarily that every component stopped cleanly.
+        // Callers must inspect success / stalledComponents / timedOut to decide
+        // what to do next.
+        completedResult = result;
 
-      // Before the completed event, as the last component's stop detached them before
-      // this pass took the detach over: a listener there - one that calls
-      // `process.exit()`, say - finds stdin restored and `signals-detached` already
-      // emitted, and one that attaches again is not undone afterwards. Covers the detach
-      // this pass's own stops deferred, and one a refused or aborted startup left to it.
-      // Only after a clean pass: a failed one keeps them, so the operator's next Ctrl+C
-      // still reaches escalation.
-      if (isSuccess) {
-        this.detachSignalsIfIdle('shutdown', { isEndingShutdownPass: true });
-      }
+        // Before the completed event, as the last component's stop detached them before
+        // this pass took the detach over: a listener there - one that calls
+        // `process.exit()`, say - finds stdin restored and `signals-detached` already
+        // emitted, and one that attaches again is not undone afterwards. Covers the detach
+        // this pass's own stops deferred, and one a refused or aborted startup left to it.
+        // Only after a clean pass: a failed one keeps them, so the operator's next Ctrl+C
+        // still reaches escalation.
+        if (isSuccess) {
+          this.detachSignalsIfIdle('shutdown', { isEndingShutdownPass: true });
+        }
 
-      this.lifecycleEvents.lifecycleManagerShutdownCompleted({
-        ...result,
-        method,
-        duringStartup: isDuringStartup,
+        this.lifecycleEvents.lifecycleManagerShutdownCompleted({
+          ...result,
+          method,
+          duringStartup: isDuringStartup,
+        });
+
+        if (isSuccess) {
+          this.resetRepeatedShutdownRequestState();
+        } else {
+          this.armRepeatedShutdownAfterFailure();
+        }
+
+        return result;
       });
-
-      if (isSuccess) {
-        this.resetRepeatedShutdownRequestState();
-      } else {
-        this.armRepeatedShutdownAfterFailure();
-      }
-
-      return result;
     } catch (error) {
       // A pass that dies resolves with a failed result rather than rejecting, so a caller
       // that fired `stopAllComponents()` without awaiting it can never be handed an
@@ -5547,26 +5573,28 @@ export class LifecycleManager
         error: toError(error),
       };
 
-      this.lastShutdownResult = result;
+      return this.withTransition(() => {
+        this.lastShutdownResult = result;
 
-      this.lifecycleEvents.lifecycleManagerShutdownCompleted({
-        ...result,
-        method,
-        duringStartup: isDuringStartup,
+        this.lifecycleEvents.lifecycleManagerShutdownCompleted({
+          ...result,
+          method,
+          duringStartup: isDuringStartup,
+        });
+
+        // After the completed event, in the same order as a stalled or timed-out pass,
+        // so a listener sees the same sequence whichever way the pass failed. Armed
+        // exactly as that path arms it: a crash is the worst way for a pass to end, so it
+        // is the last place to take the escape hatch away - dropping the cycle here would
+        // reseed the operator's next press as a fresh one, `requestCount` would never
+        // reach `forceAfterCount`, and `onForceShutdown` - the one thing left that can
+        // still get the process down - would be unreachable. Carrying the count and the
+        // force-shutdown flag over is this method's job, and it still declines when the
+        // window is disabled or force has already fired.
+        this.armRepeatedShutdownAfterFailure();
+
+        return result;
       });
-
-      // After the completed event, in the same order as a stalled or timed-out pass,
-      // so a listener sees the same sequence whichever way the pass failed. Armed
-      // exactly as that path arms it: a crash is the worst way for a pass to end, so it
-      // is the last place to take the escape hatch away - dropping the cycle here would
-      // reseed the operator's next press as a fresh one, `requestCount` would never
-      // reach `forceAfterCount`, and `onForceShutdown` - the one thing left that can
-      // still get the process down - would be unreachable. Carrying the count and the
-      // force-shutdown flag over is this method's job, and it still declines when the
-      // window is disabled or force has already fired.
-      this.armRepeatedShutdownAfterFailure();
-
-      return result;
     } finally {
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
@@ -5585,10 +5613,12 @@ export class LifecycleManager
         });
       }
 
-      this.activeShutdownPass = null;
-      this.updateStartedFlag();
+      this.withTransition(() => {
+        this.activeShutdownPass = null;
+        this.updateStartedFlag();
 
-      this.finalizePendingLoggerExit();
+        this.finalizePendingLoggerExit();
+      });
     }
   }
 
@@ -5821,11 +5851,13 @@ export class LifecycleManager
     state: 'starting' | 'stopping' | 'force-stopping',
     claim: symbol,
   ): void {
-    this.componentClaims.set(name, {
-      claim,
-      previousState: this.componentStates.get(name),
+    return this.withTransition(() => {
+      this.componentClaims.set(name, {
+        claim,
+        previousState: this.componentStates.get(name),
+      });
+      this.componentStates.set(name, state);
     });
-    this.componentStates.set(name, state);
   }
 
   /** Whether `claim` is the attempt that last claimed `name`. */
@@ -6012,9 +6044,11 @@ export class LifecycleManager
 
   /** Drop an attempt's claim, if it still holds it. */
   private releaseClaim(name: string, claim: symbol): void {
-    if (this.ownsClaim(name, claim)) {
-      this.componentClaims.delete(name);
-    }
+    return this.withTransition(() => {
+      if (this.ownsClaim(name, claim)) {
+        this.componentClaims.delete(name);
+      }
+    });
   }
 
   /**
@@ -6045,11 +6079,13 @@ export class LifecycleManager
     name: string,
     state: ComponentState | undefined,
   ): void {
-    if (state === undefined) {
-      this.componentStates.delete(name);
-    } else {
-      this.componentStates.set(name, state);
-    }
+    return this.withTransition(() => {
+      if (state === undefined) {
+        this.componentStates.delete(name);
+      } else {
+        this.componentStates.set(name, state);
+      }
+    });
   }
 
   /**
@@ -6641,20 +6677,21 @@ export class LifecycleManager
       // If shutdown began while start() was in flight, treat the component as
       // running long enough to send it through the normal stop pipeline.
       if (this.isShuttingDown || shutdownTokenAtStart !== this.shutdownToken) {
-        this.componentStates.set(name, 'running');
-        this.runningComponents.add(name);
-        this.componentErrors.set(name, null);
-        this.stalledComponents.delete(name);
-        this.updateStartedFlag();
+        this.withTransition(() => {
+          this.componentStates.set(name, 'running');
+          this.runningComponents.add(name);
+          this.componentErrors.set(name, null);
+          this.stalledComponents.delete(name);
+          this.updateStartedFlag();
 
-        const timestamps = this.componentTimestamps.get(name) ?? {
-          startedAt: null,
-          stoppedAt: null,
-        };
+          const timestamps = this.componentTimestamps.get(name) ?? {
+            startedAt: null,
+            stoppedAt: null,
+          };
 
-        timestamps.startedAt = Date.now();
-        this.componentTimestamps.set(name, timestamps);
-
+          timestamps.startedAt = Date.now();
+          this.componentTimestamps.set(name, timestamps);
+        });
         this.logger
           .entity(name)
           .warn(
@@ -6692,32 +6729,33 @@ export class LifecycleManager
         });
       }
 
-      // Update state. The previous run's error goes with it: `lastError` on a component
-      // that is running again described a run that is over, and a reader taking it for
-      // the current one - a health dashboard, a restart policy - was told the restart
-      // had not worked. A clean late stop already clears it for the same reason.
-      this.componentStates.set(name, 'running');
-      this.runningComponents.add(name);
-      this.componentErrors.set(name, null);
-      this.stalledComponents.delete(name); // Clear stalled state if component was previously stalled
-      if (flags.forceStalled) {
-        // A successful forceStalled start creates a new run. Any late stop
-        // promise from the previous stalled run must no longer own state.
-        this.issueStopAttemptToken(name);
-      }
-      this.updateStartedFlag();
+      this.withTransition(() => {
+        // Update state. The previous run's error goes with it: `lastError` on a component
+        // that is running again described a run that is over, and a reader taking it for
+        // the current one - a health dashboard, a restart policy - was told the restart
+        // had not worked. A clean late stop already clears it for the same reason.
+        this.componentStates.set(name, 'running');
+        this.runningComponents.add(name);
+        this.componentErrors.set(name, null);
+        this.stalledComponents.delete(name); // Clear stalled state if component was previously stalled
+        if (flags.forceStalled) {
+          // A successful forceStalled start creates a new run. Any late stop
+          // promise from the previous stalled run must no longer own state.
+          this.issueStopAttemptToken(name);
+        }
+        this.updateStartedFlag();
 
-      const timestamps = this.componentTimestamps.get(name) ?? {
-        startedAt: null,
-        stoppedAt: null,
-      };
-      timestamps.startedAt = Date.now();
-      this.componentTimestamps.set(name, timestamps);
+        const timestamps = this.componentTimestamps.get(name) ?? {
+          startedAt: null,
+          stoppedAt: null,
+        };
+        timestamps.startedAt = Date.now();
+        this.componentTimestamps.set(name, timestamps);
 
-      this.logger.entity(name).success('Component started');
-      const status = this.getComponentStatus(name);
-      this.lifecycleEvents.componentStarted(name, status);
-
+        this.logger.entity(name).success('Component started');
+        const status = this.getComponentStatus(name);
+        this.lifecycleEvents.componentStarted(name, status);
+      });
       // `attachSignalsOnStart` attaches once a component is actually up, not before. A
       // process configured to handle signals must not stay up without them, so a failed
       // attach takes this component back down and fails the start - after its `started`
@@ -6836,53 +6874,55 @@ export class LifecycleManager
         };
       }
 
-      // Store error
-      this.componentErrors.set(name, err);
+      return this.withTransition<ComponentOperationResult>(() => {
+        // Store error
+        this.componentErrors.set(name, err);
 
-      // Guarded for the same reason as the `component_unexpected_stop` branch above:
-      // `toError` returns a brand-claiming value unchanged, so `.message` can be an
-      // accessor that throws, and here that throw has nothing left above it to catch.
-      const reason = describeError(err);
+        // Guarded for the same reason as the `component_unexpected_stop` branch above:
+        // `toError` returns a brand-claiming value unchanged, so `.message` can be an
+        // accessor that throws, and here that throw has nothing left above it to catch.
+        const reason = describeError(err);
 
-      // Check if it was a timeout
-      if (isStartupTimeout) {
-        this.componentStates.set(name, 'starting-timed-out'); // Timeout state (observability)
+        // Check if it was a timeout
+        if (isStartupTimeout) {
+          this.componentStates.set(name, 'starting-timed-out'); // Timeout state (observability)
 
-        this.logger
-          .entity(name)
-          .error('Component startup timed out: {{error.message}}', {
-            params: { error: err },
+          this.logger
+            .entity(name)
+            .error('Component startup timed out: {{error.message}}', {
+              params: { error: err },
+            });
+
+          this.lifecycleEvents.componentStartTimeout(name, err, {
+            timeoutMS,
+            reason,
           });
+        } else {
+          this.componentStates.set(name, 'registered'); // Reset state
 
-        this.lifecycleEvents.componentStartTimeout(name, err, {
-          timeoutMS,
-          reason,
-        });
-      } else {
-        this.componentStates.set(name, 'registered'); // Reset state
+          this.logger
+            .entity(name)
+            .error('Component failed to start: {{error.message}}', {
+              params: { error: err },
+            });
 
-        this.logger
-          .entity(name)
-          .error('Component failed to start: {{error.message}}', {
-            params: { error: err },
+          this.lifecycleEvents.componentStartFailed(name, err, {
+            reason,
           });
+        }
 
-        this.lifecycleEvents.componentStartFailed(name, err, {
+        return {
+          success: false,
+          componentName: name,
           reason,
-        });
-      }
-
-      return {
-        success: false,
-        componentName: name,
-        reason,
-        code:
-          err instanceof ComponentStartTimeoutError
-            ? 'component_startup_timeout'
-            : 'unknown_error',
-        error: err,
-        status: this.getComponentStatus(name),
-      };
+          code:
+            err instanceof ComponentStartTimeoutError
+              ? 'component_startup_timeout'
+              : 'unknown_error',
+          error: err,
+          status: this.getComponentStatus(name),
+        };
+      });
     } finally {
       // Ensure we always clean up the timeout handle, even if component.start()
       // rejects (non-timeout failure). Otherwise onStartupAborted() can fire
@@ -7350,20 +7390,22 @@ export class LifecycleManager
         await stopPromise;
       }
 
-      // Update state - graceful succeeded
-      this.markComponentStopped(name);
+      return this.withTransition(() => {
+        // Update state - graceful succeeded
+        this.markComponentStopped(name);
 
-      this.logger.entity(name).success('Component stopped gracefully');
-      this.lifecycleEvents.componentStopped(
-        name,
-        this.getComponentStatus(name),
-      );
+        this.logger.entity(name).success('Component stopped gracefully');
+        this.lifecycleEvents.componentStopped(
+          name,
+          this.getComponentStatus(name),
+        );
 
-      return {
-        success: true,
-        componentName: name,
-        status: this.getComponentStatus(name),
-      };
+        return {
+          success: true,
+          componentName: name,
+          status: this.getComponentStatus(name),
+        };
+      });
     } catch (error) {
       const err = toError(error);
 
@@ -7610,21 +7652,23 @@ export class LifecycleManager
         };
       }
 
-      // Update state - force succeeded
-      this.markComponentStopped(name);
+      return this.withTransition(() => {
+        // Update state - force succeeded
+        this.markComponentStopped(name);
 
-      this.logger.entity(name).success('Component force stopped');
-      this.lifecycleEvents.componentShutdownForceCompleted(name);
-      this.lifecycleEvents.componentStopped(
-        name,
-        this.getComponentStatus(name),
-      );
+        this.logger.entity(name).success('Component force stopped');
+        this.lifecycleEvents.componentShutdownForceCompleted(name);
+        this.lifecycleEvents.componentStopped(
+          name,
+          this.getComponentStatus(name),
+        );
 
-      return {
-        success: true,
-        componentName: name,
-        status: this.getComponentStatus(name),
-      };
+        return {
+          success: true,
+          componentName: name,
+          status: this.getComponentStatus(name),
+        };
+      });
     } catch (error) {
       if (
         this.isForceAttemptSuperseded(name, component, claim) ||
@@ -7653,49 +7697,51 @@ export class LifecycleManager
       // `onShutdownForce()` that rejected with the same text is still an error.
       const isTimeout = error === forceTimeoutError;
 
-      // Mark as stalled - force phase failed
-      const stallInfo: ComponentStallInfo = {
-        name,
-        phase: 'force',
-        reason: isTimeout
-          ? 'timeout'
-          : context.gracefulTimedOut
-            ? 'both'
-            : 'error',
-        startedAt: context.startedAt,
-        stalledAt: Date.now(),
-        error: err,
-      };
-      this.markComponentStalled(name, stallInfo, err);
+      return this.withTransition<ComponentOperationResult>(() => {
+        // Mark as stalled - force phase failed
+        const stallInfo: ComponentStallInfo = {
+          name,
+          phase: 'force',
+          reason: isTimeout
+            ? 'timeout'
+            : context.gracefulTimedOut
+              ? 'both'
+              : 'error',
+          startedAt: context.startedAt,
+          stalledAt: Date.now(),
+          error: err,
+        };
+        this.markComponentStalled(name, stallInfo, err);
 
-      if (isTimeout) {
-        this.logger.entity(name).error('Force shutdown timed out - stalled', {
-          params: { timeoutMS },
-        });
-        this.lifecycleEvents.componentShutdownForceTimeout(name, timeoutMS);
-      } else {
-        this.logger
-          .entity(name)
-          .error('Force shutdown failed - stalled: {{error.message}}', {
-            params: { error: err },
+        if (isTimeout) {
+          this.logger.entity(name).error('Force shutdown timed out - stalled', {
+            params: { timeoutMS },
           });
-      }
+          this.lifecycleEvents.componentShutdownForceTimeout(name, timeoutMS);
+        } else {
+          this.logger
+            .entity(name)
+            .error('Force shutdown failed - stalled: {{error.message}}', {
+              params: { error: err },
+            });
+        }
 
-      this.lifecycleEvents.componentStalled(name, stallInfo, {
-        reason: stallInfo.reason,
-        code: isTimeout ? 'component_shutdown_timeout' : 'unknown_error',
+        this.lifecycleEvents.componentStalled(name, stallInfo, {
+          reason: stallInfo.reason,
+          code: isTimeout ? 'component_shutdown_timeout' : 'unknown_error',
+        });
+
+        return {
+          success: false,
+          componentName: name,
+          reason: isTimeout
+            ? LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT
+            : message,
+          code: isTimeout ? 'component_shutdown_timeout' : 'unknown_error',
+          error: err,
+          status: this.getComponentStatus(name),
+        };
       });
-
-      return {
-        success: false,
-        componentName: name,
-        reason: isTimeout
-          ? LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT
-          : message,
-        code: isTimeout ? 'component_shutdown_timeout' : 'unknown_error',
-        error: err,
-        status: this.getComponentStatus(name),
-      };
     } finally {
       cleanupForceWaiter();
       if (timeoutHandle) {
@@ -7939,35 +7985,38 @@ export class LifecycleManager
     trigger: string,
     options: { logMessage?: string; isEndingShutdownPass?: boolean } = {},
   ): void {
-    if (
-      !this.detachSignalsOnStop ||
-      !this.processSignalManager?.getStatus().isAttached ||
-      this.runningComponents.size > 0 ||
-      this.stalledComponents.size > 0
-    ) {
-      return;
-    }
+    return this.withTransition(() => {
+      if (
+        !this.detachSignalsOnStop ||
+        !this.processSignalManager?.getStatus().isAttached ||
+        this.runningComponents.size > 0 ||
+        this.stalledComponents.size > 0
+      ) {
+        return;
+      }
 
-    if (this.isSignalDetachWaitingOnTransient(options.isEndingShutdownPass)) {
-      this.isSignalDetachDeferred = true;
-      return;
-    }
+      if (this.isSignalDetachWaitingOnTransient(options.isEndingShutdownPass)) {
+        this.isSignalDetachDeferred = true;
+        return;
+      }
 
-    this.isSignalDetachDeferred = false;
-    // Detached before the line is logged, not after: logging runs the caller's sinks,
-    // and one that starts a startup from here attached nothing - the handlers were still
-    // up - so detaching after it pulled them out from under that startup. Worded in the
-    // past, and only on success: a failed detach has already said so. Nor once a
-    // `signals-detached` listener has attached them again - a startup it began with
-    // `attachSignalsBeforeStartup` - where the line would contradict the state.
-    if (
-      this.autoDetachSignals(trigger) &&
-      this.processSignalManager?.getStatus().isAttached !== true
-    ) {
-      this.logger.info(
-        options.logMessage ?? `Auto-detached process signals after ${trigger}`,
-      );
-    }
+      this.isSignalDetachDeferred = false;
+      // Detached before the line is logged, not after: logging runs the caller's sinks,
+      // and one that starts a startup from here attached nothing - the handlers were still
+      // up - so detaching after it pulled them out from under that startup. Worded in the
+      // past, and only on success: a failed detach has already said so. Nor once a
+      // `signals-detached` listener has attached them again - a startup it began with
+      // `attachSignalsBeforeStartup` - where the line would contradict the state.
+      if (
+        this.autoDetachSignals(trigger) &&
+        this.processSignalManager?.getStatus().isAttached !== true
+      ) {
+        this.logger.info(
+          options.logMessage ??
+            `Auto-detached process signals after ${trigger}`,
+        );
+      }
+    });
   }
 
   /**
@@ -8062,19 +8111,20 @@ export class LifecycleManager
           // Lock recovery only while cleanup is actually running. An abandoned
           // start may never settle; the attempt token protects a replacement run.
           this.pendingBulkStartupCleanup.set(name, startAttemptToken);
-          this.componentStates.set(name, 'running');
-          this.runningComponents.add(name);
-          this.stalledComponents.delete(name);
-          this.updateStartedFlag();
+          this.withTransition(() => {
+            this.componentStates.set(name, 'running');
+            this.runningComponents.add(name);
+            this.stalledComponents.delete(name);
+            this.updateStartedFlag();
 
-          const timestamps = this.componentTimestamps.get(name) ?? {
-            startedAt: null,
-            stoppedAt: null,
-          };
+            const timestamps = this.componentTimestamps.get(name) ?? {
+              startedAt: null,
+              stoppedAt: null,
+            };
 
-          timestamps.startedAt = Date.now();
-          this.componentTimestamps.set(name, timestamps);
-
+            timestamps.startedAt = Date.now();
+            this.componentTimestamps.set(name, timestamps);
+          });
           this.logger
             .entity(name)
             .warn(
@@ -8290,15 +8340,17 @@ export class LifecycleManager
     stallInfo: ComponentStallInfo,
     error?: Error,
   ): void {
-    this.stalledComponents.set(name, stallInfo);
-    this.componentStates.set(name, 'stalled');
-    this.runningComponents.delete(name);
+    return this.withTransition(() => {
+      this.stalledComponents.set(name, stallInfo);
+      this.componentStates.set(name, 'stalled');
+      this.runningComponents.delete(name);
 
-    if (error !== undefined) {
-      this.componentErrors.set(name, error);
-    }
+      if (error !== undefined) {
+        this.componentErrors.set(name, error);
+      }
 
-    this.updateStartedFlag();
+      this.updateStartedFlag();
+    });
   }
 
   /**
@@ -8307,24 +8359,26 @@ export class LifecycleManager
    * emits.
    */
   private markComponentStopped(name: string): void {
-    this.componentStates.set(name, 'stopped');
-    this.runningComponents.delete(name);
-    this.stalledComponents.delete(name);
-    // Clear the stall/timeout error so lastError reflects a clean stop.
-    this.componentErrors.set(name, null);
-    this.componentUnexpectedStopHadError.delete(name);
-    this.updateStartedFlag();
-    this.resolvePendingForceStopWaiters(name);
+    return this.withTransition(() => {
+      this.componentStates.set(name, 'stopped');
+      this.runningComponents.delete(name);
+      this.stalledComponents.delete(name);
+      // Clear the stall/timeout error so lastError reflects a clean stop.
+      this.componentErrors.set(name, null);
+      this.componentUnexpectedStopHadError.delete(name);
+      this.updateStartedFlag();
+      this.resolvePendingForceStopWaiters(name);
 
-    this.detachSignalsAfterLastStop();
+      this.detachSignalsAfterLastStop();
 
-    const timestamps = this.componentTimestamps.get(name) ?? {
-      startedAt: null,
-      stoppedAt: null,
-    };
+      const timestamps = this.componentTimestamps.get(name) ?? {
+        startedAt: null,
+        stoppedAt: null,
+      };
 
-    timestamps.stoppedAt = Date.now();
-    this.componentTimestamps.set(name, timestamps);
+      timestamps.stoppedAt = Date.now();
+      this.componentTimestamps.set(name, timestamps);
+    });
   }
 
   private createPendingForceStopWaiter(name: string): {
@@ -8410,85 +8464,92 @@ export class LifecycleManager
     token: string,
     source: 'graceful' | 'force',
   ): void {
-    // Guard 1: bail if a newer stop attempt has superseded this one. The newer
-    // attempt owns any stop/stall state and must manage its own late resolution.
-    if (this.componentStopAttemptTokens.get(name) !== token) {
-      return;
-    }
+    return this.withTransition(() => {
+      // Guard 1: bail if a newer stop attempt has superseded this one. The newer
+      // attempt owns any stop/stall state and must manage its own late resolution.
+      if (this.componentStopAttemptTokens.get(name) !== token) {
+        return;
+      }
 
-    const currentState = this.componentStates.get(name);
-    const stallInfo = this.stalledComponents.get(name);
+      const currentState = this.componentStates.get(name);
+      const stallInfo = this.stalledComponents.get(name);
 
-    // Graceful stop can also complete during the force-stopping window before a
-    // stall record exists. In that overlap, finalize the stop directly so the
-    // later force timeout path can detect the already-stopped state and no-op.
-    const isCompletedDuringForcePhase =
-      source === 'graceful' && !stallInfo && currentState === 'force-stopping';
+      // Graceful stop can also complete during the force-stopping window before a
+      // stall record exists. In that overlap, finalize the stop directly so the
+      // later force timeout path can detect the already-stopped state and no-op.
+      const isCompletedDuringForcePhase =
+        source === 'graceful' &&
+        !stallInfo &&
+        currentState === 'force-stopping';
 
-    // Still in flight for this very attempt - it settled as its timeout fired. The
-    // attempt decides how it ended: its timeout rejects a macrotask after the hook ran
-    // (`rejectAfterTimeoutHook()`), so a stop that settled then wins the race. Ahead of
-    // Guard 2, which would take a stalled component's force retry - `force-stopping`,
-    // with the old stall entry still in place - for a newer attempt and discard the
-    // stall under it.
-    if (
-      !isCompletedDuringForcePhase &&
-      (currentState === 'stopping' || currentState === 'force-stopping')
-    ) {
-      return;
-    }
+      // Still in flight for this very attempt - it settled as its timeout fired. The
+      // attempt decides how it ended: its timeout rejects a macrotask after the hook ran
+      // (`rejectAfterTimeoutHook()`), so a stop that settled then wins the race. Ahead of
+      // Guard 2, which would take a stalled component's force retry - `force-stopping`,
+      // with the old stall entry still in place - for a newer attempt and discard the
+      // stall under it.
+      if (
+        !isCompletedDuringForcePhase &&
+        (currentState === 'stopping' || currentState === 'force-stopping')
+      ) {
+        return;
+      }
 
-    // Guard 2: once the component is no longer in the stalled state because a
-    // newer lifecycle attempt changed its state, the old stop promise no longer
-    // owns the component state. Clear the stale stall bookkeeping, but do not
-    // emit stopped or overwrite the newer state. It may have been the last stall
-    // holding process signals attached, so the last-stop detach check still runs.
-    if (stallInfo && currentState !== 'stalled') {
-      this.stalledComponents.delete(name);
-      this.updateStartedFlag();
-      this.detachSignalsAfterLastStop();
-      return;
-    }
+      // Guard 2: once the component is no longer in the stalled state because a
+      // newer lifecycle attempt changed its state, the old stop promise no longer
+      // owns the component state. Clear the stale stall bookkeeping, but do not
+      // emit stopped or overwrite the newer state. It may have been the last stall
+      // holding process signals attached, so the last-stop detach check still runs.
+      if (stallInfo && currentState !== 'stalled') {
+        this.stalledComponents.delete(name);
+        this.updateStartedFlag();
+        this.detachSignalsAfterLastStop();
+        return;
+      }
 
-    // Guard 3: bail if neither a stall entry nor the force-phase overlap case
-    // exists. This covers unregistered, restarted, or already-cleared paths.
-    if (!stallInfo && !isCompletedDuringForcePhase) {
-      return;
-    }
+      // Guard 3: bail if neither a stall entry nor the force-phase overlap case
+      // exists. This covers unregistered, restarted, or already-cleared paths.
+      if (!stallInfo && !isCompletedDuringForcePhase) {
+        return;
+      }
 
-    const stalledDurationMS = stallInfo
-      ? Date.now() - stallInfo.stalledAt
-      : undefined;
+      const stalledDurationMS = stallInfo
+        ? Date.now() - stallInfo.stalledAt
+        : undefined;
 
-    this.markComponentStopped(name);
+      this.markComponentStopped(name);
 
-    this.logger
-      .entity(name)
-      .info(
-        stallInfo
-          ? 'Stalled component completed stop late, stall cleared'
-          : 'Graceful stop completed after force phase started',
-        stalledDurationMS ? { params: { stalledDurationMS } } : undefined,
-      );
+      this.logger
+        .entity(name)
+        .info(
+          stallInfo
+            ? 'Stalled component completed stop late, stall cleared'
+            : 'Graceful stop completed after force phase started',
+          stalledDurationMS ? { params: { stalledDurationMS } } : undefined,
+        );
 
-    // If the force promise itself completed late, preserve the same "force
-    // finished" signal that a normal in-time force shutdown would have emitted.
-    if (source === 'force') {
-      this.lifecycleEvents.componentShutdownForceCompleted(name);
-    }
+      // If the force promise itself completed late, preserve the same "force
+      // finished" signal that a normal in-time force shutdown would have emitted.
+      if (source === 'force') {
+        this.lifecycleEvents.componentShutdownForceCompleted(name);
+      }
 
-    if (stallInfo && stalledDurationMS !== undefined) {
-      // Late resolution is modeled as: stalled -> stall cleared -> stopped.
-      // Emit both events so observers can distinguish "the stall ended" from
-      // "the component is now fully stopped".
-      this.lifecycleEvents.componentStalledResolved(
+      if (stallInfo && stalledDurationMS !== undefined) {
+        // Late resolution is modeled as: stalled -> stall cleared -> stopped.
+        // Emit both events so observers can distinguish "the stall ended" from
+        // "the component is now fully stopped".
+        this.lifecycleEvents.componentStalledResolved(
+          name,
+          stallInfo,
+          stalledDurationMS,
+        );
+      }
+
+      this.lifecycleEvents.componentStopped(
         name,
-        stallInfo,
-        stalledDurationMS,
+        this.getComponentStatus(name),
       );
-    }
-
-    this.lifecycleEvents.componentStopped(name, this.getComponentStatus(name));
+    });
   }
 
   private handleComponentUnexpectedStop(
@@ -8496,88 +8557,148 @@ export class LifecycleManager
     startAttemptToken: string,
     error?: Error,
   ): boolean {
-    // Handler is cleared before stop begins, so a call here means the component
-    // stopped on its own during the current start/run.
-    const currentState = this.componentStates.get(name);
-    if (
-      // Startup-time self-stops are valid too: start() may still be awaiting
-      // some async work while an internal listener has already observed that
-      // the component died and reported it.
-      (currentState !== 'starting' && currentState !== 'running') ||
-      this.componentStartAttemptTokens.get(name) !== startAttemptToken
-    ) {
-      return false;
-    }
+    return this.withTransition(() => {
+      // Handler is cleared before stop begins, so a call here means the component
+      // stopped on its own during the current start/run.
+      const currentState = this.componentStates.get(name);
+      if (
+        // Startup-time self-stops are valid too: start() may still be awaiting
+        // some async work while an internal listener has already observed that
+        // the component died and reported it.
+        (currentState !== 'starting' && currentState !== 'running') ||
+        this.componentStartAttemptTokens.get(name) !== startAttemptToken
+      ) {
+        return false;
+      }
 
-    // Normalized at the boundary. `error` is declared `Error`, but it arrives from the
-    // component's own `reportUnexpectedStop()` and is never validated, so it can be any
-    // value at all. It is stored here and dereferenced in several places later — the
-    // warning below, `startAllComponents`'s failure summary, `getComponentStatus` — and
-    // every one of those reads would otherwise be an unguarded `.message` on user input.
-    // Normalized here, before a single field is written, and that ordering is the point:
-    // a throw from an unguarded `.message` once the mutations below had run would leave
-    // the component recorded as stopped with none of the events at the bottom emitted.
-    // Taking the bad value's measure first means the only thing it can cost is itself.
-    const failure =
-      error === undefined || error === null ? null : toError(error);
+      // Normalized at the boundary. `error` is declared `Error`, but it arrives from the
+      // component's own `reportUnexpectedStop()` and is never validated, so it can be any
+      // value at all. It is stored here and dereferenced in several places later — the
+      // warning below, `startAllComponents`'s failure summary, `getComponentStatus` — and
+      // every one of those reads would otherwise be an unguarded `.message` on user input.
+      // Normalized here, before a single field is written, and that ordering is the point:
+      // a throw from an unguarded `.message` once the mutations below had run would leave
+      // the component recorded as stopped with none of the events at the bottom emitted.
+      // Taking the bad value's measure first means the only thing it can cost is itself.
+      const failure =
+        error === undefined || error === null ? null : toError(error);
 
-    // Captured before the normalization above is allowed to blur the distinction, and
-    // asked with the same check `toError` just used. A bare `instanceof` contradicted the
-    // line above it: `toError` keeps a cross-realm error - from a `vm` context, an
-    // iframe - as-is, so `componentErrors` held a real error while this recorded that the
-    // component had reported none, and `startComponent`'s overlapping-failure rule read
-    // the wrong answer. Guarded internally, so the local `try` this replaces is no longer
-    // needed.
-    const didReportError = isErrorValue(error);
+      // Captured before the normalization above is allowed to blur the distinction, and
+      // asked with the same check `toError` just used. A bare `instanceof` contradicted the
+      // line above it: `toError` keeps a cross-realm error - from a `vm` context, an
+      // iframe - as-is, so `componentErrors` held a real error while this recorded that the
+      // component had reported none, and `startComponent`'s overlapping-failure rule read
+      // the wrong answer. Guarded internally, so the local `try` this replaces is no longer
+      // needed.
+      const didReportError = isErrorValue(error);
 
-    this.componentUnexpectedStopHadError.set(name, didReportError);
+      this.componentUnexpectedStopHadError.set(name, didReportError);
 
-    this.runningComponents.delete(name);
-    this.componentStates.set(name, 'stopped');
-    this.componentErrors.set(name, failure);
-    if (this.isStarting) {
-      this.unexpectedStopsDuringStartup.set(name, failure);
-    }
-    this.updateStartedFlag();
+      this.runningComponents.delete(name);
+      this.componentStates.set(name, 'stopped');
+      this.componentErrors.set(name, failure);
+      if (this.isStarting) {
+        this.unexpectedStopsDuringStartup.set(name, failure);
+      }
+      this.updateStartedFlag();
 
-    // Mirror the normal stop path: if this was the last running component, the
-    // manager should release process signal handlers instead of staying attached
-    // to an otherwise idle application. During a bulk startup the check defers to the
-    // startup's end.
-    this.detachSignalsAfterLastStop();
+      // Mirror the normal stop path: if this was the last running component, the
+      // manager should release process signal handlers instead of staying attached
+      // to an otherwise idle application. During a bulk startup the check defers to the
+      // startup's end.
+      this.detachSignalsAfterLastStop();
 
-    const timestamps = this.componentTimestamps.get(name) ?? {
-      startedAt: null,
-      stoppedAt: null,
-    };
-    timestamps.stoppedAt = Date.now();
-    this.componentTimestamps.set(name, timestamps);
+      const timestamps = this.componentTimestamps.get(name) ?? {
+        startedAt: null,
+        stoppedAt: null,
+      };
+      timestamps.stoppedAt = Date.now();
+      this.componentTimestamps.set(name, timestamps);
 
-    this.logger.entity(name).warn(
-      // A placeholder, never the message concatenated in. The component's own text
-      // becomes the *template* otherwise, and the path grammar admits ordinary name
-      // punctuation - `-`, `@`, `$` - so a failure reported as
-      // `Cannot reach {{svc-a}}` parses as a placeholder, resolves to nothing, and is
-      // rendered as the `(null)` fallback. Substituted text is not re-scanned, so the
-      // message survives verbatim here however it is spelled.
-      failure
-        ? 'Component stopped unexpectedly: {{error.message}}'
-        : 'Component stopped unexpectedly',
-      { params: { error: failure } },
-    );
+      this.logger.entity(name).warn(
+        // A placeholder, never the message concatenated in. The component's own text
+        // becomes the *template* otherwise, and the path grammar admits ordinary name
+        // punctuation - `-`, `@`, `$` - so a failure reported as
+        // `Cannot reach {{svc-a}}` parses as a placeholder, resolves to nothing, and is
+        // rendered as the `(null)` fallback. Substituted text is not re-scanned, so the
+        // message survives verbatim here however it is spelled.
+        failure
+          ? 'Component stopped unexpectedly: {{error.message}}'
+          : 'Component stopped unexpectedly',
+        { params: { error: failure } },
+      );
 
-    // Model this the same as other terminal transitions: emit the abnormal-cause
-    // event first, then the canonical stopped-state event that generic listeners
-    // can rely on regardless of why the component stopped.
-    this.lifecycleEvents.componentUnexpectedStop(name, failure ?? undefined);
-    this.lifecycleEvents.componentStopped(name, this.getComponentStatus(name));
-    return true;
+      // Model this the same as other terminal transitions: emit the abnormal-cause
+      // event first, then the canonical stopped-state event that generic listeners
+      // can rely on regardless of why the component stopped.
+      this.lifecycleEvents.componentUnexpectedStop(name, failure ?? undefined);
+      this.lifecycleEvents.componentStopped(
+        name,
+        this.getComponentStatus(name),
+      );
+      return true;
+    });
   }
 
   /**
-   * Safe emit wrapper - prevents event handler errors from breaking lifecycle
+   * A transition is a synchronous piece of manager bookkeeping, never an entire
+   * asynchronous operation. Holding depth across an await would hide progress events
+   * behind unrelated work (or deadlock a hook waiting for an event). Nesting lets a
+   * terminal component update detach signals without exposing its unfinished timestamps,
+   * and lets shutdown acceptance finish its latch and escalation state before listeners
+   * can request another pass. Dispatch boundaries, such as signals attached before
+   * startup proceeds, remain explicit: listeners still get to request shutdown there.
+   *
+   * The finally is essential on refusals and failures too. These events describe work
+   * already done, not a transaction that can be silently discarded on an exception.
+   * Operation safety nets remain responsible for restoring state and reporting failure.
+   * Logger sinks and component hooks remain synchronous caller code; their existing
+   * re-entry checks and state-before-log ordering are still necessary.
    */
+  private withTransition<T>(operation: () => T): T {
+    this.transitionDepth++;
+    try {
+      return operation();
+    } finally {
+      this.transitionDepth--;
+      this.flushEvents();
+    }
+  }
+
+  /**
+   * One FIFO for all manager events. Keep the flushing guard raised through every
+   * listener of an event: a listener may finish another transition, but its events
+   * belong behind events already waiting, never between listeners of the current one.
+   * No microtask is scheduled and listener promises are not awaited; the protected
+   * emitter observes their failures. An earlier listener may change live state, so
+   * event payloads describe their originating transition rather than promising that
+   * subsequent status reads still match that snapshot.
+   */
+  private flushEvents(): void {
+    if (this.transitionDepth !== 0 || this.isFlushingEvents) {
+      return;
+    }
+    this.isFlushingEvents = true;
+    try {
+      for (let index = 0; index < this.pendingEvents.length; index++) {
+        this.pendingEvents[index]();
+      }
+    } finally {
+      this.pendingEvents.length = 0;
+      this.isFlushingEvents = false;
+    }
+  }
+
   private safeEmit<K extends LifecycleManagerEventName>(
+    event: K,
+    data: LifecycleManagerEventMap[K],
+  ): void {
+    this.pendingEvents.push(() => this.deliverEvent(event, data));
+    this.flushEvents();
+  }
+
+  /** Safe delivery also contains an overridden emitter that throws. */
+  private deliverEvent<K extends LifecycleManagerEventName>(
     event: K,
     data: LifecycleManagerEventMap[K],
   ): void {
@@ -8614,43 +8735,48 @@ export class LifecycleManager
     error?: Error;
     targetFound?: boolean;
   }): InsertComponentAtResult {
-    // Built before the log and the event: both run caller code, which may register
-    // something the snapshot never read, or end the startup `duringStartup` describes.
-    const result = this.buildInsertResultFailure({
-      componentName: input.componentName,
-      position: input.position,
-      targetComponentName: input.targetComponentName,
-      registrationIndexBefore: input.registrationIndexBefore,
-      code: input.code,
-      reason: input.message,
-      error: input.error,
-      targetFound: input.targetFound,
-      dependencySnapshot: input.dependencySnapshot,
+    return this.withTransition(() => {
+      // Built before the log: sinks still run caller code, which may register
+      // something the snapshot never read, or end the startup `duringStartup` describes.
+      // The event itself is queued until this refusal has its complete result.
+      const result = this.buildInsertResultFailure({
+        componentName: input.componentName,
+        position: input.position,
+        targetComponentName: input.targetComponentName,
+        registrationIndexBefore: input.registrationIndexBefore,
+        code: input.code,
+        reason: input.message,
+        error: input.error,
+        targetFound: input.targetFound,
+        dependencySnapshot: input.dependencySnapshot,
+      });
+
+      this.logger
+        .entity(input.componentName)
+        .warn(
+          input.logLine,
+          input.logParams === undefined
+            ? undefined
+            : { params: input.logParams },
+        );
+
+      this.emitRegistrationRejected({
+        progress: input.progress,
+        name: input.componentName,
+        reason: input.code,
+        message: input.message,
+        registrationIndexBefore: input.registrationIndexBefore,
+        ...('target' in input ? { target: input.target } : {}),
+        ...(input.cycle !== undefined ? { cycle: input.cycle } : {}),
+        ...('targetFound' in input ? { targetFound: input.targetFound } : {}),
+        isInsertAction: input.isInsertAction,
+        position: input.position,
+        targetComponentName: input.targetComponentName,
+        startupOrder: result.startupOrder,
+      });
+
+      return result;
     });
-
-    this.logger
-      .entity(input.componentName)
-      .warn(
-        input.logLine,
-        input.logParams === undefined ? undefined : { params: input.logParams },
-      );
-
-    this.emitRegistrationRejected({
-      progress: input.progress,
-      name: input.componentName,
-      reason: input.code,
-      message: input.message,
-      registrationIndexBefore: input.registrationIndexBefore,
-      ...('target' in input ? { target: input.target } : {}),
-      ...(input.cycle !== undefined ? { cycle: input.cycle } : {}),
-      ...('targetFound' in input ? { targetFound: input.targetFound } : {}),
-      isInsertAction: input.isInsertAction,
-      position: input.position,
-      targetComponentName: input.targetComponentName,
-      startupOrder: result.startupOrder,
-    });
-
-    return result;
   }
 
   private buildInsertResultFailure(input: {
@@ -9130,33 +9256,35 @@ export class LifecycleManager
    * made the cycle's initial request.
    */
   private answerShutdownSignalDuringPass(method: ShutdownSignal): void {
-    // Only a restart's stop phase runs without a cycle: it does not seed one. The first
-    // signal asking it to stay down is where the operator's shutdown actually begins, so
-    // it seeds the cycle - the same as a signal that starts a pass - rather than counting
-    // as press one. A restart that inherited a live cycle keeps it, and this signal
-    // counts against it.
-    const isFirstRequestOfCycle =
-      this.repeatedShutdownRequestPolicy !== undefined &&
-      this.repeatedShutdownRequestState.firstRequestAt === null;
+    return this.withTransition(() => {
+      // Only a restart's stop phase runs without a cycle: it does not seed one. The first
+      // signal asking it to stay down is where the operator's shutdown actually begins, so
+      // it seeds the cycle - the same as a signal that starts a pass - rather than counting
+      // as press one. A restart that inherited a live cycle keeps it, and this signal
+      // counts against it.
+      const isFirstRequestOfCycle =
+        this.repeatedShutdownRequestPolicy !== undefined &&
+        this.repeatedShutdownRequestState.firstRequestAt === null;
 
-    this.noteShutdownRequestDuringActivePass();
-    this.lifecycleEvents.signalShutdown(method, true);
+      this.noteShutdownRequestDuringActivePass();
+      this.lifecycleEvents.signalShutdown(method, true);
 
-    if (isFirstRequestOfCycle) {
-      this.seedRepeatedShutdownRequestState(method);
-      this.logger.info('Shutdown signal received during restart', {
-        params: { method },
-      });
+      if (isFirstRequestOfCycle) {
+        this.seedRepeatedShutdownRequestState(method);
+        this.logger.info('Shutdown signal received during restart', {
+          params: { method },
+        });
 
-      return;
-    }
+        return;
+      }
 
-    // No window to consume: `acceptShutdownPass()` spends it on the request that starts
-    // the pass. A window armed by this very pass - from a listener on its completed
-    // event, before the latch comes down - that has already expired is cleared by
-    // this call. Either way the request is answered here: falling through would emit
-    // `signal:shutdown` a second time and reseed escalation under a running pass.
-    this.handleRepeatedShutdownRequest(method, null);
+      // No window to consume: `acceptShutdownPass()` spends it on the request that starts
+      // the pass. A window armed by this very pass - from a listener on its completed
+      // event, before the latch comes down - that has already expired is cleared by
+      // this call. Either way the request is answered here: falling through would emit
+      // `signal:shutdown` a second time and reseed escalation under a running pass.
+      this.handleRepeatedShutdownRequest(method, null);
+    });
   }
 
   /**
@@ -9186,69 +9314,71 @@ export class LifecycleManager
    * In all cases `signal:shutdown` is emitted exactly once.
    */
   private handleShutdownRequest(method: ShutdownSignal): void {
-    if (this.isShuttingDown) {
-      this.answerShutdownSignalDuringPass(method);
+    return this.withTransition(() => {
+      if (this.isShuttingDown) {
+        this.answerShutdownSignalDuringPass(method);
 
-      return;
-    }
+        return;
+      }
 
-    let didEmitShutdownSignal = false;
-    // Not from inside escalation handling - `onForceShutdown`, or a listener on
-    // `shutdown-escalation-forced` or `signal:shutdown`, raising a signal of its own. The
-    // armed window is already spent by then, so the request would otherwise look fresh
-    // and reseed, wiping `hasTriggeredForceShutdown` and the count: the next press
-    // forced again. It continues the request that fired it, as a manual stop does.
-    let shouldSeedRepeatedShutdownState =
-      this.repeatedShutdownRequestPolicy !== undefined &&
-      this.escalationHandlingDepth === 0;
+      let didEmitShutdownSignal = false;
+      // Not from inside escalation handling - `onForceShutdown`, or a listener on
+      // `shutdown-escalation-forced` or `signal:shutdown`, raising a signal of its own. The
+      // armed window is already spent by then, so the request would otherwise look fresh
+      // and reseed, wiping `hasTriggeredForceShutdown` and the count: the next press
+      // forced again. It continues the request that fired it, as a manual stop does.
+      let shouldSeedRepeatedShutdownState =
+        this.repeatedShutdownRequestPolicy !== undefined &&
+        this.escalationHandlingDepth === 0;
 
-    // This branch is only for the post-failure "armed" state.
-    // A previous shutdown request already happened, shutdown has already
-    // finished returning, and we intentionally keep escalation alive for a
-    // short period so follow-up presses can continue the same force count.
-    if (
-      this.repeatedShutdownRequestPolicy &&
-      this.repeatedShutdownRequestState.firstRequestAt !== null &&
-      this.normalizeRepeatedShutdownRequestStateArmedStatus()
-    ) {
-      // Consumed first, ahead of every line below that can run user code - the emit's
-      // listeners as much as the force handler `handleRepeatedShutdownRequest()` can
-      // reach. The same ordering `acceptShutdownPass()` uses, and for the same reason: a
-      // shutdown request made from inside any of them continues this one rather than
-      // counting as a press of its own. The pass this request goes on to start would have
-      // cleared the window a moment later regardless.
-      const consumedArmedUntil = this.consumeRepeatedShutdownArmedWindow();
+      // This branch is only for the post-failure "armed" state.
+      // A previous shutdown request already happened, shutdown has already
+      // finished returning, and we intentionally keep escalation alive for a
+      // short period so follow-up presses can continue the same force count.
+      if (
+        this.repeatedShutdownRequestPolicy &&
+        this.repeatedShutdownRequestState.firstRequestAt !== null &&
+        this.normalizeRepeatedShutdownRequestStateArmedStatus()
+      ) {
+        // Consumed first, ahead of every line below that can run user code - the emit's
+        // listeners as much as the force handler `handleRepeatedShutdownRequest()` can
+        // reach. The same ordering `acceptShutdownPass()` uses, and for the same reason: a
+        // shutdown request made from inside any of them continues this one rather than
+        // counting as a press of its own. The pass this request goes on to start would have
+        // cleared the window a moment later regardless.
+        const consumedArmedUntil = this.consumeRepeatedShutdownArmedWindow();
 
-      this.emitSignalShutdownForNewRequest(method);
-      didEmitShutdownSignal = true;
-      shouldSeedRepeatedShutdownState = false;
-      this.handleRepeatedShutdownRequest(method, consumedArmedUntil);
-    } else if (this.isShuttingDown) {
-      // The check above can expire a lapsed window, which emits
-      // `shutdown-escalation-expired` - and a listener there can start a shutdown. That
-      // pass is the one this signal now lands on, so it is answered as one landing on a
-      // running pass: not reseeding escalation over the cycle that pass just seeded, and
-      // not emitting `signal:shutdown` as if nothing were running.
-      this.answerShutdownSignalDuringPass(method);
+        this.emitSignalShutdownForNewRequest(method);
+        didEmitShutdownSignal = true;
+        shouldSeedRepeatedShutdownState = false;
+        this.handleRepeatedShutdownRequest(method, consumedArmedUntil);
+      } else if (this.isShuttingDown) {
+        // The check above can expire a lapsed window, which emits
+        // `shutdown-escalation-expired` - and a listener there can start a shutdown. That
+        // pass is the one this signal now lands on, so it is answered as one landing on a
+        // running pass: not reseeding escalation over the cycle that pass just seeded, and
+        // not emitting `signal:shutdown` as if nothing were running.
+        this.answerShutdownSignalDuringPass(method);
 
-      return;
-    }
+        return;
+      }
 
-    if (shouldSeedRepeatedShutdownState) {
-      this.seedRepeatedShutdownRequestState(method);
-    }
+      if (shouldSeedRepeatedShutdownState) {
+        this.seedRepeatedShutdownRequestState(method);
+      }
 
-    this.logger.info('Shutdown signal received', {
-      params: { method },
+      this.logger.info('Shutdown signal received', {
+        params: { method },
+      });
+
+      if (!didEmitShutdownSignal) {
+        this.emitSignalShutdownForNewRequest(method);
+      }
+
+      // Signal handlers cannot consume a return value, so the acknowledgement is dropped;
+      // a pass that failed to start has already been reported on the global channel.
+      this.startShutdownPass(method);
     });
-
-    if (!didEmitShutdownSignal) {
-      this.emitSignalShutdownForNewRequest(method);
-    }
-
-    // Signal handlers cannot consume a return value, so the acknowledgement is dropped;
-    // a pass that failed to start has already been reported on the global channel.
-    this.startShutdownPass(method);
   }
 
   /**
@@ -9257,23 +9387,25 @@ export class LifecycleManager
    * hand a result to. The outcome arrives on `lifecycle-manager:shutdown-completed`.
    */
   private startShutdownPass(method: ShutdownSignal): void {
-    // A signal means the process should stay down, so a refusal is recorded on the
-    // running pass - including one started from inside this request's own escalation
-    // bookkeeping, which was not there when `handleShutdownRequest()` checked the latch.
-    const acceptance = this.acceptShutdownPass(method, undefined, true);
+    return this.withTransition(() => {
+      // A signal means the process should stay down, so a refusal is recorded on the
+      // running pass - including one started from inside this request's own escalation
+      // bookkeeping, which was not there when `handleShutdownRequest()` checked the latch.
+      const acceptance = this.acceptShutdownPass(method, undefined, true);
 
-    if (!acceptance.accepted) {
-      return;
-    }
+      if (!acceptance.accepted) {
+        return;
+      }
 
-    // Deliberate insurance, not dead code - keep it. `runShutdownPass()` resolves even
-    // when the pass dies, so today this never runs. But this promise floats inside an OS
-    // signal handler, where an unhandled rejection is fatal under Node's default
-    // `--unhandled-rejections=throw`: if a future bug ever made the pass reject, this
-    // handler is all that stands between it and a crash that takes the process down
-    // before the components it was about to stop were stopped.
-    acceptance.promise.catch((error: unknown) => {
-      reportCallbackError(`shutdown after ${method}`, error);
+      // Deliberate insurance, not dead code - keep it. `runShutdownPass()` resolves even
+      // when the pass dies, so today this never runs. But this promise floats inside an OS
+      // signal handler, where an unhandled rejection is fatal under Node's default
+      // `--unhandled-rejections=throw`: if a future bug ever made the pass reject, this
+      // handler is all that stands between it and a crash that takes the process down
+      // before the components it was about to stop were stopped.
+      acceptance.promise.catch((error: unknown) => {
+        reportCallbackError(`shutdown after ${method}`, error);
+      });
     });
   }
 
@@ -9518,13 +9650,15 @@ export class LifecycleManager
     method: ShutdownMethod,
     consumedArmedUntil: number | null,
   ): void {
-    this.escalationHandlingDepth++;
+    return this.withTransition(() => {
+      this.escalationHandlingDepth++;
 
-    try {
-      this.handleRepeatedShutdownRequestInner(method, consumedArmedUntil);
-    } finally {
-      this.escalationHandlingDepth--;
-    }
+      try {
+        this.handleRepeatedShutdownRequestInner(method, consumedArmedUntil);
+      } finally {
+        this.escalationHandlingDepth--;
+      }
+    });
   }
 
   private handleRepeatedShutdownRequestInner(
@@ -9762,50 +9896,52 @@ export class LifecycleManager
    * Transition armed post-failure escalation state into its expired/reset state.
    */
   private expireRepeatedShutdownRequestState(): void {
-    const policy = this.repeatedShutdownRequestPolicy;
-    const state = this.repeatedShutdownRequestState;
+    return this.withTransition(() => {
+      const policy = this.repeatedShutdownRequestPolicy;
+      const state = this.repeatedShutdownRequestState;
 
-    if (!policy || state.remainsArmedUntil === null) {
-      return;
-    }
+      if (!policy || state.remainsArmedUntil === null) {
+        return;
+      }
 
-    // Narrowed to number by the null guard above.
-    const armedUntil: number = state.remainsArmedUntil;
+      // Narrowed to number by the null guard above.
+      const armedUntil: number = state.remainsArmedUntil;
 
-    this.clearRepeatedShutdownExpiryTimer();
+      this.clearRepeatedShutdownExpiryTimer();
 
-    const expiredState = {
-      firstMethod: state.firstMethod,
-      latestMethod: state.latestMethod,
-      requestCount: state.requestCount,
-      armedUntil,
-    };
+      const expiredState = {
+        firstMethod: state.firstMethod,
+        latestMethod: state.latestMethod,
+        requestCount: state.requestCount,
+        armedUntil,
+      };
 
-    // Reset before anything is said about it: a `shutdown-escalation-expired` listener
-    // that starts a shutdown must find no state, so its pass seeds a fresh cycle. Reset
-    // after the emit, as it was, wiped the state that pass had just seeded - `firstMethod`
-    // stayed `null` for the whole pass, and `onForceShutdown` could never fire.
-    this.resetRepeatedShutdownRequestState();
+      // Reset before anything is said about it: a `shutdown-escalation-expired` listener
+      // that starts a shutdown must find no state, so its pass seeds a fresh cycle. Reset
+      // after the emit, as it was, wiped the state that pass had just seeded - `firstMethod`
+      // stayed `null` for the whole pass, and `onForceShutdown` could never fire.
+      this.resetRepeatedShutdownRequestState();
 
-    this.logger.warn(
-      'Repeated shutdown escalation window expired, clearing previous shutdown state',
-      {
-        params: {
-          remainsArmedUntil: armedUntil,
-          withinMS: policy.withinMS,
-          forceAfterCount: policy.forceAfterCount,
+      this.logger.warn(
+        'Repeated shutdown escalation window expired, clearing previous shutdown state',
+        {
+          params: {
+            remainsArmedUntil: armedUntil,
+            withinMS: policy.withinMS,
+            forceAfterCount: policy.forceAfterCount,
+          },
         },
-      },
-    );
+      );
 
-    if (expiredState.firstMethod !== null) {
-      this.lifecycleEvents.lifecycleManagerShutdownEscalationExpired({
-        firstMethod: expiredState.firstMethod,
-        latestMethod: expiredState.latestMethod,
-        requestCount: expiredState.requestCount,
-        armedUntil: expiredState.armedUntil,
-      });
-    }
+      if (expiredState.firstMethod !== null) {
+        this.lifecycleEvents.lifecycleManagerShutdownEscalationExpired({
+          firstMethod: expiredState.firstMethod,
+          latestMethod: expiredState.latestMethod,
+          requestCount: expiredState.requestCount,
+          armedUntil: expiredState.armedUntil,
+        });
+      }
+    });
   }
 
   /**
@@ -9857,27 +9993,29 @@ export class LifecycleManager
    * losing the existing force count the moment the graceful attempt finishes.
    */
   private armRepeatedShutdownAfterFailure(): void {
-    const policy = this.repeatedShutdownRequestPolicy;
-    const state = this.repeatedShutdownRequestState;
+    return this.withTransition(() => {
+      const policy = this.repeatedShutdownRequestPolicy;
+      const state = this.repeatedShutdownRequestState;
 
-    if (
-      !policy ||
-      policy.armedAfterFailureMS <= 0 || // armedAfterFailureMS = 0 disables post-failure arming
-      state.firstRequestAt === null ||
-      state.hasTriggeredForceShutdown
-    ) {
-      return;
-    }
+      if (
+        !policy ||
+        policy.armedAfterFailureMS <= 0 || // armedAfterFailureMS = 0 disables post-failure arming
+        state.firstRequestAt === null ||
+        state.hasTriggeredForceShutdown
+      ) {
+        return;
+      }
 
-    this.refreshRepeatedShutdownArmedWindow();
-    const armedUntil = state.remainsArmedUntil;
-    if (state.firstMethod !== null && armedUntil !== null) {
-      this.lifecycleEvents.lifecycleManagerShutdownEscalationArmed({
-        firstMethod: state.firstMethod,
-        requestCount: state.requestCount,
-        armedUntil,
-      });
-    }
+      this.refreshRepeatedShutdownArmedWindow();
+      const armedUntil = state.remainsArmedUntil;
+      if (state.firstMethod !== null && armedUntil !== null) {
+        this.lifecycleEvents.lifecycleManagerShutdownEscalationArmed({
+          firstMethod: state.firstMethod,
+          requestCount: state.requestCount,
+          armedUntil,
+        });
+      }
+    });
   }
 
   /**

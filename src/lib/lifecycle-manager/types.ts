@@ -662,6 +662,14 @@ export interface ValueResult<T = unknown> {
   error?: Error;
 }
 
+/**
+ * Manager events are delivered at the end of synchronous state transitions, in FIFO
+ * emission order. Listener re-entry queues its events behind pending notifications;
+ * listener promises are observed for failure, not awaited. Failed transitions still
+ * flush events. Payloads describe the originating change, while live status may reflect
+ * changes made by an earlier listener. This changes timing for listeners that previously
+ * observed partial bookkeeping; it does not defer notifications across async work.
+ */
 type EventEmitterSurface = Pick<
   EventEmitterProtected,
   'on' | 'once' | 'hasListener' | 'hasListeners' | 'listenerCount'

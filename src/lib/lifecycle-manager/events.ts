@@ -14,6 +14,14 @@ import type {
 } from './types';
 import type { ShutdownSignal } from '../process-signal-manager';
 
+/**
+ * Manager-generated notifications are FIFO: synchronous state transitions queue them
+ * until their outermost boundary. Re-entry from a listener appends behind pending
+ * events, after all listeners of the current event. No listener promise is awaited,
+ * and a failed transition still flushes notifications already queued. Payloads describe
+ * the originating change; earlier listeners may have changed the manager's live state.
+ * Dispatch boundaries remain synchronous; the queue is never held across an await.
+ */
 export interface LifecycleManagerEventMap {
   'component:unregistered': { name: string; duringShutdown?: boolean };
   'component:start-skipped': { name: string; reason: string };

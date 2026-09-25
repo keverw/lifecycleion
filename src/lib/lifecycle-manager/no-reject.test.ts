@@ -1266,7 +1266,7 @@ describe('LifecycleManager - public methods never reject', () => {
     }
   });
 
-  test('an unarmed manual stop does not wipe a cycle a nested shutdown just seeded', async () => {
+  test('an expiry listener sees the manual shutdown already accepted', async () => {
     const { logger, manager } = setup({
       shutdownOptions: { timeoutMS: 50, retryStalled: false },
       repeatedShutdownRequestPolicy: {
@@ -1295,13 +1295,16 @@ describe('LifecycleManager - public methods never reject', () => {
 
     const outer = manager.stopAllComponents();
 
-    // The listener's pass seeded a live cycle; the refused outer request left it alone.
+    // Expiry is now queued until acceptance finishes. The outer request owns the
+    // pass; the listener sees its complete cycle and its nested request is refused.
     expect(manager.getShutdownEscalationStatus().firstMethod).toBe('manual');
-    expect((await outer).code).toBe('already_in_progress');
-    await Promise.all(nested);
+    expect((await outer).code).not.toBe('already_in_progress');
+    expect(((await nested[0]) as { code: string }).code).toBe(
+      'already_in_progress',
+    );
   });
 
-  test('a signal that expires the window into a nested shutdown is answered as in progress', async () => {
+  test('a signal accepts its shutdown before delivering window expiry', async () => {
     const { logger, manager } = setup({
       shutdownOptions: { timeoutMS: 50, retryStalled: false },
       repeatedShutdownRequestPolicy: {
@@ -1338,10 +1341,14 @@ describe('LifecycleManager - public methods never reject', () => {
     ).handleShutdownRequest('SIGTERM');
 
     expect(signals).toEqual([
-      { method: 'SIGTERM', isAlreadyShuttingDown: true },
+      // The expiry listener runs after the signal's acceptance transition, so
+      // SIGTERM owns this pass and the listener's manual stop is refused.
+      { method: 'SIGTERM', isAlreadyShuttingDown: false },
     ]);
-    expect(manager.getShutdownEscalationStatus().firstMethod).toBe('manual');
-    await Promise.all(nested);
+    expect(manager.getShutdownEscalationStatus().firstMethod).toBe('SIGTERM');
+    expect(((await nested[0]) as { code: string }).code).toBe(
+      'already_in_progress',
+    );
   });
 
   test('a throwing onStartupAborted getter cannot escape the startup timer', async () => {

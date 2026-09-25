@@ -888,7 +888,7 @@ describe('LifecycleManager - shutdown hardening', () => {
     expect(escalation.isArmed).toBe(true);
   });
 
-  test('a crashed pass arms escalation after its completed event, like a stalled one', async () => {
+  test('a crashed pass settles escalation before delivering completion, like a stalled one', async () => {
     const logger = new Logger({
       sinks: [new ArraySink()],
       callProcessExit: false,
@@ -934,11 +934,11 @@ describe('LifecycleManager - shutdown hardening', () => {
       release();
     }
 
-    // A stalled pass emits `shutdown-completed` and only then arms; a listener on the
-    // completed event must see the same not-yet-armed state whichever way the pass
-    // failed.
+    // Completion and arming are one synchronous transition. The queue preserves
+    // their event order, but both listeners now see the settled escalation state,
+    // whether the pass stalled or crashed.
     expect(order).toEqual(['completed', 'armed']);
-    expect(armedStatesSeen).toEqual([false]);
+    expect(armedStatesSeen).toEqual([true]);
     expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
   });
 
