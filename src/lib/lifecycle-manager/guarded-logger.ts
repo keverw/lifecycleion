@@ -255,19 +255,15 @@ function guardLogMethod(
   property: string,
 ): (...args: unknown[]) => void {
   const label = `${GUARDED_LOGGER_LABEL}.${property}`;
+  // Built once per wrapper rather than per log line.
+  const onError = (error: unknown): void => {
+    reportCallbackError(label, error);
+  };
 
   return (...args: unknown[]): void => {
     // `runCallbackSafely` also covers a logger method that returns a rejecting promise, and
     // a `method` that is not a function at all. `target` as `thisArg` keeps it bound.
-    runCallbackSafely(
-      label,
-      method,
-      args,
-      (error) => {
-        reportCallbackError(label, error);
-      },
-      target,
-    );
+    runCallbackSafely(label, method, args, onError, target);
   };
 }
 

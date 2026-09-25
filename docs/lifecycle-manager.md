@@ -553,7 +553,7 @@ interface RegisterComponentResult {
   error?: Error;
   registrationIndexBefore: number | null;
   registrationIndexAfter: number | null;
-  startupOrder: string[];
+  startupOrder: string[]; // empty on a refusal made before every dependency list was read, or an unexpected failure
   duringStartup?: boolean; // true if registered during bulk startup
   autoStartAttempted?: boolean; // true if auto-start was attempted
   autoStartDeferred?: boolean; // true if left to a bulk startup that had not begun its loop

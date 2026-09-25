@@ -42,11 +42,16 @@ export type ReportFailure = (error: unknown, subject: string) => void;
  *               a boolean cleared on return was cleared before an `async` handler had
  *               done anything, and the loop it guards against resumed on the far side of
  *               the handler's first `await`.
+ * @param handlerName Names the handler in the one report that does not carry `line`: a
+ *               return value whose `then` cannot be read, where the handler already
+ *               delivered its report and repeating it would be wrong. Without it, that line
+ *               could not say which handler misbehaved.
  */
 export function reportThroughHandler(
   invoke: (() => unknown) | undefined,
   line: () => string,
   onSettled?: () => void,
+  handlerName?: string,
 ): void {
   // The line is the caller's to build, and may throw: rendered through this, a report
   // still goes out - and nothing throws, or rejects unhandled, out of the one function
@@ -57,6 +62,15 @@ export function reportThroughHandler(
     } catch (lineError) {
       return `A failure occurred, but its report could not be rendered: ${describeError(lineError)}`;
     }
+  };
+
+  // The handler's own failure, after the line: on a line of its own when the line runs
+  // over several - an `errorToString` box - rather than trailing its closing border.
+  const withHandlerFailure = (verb: string, handlerError: unknown): string => {
+    const rendered = safeLine();
+    const separator = rendered.includes('\n') ? '\n\n' : ' ';
+
+    return `${rendered}${separator}(the failure handler also ${verb}: ${describeError(handlerError)})`;
   };
 
   // Called exactly once, whichever way the report ends, and contained: it is the
@@ -93,9 +107,7 @@ export function reportThroughHandler(
       //
       // The console, never a channel a logger might hear: a handler that just threw is no
       // argument for reaching past the caller for a louder rung.
-      reportToConsole(
-        `${safeLine()} (the failure handler also threw: ${describeError(handlerError)})`,
-      );
+      reportToConsole(withHandlerFailure('threw', handlerError));
       settle();
 
       return;
@@ -110,7 +122,7 @@ export function reportThroughHandler(
       isResultAdoptable = isAdoptable(result);
     } catch (thenError) {
       reportToConsole(
-        `A failure handler returned a value whose then could not be read: ${describeError(thenError)}`,
+        `A failure handler${handlerName === undefined ? '' : ` (${handlerName})`} returned a value whose then could not be read: ${describeError(thenError)}`,
       );
       settle();
 
@@ -131,9 +143,7 @@ export function reportThroughHandler(
     if (isResultAdoptable) {
       adoptPromise(result)
         .catch((handlerError: unknown) => {
-          reportToConsole(
-            `${safeLine()} (the failure handler also rejected: ${describeError(handlerError)})`,
-          );
+          reportToConsole(withHandlerFailure('rejected', handlerError));
         })
         .finally(settle);
 

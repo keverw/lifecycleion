@@ -1077,6 +1077,10 @@ describe('runCallbackSafely - a throwing onError is contained', () => {
 
     const printed = Bun.inspect(captured);
     expect(printed).toContain('reporter failure');
+    // On its own line after the rendered box, not trailing its closing border.
+    expect(String(captured[0]?.[0])).toMatch(
+      /\n\n\(the failure handler also threw: reporter failure\)$/,
+    );
     expect(printed).toContain('original failure');
     expect(printed).not.toContain('hunter2-secret');
   });
@@ -1107,6 +1111,34 @@ describe('runCallbackSafely - a throwing onError is contained', () => {
 
     expect(captured.length).toBe(1);
     expect(String(captured[0][0])).toContain('cb');
+  });
+
+  it('does not report an onError whose return has an unreadable then as having thrown', () => {
+    const captured = withCapturedConsoleError((entries) => {
+      runCallbackSafely(
+        'cb',
+        () => {
+          throw new Error('original failure');
+        },
+        [],
+        () =>
+          ({
+            get then(): never {
+              throw new Error('then getter');
+            },
+          }) as unknown as void,
+      );
+
+      return entries;
+    });
+
+    // The handler ran and delivered its report: its return is its own problem, reported
+    // as such, and the original failure is not repeated under a "threw" label.
+    expect(captured.length).toBe(1);
+    const printed = String(captured[0][0]);
+    expect(printed).toContain('(onError for cb) returned a value');
+    expect(printed).toContain('then could not be read');
+    expect(printed).not.toContain('original failure');
   });
 
   it('contains a throwing onError on the not-a-function path', () => {

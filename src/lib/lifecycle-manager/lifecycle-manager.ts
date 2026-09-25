@@ -2645,7 +2645,7 @@ export class LifecycleManager
 
     this.detachSignalsAfterLastStop(
       'last component unregistered',
-      'Auto-detaching process signals on last component unregistered',
+      'Auto-detached process signals on last component unregistered',
     );
 
     this.logger.entity(name).info('Component unregistered');
@@ -3557,7 +3557,6 @@ export class LifecycleManager
           detachReason: 'failed bulk startup',
           abandonReason: 'failed before starting components',
         });
-        this.unexpectedStopsDuringStartup.clear();
       }
     };
     // Component starts already race against the bulk deadline. Await their bookkeeping
@@ -3570,23 +3569,41 @@ export class LifecycleManager
    * signal handlers it attached if it leaves nothing running - or any detach deferred
    * while it held the latch - the startup record, and auto-starts left to it that it
    * never reached. One place, so an early exit cannot forget a step the others take.
+   *
+   * Every piece of this startup's state is cleared before any caller code runs. The
+   * detach logs through the caller's sinks and emits `signals-detached`, and a listener
+   * there may start the next startup - which runs synchronously up to its first `await`
+   * and installs its own record. Cleared after, that record was wiped out from under it:
+   * `isStarting` true with no `activeBulkStartup`, so every auto-start registered for the
+   * rest of it was deferred, never started, and left out of its rollback.
    */
   private releaseStartupLatch(input: {
     didAutoAttachSignals: boolean;
     detachReason: string;
     abandonReason: string;
   }): void {
-    this.isStarting = false;
+    const shouldDetach =
+      input.didAutoAttachSignals || this.autoAttachedSignalsDuringStartup;
+    const abandonedAutoStarts = Array.from(this.deferredAutoStartNames);
 
-    if (input.didAutoAttachSignals || this.autoAttachedSignalsDuringStartup) {
+    // `isStarting` first of all: the detach below defers while it is set.
+    this.isStarting = false;
+    this.autoAttachedSignalsDuringStartup = false;
+    this.activeBulkStartup = null;
+    this.deferredAutoStartNames.clear();
+    this.unexpectedStopsDuringStartup.clear();
+
+    if (shouldDetach) {
       this.detachSignalsIfIdle(input.detachReason);
     } else {
       this.runDeferredSignalDetach('bulk startup');
     }
 
-    this.autoAttachedSignalsDuringStartup = false;
-    this.activeBulkStartup = null;
-    this.abandonDeferredAutoStarts(input.abandonReason);
+    // Not while a startup started from the detach is running: it reads the whole
+    // registry, so these are in its order, and it is the one that starts them.
+    if (!this.isStarting) {
+      this.warnAbandonedAutoStarts(abandonedAutoStarts, input.abandonReason);
+    }
   }
 
   private async stopAllComponentsOperation(
@@ -4439,12 +4456,17 @@ export class LifecycleManager
       const shouldAutoStart = _options?.autoStart === true;
 
       if (shouldAutoStart) {
+        // Taken before the start's `await`, not after: the startup this start belongs
+        // to may roll back while it is still in flight, and the one active by then - if
+        // any - is not it. And before the log lines below, which run caller code.
+        const bulkStartup = this.activeBulkStartup;
+
         // Bulk startup first: `isStarted` turns true as soon as its first component is
         // running, and a start without `allowDuringBulkStartup` is refused with
         // `startup_in_progress` for the rest of it.
         if (
           this.isStarting &&
-          (this.activeBulkStartup === null || this.activeBulkStartup.isOrdering)
+          (bulkStartup === null || bulkStartup.isOrdering)
         ) {
           // A bulk startup that has taken its latch but not begun its loop - an
           // `attachSignalsBeforeStartup` listener on `signals-attached` registering this -
@@ -4458,7 +4480,7 @@ export class LifecycleManager
             .info('AutoStart: left to the bulk startup about to run');
           progress.isAutoStartDeferred = true;
           this.deferredAutoStartNames.add(componentName);
-        } else if (this.isStarting) {
+        } else if (this.isStarting && bulkStartup !== null) {
           // Manager is currently starting - allow during bulk startup
           this.logger
             .entity(componentName)
@@ -4468,13 +4490,9 @@ export class LifecycleManager
           // why - and set before the start's `await`, so a failure after it knows.
           progress.didAutoStartAttempt = true;
 
-          // Taken before the start's `await`, not after: the startup this start belongs
-          // to may roll back while it is still in flight, and the one active by then -
-          // if any - is not it.
-          const bulkStartup = this.activeBulkStartup;
-          const joinedDeadline = bulkStartup?.deadlineContext;
+          const joinedDeadline = bulkStartup.deadlineContext;
 
-          if (bulkStartup?.isRollingBack === true) {
+          if (bulkStartup.isRollingBack) {
             // Already being undone: starting it now would run `start()` while the
             // rollback stops its dependencies, only to stop it again.
             progress.startResult = {
@@ -4517,7 +4535,7 @@ export class LifecycleManager
           // dependents first, since it was started after them - rather than leaving it
           // running on top of dependencies the rollback stopped. One that lands after
           // the rollback began is past it, so it stops itself and fails the auto-start.
-          if (progress.startResult.success && bulkStartup !== null) {
+          if (progress.startResult.success) {
             if (bulkStartup.isRollingBack) {
               this.logger
                 .entity(componentName)
@@ -7914,10 +7932,15 @@ export class LifecycleManager
     }
 
     this.isSignalDetachDeferred = false;
-    this.logger.info(
-      options.logMessage ?? `Auto-detaching process signals after ${trigger}`,
-    );
-    this.autoDetachSignals(trigger);
+    // Detached before the line is logged, not after: logging runs the caller's sinks,
+    // and one that starts a startup from here attached nothing - the handlers were still
+    // up - so detaching after it pulled them out from under that startup. Worded in the
+    // past, and only on success: a failed detach has already said so.
+    if (this.autoDetachSignals(trigger)) {
+      this.logger.info(
+        options.logMessage ?? `Auto-detached process signals after ${trigger}`,
+      );
+    }
   }
 
   /**
@@ -7960,9 +7983,11 @@ export class LifecycleManager
    * `ProcessSignalManager.detach()` marks itself detached even when it throws, so there
    * is nothing to retry.
    */
-  private autoDetachSignals(trigger: string): void {
+  private autoDetachSignals(trigger: string): boolean {
     try {
       this.detachSignals();
+
+      return true;
     } catch (error) {
       this.logger.error(
         'Could not detach process signals after {{trigger}}: {{error.message}}',
@@ -7972,6 +7997,8 @@ export class LifecycleManager
         `lifecycle-manager signal detach after ${trigger}`,
         error,
       );
+
+      return false;
     }
   }
 
@@ -8208,23 +8235,19 @@ export class LifecycleManager
   /**
    * Warn about auto-starts left to a bulk startup that ended before its loop could start
    * them. Their registration already answered `autoStartDeferred: true`, and nothing else
-   * will start them, so this is the one place that says so.
+   * will start them, so this is the one place that says so. Handed the names, already
+   * taken off the set: the warning runs caller code, and the set may by then belong to
+   * the next startup.
    */
-  private abandonDeferredAutoStarts(reason: string): void {
-    if (this.deferredAutoStartNames.size === 0) {
+  private warnAbandonedAutoStarts(components: string[], reason: string): void {
+    if (components.length === 0) {
       return;
     }
 
     this.logger.warn(
       'Bulk startup {{reason}}; deferred auto-starts were not attempted',
-      {
-        params: {
-          reason,
-          components: Array.from(this.deferredAutoStartNames),
-        },
-      },
+      { params: { reason, components } },
     );
-    this.deferredAutoStartNames.clear();
   }
 
   /**
@@ -8564,6 +8587,20 @@ export class LifecycleManager
     error?: Error;
     targetFound?: boolean;
   }): InsertComponentAtResult {
+    // Built before the log and the event: both run caller code, which may register
+    // something the snapshot never read, or end the startup `duringStartup` describes.
+    const result = this.buildInsertResultFailure({
+      componentName: input.componentName,
+      position: input.position,
+      targetComponentName: input.targetComponentName,
+      registrationIndexBefore: input.registrationIndexBefore,
+      code: input.code,
+      reason: input.message,
+      error: input.error,
+      targetFound: input.targetFound,
+      dependencySnapshot: input.dependencySnapshot,
+    });
+
     this.logger
       .entity(input.componentName)
       .warn(
@@ -8585,17 +8622,7 @@ export class LifecycleManager
       targetComponentName: input.targetComponentName,
     });
 
-    return this.buildInsertResultFailure({
-      componentName: input.componentName,
-      position: input.position,
-      targetComponentName: input.targetComponentName,
-      registrationIndexBefore: input.registrationIndexBefore,
-      code: input.code,
-      reason: input.message,
-      error: input.error,
-      targetFound: input.targetFound,
-      dependencySnapshot: input.dependencySnapshot,
-    });
+    return result;
   }
 
   private buildInsertResultFailure(input: {
@@ -8616,11 +8643,22 @@ export class LifecycleManager
     let startupOrder: string[];
 
     try {
-      startupOrder = this.getStartupOrderInternal(
-        undefined,
-        undefined,
-        input.dependencySnapshot,
+      // Only from a snapshot that read every registered component. One refused before
+      // reading - an invalid position, a shutdown - or cut short by a shutdown has no
+      // list for some of them, and ordering those as though they had no dependencies
+      // reported an order that ignored them. Empty, as the failure event reports it,
+      // rather than an order that is not the startup order.
+      const isSnapshotComplete = this.components.every((component) =>
+        input.dependencySnapshot.has(component),
       );
+
+      startupOrder = isSnapshotComplete
+        ? this.getStartupOrderInternal(
+            undefined,
+            undefined,
+            input.dependencySnapshot,
+          )
+        : [];
     } catch (error) {
       // Defensive: This should never happen in normal operation since we validate
       // cycles before registration. However, if this.components somehow contains

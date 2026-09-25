@@ -909,7 +909,12 @@ export interface RegistrationResultBase extends BaseOperationResult {
   /** Registration index after the operation (null if not registered) */
   registrationIndexAfter: number | null;
 
-  /** Resolved startup order after applying dependency constraints */
+  /**
+   * Resolved startup order after applying dependency constraints. On a refusal it is the
+   * order of the registry as it stands, or empty when the registration was refused before
+   * it had read every registered component's dependencies - an invalid position, or a
+   * shutdown in progress. Also empty for an `unknown_error` failure before the commit.
+   */
   startupOrder: string[];
 
   /** Whether registration occurred during startup */

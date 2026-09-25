@@ -3,8 +3,8 @@ import { toError } from './to-error';
 import { DOUBLE_EOL } from './constants';
 import { installGlobalEventTarget } from './global-event-target';
 import { reportToHost } from './internal/report-to-host';
-import { reportToConsole } from './internal/report-to-console';
 import { adoptPromise, isAdoptable } from './internal/adopt-promise';
+import { reportThroughHandler } from './internal/failure-reporter';
 
 // Node.js has a global `ErrorEvent` constructor (Node 25+) but does not make `globalThis`
 // an EventTarget, so the global event methods must be supplied before anything can be
@@ -146,45 +146,14 @@ export function runCallbackSafely(
   onError: (error: unknown) => void,
   thisArg?: unknown,
 ): void {
-  // `onError` is the last rung that can still describe the original failure. If it throws,
-  // the failure it was handed must not be replaced by its own, and must not escape.
-  const safeOnError = (error: unknown): void => {
-    // Rendered, not passed raw: `console.error` of the errors themselves prints every
-    // `additionalInfo` and `cause` field in the clear, which the masking in
-    // `errorToString` - what `reportCallbackError()` renders with - exists to prevent.
-    // `errorToString` guards its own reads and does not throw.
-    const reportFailedHandler = (
-      verb: string,
-      reportingError: unknown,
-    ): void => {
-      reportToConsole(
-        `Error handler for ${callbackName} ${verb} while reporting a failure${DOUBLE_EOL}` +
-          `${errorToString(reportingError)}${DOUBLE_EOL}` +
-          `Original failure:${DOUBLE_EOL}${errorToString(error)}`,
-      );
-    };
-
-    try {
-      // Typed `void`, but an `async` handler returns a promise: one that rejects is
-      // followed, not dropped as an unhandled rejection.
-      const result: unknown = onError(error);
-
-      if (isAdoptable(result)) {
-        void adoptPromise(result).then(undefined, (reportingError: unknown) => {
-          reportFailedHandler('rejected', reportingError);
-        });
-      }
-    } catch (reportingError) {
-      reportFailedHandler('threw', reportingError);
-    }
-  };
-
   // `typeof`, not `isFunction()`: its `instanceof Function` fallback reads the value's
   // prototype, which throws for a revoked proxy - outside every guard here. Anything
   // callable is `typeof 'function'` anyway.
   if (typeof callback !== 'function') {
-    safeOnError(
+    reportToOnError(
+      callbackName,
       new Error(`Callback provided for ${callbackName} is not a function`),
+      onError,
     );
 
     return;
@@ -213,11 +182,41 @@ export function runCallbackSafely(
       // the rejection. Every untrusted-callback surface funnels through here:
       // `safeHandleCallback`, `EventEmitter`, `ProcessSignalManager`,
       // `LRUCache.onChange`, `PromiseProtectedResolver`.
-      void adoptPromise(result).then(undefined, safeOnError);
+      void adoptPromise(result).then(undefined, (error: unknown) => {
+        reportToOnError(callbackName, error, onError);
+      });
     }
   } catch (error) {
-    safeOnError(error);
+    reportToOnError(callbackName, error, onError);
   }
+}
+
+/**
+ * Hand a callback's failure to `onError`, through the rung every supplied failure handler
+ * in this library shares. `onError` is the last rung that can still describe the original
+ * failure: a throw or rejection from it goes to the console alongside that failure rather
+ * than replacing it or escaping, and a `then` on its return that cannot be read is not
+ * mistaken for either. Module-level, so a callback that succeeds - every guarded log line
+ * - allocates nothing for a failure it never had.
+ */
+function reportToOnError(
+  callbackName: string,
+  error: unknown,
+  onError: (error: unknown) => void,
+): void {
+  reportThroughHandler(
+    // Typed `void`, but an `async` handler returns a promise: one that rejects is
+    // followed, not dropped as an unhandled rejection.
+    () => onError(error),
+    // Rendered, not passed raw: `console.error` of the error itself prints every
+    // `additionalInfo` and `cause` field in the clear, which the masking in
+    // `errorToString` - what `reportCallbackError()` renders with - exists to prevent.
+    () =>
+      `Error handler for ${callbackName} failed while reporting a failure${DOUBLE_EOL}` +
+      `Original failure:${DOUBLE_EOL}${errorToString(error)}`,
+    undefined,
+    `onError for ${callbackName}`,
+  );
 }
 
 /**

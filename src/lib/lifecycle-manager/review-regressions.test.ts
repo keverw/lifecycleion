@@ -3992,4 +3992,145 @@ describe('LifecycleManager - review regressions', () => {
       ),
     ).toBe(true);
   });
+
+  test('a startup retried from signals-detached keeps its own startup record', async () => {
+    const { logger, manager } = setup({
+      attachSignalsBeforeStartup: true,
+      detachSignalsOnStop: true,
+    });
+    const signals = fakeSignals(manager);
+    const gate = deferred();
+    const a = new Plain(logger, 'a');
+    let aStarts = 0;
+    a.start = (): Promise<void> => {
+      aStarts++;
+
+      return aStarts === 1
+        ? Promise.reject(new Error('first start fails'))
+        : gate.promise;
+    };
+    await manager.registerComponent(a);
+
+    // Stands in for a `signals-detached` listener, which runs inside the detach.
+    let retry: Promise<{ success: boolean }> | undefined;
+    manager.detachSignals = (): void => {
+      (
+        manager as unknown as { processSignalManager: unknown }
+      ).processSignalManager = undefined;
+      retry ??= manager.startAllComponents();
+    };
+
+    const first = await manager.startAllComponents();
+
+    expect(first.success).toBe(false);
+    expect(retry).toBeDefined();
+    expect(signals.attachCalls()).toBe(2);
+
+    // Registered while the retry is starting `a`: it joins the retry.
+    const registration = await manager.insertComponentAt(
+      new Plain(logger, 'y'),
+      'end',
+      undefined,
+      { autoStart: true },
+    );
+    gate.resolve();
+    const second = await retry;
+
+    expect(registration.autoStartDeferred).not.toBe(true);
+    expect(registration.autoStartAttempted).toBe(true);
+    expect(second?.success).toBe(true);
+    expect(manager.isComponentRunning('y')).toBe(true);
+  });
+
+  test('a registration refused before reading every list reports no startup order', async () => {
+    const { logger, manager } = setup();
+    // `a` depends on `b`, so the real order is [b, a].
+    await manager.registerComponent(new Plain(logger, 'a', ['b']));
+    await manager.registerComponent(new Plain(logger, 'b'));
+
+    expect(manager.getStartupOrder().startupOrder).toEqual(['b', 'a']);
+
+    const refused = await manager.insertComponentAt(
+      new Plain(logger, 'c'),
+      'after',
+      'missing',
+    );
+
+    expect(refused.code).toBe('target_not_found');
+    expect(refused.startupOrder).toEqual(['b', 'a']);
+
+    const invalid = await manager.insertComponentAt(
+      new Plain(logger, 'd'),
+      'sideways' as 'start',
+    );
+
+    expect(invalid.success).toBe(false);
+    expect(invalid.startupOrder).toEqual([]);
+  });
+
+  test('a refusal reports the order from before its listeners registered anything', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    const late = new Plain(logger, 'late');
+    let lateRegistration: Promise<unknown> | undefined;
+    manager.once('component:registration-rejected', () => {
+      lateRegistration = manager.registerComponent(late);
+    });
+
+    const refused = await manager.insertComponentAt(
+      new Plain(logger, 'c'),
+      'after',
+      'missing',
+    );
+    await lateRegistration;
+
+    expect(refused.success).toBe(false);
+    expect(refused.startupOrder).toEqual(['a']);
+    expect(manager.getComponentNames()).toEqual(['a', 'late']);
+  });
+
+  test('a startup retried from the auto-detach log line keeps its signals', async () => {
+    let retry: Promise<{ success: boolean }> | undefined;
+    // Filled in below: the sink needs the manager the logger is handed to.
+    const holder: { manager?: LifecycleManager } = {};
+    const logger = new Logger({
+      sinks: [
+        {
+          write: (entry: { message: string }): void => {
+            if (entry.message.includes('Auto-detached process signals')) {
+              retry ??= holder.manager?.startAllComponents();
+            }
+          },
+        },
+      ],
+      callProcessExit: false,
+    });
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      attachSignalsBeforeStartup: true,
+      detachSignalsOnStop: true,
+    });
+    holder.manager = manager;
+    const signals = fakeSignals(manager);
+    const a = new Plain(logger, 'a');
+    let aStarts = 0;
+    a.start = (): Promise<void> => {
+      aStarts++;
+
+      return aStarts === 1
+        ? Promise.reject(new Error('first start fails'))
+        : Promise.resolve();
+    };
+    await manager.registerComponent(a);
+
+    const first = await manager.startAllComponents();
+    const second = await retry;
+
+    expect(first.success).toBe(false);
+    expect(second?.success).toBe(true);
+    expect(manager.isComponentRunning('a')).toBe(true);
+    // The failed startup's detach did not land on top of the retry's handlers.
+    expect(signals.isAttached()).toBe(true);
+  });
 });
