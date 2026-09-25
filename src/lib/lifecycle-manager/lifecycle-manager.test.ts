@@ -911,8 +911,8 @@ describe('LifecycleManager - BaseComponent', () => {
       const a = new TestComponent(logger, { name: 'a', dependencies: ['b'] });
       const b = new TestComponent(logger, { name: 'b', dependencies: ['a'] });
 
-      // Inject the backing entries; components is now a committed-only view.
-      (lifecycle as any).componentEntries = [a, b];
+      // Inject the committed entries to exercise invalid registry handling.
+      (lifecycle as any).components = [a, b];
 
       const orderResult = lifecycle.getStartupOrder();
       expect(orderResult.success).toBe(false);
@@ -6419,15 +6419,9 @@ describe('LifecycleManager - Bulk Operations', () => {
         dependencies: ['comp-x'],
       });
 
-      // Access private backing entries to add them directly
+      // Access private committed entries to add them directly
       // This simulates having cycles that weren't caught during registration
-      (lifecycle as any).componentEntries.push(
-        compA,
-        compB,
-        compX,
-        compY,
-        compZ,
-      );
+      (lifecycle as any).components.push(compA, compB, compX, compY, compZ);
 
       const result = lifecycle.validateDependencies();
 

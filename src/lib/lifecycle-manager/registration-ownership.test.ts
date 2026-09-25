@@ -191,3 +191,106 @@ test('nested registration preserves reserved entries and detects cycles through 
   expect(names).toEqual(['nested']);
   expect(manager.getComponentNames()).toEqual(['outer', 'nested']);
 });
+
+test('nested registration reports only committed names when its outer hook rolls back', async () => {
+  const { logger, manager } = setup();
+  const { release } = claimReports();
+  const outer = new Plain(logger, 'outer');
+  const nested = new Plain(logger, 'nested');
+  let result: ReturnType<typeof manager.registerComponent> | undefined;
+  const orders: string[][] = [];
+  manager.on('component:registered', (event) => {
+    orders.push((event as { startupOrder: string[] }).startupOrder);
+  });
+  outer._markRegistered = (): void => {
+    result = manager.registerComponent(nested);
+    throw new Error('outer failed');
+  };
+  try {
+    await manager.registerComponent(outer);
+    expect((await result)?.startupOrder).toEqual(['nested']);
+    expect((await result)?.registrationIndexAfter).toBe(0);
+    expect(orders).toEqual([['nested']]);
+    expect(manager.getComponentNames()).toEqual(['nested']);
+  } finally {
+    release();
+  }
+});
+
+test('insertion targets must be committed even within registration hooks', async () => {
+  const { logger, manager } = setup();
+  const outer = new Plain(logger, 'outer');
+  let result: ReturnType<typeof manager.insertComponentAt> | undefined;
+  outer._markRegistered = (): void => {
+    result = manager.insertComponentAt(
+      new Plain(logger, 'sidecar'),
+      'after',
+      'outer',
+    );
+  };
+  await manager.registerComponent(outer);
+  expect((await result)?.code).toBe('target_not_found');
+  expect(
+    (
+      await manager.insertComponentAt(
+        new Plain(logger, 'sidecar'),
+        'after',
+        'outer',
+      )
+    ).success,
+  ).toBe(true);
+  expect(manager.getComponentNames()).toEqual(['outer', 'sidecar']);
+});
+
+test('a failure during provisional map writes releases the name and instance', async () => {
+  const { logger, manager } = setup();
+  const { release } = claimReports();
+  const component = new Plain(logger, 'a');
+  // Inject a failure before either registration hook, after reserving the entry.
+  // This probes the transaction boundary independently of a particular ULID source.
+  const timestamps = (
+    manager as unknown as { componentTimestamps: Map<string, unknown> }
+  ).componentTimestamps;
+  const set = timestamps.set.bind(timestamps);
+  let shouldThrow = true;
+  timestamps.set = (name, value): typeof timestamps => {
+    if (shouldThrow) {
+      shouldThrow = false;
+      throw new Error('map write failed');
+    }
+    return set(name, value);
+  };
+  try {
+    expect((await manager.registerComponent(component)).registered).toBe(false);
+    expect(manager.hasComponent('a')).toBe(false);
+    expect((await manager.registerComponent(component)).registered).toBe(true);
+    expect(manager.hasComponent('a')).toBe(true);
+  } finally {
+    release();
+  }
+});
+
+test('registration rolls back when its hook starts shutdown', async () => {
+  const { logger, manager } = setup();
+  const peer = new Plain(logger, 'peer');
+  const gate = deferred();
+  peer.stop = (): Promise<void> => gate.promise;
+  await manager.registerComponent(peer);
+  await manager.startComponent('peer');
+  const component = new Plain(logger, 'a');
+  let shutdown: ReturnType<typeof manager.stopAllComponents> | undefined;
+  component._markRegistered = (): void => {
+    shutdown = manager.stopAllComponents();
+  };
+  try {
+    const result = await manager.registerComponent(component);
+    expect(result.code).toBe('shutdown_in_progress');
+    expect(result.registered).toBe(false);
+    expect(manager.hasComponent('a')).toBe(false);
+  } finally {
+    gate.resolve();
+    await shutdown;
+  }
+  component._markRegistered = (): void => {};
+  expect((await manager.registerComponent(component)).registered).toBe(true);
+});

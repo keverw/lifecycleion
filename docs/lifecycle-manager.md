@@ -996,11 +996,16 @@ not-found results (unless a broader operation already blocks them), and bulk sta
 excludes it. No public `registering` state is introduced. Its name and instance remain
 reserved for registration validation, so hooks cannot unregister and re-register the
 same instance or reuse its name. Nested registrations of other components remain
-supported, with dependency-cycle checks including provisional reservations.
+supported, with dependency-cycle checks including provisional reservations. Insertion
+with `before` or `after` requires a committed target; targeting a provisional component
+returns `target_not_found`. Registration results and events report startup order using
+committed names only, excluding any enclosing registration that may still roll back.
 
 Successful hooks publish the registration before queued notifications are delivered.
-Failed hooks roll back only their own entry, without announcing an unregistration or
-orphaning resources from a nested start. A bulk startup invoked by a hook operates on
+Any failure during provisional bookkeeping or hooks rolls back only that entry. A hook
+that starts an active shutdown also prevents publication and returns
+`shutdown_in_progress`. Rollback does not announce an unregistration or
+orphan resources from a nested start. A bulk startup invoked by a hook operates on
 committed components; the new component can be started after registration, or use the
 existing `autoStart` registration option.
 

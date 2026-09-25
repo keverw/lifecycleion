@@ -375,18 +375,10 @@ export class LifecycleManager
   // Component management
   private componentEntries: BaseComponent[] = [];
 
-  // Operations see only committed registrations. Keeping provisional entries out of
-  // this single registry view prevents bulk startup, messaging, health checks and
-  // unregister from observing a component whose registration hooks can still fail.
-  // Registration alone uses the underlying entries to reserve names/instances and
-  // validate dependency cycles, including across nested registrations.
-  private get components(): BaseComponent[] {
-    return this.pendingRegistrations.size === 0
-      ? this.componentEntries
-      : this.componentEntries.filter(
-          (component) => !this.pendingRegistrations.has(component),
-        );
-  }
+  // Operations share this committed snapshot. Publication and unregister replace
+  // it once; reads during registration hooks never allocate a filtered copy.
+  private components: BaseComponent[] = [];
+
   private runningComponents: Set<string> = new Set();
   private componentStates: Map<string, ComponentState> = new Map();
   private stalledComponents: Map<string, ComponentStallInfo> = new Map();
@@ -2660,6 +2652,8 @@ export class LifecycleManager
         (c) => this.nameOf(c) !== name,
       );
 
+      this.components = this.components.filter((c) => this.nameOf(c) !== name);
+
       // Clean up state - the manager's own maps first, all of them, so the component is
       // either fully registered or fully gone. The component's hooks run after, contained:
       // they can be overridden, and one that threw used to leave the component out of the
@@ -4208,7 +4202,7 @@ export class LifecycleManager
             isRegisteredWithAManager =
               component._isRegisteredWithManager() || isRegisteredWithAManager;
           },
-          true,
+          () => this.componentEntries,
         );
       }
 
@@ -4332,19 +4326,14 @@ export class LifecycleManager
           : position === 'end'
             ? this.componentEntries.length
             : this.componentEntries.indexOf(this.components[insertIndex]);
+      const at =
+        reservedInsertIndex < 0
+          ? this.componentEntries.length
+          : reservedInsertIndex;
       const nextComponents = [
-        ...this.componentEntries.slice(
-          0,
-          reservedInsertIndex < 0
-            ? this.componentEntries.length
-            : reservedInsertIndex,
-        ),
+        ...this.componentEntries.slice(0, at),
         component,
-        ...this.componentEntries.slice(
-          reservedInsertIndex < 0
-            ? this.componentEntries.length
-            : reservedInsertIndex,
-        ),
+        ...this.componentEntries.slice(at),
       ];
 
       if (!('dependencies' in candidateRead)) {
@@ -4394,50 +4383,52 @@ export class LifecycleManager
       const wasOptionalReported =
         this.reportedOptionalReadFailures.has(component);
 
+      const shutdownDuringRegistration = new Error(
+        'Shutdown began during registration',
+      );
+      let wasShutdownInterrupted = false;
       this.withTransition(() => {
-        // A new array rather than a splice, as unregister does: a loop over the registry
-        // that a re-entrant registration lands in keeps walking the array it started on.
-        this.pendingRegistrations.add(component);
-        this.componentEntries = nextComponents;
-        this.registrationGenerations.set(component, ++this.registrationCount);
-        progress.hasCommitted = true;
-        progress.wasDuringStartup = this.isStarting;
-        committed.startupOrder = startupOrder;
-        this.registeredNames.set(component, componentName);
-        this.componentStates.set(componentName, 'registered');
-        this.componentTimestamps.set(componentName, {
-          startedAt: null,
-          stoppedAt: null,
-        });
-        this.componentErrors.set(componentName, null);
-        this.componentUnexpectedStopHadError.delete(componentName);
-        this.componentStartAttemptTokens.set(componentName, ulid());
-
-        // Create callbacks for component-scoped lifecycle
-        const internalCallbacks: LifecycleInternalCallbacks = {
-          sendMessageInternal: (
-            compName: string,
-            payload: unknown,
-            from: string | null,
-            options?: SendMessageOptions,
-          ) => this.sendMessageSettled(compName, payload, from, options),
-          broadcastMessageInternal: (
-            payload: unknown,
-            from: string | null,
-            opts?: BroadcastOptions,
-          ) => this.broadcastMessageSettled(payload, from, opts),
-          getValueInternal: <T = unknown>(
-            compName: string,
-            key: string,
-            from: string | null,
-            options?: GetValueOptions,
-          ) => this.getValueSettled<T>(compName, key, from, options),
-        };
-
-        // The lifecycle setter and registration hook can both be overridden. Keep
-        // the entry unavailable to startup throughout them and their rollback, and
-        // release the guard on every exit before queued notifications are delivered.
         try {
+          // A new array rather than a splice, as unregister does: a loop over the registry
+          // that a re-entrant registration lands in keeps walking the array it started on.
+          this.pendingRegistrations.add(component);
+          this.componentEntries = nextComponents;
+          this.registrationGenerations.set(component, ++this.registrationCount);
+          progress.wasDuringStartup = this.isStarting;
+          this.registeredNames.set(component, componentName);
+          this.componentStates.set(componentName, 'registered');
+          this.componentTimestamps.set(componentName, {
+            startedAt: null,
+            stoppedAt: null,
+          });
+          this.componentErrors.set(componentName, null);
+          this.componentUnexpectedStopHadError.delete(componentName);
+          this.componentStartAttemptTokens.set(componentName, ulid());
+
+          // Create callbacks for component-scoped lifecycle
+          const internalCallbacks: LifecycleInternalCallbacks = {
+            sendMessageInternal: (
+              compName: string,
+              payload: unknown,
+              from: string | null,
+              options?: SendMessageOptions,
+            ) => this.sendMessageSettled(compName, payload, from, options),
+            broadcastMessageInternal: (
+              payload: unknown,
+              from: string | null,
+              opts?: BroadcastOptions,
+            ) => this.broadcastMessageSettled(payload, from, opts),
+            getValueInternal: <T = unknown>(
+              compName: string,
+              key: string,
+              from: string | null,
+              options?: GetValueOptions,
+            ) => this.getValueSettled<T>(compName, key, from, options),
+          };
+
+          // The lifecycle setter and registration hook can both be overridden. Keep
+          // the entry unavailable to startup throughout them and their rollback, and
+          // release the guard on every exit before queued notifications are delivered.
           (
             component as unknown as { lifecycle: ComponentLifecycleRef }
           ).lifecycle = new ComponentLifecycle(
@@ -4446,6 +4437,13 @@ export class LifecycleManager
             internalCallbacks,
           );
           component._markRegistered();
+          // A hook may start shutdown while this entry is invisible to that pass.
+          // It must not publish a new component into the pass after its snapshot.
+          if (this.isShuttingDown) {
+            wasShutdownInterrupted = true;
+            throw shutdownDuringRegistration;
+          }
+          progress.hasCommitted = true;
         } catch (error) {
           this.componentEntries = this.componentEntries.filter(
             (registered) => registered !== component,
@@ -4488,11 +4486,34 @@ export class LifecycleManager
             this.reportedOptionalReadFailures.delete(component);
           }
 
-          throw error;
+          if (error !== shutdownDuringRegistration) {
+            throw error;
+          }
         } finally {
           this.pendingRegistrations.delete(component);
+          // Publish only after hooks succeed (or rebuild after rollback), before
+          // notifications flush. Nested commits and unregisters remain in the live
+          // entries; never restore the stale array captured before calling hooks.
+          this.components = this.componentEntries.filter(
+            (entry) => !this.pendingRegistrations.has(entry),
+          );
         }
       });
+      if (wasShutdownInterrupted) {
+        return this.refuseRegistration({
+          ...refusal,
+          code: 'shutdown_in_progress',
+          message: LIFECYCLE_MANAGER_MESSAGE_REGISTER_SHUTDOWN_IN_PROGRESS,
+          logLine: 'Cannot commit component registration during shutdown',
+        });
+      }
+      // The full order above validates reserved entries for cycles. Results and
+      // events describe only committed entries: an enclosing hook may still fail.
+      const committedNames = new Set(
+        this.components.map((entry) => this.nameOf(entry)),
+      );
+      startupOrder = startupOrder.filter((name) => committedNames.has(name));
+      committed.startupOrder = startupOrder;
       // Only now: a registration refused above - a dependency cycle, a failed hook - used
       // to have spent this component's one report, leaving the registration that
       // followed silent about the same broken list.
@@ -5712,17 +5733,7 @@ export class LifecycleManager
     const { component } = preconditions;
 
     if (!this.stalledComponents.has(name)) {
-      if (this.isComponentRunning(name)) {
-        return this.stopComponentInternal(name);
-      }
-
-      return {
-        success: false,
-        componentName: name,
-        reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_RUNNING,
-        code: 'component_not_running',
-        status: this.getComponentStatus(name),
-      };
+      return this.stopComponentInternal(name);
     }
 
     this.logger
@@ -9078,7 +9089,7 @@ export class LifecycleManager
     // Run each time every component has been read. It may run the caller's code and
     // register more, which are then read in turn, within the same bound.
     onSettled?: () => void,
-    shouldIncludeProvisional = false,
+    source: () => BaseComponent[] = () => this.components,
   ): {
     reads: Map<BaseComponent, T>;
     isSettled: boolean;
@@ -9097,9 +9108,7 @@ export class LifecycleManager
       !this.isReadCurrent(reads, component);
 
     for (let round = 0; ; round++) {
-      let unread = (
-        shouldIncludeProvisional ? this.componentEntries : this.components
-      ).filter(isUnread);
+      let unread = source().filter(isUnread);
 
       if (
         unread.length === 0 &&
@@ -9109,9 +9118,7 @@ export class LifecycleManager
       ) {
         didRead = false;
         onSettled();
-        unread = (
-          shouldIncludeProvisional ? this.componentEntries : this.components
-        ).filter(isUnread);
+        unread = source().filter(isUnread);
       }
 
       if (unread.length === 0) {

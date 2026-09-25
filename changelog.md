@@ -216,6 +216,10 @@
   nested unregister/re-register from bypassing rollback protection. Successful hooks
   publish the component; failed hooks cannot leave phantom startup state or emit an
   unregistration for an unpublished component. No public component state is added.
+  Registration results/events omit provisional names from startup order. Failures in
+  provisional bookkeeping release reservations, and hooks that start shutdown cause
+  registration to roll back with `shutdown_in_progress`. `before`/`after` insertion
+  targets must be committed. Registry reads now reuse a maintained committed array.
 
 - Graceful and force component stops recheck registration and stop eligibility after reading
   caller-owned timeout and abort-hook properties. A getter that starts another stop
