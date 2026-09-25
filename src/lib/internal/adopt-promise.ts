@@ -119,6 +119,16 @@ function isPlainObject(value: object): boolean {
 export function adoptPromise<T>(
   value: T | PromiseLike<T>,
 ): Promise<Awaited<T>> {
+  return adopt(value);
+}
+
+// A captured then belongs to the classification read. Reusing it keeps accessor side
+// effects and return-contract classification stable. Native own-then handling below
+// still takes precedence: it reads the promise's internal state, not that override.
+function adopt<T>(
+  value: T | PromiseLike<T>,
+  capturedThen?: (...args: unknown[]) => unknown,
+): Promise<Awaited<T>> {
   return new Promise<Awaited<T>>((resolve, reject) => {
     // A primitive - what most hooks return, synchronously - cannot be a promise or a
     // thenable.
@@ -158,6 +168,17 @@ export function adoptPromise<T>(
       }
     }
 
+    if (capturedThen !== undefined) {
+      // Thenable invocation is a microtask, just like Promise.resolve assimilation.
+      // Ignore its return: only the supplied resolve/reject callbacks settle adoption.
+      void Promise.resolve()
+        .then(() => {
+          Reflect.apply(capturedThen, value, [resolve, reject]);
+        })
+        .catch(reject);
+      return;
+    }
+
     // The standard adoption, as `await` performs it; the intrinsic is applied to the
     // adopted promise, which is this module's own.
     // eslint-disable-next-line @typescript-eslint/unbound-method
@@ -193,11 +214,22 @@ export class UnreadableReturn extends Error {
 export function adoptResult(
   result: unknown,
 ): Promise<unknown> | UnreadableReturn | undefined {
-  let shouldAdopt: boolean;
+  if (inheritsFromPromise(result)) {
+    return adoptPromise(result);
+  }
+  if (
+    result === null ||
+    (typeof result !== 'object' && typeof result !== 'function')
+  ) {
+    return undefined;
+  }
+  let then: unknown;
   try {
-    shouldAdopt = isAdoptable(result);
+    then = Reflect.get(result, 'then', result);
   } catch (error) {
     return new UnreadableReturn(error);
   }
-  return shouldAdopt ? adoptPromise(result) : undefined;
+  return typeof then === 'function'
+    ? adopt(result, then as (...args: unknown[]) => unknown)
+    : undefined;
 }

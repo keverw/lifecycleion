@@ -131,7 +131,7 @@ export function createGuardedLoggerService(
     deleteProperty(_shadow, property): boolean {
       return Reflect.deleteProperty(target, property);
     },
-    get(_shadow, property, receiver): unknown {
+    get(_shadow, property): unknown {
       // `Object.hasOwn`, not `in`: `in` walks `Object.prototype`, so `toString` and
       // friends would come back as log methods and be wrapped. Everything else -
       // including the service's own fields - passes straight through untouched.
@@ -144,7 +144,7 @@ export function createGuardedLoggerService(
         // `JSON.stringify` reading `toJSON` - would otherwise throw at its call site
         // for a service whose accessor throws. Answered as absent.
         try {
-          const passthrough: unknown = Reflect.get(target, property, receiver);
+          const passthrough: unknown = Reflect.get(target, property, target);
 
           return passthrough;
         } catch (error) {

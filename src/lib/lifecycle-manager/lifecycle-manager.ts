@@ -487,9 +487,10 @@ export class LifecycleManager
   // registration back. Never let start() acquire resources for an uncommitted entry:
   // rollback would remove the only manager record capable of stopping them.
   private readonly pendingRegistrations = new Set<BaseComponent>();
-  // Rollback still reserves names and instances, but its component must no longer
-  // contribute dependency reads or cycle edges to registrations made by cleanup hooks.
-  private readonly rollingBackRegistrations = new Set<BaseComponent>();
+  // Rollback removes registry entries before cleanup hooks, but keeps their original
+  // names reserved independently until cleanup returns. Registry readers never need
+  // to know about half-rolled-back entries or filter them at individual call sites.
+  private readonly rollbackReservations = new Map<BaseComponent, string>();
   // Successful registrations retain their validated read for reports and checks of
   // components committed by nested hooks, without probing caller getters again.
   private readonly committedDependencyReads = new WeakMap<
@@ -4217,10 +4218,7 @@ export class LifecycleManager
             isRegisteredWithAManager =
               component._isRegisteredWithManager() || isRegisteredWithAManager;
           },
-          () =>
-            this.componentEntries.filter(
-              (entry) => !this.rollingBackRegistrations.has(entry),
-            ),
+          () => this.componentEntries,
         );
       }
 
@@ -4345,9 +4343,7 @@ export class LifecycleManager
 
       try {
         startupOrder = this.getStartupOrderInternal(
-          nextComponents.filter(
-            (entry) => !this.rollingBackRegistrations.has(entry),
-          ),
+          nextComponents,
           {
             component,
             name: componentName,
@@ -4393,7 +4389,10 @@ export class LifecycleManager
       // this attempt. Keep the reservation until finally so rollback hooks cannot
       // claim its name while cleanup is still in progress.
       const rollBack = (): void => {
-        this.rollingBackRegistrations.add(component);
+        this.rollbackReservations.set(component, componentName);
+        this.componentEntries = this.componentEntries.filter(
+          (registered) => registered !== component,
+        );
         // Rolled back, so this registration did not commit after all.
         progress.hasCommitted = false;
         if (previousGeneration === undefined) {
@@ -4414,11 +4413,8 @@ export class LifecycleManager
           component,
           'lifecycle-manager registration rollback',
         );
-        // The hook has finished. Only now release the instance/name reservation;
-        // restoring an older recorded name first would also expose this name early.
-        this.componentEntries = this.componentEntries.filter(
-          (registered) => registered !== component,
-        );
+        // The separate reservation retains the attempted name while bookkeeping is
+        // restored; finally releases it after cleanup has completely finished.
         if (previousRecordedName === undefined) {
           this.registeredNames.delete(component);
         } else {
@@ -4514,7 +4510,7 @@ export class LifecycleManager
           throw error;
         } finally {
           this.pendingRegistrations.delete(component);
-          this.rollingBackRegistrations.delete(component);
+          this.rollbackReservations.delete(component);
           // Publish only after hooks succeed (or rebuild after rollback), before
           // notifications flush. Nested commits and unregisters remain in the live
           // entries; never restore the stale array captured before calling hooks.
@@ -9104,13 +9100,24 @@ export class LifecycleManager
   }
 
   private isInstanceReserved(component: BaseComponent): boolean {
-    return this.componentEntries.includes(component);
+    return (
+      this.componentEntries.includes(component) ||
+      this.rollbackReservations.has(component)
+    );
   }
 
   private isNameReserved(name: string): boolean {
-    return this.componentEntries.some(
-      (component) => this.nameOf(component) === name,
-    );
+    if (
+      this.componentEntries.some((component) => this.nameOf(component) === name)
+    ) {
+      return true;
+    }
+    for (const reservedName of this.rollbackReservations.values()) {
+      if (reservedName === name) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Current-generation dependency metadata, without running caller getters. */

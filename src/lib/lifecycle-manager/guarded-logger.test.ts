@@ -9,7 +9,7 @@
 
 import { describe, test, expect } from 'bun:test';
 import { Logger } from '../logger';
-import type { LoggerService } from '../logger/logger-service';
+import { LoggerService } from '../logger/logger-service';
 import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
 import { createGuardedLoggerService } from './guarded-logger';
@@ -884,4 +884,20 @@ describe('LifecycleManager - a logger that cannot be trusted', () => {
     // Only the manager's own service logger is the stand-in.
     expect(internals.logger).not.toBe(logger);
   });
+});
+
+test('passthrough accessors preserve the service receiver', () => {
+  class Service extends LoggerService {
+    #value = 42;
+    public get value(): number {
+      return this.#value;
+    }
+  }
+  const service = new Service(
+    () => {},
+    () => '',
+    'test',
+  );
+  const guarded = createGuardedLoggerService(service);
+  expect(Reflect.get(guarded, 'value')).toBe(42);
 });

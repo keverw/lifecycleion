@@ -170,3 +170,37 @@ test('close preserves sink identity when a close hook removes its own sink', asy
     output.mockRestore();
   }
 });
+
+test('a sink thenable is adopted from one accessor read without a false sink failure', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  let reads = 0;
+  let calls = 0;
+  const logger = new Logger({
+    callProcessExit: false,
+    sinks: [
+      {
+        write: () =>
+          ({
+            get then() {
+              if (++reads > 1) {
+                throw new Error('second read');
+              }
+              return (resolve: () => void): void => {
+                calls++;
+                resolve();
+              };
+            },
+          }) as unknown as Promise<void>,
+      },
+    ],
+  });
+  try {
+    logger.info('entry');
+    await sleep(0);
+    expect(reads).toBe(1);
+    expect(calls).toBe(1);
+    expect(output).not.toHaveBeenCalled();
+  } finally {
+    output.mockRestore();
+  }
+});

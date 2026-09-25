@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { adoptPromise } from './adopt-promise';
+import { adoptPromise, adoptResult, UnreadableReturn } from './adopt-promise';
 
 // The rejection's message, or `'resolved'`.
 async function settle(promise: Promise<unknown>): Promise<string> {
@@ -213,4 +213,39 @@ describe('adoptPromise', () => {
     expect(await adopted).toBe('plain');
     expect(intrinsicCallsOnThenable).toBe(0);
   });
+});
+
+test('adoptResult reads a thenable accessor once and invokes it asynchronously with its receiver', async () => {
+  let reads = 0;
+  let calls = 0;
+  const value = {
+    get then() {
+      if (++reads > 1) {
+        throw new Error('second read');
+      }
+      return function (this: unknown, resolve: (value: number) => void): void {
+        expect(this).toBe(value);
+        calls++;
+        resolve(42);
+      };
+    },
+  };
+  const pending = adoptResult(value);
+  expect(pending).not.toBeInstanceOf(UnreadableReturn);
+  expect(reads).toBe(1);
+  expect(calls).toBe(0);
+  expect(await pending).toBe(42);
+  expect(reads).toBe(1);
+  expect(calls).toBe(1);
+});
+
+test('adoptResult preserves an unreadable first read as a return-contract error', () => {
+  const cause = new Error('first read');
+  const result = adoptResult({
+    get then(): never {
+      throw cause;
+    },
+  });
+  expect(result).toBeInstanceOf(UnreadableReturn);
+  expect((result as UnreadableReturn).cause).toBe(cause);
 });

@@ -211,6 +211,13 @@
 
 ## Unreleased
 
+- Callback/sink return adoption reads a thenable's `then` accessor once and invokes
+  the captured method asynchronously with its original receiver. Native promise
+  own-`then` protection remains intact. Registration rollback now removes its registry
+  entry before cleanup while reserving its name and instance separately, eliminating
+  per-reader rollback filters. Guarded logger passthrough getters use the service as
+  their receiver, matching guarded methods.
+
 - Both callback helpers route unreadable `then` returns through the configured error
   channel as return-contract errors, preserving the getter failure as `cause`; the
   awaited helper also returns `success: false`. Terminal reports from anonymous

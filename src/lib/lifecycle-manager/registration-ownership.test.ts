@@ -721,6 +721,9 @@ test('rollback reservations do not contribute dependency reads to cleanup regist
   component._markUnregistered = (): void => {
     unmark();
     isRollingBack = true;
+    // Raw registry readers must not need a special rollback filter. Reservations
+    // live separately until this hook returns; the duplicate tests above cover them.
+    expect(Reflect.get(manager, 'componentEntries')).toEqual([]);
     nested = manager.registerComponent(new Plain(logger, 'b'));
   };
   try {

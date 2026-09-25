@@ -1014,8 +1014,9 @@ Lifecycle state maps are written only after the hooks and commit checks succeed.
 A hook failure or a partial publication failure rolls back only that entry. Its name
 and instance remain reserved until the overridable unregistration hook has returned,
 so rollback cannot silently replace the rejected registration. Entries being rolled
-back are excluded from nested dependency reads and cycle checks while their names
-and instances remain reserved. A hook
+back are removed from the registry before cleanup; a separate reservation retains
+their original names and instances until cleanup returns. Nested dependency reads,
+cycle checks, and insertion positions therefore use only live registry entries. A hook
 that starts an active shutdown also prevents publication and returns
 `shutdown_in_progress`. A hook that begins bulk startup is rechecked before publication:
 using the pass's dependency snapshot plus separate metadata for registrations committed
@@ -3800,3 +3801,13 @@ How to reduce the risk:
 ### 3. No Atomic Restart
 
 `restartAllComponents()` is not atomic. There is a window where all components are stopped but none are started yet. For zero-downtime restarts, use rolling restarts with individual `restartComponent()` calls.
+
+### Logger contract
+
+The manager requires lifecycleion's concrete `Logger` and obtains its internal
+`LoggerService` through `logger.service()`. It is not a generic adapter for arbitrary
+third-party logging interfaces. The internal guard contains logger failures; it does
+not promise transparent behavior for arbitrary custom service implementations.
+In particular, entity children are cached by name (up to 256 per guarded service),
+which relies on the built-in `LoggerService.entity()` being context-independent.
+Passthrough getters and log methods use the original service as their receiver.

@@ -1693,7 +1693,7 @@ not reported as a sink invocation failure, and an already-delivered diagnostic i
 repeated. The report identifies the sink by its one-based position in the applicable
 sink list. Close reports use the original log or diagnostic list, preferring the log
 list for a sink present in both. Sink close methods are read once and their results use the same guarded
-adoption, including native promises with overwritten own `then` properties. Actual sink throws and asynchronous rejections retain their normal handling.
+adoption, including native promises with overwritten own `then` properties. Thenable accessors are read once; their captured method is invoked asynchronously with the original receiver. Actual sink throws and asynchronous rejections retain their normal handling.
 
 Callback helpers (`runCallbackSafely`, `safeHandleCallback`, and
 `safeHandleCallbackAndWait`) report unreadable returns through the configured
