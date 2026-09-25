@@ -472,6 +472,12 @@ export class LifecycleManager
   // Each registered component's name, read once when it is committed to the registry.
   // See {@link nameOf}.
   private readonly registeredNames = new WeakMap<BaseComponent, string>();
+
+  // Registry bookkeeping exists while the component receives its lifecycle ref and
+  // registration hook. Those overrides can re-enter, but may still throw and roll
+  // registration back. Never let start() acquire resources for an uncommitted entry:
+  // rollback would remove the only manager record capable of stopping them.
+  private readonly pendingRegistrations = new WeakSet<BaseComponent>();
   // How deep the manager is inside escalation handling - `onForceShutdown` and the
   // escalation events it emits. A shutdown request made from in there continues the
   // cycle being handled rather than starting one. See `acceptShutdownPass()`.
@@ -4335,9 +4341,9 @@ export class LifecycleManager
         throw error;
       }
 
-      // Commit registration - the registry entry and every state map together, before
-      // any of the component's own code runs, so the component is never in the registry
-      // without its state.
+      // Prepare registration - the registry entry and every state map together,
+      // before the component's own code runs. Startup remains blocked until its
+      // registration hook succeeds, because failure rolls these provisional writes back.
       // An instance registered before keeps its old recorded name after unregistering,
       // for work still in flight; a rollback below puts that back rather than dropping
       // it.
@@ -4389,9 +4395,10 @@ export class LifecycleManager
           ) => this.getValueSettled<T>(compName, key, from, options),
         };
 
-        // The component's side of the registration. It can be overridden, so a throw here
-        // rolls the commit above back out - all or nothing, as unregister is - and the
-        // registration fails as unregistered.
+        // The lifecycle setter and registration hook can both be overridden. Keep
+        // the entry unavailable to startup throughout them and their rollback, and
+        // release the guard on every exit before queued notifications are delivered.
+        this.pendingRegistrations.add(component);
         try {
           (
             component as unknown as { lifecycle: ComponentLifecycleRef }
@@ -4444,6 +4451,8 @@ export class LifecycleManager
           }
 
           throw error;
+        } finally {
+          this.pendingRegistrations.delete(component);
         }
       });
       // Only now: a registration refused above - a dependency cycle, a failed hook - used
@@ -6276,6 +6285,18 @@ export class LifecycleManager
             ? LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND
             : `Component "${name}" was unregistered or replaced while its start was being prepared`,
         code: 'component_not_found',
+      };
+    }
+
+    // A provisional registry entry is not yet available to start. In particular,
+    // forceStalled/allowDuringBulkStartup must not bypass this check. Both individual
+    // and bulk startup reach this gate before invoking any start hook.
+    if (this.pendingRegistrations.has(component)) {
+      return {
+        success: false,
+        componentName: name,
+        code: 'component_not_found',
+        reason: `Component "${name}" has not completed registration`,
       };
     }
 

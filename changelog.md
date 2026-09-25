@@ -211,6 +211,11 @@
 
 ## Unreleased
 
+- Starts during a component's registration hooks are now refused until registration
+  commits (`component_not_found` unless a broader operation already blocks startup). A throwing `_markRegistered()` or lifecycle setter
+  can no longer leave resources acquired by a nested `start()` unmanaged after
+  registration rollback. Startup override options do not bypass this guard.
+
 - Graceful and force component stops recheck registration and stop eligibility after reading
   caller-owned timeout and abort-hook properties. A getter that starts another stop
   can no longer cause duplicate `stop()` or force-hook calls or force the other attempt; replacing
