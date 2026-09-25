@@ -3726,7 +3726,8 @@ describe('LifecycleManager - review regressions', () => {
     // Stands in for the component being unregistered and another registered under its
     // name while its auto-start finished - which a real unregister cannot do mid-start.
     manager.once('component:started', () => {
-      (manager as unknown as { components: Plain[] }).components = [
+      // Inject the backing entries rather than the committed-only getter.
+      (manager as unknown as { componentEntries: Plain[] }).componentEntries = [
         replacement,
       ];
     });

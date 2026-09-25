@@ -990,12 +990,19 @@ A request that arrives during the restart's _startup_ phase aborts that startup 
 #### Individual Component Operations
 
 Registration is provisional while the component receives its `lifecycle` reference and
-runs `_markRegistered()`. A re-entrant start during those hooks is refused. Unless
-a broader startup or shutdown operation already blocks it, the result is
-`component_not_found` with a reason indicating registration is incomplete.
-Startup override options do not bypass this registration check. No `start()` hook runs until registration commits. If a
-registration hook throws, rollback cannot orphan resources from a nested start;
-after rollback, the instance can be registered again.
+runs `_markRegistered()`. Until both succeed, the component is absent from the manager's
+public registry: lookups and status return no component, component operations return
+not-found results (unless a broader operation already blocks them), and bulk startup
+excludes it. No public `registering` state is introduced. Its name and instance remain
+reserved for registration validation, so hooks cannot unregister and re-register the
+same instance or reuse its name. Nested registrations of other components remain
+supported, with dependency-cycle checks including provisional reservations.
+
+Successful hooks publish the registration before queued notifications are delivered.
+Failed hooks roll back only their own entry, without announcing an unregistration or
+orphaning resources from a nested start. A bulk startup invoked by a hook operates on
+committed components; the new component can be started after registration, or use the
+existing `autoStart` registration option.
 
 Both stop phases validate the registered instance and its state after reading caller-owned
 properties. The graceful phase reads
