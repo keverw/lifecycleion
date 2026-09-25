@@ -294,6 +294,41 @@ describe('runCallbackSafely', () => {
     expect(failures).toEqual([]);
   });
 
+  it('follows an async onError that rejects instead of leaving it unhandled', async () => {
+    const captured = muteConsoleError();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      runCallbackSafely(
+        'cb',
+        () => Promise.reject(new Error('callback rejected')),
+        [],
+        // eslint-disable-next-line @typescript-eslint/no-misused-promises -- an async onError is the subject of this test
+        async () => {
+          await Promise.resolve();
+
+          throw new Error('handler rejected');
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(unhandled).toEqual([]);
+      expect(captured.some((line) => line.includes('handler rejected'))).toBe(
+        true,
+      );
+      expect(captured.some((line) => line.includes('callback rejected'))).toBe(
+        true,
+      );
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      restoreConsoleError();
+    }
+  });
+
   it('reports a rejected native promise whose own then is not a function', async () => {
     const failures: unknown[] = [];
     const thrown = new Error('rejected');

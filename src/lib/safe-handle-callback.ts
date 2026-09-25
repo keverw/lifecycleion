@@ -133,7 +133,9 @@ export function safeHandleCallback(
  * @param callback The untrusted value to invoke.
  * @param args Arguments to pass to the callback.
  * @param onError Receives the thrown value, the rejection reason, or a synthesized
- *                `Error` when `callback` is not callable.
+ *                `Error` when `callback` is not callable. It may be `async`: a promise it
+ *                returns is followed, and a rejection lands on the console rung like a
+ *                throw does.
  * @param thisArg Receiver to invoke `callback` with. Omit for a plain function or a
  *                closure; supply the owning object when passing an extracted method.
  */
@@ -147,18 +149,33 @@ export function runCallbackSafely(
   // `onError` is the last rung that can still describe the original failure. If it throws,
   // the failure it was handed must not be replaced by its own, and must not escape.
   const safeOnError = (error: unknown): void => {
-    try {
-      onError(error);
-    } catch (reportingError) {
-      // Rendered, not passed raw: `console.error` of the errors themselves prints every
-      // `additionalInfo` and `cause` field in the clear, which the masking in
-      // `errorToString` - what `reportCallbackError()` renders with - exists to prevent.
-      // `errorToString` guards its own reads and does not throw.
+    // Rendered, not passed raw: `console.error` of the errors themselves prints every
+    // `additionalInfo` and `cause` field in the clear, which the masking in
+    // `errorToString` - what `reportCallbackError()` renders with - exists to prevent.
+    // `errorToString` guards its own reads and does not throw.
+    const reportFailedHandler = (
+      verb: string,
+      reportingError: unknown,
+    ): void => {
       reportToConsole(
-        `Error handler for ${callbackName} threw while reporting a failure${DOUBLE_EOL}` +
+        `Error handler for ${callbackName} ${verb} while reporting a failure${DOUBLE_EOL}` +
           `${errorToString(reportingError)}${DOUBLE_EOL}` +
           `Original failure:${DOUBLE_EOL}${errorToString(error)}`,
       );
+    };
+
+    try {
+      // Typed `void`, but an `async` handler returns a promise: one that rejects is
+      // followed, not dropped as an unhandled rejection.
+      const result: unknown = onError(error);
+
+      if (isAdoptable(result)) {
+        void adoptPromise(result).then(undefined, (reportingError: unknown) => {
+          reportFailedHandler('rejected', reportingError);
+        });
+      }
+    } catch (reportingError) {
+      reportFailedHandler('threw', reportingError);
     }
   };
 

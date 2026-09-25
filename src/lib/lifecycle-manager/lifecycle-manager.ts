@@ -190,18 +190,14 @@ interface RegistrationProgress {
   didAutoStartAttempt: boolean;
   isAutoStartDeferred: boolean;
   startResult: ComponentOperationResult | undefined;
-  // What broke the registration, recorded as its catch is entered: should that catch
-  // throw too, the net reports this rather than the catch's own failure.
-  failure?: { error: unknown };
-  // Whether the catch got as far as sending that failure to the global channel (or
-  // deciding not to, for a cycle): the net sends it otherwise, so it is never lost.
-  isFailureReported: boolean;
   // Whether `component:registered` or `component:registration-rejected` went out for
-  // this call, so whatever answers last announces it exactly once.
+  // this call, so it is announced exactly once whichever path answers.
   isAnnounced: boolean;
-  // The name as registration read and checked it, for the net to use rather than
-  // asking the component again - which may answer differently, or throw.
-  componentName?: string;
+  // What this call's `getName()` answered, whatever it was; absent if it threw. The net
+  // names the component from this rather than asking again - which runs the
+  // component's code a second time, may answer differently, and would fall back to a
+  // name an earlier registration of the same instance recorded.
+  nameRead?: { value: unknown };
 }
 
 function newRegistrationProgress(): RegistrationProgress {
@@ -212,9 +208,32 @@ function newRegistrationProgress(): RegistrationProgress {
     didAutoStartAttempt: false,
     isAutoStartDeferred: false,
     startResult: undefined,
-    isFailureReported: false,
     isAnnounced: false,
   };
+}
+
+/**
+ * `targetFound` for a registration refused before it looked for a target: `false` for a
+ * position that has one, and absent for `start` / `end`.
+ */
+function defaultTargetFound(position: InsertPosition): boolean | undefined {
+  return position === 'before' || position === 'after' ? false : undefined;
+}
+
+/**
+ * The name to report a registration under, from what its `getName()` answered - never
+ * by asking again. Only a string is a name; anything else is described by its type.
+ */
+function reportedComponentName(progress: RegistrationProgress): string {
+  if (progress.nameRead === undefined) {
+    return '<unknown>';
+  }
+
+  const { value } = progress.nameRead;
+
+  return typeof value === 'string'
+    ? value
+    : `<getName() returned ${value === null ? 'null' : typeof value}>`;
 }
 
 /**
@@ -245,8 +264,7 @@ function committedRegistrationReport(
     return {
       startupOrder: [],
       manualPositionRespected: false,
-      targetFound:
-        position === 'before' || position === 'after' ? false : undefined,
+      targetFound: defaultTargetFound(position),
       autoStartAttempted: false,
     };
   }
@@ -259,9 +277,7 @@ function committedRegistrationReport(
     targetFound:
       'targetFound' in committed
         ? committed.targetFound
-        : position === 'before' || position === 'after'
-          ? false
-          : undefined,
+        : defaultTargetFound(position),
     autoStartAttempted: progress.didAutoStartAttempt,
     ...(progress.isAutoStartDeferred ? { autoStartDeferred: true } : {}),
     ...(progress.didAutoStartAttempt
@@ -2398,114 +2414,24 @@ export class LifecycleManager
           options,
           progress,
         ),
-      (error, reason) => {
-        const registrationIndex = this.components.indexOf(component);
-        // Only this call's own entry: an instance a re-entrant registration put there
-        // is not where this one landed.
-        const registrationIndexAfter =
-          progress.hasCommitted && registrationIndex !== -1
-            ? registrationIndex
-            : null;
-        // The name registration read and checked, when it got that far.
-        const componentName =
-          progress.componentName ?? this.readComponentNameSafely(component);
-
-        // The failure that broke the registration, when its catch was reached and threw
-        // in turn: the caller needs the first, not the one met while reporting it, which
-        // `settleOperation` has already sent to the global channel. The first goes
-        // there too, if the catch threw before sending it.
-        const failure = progress.failure;
-        const reportedError =
-          failure === undefined ? error : toError(failure.error);
-        const reportedReason =
-          failure === undefined
-            ? reason
-            : `${isInsertAction ? 'insertComponentAt' : 'registerComponent'}() failed unexpectedly: ${describeError(failure.error)}`;
-
-        if (failure !== undefined && !progress.isFailureReported) {
-          reportCallbackError(
-            'lifecycle-manager registerComponent',
-            failure.error,
-          );
-        }
-
-        // Guarded: this net must answer, and the catch it stands in for just threw.
-        let actualPosition: InsertComponentAtResult['actualPosition'];
-
-        try {
-          actualPosition = this.describeRegistryPosition(
-            registrationIndexAfter,
-          );
-        } catch {
-          actualPosition = undefined;
-        }
-
-        // As the registration's own catch reports it - the same builder.
-        const report = committedRegistrationReport(
-          progress,
+      // Reached only for what fails before the registration's own `try` - in practice a
+      // `getName()` that threw or answered a non-string: every later failure is answered
+      // inside the registration by the same method, which cannot throw. Named from what `getName()` answered, never by asking again.
+      (error, reason) =>
+        this.answerRegistrationFailure({
+          component,
+          componentName: reportedComponentName(progress),
+          error,
+          // `settleOperation` has reported it.
+          isErrorReported: true,
+          reason,
           position,
-          actualPosition,
-        );
-
-        // Announced unless the registration already did: anyone tracking the registry
-        // would otherwise never hear of a component that is in it, and may be running -
-        // or of one refused, as every other refusal is announced. A `getName()` that
-        // threw, or answered a non-string, lands here with nothing announced.
-        if (!progress.isAnnounced) {
-          try {
-            if (progress.hasCommitted) {
-              this.emitCommittedRegistration({
-                componentName,
-                index: registrationIndexAfter,
-                isInsertAction,
-                position,
-                targetComponentName,
-                report,
-              });
-            } else {
-              this.lifecycleEvents.componentRegistrationRejected({
-                name: componentName,
-                reason: 'unknown_error',
-                message: reportedReason,
-                registrationIndexBefore: null,
-                registrationIndexAfter: null,
-                startupOrder: [],
-                requestedPosition: isInsertAction
-                  ? { position, targetComponentName }
-                  : undefined,
-                manualPositionRespected: false,
-                targetFound: report.targetFound,
-              });
-            }
-          } catch (eventError) {
-            reportCallbackError(
-              'lifecycle-manager registerComponent event',
-              eventError,
-            );
-          }
-        }
-
-        return {
-          action: 'insert',
-          success: false,
-          // Whether this call committed, as the registration's own catch decides it -
-          // not registry membership, which a re-entrant registration of the same
-          // instance can produce while this one committed nothing.
-          registered: progress.hasCommitted,
-          componentName,
-          reason: reportedReason,
-          code: 'unknown_error',
-          error: reportedError,
-          // Unknown: reading it means asking the component for its name, which may be
-          // what threw.
+          targetComponentName,
+          isInsertAction,
+          // Unknown: there is no name to look it up by.
           registrationIndexBefore: null,
-          registrationIndexAfter,
-          requestedPosition: { position, targetComponentName },
-          duringStartup: this.isStarting,
-          ...report,
-          startResult: progress.hasCommitted ? progress.startResult : undefined,
-        };
-      },
+          progress,
+        }),
     );
   }
 
@@ -4121,6 +4047,7 @@ export class LifecycleManager
     progress: RegistrationProgress,
   ): Promise<InsertComponentAtResult> {
     const componentName: unknown = component.getName();
+    progress.nameRead = { value: componentName };
 
     // The name is recorded here and trusted from then on - see `nameOf()` - so a
     // `getName()` that breaks its contract is refused now rather than recorded as a
@@ -4131,8 +4058,6 @@ export class LifecycleManager
         `Component getName() must return a string, got ${typeof componentName}`,
       );
     }
-
-    progress.componentName = componentName;
 
     // Read again once the reads below are done: they can register the name.
     let registrationIndexBefore = this.getComponentIndex(componentName);
@@ -4223,16 +4148,14 @@ export class LifecycleManager
           params: { position },
         });
 
-        this.lifecycleEvents.componentRegistrationRejected({
+        this.emitRegistrationRejected({
           name: componentName,
           reason: 'invalid_position',
           message: `Invalid insert position: "${String(position)}". Expected one of: start, end, before, after.`,
           registrationIndexBefore,
-          registrationIndexAfter: registrationIndexBefore,
-          requestedPosition: isInsertAction
-            ? { position, targetComponentName }
-            : undefined,
-          manualPositionRespected: false,
+          isInsertAction,
+          position,
+          targetComponentName,
         });
 
         return this.buildInsertResultFailure({
@@ -4252,16 +4175,14 @@ export class LifecycleManager
           .entity(componentName)
           .warn('Cannot register component during shutdown');
 
-        this.lifecycleEvents.componentRegistrationRejected({
+        this.emitRegistrationRejected({
           name: componentName,
           reason: 'shutdown_in_progress',
           message: LIFECYCLE_MANAGER_MESSAGE_REGISTER_SHUTDOWN_IN_PROGRESS,
           registrationIndexBefore,
-          registrationIndexAfter: registrationIndexBefore,
-          requestedPosition: isInsertAction
-            ? { position, targetComponentName }
-            : undefined,
-          manualPositionRespected: false,
+          isInsertAction,
+          position,
+          targetComponentName,
         });
 
         return this.buildInsertResultFailure({
@@ -4289,17 +4210,15 @@ export class LifecycleManager
             'Cannot register component during startup - it is a required dependency for other components',
           );
 
-        this.lifecycleEvents.componentRegistrationRejected({
+        this.emitRegistrationRejected({
           name: componentName,
           reason: 'startup_in_progress',
           message:
             LIFECYCLE_MANAGER_MESSAGE_REGISTER_REQUIRED_DEPENDENCY_DURING_STARTUP,
           registrationIndexBefore,
-          registrationIndexAfter: registrationIndexBefore,
-          requestedPosition: isInsertAction
-            ? { position, targetComponentName }
-            : undefined,
-          manualPositionRespected: false,
+          isInsertAction,
+          position,
+          targetComponentName,
         });
 
         return this.buildInsertResultFailure({
@@ -4330,16 +4249,14 @@ export class LifecycleManager
               : 'Component instance already registered with another lifecycle manager',
           );
 
-        this.lifecycleEvents.componentRegistrationRejected({
+        this.emitRegistrationRejected({
           name: componentName,
           reason: 'duplicate_instance',
           message,
           registrationIndexBefore,
-          registrationIndexAfter: registrationIndexBefore,
-          requestedPosition: isInsertAction
-            ? { position, targetComponentName }
-            : undefined,
-          manualPositionRespected: false,
+          isInsertAction,
+          position,
+          targetComponentName,
         });
 
         return this.buildInsertResultFailure({
@@ -4358,16 +4275,14 @@ export class LifecycleManager
         this.logger
           .entity(componentName)
           .warn('Component with this name already registered');
-        this.lifecycleEvents.componentRegistrationRejected({
+        this.emitRegistrationRejected({
           name: componentName,
           reason: 'duplicate_name',
           message: `Component "${componentName}" is already registered.`,
           registrationIndexBefore,
-          registrationIndexAfter: registrationIndexBefore,
-          requestedPosition: isInsertAction
-            ? { position, targetComponentName }
-            : undefined,
-          manualPositionRespected: false,
+          isInsertAction,
+          position,
+          targetComponentName,
         });
 
         return this.buildInsertResultFailure({
@@ -4387,18 +4302,17 @@ export class LifecycleManager
         this.logger.entity(componentName).warn('Target component not found', {
           params: { target: targetComponentName },
         });
-        this.lifecycleEvents.componentRegistrationRejected({
+        this.emitRegistrationRejected({
           name: componentName,
           reason: 'target_not_found',
           target: targetComponentName,
           message: `Target component "${targetComponentName ?? ''}" not found in registry.`,
           registrationIndexBefore,
           registrationIndexAfter: null,
-          requestedPosition: isInsertAction
-            ? { position, targetComponentName }
-            : undefined,
-          manualPositionRespected: false,
           targetFound: false,
+          isInsertAction,
+          position,
+          targetComponentName,
         });
 
         // Block registration during startup if this component would be a dependency
@@ -4477,19 +4391,17 @@ export class LifecycleManager
             .warn('Registration rejected due to dependency cycle', {
               params: { cycle: error.additionalInfo.cycle },
             });
-          this.lifecycleEvents.componentRegistrationRejected({
+          this.emitRegistrationRejected({
             name: componentName,
             reason: 'dependency_cycle',
             cycle: error.additionalInfo.cycle,
             message: error.message,
             registrationIndexBefore,
-            registrationIndexAfter: registrationIndexBefore,
-            requestedPosition: isInsertAction
-              ? { position, targetComponentName }
-              : undefined,
-            manualPositionRespected: false,
             targetFound:
               position === 'before' || position === 'after' ? true : undefined,
+            isInsertAction,
+            position,
+            targetComponentName,
           });
 
           return this.buildInsertResultFailure({
@@ -4815,102 +4727,198 @@ export class LifecycleManager
         startResult: progress.startResult,
       };
     } catch (error) {
-      // Handle unexpected errors during registration
-      progress.failure = { error };
-      const err = toError(error);
-      const code: RegistrationFailureCode =
-        err instanceof DependencyCycleError
-          ? 'dependency_cycle'
-          : 'unknown_error';
+      // Answered by the same guarded code the safety net above uses, which cannot throw:
+      // the net is then reached only for a `getName()` that failed, before this `try`.
+      return this.answerRegistrationFailure({
+        component,
+        componentName,
+        error,
+        isErrorReported: false,
+        reason: undefined,
+        position,
+        targetComponentName,
+        isInsertAction,
+        registrationIndexBefore,
+        progress,
+      });
+    }
+  }
 
-      // Reported for the reason `getStartupOrder()` reports it.
-      if (code === 'unknown_error') {
-        reportCallbackError('lifecycle-manager registerComponent', error);
+  /**
+   * The answer to a registration that failed unexpectedly - from its own catch, or from
+   * the safety net above it for a `getName()` that failed first. One place, every step
+   * guarded, so it cannot throw: the report on the global `'error'` channel, the log
+   * line, the announcement - `component:registered` for one that committed,
+   * `component:registration-rejected` otherwise, once - and the result, which says what
+   * a committed registration had done rather than a refusal's defaults.
+   */
+  private answerRegistrationFailure(input: {
+    component: BaseComponent;
+    componentName: string;
+    error: unknown;
+    // Whether the error is on the global channel already - the net's is.
+    isErrorReported: boolean;
+    // The net's wording; the error's own when not given.
+    reason: string | undefined;
+    position: InsertPosition;
+    targetComponentName: string | undefined;
+    isInsertAction: boolean;
+    registrationIndexBefore: number | null;
+    progress: RegistrationProgress;
+  }): InsertComponentAtResult {
+    const { componentName, position, progress } = input;
+    const err = toError(input.error);
+    // A step that throws is reported and skipped, never allowed to replace the answer.
+    const contain = (step: string, run: () => void): void => {
+      try {
+        run();
+      } catch (stepError) {
+        reportCallbackError(
+          `lifecycle-manager registerComponent ${step}`,
+          stepError,
+        );
       }
+    };
+    let cycle: string[] | undefined;
 
-      progress.isFailureReported = true;
+    contain('cycle', () => {
+      if (err instanceof DependencyCycleError) {
+        cycle = err.additionalInfo.cycle;
+      }
+    });
 
+    const code: RegistrationFailureCode =
+      cycle !== undefined ? 'dependency_cycle' : 'unknown_error';
+
+    // Reported for the reason `getStartupOrder()` reports it; a cycle is the caller's
+    // configuration, answered by the result.
+    if (code === 'unknown_error' && !input.isErrorReported) {
+      reportCallbackError('lifecycle-manager registerComponent', input.error);
+    }
+
+    contain('log', () => {
       this.logger
         .entity(componentName)
         .error('Registration failed with unexpected error: {{error.message}}', {
           params: { error: err },
         });
+    });
 
-      // `registered` is whether this call added the component, as on success: a throw
-      // after the commit - from an auto-start, say - leaves it added, and both the event
-      // and the result must say so. Where it is now is read back from the registry, and
-      // is `null` if a listener has removed it since.
-      const indexOfComponent = this.components.indexOf(component);
-      const registrationIndexNow =
-        indexOfComponent === -1 ? null : indexOfComponent;
-      const isRegistered = progress.hasCommitted;
-      // What it reports, on both the event and the result; see
-      // `committedRegistrationReport()`.
-      const report = committedRegistrationReport(
-        progress,
-        position,
-        this.describeRegistryPosition(registrationIndexNow),
-      );
+    // `registered` is whether this call added the component, as on success: a throw
+    // after the commit - from an auto-start, say - leaves it added, and both the event
+    // and the result must say so. Where it is now is read back from the registry, and
+    // is `null` if a listener has removed it since.
+    const isRegistered = progress.hasCommitted;
+    const indexOfComponent = this.components.indexOf(input.component);
+    const registrationIndexNow =
+      isRegistered && indexOfComponent !== -1 ? indexOfComponent : null;
+    let actualPosition: InsertComponentAtResult['actualPosition'];
 
-      if (progress.isAnnounced) {
-        // The success path's event already went out; the failure came after it.
-      } else if (isRegistered) {
-        // Committed, so it is a registration as far as anyone tracking the registry is
-        // concerned; the failure is reported through the result and the log line above.
-        this.emitCommittedRegistration({
-          componentName,
-          index: registrationIndexNow,
-          isInsertAction,
-          position,
-          targetComponentName,
-          report,
-        });
-      } else {
-        this.lifecycleEvents.componentRegistrationRejected({
-          name: componentName,
-          reason: code,
-          // Guarded like every other failure-path read of a normalized throw: a
-          // brand-claiming value reaches `.message` unchanged, and a throw here would
-          // reject `registerComponent`/`insertComponentAt` rather than answering with the
-          // rejected result below.
-          message: describeError(err),
-          registrationIndexBefore,
-          registrationIndexAfter: registrationIndexBefore,
-          startupOrder: [],
-          requestedPosition: isInsertAction
-            ? { position, targetComponentName }
-            : undefined,
-          manualPositionRespected: false,
-          targetFound:
-            position === 'before' || position === 'after' ? false : undefined,
-          ...(err instanceof DependencyCycleError
-            ? { cycle: err.additionalInfo.cycle }
-            : {}),
-        });
-      }
+    contain('position', () => {
+      actualPosition = this.describeRegistryPosition(registrationIndexNow);
+    });
 
+    const report = committedRegistrationReport(
+      progress,
+      position,
+      actualPosition,
+    );
+    const reason = input.reason ?? describeError(err);
+
+    if (!progress.isAnnounced) {
       progress.isAnnounced = true;
 
-      return {
-        action: 'insert',
-        success: false,
-        registered: isRegistered,
-        componentName,
-        reason: describeError(err),
-        code,
-        error: err,
-        registrationIndexBefore,
-        registrationIndexAfter: isRegistered
-          ? registrationIndexNow
-          : registrationIndexBefore,
-        requestedPosition: { position, targetComponentName },
-        duringStartup: this.isStarting,
-        // A committed registration reports what it did before the failure rather than
-        // the refusal's defaults.
-        ...report,
-        startResult: isRegistered ? progress.startResult : undefined,
-      };
+      contain('event', () => {
+        if (isRegistered) {
+          this.emitCommittedRegistration({
+            componentName,
+            index: registrationIndexNow,
+            isInsertAction: input.isInsertAction,
+            position,
+            targetComponentName: input.targetComponentName,
+            report,
+          });
+        } else {
+          this.emitRegistrationRejected({
+            name: componentName,
+            reason: code,
+            message: reason,
+            registrationIndexBefore: input.registrationIndexBefore,
+            startupOrder: [],
+            targetFound: defaultTargetFound(position),
+            ...(cycle !== undefined ? { cycle } : {}),
+            isInsertAction: input.isInsertAction,
+            position,
+            targetComponentName: input.targetComponentName,
+          });
+        }
+      });
     }
+
+    return {
+      action: 'insert',
+      success: false,
+      registered: isRegistered,
+      componentName,
+      reason,
+      code,
+      error: err,
+      registrationIndexBefore: input.registrationIndexBefore,
+      registrationIndexAfter: isRegistered
+        ? registrationIndexNow
+        : input.registrationIndexBefore,
+      requestedPosition: {
+        position,
+        targetComponentName: input.targetComponentName,
+      },
+      duringStartup: this.isStarting,
+      ...report,
+      startResult: isRegistered ? progress.startResult : undefined,
+    };
+  }
+
+  /**
+   * `component:registration-rejected`, built in one place for every refusal and
+   * failure. `registrationIndexAfter` is `registrationIndexBefore` unless given: a
+   * refusal leaves the registry as it was.
+   */
+  private emitRegistrationRejected(input: {
+    name: string;
+    reason: RegistrationFailureCode;
+    message: string;
+    registrationIndexBefore: number | null;
+    registrationIndexAfter?: number | null;
+    target?: string;
+    cycle?: string[];
+    startupOrder?: string[];
+    targetFound?: boolean;
+    isInsertAction: boolean;
+    position: InsertPosition;
+    targetComponentName: string | undefined;
+  }): void {
+    this.lifecycleEvents.componentRegistrationRejected({
+      name: input.name,
+      reason: input.reason,
+      ...('target' in input ? { target: input.target } : {}),
+      ...(input.cycle !== undefined ? { cycle: input.cycle } : {}),
+      message: input.message,
+      registrationIndexBefore: input.registrationIndexBefore,
+      registrationIndexAfter:
+        'registrationIndexAfter' in input
+          ? input.registrationIndexAfter
+          : input.registrationIndexBefore,
+      ...(input.startupOrder !== undefined
+        ? { startupOrder: input.startupOrder }
+        : {}),
+      requestedPosition: input.isInsertAction
+        ? {
+            position: input.position,
+            targetComponentName: input.targetComponentName,
+          }
+        : undefined,
+      manualPositionRespected: false,
+      ...('targetFound' in input ? { targetFound: input.targetFound } : {}),
+    });
   }
 
   /**
@@ -9454,26 +9462,6 @@ export class LifecycleManager
     const component = this.components[index];
 
     return component === undefined ? undefined : this.nameOf(component);
-  }
-
-  /**
-   * A component's name for a failure result, without letting an overridden `getName()`
-   * that throws turn the failure report into a second failure.
-   */
-  private readComponentNameSafely(component: unknown): string {
-    const registeredName = this.registeredNames.get(component as BaseComponent);
-
-    if (registeredName !== undefined) {
-      return registeredName;
-    }
-
-    try {
-      const name: unknown = (component as BaseComponent).getName();
-
-      return typeof name === 'string' ? name : String(name);
-    } catch {
-      return '<unknown>';
-    }
   }
 
   /**

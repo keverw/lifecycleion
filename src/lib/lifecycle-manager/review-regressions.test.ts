@@ -45,8 +45,7 @@ function crashFirstRegisteredEvent(
 }
 
 // After a component's auto-start, fails the success path - describing the position
-// throws - and then the registration's catch, which describes it again, so the failure
-// reaches the safety net above it.
+// throws - and the registration's catch, which describes it again and must contain it.
 function breakCatchAfterAutoStart(manager: LifecycleManager): void {
   manager.once('component:started', () => {
     (
@@ -3790,7 +3789,7 @@ describe('LifecycleManager - review regressions', () => {
     expect(result.registrationIndexAfter).toBeNull();
   });
 
-  test('the safety net reports an auto-start that ran when the catch itself throws', async () => {
+  test('a failure after an auto-start reports it, though reporting hits a failure too', async () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new Plain(logger, 'a'));
     await manager.startAllComponents();
@@ -3811,17 +3810,16 @@ describe('LifecycleManager - review regressions', () => {
     expect(result.success).toBe(false);
     // The failure that broke the registration, not the one met reporting it.
     expect(result.error?.message).toBe('position exploded');
-    // Worded by the safety net, which is what answered.
-    expect(result.reason).toBe(
-      'registerComponent() failed unexpectedly: position exploded',
-    );
+    // The failure that broke the registration, answered by its own guarded catch -
+    // the position read failing there too is contained, not a second failure.
+    expect(result.reason).toBe('position exploded');
     expect(result.registered).toBe(true);
     expect(result.autoStartAttempted).toBe(true);
     expect(result.autoStartSucceeded).toBe(true);
     expect(result.startResult?.success).toBe(true);
   });
 
-  test('the safety net announces a committed registration and reports what it computed', async () => {
+  test('a failure after the commit announces the registration and reports what it computed', async () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new Plain(logger, 'a'));
     await manager.startAllComponents();
@@ -3926,4 +3924,34 @@ describe('LifecycleManager - review regressions', () => {
       expect(rejected).toHaveLength(1);
     },
   );
+
+  test('a re-registered instance whose getName() now fails is not named by its old name', async () => {
+    const { logger, manager } = setup();
+    const c = new Plain(logger, 'db');
+    await manager.registerComponent(c);
+    await manager.unregisterComponent('db');
+    let calls = 0;
+    c.getName = (): string => {
+      calls++;
+      throw new Error('getName exploded');
+    };
+    const rejected: Array<{ name: string }> = [];
+    manager.on('component:registration-rejected', (event: { name: string }) => {
+      rejected.push(event);
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.registerComponent(c);
+    } finally {
+      release();
+    }
+
+    expect(result.componentName).toBe('<unknown>');
+    expect(rejected.map((event) => event.name)).toEqual(['<unknown>']);
+    // Asked once - the failure is not answered by running it again.
+    expect(calls).toBe(1);
+  });
 });
