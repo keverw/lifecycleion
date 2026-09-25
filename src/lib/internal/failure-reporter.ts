@@ -48,6 +48,37 @@ export function reportThroughHandler(
   line: () => string,
   onSettled?: () => void,
 ): void {
+  // The line is the caller's to build, and may throw: rendered through this, a report
+  // still goes out - and nothing throws, or rejects unhandled, out of the one function
+  // whose contract is that reporting a failure may never raise one.
+  const safeLine = (): string => {
+    try {
+      return line();
+    } catch (lineError) {
+      return `A failure occurred, but its report could not be rendered: ${describeError(lineError)}`;
+    }
+  };
+
+  // Called exactly once, whichever way the report ends, and contained: it is the
+  // caller's guard coming down, and throwing it out of here - or into the handler's
+  // catch below, which called it again - broke the contract above.
+  let isSettled = false;
+  const settle = (): void => {
+    if (isSettled) {
+      return;
+    }
+
+    isSettled = true;
+
+    try {
+      onSettled?.();
+    } catch (settleError) {
+      reportToConsole(
+        `A failure report's settle callback threw: ${describeError(settleError)}`,
+      );
+    }
+  };
+
   if (invoke !== undefined) {
     try {
       const result: unknown = invoke();
@@ -67,17 +98,15 @@ export function reportThroughHandler(
         adoptPromise(result)
           .catch((handlerError: unknown) => {
             reportToConsole(
-              `${line()} (the failure handler also rejected: ${describeError(handlerError)})`,
+              `${safeLine()} (the failure handler also rejected: ${describeError(handlerError)})`,
             );
           })
-          .finally(() => {
-            onSettled?.();
-          });
+          .finally(settle);
 
         return;
       }
 
-      onSettled?.();
+      settle();
 
       return;
     } catch (handlerError) {
@@ -90,17 +119,17 @@ export function reportThroughHandler(
       // The console, never a channel a logger might hear: a handler that just threw is no
       // argument for reaching past the caller for a louder rung.
       reportToConsole(
-        `${line()} (the failure handler also threw: ${describeError(handlerError)})`,
+        `${safeLine()} (the failure handler also threw: ${describeError(handlerError)})`,
       );
 
-      onSettled?.();
+      settle();
 
       return;
     }
   }
 
-  reportToConsole(line());
-  onSettled?.();
+  reportToConsole(safeLine());
+  settle();
 }
 
 /**

@@ -3954,4 +3954,41 @@ describe('LifecycleManager - review regressions', () => {
     // Asked once - the failure is not answered by running it again.
     expect(calls).toBe(1);
   });
+
+  test('a deferred auto-start left by a failed signal attach is warned about', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      attachSignalsBeforeStartup: true,
+    });
+    await manager.registerComponent(new Plain(logger, 'a'));
+    let registration: Promise<{ autoStartDeferred?: boolean }> | undefined;
+    // The attach's failure is where caller code runs - a sink, here the stub itself -
+    // and registers an auto-start the startup will never reach.
+    manager.attachSignals = (): void => {
+      registration = manager.registerComponent(new Plain(logger, 'late'), {
+        autoStart: true,
+      });
+      throw new Error('attach failed');
+    };
+
+    const { release } = claimReports();
+    let startup;
+
+    try {
+      startup = await manager.startAllComponents();
+    } finally {
+      release();
+    }
+
+    expect(startup.code).toBe('signal_attach_failed');
+    expect((await registration)?.autoStartDeferred).toBe(true);
+    expect(
+      sink.logs.some((log) =>
+        log.message.includes('deferred auto-starts were not attempted'),
+      ),
+    ).toBe(true);
+  });
 });

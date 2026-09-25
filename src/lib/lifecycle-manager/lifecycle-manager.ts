@@ -212,12 +212,17 @@ function newRegistrationProgress(): RegistrationProgress {
   };
 }
 
+/** Whether `position` is relative to a target component: `before` or `after`. */
+function positionHasTarget(position: InsertPosition): boolean {
+  return position === 'before' || position === 'after';
+}
+
 /**
  * `targetFound` for a registration refused before it looked for a target: `false` for a
  * position that has one, and absent for `start` / `end`.
  */
 function defaultTargetFound(position: InsertPosition): boolean | undefined {
-  return position === 'before' || position === 'after' ? false : undefined;
+  return positionHasTarget(position) ? false : undefined;
 }
 
 /**
@@ -2867,6 +2872,11 @@ export class LifecycleManager
     if (bulkSignalAttach?.outcome === 'failed') {
       this.isStarting = false;
       this.autoAttachedSignalsDuringStartup = false;
+      // The attach's own failure report ran caller code - a logger sink - that may have
+      // registered an auto-start and left it to this startup, which will not run.
+      this.abandonDeferredAutoStarts(
+        'refused: process signals could not be attached',
+      );
 
       return {
         ...this.refusedStartupResult(
@@ -4063,8 +4073,7 @@ export class LifecycleManager
     let registrationIndexBefore = this.getComponentIndex(componentName);
     // What a committed registration has done so far, for a failure after the commit to
     // report rather than contradict: a caller told `autoStartAttempted: false` for an
-    // auto-start that ran could start the component a second time - from this catch, or
-    // from the safety net above, should this catch itself throw. Whether it committed
+    // auto-start that ran could start the component a second time. Whether it committed
     // is `progress.hasCommitted`: set by this registration's own commit, not inferred
     // from the registry, since a re-entrant registration of the same instance - from its
     // own `getDependencies()` - can put it there while this one goes on to fail before
@@ -4149,6 +4158,7 @@ export class LifecycleManager
         });
 
         this.emitRegistrationRejected({
+          progress,
           name: componentName,
           reason: 'invalid_position',
           message: `Invalid insert position: "${String(position)}". Expected one of: start, end, before, after.`,
@@ -4176,6 +4186,7 @@ export class LifecycleManager
           .warn('Cannot register component during shutdown');
 
         this.emitRegistrationRejected({
+          progress,
           name: componentName,
           reason: 'shutdown_in_progress',
           message: LIFECYCLE_MANAGER_MESSAGE_REGISTER_SHUTDOWN_IN_PROGRESS,
@@ -4211,6 +4222,7 @@ export class LifecycleManager
           );
 
         this.emitRegistrationRejected({
+          progress,
           name: componentName,
           reason: 'startup_in_progress',
           message:
@@ -4250,6 +4262,7 @@ export class LifecycleManager
           );
 
         this.emitRegistrationRejected({
+          progress,
           name: componentName,
           reason: 'duplicate_instance',
           message,
@@ -4276,6 +4289,7 @@ export class LifecycleManager
           .entity(componentName)
           .warn('Component with this name already registered');
         this.emitRegistrationRejected({
+          progress,
           name: componentName,
           reason: 'duplicate_name',
           message: `Component "${componentName}" is already registered.`,
@@ -4303,6 +4317,7 @@ export class LifecycleManager
           params: { target: targetComponentName },
         });
         this.emitRegistrationRejected({
+          progress,
           name: componentName,
           reason: 'target_not_found',
           target: targetComponentName,
@@ -4315,48 +4330,17 @@ export class LifecycleManager
           targetComponentName,
         });
 
-        // Block registration during startup if this component would be a dependency
-        // for any already-registered component (would break dependency ordering)
-        let startupOrder: string[];
-
-        try {
-          // Read afresh: this refusal has already emitted its event, whose listeners
-          // may have changed the registry since the snapshot.
-          startupOrder = this.getStartupOrderInternal();
-        } catch (error) {
-          // Defensive: This should never happen in normal operation since we validate
-          // cycles before registration. However, if this.components somehow contains
-          // a cycle (e.g., due to internal bugs or direct mutations), we must not
-          // throw from an error handler. Return empty array to fail gracefully.
-          const err = toError(error);
-
-          this.logger.warn(
-            'Failed to compute startup order in error handler: {{error.message}}',
-            {
-              params: { error: err },
-            },
-          );
-
-          startupOrder = [];
-        }
-
-        return {
-          action: 'insert',
-          success: false,
-          registered: false,
+        // Its startup order read afresh, as every refusal's is: this one has already
+        // emitted its event, whose listeners may have changed the registry since.
+        return this.buildInsertResultFailure({
           componentName,
-          reason: `Target component "${targetComponentName ?? ''}" not found in registry.`,
+          position,
+          targetComponentName,
+          registrationIndexBefore,
           code: 'target_not_found',
-          registrationIndexBefore: null,
-          registrationIndexAfter: null,
-          startupOrder,
-          requestedPosition: { position, targetComponentName },
-          manualPositionRespected: false,
+          reason: `Target component "${targetComponentName ?? ''}" not found in registry.`,
           targetFound: false,
-          duringStartup: this.isStarting,
-          autoStartAttempted: false,
-          startResult: undefined,
-        };
+        });
       }
 
       // Compute dependency order *before* committing registration mutations.
@@ -4392,13 +4376,13 @@ export class LifecycleManager
               params: { cycle: error.additionalInfo.cycle },
             });
           this.emitRegistrationRejected({
+            progress,
             name: componentName,
             reason: 'dependency_cycle',
             cycle: error.additionalInfo.cycle,
             message: error.message,
             registrationIndexBefore,
-            targetFound:
-              position === 'before' || position === 'after' ? true : undefined,
+            targetFound: positionHasTarget(position) ? true : undefined,
             isInsertAction,
             position,
             targetComponentName,
@@ -4412,8 +4396,7 @@ export class LifecycleManager
             code: 'dependency_cycle',
             reason: error.message,
             error,
-            targetFound:
-              position === 'before' || position === 'after' ? true : undefined,
+            targetFound: positionHasTarget(position) ? true : undefined,
           });
         }
         throw error;
@@ -4545,10 +4528,9 @@ export class LifecycleManager
       // Get the final registration index after insertion - by instance, as the result
       // and event read it.
       const registrationIndexAfter = this.components.indexOf(component);
-      const isTargetFound =
-        position === 'before' || position === 'after'
-          ? this.getComponentIndex(targetComponentName ?? '') !== null
-          : undefined;
+      const isTargetFound = positionHasTarget(position)
+        ? this.getComponentIndex(targetComponentName ?? '') !== null
+        : undefined;
       committed.manualPositionRespected = isManualPositionRespected;
       committed.targetFound = isTargetFound;
 
@@ -4706,6 +4688,7 @@ export class LifecycleManager
       );
 
       this.emitCommittedRegistration({
+        progress,
         componentName,
         index: registrationIndexNow,
         isInsertAction,
@@ -4713,7 +4696,6 @@ export class LifecycleManager
         targetComponentName,
         report,
       });
-      progress.isAnnounced = true;
 
       return {
         action: 'insert',
@@ -4826,11 +4808,10 @@ export class LifecycleManager
     const reason = input.reason ?? describeError(err);
 
     if (!progress.isAnnounced) {
-      progress.isAnnounced = true;
-
       contain('event', () => {
         if (isRegistered) {
           this.emitCommittedRegistration({
+            progress,
             componentName,
             index: registrationIndexNow,
             isInsertAction: input.isInsertAction,
@@ -4840,6 +4821,7 @@ export class LifecycleManager
           });
         } else {
           this.emitRegistrationRejected({
+            progress,
             name: componentName,
             reason: code,
             message: reason,
@@ -4883,6 +4865,8 @@ export class LifecycleManager
    * refusal leaves the registry as it was.
    */
   private emitRegistrationRejected(input: {
+    // Marked announced here once emitted, so the rule lives in one place.
+    progress: RegistrationProgress;
     name: string;
     reason: RegistrationFailureCode;
     message: string;
@@ -4919,6 +4903,9 @@ export class LifecycleManager
       manualPositionRespected: false,
       ...('targetFound' in input ? { targetFound: input.targetFound } : {}),
     });
+    // Once it has gone out: an emit that throws leaves it unannounced, for the
+    // failure path to announce - which makes one attempt, so never twice.
+    input.progress.isAnnounced = true;
   }
 
   /**
@@ -4928,6 +4915,8 @@ export class LifecycleManager
    * registration commits only for a name that was not registered.
    */
   private emitCommittedRegistration(input: {
+    // Marked announced here once emitted, so the rule lives in one place.
+    progress: RegistrationProgress;
     componentName: string;
     index: number | null;
     isInsertAction: boolean;
@@ -4949,6 +4938,9 @@ export class LifecycleManager
         : undefined,
       ...input.report,
     });
+    // Once it has gone out: an emit that throws leaves it unannounced, for the
+    // failure path to announce - which makes one attempt, so never twice.
+    input.progress.isAnnounced = true;
   }
 
   /**

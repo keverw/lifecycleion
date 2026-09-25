@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { muteConsoleError, restoreConsoleError } from './console-test-utils';
 import { createFormatReporter } from './format-reporter';
+import { reportThroughHandler } from './failure-reporter';
 import { hostileRejections } from './hostile-promise-test-utils';
 
 describe('createFormatReporter follows an async handler', () => {
@@ -121,4 +122,74 @@ describe('createFormatReporter follows a hostile rejected promise', () => {
       expect(captured[0]).toContain('the handler rejected');
     },
   );
+});
+
+describe('reportThroughHandler with a line that throws', () => {
+  let captured: string[];
+
+  beforeEach(() => {
+    captured = muteConsoleError();
+  });
+
+  afterEach(() => {
+    restoreConsoleError();
+  });
+
+  const throwingLine = (): string => {
+    throw new Error('line exploded');
+  };
+
+  test('a rejecting handler still reports, and nothing is left unhandled', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      reportThroughHandler(
+        () => Promise.reject(new Error('handler rejected')),
+        throwingLine,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(unhandled).toEqual([]);
+      expect(captured.some((line) => line.includes('line exploded'))).toBe(
+        true,
+      );
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  test('a throwing handler, or none, still reports without throwing', () => {
+    expect(() => {
+      reportThroughHandler(() => {
+        throw new Error('handler threw');
+      }, throwingLine);
+      reportThroughHandler(undefined, throwingLine);
+    }).not.toThrow();
+    expect(
+      captured.filter((line) => line.includes('line exploded')),
+    ).toHaveLength(2);
+  });
+
+  test('a settle callback that throws is called once and contained', () => {
+    let calls = 0;
+
+    expect(() => {
+      reportThroughHandler(
+        () => undefined,
+        () => 'a report',
+        () => {
+          calls++;
+          throw new Error('settle exploded');
+        },
+      );
+    }).not.toThrow();
+    expect(calls).toBe(1);
+    expect(captured.some((line) => line.includes('settle exploded'))).toBe(
+      true,
+    );
+  });
 });
