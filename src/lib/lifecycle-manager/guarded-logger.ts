@@ -139,9 +139,22 @@ export function createGuardedLoggerService(
         typeof property !== 'string' ||
         (property !== 'entity' && !Object.hasOwn(GUARDED_LOG_METHODS, property))
       ) {
-        const passthrough: unknown = Reflect.get(target, property, receiver);
+        // Contained like a method read below: anything probing the logger - `await`
+        // reading `then`, a template literal reading `Symbol.toPrimitive`, a sink's
+        // `JSON.stringify` reading `toJSON` - would otherwise throw at its call site
+        // for a service whose accessor throws. Answered as absent.
+        try {
+          const passthrough: unknown = Reflect.get(target, property, receiver);
 
-        return passthrough;
+          return passthrough;
+        } catch (error) {
+          reportCallbackError(
+            `${GUARDED_LOGGER_LABEL}.${String(property)}`,
+            error,
+          );
+
+          return undefined;
+        }
       }
 
       // Resolved on every read - a cheap property read - even though the wrapper built

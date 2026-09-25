@@ -3901,4 +3901,38 @@ describe('LifecycleManager - review regressions', () => {
     expect(result.reason).toBe('position exploded');
     expect(registered).toEqual(['c']);
   });
+
+  test('a slow auto-start that joined a bulk startup reports it, though it outlasted it', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    const late = new Plain(logger, 'late');
+    late.start = (): Promise<void> => sleep(30);
+    let registration:
+      Promise<{ duringStartup?: boolean; success: boolean }> | undefined;
+    const events: Array<{ name: string; duringStartup?: boolean }> = [];
+    manager.on(
+      'component:registered',
+      (event: { name: string; duringStartup?: boolean }) => {
+        events.push(event);
+      },
+    );
+    // Registered from inside the bulk loop, whose auto-start joins the startup - which
+    // does not wait for it, and returns first.
+    a.start = (): Promise<void> => {
+      registration = manager.registerComponent(late, { autoStart: true });
+
+      return Promise.resolve();
+    };
+    await manager.registerComponent(a);
+
+    expect((await manager.startAllComponents()).success).toBe(true);
+
+    const result = await registration;
+
+    expect(result?.success).toBe(true);
+    expect(result?.duringStartup).toBe(true);
+    expect(events.find((event) => event.name === 'late')?.duringStartup).toBe(
+      true,
+    );
+  });
 });

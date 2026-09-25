@@ -184,6 +184,9 @@ interface RegistrationProgress {
       'startupOrder' | 'manualPositionRespected' | 'targetFound'
     >
   >;
+  // Whether a bulk startup was running when it committed - read then, since an
+  // auto-start that joined the startup can outlast it.
+  wasDuringStartup: boolean;
   didAutoStartAttempt: boolean;
   isAutoStartDeferred: boolean;
   startResult: ComponentOperationResult | undefined;
@@ -196,6 +199,7 @@ function newRegistrationProgress(): RegistrationProgress {
   return {
     hasCommitted: false,
     committed: {},
+    wasDuringStartup: false,
     didAutoStartAttempt: false,
     isAutoStartDeferred: false,
     startResult: undefined,
@@ -216,6 +220,7 @@ function committedRegistrationReport(
 ): Pick<
   InsertComponentAtResult,
   | 'startupOrder'
+  | 'duringStartup'
   | 'actualPosition'
   | 'manualPositionRespected'
   | 'targetFound'
@@ -227,6 +232,7 @@ function committedRegistrationReport(
 
   return {
     startupOrder: committed.startupOrder ?? [],
+    duringStartup: progress.wasDuringStartup,
     actualPosition,
     manualPositionRespected: committed.manualPositionRespected ?? false,
     targetFound:
@@ -363,11 +369,10 @@ export class LifecycleManager
   // State flags
   private isStarting = false;
   private autoAttachedSignalsDuringStartup = false;
-  // The running bulk startup's started list, or `null` outside one. See
-  // `startAllComponentsOperation()`.
-  // Auto-starts left to a bulk startup that had taken its latch but not begun its loop.
-  // Cleared once that loop has its order - they are in it - and reported if the startup
-  // ends before then, since nothing will start them.
+  // Auto-starts left to a bulk startup that had taken its latch but not begun its loop,
+  // or was still computing its order. Cleared once that loop has its order - they are in
+  // it - and reported if the startup ends before then, since nothing will start them.
+  // Only ever non-empty while `isStarting` holds, which also refuses every unregister.
   private deferredAutoStartNames = new Set<string>();
   // Components whose broken `getDependencies()` was already reported; see
   // `readDependencies()`.
@@ -375,6 +380,8 @@ export class LifecycleManager
     new WeakSet<BaseComponent>();
   // The same, for `isOptional()`; see `isComponentOptional()`.
   private readonly reportedOptionalReadFailures = new WeakSet<BaseComponent>();
+  // The running bulk startup's started list, or `null` outside one. See
+  // `startAllComponentsOperation()`.
   private activeBulkStartup: {
     readonly started: string[];
     // Set as its rollback begins: the rollback works from the list as it stood then,
@@ -1031,7 +1038,7 @@ export class LifecycleManager
       graph.push({
         name,
         isOptional,
-        dependencies: 'dependencies' in read ? read.dependencies : [],
+        dependencies: dependenciesOf(read),
       });
     }
 
@@ -2638,7 +2645,6 @@ export class LifecycleManager
     this.componentStartAttemptTokens.delete(name);
     this.componentStopAttemptTokens.delete(name);
     this.pendingForceStopWaiters.delete(name);
-    this.deferredAutoStartNames.delete(name);
     // A later registration of the same instance reports a broken list afresh.
     this.reportedDependencyReadFailures.delete(component);
     this.reportedOptionalReadFailures.delete(component);
@@ -4466,6 +4472,7 @@ export class LifecycleManager
       // that a re-entrant registration lands in keeps walking the array it started on.
       this.components = nextComponents;
       progress.hasCommitted = true;
+      progress.wasDuringStartup = this.isStarting;
       committed.startupOrder = startupOrder;
       this.registeredNames.set(component, componentName);
       this.componentStates.set(componentName, 'registered');
@@ -4750,7 +4757,6 @@ export class LifecycleManager
         registrationIndexBefore: null,
         registrationIndexAfter: registrationIndexNow,
         requestedPosition: { position, targetComponentName },
-        duringStartup: this.isStarting,
         ...report,
         startResult: progress.startResult,
       };
@@ -4881,7 +4887,6 @@ export class LifecycleManager
             targetComponentName: input.targetComponentName,
           }
         : undefined,
-      duringStartup: this.isStarting,
       ...input.report,
     });
   }
@@ -5824,12 +5829,13 @@ export class LifecycleManager
    * should not have to rely on that.
    */
   private observeFailureAfterTimeout(
-    promise: unknown,
+    // Already adopted by every caller - see `adoptPromise()` - so chained on directly.
+    promise: Promise<unknown>,
     name: string,
     message: string,
     params: Record<string, unknown> = {},
   ): void {
-    adoptPromise(promise)
+    promise
       .catch((error: unknown) => {
         this.logger.entity(name).debug(message, {
           params: { error: toError(error), ...params },
@@ -5879,7 +5885,7 @@ export class LifecycleManager
     // the guard - `Array.isArray` itself throws for a revoked proxy.
     const read = this.readDependenciesReported(component, context);
 
-    return 'dependencies' in read ? read.dependencies : [];
+    return dependenciesOf(read);
   }
 
   /**

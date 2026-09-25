@@ -149,6 +149,31 @@ describe('createGuardedLoggerService', () => {
     }
   });
 
+  test('a non-method accessor that throws is contained and reported', async () => {
+    const service = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    }).service('svc');
+    Object.defineProperty(service, 'then', {
+      get: (): never => {
+        throw new Error('then accessor exploded');
+      },
+    });
+    const guarded = createGuardedLoggerService(service);
+    let then: unknown = 'unread';
+
+    const reports = await collectReports(() => {
+      expect(() => {
+        then = (guarded as unknown as { then: unknown }).then;
+      }).not.toThrow();
+    });
+
+    expect(then).toBeUndefined();
+    expect(reports.length).toBe(1);
+    expect(reports[0]?.message).toContain('lifecycle-manager logger.then');
+    expect((reports[0]?.cause as Error).message).toBe('then accessor exploded');
+  });
+
   test('a method that returns a rejecting promise is reported, not left floating', async () => {
     const guarded = createGuardedLoggerService(
       hostileLogger('reject').service('svc'),
