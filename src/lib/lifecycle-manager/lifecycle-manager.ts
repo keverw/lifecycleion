@@ -486,6 +486,12 @@ export class LifecycleManager
   // registration back. Never let start() acquire resources for an uncommitted entry:
   // rollback would remove the only manager record capable of stopping them.
   private readonly pendingRegistrations = new Set<BaseComponent>();
+  // Successful registrations retain their validated read for reports and checks of
+  // components committed by nested hooks, without probing caller getters again.
+  private readonly committedDependencyReads = new WeakMap<
+    BaseComponent,
+    DependencyRead
+  >();
   // How deep the manager is inside escalation handling - `onForceShutdown` and the
   // escalation events it emits. A shutdown request made from in there continues the
   // cycle being handled rather than starting one. See `acceptShutdownPass()`.
@@ -3233,6 +3239,7 @@ export class LifecycleManager
             // The same context an auto-start that joins this startup gets.
             bulkStartup.deadlineContext,
             dependencyRead,
+            bulkStartup.dependencyReads,
           );
 
           if (this.shutdownToken !== shutdownTokenAtBulkStart) {
@@ -4274,11 +4281,8 @@ export class LifecycleManager
 
       // Check if component instance is already registered - here, by the instance's own
       // answer, or with this manager since that answer was read
-      if (
-        isRegisteredWithAManager ||
-        this.componentEntries.includes(component)
-      ) {
-        const isRegisteredHere = this.componentEntries.includes(component);
+      const isRegisteredHere = this.isInstanceReserved(component);
+      if (isRegisteredWithAManager || isRegisteredHere) {
         const message = isRegisteredHere
           ? LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE
           : LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE_EXTERNAL;
@@ -4294,11 +4298,7 @@ export class LifecycleManager
       }
 
       // Check if component name is already registered
-      if (
-        this.componentEntries.some(
-          (entry) => this.nameOf(entry) === componentName,
-        )
-      ) {
+      if (this.isNameReserved(componentName)) {
         return this.refuseRegistration({
           ...refusal,
           code: 'duplicate_name',
@@ -4389,7 +4389,6 @@ export class LifecycleManager
           this.pendingRegistrations.add(component);
           this.componentEntries = nextComponents;
           this.registrationGenerations.set(component, ++this.registrationCount);
-          progress.wasDuringStartup = this.isStarting;
           this.registeredNames.set(component, componentName);
           this.componentStates.set(componentName, 'registered');
           this.componentTimestamps.set(componentName, {
@@ -4452,10 +4451,7 @@ export class LifecycleManager
             throw registrationInterrupted;
           }
           progress.hasCommitted = true;
-          // A hook may commit another component after an active pass has taken its
-          // order snapshot. Retain that registration's checked dependency read too,
-          // so an enclosing provisional registration cannot miss this new dependent.
-          this.activeBulkStartup?.dependencyReads.set(component, candidateRead);
+          this.committedDependencyReads.set(component, candidateRead);
         } catch (error) {
           this.componentEntries = this.componentEntries.filter(
             (registered) => registered !== component,
@@ -4507,6 +4503,40 @@ export class LifecycleManager
           // notifications flush. Nested commits and unregisters remain in the live
           // entries; never restore the stale array captured before calling hooks.
           this.publishRegistry();
+          if (progress.hasCommitted) {
+            // Capture the report before queued listeners can mutate the registry.
+            // The pre-hook order was only the reserved-entry cycle check; hooks may
+            // have committed more components. Merge their validated reads into this
+            // report snapshot without invoking more caller code during publication.
+            const reportReads = new Map(
+              this.components.map((entry) => [
+                entry,
+                entry === component
+                  ? candidateRead
+                  : ((this.isReadCurrent(dependencySnapshot, entry)
+                      ? dependencySnapshot.get(entry)
+                      : undefined) ??
+                    this.committedDependencyReads.get(entry) ?? {
+                      dependencies: [],
+                    }),
+              ]),
+            );
+            startupOrder = this.getStartupOrderInternal(
+              this.components,
+              undefined,
+              reportReads,
+            );
+            committed.startupOrder = startupOrder;
+            committed.manualPositionRespected = this.isManualPositionRespected({
+              componentName,
+              position,
+              targetComponentName,
+              startupOrder,
+            });
+            committed.targetFound = positionHasTarget(position)
+              ? this.getComponentIndex(targetComponentName ?? '') !== null
+              : undefined;
+          }
         }
       });
       if (interruptionCode !== undefined) {
@@ -4520,13 +4550,6 @@ export class LifecycleManager
           logLine: 'Cannot commit component registration during bulk operation',
         });
       }
-      // The full order above validates reserved entries for cycles. Results and
-      // events describe only committed entries: an enclosing hook may still fail.
-      const committedNames = new Set(
-        this.components.map((entry) => this.nameOf(entry)),
-      );
-      startupOrder = startupOrder.filter((name) => committedNames.has(name));
-      committed.startupOrder = startupOrder;
       // Only now: a registration refused above - a dependency cycle, a failed hook - used
       // to have spent this component's one report, leaving the registration that
       // followed silent about the same broken list.
@@ -4539,22 +4562,7 @@ export class LifecycleManager
         );
       }
 
-      // Check if manual position was respected for logging
-      const isManualPositionRespected = this.isManualPositionRespected({
-        componentName,
-        position,
-        targetComponentName,
-        startupOrder,
-      });
-
-      // Get the final registration index after insertion - by instance, as the result
-      // and event read it.
       const registrationIndexAfter = this.components.indexOf(component);
-      const isTargetFound = positionHasTarget(position)
-        ? this.getComponentIndex(targetComponentName ?? '') !== null
-        : undefined;
-      committed.manualPositionRespected = isManualPositionRespected;
-      committed.targetFound = isTargetFound;
 
       if (isInsertAction) {
         this.logger.entity(componentName).info('Component inserted', {
@@ -4642,6 +4650,8 @@ export class LifecycleManager
                     },
                     hasExpired: () => joinedDeadline.hasExpired(),
                   },
+              undefined,
+              bulkStartup.dependencyReads,
             );
           }
 
@@ -5736,6 +5746,22 @@ export class LifecycleManager
     name: string,
     claim: symbol,
   ): Promise<ComponentOperationResult> {
+    // A stale retry request may now name an ordinary in-progress start. Preserve
+    // its former not-running result; only an actual stalled retry reports the
+    // more specific in-flight refusal from the force preconditions below.
+    if (
+      this.getComponent(name) !== undefined &&
+      !this.stalledComponents.has(name) &&
+      !this.isComponentRunning(name)
+    ) {
+      return {
+        success: false,
+        componentName: name,
+        code: 'component_not_running',
+        reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_RUNNING,
+        status: this.getComponentStatus(name),
+      };
+    }
     const preconditions = this.checkStopPreconditions(name, undefined, {
       claim,
       isStalledRetry: true,
@@ -6153,6 +6179,7 @@ export class LifecycleManager
     // The bulk loop's read of the component's list, so its skip check and this start act
     // on the same one - and the component's code runs once for both.
     preReadDependencies?: DependencyRead,
+    startupDependencyReads?: Map<BaseComponent, DependencyRead>,
   ): Promise<ComponentOperationResult> {
     const claim = Symbol(name);
 
@@ -6166,6 +6193,7 @@ export class LifecycleManager
           bulkStartup,
           claim,
           preReadDependencies,
+          startupDependencyReads,
         );
       } catch (error) {
         // Nothing below touches the component unless this attempt claimed it - and still
@@ -6386,6 +6414,7 @@ export class LifecycleManager
       | undefined,
     claim: symbol,
     preReadDependencies: DependencyRead | undefined,
+    startupDependencyReads: Map<BaseComponent, DependencyRead> | undefined,
   ): Promise<ComponentOperationResult> {
     // Each option read once, here: the checks below run twice, and a caller's getter that
     // answered differently the second time - `forceStalled` true for the stalled check,
@@ -6482,15 +6511,6 @@ export class LifecycleManager
       return recheck;
     }
 
-    // Only after confirming this attempt may proceed: a dependency getter can
-    // start a newer attempt, whose read a refused outer attempt must not overwrite.
-    // Auto-starts joining an already ordered pass read their own dependencies.
-    // Keep the read actually used by that attempt, which may differ from registration
-    // if its hook changed the list. Enclosing registration rechecks use this map too.
-    if (flags.allowDuringBulkStartup) {
-      this.activeBulkStartup?.dependencyReads.set(component, ownDependencies);
-    }
-
     const skippedDependencyWarnings: string[] = [];
 
     for (const dependencyName of ownDependencies.dependencies) {
@@ -6545,6 +6565,13 @@ export class LifecycleManager
     const restoreStateBeforeStart = (): void => {
       this.restoreComponentState(name, stateBeforeStart);
     };
+
+    // Only accepted starts belonging to this pass may update its dependency facts.
+    // Public allowDuringBulkStartup bypasses a gate; it does not join the pass. A
+    // refused dependency check must leave the pass's accepted snapshot unchanged.
+    if (startupDependencyReads === this.activeBulkStartup?.dependencyReads) {
+      startupDependencyReads?.set(component, ownDependencies);
+    }
 
     this.claimComponent(name, 'starting', claim);
 
@@ -7934,7 +7961,10 @@ export class LifecycleManager
     return this.components.some((c) =>
       dependenciesOf(
         this.activeBulkStartup?.dependencyReads.get(c) ??
-          dependencySnapshot.get(c),
+          (this.isReadCurrent(dependencySnapshot, c)
+            ? dependencySnapshot.get(c)
+            : undefined) ??
+          this.committedDependencyReads.get(c),
       ).includes(componentName),
     );
   }
@@ -9023,6 +9053,16 @@ export class LifecycleManager
       value === 'end' ||
       value === 'before' ||
       value === 'after'
+    );
+  }
+
+  private isInstanceReserved(component: BaseComponent): boolean {
+    return this.componentEntries.includes(component);
+  }
+
+  private isNameReserved(name: string): boolean {
+    return this.componentEntries.some(
+      (component) => this.nameOf(component) === name,
     );
   }
 

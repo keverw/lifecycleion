@@ -440,7 +440,7 @@ test('post-hook check includes a dependent committed after bulk ordering', async
   }
 });
 
-test('post-hook check uses dependencies changed by a joined registration hook', async () => {
+test('a refused joined start does not change the pass dependency snapshot', async () => {
   const { logger, manager } = setup();
   const peer = new Plain(logger, 'peer');
   const gate = deferred();
@@ -461,11 +461,105 @@ test('post-hook check uses dependencies changed by a joined registration hook', 
   };
   try {
     const result = await manager.registerComponent(component);
-    expect(result.code).toBe('startup_in_progress');
-    expect(result.registered).toBe(false);
+    // The joined attempt fails its missing-dependency check; that refused read
+    // must not become an obligation of the active pass. Registration may commit.
+    expect(result.registered).toBe(true);
   } finally {
     gate.resolve();
     await Promise.all([bulk, dependent]);
     await manager.stopAllComponents();
   }
+});
+
+test('registration reports nested commits and their final manual placement', async () => {
+  const { logger, manager } = setup();
+  const parent = new Plain(logger, 'parent');
+  let nested: ReturnType<typeof manager.registerComponent> | undefined;
+  const reports: {
+    name: string;
+    startupOrder: string[];
+    manualPositionRespected: boolean;
+  }[] = [];
+  manager.on('component:registered', (event) => {
+    reports.push(event as (typeof reports)[number]);
+  });
+  parent._markRegistered = (): void => {
+    nested = manager.registerComponent(new Plain(logger, 'nested'));
+  };
+  const result = await manager.insertComponentAt(parent, 'end');
+  await nested;
+  expect(result.startupOrder).toEqual(['parent', 'nested']);
+  expect(result.manualPositionRespected).toBe(false);
+  expect(
+    reports.find((event) => event.name === 'parent')?.startupOrder,
+  ).toEqual(result.startupOrder);
+  expect(
+    reports.find((event) => event.name === 'parent')?.manualPositionRespected,
+  ).toBe(false);
+});
+
+test('a refused public start override cannot add dependencies to the bulk pass', async () => {
+  const { logger, manager } = setup();
+  const gate = deferred();
+  const peer = new Plain(logger, 'peer');
+  peer.start = (): Promise<void> => gate.promise;
+  const component = new Plain(logger, 'x');
+  await manager.registerComponent(peer);
+  await manager.registerComponent(component);
+  const bulk = manager.startAllComponents();
+  component.getDependencies = (): string[] => ['d'];
+  try {
+    const refused = await manager.startComponent('x', {
+      allowDuringBulkStartup: true,
+    });
+    expect(refused.code).toBe('missing_dependency');
+    expect(
+      (await manager.registerComponent(new Plain(logger, 'd'))).registered,
+    ).toBe(true);
+  } finally {
+    gate.resolve();
+    await bulk;
+    await manager.stopAllComponents();
+  }
+});
+
+test('a stale stalled retry keeps not-running for a component now starting', async () => {
+  const { logger, manager } = setup();
+  const component = new Plain(logger, 'a');
+  const gate = deferred();
+  component.start = (): Promise<void> => gate.promise;
+  await manager.registerComponent(component);
+  const start = manager.startComponent('a');
+  try {
+    const result = await (
+      manager as unknown as {
+        retryStalledComponent: (
+          name: string,
+        ) => Promise<ComponentOperationResult>;
+      }
+    ).retryStalledComponent('a');
+    expect(result.code).toBe('component_not_running');
+    expect(manager.getComponentStatus('a')?.state).toBe('starting');
+  } finally {
+    gate.resolve();
+    await start;
+    await manager.stopAllComponents();
+  }
+});
+
+test('registration report ignores dependency reads from a peer previous registration', async () => {
+  const { logger, manager } = setup();
+  const peer = new Plain(logger, 'peer');
+  await manager.registerComponent(peer);
+  const parent = new Plain(logger, 'parent');
+  let removed: ReturnType<typeof manager.unregisterComponent> | undefined;
+  let inserted: ReturnType<typeof manager.insertComponentAt> | undefined;
+  parent._markRegistered = (): void => {
+    removed = manager.unregisterComponent('peer');
+    peer.getDependencies = (): string[] => ['parent'];
+    inserted = manager.insertComponentAt(peer, 'start');
+  };
+  const result = await manager.registerComponent(parent);
+  await Promise.all([removed, inserted]);
+  expect(result.startupOrder).toEqual(['parent', 'peer']);
 });

@@ -224,6 +224,11 @@
   `duringStartup`; dependencies required by that pass are refused. Insertions stay
   adjacent to committed targets across provisional entries, and value/message error
   fallbacks exclude provisional components from `componentFound`.
+  Registration reports now include hook-committed components and capture manual
+  placement before event delivery. Refused starts and public startup overrides no
+  longer modify the bulk pass's dependency snapshot. Registration metadata is kept
+  separately from ordering reads. Stale stalled retries again return
+  `component_not_running` when their component is no longer stalled but is starting.
 
 - Graceful and force component stops recheck registration and stop eligibility after reading
   caller-owned timeout and abort-hook properties. A getter that starts another stop
