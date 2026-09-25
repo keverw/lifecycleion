@@ -69,6 +69,12 @@ function hasOwnThen(value: object): boolean {
  * fake. No check tells the two apart without reading the value's own properties, which is
  * what the broken promise breaks.
  *
+ * Known limit, the other way: a `then` attached to a single native promise as an own
+ * property is never called, even one that does real work when first chained - starts
+ * something lazily, or instruments the call - which `await` would call. The promise's
+ * own state is what is read. An own `then` on one promise is the shape the hostile
+ * no-op takes, and calling it as well would bring back the hang this exists to prevent.
+ *
  * Known limit: a `then` that comes from the value's prototype chain is trusted, so a
  * native promise whose chain supplies a no-op one - a subclass that overrides `then`
  * with one, or a promise given such a prototype - never settles, and its rejection goes

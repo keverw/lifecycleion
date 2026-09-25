@@ -187,6 +187,9 @@ interface RegistrationProgress {
   didAutoStartAttempt: boolean;
   isAutoStartDeferred: boolean;
   startResult: ComponentOperationResult | undefined;
+  // What broke the registration, recorded as its catch is entered: should that catch
+  // throw too, the net reports this rather than the catch's own failure.
+  failure?: { error: unknown };
 }
 
 function newRegistrationProgress(): RegistrationProgress {
@@ -2384,34 +2387,20 @@ export class LifecycleManager
         // would otherwise never hear of a component that is in it, and may be running.
         // Guarded: this net must answer, and the catch it stands in for just threw.
         if (progress.hasCommitted) {
-          let actualPosition: InsertComponentAtResult['actualPosition'];
-
-          try {
-            actualPosition = this.describeRegistryPosition(
-              registrationIndexAfter,
-            );
-          } catch {
-            actualPosition = undefined;
-          }
-
           committedReport = committedRegistrationReport(
             progress,
             position,
-            actualPosition,
+            this.describeRegistryPositionSafely(registrationIndexAfter),
           );
 
           try {
-            this.lifecycleEvents.componentRegistered({
-              name: componentName,
+            this.emitCommittedRegistration({
+              componentName,
               index: registrationIndexAfter,
-              action: isInsertAction ? 'insert' : 'register',
-              registrationIndexBefore: null,
-              registrationIndexAfter,
-              requestedPosition: isInsertAction
-                ? { position, targetComponentName }
-                : undefined,
-              duringStartup: this.isStarting,
-              ...committedReport,
+              isInsertAction,
+              position,
+              targetComponentName,
+              report: committedReport,
             });
           } catch (eventError) {
             reportCallbackError(
@@ -2421,6 +2410,17 @@ export class LifecycleManager
           }
         }
 
+        // The failure that broke the registration, when its catch was reached and threw
+        // in turn: the caller needs the first, not the one met while reporting it, which
+        // `settleOperation` has already sent to the global channel.
+        const failure = progress.failure;
+        const reportedError =
+          failure === undefined ? error : toError(failure.error);
+        const reportedReason =
+          failure === undefined
+            ? reason
+            : `${isInsertAction ? 'insertComponentAt' : 'registerComponent'}() failed unexpectedly: ${describeError(failure.error)}`;
+
         return {
           action: 'insert',
           success: false,
@@ -2429,9 +2429,9 @@ export class LifecycleManager
           // instance can produce while this one committed nothing.
           registered: progress.hasCommitted,
           componentName,
-          reason,
+          reason: reportedReason,
           code: 'unknown_error',
-          error,
+          error: reportedError,
           // Unknown: reading it means asking the component for its name, which may be
           // what threw.
           registrationIndexBefore: null,
@@ -4055,12 +4055,13 @@ export class LifecycleManager
   private async registerComponentInternal(
     component: BaseComponent,
     position: InsertPosition,
-    targetComponentName?: string,
-    isInsertAction = false,
-    _options?: RegisterOptions,
+    targetComponentName: string | undefined,
+    isInsertAction: boolean,
+    _options: RegisterOptions | undefined,
     // Whether this call committed, and the auto-start it attempted or deferred, kept
-    // where the safety net above it can read them.
-    progress: RegistrationProgress = newRegistrationProgress(),
+    // where the safety net above it can read them. Required: a call that made its own
+    // would leave the net reading one that never changes.
+    progress: RegistrationProgress,
   ): Promise<InsertComponentAtResult> {
     const componentName: unknown = component.getName();
 
@@ -4719,37 +4720,26 @@ export class LifecycleManager
         }
       }
 
-      const didAutoStartSucceed = progress.didAutoStartAttempt
-        ? progress.startResult?.success === true
-        : undefined;
-
       // Where it is now, not where it landed: an auto-start can register or remove
       // components around it. By instance, as the failure path reads it: one unregistered
       // and replaced under its name by a listener must not be described as the other.
       const indexOfComponent = this.components.indexOf(component);
       const registrationIndexNow =
         indexOfComponent === -1 ? null : indexOfComponent;
-      const actualPosition =
-        this.describeRegistryPosition(registrationIndexNow);
+      // The same report, and the same event, as a failure after the commit gives.
+      const report = committedRegistrationReport(
+        progress,
+        position,
+        this.describeRegistryPosition(registrationIndexNow),
+      );
 
-      // Emit registration event
-      this.lifecycleEvents.componentRegistered({
-        name: componentName,
+      this.emitCommittedRegistration({
+        componentName,
         index: registrationIndexNow,
-        action: isInsertAction ? 'insert' : 'register',
-        registrationIndexBefore,
-        registrationIndexAfter: registrationIndexNow,
-        startupOrder,
-        requestedPosition: isInsertAction
-          ? { position, targetComponentName }
-          : undefined,
-        actualPosition,
-        manualPositionRespected: isManualPositionRespected,
-        targetFound: isTargetFound,
-        duringStartup: this.isStarting,
-        autoStartAttempted: progress.didAutoStartAttempt,
-        ...(progress.isAutoStartDeferred ? { autoStartDeferred: true } : {}),
-        autoStartSucceeded: didAutoStartSucceed,
+        isInsertAction,
+        position,
+        targetComponentName,
+        report,
       });
 
       return {
@@ -4759,19 +4749,14 @@ export class LifecycleManager
         componentName,
         registrationIndexBefore: null,
         registrationIndexAfter: registrationIndexNow,
-        startupOrder,
         requestedPosition: { position, targetComponentName },
-        actualPosition,
-        manualPositionRespected: isManualPositionRespected,
-        targetFound: isTargetFound,
         duringStartup: this.isStarting,
-        autoStartAttempted: progress.didAutoStartAttempt,
-        ...(progress.isAutoStartDeferred ? { autoStartDeferred: true } : {}),
-        autoStartSucceeded: didAutoStartSucceed,
+        ...report,
         startResult: progress.startResult,
       };
     } catch (error) {
       // Handle unexpected errors during registration
+      progress.failure = { error };
       const err = toError(error);
       const code: RegistrationFailureCode =
         err instanceof DependencyCycleError
@@ -4803,24 +4788,20 @@ export class LifecycleManager
         ? committedRegistrationReport(
             progress,
             position,
-            this.describeRegistryPosition(registrationIndexNow),
+            this.describeRegistryPositionSafely(registrationIndexNow),
           )
         : undefined;
 
       if (committedReport !== undefined) {
         // Committed, so it is a registration as far as anyone tracking the registry is
         // concerned; the failure is reported through the result and the log line above.
-        this.lifecycleEvents.componentRegistered({
-          name: componentName,
+        this.emitCommittedRegistration({
+          componentName,
           index: registrationIndexNow,
-          action: isInsertAction ? 'insert' : 'register',
-          registrationIndexBefore,
-          registrationIndexAfter: registrationIndexNow,
-          requestedPosition: isInsertAction
-            ? { position, targetComponentName }
-            : undefined,
-          duringStartup: this.isStarting,
-          ...committedReport,
+          isInsertAction,
+          position,
+          targetComponentName,
+          report: committedReport,
         });
       } else {
         this.lifecycleEvents.componentRegistrationRejected({
@@ -4871,6 +4852,51 @@ export class LifecycleManager
         }),
         startResult: isRegistered ? progress.startResult : undefined,
       };
+    }
+  }
+
+  /**
+   * `component:registered` for a registration that committed, from wherever it is
+   * reported - the success path, the registration's catch, or the safety net above it -
+   * so the payload is built once. `registrationIndexBefore` is always `null`: a
+   * registration commits only for a name that was not registered.
+   */
+  private emitCommittedRegistration(input: {
+    componentName: string;
+    index: number | null;
+    isInsertAction: boolean;
+    position: InsertPosition;
+    targetComponentName: string | undefined;
+    report: ReturnType<typeof committedRegistrationReport>;
+  }): void {
+    this.lifecycleEvents.componentRegistered({
+      name: input.componentName,
+      index: input.index,
+      action: input.isInsertAction ? 'insert' : 'register',
+      registrationIndexBefore: null,
+      registrationIndexAfter: input.index,
+      requestedPosition: input.isInsertAction
+        ? {
+            position: input.position,
+            targetComponentName: input.targetComponentName,
+          }
+        : undefined,
+      duringStartup: this.isStarting,
+      ...input.report,
+    });
+  }
+
+  /**
+   * {@link describeRegistryPosition} for a failure path, where a throw would replace the
+   * failure being reported: no description rather than a second failure.
+   */
+  private describeRegistryPositionSafely(
+    index: number | null,
+  ): InsertComponentAtResult['actualPosition'] {
+    try {
+      return this.describeRegistryPosition(index);
+    } catch {
+      return undefined;
     }
   }
 

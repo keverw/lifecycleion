@@ -2480,16 +2480,16 @@ if (result.success && result.status) {
 
 Every async method answers with a result object, including when something goes wrong that the manager did not plan for - a bug in the manager, or a component that breaks its contract with a getter (`getName()`, `getDependencies()`, `isOptional()`) that throws. The promise resolves with a failed result and the original error is reported on the global `'error'` channel (see [safe-handle-callback](./safe-handle-callback.md)):
 
-| Method                                                                   | Unexpected failure resolves with                     |
-| ------------------------------------------------------------------------ | ---------------------------------------------------- |
-| `registerComponent()`, `insertComponentAt()`                             | `code: 'unknown_error'`, `registered` as it stands   |
-| `unregisterComponent()`                                                  | `code: 'unknown_error'`                              |
-| `startAllComponents()`, `stopAllComponents()`, `restartAllComponents()`  | `code: 'unknown_error'` with `error`                 |
-| `startComponent()`, `stopComponent()`, `restartComponent()`              | `code: 'unknown_error'` with `error`                 |
-| `sendMessageToComponent()`, `checkComponentHealth()`, `checkAllHealth()` | `code: 'error'`                                      |
-| `getValue()` (synchronous)                                               | `code: 'error'` with `error`                         |
-| `triggerReload()`, `triggerInfo()`, `triggerDebug()`                     | `code: 'error'`, including when your callback throws |
-| `broadcastMessage()`                                                     | an empty array                                       |
+| Method                                                                   | Unexpected failure resolves with                                  |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| `registerComponent()`, `insertComponentAt()`                             | `code: 'unknown_error'`, `registered`: whether this call added it |
+| `unregisterComponent()`                                                  | `code: 'unknown_error'`                                           |
+| `startAllComponents()`, `stopAllComponents()`, `restartAllComponents()`  | `code: 'unknown_error'` with `error`                              |
+| `startComponent()`, `stopComponent()`, `restartComponent()`              | `code: 'unknown_error'` with `error`                              |
+| `sendMessageToComponent()`, `checkComponentHealth()`, `checkAllHealth()` | `code: 'error'`                                                   |
+| `getValue()` (synchronous)                                               | `code: 'error'` with `error`                                      |
+| `triggerReload()`, `triggerInfo()`, `triggerDebug()`                     | `code: 'error'`, including when your callback throws              |
+| `broadcastMessage()`                                                     | an empty array                                                    |
 
 Branch on `code` as usual; `unknown_error` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around.
 

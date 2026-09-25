@@ -44,6 +44,32 @@ function crashFirstRegisteredEvent(
   };
 }
 
+// After a component's auto-start, fails the success path - describing the position
+// throws - and then the registration's catch, whose event throws once, so the failure
+// reaches the safety net above it.
+function breakCatchAfterAutoStart(manager: LifecycleManager): void {
+  manager.once('component:started', () => {
+    const internals = manager as unknown as {
+      describeRegistryPosition: () => never;
+      emitCommittedRegistration: (...args: unknown[]) => void;
+    };
+    const emit = internals.emitCommittedRegistration.bind(manager);
+    let hasThrown = false;
+
+    internals.describeRegistryPosition = (): never => {
+      throw new Error('position exploded');
+    };
+    internals.emitCommittedRegistration = (...args: unknown[]): void => {
+      if (!hasThrown) {
+        hasThrown = true;
+        throw new Error('event exploded');
+      }
+
+      emit(...args);
+    };
+  });
+}
+
 describe('LifecycleManager - review regressions', () => {
   test('a stall cleared by a late stop after a failed forced restart detaches signals', async () => {
     const { logger, manager } = setup({
@@ -3781,15 +3807,7 @@ describe('LifecycleManager - review regressions', () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new Plain(logger, 'a'));
     await manager.startAllComponents();
-    // After the auto-start, describing the position throws - on the success path, which
-    // enters the catch, and again in the catch, which throws into the safety net.
-    manager.once('component:started', () => {
-      (
-        manager as unknown as { describeRegistryPosition: () => never }
-      ).describeRegistryPosition = (): never => {
-        throw new Error('catch exploded');
-      };
-    });
+    breakCatchAfterAutoStart(manager);
 
     const { release } = claimReports();
     let result;
@@ -3804,6 +3822,12 @@ describe('LifecycleManager - review regressions', () => {
 
     expect(manager.isComponentRunning('c')).toBe(true);
     expect(result.success).toBe(false);
+    // The failure that broke the registration, not the one met reporting it.
+    expect(result.error?.message).toBe('position exploded');
+    // Worded by the safety net, which is what answered.
+    expect(result.reason).toBe(
+      'registerComponent() failed unexpectedly: position exploded',
+    );
     expect(result.registered).toBe(true);
     expect(result.autoStartAttempted).toBe(true);
     expect(result.autoStartSucceeded).toBe(true);
@@ -3821,15 +3845,7 @@ describe('LifecycleManager - review regressions', () => {
         registered.push(event);
       },
     );
-    // Describing the position throws - on the success path, which enters the catch,
-    // and again in the catch, which throws into the safety net.
-    manager.once('component:started', () => {
-      (
-        manager as unknown as { describeRegistryPosition: () => never }
-      ).describeRegistryPosition = (): never => {
-        throw new Error('catch exploded');
-      };
-    });
+    breakCatchAfterAutoStart(manager);
 
     const { release } = claimReports();
     let result;
@@ -3855,5 +3871,34 @@ describe('LifecycleManager - review regressions', () => {
     expect(registered.find((event) => event.name === 'c')?.targetFound).toBe(
       true,
     );
+  });
+
+  test('a position read that throws after the commit is answered by the catch, not the net', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    const registered: string[] = [];
+    manager.on('component:registered', (event: { name: string }) => {
+      registered.push(event.name);
+    });
+    (
+      manager as unknown as { describeRegistryPosition: () => never }
+    ).describeRegistryPosition = (): never => {
+      throw new Error('position exploded');
+    };
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.registerComponent(new Plain(logger, 'c'));
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.registered).toBe(true);
+    // The catch's own wording - the net's would be prefixed "failed unexpectedly".
+    expect(result.reason).toBe('position exploded');
+    expect(registered).toEqual(['c']);
   });
 });
