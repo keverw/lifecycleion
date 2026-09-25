@@ -913,7 +913,10 @@ export interface RegistrationResultBase extends BaseOperationResult {
   /** Machine-readable failure code if !success */
   code?: RegistrationFailureCode;
 
-  /** Registration index before the operation (null if not previously registered) */
+  /**
+   * Index in the committed registry before the operation. Null for an unpublished
+   * reservation too, even when its reserved name causes a duplicate_name refusal.
+   */
   registrationIndexBefore: number | null;
 
   /** Registration index after the operation (null if not registered) */

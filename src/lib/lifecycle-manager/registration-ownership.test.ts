@@ -1,5 +1,11 @@
 import { describe, expect, test } from 'bun:test';
-import { claimReports, deferred, Plain, setup } from './test-helpers';
+import {
+  claimReports,
+  deferred,
+  fakeSignals,
+  Plain,
+  setup,
+} from './test-helpers';
 import type { ComponentOperationResult } from './types';
 
 describe('LifecycleManager uncommitted registration', () => {
@@ -246,8 +252,8 @@ test('a failure during provisional map writes releases the name and instance', a
   const { logger, manager } = setup();
   const { release } = claimReports();
   const component = new Plain(logger, 'a');
-  // Inject a failure before either registration hook, after reserving the entry.
-  // This probes the transaction boundary independently of a particular ULID source.
+  // Inject a failure while publishing state after the registration hooks.
+  // Partial publication must still release the reserved name and instance.
   const timestamps = (
     manager as unknown as { componentTimestamps: Map<string, unknown> }
   ).componentTimestamps;
@@ -385,6 +391,7 @@ test('a provisional name is reserved but is not an insertion target', async () =
   };
   await manager.registerComponent(component);
   expect((await duplicate)?.code).toBe('duplicate_name');
+  expect((await duplicate)?.registrationIndexBefore).toBeNull();
   expect((await inserted)?.code).toBe('target_not_found');
 });
 
@@ -562,4 +569,97 @@ test('registration report ignores dependency reads from a peer previous registra
   const result = await manager.registerComponent(parent);
   await Promise.all([removed, inserted]);
   expect(result.startupOrder).toEqual(['parent', 'peer']);
+});
+
+test('mixed-time dependency reads cannot fail an already published registration', async () => {
+  const { logger, manager } = setup();
+  const x = new Plain(logger, 'x', ['y']);
+  await manager.registerComponent(x);
+  const parent = new Plain(logger, 'parent');
+  let nested: ReturnType<typeof manager.registerComponent> | undefined;
+  parent._markRegistered = (): void => {
+    x.getDependencies = (): string[] => [];
+    nested = manager.registerComponent(new Plain(logger, 'y', ['x']));
+  };
+  const { reports, release } = claimReports();
+  try {
+    const result = await manager.registerComponent(parent);
+    await nested;
+    expect(result.success).toBe(true);
+    expect(result.registered).toBe(true);
+    expect(result.startupOrder).toEqual([]);
+    expect(reports).toHaveLength(0);
+    expect(manager.getComponentNames()).toEqual(['x', 'parent', 'y']);
+  } finally {
+    release();
+  }
+});
+
+test('a joined start refused during signal attachment does not update pass reads', async () => {
+  const { logger, manager } = setup({ attachSignalsBeforeStartup: true });
+  fakeSignals(manager);
+  const gate = deferred();
+  const peer = new Plain(logger, 'peer');
+  peer.start = (): Promise<void> => gate.promise;
+  await manager.registerComponent(peer);
+  const bulk = manager.startAllComponents();
+  manager.detachSignals();
+  manager.attachSignals = (): never => {
+    throw new Error('attach failed');
+  };
+  const joined = new Plain(logger, 'joined');
+  try {
+    const result = await manager.registerComponent(joined, { autoStart: true });
+    expect(result.startResult?.code).toBe('signal_attach_failed');
+    const reads = (
+      manager as unknown as {
+        activeBulkStartup: { dependencyReads: Map<Plain, unknown> };
+      }
+    ).activeBulkStartup.dependencyReads;
+    expect(reads.has(joined)).toBe(false);
+  } finally {
+    gate.resolve();
+    await bulk;
+    await manager.stopAllComponents();
+  }
+});
+
+test('registration hooks have no provisional lifecycle state map entries', async () => {
+  const { logger, manager } = setup();
+  const component = new Plain(logger, 'a');
+  const maps = manager as unknown as {
+    componentStates: Map<string, unknown>;
+    componentTimestamps: Map<string, unknown>;
+    componentErrors: Map<string, unknown>;
+    componentStartAttemptTokens: Map<string, unknown>;
+  };
+  let observed: boolean[] = [];
+  component._markRegistered = (): void => {
+    observed = [
+      maps.componentStates,
+      maps.componentTimestamps,
+      maps.componentErrors,
+      maps.componentStartAttemptTokens,
+    ].map((map) => map.has('a'));
+  };
+  expect((await manager.registerComponent(component)).success).toBe(true);
+  expect(observed).toEqual([false, false, false, false]);
+  expect(maps.componentStates.get('a')).toBe('registered');
+});
+
+test('unchanged registration reuses its validated startup order', async () => {
+  const { logger, manager } = setup();
+  const internals = manager as unknown as {
+    getStartupOrderInternal: (...args: unknown[]) => string[];
+  };
+  const order = internals.getStartupOrderInternal.bind(manager);
+  let calls = 0;
+  internals.getStartupOrderInternal = (...args): string[] => {
+    calls++;
+    return order(...args);
+  };
+  expect(
+    (await manager.registerComponent(new Plain(logger, 'a'))).startupOrder,
+  ).toEqual(['a']);
+  expect(calls).toBe(1);
 });

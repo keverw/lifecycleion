@@ -999,19 +999,27 @@ same instance or reuse its name. Nested registrations of other components remain
 supported, with dependency-cycle checks including provisional reservations. Insertion
 with `before` or `after` requires a committed target; targeting a provisional component
 returns `target_not_found`, while a duplicate reserved name still returns
-`duplicate_name`: reservation prevents conflicts but does not make the component a
+`duplicate_name` with `registrationIndexBefore: null`: the index describes the
+committed registry. Reservation prevents conflicts but does not make the component a
 published target. Placement next to a committed target stays adjacent in the reserved
 order even when another registration is pending. Registration results and events capture startup order and manual-position metadata
 from the committed registry at publication, before queued listeners run. The order
 includes components committed by hooks and excludes enclosing provisional registrations.
+If dependency reads collected at different times form a cycle only in the report,
+registration remains successful and reports `startupOrder: []` with manual placement
+unconfirmed. It does not re-enter dependency getters after publication. Registrations
+whose hooks leave the registry unchanged reuse their already-validated order.
 
 Successful hooks publish the registration before queued notifications are delivered.
-Any failure during provisional bookkeeping or hooks rolls back only that entry. A hook
+Lifecycle state maps are written only after the hooks and commit checks succeed.
+A hook failure or a partial publication failure rolls back only that entry. A hook
 that starts an active shutdown also prevents publication and returns
 `shutdown_in_progress`. A hook that begins bulk startup is rechecked before publication:
 using the pass's dependency snapshot plus separate metadata for registrations committed
 while it runs. Only validated starts from the bulk loop or joined auto-starts update the
-pass snapshot; refused attempts and public `allowDuringBulkStartup` calls do not. If this
+pass snapshot immediately before `start()` is invoked, after signal attachment and
+shutdown refusal checks; refused attempts and public `allowDuringBulkStartup` calls do
+not. Dependency reads are checked against their registration generation. If this
 component is a dependency needed by that pass, registration rolls back with
 `startup_in_progress`. Otherwise it may commit, and `duringStartup` reflects the startup
 that the hook began. Error fallbacks for values and messages report component presence

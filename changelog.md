@@ -229,6 +229,11 @@
   longer modify the bulk pass's dependency snapshot. Registration metadata is kept
   separately from ordering reads. Stale stalled retries again return
   `component_not_running` when their component is no longer stalled but is starting.
+  Report-only cycles from mixed-time dependency reads now yield an unavailable order
+  (`[]`) without failing an already published registration. Lifecycle state maps are
+  written at publication, and late startup refusals do not modify bulk dependency
+  metadata. Dependency generations are checked, and unchanged registrations reuse
+  their validated order.
 
 - Graceful and force component stops recheck registration and stop eligibility after reading
   caller-owned timeout and abort-hook properties. A getter that starts another stop

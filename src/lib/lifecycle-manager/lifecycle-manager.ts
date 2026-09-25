@@ -378,6 +378,7 @@ export class LifecycleManager
   // Operations share this committed snapshot. Publication and unregister replace
   // it once; reads during registration hooks never allocate a filtered copy.
   private components: BaseComponent[] = [];
+  private registryRevision = 0;
 
   private runningComponents: Set<string> = new Set();
   private componentStates: Map<string, ComponentState> = new Map();
@@ -4377,11 +4378,54 @@ export class LifecycleManager
       const wasOptionalReported =
         this.reportedOptionalReadFailures.has(component);
 
-      const registrationInterrupted = new Error(
-        'Bulk operation interrupted registration',
-      );
+      const revisionBeforeHooks = this.registryRevision;
       let interruptionCode:
         'shutdown_in_progress' | 'startup_in_progress' | undefined;
+      // Both expected bulk-operation refusals and unexpected failures undo only
+      // this attempt. Keep the reservation until finally so rollback hooks cannot
+      // claim its name while cleanup is still in progress.
+      const rollBack = (): void => {
+        this.componentEntries = this.componentEntries.filter(
+          (registered) => registered !== component,
+        );
+        // Rolled back, so this registration did not commit after all.
+        progress.hasCommitted = false;
+        if (previousGeneration === undefined) {
+          this.registrationGenerations.delete(component);
+        } else {
+          this.registrationGenerations.set(component, previousGeneration);
+        }
+        if (previousRecordedName === undefined) {
+          this.registeredNames.delete(component);
+        } else {
+          this.registeredNames.set(component, previousRecordedName);
+        }
+
+        this.componentStates.delete(componentName);
+        this.componentTimestamps.delete(componentName);
+        this.componentErrors.delete(componentName);
+        this.componentStartAttemptTokens.delete(componentName);
+
+        // The component's side too: a hook that marked it registered before throwing
+        // would otherwise leave it believing it is, and its next registration refused as
+        // `duplicate_instance`.
+        this.markComponentUnregistered(
+          component,
+          'lifecycle-manager registration rollback',
+        );
+
+        // "Reported once per registration": this one never happened, so a report made
+        // under it - by the hook's own code reading the component - does not count
+        // against the next. Only such a report: a mark that was already there stays, or
+        // a caller retrying a failing registration would be told the same thing each
+        // time.
+        if (!wasDependencyReported) {
+          this.reportedDependencyReadFailures.delete(component);
+        }
+        if (!wasOptionalReported) {
+          this.reportedOptionalReadFailures.delete(component);
+        }
+      };
       this.withTransition(() => {
         try {
           // A new array rather than a splice, as unregister does: a loop over the registry
@@ -4390,14 +4434,6 @@ export class LifecycleManager
           this.componentEntries = nextComponents;
           this.registrationGenerations.set(component, ++this.registrationCount);
           this.registeredNames.set(component, componentName);
-          this.componentStates.set(componentName, 'registered');
-          this.componentTimestamps.set(componentName, {
-            startedAt: null,
-            stoppedAt: null,
-          });
-          this.componentErrors.set(componentName, null);
-          this.componentUnexpectedStopHadError.delete(componentName);
-          this.componentStartAttemptTokens.set(componentName, ulid());
 
           // Create callbacks for component-scoped lifecycle
           const internalCallbacks: LifecycleInternalCallbacks = {
@@ -4436,7 +4472,8 @@ export class LifecycleManager
           progress.wasDuringStartup = this.isStarting;
           if (this.isShuttingDown) {
             interruptionCode = 'shutdown_in_progress';
-            throw registrationInterrupted;
+            rollBack();
+            return;
           }
           // Startup can also begin inside either hook. Its order excludes this
           // provisional entry, so publishing a dependency needed by that pass would
@@ -4448,84 +4485,68 @@ export class LifecycleManager
             )
           ) {
             interruptionCode = 'startup_in_progress';
-            throw registrationInterrupted;
+            rollBack();
+            return;
           }
+          this.componentStates.set(componentName, 'registered');
+          this.componentTimestamps.set(componentName, {
+            startedAt: null,
+            stoppedAt: null,
+          });
+          this.componentErrors.set(componentName, null);
+          this.componentUnexpectedStopHadError.delete(componentName);
+          this.componentStartAttemptTokens.set(componentName, ulid());
           progress.hasCommitted = true;
           this.committedDependencyReads.set(component, candidateRead);
         } catch (error) {
-          this.componentEntries = this.componentEntries.filter(
-            (registered) => registered !== component,
-          );
-          // Rolled back, so this registration did not commit after all.
-          progress.hasCommitted = false;
-          if (previousGeneration === undefined) {
-            this.registrationGenerations.delete(component);
-          } else {
-            this.registrationGenerations.set(component, previousGeneration);
-          }
-          if (previousRecordedName === undefined) {
-            this.registeredNames.delete(component);
-          } else {
-            this.registeredNames.set(component, previousRecordedName);
-          }
-
-          this.componentStates.delete(componentName);
-          this.componentTimestamps.delete(componentName);
-          this.componentErrors.delete(componentName);
-          this.componentStartAttemptTokens.delete(componentName);
-
-          // The component's side too: a hook that marked it registered before throwing
-          // would otherwise leave it believing it is, and its next registration refused as
-          // `duplicate_instance`.
-          this.markComponentUnregistered(
-            component,
-            'lifecycle-manager registration rollback',
-          );
-
-          // "Reported once per registration": this one never happened, so a report made
-          // under it - by the hook's own code reading the component - does not count
-          // against the next. Only such a report: a mark that was already there stays, or
-          // a caller retrying a failing registration would be told the same thing each
-          // time.
-          if (!wasDependencyReported) {
-            this.reportedDependencyReadFailures.delete(component);
-          }
-          if (!wasOptionalReported) {
-            this.reportedOptionalReadFailures.delete(component);
-          }
-
-          if (error !== registrationInterrupted) {
-            throw error;
-          }
+          rollBack();
+          throw error;
         } finally {
           this.pendingRegistrations.delete(component);
           // Publish only after hooks succeed (or rebuild after rollback), before
           // notifications flush. Nested commits and unregisters remain in the live
           // entries; never restore the stale array captured before calling hooks.
+          const didRegistryChange =
+            this.registryRevision !== revisionBeforeHooks;
           this.publishRegistry();
           if (progress.hasCommitted) {
             // Capture the report before queued listeners can mutate the registry.
             // The pre-hook order was only the reserved-entry cycle check; hooks may
             // have committed more components. Merge their validated reads into this
             // report snapshot without invoking more caller code during publication.
-            const reportReads = new Map(
-              this.components.map((entry) => [
-                entry,
-                entry === component
-                  ? candidateRead
-                  : ((this.isReadCurrent(dependencySnapshot, entry)
-                      ? dependencySnapshot.get(entry)
-                      : undefined) ??
-                    this.committedDependencyReads.get(entry) ?? {
-                      dependencies: [],
-                    }),
-              ]),
-            );
-            startupOrder = this.getStartupOrderInternal(
-              this.components,
-              undefined,
-              reportReads,
-            );
+            if (didRegistryChange) {
+              const reportReads = new Map(
+                this.components.map((entry) => [
+                  entry,
+                  entry === component
+                    ? candidateRead
+                    : (this.currentReadOf(entry, dependencySnapshot) ?? {
+                        dependencies: [],
+                      }),
+                ]),
+              );
+              try {
+                startupOrder = this.getStartupOrderInternal(
+                  this.components,
+                  undefined,
+                  reportReads,
+                );
+              } catch {
+                // This diagnostic cannot undo publication, regardless of why its
+                // order is unavailable. Snapshots observed at different times can disagree even though
+                // every registration passed its own cycle check. This is a report,
+                // not a failed commit: use an unavailable order rather than throw
+                // after publication or re-enter caller getters to manufacture one.
+                startupOrder = [];
+              }
+            } else {
+              const committedNames = new Set(
+                this.components.map((entry) => this.nameOf(entry)),
+              );
+              startupOrder = startupOrder.filter((name) =>
+                committedNames.has(name),
+              );
+            }
             committed.startupOrder = startupOrder;
             committed.manualPositionRespected = this.isManualPositionRespected({
               componentName,
@@ -6566,13 +6587,6 @@ export class LifecycleManager
       this.restoreComponentState(name, stateBeforeStart);
     };
 
-    // Only accepted starts belonging to this pass may update its dependency facts.
-    // Public allowDuringBulkStartup bypasses a gate; it does not join the pass. A
-    // refused dependency check must leave the pass's accepted snapshot unchanged.
-    if (startupDependencyReads === this.activeBulkStartup?.dependencyReads) {
-      startupDependencyReads?.set(component, ownDependencies);
-    }
-
     this.claimComponent(name, 'starting', claim);
 
     for (const warning of skippedDependencyWarnings) {
@@ -6660,6 +6674,21 @@ export class LifecycleManager
       // Race against timeout
       // Adopted, not raced as it is: a native promise carrying its own no-op `then`
       // never settled the race, and its rejection went unhandled. See `adoptPromise()`.
+      // All refusal points and the overridable handler setup are past. Only now
+      // record this accepted start, with its registration generation; failed attach
+      // or shutdown checks must not change the pass's dependency facts.
+      if (
+        startupDependencyReads === this.activeBulkStartup?.dependencyReads &&
+        startupDependencyReads !== undefined
+      ) {
+        startupDependencyReads.set(component, ownDependencies);
+        let generations = this.readGenerations.get(startupDependencyReads);
+        if (generations === undefined) {
+          generations = new Map();
+          this.readGenerations.set(startupDependencyReads, generations);
+        }
+        generations.set(component, this.registrationGenerations.get(component));
+      }
       const startPromise = adoptPromise(component.start());
 
       if (toTimerDelayMS(timeoutMS) > 0) {
@@ -7960,11 +7989,11 @@ export class LifecycleManager
     // must not fail this registration.
     return this.components.some((c) =>
       dependenciesOf(
-        this.activeBulkStartup?.dependencyReads.get(c) ??
-          (this.isReadCurrent(dependencySnapshot, c)
-            ? dependencySnapshot.get(c)
-            : undefined) ??
-          this.committedDependencyReads.get(c),
+        this.currentReadOf(
+          c,
+          dependencySnapshot,
+          this.activeBulkStartup?.dependencyReads,
+        ),
       ).includes(componentName),
     );
   }
@@ -9066,11 +9095,34 @@ export class LifecycleManager
     );
   }
 
+  /** Current-generation dependency metadata, without running caller getters. */
+  private currentReadOf(
+    component: BaseComponent,
+    snapshot: ReadonlyMap<BaseComponent, DependencyRead>,
+    preferred?: ReadonlyMap<BaseComponent, DependencyRead>,
+  ): DependencyRead | undefined {
+    if (preferred !== undefined && this.isReadCurrent(preferred, component)) {
+      return preferred.get(component);
+    }
+    return (
+      (this.isReadCurrent(snapshot, component)
+        ? snapshot.get(component)
+        : undefined) ?? this.committedDependencyReads.get(component)
+    );
+  }
+
   /** Publish the live committed subset after registry mutations, without caller code. */
   private publishRegistry(): void {
-    this.components = this.componentEntries.filter(
+    const published = this.componentEntries.filter(
       (component) => !this.pendingRegistrations.has(component),
     );
+    if (
+      published.length !== this.components.length ||
+      published.some((entry, index) => this.components[index] !== entry)
+    ) {
+      this.components = published;
+      this.registryRevision++;
+    }
   }
 
   private getInsertIndex(
