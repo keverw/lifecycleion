@@ -1,12 +1,10 @@
-import { reportToConsole } from '../../internal/report-to-console';
-import { describeError } from '../../to-error';
 import {
   defineEntry,
   describeContainer,
   namedArrayKeys,
 } from '../../internal/container-entries';
 import { isPlainContainer } from '../../internal/is-plain-container';
-import { adoptResult } from '../../internal/adopt-promise';
+import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { MAX_REDACTION_ENTRIES } from '../../internal/redact-paths';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
 import {
@@ -449,11 +447,12 @@ export class ArraySink implements LogSink {
         throw handlerError;
       }
 
-      const settled = adoptResult(result, (thenError) => {
-        reportToConsole(
-          `ArraySink onFormatError returned a value whose then could not be read: ${describeError(thenError)}`,
-        );
-      });
+      const settled = adoptResult(result);
+      if (settled instanceof UnreadableReturn) {
+        settled.report('ArraySink onFormatError');
+        this.formatReportsInFlight--;
+        return undefined;
+      }
       if (settled !== undefined) {
         void settled.then(
           () => {

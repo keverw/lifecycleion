@@ -212,3 +212,28 @@ describe('reportThroughHandler with a line that throws', () => {
     ).toHaveLength(1);
   });
 });
+
+test('an anonymous failure handler with an unreadable return retains the report context', () => {
+  const captured = muteConsoleError();
+  let settlements = 0;
+  try {
+    reportThroughHandler(
+      () => ({
+        get then(): never {
+          throw new Error('broken return');
+        },
+      }),
+      () => 'FileSink /test/output failed writing original entry',
+      () => {
+        settlements++;
+      },
+    );
+    expect(settlements).toBe(1);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('FileSink /test/output');
+    expect(captured[0]).toContain('then could not be read');
+    expect(captured[0]).not.toContain('also threw');
+  } finally {
+    restoreConsoleError();
+  }
+});

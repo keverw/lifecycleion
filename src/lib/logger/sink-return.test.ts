@@ -109,8 +109,63 @@ test('close identifies unreadable returns without claiming the sink threw', asyn
     await logger.close();
     expect(output).toHaveBeenCalledTimes(1);
     const message = String(output.mock.calls[0]?.[0]);
-    expect(message).toContain('Closing sink #1 returned a value');
+    expect(message).toContain('Log sink #1 close returned a value');
     expect(message).toContain('then could not be read');
+  } finally {
+    output.mockRestore();
+  }
+});
+
+test('close identifies sinks using their configured list indices', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  const makeSink = () => ({
+    write: () => {},
+    close: () =>
+      ({
+        get then(): never {
+          throw new Error('close return');
+        },
+      }) as unknown as Promise<void>,
+  });
+  const a = makeSink();
+  const b = makeSink();
+  const c = makeSink();
+  const logger = new Logger({
+    callProcessExit: false,
+    sinks: [a, b],
+    diagnosticSinks: [c, a],
+  });
+  try {
+    await logger.close();
+    const lines = output.mock.calls.map((call) => String(call[0]));
+    expect(lines).toHaveLength(3);
+    expect(lines[0]).toContain('Log sink #1 close');
+    expect(lines[1]).toContain('Log sink #2 close');
+    expect(lines[2]).toContain('Diagnostic sink #1 close');
+  } finally {
+    output.mockRestore();
+  }
+});
+
+test('close preserves sink identity when a close hook removes its own sink', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  const logger = new Logger({ callProcessExit: false, sinks: [] });
+  const sink = {
+    write: () => {},
+    close: (): Promise<void> => {
+      logger.removeSink(sink);
+      return {
+        get then(): never {
+          throw new Error('close return');
+        },
+      } as unknown as Promise<void>;
+    },
+  };
+  logger.addSink(sink);
+  try {
+    await logger.close();
+    expect(output).toHaveBeenCalledTimes(1);
+    expect(String(output.mock.calls[0]?.[0])).toContain('Log sink #1 close');
   } finally {
     output.mockRestore();
   }

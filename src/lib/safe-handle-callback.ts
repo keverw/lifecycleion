@@ -1,14 +1,9 @@
-import { reportToConsole } from './internal/report-to-console';
 import { errorToString } from './error-to-string';
-import { describeError, toError } from './to-error';
+import { toError } from './to-error';
 import { DOUBLE_EOL } from './constants';
 import { installGlobalEventTarget } from './global-event-target';
 import { reportToHost } from './internal/report-to-host';
-import {
-  adoptPromise,
-  isAdoptable,
-  adoptResult,
-} from './internal/adopt-promise';
+import { UnreadableReturn, adoptResult } from './internal/adopt-promise';
 import { reportThroughHandler } from './internal/failure-reporter';
 
 // Node.js has a global `ErrorEvent` constructor (Node 25+) but does not make `globalThis`
@@ -139,7 +134,8 @@ export function safeHandleCallback(
  * @param callback The untrusted value to invoke.
  * @param args Arguments to pass to the callback.
  * @param onError Receives the thrown value, the rejection reason, or a synthesized
- *                `Error` when `callback` is not callable. It may be `async`: a promise it
+ *                `Error` when `callback` is not callable or its return has an unreadable
+ *                `then` (the original failure is its `cause`). It may be `async`: a promise it
  *                returns is followed, and a rejection lands on the console rung like a
  *                throw does.
  * @param thisArg Receiver to invoke `callback` with. Omit for a plain function or a
@@ -195,11 +191,11 @@ function invokeCallbackSafely(
     reportToOnError(callbackName, error, onError);
     return;
   }
-  const pending = adoptResult(result, (thenError) => {
-    reportToConsole(
-      `Callback ${callbackName} returned a value whose then could not be read: ${describeError(thenError)}`,
-    );
-  });
+  const pending = adoptResult(result);
+  if (pending instanceof UnreadableReturn) {
+    reportToOnError(callbackName, pending, onError);
+    return;
+  }
   void pending?.catch((error: unknown) => {
     reportToOnError(callbackName, error, onError);
   });
@@ -306,13 +302,17 @@ export async function safeHandleCallbackAndWait<T>(
   // `typeof`, for the reason `runCallbackSafely()` gives.
   if (typeof callback === 'function') {
     try {
-      // `Reflect.apply` and `adoptPromise()`, as `runCallbackSafely()` calls and adopts:
+      // `Reflect.apply` and `adoptResult()`, as `runCallbackSafely()` calls and adopts:
       // one path for how an untrusted callback is invoked and how its promise is read.
       const result: unknown = Reflect.apply(callback, undefined, args);
 
-      if (isAdoptable(result)) {
+      const pending = adoptResult(result);
+      if (pending instanceof UnreadableReturn) {
+        return handleError(pending);
+      }
+      if (pending !== undefined) {
         // Wait for the async callback to complete
-        const value = await adoptPromise<T>(result as PromiseLike<T>);
+        const value = (await pending) as T;
 
         return { success: true, value };
       } else {

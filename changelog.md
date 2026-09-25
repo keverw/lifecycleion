@@ -211,6 +211,14 @@
 
 ## Unreleased
 
+- Both callback helpers route unreadable `then` returns through the configured error
+  channel as return-contract errors, preserving the getter failure as `cause`; the
+  awaited helper also returns `success: false`. Terminal reports from anonymous
+  failure handlers retain the original report context. Return classification no
+  longer allocates a reporter closure on successful synchronous calls, and sink
+  loops use indices directly. Close reports identify the original log or diagnostic
+  sink list and index (preferring the log list for shared sinks).
+
 - **BREAKING (TypeScript):** `InsertComponentAtResult.manualPositionRespected` is
   optional. It is `undefined` for refusals and unavailable ordering, `false` only for
   a known position changed by dependency ordering. Strict consumers must handle the

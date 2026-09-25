@@ -1,5 +1,5 @@
 import { describeError, toError } from '../to-error';
-import { adoptResult } from './adopt-promise';
+import { adoptResult, UnreadableReturn } from './adopt-promise';
 import { reportToConsole } from './report-to-console';
 import { reportToHost } from './report-to-host';
 
@@ -45,7 +45,7 @@ export type ReportFailure = (error: unknown, subject: string) => void;
  * @param handlerName Names the handler in the one report that does not carry `line`: a
  *               return value whose `then` cannot be read, where the handler already
  *               delivered its report and repeating it would be wrong. Without it, that line
- *               could not say which handler misbehaved.
+ *               uses `line` as context so an anonymous handler can still be identified.
  */
 export function reportThroughHandler(
   invoke: (() => unknown) | undefined,
@@ -113,11 +113,18 @@ export function reportThroughHandler(
       return;
     }
 
-    const pending = adoptResult(result, (thenError) => {
-      reportToConsole(
-        `A failure handler${handlerName === undefined ? '' : ` (${handlerName})`} returned a value whose then could not be read: ${describeError(thenError)}`,
+    const pending = adoptResult(result);
+    if (pending instanceof UnreadableReturn) {
+      // Named handlers need no repeated original report. Otherwise preserve the
+      // caller's context so a terminal failure can still be traced to its source.
+      pending.report(
+        handlerName === undefined
+          ? `Failure handler for: ${safeLine()}`
+          : `Failure handler (${handlerName})`,
       );
-    });
+      settle();
+      return;
+    }
     if (pending !== undefined) {
       void pending
         .catch((handlerError: unknown) => {

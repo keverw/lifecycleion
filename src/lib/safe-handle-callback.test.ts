@@ -1211,27 +1211,57 @@ describe('CallbackResult narrowing', () => {
   });
 });
 
-it('a callback with an unreadable return does not invoke its error handler', () => {
-  let errorCalls = 0;
-  const captured = muteConsoleError();
-  try {
-    runCallbackSafely(
-      'delivered',
-      () => ({
-        get then(): never {
-          throw new Error('return getter');
-        },
-      }),
-      [],
-      () => {
-        errorCalls++;
+// Malformed returns still reach the configured channel, but are explicitly labeled
+// as return-contract failures rather than claiming the callback invocation threw.
+it('a callback with an unreadable return invokes its error handler once', () => {
+  const cause = new Error('return getter');
+  const errors: unknown[] = [];
+  runCallbackSafely(
+    'delivered',
+    () => ({
+      get then(): never {
+        throw cause;
       },
-    );
-    expect(errorCalls).toBe(0);
-    expect(captured).toHaveLength(1);
-    expect(captured[0]).toContain('Callback delivered returned a value');
-    expect(captured[0]).toContain('then could not be read');
-  } finally {
-    restoreConsoleError();
-  }
+    }),
+    [],
+    (error) => {
+      errors.push(error);
+    },
+  );
+  expect(errors).toHaveLength(1);
+  expect((errors[0] as Error).message).toContain('then could not be read');
+  expect((errors[0] as Error).cause).toBe(cause);
 });
+
+for (const shouldWait of [false, true]) {
+  it(`${shouldWait ? 'awaited' : 'fire-and-forget'} unreadable returns reach the global error channel`, async () => {
+    const cause = new Error('unreadable callback return');
+    const errors: Error[] = [];
+    const listener = (event: Event): void => {
+      event.preventDefault();
+      errors.push((event as ErrorEvent).error as Error);
+    };
+    globalThis.addEventListener('error', listener);
+    try {
+      const callback = (): unknown => ({
+        get then(): never {
+          throw cause;
+        },
+      });
+      if (shouldWait) {
+        const result = await safeHandleCallbackAndWait('delivered', callback);
+        expect(result.success).toBe(false);
+        expect(result.error?.message).toContain('then could not be read');
+        expect(result.error?.cause).toBe(cause);
+      } else {
+        safeHandleCallback('delivered', callback);
+      }
+      expect(errors).toHaveLength(1);
+      const failure = errors[0].cause as Error;
+      expect(failure.message).toContain('then could not be read');
+      expect(failure.cause).toBe(cause);
+    } finally {
+      globalThis.removeEventListener('error', listener);
+    }
+  });
+}

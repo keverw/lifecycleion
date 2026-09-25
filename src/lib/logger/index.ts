@@ -8,7 +8,7 @@ import {
 import { CurlyBrackets } from '../curly-brackets';
 import { MAX_RENDER_LENGTH } from '../internal/render-budget';
 import { isNumber } from '../is-number';
-import { adoptResult } from '../internal/adopt-promise';
+import { adoptResult, UnreadableReturn } from '../internal/adopt-promise';
 import { describeError, isErrorValue, toError } from '../to-error';
 import { readMember, readUnknownMember } from '../internal/read-member';
 import { reportToConsole } from '../internal/report-to-console';
@@ -861,10 +861,14 @@ export class Logger extends EventEmitter {
     this.unregisterReportErrorListener();
 
     // Close all sinks
-    const sinksToClose = [...new Set([...this.sinks, ...this.diagnosticSinks])];
+    // Snapshot identities and positions before any close hook can edit the lists.
+    // A later malformed return must still name the destination we actually closed.
+    const logSinks = [...this.sinks];
+    const diagnosticSinks = [...this.diagnosticSinks];
+    const sinksToClose = [...new Set([...logSinks, ...diagnosticSinks])];
 
     await Promise.all(
-      sinksToClose.map(async (sink, sinkIndex) => {
+      sinksToClose.map(async (sink) => {
         let result: unknown;
         try {
           // Read once, preserving the receiver, and contain property-access failures
@@ -879,11 +883,18 @@ export class Logger extends EventEmitter {
           this.handleSinkError(error, 'close', sink);
           return;
         }
-        const pending = adoptResult(result, (thenError) => {
-          reportToConsole(
-            `Closing sink #${sinkIndex + 1} returned a value whose then could not be read: ${describeError(thenError)}`,
+        const pending = adoptResult(result);
+        if (pending instanceof UnreadableReturn) {
+          // Use the configured lists, not the merged/deduplicated close order.
+          const logIndex = logSinks.indexOf(sink);
+          const diagnosticIndex = diagnosticSinks.indexOf(sink);
+          pending.report(
+            logIndex >= 0
+              ? `Log sink #${logIndex + 1} close`
+              : `Diagnostic sink #${diagnosticIndex + 1} close`,
           );
-        });
+          return;
+        }
         try {
           await pending;
         } catch (error) {
@@ -1263,7 +1274,8 @@ export class Logger extends EventEmitter {
 
     // Write to all sinks. Classify return values separately: a sink that returned
     // successfully did not throw just because its result has a broken then getter.
-    for (const [sinkIndex, sink] of this.sinks.entries()) {
+    for (let sinkIndex = 0; sinkIndex < this.sinks.length; sinkIndex++) {
+      const sink = this.sinks[sinkIndex];
       let result: unknown;
       try {
         result = sink.write(entry);
@@ -1271,11 +1283,11 @@ export class Logger extends EventEmitter {
         this.handleSinkError(error, 'write', sink);
         continue;
       }
-      const pending = adoptResult(result, (thenError) => {
-        reportToConsole(
-          `Log sink #${sinkIndex + 1} returned a value whose then could not be read: ${describeError(thenError)}`,
-        );
-      });
+      const pending = adoptResult(result);
+      if (pending instanceof UnreadableReturn) {
+        pending.report(`Log sink #${sinkIndex + 1}`);
+        continue;
+      }
       void pending?.catch((error: unknown) => {
         this.handleSinkError(error, 'write', sink);
       });
@@ -1490,7 +1502,10 @@ export class Logger extends EventEmitter {
 
       const entry = diagnosticEntry(diagnostic);
 
-      for (const [sinkIndex, sink] of destinations.entries()) {
+      // Keep the configured destination index without allocating entries tuples.
+      // eslint-disable-next-line unicorn/no-for-loop
+      for (let sinkIndex = 0; sinkIndex < destinations.length; sinkIndex++) {
+        const sink = destinations[sinkIndex];
         let result: unknown;
         try {
           const writeDiagnostic = sink.writeDiagnostic?.bind(sink);
@@ -1506,11 +1521,11 @@ export class Logger extends EventEmitter {
         }
         // The diagnostic was already delivered; identify a malformed return without
         // repeating it. The index names the destination without reading sink getters.
-        const pending = adoptResult(result, (thenError) => {
-          reportToConsole(
-            `Diagnostic sink #${sinkIndex + 1} returned a value whose then could not be read: ${describeError(thenError)}`,
-          );
-        });
+        const pending = adoptResult(result);
+        if (pending instanceof UnreadableReturn) {
+          pending.report(`Diagnostic sink #${sinkIndex + 1}`);
+          continue;
+        }
         void pending?.catch((deliveryError: unknown) => {
           reportToConsole(
             `${diagnostic.message} (diagnostic sink also rejected: ${describeError(deliveryError)})`,

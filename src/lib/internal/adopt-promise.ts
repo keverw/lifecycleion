@@ -1,3 +1,5 @@
+import { describeError } from '../to-error';
+import { reportToConsole } from './report-to-console';
 import { isPromise } from '../is-promise';
 
 /**
@@ -166,22 +168,36 @@ export function adoptPromise<T>(
   });
 }
 
+/** A malformed return is distinct from a throw during the callback invocation. */
+export class UnreadableReturn extends Error {
+  constructor(cause: unknown) {
+    super(`Returned value's then could not be read: ${describeError(cause)}`, {
+      cause,
+    });
+  }
+
+  /** Shared terminal wording, built only on failure rather than for every call. */
+  public report(subject: string): void {
+    reportToConsole(
+      `${subject} returned a value whose then could not be read: ${describeError(this.cause)}`,
+    );
+  }
+}
+
 /**
- * Classify a completed callback's return separately from invoking that callback.
- * An unreadable then is a return-contract failure, not evidence that the callback
- * threw or failed to deliver. Callers supply a guarded terminal reporter and decide
- * how to handle actual async rejection. Undefined means no async work remains.
+ * Classify a completed callback's return separately from invoking it. Synchronous
+ * success creates no reporting closure or wrapper. Only a malformed return allocates
+ * a failure, which callers route through their configured channel or terminal console.
+ * A promise is always freshly adopted and safe to chain; undefined means no async work.
  */
 export function adoptResult(
   result: unknown,
-  onUnreadable: (error: unknown) => void,
-): Promise<unknown> | undefined {
+): Promise<unknown> | UnreadableReturn | undefined {
   let shouldAdopt: boolean;
   try {
     shouldAdopt = isAdoptable(result);
   } catch (error) {
-    onUnreadable(error);
-    return undefined;
+    return new UnreadableReturn(error);
   }
   return shouldAdopt ? adoptPromise(result) : undefined;
 }

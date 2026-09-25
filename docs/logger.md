@@ -1691,8 +1691,18 @@ A sink that returns successfully but whose return value has a throwing `then` ge
 produces a terminal console report identifying the unreadable return value. This is
 not reported as a sink invocation failure, and an already-delivered diagnostic is not
 repeated. The report identifies the sink by its one-based position in the applicable
-sink list. Sink close methods are read once and their results use the same guarded
+sink list. Close reports use the original log or diagnostic list, preferring the log
+list for a sink present in both. Sink close methods are read once and their results use the same guarded
 adoption, including native promises with overwritten own `then` properties. Actual sink throws and asynchronous rejections retain their normal handling.
+
+Callback helpers (`runCallbackSafely`, `safeHandleCallback`, and
+`safeHandleCallbackAndWait`) report unreadable returns through the configured
+`onError` or global error channel. The error explicitly describes the return-contract
+failure and keeps the getter's thrown value as `cause`; the awaited helper returns
+`success: false`. This keeps event-listener and guarded-logger failures observable
+without labeling a completed invocation as a throw. A malformed return from the
+failure handler itself stays on the terminal console rung; anonymous handlers include
+the original report context so the source remains identifiable.
 
 A sink whose `write()` or `close()` throws or rejects produces a logger diagnostic with
 `kind: 'sink'`, the normalized failure in `error`, the failing `sink`, and `context` set
