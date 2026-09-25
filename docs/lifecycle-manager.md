@@ -989,13 +989,18 @@ A request that arrives during the restart's _startup_ phase aborts that startup 
 
 #### Individual Component Operations
 
-Graceful stops validate the registered instance and its state again after reading
+Both stop phases validate the registered instance and its state after reading caller-owned
+properties. The graceful phase reads
 `onGracefulStopTimeout`, `shutdownGracefulTimeoutMS`, and an explicit `timeout` option.
-These properties can be getters that re-enter the manager. If another stop takes the
+The force phase reads `onShutdownForce`, `onShutdownForceAborted`, and
+`shutdownForceTimeoutMS`. These properties can be getters that re-enter the manager. If another stop takes the
 component during those reads, the outer attempt returns `component_already_stopping`
-without calling `stop()` or forcing the other attempt. If the original instance was
+without calling `stop()` or forcing the other attempt. Force escalation may continue
+its own graceful claim; stalled retries may claim only an idle stall. Neither may
+overwrite a newer attempt, and a refused force attempt does not advance the stop
+generation used to observe late completions. If the original instance was
 unregistered or replaced, it returns `component_not_found` and leaves the replacement
-untouched. A refusal before taking ownership does not enter the force phase. Once the
+untouched. A refusal before taking ownership never invokes the force handler. Once the
 stop claims the component, re-entry from its unexpected-stop-handler clearing hook
 also sees a stop already in progress.
 

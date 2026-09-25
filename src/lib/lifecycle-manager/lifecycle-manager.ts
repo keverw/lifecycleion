@@ -7021,8 +7021,8 @@ export class LifecycleManager
   }
 
   /**
-   * The stop preconditions, checked without reading component-owned properties. A
-   * graceful attempt checks again after reading its timeout and abort hook: getters
+   * The stop preconditions, checked without reading component-owned properties. Each
+   * phase checks again after reading its timeout and hooks: getters
    * may stop, unregister, or replace the component synchronously. Taking the claim
    * from that newer stop would call stop() twice and let either completion overwrite
    * the other's state. A replacement must not inherit the old instance's outcome.
@@ -7030,6 +7030,7 @@ export class LifecycleManager
   private checkStopPreconditions(
     name: string,
     expected?: BaseComponent,
+    force?: { claim: symbol; isStalledRetry: boolean },
   ): ComponentOperationResult | { component: BaseComponent } {
     const component = this.getComponent(name);
 
@@ -7043,6 +7044,32 @@ export class LifecycleManager
             : `Component "${name}" was unregistered or replaced while its stop was being prepared`,
         code: 'component_not_found',
       };
+    }
+
+    // A force phase may continue its own graceful claim, or retry an idle stall.
+    // It may never replace another in-flight claim, including a forceStalled start.
+    // Do this before the stall check because retries retain the stall record while
+    // their force handler runs.
+    if (force && this.isComponentInFlight(name)) {
+      const state = this.componentStates.get(name);
+      if (state === 'stopping' && this.ownsClaim(name, force.claim)) {
+        return { component };
+      }
+      const isStarting = state === 'starting';
+      return {
+        success: false,
+        componentName: name,
+        reason: isStarting
+          ? 'Component is starting'
+          : 'Component is already stopping',
+        code: isStarting
+          ? 'component_already_starting'
+          : 'component_already_stopping',
+        status: this.getComponentStatus(name),
+      };
+    }
+    if (force?.isStalledRetry && this.stalledComponents.has(name)) {
+      return { component };
     }
 
     // Check if stalled
@@ -7095,14 +7122,6 @@ export class LifecycleManager
 
     // Handle forceImmediate option - skip all phases and go straight to force
     if (options?.forceImmediate) {
-      // A fresh stop, so a fresh token: this path only runs for a running component,
-      // which has no older stop still floating for the token to protect, and a late
-      // settlement of an earlier stop must not answer for this one. The unexpected-stop
-      // handler is cleared by `shutdownComponentForce()` once it has read the component's
-      // getters - cleared first, a getter that threw left the component running with
-      // `reportUnexpectedStop()` silenced for good.
-      this.issueStopAttemptToken(name);
-
       return this.shutdownComponentForce(
         name,
         component,
@@ -7531,20 +7550,32 @@ export class LifecycleManager
       : undefined;
     const timeoutMS = hasForceHandler ? component.shutdownForceTimeoutMS : 0;
 
-    // A stalled retry bumps the stop generation only when a force handler will run, and
-    // decides that from the one read above. Without one this stalls again at once with
-    // no async work to protect, and bumping would orphan the floating graceful `stop()`
-    // whose late resolution can still clear the stall. Read separately - and checked for
-    // truthiness rather than being a function - the two reads could disagree and do
-    // exactly that.
-    if (context.isStalledRetry === true && hasForceHandler) {
+    // Hook and timeout getters can synchronously start another stop, restart a
+    // stalled component, or unregister and replace it. Recheck after all reads and
+    // before changing either ownership or the stop generation. In particular, a
+    // refused outer attempt must not orphan a nested attempt's late completion.
+    const recheck = this.checkStopPreconditions(name, component, {
+      claim,
+      isStalledRetry: context.isStalledRetry === true,
+    });
+    if ('success' in recheck) {
+      return recheck;
+    }
+
+    this.claimComponent(name, 'force-stopping', claim);
+    // A fresh force-immediate stop needs a token. A stalled retry only advances it
+    // when a handler will actually run: without one, the old graceful promise may
+    // still settle late and clear the stall. Graceful escalation keeps its token.
+    if (
+      !context.gracefulPhaseRan &&
+      (!context.isStalledRetry || hasForceHandler)
+    ) {
       this.issueStopAttemptToken(name);
     }
 
-    // Already cleared when a graceful phase ran; a `forceImmediate` stop clears it here,
-    // after the reads above, so a getter that throws leaves it in place.
+    // Claim before calling this overridable hook, just as in the graceful phase.
+    // Property-read failures above still leave the unexpected-stop handler intact.
     this.clearUnexpectedStopHandler(component, 'force stop');
-    this.claimComponent(name, 'force-stopping', claim);
     this.logger.entity(name).info('Force shutdown started', {
       params: {
         gracefulPhaseRan: context.gracefulPhaseRan,
