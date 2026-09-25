@@ -1,5 +1,5 @@
 import type { LoggerService } from '../logger/logger-service';
-import { adoptPromise, isAdoptable } from '../internal/adopt-promise';
+import { adoptResult, UnreadableReturn } from '../internal/adopt-promise';
 import {
   reportCallbackError,
   runCallbackSafely,
@@ -306,32 +306,22 @@ function guardEntity(
   // rejection carries the reason, which is the more useful report, and one that
   // resolves still says so. Nothing is left floating either way.
   //
-  // Contained, because detecting and adopting a thenable each read `child.then`, and
-  // that read runs code the logger owns: a `then` getter that throws would otherwise
-  // escape here, past every other guard.
-  //
-  // Through `adoptPromise()` rather than `.then`: `Promise.resolve()` hands a native
-  // promise back as it is, own `then` property included, and a no-op one there would
-  // swallow the rejection, leaving it unhandled.
-  try {
-    if (isAdoptable(child)) {
-      void adoptPromise(child).then(
-        () => {
-          reportCallbackError(
-            label,
-            new Error(`${label} did not return a logger`),
-          );
-        },
-        (error: unknown) => {
-          reportCallbackError(label, error);
-        },
-      );
-
-      return parent;
-    }
-  } catch (error) {
-    reportCallbackError(label, error);
-
+  // Classification captures then once; both malformed returns and rejected
+  // thenables remain contained, and no asynchronous child can be used as a logger.
+  const pending = adoptResult(child);
+  if (pending instanceof UnreadableReturn) {
+    reportCallbackError(label, pending);
+    return parent;
+  }
+  if (pending !== undefined) {
+    void pending.then(
+      () =>
+        reportCallbackError(
+          label,
+          new Error(`${label} did not return a logger`),
+        ),
+      (error: unknown) => reportCallbackError(label, error),
+    );
     return parent;
   }
 

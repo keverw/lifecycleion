@@ -1701,8 +1701,9 @@ Callback helpers (`runCallbackSafely`, `safeHandleCallback`, and
 failure and keeps the getter's thrown value as `cause`; the awaited helper returns
 `success: false`. This keeps event-listener and guarded-logger failures observable
 without labeling a completed invocation as a throw. A malformed return from the
-failure handler itself stays on the terminal console rung; anonymous handlers include
-the original report context so the source remains identifiable.
+failure handler itself stays on the terminal console rung. Built-in sink, format, and
+truncation reporters name their handlers without repeating the original failure.
+An unnamed internal caller retains the report context as a fallback.
 
 A sink whose `write()` or `close()` throws or rejects produces a logger diagnostic with
 `kind: 'sink'`, the normalized failure in `error`, the failing `sink`, and `context` set

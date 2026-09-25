@@ -211,6 +211,14 @@
 
 ## Unreleased
 
+- Registration reports recompute startup order from committed components, using
+  validated dependency reads without calling getters again; pending entries cannot
+  distort reported ordering. Retry operations, advisory upload outcomes, getValue
+  handlers, and guarded entity returns now use the shared single-read thenable
+  adoption. Captured then methods run via a microtask without extra promise chains.
+  Sink, format, and truncation failure handlers identify malformed returns by handler
+  name, without repeating the original failure.
+
 - Callback/sink return adoption reads a thenable's `then` accessor once and invokes
   the captured method asynchronously with its original receiver. Native promise
   own-`then` protection remains intact. Registration rollback now removes its registry
@@ -267,8 +275,8 @@
   Report-only cycles from mixed-time dependency reads now yield an unavailable order
   (`[]`) without failing an already published registration. Lifecycle state maps are
   written at publication, and late startup refusals do not modify bulk dependency
-  metadata. Dependency generations are checked, and unchanged registrations reuse
-  their validated order.
+  metadata. Dependency generations are checked, and committed report orders are
+  recomputed from validated reads.
 
 - Graceful and force component stops recheck registration and stop eligibility after reading
   caller-owned timeout and abort-hook properties. A getter that starts another stop

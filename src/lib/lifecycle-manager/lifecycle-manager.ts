@@ -84,7 +84,11 @@ import {
   ProcessSignalManager,
   type ShutdownSignal,
 } from '../process-signal-manager';
-import { adoptPromise, isAdoptable } from '../internal/adopt-promise';
+import {
+  adoptPromise,
+  adoptResult,
+  UnreadableReturn,
+} from '../internal/adopt-promise';
 import {
   reportCallbackError,
   runCallbackSafely,
@@ -378,7 +382,6 @@ export class LifecycleManager
   // Operations share this committed snapshot. Publication and unregister replace
   // it once; reads during registration hooks never allocate a filtered copy.
   private components: BaseComponent[] = [];
-  private registryRevision = 0;
 
   private runningComponents: Set<string> = new Set();
   private componentStates: Map<string, ComponentState> = new Map();
@@ -2286,8 +2289,12 @@ export class LifecycleManager
       // `async getValue` - is a contract break, not a value: read as one it came back
       // `not_found`, and a rejection it carried went unhandled. Its settlement is
       // observed, so nothing floats, and the call fails with `code: 'error'`.
-      if (isAdoptable(rawResult)) {
-        void adoptPromise(rawResult).catch((error: unknown) => {
+      const pending = adoptResult(rawResult);
+      if (pending instanceof UnreadableReturn) {
+        throw pending;
+      }
+      if (pending !== undefined) {
+        void pending.catch((error: unknown) => {
           this.logger
             .entity(componentName)
             .warn('Asynchronous getValue handler rejected: {{error.message}}', {
@@ -4382,7 +4389,6 @@ export class LifecycleManager
       const wasOptionalReported =
         this.reportedOptionalReadFailures.has(component);
 
-      const revisionBeforeHooks = this.registryRevision;
       let interruptionCode:
         'shutdown_in_progress' | 'startup_in_progress' | undefined;
       // Both expected bulk-operation refusals and unexpected failures undo only
@@ -4514,46 +4520,35 @@ export class LifecycleManager
           // Publish only after hooks succeed (or rebuild after rollback), before
           // notifications flush. Nested commits and unregisters remain in the live
           // entries; never restore the stale array captured before calling hooks.
-          const didRegistryChange =
-            this.registryRevision !== revisionBeforeHooks;
           this.publishRegistry();
           if (progress.hasCommitted) {
             // Capture the report before queued listeners can mutate the registry.
             // The pre-hook order was only the reserved-entry cycle check; hooks may
             // have committed more components. Merge their validated reads into this
             // report snapshot without invoking more caller code during publication.
-            if (didRegistryChange) {
-              const reportReads = new Map(
-                this.components.map((entry) => [
-                  entry,
-                  entry === component
-                    ? candidateRead
-                    : (this.currentReadOf(entry, dependencySnapshot) ?? {
-                        dependencies: [],
-                      }),
-                ]),
+            const reportReads = new Map(
+              this.components.map((entry) => [
+                entry,
+                entry === component
+                  ? candidateRead
+                  : (this.currentReadOf(entry, dependencySnapshot) ?? {
+                      dependencies: [],
+                    }),
+              ]),
+            );
+            try {
+              startupOrder = this.getStartupOrderInternal(
+                this.components,
+                undefined,
+                reportReads,
               );
-              try {
-                startupOrder = this.getStartupOrderInternal(
-                  this.components,
-                  undefined,
-                  reportReads,
-                );
-              } catch {
-                // This diagnostic cannot undo publication, regardless of why its
-                // order is unavailable. Snapshots observed at different times can disagree even though
-                // every registration passed its own cycle check. This is a report,
-                // not a failed commit: use an unavailable order rather than throw
-                // after publication or re-enter caller getters to manufacture one.
-                startupOrder = [];
-              }
-            } else {
-              const committedNames = new Set(
-                this.components.map((entry) => this.nameOf(entry)),
-              );
-              startupOrder = startupOrder.filter((name) =>
-                committedNames.has(name),
-              );
+            } catch {
+              // This diagnostic cannot undo publication, regardless of why its
+              // order is unavailable. Snapshots observed at different times can disagree even though
+              // every registration passed its own cycle check. This is a report,
+              // not a failed commit: use an unavailable order rather than throw
+              // after publication or re-enter caller getters to manufacture one.
+              startupOrder = [];
             }
             committed.startupOrder = startupOrder;
             committed.manualPositionRespected =
@@ -9146,7 +9141,6 @@ export class LifecycleManager
       published.some((entry, index) => this.components[index] !== entry)
     ) {
       this.components = published;
-      this.registryRevision++;
     }
   }
 

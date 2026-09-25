@@ -8928,3 +8928,33 @@ test.each([false, true])(
     }
   },
 );
+
+test('requestBodySettled uses one then read and observes the captured settlement', async () => {
+  let reads = 0;
+  const failure = new Error('upload failed');
+  const settled = {
+    get then() {
+      if (++reads > 1) {
+        return undefined;
+      }
+      return (resolve: (value: Error) => void): void => {
+        resolve(failure);
+      };
+    },
+  } as unknown as Promise<Error | undefined>;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () =>
+      Promise.resolve({
+        status: 200,
+        headers: {},
+        body: null,
+        requestBodySettled: settled,
+      }),
+  };
+  const client = new HTTPClient({ adapter });
+  const response = await client.get('https://example.com').send();
+  expect(response.status).toBe(200);
+  expect(await response.requestBodySettled).toBe(failure);
+  expect(reads).toBe(1);
+});

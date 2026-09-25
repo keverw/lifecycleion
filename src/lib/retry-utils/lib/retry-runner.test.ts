@@ -1116,3 +1116,42 @@ describe('RetryRunner - an operation returning a hostile rejected promise', () =
     },
   );
 });
+
+test('operation thenable uses its first then read and observes rejection', async () => {
+  muteConsoleError();
+  let reads = 0;
+  let attempts = 0;
+  const failure = new Error('operation failed');
+  const runner = new RetryRunner(
+    { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 1 },
+    () => {
+      attempts++;
+      let resultReads = 0;
+      return {
+        get then() {
+          reads++;
+          if (++resultReads > 1) {
+            return undefined;
+          }
+          return (
+            _resolve: unknown,
+            reject: (reason: unknown) => void,
+          ): void => {
+            reject(failure);
+          };
+        },
+      } as unknown as Promise<void>;
+    },
+  );
+  try {
+    const outcome = await Promise.race([
+      runner.run(true).then(() => 'settled'),
+      sleep(200).then(() => 'hung'),
+    ]);
+    expect(outcome).toBe('settled');
+    expect(reads).toBe(attempts);
+    expect(runner.lastError).toBe(failure);
+  } finally {
+    restoreConsoleError();
+  }
+});

@@ -1,6 +1,5 @@
 import { describeError } from '../to-error';
 import { reportToConsole } from './report-to-console';
-import { isPromise } from '../is-promise';
 
 /**
  * Whether `value` has `Promise.prototype` on its prototype chain - the shape of a native
@@ -13,18 +12,6 @@ function inheritsFromPromise(value: unknown): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * Whether a value from untrusted code should go through {@link adoptPromise}: anything on
- * the `Promise.prototype` chain, decided without reading it, or else a thenable, decided
- * by its `then`. `isPromise()` alone reads `then` first, so a native promise whose own
- * `then` is not a function - or a getter that throws - was never adopted, and its
- * rejection went unhandled. A throwing `then` getter on anything else still throws here,
- * for the caller to report.
- */
-export function isAdoptable(value: unknown): boolean {
-  return inheritsFromPromise(value) || isPromise(value);
 }
 
 /**
@@ -171,11 +158,15 @@ function adopt<T>(
     if (capturedThen !== undefined) {
       // Thenable invocation is a microtask, just like Promise.resolve assimilation.
       // Ignore its return: only the supplied resolve/reject callbacks settle adoption.
-      void Promise.resolve()
-        .then(() => {
+      queueMicrotask(() => {
+        try {
           Reflect.apply(capturedThen, value, [resolve, reject]);
-        })
-        .catch(reject);
+        } catch (error) {
+          // Preserve arbitrary rejection reasons exactly as Promise assimilation does.
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+          reject(error);
+        }
+      });
       return;
     }
 
@@ -210,6 +201,9 @@ export class UnreadableReturn extends Error {
  * success creates no reporting closure or wrapper. Only a malformed return allocates
  * a failure, which callers route through their configured channel or terminal console.
  * A promise is always freshly adopted and safe to chain; undefined means no async work.
+ * Native promises are detected before reading then so hostile own properties cannot
+ * hide a rejection. Other thenables are classified and adopted from a single read;
+ * do not reintroduce a separate predicate followed by adoption.
  */
 export function adoptResult(
   result: unknown,

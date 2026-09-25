@@ -233,6 +233,8 @@ export function createFailureReporter(
       reportThroughHandler(
         () => handler(failure, subject),
         () => `${label} failed for ${subject}: ${describeError(failure)}`,
+        undefined,
+        `${label} failure handler`,
       );
 
       return;

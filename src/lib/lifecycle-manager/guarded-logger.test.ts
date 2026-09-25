@@ -643,18 +643,20 @@ describe('createGuardedLoggerService', () => {
     });
 
     expect(reports.length).toBe(1);
-    expect((reports[0]?.cause as Error).message).toBe('then getter exploded');
+    expect(((reports[0]?.cause as Error).cause as Error).message).toBe(
+      'then getter exploded',
+    );
     expect(sink.logs[0]?.message).toBe('still logged');
     expect(sink.logs[0]?.entityName).toBeUndefined();
   });
 
-  test('entity() that returns a thenable whose then getter throws on adoption is contained', async () => {
+  test('entity() adopts a thenable from one getter read', async () => {
     const sink = new ArraySink();
     const logger = new Logger({ sinks: [sink], callProcessExit: false });
     const service = logger.service('svc');
 
-    // The first read (detection) sees a function; the second (adoption by
-    // `Promise.resolve`) throws. Both reads happen synchronously.
+    // A second detection/adoption read would throw instead of invoking the captured
+    // method. Async children are still rejected as a logger contract violation.
     let reads = 0;
     service.entity = (): LoggerService =>
       ({
@@ -665,7 +667,9 @@ describe('createGuardedLoggerService', () => {
             throw new Error('then getter exploded on adoption');
           }
 
-          return (): void => {};
+          return (resolve: () => void): void => {
+            resolve();
+          };
         },
       }) as unknown as LoggerService;
 
@@ -679,8 +683,9 @@ describe('createGuardedLoggerService', () => {
 
     expect(reports.length).toBe(1);
     expect((reports[0]?.cause as Error).message).toBe(
-      'then getter exploded on adoption',
+      'lifecycle-manager logger.entity did not return a logger',
     );
+    expect(reads).toBe(1);
     expect(sink.logs[0]?.message).toBe('still logged');
   });
 

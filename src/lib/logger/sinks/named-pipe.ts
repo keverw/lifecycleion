@@ -2709,6 +2709,7 @@ export class NamedPipeSink implements LogSink {
             }),
       () => `NamedPipeSink error (${kind}): ${describeError(failure)}`,
       options?.onReported,
+      'NamedPipeSink onError',
     );
   }
 

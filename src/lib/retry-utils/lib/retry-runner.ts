@@ -1,7 +1,7 @@
 import { PromiseProtectedResolver } from '../../promise-protected-resolver';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { generateID } from '../../id-helpers';
-import { adoptPromise, isAdoptable } from '../../internal/adopt-promise';
+import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { isString } from '../../strings';
 import { isPlainObject } from '../../is-plain-object';
 import { isFunction } from '../../is-function';
@@ -1245,9 +1245,13 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         // Adopted, not awaited as it is: a native promise whose own `then` is not a
         // function failed `isPromise()`, so its rejection was never awaited and went
         // unhandled, and `await` calls an own `then` on one carrying its own
-        // `constructor`. See `adoptPromise()`.
-        if (isAdoptable(result)) {
-          await adoptPromise(result);
+        // `constructor`. Classification and adoption share one captured then read.
+        const pending = adoptResult(result);
+        if (pending instanceof UnreadableReturn) {
+          throw pending;
+        }
+        if (pending !== undefined) {
+          await pending;
         }
       } catch (error) {
         // A rethrow of what was already reported is not a second outcome, and reporting it

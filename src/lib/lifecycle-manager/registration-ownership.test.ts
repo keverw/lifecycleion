@@ -648,7 +648,7 @@ test('registration hooks have no provisional lifecycle state map entries', async
   expect(maps.componentStates.get('a')).toBe('registered');
 });
 
-test('unchanged registration reuses its validated startup order', async () => {
+test('registration recomputes committed order from validated reads', async () => {
   const { logger, manager } = setup();
   const internals = manager as unknown as {
     getStartupOrderInternal: (...args: unknown[]) => string[];
@@ -662,7 +662,8 @@ test('unchanged registration reuses its validated startup order', async () => {
   expect(
     (await manager.registerComponent(new Plain(logger, 'a'))).startupOrder,
   ).toEqual(['a']);
-  expect(calls).toBe(1);
+  // Filtering the pre-hook order is insufficient when pending nodes constrain it.
+  expect(calls).toBe(2);
 });
 
 for (const shouldReuseInstance of [true, false]) {
@@ -745,4 +746,78 @@ test('a refused insertion does not claim its position was reordered', async () =
   );
   expect(result.code).toBe('target_not_found');
   expect(result.manualPositionRespected).toBeUndefined();
+});
+
+test('nested registration reports committed ordering without pending dependency edges', async () => {
+  const { logger, manager } = setup();
+  await manager.registerComponent(new Plain(logger, 'y', ['a']));
+  await manager.registerComponent(new Plain(logger, 'z'));
+  const outer = new Plain(logger, 'a', ['z']);
+  let nested: ReturnType<typeof manager.registerComponent> | undefined;
+  let eventOrder: unknown;
+  manager.on('component:registered', (event) => {
+    const report = event as { name: string; startupOrder: string[] };
+    if (report.name === 'b') {
+      eventOrder = report.startupOrder;
+    }
+  });
+  outer._markRegistered = (): void => {
+    nested = manager.registerComponent(new Plain(logger, 'b'));
+  };
+  await manager.insertComponentAt(outer, 'start');
+  expect((await nested)?.startupOrder).toEqual(['y', 'z', 'b']);
+  expect(eventOrder).toEqual(['y', 'z', 'b']);
+});
+
+test('a joined start with a newly declared missing dependency never reaches starting callbacks', async () => {
+  const { logger, manager } = setup();
+  const gate = deferred();
+  const peer = new Plain(logger, 'peer');
+  peer.start = (): Promise<void> => gate.promise;
+  await manager.registerComponent(peer);
+  const bulk = manager.startAllComponents();
+  const joined = new Plain(logger, 'joined');
+  joined._markRegistered = (): void => {
+    joined.getDependencies = (): string[] => ['cache'];
+  };
+  let startingCalls = 0;
+  manager.on('component:starting', (event) => {
+    if ((event as { name: string }).name === 'joined') {
+      startingCalls++;
+    }
+  });
+  try {
+    const result = await manager.registerComponent(joined, { autoStart: true });
+    expect(result.startResult?.code).toBe('missing_dependency');
+    expect(startingCalls).toBe(0);
+  } finally {
+    gate.resolve();
+    await bulk;
+    await manager.stopAllComponents();
+  }
+});
+
+test('getValue follows one captured then even though async values are refused', async () => {
+  const { logger, manager } = setup();
+  const component = new Plain(logger, 'a');
+  let reads = 0;
+  let calls = 0;
+  (component as unknown as { getValue: () => unknown }).getValue = () => ({
+    get then() {
+      if (++reads > 1) {
+        return undefined;
+      }
+      return (resolve: () => void): void => {
+        calls++;
+        resolve();
+      };
+    },
+  });
+  await manager.registerComponent(component);
+  const result = manager.getValue('a', 'key', { includeStopped: true });
+  expect(result.code).toBe('error');
+  await Promise.resolve();
+  await Promise.resolve();
+  expect(reads).toBe(1);
+  expect(calls).toBe(1);
 });

@@ -80,7 +80,11 @@ import type { CookieJar } from './cookie-jar';
 // original value retained on cause for consumers of the normalized error.
 import { isErrorValue, toError as normalizeError } from '../to-error';
 import { readUnknownMember as readObjectMember } from '../internal/read-member';
-import { adoptPromise, isAdoptable } from '../internal/adopt-promise';
+import {
+  adoptPromise,
+  adoptResult,
+  UnreadableReturn,
+} from '../internal/adopt-promise';
 
 type RemoveFn = () => void;
 
@@ -3505,28 +3509,14 @@ function getRequestBodySettled(
 function adoptRequestBodySettled(
   settled: unknown,
 ): Promise<Error | undefined> | undefined {
-  // Guarded, because deciding whether it is a thenable reads `.then` on a value the
-  // adapter made. A `Proxy` or an accessor that throws there threw out of
-  // `_buildResponse` - and out of a request that had already succeeded - turning a `200`
-  // into a synthetic failed status-0 response over a field documented as advisory.
-  // An unusable value is treated as absent, which is what "no adapter reported an upload
-  // outcome" already means. `isAdoptable()` and `adoptPromise()`, not `isPromise()` and
-  // `Promise.resolve()`: a native promise whose own `then` is not a function failed the
-  // one - its rejection then unhandled - and one with its own no-op `then` never settled
-  // through the other. `adoptPromise()` rejects rather than throws on a bad read.
-  let isThenable = false;
-
-  try {
-    isThenable = isAdoptable(settled);
-  } catch {
+  // Advisory metadata must not turn a successful request into failure. Classify
+  // once, preserving the captured then function; an unreadable return is absent,
+  // while a real async rejection becomes the upload's reported error.
+  const pending = adoptResult(settled);
+  if (pending === undefined || pending instanceof UnreadableReturn) {
     return undefined;
   }
-
-  if (!isThenable) {
-    return undefined;
-  }
-
-  return adoptPromise(settled).then(
+  return pending.then(
     (value) => (value === undefined ? undefined : normalizeError(value)),
     (error: unknown) => normalizeError(error),
   );

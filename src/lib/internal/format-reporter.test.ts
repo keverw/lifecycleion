@@ -237,3 +237,22 @@ test('an anonymous failure handler with an unreadable return retains the report 
     restoreConsoleError();
   }
 });
+
+test('format failure handlers identify an unreadable return without repeating the original failure', () => {
+  const captured = muteConsoleError();
+  try {
+    const reporter = createFormatReporter('render', () => ({
+      get then(): never {
+        throw new Error('bad return');
+      },
+    }));
+    reporter(new Error('original delivered failure'), 'params.secret');
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('failure handler');
+    expect(captured[0]).toContain('then could not be read');
+    expect(captured[0]).not.toContain('original delivered failure');
+    expect(captured[0]).not.toContain('params.secret');
+  } finally {
+    restoreConsoleError();
+  }
+});
