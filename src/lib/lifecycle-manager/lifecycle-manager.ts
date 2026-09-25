@@ -6971,9 +6971,9 @@ export class LifecycleManager
       try {
         return await run(claim);
       } catch (error) {
-        // The attempt claims `stopping` / `force-stopping` before work that runs the
-        // component's own code - its timeout getters, its hooks - and not all of it sits
-        // inside a `try`. Left alone, a throw there held that state for good: every later
+        // Once an attempt claims `stopping` / `force-stopping`, subsequent hook calls
+        // and result bookkeeping can still throw outside the phase's own `try`.
+        // Left alone, a throw there held that state for good: every later
         // start or stop answered `component_already_stopping`, and it could never be
         // unregistered. Nobody can vouch for what the component did stop, which is what
         // `stalled` means, and a stalled component can be retried or unregistered.
@@ -7020,18 +7020,27 @@ export class LifecycleManager
     }
   }
 
-  private async stopComponentAttempt(
+  /**
+   * The stop preconditions, checked without reading component-owned properties. A
+   * graceful attempt checks again after reading its timeout and abort hook: getters
+   * may stop, unregister, or replace the component synchronously. Taking the claim
+   * from that newer stop would call stop() twice and let either completion overwrite
+   * the other's state. A replacement must not inherit the old instance's outcome.
+   */
+  private checkStopPreconditions(
     name: string,
-    options: StopComponentOptions | undefined,
-    claim: symbol,
-  ): Promise<ComponentOperationResult> {
+    expected?: BaseComponent,
+  ): ComponentOperationResult | { component: BaseComponent } {
     const component = this.getComponent(name);
 
-    if (!component) {
+    if (!component || (expected !== undefined && component !== expected)) {
       return {
         success: false,
         componentName: name,
-        reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND,
+        reason:
+          expected === undefined
+            ? LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND
+            : `Component "${name}" was unregistered or replaced while its stop was being prepared`,
         code: 'component_not_found',
       };
     }
@@ -7069,6 +7078,20 @@ export class LifecycleManager
         status: this.getComponentStatus(name),
       };
     }
+
+    return { component };
+  }
+
+  private async stopComponentAttempt(
+    name: string,
+    options: StopComponentOptions | undefined,
+    claim: symbol,
+  ): Promise<ComponentOperationResult> {
+    const preconditions = this.checkStopPreconditions(name);
+    if ('success' in preconditions) {
+      return preconditions;
+    }
+    const { component } = preconditions;
 
     // Handle forceImmediate option - skip all phases and go straight to force
     if (options?.forceImmediate) {
@@ -7121,8 +7144,13 @@ export class LifecycleManager
       claim,
     );
 
-    if (gracefulResult.success) {
-      return gracefulResult; // Graceful shutdown succeeded
+    // Only an attempt that claimed the graceful phase may escalate it. A refusal
+    // after a re-entrant getter owns no stop, and the current claim may belong to
+    // the nested attempt. Its refusal is the result, not a reason to force that
+    // other attempt's component. The same applies if our claim was superseded while
+    // awaiting the graceful result.
+    if (gracefulResult.success || !this.ownsClaim(name, claim)) {
+      return gracefulResult;
     }
 
     // ============================================================================
@@ -7342,10 +7370,17 @@ export class LifecycleManager
     // Use custom timeout if provided, otherwise use component's configured timeout
     const timeoutMS = options?.timeout ?? component.shutdownGracefulTimeoutMS;
 
-    // Set state to stopping — clear the unexpected-stop handler before any async
-    // work so a concurrent reportUnexpectedStop() call has no effect from here on.
-    this.clearUnexpectedStopHandler(component, 'stop');
+    const recheck = this.checkStopPreconditions(name, component);
+    if ('success' in recheck) {
+      return recheck;
+    }
+
+    // Nothing between the recheck and claim runs caller code. Claim first, then
+    // clear the unexpected-stop handler: even the clearing hook can be overridden
+    // to re-enter. It must find this stop already in progress. Both happen before
+    // any async work, so reports of an unexpected stop are ignored from here on.
     this.claimComponent(name, 'stopping', claim);
+    this.clearUnexpectedStopHandler(component, 'stop');
     this.logger.entity(name).info('Graceful shutdown started');
     this.lifecycleEvents.componentStopping(name);
 
@@ -8263,10 +8298,10 @@ export class LifecycleManager
   }
 
   /**
-   * Clear a component's unexpected-stop handler, contained. The hook is overridable, and
-   * one that throws must not derail the operation clearing it: from a stop, it escaped
-   * before the stop had claimed the component, so the stop net - which acts only through a
-   * claim - left it `running` with the stop answered `unknown_error`.
+   * Clear a component's unexpected-stop handler, contained. The hook is overridable,
+   * and a throw must not skip the operation that clears it. A graceful stop now claims
+   * the component before this hook, so re-entry sees the stop in progress; containing
+   * a failure still lets stop() run rather than reporting a stall without attempting it.
    */
   private clearUnexpectedStopHandler(
     component: BaseComponent,

@@ -211,6 +211,13 @@
 
 ## Unreleased
 
+- Graceful component stops recheck registration and stop eligibility after reading
+  caller-owned timeout and abort-hook properties. A getter that starts another stop
+  can no longer cause duplicate `stop()` calls or force the other attempt; replacing
+  a component during a getter cannot overwrite the replacement's state. The stop
+  claims ownership before clearing its unexpected-stop handler, protecting that
+  overridable hook from the same re-entry race.
+
 - LifecycleManager queues state notifications until synchronous transitions finish,
   including failed transitions. Re-entrant notifications retain FIFO order, and an
   unexpected delivery failure no longer discards the remaining queue. Listeners see

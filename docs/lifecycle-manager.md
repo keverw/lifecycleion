@@ -989,6 +989,16 @@ A request that arrives during the restart's _startup_ phase aborts that startup 
 
 #### Individual Component Operations
 
+Graceful stops validate the registered instance and its state again after reading
+`onGracefulStopTimeout`, `shutdownGracefulTimeoutMS`, and an explicit `timeout` option.
+These properties can be getters that re-enter the manager. If another stop takes the
+component during those reads, the outer attempt returns `component_already_stopping`
+without calling `stop()` or forcing the other attempt. If the original instance was
+unregistered or replaced, it returns `component_not_found` and leaves the replacement
+untouched. A refusal before taking ownership does not enter the force phase. Once the
+stop claims the component, re-entry from its unexpected-stop-handler clearing hook
+also sees a stop already in progress.
+
 ```typescript
 // Start a single component
 startComponent(name: string, options?: StartComponentOptions): Promise<ComponentOperationResult>
