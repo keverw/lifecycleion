@@ -211,6 +211,14 @@
 
 ## Unreleased
 
+- Registration rollback retains name and instance reservations through its cleanup
+  hook. An unavailable startup order now reports `manualPositionRespected: undefined`
+  rather than claiming the requested placement was not respected. Startup dependency
+  reads retain the generation captured when read, using shared bookkeeping.
+- Logger sink return values with throwing `then` getters are reported as unreadable
+  return values, separately from sink invocation failures, without repeating a delivered
+  diagnostic.
+
 - Registration hooks now run with a provisional entry excluded from all public
   registry operations and bulk startup. Names and instances remain reserved, preventing
   nested unregister/re-register from bypassing rollback protection. Successful hooks

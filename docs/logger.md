@@ -1687,6 +1687,11 @@ interface BeforeExitResult {
 
 #### Sink Error Handling
 
+A sink that returns successfully but whose return value has a throwing `then` getter
+produces a terminal console report identifying the unreadable return value. This is
+not reported as a sink invocation failure, and an already-delivered diagnostic is not
+repeated. Actual sink throws and asynchronous rejections retain their normal handling.
+
 A sink whose `write()` or `close()` throws or rejects produces a logger diagnostic with
 `kind: 'sink'`, the normalized failure in `error`, the failing `sink`, and `context` set
 to `'write'` or `'close'`. It follows the same diagnostic route as logger formatting and

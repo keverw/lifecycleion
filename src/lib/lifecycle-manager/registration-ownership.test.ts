@@ -583,11 +583,12 @@ test('mixed-time dependency reads cannot fail an already published registration'
   };
   const { reports, release } = claimReports();
   try {
-    const result = await manager.registerComponent(parent);
+    const result = await manager.insertComponentAt(parent, 'end');
     await nested;
     expect(result.success).toBe(true);
     expect(result.registered).toBe(true);
     expect(result.startupOrder).toEqual([]);
+    expect(result.manualPositionRespected).toBeUndefined();
     expect(reports).toHaveLength(0);
     expect(manager.getComponentNames()).toEqual(['x', 'parent', 'y']);
   } finally {
@@ -663,3 +664,39 @@ test('unchanged registration reuses its validated startup order', async () => {
   ).toEqual(['a']);
   expect(calls).toBe(1);
 });
+
+for (const shouldReuseInstance of [true, false]) {
+  test(`rollback keeps its reservation against ${shouldReuseInstance ? 'same-instance' : 'same-name'} registration`, async () => {
+    const { logger, manager } = setup();
+    const { release } = claimReports();
+    const component = new Plain(logger, 'a');
+    const mark = component._markRegistered.bind(component);
+    const unmark = component._markUnregistered.bind(component);
+    let nested: ReturnType<typeof manager.registerComponent> | undefined;
+    component._markRegistered = (): void => {
+      mark();
+      throw new Error('hook failed');
+    };
+    component._markUnregistered = (): void => {
+      unmark();
+      component._markRegistered = mark;
+      nested = manager.registerComponent(
+        shouldReuseInstance ? component : new Plain(logger, 'a'),
+      );
+    };
+    try {
+      expect((await manager.registerComponent(component)).registered).toBe(
+        false,
+      );
+      expect((await nested)?.code).toBe(
+        shouldReuseInstance ? 'duplicate_instance' : 'duplicate_name',
+      );
+      expect(manager.hasComponent('a')).toBe(false);
+      expect((await manager.registerComponent(component)).registered).toBe(
+        true,
+      );
+    } finally {
+      release();
+    }
+  });
+}

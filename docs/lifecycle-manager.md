@@ -620,7 +620,7 @@ interface InsertComponentAtResult {
     index: number; // The actual registry index where the component was inserted
     description?: string; // Human-readable position description (e.g., "after database, before api")
   };
-  manualPositionRespected: boolean; // Whether explicit position was honored (vs dependency-based reordering)
+  manualPositionRespected?: boolean; // True/false when order is known; undefined when unavailable
   targetFound?: boolean; // Whether 'before'/'after' reference component was found (always `undefined` for 'start'/'end')
 }
 ```
@@ -631,7 +631,7 @@ interface InsertComponentAtResult {
 - `actualPosition` - Where it actually ended up after dependency resolution, read when the call returns. Present when the component is still registered then - not when a listener removed it again during its auto-start
   - `index` - The registry array index (0-based)
   - `description` - Human-readable position like `"at start"`, `"at end"`, `"after database, before api"`, or `"only component"`
-- `manualPositionRespected` - `true` if the explicit position was honored, `false` if dependency ordering forced a different position
+- `manualPositionRespected` - `true` if the explicit position was honored, `false` if dependency ordering forced a different position, and `undefined` when startup order is unavailable
 - `targetFound` - For 'before'/'after' positions, indicates if the reference component was found (always `undefined` for 'start'/'end')
 
 **Example:**
@@ -1006,13 +1006,14 @@ order even when another registration is pending. Registration results and events
 from the committed registry at publication, before queued listeners run. The order
 includes components committed by hooks and excludes enclosing provisional registrations.
 If dependency reads collected at different times form a cycle only in the report,
-registration remains successful and reports `startupOrder: []` with manual placement
-unconfirmed. It does not re-enter dependency getters after publication. Registrations
+registration remains successful and reports `startupOrder: []` with `manualPositionRespected: undefined` (unknown). It does not re-enter dependency getters after publication. Registrations
 whose hooks leave the registry unchanged reuse their already-validated order.
 
 Successful hooks publish the registration before queued notifications are delivered.
 Lifecycle state maps are written only after the hooks and commit checks succeed.
-A hook failure or a partial publication failure rolls back only that entry. A hook
+A hook failure or a partial publication failure rolls back only that entry. Its name
+and instance remain reserved until the overridable unregistration hook has returned,
+so rollback cannot silently replace the rejected registration. A hook
 that starts an active shutdown also prevents publication and returns
 `shutdown_in_progress`. A hook that begins bulk startup is rechecked before publication:
 using the pass's dependency snapshot plus separate metadata for registrations committed

@@ -1250,27 +1250,31 @@ export class Logger extends EventEmitter {
       tags: tags !== null && tags.length > 0 ? tags : undefined,
     };
 
-    // Write to all sinks
+    // Write to all sinks. Classify return values separately: a sink that returned
+    // successfully did not throw just because its result has a broken then getter.
     for (const sink of this.sinks) {
+      let result: unknown;
       try {
-        const result = sink.write(entry);
-        // Handle async errors from sinks that return promises
-        if (isAdoptable(result)) {
-          // Adopted rather than called on directly. A sink may return any thenable, but
-          // a thenable is not required to have `.catch`: calling it on one that does not
-          // threw a `TypeError` here, which the outer `catch` then reported as *the
-          // sink's* failure while the real rejection went unhandled. Through
-          // `adoptPromise()` rather than `Promise.resolve()`, which hands a native promise
-          // back with its own `then` - a no-op one swallowed the rejection - and
-          // `isAdoptable()` rather than `isPromise()`, which missed a native promise whose
-          // own `then` is not a function. See `adoptPromise()`.
-          adoptPromise(result).catch((error: unknown) => {
-            this.handleSinkError(error, 'write', sink);
-          });
-        }
+        result = sink.write(entry);
       } catch (error) {
-        // Handle sync errors
         this.handleSinkError(error, 'write', sink);
+        continue;
+      }
+      let isResultAdoptable: boolean;
+      try {
+        isResultAdoptable = isAdoptable(result);
+      } catch (error) {
+        reportToConsole(
+          `A log sink returned a value whose then could not be read: ${describeError(error)}`,
+        );
+        continue;
+      }
+      if (isResultAdoptable) {
+        // Adoption supports then-only return values and native promises with hostile
+        // own then properties, without assuming their result exposes .catch().
+        void adoptPromise(result).catch((error: unknown) => {
+          this.handleSinkError(error, 'write', sink);
+        });
       }
     }
 
@@ -1484,25 +1488,36 @@ export class Logger extends EventEmitter {
       const entry = diagnosticEntry(diagnostic);
 
       for (const sink of destinations) {
+        let result: unknown;
         try {
           const writeDiagnostic = sink.writeDiagnostic?.bind(sink);
-          const result =
+          result =
             writeDiagnostic === undefined
               ? sink.write(entry)
               : writeDiagnostic(diagnostic);
-
-          // Adopted, for the reasons the write path above gives.
-          if (isAdoptable(result)) {
-            void adoptPromise(result).catch((deliveryError: unknown) => {
-              reportToConsole(
-                `${diagnostic.message} (diagnostic sink also rejected: ${describeError(deliveryError)})`,
-              );
-            });
-          }
         } catch (deliveryError) {
           reportToConsole(
             `${diagnostic.message} (diagnostic sink also threw: ${describeError(deliveryError)})`,
           );
+          continue;
+        }
+        // The diagnostic was already delivered. A broken return value is its own
+        // contract failure, not a reason to repeat that report as a sink throw.
+        let isResultAdoptable: boolean;
+        try {
+          isResultAdoptable = isAdoptable(result);
+        } catch (thenError) {
+          reportToConsole(
+            `A diagnostic sink returned a value whose then could not be read: ${describeError(thenError)}`,
+          );
+          continue;
+        }
+        if (isResultAdoptable) {
+          void adoptPromise(result).catch((deliveryError: unknown) => {
+            reportToConsole(
+              `${diagnostic.message} (diagnostic sink also rejected: ${describeError(deliveryError)})`,
+            );
+          });
         }
       }
     });

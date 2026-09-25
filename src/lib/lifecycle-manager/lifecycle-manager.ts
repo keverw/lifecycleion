@@ -278,7 +278,7 @@ function committedRegistrationReport(
     startupOrder: committed.startupOrder ?? [],
     duringStartup: progress.wasDuringStartup,
     actualPosition,
-    manualPositionRespected: committed.manualPositionRespected ?? false,
+    manualPositionRespected: committed.manualPositionRespected,
     targetFound:
       'targetFound' in committed
         ? committed.targetFound
@@ -4385,20 +4385,12 @@ export class LifecycleManager
       // this attempt. Keep the reservation until finally so rollback hooks cannot
       // claim its name while cleanup is still in progress.
       const rollBack = (): void => {
-        this.componentEntries = this.componentEntries.filter(
-          (registered) => registered !== component,
-        );
         // Rolled back, so this registration did not commit after all.
         progress.hasCommitted = false;
         if (previousGeneration === undefined) {
           this.registrationGenerations.delete(component);
         } else {
           this.registrationGenerations.set(component, previousGeneration);
-        }
-        if (previousRecordedName === undefined) {
-          this.registeredNames.delete(component);
-        } else {
-          this.registeredNames.set(component, previousRecordedName);
         }
 
         this.componentStates.delete(componentName);
@@ -4413,6 +4405,16 @@ export class LifecycleManager
           component,
           'lifecycle-manager registration rollback',
         );
+        // The hook has finished. Only now release the instance/name reservation;
+        // restoring an older recorded name first would also expose this name early.
+        this.componentEntries = this.componentEntries.filter(
+          (registered) => registered !== component,
+        );
+        if (previousRecordedName === undefined) {
+          this.registeredNames.delete(component);
+        } else {
+          this.registeredNames.set(component, previousRecordedName);
+        }
 
         // "Reported once per registration": this one never happened, so a report made
         // under it - by the hook's own code reading the component - does not count
@@ -4548,12 +4550,15 @@ export class LifecycleManager
               );
             }
             committed.startupOrder = startupOrder;
-            committed.manualPositionRespected = this.isManualPositionRespected({
-              componentName,
-              position,
-              targetComponentName,
-              startupOrder,
-            });
+            committed.manualPositionRespected =
+              startupOrder.length === 0
+                ? undefined
+                : this.isManualPositionRespected({
+                    componentName,
+                    position,
+                    targetComponentName,
+                    startupOrder,
+                  });
             committed.targetFound = positionHasTarget(position)
               ? this.getComponentIndex(targetComponentName ?? '') !== null
               : undefined;
@@ -6467,6 +6472,10 @@ export class LifecycleManager
     // Its own list read strictly: a broken one fails this start as `missing_dependency`,
     // naming the component, rather than being read as fewer dependencies than it
     // declares. Reported once per registration, as other reads of it are.
+    const dependencyGeneration =
+      preReadDependencies !== undefined && startupDependencyReads !== undefined
+        ? this.readGenerations.get(startupDependencyReads)?.get(component)
+        : this.registrationGenerations.get(component);
     const ownDependencies =
       preReadDependencies ?? this.readDependenciesReported(component, 'start');
 
@@ -6671,9 +6680,6 @@ export class LifecycleManager
         this.handleComponentUnexpectedStop(name, startAttemptToken, error),
       );
 
-      // Race against timeout
-      // Adopted, not raced as it is: a native promise carrying its own no-op `then`
-      // never settled the race, and its rejection went unhandled. See `adoptPromise()`.
       // All refusal points and the overridable handler setup are past. Only now
       // record this accepted start, with its registration generation; failed attach
       // or shutdown checks must not change the pass's dependency facts.
@@ -6681,14 +6687,16 @@ export class LifecycleManager
         startupDependencyReads === this.activeBulkStartup?.dependencyReads &&
         startupDependencyReads !== undefined
       ) {
-        startupDependencyReads.set(component, ownDependencies);
-        let generations = this.readGenerations.get(startupDependencyReads);
-        if (generations === undefined) {
-          generations = new Map();
-          this.readGenerations.set(startupDependencyReads, generations);
-        }
-        generations.set(component, this.registrationGenerations.get(component));
+        this.recordRead(
+          startupDependencyReads,
+          component,
+          ownDependencies,
+          dependencyGeneration,
+        );
       }
+      // Race against timeout
+      // Adopted, not raced as it is: a native promise carrying its own no-op `then`
+      // never settled the race, and its rejection went unhandled. See `adoptPromise()`.
       const startPromise = adoptPromise(component.start());
 
       if (toTimerDelayMS(timeoutMS) > 0) {
@@ -9183,6 +9191,21 @@ export class LifecycleManager
     return false;
   }
 
+  private recordRead<T>(
+    reads: Map<BaseComponent, T>,
+    component: BaseComponent,
+    read: T,
+    generation: number | undefined,
+  ): void {
+    let generations = this.readGenerations.get(reads);
+    if (generations === undefined) {
+      generations = new Map();
+      this.readGenerations.set(reads, generations);
+    }
+    reads.set(component, read);
+    generations.set(component, generation);
+  }
+
   /**
    * Whether `reads` holds an answer from `component`'s current registration - not one
    * read before it was unregistered and registered again.
@@ -9225,13 +9248,6 @@ export class LifecycleManager
     // Whether the round before read anything: `onSettled` is for what the reads may
     // have changed, and a registry that was already read has nothing new to ask about.
     let didRead = false;
-    let generations = this.readGenerations.get(reads);
-
-    if (generations === undefined) {
-      generations = new Map();
-      this.readGenerations.set(reads, generations);
-    }
-
     const isUnread = (component: BaseComponent): boolean =>
       !this.isReadCurrent(reads, component);
 
@@ -9264,8 +9280,7 @@ export class LifecycleManager
 
         // Taken before the read, which may itself register the instance again.
         const generation = this.registrationGenerations.get(component);
-        reads.set(component, read(component));
-        generations.set(component, generation);
+        this.recordRead(reads, component, read(component), generation);
         didRead = true;
       }
     }

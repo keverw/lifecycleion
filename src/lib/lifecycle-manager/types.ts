@@ -1008,8 +1008,8 @@ export interface InsertComponentAtResult extends RegistrationResultBase {
     description?: string;
   };
 
-  /** True if requested relative positioning was achievable under dependency constraints */
-  manualPositionRespected: boolean;
+  /** True if positioning was respected, false if reordered, undefined if order is unavailable. */
+  manualPositionRespected?: boolean;
 
   /** Present when inserting before/after a target */
   targetFound?: boolean;
