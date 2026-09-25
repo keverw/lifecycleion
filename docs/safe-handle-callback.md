@@ -111,9 +111,9 @@ function runCallbackSafely(
 ): void;
 ```
 
-Runs a callback without awaiting it, forwarding a synchronous throw, a returned promise's rejection, or a synthesized non-function error to `onError`. The `onError` callback runs on the final failure path and must not throw.
+Runs a callback without awaiting it, forwarding a synchronous throw, a returned promise's rejection, or a synthesized non-function error to `onError`. The `onError` callback runs on the final failure path and should not throw; one that does is contained (see below).
 
-This is the lower-level invocation helper used by `safeHandleCallback()`. Choose `safeHandleCallback()` for the standard global error reporting and fallback chain. Choose `runCallbackSafely()` when you need to route failures yourself, such as to logger diagnostics or a local fallback. It does not report failures globally unless your `onError` handler does so. Keep that handler synchronous and non-throwing, because its own returned promise is not followed. Use `safeHandleCallbackAndWait()` when you need to await completion and receive a result.
+This is the lower-level invocation helper used by `safeHandleCallback()`. Choose `safeHandleCallback()` for the standard global error reporting and fallback chain. Choose `runCallbackSafely()` when you need to route failures yourself, such as to logger diagnostics or a local fallback. It does not report failures globally unless your `onError` handler does so. That handler should not throw, but one that throws - or is `async` and rejects - is contained: its failure goes to the console alongside the original, never escaping or becoming an unhandled rejection. Use `safeHandleCallbackAndWait()` when you need to await completion and receive a result.
 
 `thisArg` is the receiver the callback is invoked with. Omit it for a plain function or a closure, and supply the owning object when passing an extracted method.
 

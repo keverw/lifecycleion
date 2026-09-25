@@ -181,4 +181,36 @@ describe('adoptPromise', () => {
 
     expect(await settle(adoptPromise(promise))).toBe('real rejection');
   });
+
+  test('adopts a plain thenable without trying the intrinsic on it', async () => {
+    const thenable = {
+      then(resolve: (value: string) => void): void {
+        resolve('plain');
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- restored, and only applied
+    const intrinsic = Promise.prototype.then;
+    let intrinsicCallsOnThenable = 0;
+    Promise.prototype.then = function (
+      this: unknown,
+      ...args: Parameters<typeof intrinsic>
+    ): Promise<unknown> {
+      if (this === thenable) {
+        intrinsicCallsOnThenable++;
+      }
+
+      return Reflect.apply(intrinsic, this, args);
+    } as typeof intrinsic;
+
+    let adopted: Promise<string>;
+
+    try {
+      adopted = adoptPromise(thenable as unknown as PromiseLike<string>);
+    } finally {
+      Promise.prototype.then = intrinsic;
+    }
+
+    expect(await adopted).toBe('plain');
+    expect(intrinsicCallsOnThenable).toBe(0);
+  });
 });

@@ -1,4 +1,3 @@
-import { isFunction } from '../is-function';
 import {
   installGlobalEventTarget,
   isGlobalEventTargetAvailable,
@@ -225,8 +224,10 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
   const dispatchEvent = readGlobal('dispatchEvent');
   const errorEventConstructor = readGlobal('ErrorEvent');
 
+  // `typeof`, not `isFunction()`: its `instanceof Function` fallback reads the value's
+  // prototype, which throws for a revoked proxy.
   if (
-    !isFunction(dispatchEvent) ||
+    typeof dispatchEvent !== 'function' ||
     typeof errorEventConstructor !== 'function'
   ) {
     return 'unavailable';
@@ -358,7 +359,8 @@ export function reportToHost(
     if (outcome === 'unavailable') {
       const reportError = readGlobal('reportError');
 
-      if (isFunction(reportError)) {
+      // `typeof`, for the reason `dispatchErrorEvent()` gives.
+      if (typeof reportError === 'function') {
         try {
           (reportError as (this: unknown, error: unknown) => void).call(
             globalThis,
@@ -382,6 +384,13 @@ export function reportToHost(
     // The last reporting rung, by design, and guarded by `reportToConsole`: neither
     // `safeHandleCallback` nor `safeHandleCallbackAndWait` may throw from this path.
     // `renderedReport` guards its own rendering and falls back to the error itself.
+    reportToConsole(renderedReport(error, renderForConsole));
+  } catch {
+    // Anything above reading a hostile global - an `ErrorEvent` constructor, a
+    // `dispatchEvent`, an installer - that throws has not reported anything. Callers
+    // reach here with nothing left to catch for them: `safeHandleCallback` hands it
+    // failures directly, and a throw from here would escape the one function whose
+    // contract is that it never throws.
     reportToConsole(renderedReport(error, renderForConsole));
   } finally {
     releaseHostReportLease(lease);

@@ -1013,6 +1013,36 @@ describe('runCallbackSafely - thisArg', () => {
   });
 });
 
+describe('safeHandleCallback - hostile reporting globals', () => {
+  it('does not throw when reportError is a revoked proxy and dispatch is unavailable', () => {
+    const globals = globalThis as unknown as Record<string, unknown>;
+    const originalErrorEvent = globals.ErrorEvent;
+    const originalReportError = globals.reportError;
+    // Around an object, so `typeof` answers `object` and `instanceof` reads it.
+    const revocable = Proxy.revocable({}, {});
+    revocable.revoke();
+    const captured = muteConsoleError();
+
+    try {
+      globals.ErrorEvent = undefined;
+      globals.reportError = revocable.proxy;
+
+      expect(() => {
+        safeHandleCallback('hostile-globals', () => {
+          throw new Error('original failure');
+        });
+      }).not.toThrow();
+      expect(captured.some((line) => line.includes('hostile-globals'))).toBe(
+        true,
+      );
+    } finally {
+      globals.ErrorEvent = originalErrorEvent;
+      globals.reportError = originalReportError;
+      restoreConsoleError();
+    }
+  });
+});
+
 describe('runCallbackSafely - a throwing onError is contained', () => {
   function withCapturedConsoleError<T>(run: (captured: unknown[][]) => T): T {
     const captured: unknown[][] = [];

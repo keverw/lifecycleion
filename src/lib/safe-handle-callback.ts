@@ -100,9 +100,9 @@ export function safeHandleCallback(
   callback: unknown,
   ...args: unknown[]
 ): void {
-  runCallbackSafely(callbackName, callback, args, (error) => {
-    reportCallbackError(callbackName, error);
-  });
+  // No `onError` closure: the standard channel is the default, so a callback that
+  // succeeds allocates nothing for a failure it never had.
+  invokeCallbackSafely(callbackName, callback, args, undefined, undefined);
 }
 
 /**
@@ -129,7 +129,8 @@ export function safeHandleCallback(
  * site, so a method that merely *reports* through this path can look like it ran. Pass
  * `thisArg`, or hand over `() => logger.info(a, b)` or `logger.info.bind(logger)`.
  *
- * @param callbackName Used only for the "is not a function" message.
+ * @param callbackName Names the callback in the "is not a function" message and in the
+ *                     console line for a failing `onError`.
  * @param callback The untrusted value to invoke.
  * @param args Arguments to pass to the callback.
  * @param onError Receives the thrown value, the rejection reason, or a synthesized
@@ -145,6 +146,21 @@ export function runCallbackSafely(
   args: unknown[],
   onError: (error: unknown) => void,
   thisArg?: unknown,
+): void {
+  invokeCallbackSafely(callbackName, callback, args, onError, thisArg);
+}
+
+/**
+ * The body of {@link runCallbackSafely}, with `onError` optional: when it is `undefined`,
+ * a failure goes straight to {@link reportCallbackError}, which is what
+ * {@link safeHandleCallback} wants without building a closure for it on every call.
+ */
+function invokeCallbackSafely(
+  callbackName: string,
+  callback: unknown,
+  args: unknown[],
+  onError: ((error: unknown) => void) | undefined,
+  thisArg: unknown,
 ): void {
   // `typeof`, not `isFunction()`: its `instanceof Function` fallback reads the value's
   // prototype, which throws for a revoked proxy - outside every guard here. Anything
@@ -202,8 +218,16 @@ export function runCallbackSafely(
 function reportToOnError(
   callbackName: string,
   error: unknown,
-  onError: (error: unknown) => void,
+  onError: ((error: unknown) => void) | undefined,
 ): void {
+  if (onError === undefined) {
+    // The standard channel. `reportToHost` never throws - a hostile global it reads
+    // included - so this needs no rung beneath it.
+    reportCallbackError(callbackName, error);
+
+    return;
+  }
+
   reportThroughHandler(
     // Typed `void`, but an `async` handler returns a promise: one that rejects is
     // followed, not dropped as an unhandled rejection.

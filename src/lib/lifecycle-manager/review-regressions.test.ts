@@ -4133,4 +4133,67 @@ describe('LifecycleManager - review regressions', () => {
     // The failed startup's detach did not land on top of the retry's handlers.
     expect(signals.isAttached()).toBe(true);
   });
+
+  test('no auto-detached line once a signals-detached listener attached them again', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      attachSignalsBeforeStartup: true,
+      detachSignalsOnStop: true,
+    });
+    const signals = fakeSignals(manager);
+    const a = new Plain(logger, 'a');
+    let aStarts = 0;
+    a.start = (): Promise<void> => {
+      aStarts++;
+
+      return aStarts === 1
+        ? Promise.reject(new Error('first start fails'))
+        : Promise.resolve();
+    };
+    await manager.registerComponent(a);
+
+    // Stands in for a `signals-detached` listener, which runs inside the detach.
+    let retry: Promise<{ success: boolean }> | undefined;
+    manager.detachSignals = (): void => {
+      (
+        manager as unknown as { processSignalManager: unknown }
+      ).processSignalManager = undefined;
+      retry ??= manager.startAllComponents();
+    };
+
+    await manager.startAllComponents();
+    await retry;
+
+    expect(signals.attachCalls()).toBe(2);
+    expect(
+      sink.logs.some((log) =>
+        log.message.includes('Auto-detached process signals'),
+      ),
+    ).toBe(false);
+  });
+
+  test('a refusal announces the startup order its result reports', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a', ['b']));
+    await manager.registerComponent(new Plain(logger, 'b'));
+    const events: Array<{ startupOrder?: string[] }> = [];
+    manager.on(
+      'component:registration-rejected',
+      (event: { startupOrder?: string[] }) => {
+        events.push(event);
+      },
+    );
+
+    const refused = await manager.insertComponentAt(
+      new Plain(logger, 'c'),
+      'after',
+      'missing',
+    );
+
+    expect(refused.startupOrder).toEqual(['b', 'a']);
+    expect(events[0]?.startupOrder).toEqual(['b', 'a']);
+  });
 });

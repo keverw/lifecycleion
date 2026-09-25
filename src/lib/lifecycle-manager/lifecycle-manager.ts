@@ -7935,8 +7935,13 @@ export class LifecycleManager
     // Detached before the line is logged, not after: logging runs the caller's sinks,
     // and one that starts a startup from here attached nothing - the handlers were still
     // up - so detaching after it pulled them out from under that startup. Worded in the
-    // past, and only on success: a failed detach has already said so.
-    if (this.autoDetachSignals(trigger)) {
+    // past, and only on success: a failed detach has already said so. Nor once a
+    // `signals-detached` listener has attached them again - a startup it began with
+    // `attachSignalsBeforeStartup` - where the line would contradict the state.
+    if (
+      this.autoDetachSignals(trigger) &&
+      this.processSignalManager?.getStatus().isAttached !== true
+    ) {
       this.logger.info(
         options.logMessage ?? `Auto-detached process signals after ${trigger}`,
       );
@@ -8620,6 +8625,7 @@ export class LifecycleManager
       isInsertAction: input.isInsertAction,
       position: input.position,
       targetComponentName: input.targetComponentName,
+      startupOrder: result.startupOrder,
     });
 
     return result;
@@ -8646,8 +8652,8 @@ export class LifecycleManager
       // Only from a snapshot that read every registered component. One refused before
       // reading - an invalid position, a shutdown - or cut short by a shutdown has no
       // list for some of them, and ordering those as though they had no dependencies
-      // reported an order that ignored them. Empty, as the failure event reports it,
-      // rather than an order that is not the startup order.
+      // reported an order that ignored them. Empty, rather than an order that is not the
+      // startup order - on the result and on `registration-rejected` alike.
       const isSnapshotComplete = this.components.every((component) =>
         input.dependencySnapshot.has(component),
       );

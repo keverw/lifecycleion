@@ -40,6 +40,22 @@ function hasOwnThen(value: object): boolean {
 }
 
 /**
+ * Whether `value` is a plain object of this realm - `Object.prototype` directly above it -
+ * which no native promise is unless someone rebuilt one's prototype chain. Such a value is
+ * spared trying the intrinsic `then` on it, which can only throw - and capture a stack - to
+ * be caught. A native promise from another realm has that realm's `Promise.prototype`, not
+ * this `Object.prototype`, so it still reaches the intrinsic. A `getPrototypeOf` trap
+ * that throws answers `false`, so the intrinsic is tried.
+ */
+function isPlainObject(value: object): boolean {
+  try {
+    return Reflect.getPrototypeOf(value) === Object.prototype;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Adopt a value from untrusted code - a component hook's return, a callback's result - as
  * a fresh native promise that settles as it does, and that is safe to chain on.
  *
@@ -82,6 +98,10 @@ function hasOwnThen(value: object): boolean {
  * that starts its work in `then` would mean second-guessing the class, which is the
  * value's own behaviour to define.
  *
+ * Known limit: a native promise whose prototype was replaced with `Object.prototype`, and
+ * which carries its own `then`, is taken for the plain thenable it looks like and adopted
+ * as `await` would adopt one: through that `then`.
+ *
  * Known limit: a broken native promise - one whose `constructor` misbehaves - cannot be
  * adopted without modifying it.
  * Every way the language offers to attach a reaction to one - `then`, `await`,
@@ -110,10 +130,12 @@ export function adoptPromise<T>(
     }
 
     // Only an own `then` is bypassed, so only then is the intrinsic tried - which also
-    // spares an object without one a thrown and caught `TypeError`, and its stack. A
-    // plain thenable, whose `then` is usually its own, still pays it: the intrinsic has
-    // to be tried first, for a native promise from another realm with an own `then`.
-    if (hasOwnThen(value)) {
+    // spares an object without one a thrown and caught `TypeError`, and its stack. So
+    // does a plain object literal's own `then` - the common thenable, on hot paths such
+    // as sink writes - since no native promise has `Object.prototype` above it. Anything
+    // else with an own `then` still tries the intrinsic first, for a native promise from
+    // another realm.
+    if (hasOwnThen(value) && !isPlainObject(value)) {
       try {
         // eslint-disable-next-line @typescript-eslint/unbound-method
         Reflect.apply(Promise.prototype.then, value, [resolve, reject]);
