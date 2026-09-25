@@ -211,11 +211,18 @@
 
 ## Unreleased
 
-- LifecycleManager queues events until synchronous state transitions finish. Listeners
-  now see complete bookkeeping; re-entrant events are delivered in FIFO order after
-  pending events and all listeners of the current event. This changes delivery timing
-  for listeners that relied on intermediate state. No queue is held across async work;
-  listener failures remain contained and failed transitions still flush their events.
+- LifecycleManager queues state notifications until synchronous transitions finish,
+  including failed transitions. Re-entrant notifications retain FIFO order, and an
+  unexpected delivery failure no longer discards the remaining queue. Listeners see
+  completed bookkeeping rather than intermediate writes.
+- Three control events remain synchronous, including during another event's delivery:
+  `lifecycle-manager:signals-attached`, `signal:shutdown`, and
+  `lifecycle-manager:shutdown-escalation-forced`. Attach listeners can refuse nested
+  startup before component hooks run; signal listeners run before a force callback
+  can exit the process; forced listeners retain escalation context and can call
+  `logger.exit()` immediately. These checkpoints can overtake queued notifications,
+  so FIFO applies to notifications rather than all events. Idle notifications avoid
+  queue allocation while preserving the ordering of notifications produced by listeners.
 
 - **`LifecycleManager`'s async methods no longer reject.** Every one answers with a result object, including when something unplanned goes wrong - a bug in the manager, or a component getter such as `getDependencies()` that throws. The promise resolves with `code: 'unknown_error'` (`'error'` for messaging, health, and `trigger*()` results; an empty array for `broadcastMessage()`), and the original is reported on the global `'error'` channel. `ShutdownResult` gains an optional `error`, and `UnregisterFailureCode` gains `'unknown_error'`. Because nothing rejects, an operation can be started without awaiting it and its result read later from the same promise - `const pending = manager.stopAllComponents(); pending.then(...)` - or dropped with `void`. See [running operations in the background](./docs/lifecycle-manager.md#running-operations-in-the-background).
 - A shutdown pass that throws outright now resolves `stopAllComponents()` with that failure instead of rejecting it, and emits the same result on `lifecycle-manager:shutdown-completed`, which now always pairs with `lifecycle-manager:shutdown-initiated`. The result lists the components that had already stopped, scopes `stalledComponents` to the ones that pass had in view, and updates `getLastShutdownResult()`. The escalation window is armed exactly as it is for a stalled or timed-out pass, so `onForceShutdown` stays reachable. `restartAllComponents()` resolves with the crashed result as its `shutdownResult` and skips its startup phase.

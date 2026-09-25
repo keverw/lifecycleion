@@ -2310,31 +2310,49 @@ class ApiComponent extends BaseComponent {
 
 The LifecycleManager emits events for monitoring and observability. All events are typed via `LifecycleManagerEvents`.
 
-Manager-generated events are queued during synchronous state transitions and delivered
-when the outermost transition finishes, before control returns from that transition.
-Transitions include registry commits/removals and result publication, component state
-updates (including late and unexpected stops), startup-latch release, signal attachment
-and detachment, and shutdown acceptance, result publication, and escalation bookkeeping.
-An asynchronous operation consists of separate synchronous transitions: the manager
-never holds this queue across an `await` or waits for a listener's promise.
+Manager-generated **state notifications** are queued during synchronous state
+transitions and delivered when the outermost transition finishes. Transitions include
+registry commits/removals and result publication, component state updates (including
+late and unexpected stops), startup-latch release, signal attachment/detachment, and
+shutdown acceptance, result publication, and escalation bookkeeping. No transition
+holds the queue across an `await`, and listener promises are not awaited.
 
-Events retain FIFO emission order and listener registration order. If a listener starts
-another transition, its events go behind those already queued; they cannot interrupt the
-remaining listeners of the current event. A failed transition still delivers events
-already queued, and listener throws/rejections remain contained. These are notifications
-of changes that happened, not a transaction log that disappears on failure. Earlier
-listeners can change live state, so use the event payload for the originating snapshot
-and status getters for the current state.
+Three events are **synchronous control checkpoints**, including when called from
+another event listener:
 
-**Timing compatibility:** listeners now see completed bookkeeping instead of intermediate
-writes. This is an observable change for code that relied on re-entering halfway through
-a transition. For example, `signals-detached` sees the stopped timestamp already recorded;
-an expiry event raised while accepting shutdown sees the accepted pass; and
-`shutdown-completed` sees escalation already settled, while retaining the shutdown latch
-until its listeners finish. A `signals-attached` listener during startup still finds a
-startup/claim in progress and can request shutdown before startup proceeds. Standalone
-events at stable dispatch boundaries still run synchronously. Logs and component hooks
-remain synchronous, so their existing re-entry guards are still required.
+- `lifecycle-manager:signals-attached` lets listeners intervene before startup proceeds
+  when `attachSignalsBeforeStartup` is enabled. They find the startup latch or component
+  claim already installed. A listener can request shutdown to refuse the start, or
+  register an auto-start for a bulk startup that has not computed its order yet.
+- `signal:shutdown` runs before that request can invoke `onForceShutdown()`, so listeners
+  receive the signal even if the callback immediately calls `process.exit()`.
+- `lifecycle-manager:shutdown-escalation-forced` runs after `onForceShutdown()` returns,
+  while force and escalation guards remain active. A synchronous `logger.exit()` from
+  this listener proceeds without waiting for a blocked stop; nested shutdown requests
+  retain the current cycle. The event cannot run if `onForceShutdown()` itself exits.
+
+Control events can interrupt the remaining listeners of another event and overtake
+queued notifications. **There is no global FIFO across both kinds of event.** The
+control call sites establish the state listeners need before dispatch and retain their
+re-entry checks afterwards. Context guards cover synchronous listener execution;
+continuations after an async listener's `await` run outside those guards.
+
+State notifications retain FIFO emission order and listener registration order. A
+listener's new notifications wait behind those pending and the remaining listeners of
+the current event. Even an unexpected failure delivering one queued entry is reported
+without dropping later entries. Failed transitions still flush notifications already
+queued: these describe changes that happened, not a transaction log discarded on
+failure. Earlier listeners can change live state, so use payloads for the originating
+snapshot and status getters for the current state. Logging and component hooks remain
+synchronous, and their existing re-entry guards are still required.
+
+**Timing compatibility:** notification listeners see completed bookkeeping instead of
+intermediate writes. For example, `signals-detached` sees the stopped timestamp already
+recorded, an expiry notification during shutdown acceptance sees the accepted pass, and
+`shutdown-completed` sees escalation already settled while the pass latch remains held.
+Code that previously relied on interrupting a transition from these notifications must
+adapt. The three control checkpoints preserve their synchronous timing even during
+re-entrant delivery.
 
 ### Subscribing to Events
 

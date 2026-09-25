@@ -1298,7 +1298,10 @@ describe('LifecycleManager - public methods never reject', () => {
     // Expiry is now queued until acceptance finishes. The outer request owns the
     // pass; the listener sees its complete cycle and its nested request is refused.
     expect(manager.getShutdownEscalationStatus().firstMethod).toBe('manual');
-    expect((await outer).code).not.toBe('already_in_progress');
+    const outerResult = await outer;
+    expect(outerResult.success).toBe(false);
+    expect(outerResult.reason).toBe('Shutdown is still in progress for: a');
+    expect(outerResult.code).toBeUndefined();
     expect(((await nested[0]) as { code: string }).code).toBe(
       'already_in_progress',
     );

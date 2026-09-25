@@ -663,12 +663,14 @@ export interface ValueResult<T = unknown> {
 }
 
 /**
- * Manager events are delivered at the end of synchronous state transitions, in FIFO
- * emission order. Listener re-entry queues its events behind pending notifications;
- * listener promises are observed for failure, not awaited. Failed transitions still
- * flush events. Payloads describe the originating change, while live status may reflect
- * changes made by an earlier listener. This changes timing for listeners that previously
- * observed partial bookkeeping; it does not defer notifications across async work.
+ * State notifications are FIFO at the end of synchronous transitions, including failed
+ * transitions. Listener re-entry queues notifications behind those pending; promises
+ * are observed for failure, not awaited. Three control events instead run synchronously,
+ * even during another event's delivery: lifecycle-manager:signals-attached,
+ * signal:shutdown, and lifecycle-manager:shutdown-escalation-forced. This preserves
+ * pre-start intervention and immediate force-exit behavior; there is no global FIFO
+ * across control events and notifications. Payloads describe their originating change,
+ * while live status may reflect changes made by earlier listeners.
  */
 type EventEmitterSurface = Pick<
   EventEmitterProtected,

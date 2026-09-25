@@ -15,12 +15,18 @@ import type {
 import type { ShutdownSignal } from '../process-signal-manager';
 
 /**
- * Manager-generated notifications are FIFO: synchronous state transitions queue them
- * until their outermost boundary. Re-entry from a listener appends behind pending
- * events, after all listeners of the current event. No listener promise is awaited,
- * and a failed transition still flushes notifications already queued. Payloads describe
- * the originating change; earlier listeners may have changed the manager's live state.
- * Dispatch boundaries remain synchronous; the queue is never held across an await.
+ * State notifications are FIFO: synchronous transitions queue them until their
+ * outermost boundary. Listener re-entry appends notifications behind those pending,
+ * after all listeners of the current notification. Failed transitions still flush,
+ * delivery failures are contained, and listener promises are never awaited.
+ *
+ * Three control checkpoints are synchronous even during a transition or notification
+ * drain: lifecycle-manager:signals-attached, signal:shutdown, and
+ * lifecycle-manager:shutdown-escalation-forced. They may interleave with notifications:
+ * startup must allow intervention after attachment, signals must precede a force exit,
+ * and forced listeners must retain the active force/escalation guards. Call sites
+ * commit the state needed by these listeners before dispatch and recheck afterwards.
+ * Payloads describe the originating change; earlier listeners can change live state.
  */
 export interface LifecycleManagerEventMap {
   'component:unregistered': { name: string; duringShutdown?: boolean };
@@ -31,6 +37,7 @@ export interface LifecycleManagerEventMap {
     failedOptionalComponents: StartupResult['failedOptionalComponents'];
     skippedComponents: string[];
   };
+  /** Synchronous control checkpoint; automatic pre-start attachment precedes startup work. */
   'lifecycle-manager:signals-attached': undefined;
   'lifecycle-manager:signals-detached': undefined;
   'component:health-check-started': { name: string };
@@ -141,7 +148,10 @@ export interface LifecycleManagerEventMap {
     requestCount: number;
     armedUntil: number;
   };
-  /** Repeated shutdown requests crossed the force threshold and onForceShutdown() was invoked. */
+  /**
+   * Synchronous control checkpoint after onForceShutdown() returns, with force and
+   * escalation guards still active. Not emitted if that callback exits the process.
+   */
   'lifecycle-manager:shutdown-escalation-forced': {
     firstMethod: ShutdownMethod;
     latestMethod: ShutdownMethod;
@@ -199,6 +209,7 @@ export interface LifecycleManagerEventMap {
   'component:shutdown-force-completed': { name: string };
   'component:shutdown-force-timeout': { name: string; timeoutMS: number };
   'component:startup-rollback': { name: string };
+  /** Synchronous control checkpoint before this request can invoke onForceShutdown(). */
   'signal:shutdown': {
     method: ShutdownSignal;
     isAlreadyShuttingDown: boolean;

@@ -5022,9 +5022,10 @@ export class LifecycleManager
       // set, force could never fire for it. Signals need no such step: they reseed when
       // not armed before they get here.
       //
-      // Not while a shutdown is running: expiring a lapsed window just above emits
-      // `shutdown-escalation-expired`, and a listener that starts a shutdown from there
-      // seeds a live cycle this request must not wipe. It is refused a few lines down.
+      // Not while a shutdown is running: expiring a lapsed window logs through the
+      // caller's sinks, and a sink may start a shutdown and seed its live cycle. This
+      // request must not wipe it and is refused below. The expiry event itself is a
+      // queued notification, so its listeners cannot interrupt this acceptance.
       if (
         method === 'manual' &&
         consumedArmedUntil === null &&
@@ -5048,9 +5049,10 @@ export class LifecycleManager
         }
       }
 
-      // The bookkeeping above runs user code before the latch is taken: an expiring armed
-      // window emits `shutdown-escalation-expired`, and a counted manual retry can reach
-      // `onForceShutdown` and `shutdown-escalation-forced`. A listener or callback that
+      // The bookkeeping above runs user code before the latch is taken: an expiring
+      // armed window logs through caller sinks, and a counted manual retry can reach
+      // `onForceShutdown` and the synchronous `shutdown-escalation-forced` checkpoint.
+      // A sink, control listener, or callback that
       // starts its own shutdown from there - `stopAllComponents()` inside
       // `onForceShutdown` is the realistic case - gets a pass that finds no latch, announces itself and
       // starts stopping, and control then returns here. Refuse rather than run a second
@@ -8646,8 +8648,10 @@ export class LifecycleManager
    * behind unrelated work (or deadlock a hook waiting for an event). Nesting lets a
    * terminal component update detach signals without exposing its unfinished timestamps,
    * and lets shutdown acceptance finish its latch and escalation state before listeners
-   * can request another pass. Dispatch boundaries, such as signals attached before
-   * startup proceeds, remain explicit: listeners still get to request shutdown there.
+   * can request another pass. Three synchronous control checkpoints are deliberately
+   * exempt: signals-attached, signal:shutdown, and shutdown-escalation-forced. Their
+   * call sites commit the state needed by listeners before dispatch and retain their
+   * re-entry checks afterwards; the operation must not proceed past them first.
    *
    * The finally is essential on refusals and failures too. These events describe work
    * already done, not a transaction that can be silently discarded on an exception.
@@ -8666,9 +8670,11 @@ export class LifecycleManager
   }
 
   /**
-   * One FIFO for all manager events. Keep the flushing guard raised through every
-   * listener of an event: a listener may finish another transition, but its events
-   * belong behind events already waiting, never between listeners of the current one.
+   * One FIFO for state notifications. Keep the flushing guard raised through every
+   * listener: a listener may finish another transition, but its notifications belong
+   * behind those already waiting, never between listeners of the current one. Control
+   * checkpoints are synchronous and may interrupt this drain; they restore its flag
+   * afterwards so notifications they generate still join the same FIFO.
    * No microtask is scheduled and listener promises are not awaited; the protected
    * emitter observes their failures. An earlier listener may change live state, so
    * event payloads describe their originating transition rather than promising that
@@ -8681,7 +8687,15 @@ export class LifecycleManager
     this.isFlushingEvents = true;
     try {
       for (let index = 0; index < this.pendingEvents.length; index++) {
-        this.pendingEvents[index]();
+        try {
+          this.pendingEvents[index]();
+        } catch (error) {
+          // deliverEvent contains listener/emitter failures and uses a guarded logger.
+          // This final net is for an unexpected failure of delivery itself: one broken
+          // entry must not discard the rest of a transition's notifications, nor leave
+          // the flushing flag raised. Reporting is protected too.
+          reportCallbackError('lifecycle-manager event delivery', error);
+        }
       }
     } finally {
       this.pendingEvents.length = 0;
@@ -8693,6 +8707,40 @@ export class LifecycleManager
     event: K,
     data: LifecycleManagerEventMap[K],
   ): void {
+    // These are control checkpoints, not delayed descriptions of completed work:
+    // attach listeners may refuse startup, a shutdown signal must precede a force
+    // callback that can exit the process, and forced listeners must run while the
+    // force/escalation depth guards are still raised. They run even inside another
+    // event's listener. Keeping a global non-interleaving FIFO here would require
+    // deferring the control operation itself, including an immediate force exit.
+    const isControlEvent =
+      event === 'lifecycle-manager:signals-attached' ||
+      event === 'signal:shutdown' ||
+      event === 'lifecycle-manager:shutdown-escalation-forced';
+
+    // The ordinary idle case needs neither a closure nor an array entry. Still raise
+    // the flushing flag: notifications produced by a listener must wait until all
+    // listeners of this event finish. A nested control checkpoint inherits that flag
+    // and restores it instead of starting a second notification drain.
+    if (
+      isControlEvent ||
+      (this.transitionDepth === 0 &&
+        !this.isFlushingEvents &&
+        this.pendingEvents.length === 0)
+    ) {
+      const wasFlushingEvents = this.isFlushingEvents;
+      this.isFlushingEvents = true;
+      try {
+        this.deliverEvent(event, data);
+      } catch (error) {
+        reportCallbackError('lifecycle-manager event delivery', error);
+      } finally {
+        this.isFlushingEvents = wasFlushingEvents;
+        this.flushEvents();
+      }
+      return;
+    }
+
     this.pendingEvents.push(() => this.deliverEvent(event, data));
     this.flushEvents();
   }
@@ -9267,10 +9315,15 @@ export class LifecycleManager
         this.repeatedShutdownRequestState.firstRequestAt === null;
 
       this.noteShutdownRequestDuringActivePass();
+      if (isFirstRequestOfCycle) {
+        // This is a synchronous control checkpoint. Its listeners must find the
+        // restart's new shutdown cycle already seeded, rather than seed a competing
+        // cycle when they re-enter through another signal or a manual stop.
+        this.seedRepeatedShutdownRequestState(method);
+      }
       this.lifecycleEvents.signalShutdown(method, true);
 
       if (isFirstRequestOfCycle) {
-        this.seedRepeatedShutdownRequestState(method);
         this.logger.info('Shutdown signal received during restart', {
           params: { method },
         });
@@ -9353,9 +9406,9 @@ export class LifecycleManager
         shouldSeedRepeatedShutdownState = false;
         this.handleRepeatedShutdownRequest(method, consumedArmedUntil);
       } else if (this.isShuttingDown) {
-        // The check above can expire a lapsed window, which emits
-        // `shutdown-escalation-expired` - and a listener there can start a shutdown. That
-        // pass is the one this signal now lands on, so it is answered as one landing on a
+        // Expiring a lapsed window logs through caller sinks, which can start a
+        // shutdown here; the expiry notification stays queued until this transition
+        // ends. That pass is the one this signal now lands on, so it is answered as one landing on a
         // running pass: not reseeding escalation over the cycle that pass just seeded, and
         // not emitting `signal:shutdown` as if nothing were running.
         this.answerShutdownSignalDuringPass(method);
@@ -9916,10 +9969,10 @@ export class LifecycleManager
         armedUntil,
       };
 
-      // Reset before anything is said about it: a `shutdown-escalation-expired` listener
-      // that starts a shutdown must find no state, so its pass seeds a fresh cycle. Reset
-      // after the emit, as it was, wiped the state that pass had just seeded - `firstMethod`
-      // stayed `null` for the whole pass, and `onForceShutdown` could never fire.
+      // Reset before the warning runs caller sinks: a sink that starts a shutdown
+      // must find no state, so its pass seeds a fresh cycle. Resetting afterwards
+      // would wipe that cycle and make force escalation unreachable. The expiry
+      // notification waits for the enclosing transition to finish.
       this.resetRepeatedShutdownRequestState();
 
       this.logger.warn(
