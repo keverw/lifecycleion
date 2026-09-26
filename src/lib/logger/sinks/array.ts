@@ -1,10 +1,11 @@
+import { describeError } from '../../to-error';
 import {
   defineEntry,
   describeContainer,
   namedArrayKeys,
 } from '../../internal/container-entries';
 import { isPlainContainer } from '../../internal/is-plain-container';
-import { isPromise } from '../../is-promise';
+import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { MAX_REDACTION_ENTRIES } from '../../internal/redact-paths';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
 import {
@@ -447,15 +448,16 @@ export class ArraySink implements LogSink {
         throw handlerError;
       }
 
-      if (isPromise(result)) {
-        // Settled through `Promise.resolve` rather than `result.finally`, as the logger
-        // does: `isPromise` accepts any thenable, and a `then`-only one has no `finally`
-        // to call - nor the `catch` the reporter calls on what this returns, which is
-        // why the wrapped promise is what goes back rather than the handler's own
-        // object. A rejection still travels on to the reporter through it; the side
-        // chain here only lowers the guard either way.
-        const settled = Promise.resolve(result);
-
+      const settled = adoptResult(result);
+      if (settled instanceof UnreadableReturn) {
+        settled.report(
+          'ArraySink onFormatError',
+          `${kind} failed for ${path}: ${describeError(error)}`,
+        );
+        this.formatReportsInFlight--;
+        return undefined;
+      }
+      if (settled !== undefined) {
         void settled.then(
           () => {
             this.formatReportsInFlight--;
@@ -470,7 +472,9 @@ export class ArraySink implements LogSink {
 
       this.formatReportsInFlight--;
 
-      return result;
+      // Classification already handled any malformed return; do not send that
+      // object back through the outer reporter and read its then a second time.
+      return undefined;
     };
   }
 }

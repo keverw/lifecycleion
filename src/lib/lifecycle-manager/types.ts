@@ -228,6 +228,10 @@ export type ComponentOperationFailureCode =
   | 'component_shutdown_timeout'
   | 'restart_stop_failed'
   | 'restart_start_failed'
+  | 'signal_attach_failed'
+  // An auto-start that joined a bulk startup which then rolled back: it was started,
+  // and stopped again with the rest.
+  | 'startup_rolled_back'
   | 'unknown_error';
 
 /**
@@ -236,8 +240,11 @@ export type ComponentOperationFailureCode =
 export type UnregisterFailureCode =
   | 'component_not_found'
   | 'component_running'
+  | 'component_starting'
+  | 'component_stopping'
   | 'stop_failed'
-  | 'bulk_operation_in_progress';
+  | 'bulk_operation_in_progress'
+  | 'unknown_error';
 
 /**
  * Additional details for why unregister stop failed
@@ -302,6 +309,8 @@ export interface StartupResult {
     | 'stalled_components_exist'
     | 'partial_state'
     | 'required_component_failed'
+    | 'shutdown_requested_during_restart'
+    | 'signal_attach_failed'
     | 'startup_timeout'
     | 'unknown_error';
 
@@ -338,7 +347,10 @@ export interface ShutdownResult {
   reason?: string;
 
   /** Error code (when success is false) */
-  code?: 'already_in_progress' | 'shutdown_timeout';
+  code?: 'already_in_progress' | 'shutdown_timeout' | 'unknown_error';
+
+  /** The thrown value, when the pass itself failed (`code: 'unknown_error'`) */
+  error?: Error;
 }
 
 /**
@@ -362,6 +374,15 @@ export interface RestartResult {
 
   /** Startup phase result */
   startupResult: StartupResult;
+
+  /**
+   * Present and `true` when a shutdown request arrived during the shutdown phase and
+   * the startup phase was skipped, so nothing is started again. `startupResult` then
+   * carries the `shutdown_requested_during_restart` code and `success` is false. Whether
+   * every component actually stopped is `shutdownResult`'s to say: a shutdown phase that
+   * stalled or timed out can leave some running, as any failed shutdown can.
+   */
+  startupSkippedByShutdownRequest?: boolean;
 
   /** True only if both shutdown and startup succeeded */
   success: boolean;
@@ -548,6 +569,9 @@ export interface HealthReport {
 
   /** Machine-readable outcome code */
   code: 'ok' | 'degraded' | 'timeout' | 'error';
+
+  /** The thrown value, when the check itself failed unexpectedly (`code: 'error'`) */
+  error?: Error;
 }
 
 /**
@@ -565,6 +589,13 @@ export interface SignalBroadcastResult {
 
   /** Machine-readable outcome code */
   code: 'ok' | 'partial_timeout' | 'timeout' | 'partial_error' | 'error';
+
+  /**
+   * The thrown value, when the broadcast itself failed rather than a component's handler
+   * - a custom `on*Requested` callback that threw or rejected, or an unexpected failure
+   * (`code: 'error'`). Per-component failures are on `results`.
+   */
+  error?: Error;
 }
 
 /**
@@ -623,8 +654,24 @@ export interface ValueResult<T = unknown> {
 
   /** Machine-readable outcome code */
   code: 'found' | 'not_found' | 'stopped' | 'stalled' | 'no_handler' | 'error';
+
+  /**
+   * The failure behind `code: 'error'`: what the component's `getValue()` handler threw, or
+   * what the lookup itself threw unexpectedly.
+   */
+  error?: Error;
 }
 
+/**
+ * State notifications are FIFO at the end of synchronous transitions, including failed
+ * transitions. Listener re-entry queues notifications behind those pending; promises
+ * are observed for failure, not awaited. Three control events instead run synchronously,
+ * even during another event's delivery: lifecycle-manager:signals-attached,
+ * signal:shutdown, and lifecycle-manager:shutdown-escalation-forced. This preserves
+ * pre-start intervention and immediate force-exit behavior; there is no global FIFO
+ * across control events and notifications. Payloads describe their originating change,
+ * while live status may reflect changes made by earlier listeners.
+ */
 type EventEmitterSurface = Pick<
   EventEmitterProtected,
   'on' | 'once' | 'hasListener' | 'hasListeners' | 'listenerCount'
@@ -852,7 +899,12 @@ export type RegistrationFailureCode =
  * Common result shape for component registration operations
  */
 export interface RegistrationResultBase extends BaseOperationResult {
-  /** Whether the component was added to the registry */
+  /**
+   * Whether this call added the component to the registry. It stays `true` for one that
+   * failed after it was added - an auto-start that crashed, say - and for one a listener
+   * has removed again since, whose `registrationIndexAfter` is then `null` and which has
+   * no `actualPosition`.
+   */
   registered: boolean;
 
   /** Component name */
@@ -861,20 +913,43 @@ export interface RegistrationResultBase extends BaseOperationResult {
   /** Machine-readable failure code if !success */
   code?: RegistrationFailureCode;
 
-  /** Registration index before the operation (null if not previously registered) */
+  /**
+   * Index in the committed registry before the operation. Null for an unpublished
+   * reservation too, even when its reserved name causes a duplicate_name refusal.
+   */
   registrationIndexBefore: number | null;
 
   /** Registration index after the operation (null if not registered) */
   registrationIndexAfter: number | null;
 
-  /** Resolved startup order after applying dependency constraints */
+  /**
+   * Resolved startup order after applying dependency constraints. On a refusal it is the
+   * order of the registry as it stands, or empty when the registration was refused before
+   * it had read every registered component's dependencies - an invalid position, or a
+   * shutdown in progress. Also empty for an `unknown_error` failure before the commit.
+   */
   startupOrder: string[];
 
   /** Whether registration occurred during startup */
   duringStartup?: boolean;
 
-  /** Whether auto-start was attempted after registration */
+  /**
+   * Whether auto-start was attempted after registration. Also `true` for one refused
+   * before `start()` ran - the bulk startup it would have joined was already rolling
+   * back - with `startResult` saying why.
+   */
   autoStartAttempted?: boolean;
+
+  /**
+   * `true` when `autoStart` was requested while a bulk startup held its latch but had not
+   * begun starting components - from a `signals-attached` listener, say, or from a
+   * `getDependencies()` the startup read while computing its order. The component is
+   * ordered with the rest and left to that startup rather than started here, so
+   * `autoStartAttempted` is `false`;
+   * whether it starts is that startup's result to say. One refused or failed before its
+   * loop - a shutdown started meanwhile - never starts it.
+   */
+  autoStartDeferred?: boolean;
 
   /** Whether auto-start succeeded (only present when autoStartAttempted is true) */
   autoStartSucceeded?: boolean;
@@ -933,8 +1008,8 @@ export interface InsertComponentAtResult extends RegistrationResultBase {
     description?: string;
   };
 
-  /** True if requested relative positioning was achievable under dependency constraints */
-  manualPositionRespected: boolean;
+  /** True if positioning was respected, false if reordered, undefined if order is unavailable. */
+  manualPositionRespected?: boolean;
 
   /** Present when inserting before/after a target */
   targetFound?: boolean;
@@ -948,7 +1023,7 @@ export interface InsertComponentAtResult extends RegistrationResultBase {
  * flag affects startup behavior, not whether dependencies must exist.
  */
 export interface DependencyValidationResult {
-  /** True if all dependencies are valid (no circular cycles, no missing dependencies) */
+  /** True if all dependencies are valid (no circular cycles, no missing or unreadable dependencies) */
   valid: boolean;
 
   /** Missing dependencies: components that depend on non-registered components */
@@ -965,6 +1040,17 @@ export interface DependencyValidationResult {
    */
   circularCycles: string[][];
 
+  /**
+   * Components whose `getDependencies()` threw, did not return an array, or returned a
+   * non-string entry. The component's own start fails on the same list, so any entry
+   * here makes `valid` false. An `isOptional()` that throws is not listed: it is reported
+   * and read as required, as startup reads it.
+   */
+  unreadableDependencies: Array<{
+    componentName: string;
+    error: Error;
+  }>;
+
   /** Summary counts for quick overview */
   summary: {
     /** Total number of missing dependencies */
@@ -975,6 +1061,8 @@ export interface DependencyValidationResult {
     optionalMissingDependencies: number;
     /** Total number of circular dependency cycles detected */
     totalCircularCycles: number;
+    /** Number of `unreadableDependencies` entries */
+    totalUnreadableDependencies: number;
   };
 }
 

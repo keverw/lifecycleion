@@ -1,15 +1,20 @@
 import { errorToString } from './error-to-string';
-import { isPromise } from './is-promise';
-import { isFunction } from './is-function';
 import { toError } from './to-error';
 import { DOUBLE_EOL } from './constants';
 import { installGlobalEventTarget } from './global-event-target';
 import { reportToHost } from './internal/report-to-host';
+import { UnreadableReturn, adoptResult } from './internal/adopt-promise';
+import { reportThroughHandler } from './internal/failure-reporter';
 
 // Node.js has a global `ErrorEvent` constructor (Node 25+) but does not make `globalThis`
 // an EventTarget, so the global event methods must be supplied before anything can be
 // dispatched or listened for. No-op in browsers, Bun, and Deno.
 installGlobalEventTarget();
+
+// Re-exported so an integrator holding its own structured `Error` can publish it directly.
+// `reportCallbackError` is a normalizer for raw thrown values; see `reportToHost`'s own
+// docs for when each one applies. Imported above as well, because this module calls it.
+export { reportToHost } from './internal/report-to-host';
 
 /**
  * Report a callback failure on the standard `'error'` channel. See {@link reportToHost}.
@@ -78,6 +83,12 @@ export function reportCallbackError(
  * to handle the result or error of the callback, consider using the
  * `safeHandleCallbackAndWait` function instead.
  *
+ * **`this` is not preserved.** The callback is invoked without a receiver, so an extracted
+ * method such as `logger.info` loses `logger` and any `this.x` inside it throws, arriving
+ * as an ordinary callback failure rather than a `TypeError` at the call site. Pass
+ * `() => logger.info(a, b)` or `logger.info.bind(logger)`. `runCallbackSafely` takes an
+ * explicit `thisArg` if you need to keep using `args`.
+ *
  * @param {string} callbackName - The name of the callback function, used for error reporting.
  * @param {unknown} callback - The callback function to be executed. It can be either a
  *                             synchronous function or a function that returns a Promise.
@@ -89,9 +100,9 @@ export function safeHandleCallback(
   callback: unknown,
   ...args: unknown[]
 ): void {
-  runCallbackSafely(callbackName, callback, args, (error) => {
-    reportCallbackError(callbackName, error);
-  });
+  // No `onError` closure: the standard channel is the default, so a callback that
+  // succeeds allocates nothing for a failure it never had.
+  invokeCallbackSafely(callbackName, callback, args, undefined, undefined);
 }
 
 /**
@@ -104,56 +115,145 @@ export function safeHandleCallback(
  * that must stay off the global `'error'` channel (`Logger`) does not need a second copy
  * of this body.
  *
- * `onError` must not throw: it runs on the failure path, and there is nothing above it
- * left to catch.
+ * `onError` should not throw, but a throw from it is contained rather than escaping: it
+ * runs on the failure path, where there is nothing above it left to catch. A synchronous
+ * throw would otherwise surface at an unrelated call site, and one from the promise rung
+ * would be an unhandled rejection - fatal under Node's default
+ * `--unhandled-rejections=throw`, which is the outcome this helper exists to prevent. Both
+ * are caught and sent to the guarded console rung instead.
  *
- * @param callbackName Used only for the "is not a function" message.
+ * **`this` is not preserved unless you pass `thisArg`.** The callback is invoked with the
+ * receiver you supply, and with none by default. Passing an extracted method such as
+ * `logger.info` therefore loses `logger`, and any `this.x` inside it throws - which
+ * arrives as an ordinary callback failure on `onError`, not as a `TypeError` at the call
+ * site, so a method that merely *reports* through this path can look like it ran. Pass
+ * `thisArg`, or hand over `() => logger.info(a, b)` or `logger.info.bind(logger)`.
+ *
+ * @param callbackName Names the callback in the "is not a function" message and in the
+ *                     console line for a failing `onError`.
  * @param callback The untrusted value to invoke.
  * @param args Arguments to pass to the callback.
  * @param onError Receives the thrown value, the rejection reason, or a synthesized
- *                `Error` when `callback` is not callable.
+ *                `Error` when `callback` is not callable or its return has an unreadable
+ *                `then` (the original failure is its `cause`). It may be `async`: a promise it
+ *                returns is followed, and a rejection lands on the console rung like a
+ *                throw does.
+ * @param thisArg Receiver to invoke `callback` with. Omit for a plain function or a
+ *                closure; supply the owning object when passing an extracted method.
  */
 export function runCallbackSafely(
   callbackName: string,
   callback: unknown,
   args: unknown[],
   onError: (error: unknown) => void,
+  thisArg?: unknown,
 ): void {
-  if (!isFunction(callback)) {
-    onError(
+  invokeCallbackSafely(callbackName, callback, args, onError, thisArg);
+}
+
+/**
+ * The body of {@link runCallbackSafely}, with `onError` optional: when it is `undefined`,
+ * a failure goes straight to {@link reportCallbackError}, which is what
+ * {@link safeHandleCallback} wants without building a closure for it on every call.
+ */
+function invokeCallbackSafely(
+  callbackName: string,
+  callback: unknown,
+  args: unknown[],
+  onError: ((error: unknown) => void) | undefined,
+  thisArg: unknown,
+): void {
+  // `typeof`, not `isFunction()`: its `instanceof Function` fallback reads the value's
+  // prototype, which throws for a revoked proxy - outside every guard here. Anything
+  // callable is `typeof 'function'` anyway.
+  if (typeof callback !== 'function') {
+    reportToOnError(
+      callbackName,
       new Error(`Callback provided for ${callbackName} is not a function`),
+      onError,
     );
 
     return;
   }
 
+  let result: unknown;
   try {
-    // We need to cast callback to the appropriate function type now
-    const result = (callback as (...args: unknown[]) => unknown)(...args);
-
-    if (isPromise(result)) {
-      // Fire-and-forget: a rejection is reported, never awaited.
-      //
-      // Adopted through `Promise.resolve` rather than calling `result.catch` directly, as
-      // `ArraySink` does and for the same reason: `isPromise` accepts any thenable, and a
-      // `then`-only one has no `catch`. Calling it threw a `TypeError` that the
-      // surrounding `catch` reported *in place of* the real failure - and because `then`
-      // was never called, the callback's actual rejection was dropped and went nowhere.
-      // Every untrusted-callback surface funnels through here: `safeHandleCallback`,
-      // `EventEmitter`, `ProcessSignalManager`, `LRUCache.onChange`,
-      // `PromiseProtectedResolver`.
-      void Promise.resolve(result).catch(onError);
-    }
+    // `Reflect.apply` so an extracted method can still be given its receiver - and not
+    // `callback.apply(...)`, which reads `apply` off the untrusted callback itself: one
+    // with its own `apply` property would run that instead. With `thisArg` omitted this
+    // is the same bare call as before.
+    result = Reflect.apply(
+      callback as (...args: unknown[]) => unknown,
+      thisArg,
+      args,
+    );
   } catch (error) {
-    onError(error);
+    reportToOnError(callbackName, error, onError);
+    return;
   }
+  const pending = adoptResult(result);
+  if (pending instanceof UnreadableReturn) {
+    reportToOnError(callbackName, pending, onError);
+    return;
+  }
+  void pending?.catch((error: unknown) => {
+    reportToOnError(callbackName, error, onError);
+  });
 }
 
-interface CallbackResult<T> {
-  success: boolean;
-  value?: T;
-  error?: Error;
+/**
+ * Hand a callback's failure to `onError`, through the rung every supplied failure handler
+ * in this library shares. `onError` is the last rung that can still describe the original
+ * failure: a throw or rejection from it goes to the console alongside that failure rather
+ * than replacing it or escaping, and a `then` on its return that cannot be read is not
+ * mistaken for either. Module-level, so a callback that succeeds - every guarded log line
+ * - allocates nothing for a failure it never had.
+ */
+function reportToOnError(
+  callbackName: string,
+  error: unknown,
+  onError: ((error: unknown) => void) | undefined,
+): void {
+  if (onError === undefined) {
+    // The standard channel. `reportToHost` never throws - a hostile global it reads
+    // included - so this needs no rung beneath it.
+    reportCallbackError(callbackName, error);
+
+    return;
+  }
+
+  reportThroughHandler(
+    // Typed `void`, but an `async` handler returns a promise: one that rejects is
+    // followed, not dropped as an unhandled rejection.
+    () => onError(error),
+    // Rendered, not passed raw: `console.error` of the error itself prints every
+    // `additionalInfo` and `cause` field in the clear, which the masking in
+    // `errorToString` - what `reportCallbackError()` renders with - exists to prevent.
+    () =>
+      `Error handler for ${callbackName} failed while reporting a failure${DOUBLE_EOL}` +
+      `Original failure:${DOUBLE_EOL}${errorToString(error)}`,
+    { handlerName: `onError for ${callbackName}` },
+  );
 }
+
+/**
+ * Outcome of {@link safeHandleCallbackAndWait}.
+ *
+ * A discriminated union, so `if (result.success)` narrows to the branch that carries
+ * `value` and the `else` narrows to the one that carries `error`. Neither field needs a
+ * non-null assertion after the check.
+ *
+ * Each branch declares the other's field as optional `undefined` rather than omitting it,
+ * so reading `result.value` without narrowing first still type-checks - as `T | undefined`
+ * - and existing callers that check `success` some other way keep compiling.
+ *
+ * `T` cannot be inferred - `callback` is typed `unknown`, so nothing in the call carries
+ * the return type - and defaults to `unknown`. Supply it explicitly when you know what the
+ * callback returns.
+ */
+export type CallbackResult<T = unknown> =
+  | { success: true; value: T; error?: undefined }
+  | { success: false; error: Error; value?: undefined };
 
 /**
  * Safely handles a callback function by catching any errors and reporting them on the
@@ -168,6 +268,12 @@ interface CallbackResult<T> {
  * Browsers, Bun, and Deno expose these globals natively. Node.js provides `ErrorEvent` (Node 25+)
  * but not the global event methods, so importing this module installs them via a shared
  * `EventTarget` (see `global-event-target`) without overwriting existing implementations.
+ *
+ * **`this` is not preserved.** The callback is invoked without a receiver, so an extracted
+ * method such as `logger.info` loses `logger` and any `this.x` inside it throws, arriving
+ * as an ordinary callback failure rather than a `TypeError` at the call site. Pass
+ * `() => logger.info(a, b)` or `logger.info.bind(logger)`. `runCallbackSafely` takes an
+ * explicit `thisArg` if you need to keep using `args`.
  *
  * @param {string} callbackName - The name of the callback function, used for error reporting.
  * @param {unknown} callback - The callback function to be executed. It can be either a
@@ -192,14 +298,20 @@ export async function safeHandleCallbackAndWait<T>(
     return { success: false, error: toError(error) };
   };
 
-  if (isFunction(callback)) {
+  // `typeof`, for the reason `runCallbackSafely()` gives.
+  if (typeof callback === 'function') {
     try {
-      // We need to cast callback to the appropriate function type now
-      const result = (callback as (...args: unknown[]) => unknown)(...args);
+      // `Reflect.apply` and `adoptResult()`, as `runCallbackSafely()` calls and adopts:
+      // one path for how an untrusted callback is invoked and how its promise is read.
+      const result: unknown = Reflect.apply(callback, undefined, args);
 
-      if (isPromise(result)) {
+      const pending = adoptResult(result);
+      if (pending instanceof UnreadableReturn) {
+        return handleError(pending);
+      }
+      if (pending !== undefined) {
         // Wait for the async callback to complete
-        const value = await (result as Promise<T>);
+        const value = (await pending) as T;
 
         return { success: true, value };
       } else {

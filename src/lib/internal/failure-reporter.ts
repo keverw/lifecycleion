@@ -1,5 +1,5 @@
 import { describeError, toError } from '../to-error';
-import { isPromise } from '../is-promise';
+import { adoptResult, UnreadableReturn } from './adopt-promise';
 import { reportToConsole } from './report-to-console';
 import { reportToHost } from './report-to-host';
 
@@ -35,47 +35,69 @@ export type ReportFailure = (error: unknown, subject: string) => void;
  * @param line   What the console rung should say. Built by the caller, since only it knows
  *               what its arguments mean. Evaluated lazily so an unset handler that
  *               succeeds costs nothing.
- * @param onSettled Called exactly once when the report is over: after a synchronous
+ * @param options Optional settlement callback and handler identity.
+ * @param options.onSettled Called exactly once when the report is over: after a synchronous
  *               handler returns or throws, after an `async` one resolves or rejects, or
  *               straight away when there is no handler. For a caller holding a re-entry
  *               guard across the report - the sinks hold one over a `'format'` failure -
  *               a boolean cleared on return was cleared before an `async` handler had
  *               done anything, and the loop it guards against resumed on the far side of
  *               the handler's first `await`.
+ * @param options.handlerName Identifies the handler alongside the original failure when its
+ *               return cannot be adopted. Delivery cannot be inferred from a return:
+ *               lazy handlers may not have done any reporting yet.
  */
 export function reportThroughHandler(
   invoke: (() => unknown) | undefined,
   line: () => string,
-  onSettled?: () => void,
+  options: { onSettled?: () => void; handlerName?: string } = {},
 ): void {
-  if (invoke !== undefined) {
+  const { onSettled, handlerName } = options;
+  // The line is the caller's to build, and may throw: rendered through this, a report
+  // still goes out - and nothing throws, or rejects unhandled, out of the one function
+  // whose contract is that reporting a failure may never raise one.
+  const safeLine = (): string => {
     try {
-      const result: unknown = invoke();
+      return line();
+    } catch (lineError) {
+      return `A failure occurred, but its report could not be rendered: ${describeError(lineError)}`;
+    }
+  };
 
-      // A handler is free to be `async` - the named-pipe docs show one - and a rejected
-      // promise sails straight past a `try`/`catch`. Unfollowed, that is an unhandled
-      // rejection raised out of an error path, which under Node's default
-      // `--unhandled-rejections=throw` ends the process: a logging failure taking down the
-      // application, from the one function whose contract is that reporting a failure may
-      // never raise one. Followed, it lands on the console rung like any other broken
-      // handler.
-      if (isPromise(result)) {
-        Promise.resolve(result)
-          .catch((handlerError: unknown) => {
-            reportToConsole(
-              `${line()} (the failure handler also rejected: ${describeError(handlerError)})`,
-            );
-          })
-          .finally(() => {
-            onSettled?.();
-          });
+  // The handler's own failure, after the line: on a line of its own when the line runs
+  // over several - an `errorToString` box - rather than trailing its closing border.
+  const withHandlerFailure = (verb: string, handlerError: unknown): string => {
+    const rendered = safeLine();
+    const separator = rendered.includes('\n') ? '\n\n' : ' ';
 
-        return;
-      }
+    return `${rendered}${separator}(the failure handler also ${verb}: ${describeError(handlerError)})`;
+  };
 
-      onSettled?.();
-
+  // Called exactly once, whichever way the report ends, and contained: it is the
+  // caller's guard coming down, and throwing it out of here - or into the handler's
+  // catch below, which called it again - broke the contract above.
+  let isSettled = false;
+  const settle = (): void => {
+    if (isSettled) {
       return;
+    }
+
+    isSettled = true;
+
+    try {
+      onSettled?.();
+    } catch (settleError) {
+      reportToConsole(
+        `A failure report's settle callback threw: ${describeError(settleError)}`,
+      );
+    }
+  };
+
+  if (invoke !== undefined) {
+    let result: unknown;
+
+    try {
+      result = invoke();
     } catch (handlerError) {
       // Both failures, not one. The handler's own throw is the news - it means the channel
       // the caller chose is broken and every later report will be lost the same way - but
@@ -85,18 +107,43 @@ export function reportThroughHandler(
       //
       // The console, never a channel a logger might hear: a handler that just threw is no
       // argument for reaching past the caller for a louder rung.
-      reportToConsole(
-        `${line()} (the failure handler also threw: ${describeError(handlerError)})`,
-      );
-
-      onSettled?.();
+      reportToConsole(withHandlerFailure('threw', handlerError));
+      settle();
 
       return;
     }
+
+    const pending = adoptResult(result);
+    if (pending instanceof UnreadableReturn) {
+      // A successful invocation does not establish delivery: lazy thenables may
+      // defer the handler's work until adoption. If then cannot be read, retain the
+      // original failure as well as the return-contract error, without claiming a
+      // synchronous throw. A possible duplicate is preferable to losing the failure.
+      pending.report(
+        handlerName === undefined
+          ? 'A failure handler'
+          : `Failure handler (${handlerName})`,
+        safeLine(),
+      );
+      settle();
+      return;
+    }
+    if (pending !== undefined) {
+      void pending
+        .catch((handlerError: unknown) => {
+          reportToConsole(withHandlerFailure('rejected', handlerError));
+        })
+        .finally(settle);
+      return;
+    }
+
+    settle();
+
+    return;
   }
 
-  reportToConsole(line());
-  onSettled?.();
+  reportToConsole(safeLine());
+  settle();
 }
 
 /**
@@ -189,6 +236,7 @@ export function createFailureReporter(
       reportThroughHandler(
         () => handler(failure, subject),
         () => `${label} failed for ${subject}: ${describeError(failure)}`,
+        { handlerName: `${label} failure handler` },
       );
 
       return;

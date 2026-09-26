@@ -139,6 +139,16 @@ describe('safeHandleCallback', () => {
 });
 
 describe('safeHandleCallbackAndWait', () => {
+  it('waits on a native promise whose own then is not a function', async () => {
+    const promise: object = Promise.reject(new Error('rejected'));
+    Object.defineProperty(promise, 'then', { value: 1 });
+
+    const result = await safeHandleCallbackAndWait('cb', () => promise);
+
+    expect(result.success).toBe(false);
+    expect(result.error?.message).toBe('rejected');
+  });
+
   it('should call a synchronous callback successfully', async () => {
     const callbackName = 'syncCallback';
 
@@ -282,6 +292,133 @@ describe('runCallbackSafely', () => {
 
     expect(received).toEqual([[1, 'two']]);
     expect(failures).toEqual([]);
+  });
+
+  it('follows an async onError that rejects instead of leaving it unhandled', async () => {
+    const captured = muteConsoleError();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      runCallbackSafely(
+        'cb',
+        () => Promise.reject(new Error('callback rejected')),
+        [],
+        // eslint-disable-next-line @typescript-eslint/no-misused-promises -- an async onError is the subject of this test
+        async () => {
+          await Promise.resolve();
+
+          throw new Error('handler rejected');
+        },
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(unhandled).toEqual([]);
+      expect(captured.some((line) => line.includes('handler rejected'))).toBe(
+        true,
+      );
+      expect(captured.some((line) => line.includes('callback rejected'))).toBe(
+        true,
+      );
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      restoreConsoleError();
+    }
+  });
+
+  it('reports a rejected native promise whose own then is not a function', async () => {
+    const failures: unknown[] = [];
+    const thrown = new Error('rejected');
+    const promise: object = Promise.reject(thrown);
+    Object.defineProperty(promise, 'then', { value: 1 });
+
+    runCallbackSafely(
+      'cb',
+      () => promise,
+      [],
+      (error) => failures.push(error),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(failures).toEqual([thrown]);
+  });
+
+  it('reports the rejection of a native promise whose then getter throws', async () => {
+    const failures: unknown[] = [];
+    const thrown = new Error('rejected');
+    const promise: object = Promise.reject(thrown);
+    Object.defineProperty(promise, 'then', {
+      get: (): never => {
+        throw new Error('then getter exploded');
+      },
+    });
+
+    runCallbackSafely(
+      'cb',
+      () => promise,
+      [],
+      (error) => failures.push(error),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(failures).toEqual([thrown]);
+  });
+
+  it('reports a rejected native promise that carries its own no-op then', async () => {
+    const failures: unknown[] = [];
+    const thrown = new Error('rejected');
+    const promise: object = Promise.reject(thrown);
+    Object.defineProperty(promise, 'then', { value: () => undefined });
+
+    runCallbackSafely(
+      'cb',
+      () => promise,
+      [],
+      (error) => failures.push(error),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(failures).toEqual([thrown]);
+  });
+
+  it('reports a rejected native promise that carries its own throwing then and catch', async () => {
+    const failures: unknown[] = [];
+    const thrown = new Error('rejected');
+    const promise: object = Promise.reject(thrown);
+    Object.defineProperty(promise, 'then', {
+      value: (): never => {
+        throw new Error('then exploded');
+      },
+    });
+    Object.defineProperty(promise, 'catch', {
+      value: (): never => {
+        throw new Error('catch exploded');
+      },
+    });
+
+    runCallbackSafely(
+      'cb',
+      () => promise,
+      [],
+      (error) => failures.push(error),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(failures).toEqual([thrown]);
+  });
+
+  it('reports a revoked proxy as not a function instead of throwing', () => {
+    const failures: unknown[] = [];
+    const { proxy, revoke } = Proxy.revocable({}, {});
+    revoke();
+
+    expect(() => {
+      runCallbackSafely('cb', proxy, [], (error) => failures.push(error));
+    }).not.toThrow();
+    expect(failures).toHaveLength(1);
   });
 
   it('routes a then-only thenable rejection to onError', async () => {
@@ -796,3 +933,335 @@ describe('safeHandleCallback error channel', () => {
     expect(captured.length).toBe(0);
   });
 });
+
+describe('runCallbackSafely - thisArg', () => {
+  class Greeter {
+    public readonly prefix = '[app] ';
+    public seen: string[] = [];
+
+    public record(message: string): void {
+      // Throws with no receiver, which is exactly the silent-degradation case.
+      this.seen.push(this.prefix + message);
+    }
+  }
+
+  it('invokes an extracted method with the supplied receiver', () => {
+    const greeter = new Greeter();
+    const errors: unknown[] = [];
+
+    runCallbackSafely(
+      'greeter.record',
+      // Deliberately unbound: supplying `thisArg` is what makes this work, and is the
+      // behaviour under test. `unbound-method` is flagging the very hazard being covered.
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      greeter.record,
+      ['hello'],
+      (error) => errors.push(error),
+      greeter,
+    );
+
+    expect(errors).toEqual([]);
+    expect(greeter.seen).toEqual(['[app] hello']);
+  });
+
+  it('reports the failure when an extracted method is passed without a receiver', () => {
+    const greeter = new Greeter();
+    const errors: unknown[] = [];
+
+    runCallbackSafely(
+      'greeter.record',
+      // Deliberately unbound and with no `thisArg`, so the call fails the way an
+      // integrator's would.
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      greeter.record,
+      ['hello'],
+      (error) => errors.push(error),
+    );
+
+    expect(errors.length).toBe(1);
+    expect(greeter.seen).toEqual([]);
+  });
+
+  it('leaves a plain function unaffected when thisArg is omitted', () => {
+    const calls: unknown[][] = [];
+
+    runCallbackSafely(
+      'plain',
+      (...args: unknown[]) => calls.push(args),
+      [1, 2],
+      () => {
+        throw new Error('should not be reached');
+      },
+    );
+
+    expect(calls).toEqual([[1, 2]]);
+  });
+
+  it('calls the callback itself, not an apply property it carries', () => {
+    const calls: unknown[][] = [];
+    const callback = Object.assign((...args: unknown[]) => calls.push(args), {
+      // Shadows `Function.prototype.apply`. Reading it off the callback would run this
+      // instead of the callback.
+      apply: (): void => {},
+    });
+
+    runCallbackSafely('shadowed-apply', callback, [1, 2], () => {
+      throw new Error('should not be reached');
+    });
+
+    expect(calls).toEqual([[1, 2]]);
+  });
+});
+
+describe('safeHandleCallback - hostile reporting globals', () => {
+  it('does not throw when reportError is a revoked proxy and dispatch is unavailable', () => {
+    const globals = globalThis as unknown as Record<string, unknown>;
+    const originalErrorEvent = globals.ErrorEvent;
+    const originalReportError = globals.reportError;
+    // Around an object, so `typeof` answers `object` and `instanceof` reads it.
+    const revocable = Proxy.revocable({}, {});
+    revocable.revoke();
+    const captured = muteConsoleError();
+
+    try {
+      globals.ErrorEvent = undefined;
+      globals.reportError = revocable.proxy;
+
+      expect(() => {
+        safeHandleCallback('hostile-globals', () => {
+          throw new Error('original failure');
+        });
+      }).not.toThrow();
+      expect(captured.some((line) => line.includes('hostile-globals'))).toBe(
+        true,
+      );
+    } finally {
+      globals.ErrorEvent = originalErrorEvent;
+      globals.reportError = originalReportError;
+      restoreConsoleError();
+    }
+  });
+});
+
+describe('runCallbackSafely - a throwing onError is contained', () => {
+  function withCapturedConsoleError<T>(run: (captured: unknown[][]) => T): T {
+    const captured: unknown[][] = [];
+    const original = console.error;
+
+    console.error = (...args: unknown[]): void => {
+      captured.push(args);
+    };
+
+    try {
+      return run(captured);
+    } finally {
+      console.error = original;
+    }
+  }
+
+  it('does not let a synchronous onError throw escape to the caller', () => {
+    const captured = withCapturedConsoleError((entries) => {
+      expect(() => {
+        runCallbackSafely(
+          'cb',
+          () => {
+            throw new Error('original failure');
+          },
+          [],
+          () => {
+            throw new Error('reporter failure');
+          },
+        );
+      }).not.toThrow();
+
+      return entries;
+    });
+
+    expect(captured.length).toBe(1);
+    // Both the reporter's failure and the original are handed to the console rung.
+    expect(String(captured[0][0])).toContain('cb');
+  });
+
+  it('renders both errors through the masking renderer, not raw', () => {
+    const captured = withCapturedConsoleError((entries) => {
+      runCallbackSafely(
+        'cb',
+        () => {
+          throw Object.assign(new Error('original failure'), {
+            additionalInfo: { password: 'hunter2-secret' },
+            sensitiveFieldNames: ['password'],
+          });
+        },
+        [],
+        () => {
+          throw new Error('reporter failure');
+        },
+      );
+
+      return entries;
+    });
+
+    // No raw error reaches the console: Node's `console.error` prints an error's own
+    // fields - `additionalInfo` included - unmasked.
+    expect(captured[0]?.some((arg) => arg instanceof Error)).toBe(false);
+
+    const printed = Bun.inspect(captured);
+    expect(printed).toContain('reporter failure');
+    // On its own line after the rendered box, not trailing its closing border.
+    expect(String(captured[0]?.[0])).toMatch(
+      /\n\n\(the failure handler also threw: reporter failure\)$/,
+    );
+    expect(printed).toContain('original failure');
+    expect(printed).not.toContain('hunter2-secret');
+  });
+
+  it('does not let a rejected-promise onError throw become an unhandled rejection', async () => {
+    // The sync helper restores `console.error` as soon as `run` returns, so an async body
+    // would finish reporting after the swap was undone. Captured inline instead.
+    const captured: unknown[][] = [];
+    const original = console.error;
+    console.error = (...args: unknown[]): void => {
+      captured.push(args);
+    };
+
+    try {
+      runCallbackSafely(
+        'cb',
+        () => Promise.reject(new Error('original failure')),
+        [],
+        () => {
+          throw new Error('reporter failure');
+        },
+      );
+
+      await sleep(20);
+    } finally {
+      console.error = original;
+    }
+
+    expect(captured.length).toBe(1);
+    expect(String(captured[0][0])).toContain('cb');
+  });
+
+  it('does not report an onError whose return has an unreadable then as having thrown', () => {
+    const captured = withCapturedConsoleError((entries) => {
+      runCallbackSafely(
+        'cb',
+        () => {
+          throw new Error('original failure');
+        },
+        [],
+        () =>
+          ({
+            get then(): never {
+              throw new Error('then getter');
+            },
+          }) as unknown as void,
+      );
+
+      return entries;
+    });
+
+    // Invocation does not prove delivery: the handler could defer its work to then.
+    // Preserve the original failure without mislabeling the return as a thrown call.
+    expect(captured.length).toBe(1);
+    const printed = String(captured[0][0]);
+    expect(printed).toContain('(onError for cb) returned a value');
+    expect(printed).toContain('then could not be read');
+    expect(printed).toContain('original failure');
+  });
+
+  it('contains a throwing onError on the not-a-function path', () => {
+    const captured = withCapturedConsoleError((entries) => {
+      expect(() => {
+        runCallbackSafely('cb', 'not callable', [], () => {
+          throw new Error('reporter failure');
+        });
+      }).not.toThrow();
+
+      return entries;
+    });
+
+    expect(captured.length).toBe(1);
+  });
+});
+
+describe('CallbackResult narrowing', () => {
+  it('narrows to value on success and error on failure', async () => {
+    const ok = await safeHandleCallbackAndWait<number>('ok', () => 42);
+
+    if (ok.success) {
+      // No non-null assertion needed here.
+      const value: number = ok.value;
+      expect(value).toBe(42);
+    } else {
+      throw new Error('expected success');
+    }
+
+    const failed = await safeHandleCallbackAndWait<number>('bad', () => {
+      throw new Error('boom');
+    });
+
+    if (failed.success) {
+      throw new Error('expected failure');
+    } else {
+      const error: Error = failed.error;
+      expect(error.message).toBe('boom');
+    }
+  });
+});
+
+// Malformed returns still reach the configured channel, but are explicitly labeled
+// as return-contract failures rather than claiming the callback invocation threw.
+it('a callback with an unreadable return invokes its error handler once', () => {
+  const cause = new Error('return getter');
+  const errors: unknown[] = [];
+  runCallbackSafely(
+    'delivered',
+    () => ({
+      get then(): never {
+        throw cause;
+      },
+    }),
+    [],
+    (error) => {
+      errors.push(error);
+    },
+  );
+  expect(errors).toHaveLength(1);
+  expect((errors[0] as Error).message).toContain('then could not be read');
+  expect((errors[0] as Error).cause).toBe(cause);
+});
+
+for (const shouldWait of [false, true]) {
+  it(`${shouldWait ? 'awaited' : 'fire-and-forget'} unreadable returns reach the global error channel`, async () => {
+    const cause = new Error('unreadable callback return');
+    const errors: Error[] = [];
+    const listener = (event: Event): void => {
+      event.preventDefault();
+      errors.push((event as ErrorEvent).error as Error);
+    };
+    globalThis.addEventListener('error', listener);
+    try {
+      const callback = (): unknown => ({
+        get then(): never {
+          throw cause;
+        },
+      });
+      if (shouldWait) {
+        const result = await safeHandleCallbackAndWait('delivered', callback);
+        expect(result.success).toBe(false);
+        expect(result.error?.message).toContain('then could not be read');
+        expect(result.error?.cause).toBe(cause);
+      } else {
+        safeHandleCallback('delivered', callback);
+      }
+      expect(errors).toHaveLength(1);
+      const failure = errors[0].cause as Error;
+      expect(failure.message).toContain('then could not be read');
+      expect(failure.cause).toBe(cause);
+    } finally {
+      globalThis.removeEventListener('error', listener);
+    }
+  });
+}

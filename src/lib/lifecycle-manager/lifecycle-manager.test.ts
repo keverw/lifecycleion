@@ -16,6 +16,7 @@ import {
   lifecycleManagerErrCodes,
 } from './errors';
 import type { LifecycleManagerEventMap } from './events';
+import { LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS } from './constants';
 import { sleep } from '../sleep';
 import {
   TestComponent,
@@ -834,7 +835,8 @@ describe('LifecycleManager - BaseComponent', () => {
       expect(result.targetFound).toBe(false);
       expect(result.componentName).toBe('api');
       expect(result.startupOrder).toEqual([]);
-      expect(result.manualPositionRespected).toBe(false);
+      // A refusal never applied a position; it is unknown, not dependency-reordered.
+      expect(result.manualPositionRespected).toBeUndefined();
       expect(rejectedPayload?.reason).toBe('target_not_found');
       expect(rejectedPayload?.target).toBe('missing');
       expect(rejectedPayload?.targetFound).toBe(false);
@@ -858,7 +860,8 @@ describe('LifecycleManager - BaseComponent', () => {
       expect(result.code).toBe('invalid_position');
       expect(result.componentName).toBe('api');
       expect(result.startupOrder).toEqual([]);
-      expect(result.manualPositionRespected).toBe(false);
+      // A refusal never applied a position; it is unknown, not dependency-reordered.
+      expect(result.manualPositionRespected).toBeUndefined();
       expect(result.requestedPosition.position).toBe('weird');
       expect(rejectedPayload?.reason).toBe('invalid_position');
       expect(rejectedPayload?.requestedPosition?.position).toBe('weird');
@@ -910,6 +913,7 @@ describe('LifecycleManager - BaseComponent', () => {
       const a = new TestComponent(logger, { name: 'a', dependencies: ['b'] });
       const b = new TestComponent(logger, { name: 'b', dependencies: ['a'] });
 
+      // Inject the committed entries to exercise invalid registry handling.
       (lifecycle as any).components = [a, b];
 
       const orderResult = lifecycle.getStartupOrder();
@@ -4060,10 +4064,15 @@ describe('LifecycleManager - Bulk Operations', () => {
       // Wait a bit for first component to start
       await sleep(25);
 
-      // Trigger shutdown during startup (simulate by setting the flag)
+      // Trigger shutdown during startup (simulate by holding the latch - the running
+      // pass - directly)
       // Note: This is a bit hacky for testing, but we're testing the internal behavior
-      (lifecycle as unknown as { isShuttingDown: boolean }).isShuttingDown =
-        true;
+      (
+        lifecycle as unknown as { activeShutdownPass: unknown }
+      ).activeShutdownPass = {
+        shutdownRequested: false,
+        isRestartStopPhase: false,
+      };
 
       const result = await startPromise;
 
@@ -5798,7 +5807,10 @@ describe('LifecycleManager - Bulk Operations', () => {
       expect(result.stoppedComponents).toEqual([]);
       expect(result.durationMS).toBe(0);
       expect(result.code).toBe('already_in_progress');
-      expect(result.reason).toBe('Shutdown already in progress');
+      // The shared shutdown-in-progress wording: one situation, one string.
+      expect(result.reason).toBe(
+        LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
+      );
 
       await firstStopPromise;
     });
@@ -6409,7 +6421,7 @@ describe('LifecycleManager - Bulk Operations', () => {
         dependencies: ['comp-x'],
       });
 
-      // Access private components array to add them directly
+      // Access private committed entries to add them directly
       // This simulates having cycles that weren't caught during registration
       (lifecycle as any).components.push(compA, compB, compX, compY, compZ);
 
@@ -8606,8 +8618,29 @@ describe('LifecycleManager - Signal Integration', () => {
         },
       });
 
+      expect(lifecycle.getShutdownEscalationStatus()).toMatchObject({
+        forceAfterCount: 3,
+        withinMS: 2000,
+        armedAfterFailureMS: 6000,
+      });
+
+      // This tests policy normalization, not timer scheduling. A 100ms stop and
+      // 10ms sleeps raced on loaded macOS runners: shutdown could finish before
+      // the third repeated request. Hold cleanup explicitly and advance only the
+      // policy clock, so real scheduler delays cannot change which cycle we test.
+      const stopEntered = Promise.withResolvers<void>();
+      const releaseStop = Promise.withResolvers<void>();
+      class GatedStop extends BaseComponent {
+        // Bypass the constructor's minimum: this test owns completion explicitly.
+        public override readonly shutdownGracefulTimeoutMS = 0;
+        public start(): void {}
+        public stop(): Promise<void> {
+          stopEntered.resolve();
+          return releaseStop.promise;
+        }
+      }
       await lifecycle.registerComponent(
-        new SlowStopComponent(logger, 'slow-stop', 100),
+        new GatedStop(logger, { name: 'gated-stop' }),
       );
       await lifecycle.startAllComponents();
 
@@ -8616,28 +8649,35 @@ describe('LifecycleManager - Signal Integration', () => {
           resolve();
         });
       });
-
       (lifecycle as any).handleShutdownRequest('SIGINT');
-      await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
-      await sleep(10);
-      expect(forceShutdownCalls).toEqual([]);
+      await stopEntered.promise;
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
-      await sleep(10);
-      expect(forceShutdownCalls).toEqual([]);
+      // Do not install a global clock mock until stop() has actually begun.
+      let currentTime = Date.now();
+      const clock = spyOn(Date, 'now').mockImplementation(() => currentTime);
+      try {
+        currentTime += 10;
+        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        expect(forceShutdownCalls).toEqual([]);
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+        currentTime += 10;
+        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        expect(forceShutdownCalls).toEqual([]);
 
-      await shutdownCompleted;
-
-      expect(forceShutdownCalls).toEqual([
-        {
-          requestCount: 3,
-          firstMethod: 'SIGINT',
-          latestMethod: 'SIGTERM',
-        },
-      ]);
+        currentTime += 10;
+        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        expect(forceShutdownCalls).toEqual([
+          {
+            requestCount: 3,
+            firstMethod: 'SIGINT',
+            latestMethod: 'SIGTERM',
+          },
+        ]);
+      } finally {
+        releaseStop.resolve();
+        clock.mockRestore();
+        await shutdownCompleted;
+      }
     });
 
     test('should restart only the post-start escalation window when repeated requests are too far apart', async () => {

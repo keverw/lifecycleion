@@ -1,0 +1,1994 @@
+import { describe, test, expect } from 'bun:test';
+import { BaseComponent } from './base-component';
+import type { LifecycleManager } from './lifecycle-manager';
+import {
+  claimReports,
+  fakeAttachedSignals,
+  hasReport,
+  Plain,
+  setup,
+} from './test-helpers';
+
+// Every public async method answers with a result object rather than a rejection, so a
+// caller can fire one without awaiting it. These cover the paths that used to reject -
+// and, worse, the ones that rejected with manager state still held.
+
+describe('LifecycleManager - public methods never reject', () => {
+  test('a signal attach that throws refuses bulk startup without wedging it', async () => {
+    const { logger, manager } = setup({ attachSignalsBeforeStartup: true });
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+
+    manager.attachSignals = (): never => {
+      throw new Error('attach exploded');
+    };
+
+    const result = await manager.startAllComponents();
+
+    // A process configured to handle signals does not come up without them, and the
+    // refusal happens before anything is started or latched.
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('signal_attach_failed');
+    expect(result.error?.message).toBe('attach exploded');
+    expect(result.startedComponents).toEqual([]);
+    expect(manager.isComponentRunning('a')).toBe(false);
+    expect(manager.getSystemState()).not.toBe('starting');
+
+    // `isStarting` used to stay set for good here, refusing every later start with
+    // `already_in_progress`. Once attaching works, startup goes ahead. Faked rather than
+    // real, so the test never installs process-wide handlers.
+    manager.attachSignals = (): void => {
+      fakeAttachedSignals(manager);
+    };
+
+    const retry = await manager.startAllComponents();
+
+    expect(retry.success).toBe(true);
+    expect(manager.isComponentRunning('a')).toBe(true);
+  });
+
+  test('a signal attach that throws takes the first started component back down', async () => {
+    const { logger, manager } = setup({ attachSignalsOnStart: true });
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+
+    const events: string[] = [];
+    manager.on('component:started', () => {
+      events.push('started');
+    });
+    manager.on('component:stopped', () => {
+      events.push('stopped');
+    });
+
+    manager.attachSignals = (): never => {
+      throw new Error('attach exploded');
+    };
+
+    const result = await manager.startComponent('a');
+
+    // `attachSignalsOnStart` still attaches only once a component is actually up. When it
+    // cannot, that component does not stay up without signal handling.
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('signal_attach_failed');
+    expect(result.error?.message).toBe('attach exploded');
+    expect(result.reason).toContain('component stopped again');
+    expect(events).toEqual(['started', 'stopped']);
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+    expect(manager.isComponentRunning('a')).toBe(false);
+  });
+
+  test('a signal attach that throws under attachSignalsOnStart fails bulk startup', async () => {
+    const { logger, manager } = setup({ attachSignalsOnStart: true });
+    await manager.registerComponent(new Plain(logger, 'a'));
+
+    manager.attachSignals = (): never => {
+      throw new Error('attach exploded');
+    };
+
+    const result = await manager.startAllComponents();
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('signal_attach_failed');
+    expect(manager.isComponentRunning('a')).toBe(false);
+    expect(manager.getSystemState()).not.toBe('starting');
+  });
+
+  test('a signal detach that throws does not send a clean stop to the force phase', async () => {
+    const { logger, manager } = setup({ detachSignalsOnStop: true });
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+
+    fakeAttachedSignals(manager);
+    manager.detachSignals = (): never => {
+      throw new Error('detach exploded');
+    };
+
+    const { reports, release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.stopComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(true);
+    expect(component.forceCalls).toBe(0);
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+    expect(hasReport(reports, 'signal detach after last component stop')).toBe(
+      true,
+    );
+  });
+
+  test('a signal detach that throws does not fail an unregister that already happened', async () => {
+    const { logger, manager } = setup({ detachSignalsOnStop: true });
+    await manager.registerComponent(new Plain(logger, 'a'));
+
+    fakeAttachedSignals(manager);
+    manager.detachSignals = (): never => {
+      throw new Error('detach exploded');
+    };
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.unregisterComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(true);
+    expect(manager.hasComponent('a')).toBe(false);
+  });
+
+  test('a throwing component getter resolves startComponent with unknown_error', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+
+    Object.defineProperty(component, 'startupTimeoutMS', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { reports, release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.startComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('unknown_error');
+    expect(result.componentName).toBe('a');
+    expect(result.error?.message).toBe('getter exploded');
+    expect(hasReport(reports, 'lifecycle-manager component start')).toBe(true);
+    expect(manager.getComponentStatus('a')?.state).toBe('registered');
+  });
+
+  test('a getName() that throws after registration no longer reaches the manager', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    // The name was recorded at registration, so nothing asks for it again: every
+    // operation that used to re-read it - and crash on it - carries on.
+    component.getName = (): never => {
+      throw new Error('getter exploded');
+    };
+
+    const report = await manager.checkAllHealth();
+    expect(report.healthy).toBe(true);
+    expect(report.components.map((entry) => entry.name)).toEqual(['a']);
+
+    const broadcast = await manager.broadcastMessage('hi');
+    expect(broadcast.map((entry) => entry.name)).toEqual(['a']);
+
+    expect(manager.getComponentNames()).toEqual(['a']);
+    expect((await manager.stopAllComponents()).stoppedComponents).toEqual([
+      'a',
+    ]);
+    expect((await manager.unregisterComponent('a')).success).toBe(true);
+  });
+
+  test('registering something that is not a component resolves with unknown_error', async () => {
+    const { manager } = setup();
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.registerComponent(
+        null as unknown as BaseComponent,
+      );
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.registered).toBe(false);
+    expect(result.code).toBe('unknown_error');
+    expect(result.componentName).toBe('<unknown>');
+    expect(manager.getComponentCount()).toBe(0);
+  });
+
+  test('a registration that fails after the commit reports the component as registered', async () => {
+    const { logger, manager } = setup();
+    const internals = manager as unknown as {
+      startComponentInternal: () => Promise<unknown>;
+    };
+
+    // Past the commit: the auto-start is the first thing that runs once the component is
+    // in the registry.
+    internals.startComponentInternal = (): never => {
+      throw new Error('auto-start exploded');
+    };
+
+    const result = await manager.registerComponent(new Plain(logger, 'a'), {
+      autoStart: true,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('unknown_error');
+    expect(result.registered).toBe(true);
+    expect(result.registrationIndexAfter).toBe(0);
+    expect(manager.hasComponent('a')).toBe(true);
+  });
+
+  test('a registration that fails after the commit emits registered, not rejected', async () => {
+    const { logger, manager } = setup();
+    const internals = manager as unknown as {
+      startComponentInternal: () => Promise<unknown>;
+    };
+
+    internals.startComponentInternal = (): never => {
+      throw new Error('auto-start exploded');
+    };
+
+    const events: string[] = [];
+    manager.on('component:registered', () => {
+      events.push('registered');
+    });
+    manager.on('component:registration-rejected', () => {
+      events.push('rejected');
+    });
+
+    const result = await manager.registerComponent(new Plain(logger, 'a'), {
+      autoStart: true,
+    });
+
+    // The event agrees with the registry and the result.
+    expect(result.registered).toBe(true);
+    expect(events).toEqual(['registered']);
+  });
+
+  test('a crash partway through bulk startup rolls back what it started', async () => {
+    const { logger, manager } = setup();
+    const first = new Plain(logger, 'first');
+    const second = new Plain(logger, 'second');
+    await manager.registerComponent(first);
+    await manager.registerComponent(second);
+
+    // A step the startup runs after starting both - once `first` and `second` are
+    // running - throws.
+    void second;
+    (
+      manager as unknown as { consumeUnexpectedStopsDuringStartup: () => never }
+    ).consumeUnexpectedStopsDuringStartup = (): never => {
+      throw new Error('getter exploded');
+    };
+
+    const { reports, release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.startAllComponents();
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('unknown_error');
+    expect(result.error?.message).toBe('getter exploded');
+    // Rolled back, and the result matches: nothing is claimed that is not running, and
+    // nothing is left running that is not claimed.
+    expect(result.startedComponents).toEqual([]);
+    expect(manager.isComponentRunning('first')).toBe(false);
+    expect(manager.getSystemState()).not.toBe('starting');
+    expect(hasReport(reports, 'lifecycle-manager startAllComponents')).toBe(
+      true,
+    );
+  });
+
+  test('an attachSignalsOnStart failure fails bulk startup even for optional components', async () => {
+    const { logger, manager } = setup({ attachSignalsOnStart: true });
+
+    class OptionalPlain extends BaseComponent {
+      constructor(name: string) {
+        super(logger, { name, dependencies: [], optional: true });
+      }
+
+      public async start(): Promise<void> {}
+      public async stop(): Promise<void> {}
+    }
+
+    await manager.registerComponent(new OptionalPlain('a'));
+    await manager.registerComponent(new OptionalPlain('b'));
+
+    let attachCalls = 0;
+    manager.attachSignals = (): never => {
+      attachCalls++;
+      throw new Error('attach exploded');
+    };
+
+    let didEmitStarted = false;
+    manager.on('lifecycle-manager:started', () => {
+      didEmitStarted = true;
+    });
+
+    const result = await manager.startAllComponents();
+
+    // Not a failed optional component to skip past: the startup as a whole cannot come
+    // up with the signal handling it was configured for.
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('signal_attach_failed');
+    expect(result.error?.message).toBe('attach exploded');
+    expect(attachCalls).toBe(1);
+    expect(didEmitStarted).toBe(false);
+    expect(manager.getRunningComponentNames()).toEqual([]);
+  });
+
+  test('a signals-attached listener cannot start a second bulk startup', async () => {
+    const { logger, manager } = setup({ attachSignalsBeforeStartup: true });
+    const component = new Plain(logger, 'a');
+    let startCalls = 0;
+    component.start = (): Promise<void> => {
+      startCalls++;
+
+      return Promise.resolve();
+    };
+    await manager.registerComponent(component);
+
+    manager.attachSignals = (): void => {
+      fakeAttachedSignals(manager);
+      (
+        manager as unknown as {
+          lifecycleEvents: { lifecycleManagerSignalsAttached: () => void };
+        }
+      ).lifecycleEvents.lifecycleManagerSignalsAttached();
+    };
+
+    const nested: Promise<{ code?: string }>[] = [];
+    manager.once('lifecycle-manager:signals-attached', () => {
+      nested.push(manager.startAllComponents());
+    });
+
+    const result = await manager.startAllComponents();
+
+    // The latch was already up when the listener ran, so the nested call is refused
+    // rather than running alongside this one.
+    expect(result.success).toBe(true);
+    expect((await nested[0])?.code).toBe('already_in_progress');
+    expect(startCalls).toBe(1);
+  });
+
+  test('a signals-attached listener cannot start the same component twice', async () => {
+    const { logger, manager } = setup({ attachSignalsBeforeStartup: true });
+    const component = new Plain(logger, 'a');
+    let startCalls = 0;
+    component.start = (): Promise<void> => {
+      startCalls++;
+
+      return Promise.resolve();
+    };
+    await manager.registerComponent(component);
+
+    manager.attachSignals = (): void => {
+      fakeAttachedSignals(manager);
+      (
+        manager as unknown as {
+          lifecycleEvents: { lifecycleManagerSignalsAttached: () => void };
+        }
+      ).lifecycleEvents.lifecycleManagerSignalsAttached();
+    };
+
+    const nested: Promise<{ code?: string }>[] = [];
+    manager.once('lifecycle-manager:signals-attached', () => {
+      nested.push(manager.startComponent('a'));
+    });
+
+    const result = await manager.startComponent('a');
+
+    expect(result.success).toBe(true);
+    expect((await nested[0])?.code).toBe('component_already_starting');
+    expect(startCalls).toBe(1);
+  });
+
+  test('a failed signal attach puts the component back as it was', async () => {
+    const { logger, manager } = setup({ attachSignalsBeforeStartup: true });
+    await manager.registerComponent(new Plain(logger, 'a'));
+
+    manager.attachSignals = (): never => {
+      throw new Error('attach exploded');
+    };
+
+    const result = await manager.startComponent('a');
+
+    expect(result.code).toBe('signal_attach_failed');
+    expect(manager.getComponentStatus('a')?.state).toBe('registered');
+  });
+
+  test('a stop that crashes after claiming the component leaves it stalled, not stopping', async () => {
+    const { logger, manager } = setup();
+
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+
+    // A step that runs once the stop has claimed the component.
+    (
+      manager as unknown as { issueStopAttemptToken: () => string }
+    ).issueStopAttemptToken = (): never => {
+      throw new Error('step exploded');
+    };
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.stopComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('unknown_error');
+
+    // `stalled` rather than stuck in `stopping`: it can be retried or unregistered.
+    expect(manager.getComponentStatus('a')?.state).toBe('stalled');
+    expect(
+      (await manager.unregisterComponent('a', { stopIfRunning: false }))
+        .success,
+    ).toBe(true);
+  });
+
+  test('a restart stop phase does not count toward escalation', async () => {
+    let forceShutdownCalls = 0;
+    const { logger, manager } = setup({
+      shutdownOptions: { timeoutMS: 50, retryStalled: false },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 1,
+        withinMS: 5000,
+        armedAfterFailureMS: 60_000,
+        countManualRetriesTowardEscalation: true,
+        onForceShutdown: () => {
+          forceShutdownCalls++;
+        },
+      },
+    });
+
+    let isStuck = true;
+    const component = new Plain(logger, 'a');
+    component.stop = (): Promise<void> =>
+      isStuck ? new Promise<void>(() => {}) : Promise.resolve();
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    expect((await manager.stopAllComponents()).success).toBe(false);
+    expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+
+    isStuck = false;
+    await manager.restartAllComponents();
+
+    // A stop call here would reach `forceAfterCount` and force-kill; a restart must not.
+    expect(forceShutdownCalls).toBe(0);
+  });
+
+  test('a signals-attached listener that starts a shutdown refuses the bulk startup', async () => {
+    const { logger, manager } = setup({ attachSignalsBeforeStartup: true });
+    const component = new Plain(logger, 'a');
+    let startCalls = 0;
+    component.start = (): Promise<void> => {
+      startCalls++;
+
+      return Promise.resolve();
+    };
+    await manager.registerComponent(component);
+
+    manager.attachSignals = (): void => {
+      fakeAttachedSignals(manager);
+      (
+        manager as unknown as {
+          lifecycleEvents: { lifecycleManagerSignalsAttached: () => void };
+        }
+      ).lifecycleEvents.lifecycleManagerSignalsAttached();
+    };
+
+    const nested: Promise<unknown>[] = [];
+    manager.once('lifecycle-manager:signals-attached', () => {
+      nested.push(manager.stopAllComponents());
+    });
+
+    const result = await manager.startAllComponents();
+    await Promise.all(nested);
+
+    expect(result.code).toBe('shutdown_in_progress');
+    expect(startCalls).toBe(0);
+    expect(manager.getSystemState()).not.toBe('starting');
+  });
+
+  test('a crashed start keeps the state the component had before it', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+    await manager.stopComponent('a');
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+
+    // Read after the component is claimed as `starting`, outside the attempt's `try`.
+    Object.defineProperty(component, 'startupTimeoutMS', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.startComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result.code).toBe('unknown_error');
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+  });
+
+  test('component-scoped messaging resolves on an unexpected failure', async () => {
+    const { logger, manager } = setup();
+    const sender = new Plain(logger, 'sender');
+    const target = new Plain(logger, 'target');
+    await manager.registerComponent(sender);
+    await manager.registerComponent(target);
+    await manager.startAllComponents();
+
+    // Read while the message is being delivered, outside any guard of its own.
+    Object.defineProperty(target, 'onMessage', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const lifecycle = (
+      sender as unknown as {
+        lifecycle: {
+          sendMessageToComponent(
+            name: string,
+            payload: unknown,
+          ): Promise<{ code: string; error: Error | null }>;
+        };
+      }
+    ).lifecycle;
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await lifecycle.sendMessageToComponent('target', 'hi');
+    } finally {
+      release();
+    }
+
+    expect(result.code).toBe('error');
+    expect(result.error?.message).toBe('getter exploded');
+  });
+
+  test('a start that crashes after the component is running stops it again', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+
+    // The success path builds the component's status once it is already running.
+    const originalGetStatus = manager.getComponentStatus.bind(manager);
+    let shouldThrow = true;
+    manager.getComponentStatus = (
+      name: string,
+    ): ReturnType<LifecycleManager['getComponentStatus']> => {
+      if (shouldThrow) {
+        shouldThrow = false;
+        throw new Error('status exploded');
+      }
+
+      return originalGetStatus(name);
+    };
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.startComponent('a');
+    } finally {
+      release();
+    }
+
+    // A failed start means a component that is not running.
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('unknown_error');
+    expect(result.reason).toContain('component stopped again');
+    expect(manager.isComponentRunning('a')).toBe(false);
+  });
+
+  test('a stop that crashes into a stall keeps signals attached, like any stall', async () => {
+    const { logger, manager } = setup({ detachSignalsOnStop: true });
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+
+    fakeAttachedSignals(manager);
+    let detachCalls = 0;
+    manager.detachSignals = (): void => {
+      detachCalls++;
+    };
+
+    // A step that runs once the stop has claimed the component.
+    (
+      manager as unknown as { issueStopAttemptToken: () => string }
+    ).issueStopAttemptToken = (): never => {
+      throw new Error('step exploded');
+    };
+
+    const { release } = claimReports();
+
+    try {
+      await manager.stopComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(manager.getComponentStatus('a')?.state).toBe('stalled');
+    // Not confirmed stopped, so the handlers stay: during a shutdown the operator's
+    // next Ctrl+C still has to reach escalation.
+    expect(detachCalls).toBe(0);
+  });
+
+  test('a component that crashes a broadcast only loses its own entry', async () => {
+    const { logger, manager } = setup();
+    const good = new Plain(logger, 'good');
+    const received: unknown[] = [];
+    (good as unknown as { onMessage: (payload: unknown) => string }).onMessage =
+      (payload: unknown): string => {
+        received.push(payload);
+
+        return 'ok';
+      };
+    const bad = new Plain(logger, 'bad');
+    await manager.registerComponent(good);
+    await manager.registerComponent(bad);
+    await manager.startAllComponents();
+
+    // Fails the message to this one component, after its name has been read.
+    (bad as unknown as { onMessage: unknown }).onMessage = undefined;
+    Object.defineProperty(bad, 'onMessage', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let results;
+
+    try {
+      results = await manager.broadcastMessage('hi');
+    } finally {
+      release();
+    }
+
+    expect(received).toEqual(['hi']);
+    expect(results.find((entry) => entry.name === 'good')?.data).toBe('ok');
+    expect(results.find((entry) => entry.name === 'bad')?.code).toBe('error');
+  });
+
+  test('a restart that crashes after its stop phase keeps the real stop result', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startAllComponents();
+
+    // Read once the stop phase has finished, when the startup phase begins.
+    const options = {};
+    Object.defineProperty(options, 'startupOptions', {
+      get: (): never => {
+        throw new Error('options exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.restartAllComponents(options);
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.shutdownResult.success).toBe(true);
+    expect(result.shutdownResult.stoppedComponents).toEqual(['a']);
+    expect(result.startupResult.code).toBe('unknown_error');
+  });
+
+  test('a signal against an expired window during a running pass emits signal:shutdown once', async () => {
+    const { logger, manager } = setup({
+      shutdownOptions: { timeoutMS: 50, retryStalled: false },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 5,
+        withinMS: 1000,
+        armedAfterFailureMS: 60_000,
+        onForceShutdown: () => {},
+      },
+    });
+    const component = new Plain(logger, 'a');
+    component.stop = (): Promise<void> => new Promise<void>(() => {});
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    const internals = manager as unknown as {
+      handleShutdownRequest: (method: string) => void;
+      repeatedShutdownRequestState: { remainsArmedUntil: number | null };
+    };
+    const signals: unknown[] = [];
+    manager.on('signal:shutdown', (payload) => {
+      signals.push(payload);
+    });
+
+    // Armed by the failing pass while its latch is still held; lapse the window and
+    // send a signal from right there.
+    manager.once('lifecycle-manager:shutdown-escalation-armed', () => {
+      internals.repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+      internals.handleShutdownRequest('SIGTERM');
+    });
+
+    await manager.stopAllComponents();
+
+    expect(signals).toHaveLength(1);
+  });
+
+  test('a crashed start of an already-running component leaves it running', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startComponent('a');
+
+    // The `component_already_running` refusal builds a status; make that throw once.
+    const originalGetStatus = manager.getComponentStatus.bind(manager);
+    let shouldThrow = true;
+    manager.getComponentStatus = (
+      name: string,
+    ): ReturnType<LifecycleManager['getComponentStatus']> => {
+      if (shouldThrow) {
+        shouldThrow = false;
+        throw new Error('status exploded');
+      }
+
+      return originalGetStatus(name);
+    };
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.startComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result.code).toBe('unknown_error');
+    // This attempt never ran the component, so it must not stop the run it found.
+    expect(manager.isComponentRunning('a')).toBe(true);
+  });
+
+  test('a crashed second stop does not stall a stop already in progress', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    let finishStop = (): void => {};
+    component.stop = (): Promise<void> =>
+      new Promise<void>((resolve) => {
+        finishStop = resolve;
+      });
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+
+    const firstStop = manager.stopComponent('a');
+    expect(manager.getComponentStatus('a')?.state).toBe('stopping');
+
+    // The second stop's `component_already_stopping` refusal builds a status.
+    const originalGetStatus = manager.getComponentStatus.bind(manager);
+    let shouldThrow = true;
+    manager.getComponentStatus = (
+      name: string,
+    ): ReturnType<LifecycleManager['getComponentStatus']> => {
+      if (shouldThrow) {
+        shouldThrow = false;
+        throw new Error('status exploded');
+      }
+
+      return originalGetStatus(name);
+    };
+
+    const { release } = claimReports();
+    let second;
+
+    try {
+      second = await manager.stopComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(second.code).toBe('unknown_error');
+    expect(manager.getComponentStatus('a')?.state).toBe('stopping');
+
+    finishStop();
+    expect((await firstStop).success).toBe(true);
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+  });
+
+  test('the broadcast handed to a reload callback cannot reject', async () => {
+    let fired: Promise<{ code: string }> | undefined;
+    const { manager } = setup({
+      onReloadRequested: (broadcast): void => {
+        fired = broadcast();
+      },
+    });
+
+    (
+      manager as unknown as { broadcastReload: () => Promise<never> }
+    ).broadcastReload = (): Promise<never> =>
+      Promise.reject(new Error('broadcast exploded'));
+
+    const { release } = claimReports();
+
+    try {
+      await manager.triggerReload();
+      expect((await fired)?.code).toBe('error');
+    } finally {
+      release();
+    }
+  });
+
+  test('a component registered again after unregistering is known by its current name', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'first-name');
+    await manager.registerComponent(component);
+    await manager.unregisterComponent('first-name');
+
+    // `name` is protected, so a subclass can change it between registrations.
+    (component as unknown as { name: string }).name = 'second-name';
+
+    const result = await manager.registerComponent(component);
+
+    expect(result.componentName).toBe('second-name');
+    expect(result.startupOrder).toEqual(['second-name']);
+    expect(manager.getComponentNames()).toEqual(['second-name']);
+  });
+
+  test('registration reads the candidate name once', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    let reads = 0;
+    const originalGetName = component.getName.bind(component);
+    component.getName = (): string => {
+      reads++;
+
+      if (reads > 1) {
+        throw new Error('second read exploded');
+      }
+
+      return originalGetName();
+    };
+
+    const result = await manager.registerComponent(component);
+
+    expect(result.success).toBe(true);
+    expect(result.startupOrder).toEqual(['a']);
+    expect(reads).toBe(1);
+  });
+
+  test('a throwing startup option does not leave bulk startup wedged', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+
+    const options = {};
+    Object.defineProperty(options, 'timeoutMS', {
+      get: (): never => {
+        throw new Error('option exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.startAllComponents(options);
+    } finally {
+      release();
+    }
+
+    expect(result.code).toBe('unknown_error');
+    expect(manager.getSystemState()).not.toBe('starting');
+    expect((await manager.startAllComponents()).success).toBe(true);
+  });
+
+  test('a throwing startupTimeoutMS is read before the component is claimed', async () => {
+    const { logger, manager } = setup({ attachSignalsBeforeStartup: true });
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+
+    let attachCalls = 0;
+    manager.attachSignals = (): void => {
+      attachCalls++;
+      fakeAttachedSignals(manager);
+    };
+    const starting: unknown[] = [];
+    manager.on('component:starting', (payload) => {
+      starting.push(payload);
+    });
+
+    Object.defineProperty(component, 'startupTimeoutMS', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.startComponent('a');
+    } finally {
+      release();
+    }
+
+    // Nothing was claimed, attached, or announced for a start that never began.
+    expect(result.code).toBe('unknown_error');
+    expect(attachCalls).toBe(0);
+    expect(starting).toEqual([]);
+    expect(manager.getComponentStatus('a')?.state).toBe('registered');
+  });
+
+  test('a registration hook that throws rolls the whole registration back', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+
+    (component as unknown as { _markRegistered: () => void })._markRegistered =
+      (): never => {
+        throw new Error('hook exploded');
+      };
+
+    const result = await manager.registerComponent(component);
+
+    expect(result.success).toBe(false);
+    expect(result.registered).toBe(false);
+    expect(manager.hasComponent('a')).toBe(false);
+    expect(manager.getComponentStatus('a')).toBeUndefined();
+  });
+
+  test('a rolled-back registration leaves the component free to register again', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    const markRegistered = component._markRegistered.bind(component);
+    let shouldThrow = true;
+
+    // Marks the component registered, then fails - the partial mutation rollback must undo.
+    (component as unknown as { _markRegistered: () => void })._markRegistered =
+      (): void => {
+        markRegistered();
+
+        if (shouldThrow) {
+          throw new Error('hook exploded');
+        }
+      };
+
+    const failed = await manager.registerComponent(component);
+
+    expect(failed.registered).toBe(false);
+    expect(component._isRegisteredWithManager()).toBe(false);
+
+    shouldThrow = false;
+    const retry = await manager.registerComponent(component);
+
+    expect(retry.success).toBe(true);
+    expect(manager.hasComponent('a')).toBe(true);
+  });
+
+  test('an unregister does not remove a component once a bulk operation has started', async () => {
+    const { logger, manager } = setup();
+    const gated = new Plain(logger, 'a');
+    let finishStop = (): void => {};
+    let stopEntered = (): void => {};
+    const entered = new Promise<void>((resolve) => {
+      stopEntered = resolve;
+    });
+    gated.stop = (): Promise<void> => {
+      stopEntered();
+
+      return new Promise<void>((resolve) => {
+        finishStop = resolve;
+      });
+    };
+    await manager.registerComponent(gated);
+    await manager.registerComponent(new Plain(logger, 'b'));
+    await manager.startAllComponents();
+
+    const unregister = manager.unregisterComponent('a');
+    await entered;
+
+    // A shutdown begins while the unregister is waiting on the stop.
+    const shutdown = manager.stopAllComponents();
+
+    finishStop();
+    const result = await unregister;
+
+    expect(result.code).toBe('bulk_operation_in_progress');
+    expect(result.wasStopped).toBe(true);
+    expect(manager.hasComponent('a')).toBe(true);
+
+    await shutdown;
+  });
+
+  test('a stalled component whose force timeout getter throws does not kill the shutdown pass', async () => {
+    const { logger, manager } = setup();
+    const stalled = new Plain(logger, 'stalled');
+    stalled.stop = (): Promise<void> =>
+      Promise.reject(new Error('stop failed'));
+    stalled.onShutdownForce = (): void => {
+      throw new Error('force failed');
+    };
+    await manager.registerComponent(stalled);
+    await manager.registerComponent(new Plain(logger, 'other'));
+    await manager.startAllComponents();
+
+    await manager.stopAllComponents({ haltOnStall: false });
+    expect(manager.getComponentStatus('stalled')?.state).toBe('stalled');
+
+    await manager.startComponent('other');
+    Object.defineProperty(stalled, 'shutdownForceTimeoutMS', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      // `retryStalled` defaults to true, so the stalled component's force phase reruns.
+      result = await manager.stopAllComponents({ haltOnStall: false });
+    } finally {
+      release();
+    }
+
+    expect(result.code).not.toBe('unknown_error');
+    expect(result.stoppedComponents).toContain('other');
+    expect(manager.getComponentStatus('stalled')?.state).toBe('stalled');
+  });
+
+  test('a signal handler getter that throws fails only its own broadcast entry', async () => {
+    const { logger, manager } = setup();
+    const bad = new Plain(logger, 'bad');
+    const good = new Plain(logger, 'good');
+    let wasReloaded = false;
+    (good as unknown as { onReload: () => void }).onReload = (): void => {
+      wasReloaded = true;
+    };
+    await manager.registerComponent(bad);
+    await manager.registerComponent(good);
+    await manager.startAllComponents();
+
+    Object.defineProperty(bad, 'onReload', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const result = await manager.triggerReload();
+
+    expect(wasReloaded).toBe(true);
+    expect(result.results.find((entry) => entry.name === 'bad')?.code).toBe(
+      'error',
+    );
+    expect(result.results.find((entry) => entry.name === 'good')?.code).toBe(
+      'called',
+    );
+    expect(result.code).toBe('partial_error');
+  });
+
+  test('a component without a signal handler answers no_handler whatever its timeout getter does', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    Object.defineProperty(component, 'signalTimeoutMS', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const result = await manager.triggerReload();
+
+    expect(result.results).toEqual([
+      expect.objectContaining({ name: 'a', code: 'no_handler' }),
+    ]);
+    expect(result.code).toBe('ok');
+  });
+
+  test('a shutdown started from an escalation-expired listener seeds its own cycle', async () => {
+    const { logger, manager } = setup({
+      shutdownOptions: { timeoutMS: 50, retryStalled: false },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 3,
+        withinMS: 1000,
+        armedAfterFailureMS: 60_000,
+        onForceShutdown: () => {},
+      },
+    });
+    const component = new Plain(logger, 'a');
+    component.stop = (): Promise<void> => new Promise<void>(() => {});
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    await manager.stopAllComponents();
+    expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+
+    const passes: Promise<unknown>[] = [];
+    manager.once('lifecycle-manager:shutdown-escalation-expired', () => {
+      passes.push(manager.stopAllComponents());
+    });
+
+    (
+      manager as unknown as {
+        repeatedShutdownRequestState: { remainsArmedUntil: number };
+      }
+    ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+
+    // Reading the status normalizes the lapsed window, which expires it.
+    manager.getShutdownEscalationStatus();
+
+    // The listener's pass found no stale state, so it seeded a fresh cycle that the
+    // expiry's reset did not wipe afterwards.
+    expect(manager.getShutdownEscalationStatus().firstMethod).toBe('manual');
+
+    await Promise.all(passes);
+  });
+
+  test('a failed re-registration keeps the name recorded from the earlier registration', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.unregisterComponent('a');
+
+    (component as unknown as { _markRegistered: () => void })._markRegistered =
+      (): never => {
+        throw new Error('hook exploded');
+      };
+    await manager.registerComponent(component);
+
+    component.getName = (): never => {
+      throw new Error('getter exploded');
+    };
+
+    // Work still in flight from the first registration names it without asking.
+    const nameOf = (
+      manager as unknown as { nameOf: (component: BaseComponent) => string }
+    ).nameOf.bind(manager);
+
+    expect(nameOf(component)).toBe('a');
+  });
+
+  test('an unregister does not remove a replacement registered while it was stopping', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startComponent('a');
+
+    const replacement = new Plain(logger, 'a');
+    const nested: Promise<unknown>[] = [];
+    manager.once('component:stopped', () => {
+      nested.push(
+        manager
+          .unregisterComponent('a')
+          .then(() => manager.registerComponent(replacement)),
+      );
+    });
+
+    const result = await manager.unregisterComponent('a');
+    await Promise.all(nested);
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('component_not_found');
+    expect(
+      (
+        manager as unknown as { getComponent: (name: string) => unknown }
+      ).getComponent('a'),
+    ).toBe(replacement);
+    expect(manager.getComponentStatus('a')?.state).toBe('registered');
+  });
+
+  test('a start that crashes before claiming leaves a concurrent start alone', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    let startCalls = 0;
+    let releaseStart = (): void => {};
+    component.start = (): Promise<void> => {
+      startCalls++;
+
+      return new Promise<void>((resolve) => {
+        releaseStart = resolve;
+      });
+    };
+    await manager.registerComponent(component);
+
+    // Read before the start claims the component - and only the first time.
+    let shouldThrow = true;
+    Object.defineProperty(component, 'startupTimeoutMS', {
+      get: (): number => {
+        if (shouldThrow) {
+          shouldThrow = false;
+          throw new Error('getter exploded');
+        }
+
+        return 30_000;
+      },
+    });
+
+    const { release } = claimReports();
+
+    try {
+      const first = manager.startComponent('a');
+      const second = manager.startComponent('a');
+
+      expect((await first).code).toBe('unknown_error');
+
+      // The second start claimed the component while the first was crashing; the first
+      // did not own it, so it did not reset it under the second.
+      expect(manager.getComponentStatus('a')?.state).toBe('starting');
+      expect((await manager.startComponent('a')).code).toBe(
+        'component_already_starting',
+      );
+
+      releaseStart();
+      expect((await second).success).toBe(true);
+      expect(startCalls).toBe(1);
+    } finally {
+      release();
+    }
+  });
+
+  test('an expiry listener sees the manual shutdown already accepted', async () => {
+    const { logger, manager } = setup({
+      shutdownOptions: { timeoutMS: 50, retryStalled: false },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 3,
+        withinMS: 1000,
+        armedAfterFailureMS: 60_000,
+        onForceShutdown: () => {},
+      },
+    });
+    const component = new Plain(logger, 'a');
+    component.stop = (): Promise<void> => new Promise<void>(() => {});
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    await manager.stopAllComponents();
+
+    const nested: Promise<unknown>[] = [];
+    manager.once('lifecycle-manager:shutdown-escalation-expired', () => {
+      nested.push(manager.stopAllComponents());
+    });
+    (
+      manager as unknown as {
+        repeatedShutdownRequestState: { remainsArmedUntil: number };
+      }
+    ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+
+    const outer = manager.stopAllComponents();
+
+    // Expiry is now queued until acceptance finishes. The outer request owns the
+    // pass; the listener sees its complete cycle and its nested request is refused.
+    expect(manager.getShutdownEscalationStatus().firstMethod).toBe('manual');
+    const outerResult = await outer;
+    expect(outerResult.success).toBe(false);
+    expect(outerResult.reason).toBe('Shutdown is still in progress for: a');
+    expect(outerResult.code).toBeUndefined();
+    expect(((await nested[0]) as { code: string }).code).toBe(
+      'already_in_progress',
+    );
+  });
+
+  test('a signal accepts its shutdown before delivering window expiry', async () => {
+    const { logger, manager } = setup({
+      shutdownOptions: { timeoutMS: 50, retryStalled: false },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 3,
+        withinMS: 1000,
+        armedAfterFailureMS: 60_000,
+        onForceShutdown: () => {},
+      },
+    });
+    const component = new Plain(logger, 'a');
+    component.stop = (): Promise<void> => new Promise<void>(() => {});
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    await manager.stopAllComponents();
+
+    const nested: Promise<unknown>[] = [];
+    manager.once('lifecycle-manager:shutdown-escalation-expired', () => {
+      nested.push(manager.stopAllComponents());
+    });
+    (
+      manager as unknown as {
+        repeatedShutdownRequestState: { remainsArmedUntil: number };
+      }
+    ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+
+    const signals: unknown[] = [];
+    manager.on('signal:shutdown', (payload) => {
+      signals.push(payload);
+    });
+
+    (
+      manager as unknown as { handleShutdownRequest: (method: string) => void }
+    ).handleShutdownRequest('SIGTERM');
+
+    expect(signals).toEqual([
+      // The expiry listener runs after the signal's acceptance transition, so
+      // SIGTERM owns this pass and the listener's manual stop is refused.
+      { method: 'SIGTERM', isAlreadyShuttingDown: false },
+    ]);
+    expect(manager.getShutdownEscalationStatus().firstMethod).toBe('SIGTERM');
+    expect(((await nested[0]) as { code: string }).code).toBe(
+      'already_in_progress',
+    );
+  });
+
+  test('a throwing onStartupAborted getter cannot escape the startup timer', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+
+    Object.defineProperty(component, 'onStartupAborted', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.startComponent('a');
+    } finally {
+      release();
+    }
+
+    // Read before the start, so it fails there - not later, inside the timer.
+    expect(result.code).toBe('unknown_error');
+    expect(manager.getComponentStatus('a')?.state).toBe('registered');
+  });
+
+  test('a throwing broadcast option fails the broadcast before it announces itself', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startAllComponents();
+
+    let startedEvents = 0;
+    manager.on('component:broadcast-started', () => {
+      startedEvents++;
+    });
+
+    const options = {};
+    Object.defineProperty(options, 'componentNames', {
+      get: (): never => {
+        throw new Error('option exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let results;
+
+    try {
+      results = await manager.broadcastMessage('hi', options);
+    } finally {
+      release();
+    }
+
+    expect(results).toEqual([]);
+    expect(startedEvents).toBe(0);
+  });
+
+  test('a stop that fails before claiming the component fails the bulk shutdown', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    let stopCalls = 0;
+    component.stop = (): Promise<void> => {
+      stopCalls++;
+
+      return Promise.resolve();
+    };
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    // Read before the stop claims the component.
+    Object.defineProperty(component, 'shutdownGracefulTimeoutMS', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.stopAllComponents();
+    } finally {
+      release();
+    }
+
+    // Never stopped, so the pass must not report success with it still running.
+    expect(stopCalls).toBe(0);
+    expect(manager.isComponentRunning('a')).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.reason).toContain('Failed to stop: a');
+  });
+
+  test('a throwing onGracefulStopTimeout getter fails the stop up front, not in the timer', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+
+    Object.defineProperty(component, 'onGracefulStopTimeout', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.stopComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result.code).toBe('unknown_error');
+    expect(manager.getComponentStatus('a')?.state).toBe('running');
+  });
+
+  test('a signal:shutdown listener that stops everything keeps the signal as the cycle start', async () => {
+    const { logger, manager } = setup({
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 3,
+        withinMS: 1000,
+        onForceShutdown: () => {},
+      },
+    });
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startAllComponents();
+
+    const stops: Promise<unknown>[] = [];
+    manager.once('signal:shutdown', () => {
+      stops.push(manager.stopAllComponents());
+    });
+
+    (
+      manager as unknown as { handleShutdownRequest: (method: string) => void }
+    ).handleShutdownRequest('SIGINT');
+
+    expect(manager.getShutdownEscalationStatus().firstMethod).toBe('SIGINT');
+    await Promise.all(stops);
+  });
+
+  test('a rollback that throws partway still rolls back the rest', async () => {
+    const { logger, manager } = setup();
+    const failing = new Plain(logger, 'c');
+    failing.start = (): Promise<void> =>
+      Promise.reject(new Error('start failed'));
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.registerComponent(new Plain(logger, 'b'));
+    await manager.registerComponent(failing);
+
+    const internals = manager as unknown as {
+      stopComponentInternal: (name: string) => Promise<unknown>;
+    };
+    const originalStop = internals.stopComponentInternal.bind(manager);
+    internals.stopComponentInternal = (name: string): Promise<unknown> => {
+      if (name === 'b') {
+        throw new Error('rollback exploded');
+      }
+
+      return originalStop(name);
+    };
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.startAllComponents();
+    } finally {
+      release();
+    }
+
+    // `b` is where the rollback died; `a`, which it had not reached, was still rolled back.
+    expect(result.success).toBe(false);
+    expect(manager.isComponentRunning('a')).toBe(false);
+  });
+
+  test('a crashed unregister reports that the component was stopped', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startComponent('a');
+
+    (
+      manager as unknown as { detachSignalsAfterLastStop: () => void }
+    ).detachSignalsAfterLastStop = (): never => {
+      throw new Error('cleanup exploded');
+    };
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.unregisterComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result.code).toBe('unknown_error');
+    expect(result.wasStopped).toBe(true);
+  });
+
+  test('a throwing stop timeout getter fails the stop before the component is claimed', async () => {
+    const { logger, manager } = setup();
+    let stopCalls = 0;
+    const component = new Plain(logger, 'a');
+    component.stop = (): Promise<void> => {
+      stopCalls++;
+
+      return Promise.resolve();
+    };
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+
+    Object.defineProperty(component, 'shutdownGracefulTimeoutMS', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.stopComponent('a');
+    } finally {
+      release();
+    }
+
+    // Not stalled: `stop()` never ran, so the component is still running as it was.
+    expect(result.code).toBe('unknown_error');
+    expect(stopCalls).toBe(0);
+    expect(manager.getComponentStatus('a')?.state).toBe('running');
+  });
+
+  test('a halted shutdown pass does not report success over components it never reached', async () => {
+    const { logger, manager } = setup({
+      shutdownOptions: { haltOnStall: true },
+    });
+
+    class Dependent extends BaseComponent {
+      public async start(): Promise<void> {}
+      public async stop(): Promise<void> {}
+    }
+
+    const dependency = new Plain(logger, 'dependency');
+    const dependent = new Dependent(logger, {
+      name: 'dependent',
+      dependencies: ['dependency'],
+    });
+    let finishStop = (): void => {};
+    let stopEntered = (): void => {};
+    const entered = new Promise<void>((resolve) => {
+      stopEntered = resolve;
+    });
+    dependent.stop = (): Promise<void> => {
+      stopEntered();
+
+      return new Promise<void>((resolve) => {
+        finishStop = resolve;
+      });
+    };
+    await manager.registerComponent(dependency);
+    await manager.registerComponent(dependent);
+    await manager.startAllComponents();
+
+    // A concurrent stop owns `dependent`, so the pass halts on it and never reaches
+    // `dependency`; the concurrent stop then finishes before the pass reconciles.
+    const concurrentStop = manager.stopComponent('dependent');
+    await entered;
+    const pass = manager.stopAllComponents();
+    finishStop();
+    await concurrentStop;
+    const result = await pass;
+
+    expect(manager.isComponentRunning('dependency')).toBe(true);
+    expect(result.success).toBe(false);
+  });
+
+  test('signals a refused start attached come off once the shutdown that refused it ends', async () => {
+    const { logger, manager } = setup({
+      attachSignalsBeforeStartup: true,
+      detachSignalsOnStop: true,
+    });
+    await manager.registerComponent(new Plain(logger, 'a'));
+
+    let isAttached = false;
+    manager.attachSignals = (): void => {
+      isAttached = true;
+      fakeAttachedSignals(manager);
+      (
+        manager as unknown as {
+          lifecycleEvents: { lifecycleManagerSignalsAttached: () => void };
+        }
+      ).lifecycleEvents.lifecycleManagerSignalsAttached();
+    };
+    manager.detachSignals = (): void => {
+      isAttached = false;
+      (
+        manager as unknown as { processSignalManager: unknown }
+      ).processSignalManager = undefined;
+    };
+
+    const passes: Promise<unknown>[] = [];
+    manager.once('lifecycle-manager:signals-attached', () => {
+      passes.push(manager.stopAllComponents());
+    });
+
+    const result = await manager.startComponent('a');
+    await Promise.all(passes);
+
+    // The start was refused and skipped its detach while the pass ran; the pass, with
+    // nothing to stop, detaches once it ends cleanly instead of leaving them attached.
+    expect(result.code).toBe('shutdown_in_progress');
+    expect(isAttached).toBe(false);
+  });
+
+  test('a shutdown pass that leaves a stall keeps signals attached for escalation', async () => {
+    const { logger, manager } = setup({
+      detachSignalsOnStop: true,
+      shutdownOptions: { haltOnStall: false },
+    });
+    const stalls = new Plain(logger, 'stalls');
+    stalls.stop = (): Promise<void> => Promise.reject(new Error('stop failed'));
+    stalls.onShutdownForce = (): void => {
+      throw new Error('force failed');
+    };
+    await manager.registerComponent(new Plain(logger, 'first'));
+    await manager.registerComponent(stalls);
+    await manager.startAllComponents();
+
+    fakeAttachedSignals(manager);
+    let detachCalls = 0;
+    manager.detachSignals = (): void => {
+      detachCalls++;
+    };
+
+    const result = await manager.stopAllComponents();
+
+    // `stalls` stalls first (reverse order), then `first` stops as the last running
+    // component - which used to detach mid-pass, although the pass then failed.
+    expect(result.success).toBe(false);
+    expect(manager.getComponentStatus('first')?.state).toBe('stopped');
+    expect(detachCalls).toBe(0);
+  });
+
+  test('a getValue() handler that throws reports the error on the result', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    (component as unknown as { getValue: () => never }).getValue =
+      (): never => {
+        throw new Error('db down');
+      };
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+
+    const result = manager.getValue('a', 'key');
+
+    expect(result.code).toBe('error');
+    expect(result.error?.message).toBe('db down');
+  });
+
+  test('a clean shutdown during bulk startup still detaches signals attached earlier', async () => {
+    const { logger, manager } = setup({ detachSignalsOnStop: true });
+    let finishStart = (): void => {};
+    const slow = new Plain(logger, 'slow');
+    slow.start = (): Promise<void> =>
+      new Promise<void>((resolve) => {
+        finishStart = resolve;
+      });
+    await manager.registerComponent(new Plain(logger, 'fast'));
+    await manager.registerComponent(slow);
+
+    // Attached earlier, not by this startup.
+    fakeAttachedSignals(manager);
+    let detachCalls = 0;
+    manager.detachSignals = (): void => {
+      detachCalls++;
+    };
+
+    const startup = manager.startAllComponents();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // The pass runs and ends while the startup still holds `isStarting`.
+    const pass = manager.stopAllComponents();
+    finishStart();
+    await pass;
+    await startup;
+
+    expect(manager.getRunningComponentNames()).toEqual([]);
+    expect(detachCalls).toBe(1);
+  });
+
+  test('a failed shutdown during bulk startup keeps signals the startup attached', async () => {
+    const { logger, manager } = setup({
+      attachSignalsBeforeStartup: true,
+      detachSignalsOnStop: true,
+    });
+    const stalls = new Plain(logger, 'stalls');
+    stalls.stop = (): Promise<void> => Promise.reject(new Error('stop failed'));
+    stalls.onShutdownForce = (): void => {
+      throw new Error('force failed');
+    };
+    let finishStart = (): void => {};
+    const slow = new Plain(logger, 'slow');
+    slow.start = (): Promise<void> =>
+      new Promise<void>((resolve) => {
+        finishStart = resolve;
+      });
+    await manager.registerComponent(stalls);
+    await manager.registerComponent(slow);
+
+    // Attached by this startup, faked so no process-wide handlers are installed.
+    manager.attachSignals = (): void => {
+      fakeAttachedSignals(manager);
+    };
+    let detachCalls = 0;
+    manager.detachSignals = (): void => {
+      detachCalls++;
+    };
+
+    const startup = manager.startAllComponents();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    // The pass stalls `stalls` and ends while `slow` still holds the startup open.
+    const { release } = claimReports();
+    let passResult;
+
+    try {
+      passResult = await manager.stopAllComponents();
+      finishStart();
+      await startup;
+    } finally {
+      release();
+    }
+
+    // A stalled component is not counted as running, so the startup's idle check used
+    // to take the handlers off, leaving the armed escalation unreachable by Ctrl+C.
+    expect(passResult.success).toBe(false);
+    expect(manager.getComponentStatus('stalls')?.state).toBe('stalled');
+    expect(detachCalls).toBe(0);
+  });
+
+  test('signals kept for a stalled component come off once it is unregistered', async () => {
+    const { logger, manager } = setup({ detachSignalsOnStop: true });
+    const stalls = new Plain(logger, 'stalls');
+    stalls.stop = (): Promise<void> => Promise.reject(new Error('stop failed'));
+    stalls.onShutdownForce = (): void => {
+      throw new Error('force failed');
+    };
+    await manager.registerComponent(stalls);
+    await manager.startAllComponents();
+
+    fakeAttachedSignals(manager);
+    let detachCalls = 0;
+    manager.detachSignals = (): void => {
+      detachCalls++;
+    };
+
+    const { release } = claimReports();
+
+    try {
+      await manager.stopAllComponents();
+    } finally {
+      release();
+    }
+
+    expect(manager.getComponentStatus('stalls')?.state).toBe('stalled');
+    expect(detachCalls).toBe(0);
+
+    const result = await manager.unregisterComponent('stalls', {
+      stopIfRunning: false,
+    });
+
+    expect(result.success).toBe(true);
+
+    expect(detachCalls).toBe(1);
+  });
+
+  test('getValue() resolves an unexpected failure as an error result', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+
+    Object.defineProperty(component, 'getValue', {
+      get: (): never => {
+        throw new Error('getter exploded');
+      },
+    });
+
+    const { reports, release } = claimReports();
+    let result;
+
+    try {
+      result = manager.getValue('a', 'key');
+    } finally {
+      release();
+    }
+
+    expect(result.code).toBe('error');
+    expect(result.error?.message).toBe('getter exploded');
+    expect(hasReport(reports, 'lifecycle-manager getValue')).toBe(true);
+  });
+
+  test('an unregister hook that throws still removes the component completely', async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    await manager.registerComponent(component);
+
+    (
+      component as unknown as { _markUnregistered: () => void }
+    )._markUnregistered = (): never => {
+      throw new Error('hook exploded');
+    };
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.unregisterComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result.success).toBe(true);
+    expect(manager.hasComponent('a')).toBe(false);
+    expect(manager.getComponentStatus('a')).toBeUndefined();
+  });
+
+  test('a throwing reload callback resolves triggerReload with an error result', async () => {
+    const { manager } = setup({
+      onReloadRequested: (): never => {
+        throw new Error('reload exploded');
+      },
+    });
+
+    const { reports, release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.triggerReload();
+    } finally {
+      release();
+    }
+
+    expect(result.signal).toBe('reload');
+    expect(result.code).toBe('error');
+    expect(result.error?.message).toBe('reload exploded');
+    expect(hasReport(reports, 'reload request callback')).toBe(true);
+  });
+
+  test('a rejecting info callback resolves triggerInfo with an error result', async () => {
+    const { manager } = setup({
+      onInfoRequested: (): Promise<never> =>
+        Promise.reject(new Error('info exploded')),
+    });
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.triggerInfo();
+    } finally {
+      release();
+    }
+
+    expect(result.signal).toBe('info');
+    expect(result.code).toBe('error');
+  });
+});
+
+test('a stalled retry without a force handler does not require a token from a crashed stop', async () => {
+  const { logger, manager } = setup();
+  const component = new Plain(logger, 'a');
+  Object.assign(component, { onShutdownForce: undefined });
+  await manager.registerComponent(component);
+  await manager.startComponent('a');
+  // Simulate the same pre-token internal crash as the safety-net coverage above.
+  // No ordinary path is known to throw here; recovery must still support its stall.
+  const internals = manager as unknown as {
+    issueStopAttemptToken: (name: string) => string;
+  };
+  const issueToken = internals.issueStopAttemptToken;
+  const { reports, release } = claimReports();
+  try {
+    internals.issueStopAttemptToken = () => {
+      throw new Error('token issuance failed');
+    };
+    expect((await manager.stopComponent('a')).code).toBe('unknown_error');
+    internals.issueStopAttemptToken = issueToken;
+    reports.length = 0;
+    for (let retry = 0; retry < 2; retry++) {
+      const result = await manager.stopAllComponents({ retryStalled: true });
+      expect(result.success).toBe(false);
+      expect(manager.getComponentStatus('a')?.stallInfo?.phase).toBe(
+        'graceful',
+      );
+      expect(reports).toHaveLength(0);
+    }
+  } finally {
+    internals.issueStopAttemptToken = issueToken;
+    release();
+  }
+});
+
+test('missing force-token invariant fails before publishing force-start side effects', async () => {
+  const { logger, manager } = setup();
+  const component = new Plain(logger, 'a');
+  let clears = 0;
+  let forceCalls = 0;
+  let forceEvents = 0;
+  await manager.registerComponent(component);
+  await manager.startComponent('a');
+  component._clearUnexpectedStopHandler = () => {
+    clears++;
+  };
+  component.onShutdownForce = () => {
+    forceCalls++;
+  };
+  manager.on('component:shutdown-force', () => {
+    forceEvents++;
+  });
+  // Invariant-failure injection, not a demonstrated ordinary way to lose a token.
+  const internals = manager as unknown as {
+    issueStopAttemptToken: (name: string) => string;
+  };
+  const original = internals.issueStopAttemptToken;
+  internals.issueStopAttemptToken = () => undefined as unknown as string;
+  const { release } = claimReports();
+  try {
+    expect(
+      (await manager.stopComponent('a', { forceImmediate: true })).code,
+    ).toBe('unknown_error');
+    expect(forceEvents).toBe(0);
+    expect(forceCalls).toBe(0);
+    expect(clears).toBe(0);
+  } finally {
+    internals.issueStopAttemptToken = original;
+    release();
+  }
+});

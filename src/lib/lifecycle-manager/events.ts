@@ -14,6 +14,20 @@ import type {
 } from './types';
 import type { ShutdownSignal } from '../process-signal-manager';
 
+/**
+ * State notifications are FIFO: synchronous transitions queue them until their
+ * outermost boundary. Listener re-entry appends notifications behind those pending,
+ * after all listeners of the current notification. Failed transitions still flush,
+ * delivery failures are contained, and listener promises are never awaited.
+ *
+ * Three control checkpoints are synchronous even during a transition or notification
+ * drain: lifecycle-manager:signals-attached, signal:shutdown, and
+ * lifecycle-manager:shutdown-escalation-forced. They may interleave with notifications:
+ * startup must allow intervention after attachment, signals must precede a force exit,
+ * and forced listeners must retain the active force/escalation guards. Call sites
+ * commit the state needed by these listeners before dispatch and recheck afterwards.
+ * Payloads describe the originating change; earlier listeners can change live state.
+ */
 export interface LifecycleManagerEventMap {
   'component:unregistered': { name: string; duringShutdown?: boolean };
   'component:start-skipped': { name: string; reason: string };
@@ -23,6 +37,7 @@ export interface LifecycleManagerEventMap {
     failedOptionalComponents: StartupResult['failedOptionalComponents'];
     skippedComponents: string[];
   };
+  /** Synchronous control checkpoint; automatic pre-start attachment precedes startup work. */
   'lifecycle-manager:signals-attached': undefined;
   'lifecycle-manager:signals-detached': undefined;
   'component:health-check-started': { name: string };
@@ -40,6 +55,13 @@ export interface LifecycleManagerEventMap {
     from: string | null;
     payload: unknown;
   };
+  /**
+   * Follows `component:message-sent` for a handler that threw, rejected, or timed out.
+   * For a timeout, `error` is one describing it - the event always carries an `Error` -
+   * while the `MessageResult` answers `error: null` with `timedOut: true`.
+   * The one exception: an `onMessage` getter that throws fails the call before anything is
+   * sent, so this arrives alone, with `handlerImplemented: false`.
+   */
   'component:message-failed': {
     componentName: string;
     from: string | null;
@@ -101,6 +123,8 @@ export interface LifecycleManagerEventMap {
     targetFound?: boolean;
     duringStartup?: boolean;
     autoStartAttempted?: boolean;
+    /** Left to a bulk startup that has not begun its loop; see `RegistrationResultBase`. */
+    autoStartDeferred?: boolean;
     autoStartSucceeded?: boolean;
   };
   'lifecycle-manager:shutdown-initiated': {
@@ -124,7 +148,10 @@ export interface LifecycleManagerEventMap {
     requestCount: number;
     armedUntil: number;
   };
-  /** Repeated shutdown requests crossed the force threshold and onForceShutdown() was invoked. */
+  /**
+   * Synchronous control checkpoint after onForceShutdown() returns, with force and
+   * escalation guards still active. Not emitted if that callback exits the process.
+   */
   'lifecycle-manager:shutdown-escalation-forced': {
     firstMethod: ShutdownMethod;
     latestMethod: ShutdownMethod;
@@ -182,6 +209,7 @@ export interface LifecycleManagerEventMap {
   'component:shutdown-force-completed': { name: string };
   'component:shutdown-force-timeout': { name: string; timeoutMS: number };
   'component:startup-rollback': { name: string };
+  /** Synchronous control checkpoint before this request can invoke onForceShutdown(). */
   'signal:shutdown': {
     method: ShutdownSignal;
     isAlreadyShuttingDown: boolean;
@@ -376,6 +404,8 @@ export class LifecycleManagerEvents {
     targetFound?: boolean;
     duringStartup?: boolean;
     autoStartAttempted?: boolean;
+    /** Left to a bulk startup that has not begun its loop; see `RegistrationResultBase`. */
+    autoStartDeferred?: boolean;
     autoStartSucceeded?: boolean;
   }): void {
     this.emit('component:registered', input);

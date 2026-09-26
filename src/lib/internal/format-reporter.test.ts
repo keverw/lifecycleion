@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import { muteConsoleError, restoreConsoleError } from './console-test-utils';
 import { createFormatReporter } from './format-reporter';
+import { reportThroughHandler } from './failure-reporter';
+import { hostileRejections } from './hostile-promise-test-utils';
 
 describe('createFormatReporter follows an async handler', () => {
   // Sink-owned failure callbacks are followed when they return a promise,
@@ -91,4 +93,202 @@ describe('createFormatReporter follows an async handler', () => {
     expect(captured[0]).toContain('the failure handler also rejected');
     expect(captured[0]).toContain('then-only rejection');
   });
+});
+
+describe('createFormatReporter follows a hostile rejected promise', () => {
+  let captured: string[];
+
+  beforeEach(() => {
+    captured = muteConsoleError();
+  });
+
+  afterEach(() => {
+    restoreConsoleError();
+  });
+
+  test.each(hostileRejections)(
+    'a handler returning one with %s lands on the console rung',
+    async (_label, make) => {
+      const report = createFormatReporter(
+        'render',
+        // eslint-disable-next-line @typescript-eslint/no-misused-promises -- the handler returning a promise is the subject of this test
+        () => make(new Error('the handler rejected')),
+      );
+
+      report(new Error('the original failure'), 'items.0');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(captured.length).toBe(1);
+      expect(captured[0]).toContain('the handler rejected');
+    },
+  );
+});
+
+describe('reportThroughHandler with a line that throws', () => {
+  let captured: string[];
+
+  beforeEach(() => {
+    captured = muteConsoleError();
+  });
+
+  afterEach(() => {
+    restoreConsoleError();
+  });
+
+  const throwingLine = (): string => {
+    throw new Error('line exploded');
+  };
+
+  test('a rejecting handler still reports, and nothing is left unhandled', async () => {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      reportThroughHandler(
+        () => Promise.reject(new Error('handler rejected')),
+        throwingLine,
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(unhandled).toEqual([]);
+      expect(captured.some((line) => line.includes('line exploded'))).toBe(
+        true,
+      );
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  test('a throwing handler, or none, still reports without throwing', () => {
+    expect(() => {
+      reportThroughHandler(() => {
+        throw new Error('handler threw');
+      }, throwingLine);
+      reportThroughHandler(undefined, throwingLine);
+    }).not.toThrow();
+    expect(
+      captured.filter((line) => line.includes('line exploded')),
+    ).toHaveLength(2);
+  });
+
+  test('a settle callback that throws is called once and contained', () => {
+    let calls = 0;
+
+    expect(() => {
+      reportThroughHandler(
+        () => undefined,
+        () => 'a report',
+        {
+          onSettled: () => {
+            calls++;
+            throw new Error('settle exploded');
+          },
+        },
+      );
+    }).not.toThrow();
+    expect(calls).toBe(1);
+    expect(captured.some((line) => line.includes('settle exploded'))).toBe(
+      true,
+    );
+  });
+
+  test('a handler result whose then getter throws is not reported as the handler throwing', () => {
+    const result = {};
+    Object.defineProperty(result, 'then', {
+      get: (): never => {
+        throw new Error('then getter exploded');
+      },
+    });
+
+    reportThroughHandler(
+      () => result,
+      () => 'a report',
+    );
+
+    expect(captured.some((line) => line.includes('also threw'))).toBe(false);
+    expect(
+      captured.filter((line) => line.includes('then getter exploded')),
+    ).toHaveLength(1);
+  });
+});
+
+test('an anonymous failure handler with an unreadable return retains the report context', () => {
+  const captured = muteConsoleError();
+  let settlements = 0;
+  try {
+    reportThroughHandler(
+      () => ({
+        get then(): never {
+          throw new Error('broken return');
+        },
+      }),
+      () => 'FileSink /test/output failed writing original entry',
+      {
+        onSettled: () => {
+          settlements++;
+        },
+      },
+    );
+    expect(settlements).toBe(1);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('FileSink /test/output');
+    expect(captured[0]).toContain('then could not be read');
+    expect(captured[0]).not.toContain('also threw');
+  } finally {
+    restoreConsoleError();
+  }
+});
+
+test('format failure handlers retain the original alongside an unreadable return', () => {
+  const captured = muteConsoleError();
+  try {
+    const reporter = createFormatReporter('render', () => ({
+      get then(): never {
+        throw new Error('bad return');
+      },
+    }));
+    reporter(new Error('original delivered failure'), 'params.secret');
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('failure handler');
+    expect(captured[0]).toContain('then could not be read');
+    expect(captured[0]).toContain('original delivered failure');
+    expect(captured[0]).toContain('params.secret');
+  } finally {
+    restoreConsoleError();
+  }
+});
+
+test('a lazy named handler with an unreadable then retains the undelivered failure', () => {
+  const captured = muteConsoleError();
+  let deliveries = 0;
+  try {
+    reportThroughHandler(
+      () =>
+        new Proxy(
+          {
+            then: (): void => {
+              deliveries++;
+            },
+          },
+          {
+            get(): never {
+              throw new Error('lazy adoption failed');
+            },
+          },
+        ),
+      () => 'original disk-write failure',
+      { handlerName: 'FileSink onError' },
+    );
+    expect(deliveries).toBe(0);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('original disk-write failure');
+    expect(captured[0]).toContain('FileSink onError');
+    expect(captured[0]).toContain('lazy adoption failed');
+    expect(captured[0]).not.toContain('also threw');
+  } finally {
+    restoreConsoleError();
+  }
 });

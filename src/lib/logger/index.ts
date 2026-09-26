@@ -8,7 +8,7 @@ import {
 import { CurlyBrackets } from '../curly-brackets';
 import { MAX_RENDER_LENGTH } from '../internal/render-budget';
 import { isNumber } from '../is-number';
-import { isPromise } from '../is-promise';
+import { adoptResult, UnreadableReturn } from '../internal/adopt-promise';
 import { describeError, isErrorValue, toError } from '../to-error';
 import { readMember, readUnknownMember } from '../internal/read-member';
 import { reportToConsole } from '../internal/report-to-console';
@@ -244,8 +244,8 @@ export class Logger extends EventEmitter {
   constructor(options: LoggerOptions = {}) {
     super();
 
-    this.sinks = options.sinks || [];
-    this.diagnosticSinks = options.diagnosticSinks || [];
+    this.sinks = copySinkList(options.sinks);
+    this.diagnosticSinks = copySinkList(options.diagnosticSinks);
     this.redactFunction = options.redactFunction;
     this.callProcessExit = options.callProcessExit ?? true;
     this.beforeExitCallback = options.beforeExitCallback;
@@ -788,10 +788,12 @@ export class Logger extends EventEmitter {
   }
 
   /**
-   * Add a sink to the logger
+   * Add a sink to the logger. Throws once closing begins; a refused sink remains
+   * the caller's responsibility to close.
    */
   public addSink(sink: LogSink): void {
-    this.sinks.push(sink);
+    this.assertCanAddSink();
+    this.sinks = [...this.sinks, sink];
   }
 
   /**
@@ -801,7 +803,7 @@ export class Logger extends EventEmitter {
   public removeSink(sink: LogSink): boolean {
     const index = this.sinks.indexOf(sink);
     if (index !== -1) {
-      this.sinks.splice(index, 1);
+      this.sinks = this.sinks.filter((_, sinkIndex) => sinkIndex !== index);
       return true;
     }
     return false;
@@ -814,9 +816,13 @@ export class Logger extends EventEmitter {
     return [...this.sinks];
   }
 
-  /** Add a sink used only for failures raised by the logging system itself. */
+  /**
+   * Add a sink used only for failures raised by the logging system itself.
+   * Throws once closing begins; refused sinks remain caller-owned.
+   */
   public addDiagnosticSink(sink: LogSink): void {
-    this.diagnosticSinks.push(sink);
+    this.assertCanAddSink();
+    this.diagnosticSinks = [...this.diagnosticSinks, sink];
   }
 
   /** Remove a diagnostic sink. */
@@ -827,7 +833,9 @@ export class Logger extends EventEmitter {
       return false;
     }
 
-    this.diagnosticSinks.splice(index, 1);
+    this.diagnosticSinks = this.diagnosticSinks.filter(
+      (_, sinkIndex) => sinkIndex !== index,
+    );
     return true;
   }
 
@@ -861,20 +869,46 @@ export class Logger extends EventEmitter {
     this.unregisterReportErrorListener();
 
     // Close all sinks
-    const sinksToClose = [...new Set([...this.sinks, ...this.diagnosticSinks])];
+    // Capture owned lists, which add/remove replaces rather than mutates.
+    // This preserves identities and positions across re-entrant close hooks.
+    // A later malformed return must still name the destination we actually closed.
+    const logSinks = this.sinks;
+    const diagnosticSinks = this.diagnosticSinks;
+    const sinksToClose = [...new Set([...logSinks, ...diagnosticSinks])];
 
     await Promise.all(
       sinksToClose.map(async (sink) => {
+        let result: unknown;
         try {
-          // The property *read* is inside the guard too. A sink is caller-supplied, so
-          // `close` can be an accessor that throws, and a read outside rejected
-          // `Promise.all` - out of `close()`, which `processExit` calls as
-          // `void this.close().finally(...)` with no `catch`: an unhandled rejection from
-          // the shutdown path, fatal under Node's default `--unhandled-rejections=throw`,
-          // and `this.sinks = []` and the `'close'` event both skipped behind it.
-          if (sink.close) {
-            await sink.close();
+          // Read once, preserving the receiver, and contain property-access failures
+          // separately from classifying the return of a successful close call.
+          // Reflect.apply below restores the original receiver.
+          // eslint-disable-next-line @typescript-eslint/unbound-method
+          const close = sink.close;
+          if (close) {
+            result = Reflect.apply(close, sink, []);
           }
+        } catch (error) {
+          this.handleSinkError(error, 'close', sink);
+          return;
+        }
+        const pending = adoptResult(result);
+        if (pending instanceof UnreadableReturn) {
+          // Use the configured lists, not the merged/deduplicated close order.
+          const logIndex = logSinks.indexOf(sink);
+          const diagnosticIndex = diagnosticSinks.indexOf(sink);
+          this.handleSinkError(
+            pending,
+            'close',
+            sink,
+            logIndex >= 0
+              ? `Log sink #${logIndex + 1} close`
+              : `Diagnostic sink #${diagnosticIndex + 1} close`,
+          );
+          return;
+        }
+        try {
+          await pending;
         } catch (error) {
           this.handleSinkError(error, 'close', sink);
         }
@@ -1250,26 +1284,34 @@ export class Logger extends EventEmitter {
       tags: tags !== null && tags.length > 0 ? tags : undefined,
     };
 
-    // Write to all sinks
-    for (const sink of this.sinks) {
+    // Write to all sinks. Classify return values separately: a sink that returned
+    // successfully did not throw just because its result has a broken then getter.
+    // Lists are owned and replaced on mutation, so capturing one reference gives
+    // stable membership without a per-entry copy. Re-entry affects later entries.
+    const sinks = this.sinks;
+    // eslint-disable-next-line unicorn/no-for-loop
+    for (let sinkIndex = 0; sinkIndex < sinks.length; sinkIndex++) {
+      const sink = sinks[sinkIndex];
+      let result: unknown;
       try {
-        const result = sink.write(entry);
-        // Handle async errors from sinks that return promises
-        if (isPromise(result)) {
-          // Adopted through `Promise.resolve` rather than called on directly. `isPromise`
-          // is a then-check, which is the right check - a sink may return any thenable -
-          // but a thenable is not required to have `.catch`. Calling it on one that does
-          // not threw a `TypeError` here, which the outer `catch` then reported as *the
-          // sink's* failure while the real rejection went unhandled: a write error
-          // replaced by a wrong error, and a process-level unhandled rejection beside it.
-          Promise.resolve(result).catch((error: unknown) => {
-            this.handleSinkError(error, 'write', sink);
-          });
-        }
+        result = sink.write(entry);
       } catch (error) {
-        // Handle sync errors
         this.handleSinkError(error, 'write', sink);
+        continue;
       }
+      const pending = adoptResult(result);
+      if (pending instanceof UnreadableReturn) {
+        this.handleSinkError(
+          pending,
+          'write',
+          sink,
+          `Log sink #${sinkIndex + 1}`,
+        );
+        continue;
+      }
+      void pending?.catch((error: unknown) => {
+        this.handleSinkError(error, 'write', sink);
+      });
     }
 
     // Emit log event
@@ -1401,6 +1443,19 @@ export class Logger extends EventEmitter {
   }
 
   /**
+   * Closing commits the set of resources the logger owns. Accepting a new sink
+   * during an awaited close would discard it at the final list clear without
+   * closing it. Refuse before taking ownership; callers must dispose refused sinks.
+   * This also keeps a close hook from extending shutdown with an unbounded stream
+   * of new destinations.
+   */
+  private assertCanAddSink(): void {
+    if (this._closed) {
+      throw new Error('Cannot add a sink to a closing or closed logger');
+    }
+  }
+
+  /**
    * Handle a sink failure through the logger's diagnostic channel.
    *
    * Nothing here may throw. This is reached from `handleLog`'s synchronous `catch`, where
@@ -1414,6 +1469,7 @@ export class Logger extends EventEmitter {
     error: unknown,
     context: 'write' | 'close',
     sink: LogSink,
+    returnSubject?: string,
   ): void {
     // Normalized rather than trusted, for the same reason as a failing event handler: a
     // sink is user-supplied and free to throw or reject with any value, and reading
@@ -1421,8 +1477,14 @@ export class Logger extends EventEmitter {
     // it. Normalizing here also makes `LoggerDiagnostic.error` reliably an `Error`.
     const failure = toError(error);
 
+    // Routing depends on the boundary that failed, not how it failed. Invocation
+    // throws, rejected promises and unreadable returns all reach diagnostics for
+    // ordinary writes/closes. Only diagnostic delivery is terminal. Preserve the
+    // distinct return-contract wording without assuming the sink delivered first.
     const line = (): string =>
-      `Error ${context === 'write' ? 'writing to' : 'closing'} sink: ${describeError(failure)}`;
+      failure instanceof UnreadableReturn && returnSubject !== undefined
+        ? failure.describe(returnSubject)
+        : `Error ${context === 'write' ? 'writing to' : 'closing'} sink: ${describeError(failure)}`;
 
     this.reportDiagnostic(
       {
@@ -1452,12 +1514,11 @@ export class Logger extends EventEmitter {
     diagnostic: LoggerDiagnostic,
     shouldDeliverToSinks = true,
   ): void {
+    const hasDiagnosticSinks = this.diagnosticSinks.length > 0;
     const destinations = shouldDeliverToSinks
-      ? [
-          ...(this.diagnosticSinks.length > 0
-            ? this.diagnosticSinks
-            : this.sinks),
-        ]
+      ? hasDiagnosticSinks
+        ? this.diagnosticSinks
+        : this.sinks
       : [];
 
     void Promise.resolve().then(() => {
@@ -1481,26 +1542,40 @@ export class Logger extends EventEmitter {
 
       const entry = diagnosticEntry(diagnostic);
 
-      for (const sink of destinations) {
+      // Keep the configured destination index without allocating entries tuples.
+      // eslint-disable-next-line unicorn/no-for-loop
+      for (let sinkIndex = 0; sinkIndex < destinations.length; sinkIndex++) {
+        const sink = destinations[sinkIndex];
+        let result: unknown;
         try {
           const writeDiagnostic = sink.writeDiagnostic?.bind(sink);
-          const result =
+          result =
             writeDiagnostic === undefined
               ? sink.write(entry)
               : writeDiagnostic(diagnostic);
-
-          if (isPromise(result)) {
-            void Promise.resolve(result).catch((deliveryError: unknown) => {
-              reportToConsole(
-                `${diagnostic.message} (diagnostic sink also rejected: ${describeError(deliveryError)})`,
-              );
-            });
-          }
         } catch (deliveryError) {
           reportToConsole(
             `${diagnostic.message} (diagnostic sink also threw: ${describeError(deliveryError)})`,
           );
+          continue;
         }
+        // A returned value does not prove delivery: a lazy destination may wait
+        // until then is invoked. At this terminal boundary retain the original
+        // diagnostic as well as the secondary return failure, just as for a throw
+        // or rejection. Never emit another diagnostic from diagnostic delivery.
+        const pending = adoptResult(result);
+        if (pending instanceof UnreadableReturn) {
+          pending.report(
+            `${hasDiagnosticSinks ? 'Diagnostic' : 'Log'} sink #${sinkIndex + 1}`,
+            diagnostic.message,
+          );
+          continue;
+        }
+        void pending?.catch((deliveryError: unknown) => {
+          reportToConsole(
+            `${diagnostic.message} (diagnostic sink also rejected: ${describeError(deliveryError)})`,
+          );
+        });
       }
     });
   }
@@ -1536,3 +1611,22 @@ export * from './types';
 export { REDACTION_FAILED_MARKER } from './utils/redaction';
 export * from './sinks';
 export type { LoggerService } from './logger-service';
+
+/** Own the list by numeric membership; caller iterators do not select destinations. */
+function copySinkList(
+  source: readonly LogSink[] | null | undefined,
+): LogSink[] {
+  if (source === null || source === undefined) {
+    return [];
+  }
+  // Preserve the typed view: Array.isArray narrows source to any[] in TypeScript.
+  const entries = source;
+  if (!Array.isArray(source)) {
+    throw new TypeError('Logger sink lists must be arrays');
+  }
+  const sinks: LogSink[] = [];
+  for (let index = 0, length = entries.length; index < length; index++) {
+    sinks.push(entries[index]);
+  }
+  return sinks;
+}

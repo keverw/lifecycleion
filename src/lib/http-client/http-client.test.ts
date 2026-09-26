@@ -38,6 +38,8 @@ import type {
   RequestInterceptorContext,
   SubClientConfig,
 } from './types';
+import { hostileRejections } from '../internal/hostile-promise-test-utils';
+import { sleep } from '../sleep';
 
 let server: TestServer;
 const originalFetch = globalThis.fetch;
@@ -527,6 +529,87 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(response.body).toEqual({ ok: true });
     expect(await response.requestBodySettled).toBeInstanceOf(Error);
   });
+
+  test.each(hostileRejections)(
+    'fails, not hangs, on an adapter send rejecting with %s',
+    async (_label, make) => {
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (): Promise<AdapterResponse> =>
+          make(new Error('adapter rejected')),
+      };
+
+      const outcome = await Promise.race([
+        new HTTPClient({ adapter, baseURL: 'http://example.test' })
+          .get('/x')
+          .send(),
+        sleep(200).then(() => 'hung' as const),
+      ]);
+
+      expect(outcome).not.toBe('hung');
+      expect((outcome as { isFailed: boolean }).isFailed).toBe(true);
+    },
+  );
+
+  test.each(hostileRejections)(
+    'fails, not hangs, on a request interceptor rejecting with %s',
+    async (_label, make) => {
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (): Promise<AdapterResponse> =>
+          Promise.resolve({
+            status: 200,
+            headers: {},
+            body: new Uint8Array(),
+          }),
+      };
+      const client = new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+      });
+      client.addRequestInterceptor(() =>
+        make(new Error('interceptor rejected')),
+      );
+
+      const outcome = await Promise.race([
+        client.get('/x').send(),
+        sleep(200).then(() => 'hung' as const),
+      ]);
+
+      expect(outcome).not.toBe('hung');
+      expect((outcome as { isFailed: boolean }).isFailed).toBe(true);
+    },
+  );
+
+  test.each(hostileRejections)(
+    'adopts a `requestBodySettled` rejected promise with %s',
+    async (_label, make) => {
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+          Promise.resolve({
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+            body: new TextEncoder().encode('{"ok":true}'),
+            requestBodySettled: make(new Error('upload blew up')),
+          }),
+      };
+
+      const response = await new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+      })
+        .post('/upload')
+        .send<{ ok: boolean }>();
+      const settled = await Promise.race([
+        response.requestBodySettled,
+        sleep(200).then(() => 'hung' as const),
+      ]);
+
+      expect(settled).toBeInstanceOf(Error);
+      expect((settled as Error).message).toContain('upload blew up');
+    },
+  );
 
   test('adopts a rejecting `requestBodySettled` from an adapter that resolves', async () => {
     // `HTTPAdapter` is a public extension point, and the resolve path handed the adapter's
@@ -8845,3 +8928,33 @@ test.each([false, true])(
     }
   },
 );
+
+test('requestBodySettled uses one then read and observes the captured settlement', async () => {
+  let reads = 0;
+  const failure = new Error('upload failed');
+  const settled = {
+    get then() {
+      if (++reads > 1) {
+        return undefined;
+      }
+      return (resolve: (value: Error) => void): void => {
+        resolve(failure);
+      };
+    },
+  } as unknown as Promise<Error | undefined>;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () =>
+      Promise.resolve({
+        status: 200,
+        headers: {},
+        body: null,
+        requestBodySettled: settled,
+      }),
+  };
+  const client = new HTTPClient({ adapter });
+  const response = await client.get('https://example.com').send();
+  expect(response.status).toBe(200);
+  expect(await response.requestBodySettled).toBe(failure);
+  expect(reads).toBe(1);
+});

@@ -10,6 +10,7 @@ import type {
   HTTPAdapter,
 } from '../types';
 import type { Cookie } from '../cookie-jar';
+import { hostileRejections } from '../../internal/hostile-promise-test-utils';
 
 function makeCookie(
   overrides: Partial<Cookie> & { name: string; value: string },
@@ -1771,4 +1772,36 @@ describe('retrySuppressedReason', () => {
     // A 404 is not retryable for any method, so nothing was suppressed.
     expect(reasons).toEqual([undefined]);
   });
+});
+
+describe('MockAdapter - a handler returning a hostile rejected promise', () => {
+  test.each(
+    hostileRejections.flatMap(([label, make]) => [
+      [`${label}, no signal`, make, false] as const,
+      [`${label}, with a signal`, make, true] as const,
+    ]),
+  )(
+    'one with %s fails the request instead of hanging',
+    async (_label, make, hasSignal) => {
+      const adapter = new MockAdapter();
+      adapter.routes.get('/hostile', () => make(new Error('handler rejected')));
+
+      const response = await Promise.race([
+        adapter.send(
+          makeAdapterRequest({
+            requestURL: '/hostile',
+            ...(hasSignal ? { signal: new AbortController().signal } : {}),
+          }),
+        ),
+        new Promise<'hung'>((resolve) => {
+          setTimeout(() => {
+            resolve('hung');
+          }, 200);
+        }),
+      ]);
+
+      expect(response).not.toBe('hung');
+      expect((response as { status: number }).status).toBe(500);
+    },
+  );
 });

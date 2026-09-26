@@ -66,6 +66,8 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
 - [Error Handling](#error-handling)
   - [Result Objects vs Exceptions](#result-objects-vs-exceptions)
     - [Operations Return Result Objects](#operations-return-result-objects)
+    - [Promises Never Reject](#promises-never-reject)
+    - [Running Operations in the Background](#running-operations-in-the-background)
     - [Exceptions (Programmer Errors)](#exceptions-programmer-errors)
   - [Failure Codes](#failure-codes)
 - [Advanced Usage](#advanced-usage)
@@ -500,7 +502,7 @@ interface LifecycleManagerOptions {
   shutdownWarningTimeoutMS?: number; // Global warning phase timeout in ms (default: 500, 0 = fire-and-forget, <0 = skip)
   messageTimeoutMS?: number; // Default message timeout in ms (default: 5000, 0 = disabled)
   attachSignalsBeforeStartup?: boolean; // Auto-attach signals before startAllComponents()/startComponent() begins work, even if startup later fails (default: false)
-  attachSignalsOnStart?: boolean; // Auto-attach signals when the first component successfully starts (default: false)
+  attachSignalsOnStart?: boolean; // Auto-attach signals when a component successfully starts and none are attached (default: false)
   detachSignalsOnStop?: boolean; // Auto-detach signals when last component stops (default: false)
   enableLoggerExitHook?: boolean; // Auto-enable logger exit hook integration (default: false)
 
@@ -551,9 +553,10 @@ interface RegisterComponentResult {
   error?: Error;
   registrationIndexBefore: number | null;
   registrationIndexAfter: number | null;
-  startupOrder: string[];
+  startupOrder: string[]; // empty on a refusal made before every dependency list was read, or an unexpected failure
   duringStartup?: boolean; // true if registered during bulk startup
   autoStartAttempted?: boolean; // true if auto-start was attempted
+  autoStartDeferred?: boolean; // true if left to a bulk startup that had not begun its loop
   autoStartSucceeded?: boolean; // true if auto-start succeeded
   startResult?: ComponentOperationResult; // result of auto-start (if attempted)
 }
@@ -562,7 +565,7 @@ interface RegisterComponentResult {
 **Registration Constraints:**
 
 - **Single Manager Binding**: A component instance can only be registered with one `LifecycleManager` at a time. Attempting to register a component instance that is already registered (either with the same manager under a different name, or with a different manager instance) will fail with `code: 'duplicate_instance'`.
-- **Unique Name Constraint**: The component name must be unique within a manager instance. Registering a component with a name that is already taken will fail with `code: 'duplicate_name'`.
+- **Unique Name Constraint**: The component name must be unique within a manager instance. Registering a component with a name that is already taken will fail with `code: 'duplicate_name'`. That holds even when a component's own code registers the name while the registration is in progress, for example from `getDependencies()`: registration checks again right before it commits.
 - **Bulk Operation Guard**: Registration/insertion is blocked while the manager is shutting down (`isShuttingDown = true`), failing with `code: 'shutdown_in_progress'`. During startup (`isStarting = true`), registration/insertion is only blocked when the new component is a required dependency of an already-registered component, failing with `code: 'startup_in_progress'`.
 
 **Example:**
@@ -617,7 +620,7 @@ interface InsertComponentAtResult {
     index: number; // The actual registry index where the component was inserted
     description?: string; // Human-readable position description (e.g., "after database, before api")
   };
-  manualPositionRespected: boolean; // Whether explicit position was honored (vs dependency-based reordering)
+  manualPositionRespected?: boolean; // True/false when order is known; undefined when unavailable
   targetFound?: boolean; // Whether 'before'/'after' reference component was found (always `undefined` for 'start'/'end')
 }
 ```
@@ -625,10 +628,10 @@ interface InsertComponentAtResult {
 **Position Debugging Fields:**
 
 - `requestedPosition` - What you asked for (position type and optional target component)
-- `actualPosition` - Where it actually ended up after dependency resolution. Only present when `registered: true`
+- `actualPosition` - Where it actually ended up after dependency resolution, read when the call returns. Present when the component is still registered then - not when a listener removed it again during its auto-start
   - `index` - The registry array index (0-based)
   - `description` - Human-readable position like `"at start"`, `"at end"`, `"after database, before api"`, or `"only component"`
-- `manualPositionRespected` - `true` if the explicit position was honored, `false` if dependency ordering forced a different position
+- `manualPositionRespected` - `true` if the explicit position was honored, `false` if dependency ordering forced a different position, and `undefined` when startup order is unavailable or insertion was refused
 - `targetFound` - For 'before'/'after' positions, indicates if the reference component was found (always `undefined` for 'start'/'end')
 
 **Example:**
@@ -668,6 +671,7 @@ interface UnregisterOptions {
 
 - `forceStop` only applies when `stopIfRunning` is true (passes through to `stopComponent` as `allowStopWithRunningDependents`).
 - If a component is stalled and `stopIfRunning` is true, unregister is blocked.
+- While a start or stop is in flight, unregister is refused with `component_starting` / `component_stopping`: the operation writes its outcome when it settles, so the component has to be left registered until then. This is checked again after unregister's own stop, since a `component:stopped` listener may have started the component again; one that is already back up is refused with `component_running`.
 - Successfully unregistering a component automatically clears its `lifecycle` reference (setting it to `undefined`) and marks it as unregistered, which allows the same component instance to be registered again (either with the same manager or with a different one).
 
 **Returns:**
@@ -732,6 +736,8 @@ interface StartupResult {
     | 'stalled_components_exist'
     | 'partial_state' // Some components already running
     | 'required_component_failed' // Required component failed to start
+    | 'shutdown_requested_during_restart' // restartAllComponents() skipped its startup phase
+    | 'signal_attach_failed' // attachSignalsBeforeStartup / attachSignalsOnStart could not attach process signals
     | 'startup_timeout'
     | 'unknown_error';
   error?: Error; // Error object (when success is false due to dependency cycle or unknown error)
@@ -917,11 +923,20 @@ interface ShutdownResult {
   durationMS: number;
   timedOut?: boolean;
   reason?: string;
-  code?: 'already_in_progress' | 'shutdown_timeout';
+  code?: 'already_in_progress' | 'shutdown_timeout' | 'unknown_error';
+  error?: Error; // The thrown value, when the pass itself failed (unknown_error)
 }
 ```
 
 **Note:** If `timedOut` is `true`, `success` will be `false` even if no components stalled.
+
+A pass that throws outright - a bug in the manager, or a component getter that throws - resolves with `code: 'unknown_error'` and the thrown value on `error`, rather than rejecting. It still emits `lifecycle-manager:shutdown-completed` with the same result and updates `getLastShutdownResult()`, lists the components it had already stopped, and arms the escalation window like any other failed pass.
+
+**From inside shutdown listeners:** `lifecycle-manager:shutdown-completed` and `shutdown-escalation-armed` run while the pass still holds its latch, so a call made from one returns `already_in_progress`. Defer it (`setImmediate`, `queueMicrotask`) or `await` this method's promise instead.
+
+**Background use:** the promise never rejects, so a caller that cannot block - an HTTP handler, an event listener - can start a shutdown without awaiting it and read the outcome later. See [Running Operations in the Background](#running-operations-in-the-background). A call made while a shutdown is already running resolves at once with `already_in_progress`.
+
+**Escalation:** calls made while a shutdown is running **never** count toward [`repeatedShutdownRequestPolicy`](#repeated-shutdown-request-policy), whatever `countManualRetriesTowardEscalation` says. Escalation represents an operator pressing Ctrl+C again; overlapping programmatic callers are not expressing that, so a burst of them can never force-kill the process. The flag only covers a deliberate retry after a failed pass: with it enabled, a call made while escalation is still armed counts once and can reach `forceAfterCount`, and the retry pass still starts. A manual call does not emit `signal:shutdown`, which describes a real OS signal; observe `lifecycle-manager:shutdown-initiated` instead.
 
 #### `restartAllComponents(options?)`
 
@@ -937,9 +952,104 @@ interface RestartAllOptions {
 }
 ```
 
+**Returns:**
+
+```typescript
+interface RestartResult {
+  shutdownResult: ShutdownResult;
+  startupResult: StartupResult;
+  startupSkippedByShutdownRequest?: boolean; // Present and true when a shutdown request canceled the startup phase
+  success: boolean; // True only if both phases succeeded
+}
+```
+
 **Important:** `restartAllComponents` hardcodes `retryStalled: true` and `haltOnStall: true` for the shutdown phase to ensure clean restart. Only `shutdownTimeoutMS` can be customized.
 
+**A shutdown request during the shutdown phase wins.** A `SIGINT`/`SIGTERM`, a `logger.exit()` under [`enableLoggerExitHook()`](#enableloggerexithook), or a direct `stopAllComponents()` call made while the restart is stopping asks the process to stay down, so the restart skips its startup phase instead of bringing every component back up. The result then carries `startupSkippedByShutdownRequest: true`, `startupResult.code` is `shutdown_requested_during_restart`, and `success` is `false` - the restart did not complete. This is checked before the shutdown phase's own outcome, so a stalled or failed stop phase paired with a request still reports the request. `getLastShutdownResult()` is left in place (a completed restart clears it), so the shutdown phase's outcome is still readable afterwards. Skipping startup does not stop anything the shutdown phase could not: if `shutdownResult.success` is `false` - a stall or a timeout - some components may still be running, exactly as after any failed shutdown.
+
+**A shutdown phase that throws outright** resolves the restart rather than rejecting it: `shutdownResult` carries the pass's `unknown_error` result, and the startup phase is skipped - with `startupResult.code` also `unknown_error` - since nothing can be said about the state the components were left in.
+
+Only the restart that actually runs the shutdown phase can be cancelled this way. A `restartAllComponents()` call made while a shutdown is already running - including one started by another restart - has its own shutdown phase refused with `already_in_progress` and then gets whatever `startAllComponents()` answers, usually `shutdown_in_progress`; it never reports `startupSkippedByShutdownRequest`, and it does not disturb the restart whose shutdown phase is running. The reverse holds too: every restart that does run a shutdown phase is cancellable on its own terms, including one that starts in the moment between a previous pass finishing and the restart that owned it resuming.
+
+```typescript
+const result = await lifecycle.restartAllComponents();
+
+if (result.startupSkippedByShutdownRequest) {
+  // Something asked us to shut down mid-restart, so nothing was started again.
+  if (!result.shutdownResult.success) {
+    // The shutdown phase stalled or timed out: some components may still be running.
+    console.warn('Restart cancelled with components still running');
+  }
+
+  return;
+}
+```
+
+A request that arrives during the restart's _startup_ phase aborts that startup instead: the request starts a real shutdown pass, and `startupResult.code` is `shutdown_in_progress`.
+
 #### Individual Component Operations
+
+Registration is provisional while the component receives its `lifecycle` reference and
+runs `_markRegistered()`. Until both succeed, the component is absent from the manager's
+public registry: lookups and status return no component, component operations return
+not-found results (unless a broader operation already blocks them), and bulk startup
+excludes it. No public `registering` state is introduced. Its name and instance remain
+reserved for registration validation, so hooks cannot unregister and re-register the
+same instance or reuse its name. Nested registrations of other components remain
+supported, with dependency-cycle checks including provisional reservations. Insertion
+with `before` or `after` requires a committed target; targeting a provisional component
+returns `target_not_found`, while a duplicate reserved name still returns
+`duplicate_name` with `registrationIndexBefore: null`: the index describes the
+committed registry. Reservation prevents conflicts but does not make the component a
+published target. Placement next to a committed target stays adjacent in the reserved
+order even when another registration is pending. Registration results and events capture
+startup order and manual-position metadata from the committed registry at publication,
+before queued listeners run. The order includes components committed by hooks and
+excludes enclosing provisional registrations. If a committed dependency read is
+unexpectedly unavailable, or reads collected at different times form a cycle only in the
+report, registration remains successful and reports `startupOrder: []` with
+`manualPositionRespected: undefined` (unknown). It does not re-enter dependency getters
+after publication. Committed ordering is always recomputed from validated reads, even
+when hooks leave the registry unchanged: filtering a provisional order can preserve
+constraints from uncommitted components and produce a different ordering.
+
+Successful hooks publish the registration before queued notifications are delivered.
+Lifecycle state maps are written only after the hooks and commit checks succeed.
+A hook failure or a partial publication failure rolls back only that entry. Its name
+and instance remain reserved until the overridable unregistration hook has returned,
+so rollback cannot silently replace the rejected registration. Entries being rolled
+back are removed from the registry before cleanup; a separate reservation retains
+their original names and instances until cleanup returns. Nested dependency reads,
+cycle checks, and insertion positions therefore use only live registry entries. A hook
+that starts an active shutdown also prevents publication and returns
+`shutdown_in_progress`. A hook that begins bulk startup is rechecked before publication:
+using the pass's dependency snapshot plus separate metadata for registrations committed
+while it runs. Only validated starts from the bulk loop or joined auto-starts update the
+pass snapshot immediately before `start()` is invoked, after signal attachment and
+shutdown refusal checks; refused attempts and public `allowDuringBulkStartup` calls do
+not. Dependency reads are checked against their registration generation. If this
+component is a dependency needed by that pass, registration rolls back with
+`startup_in_progress`. Otherwise it may commit, and `duringStartup` reflects the startup
+that the hook began. Error fallbacks for values and messages report component presence
+from the committed registry, not provisional state maps. Rollback does not announce an unregistration or
+orphan resources from a nested start. A bulk startup invoked by a hook operates on
+committed components; the new component can be started after registration, or use the
+existing `autoStart` registration option.
+
+Both stop phases validate the registered instance and its state after reading caller-owned
+properties. The graceful phase reads
+`onGracefulStopTimeout`, `shutdownGracefulTimeoutMS`, and an explicit `timeout` option.
+The force phase reads `onShutdownForce`, `onShutdownForceAborted`, and
+`shutdownForceTimeoutMS`. These properties can be getters that re-enter the manager. If another stop takes the
+component during those reads, the outer attempt returns `component_already_stopping`
+without calling `stop()` or forcing the other attempt. Force escalation may continue
+its own graceful claim; stalled retries may claim only an idle stall. Neither may
+overwrite a newer attempt, and a refused force attempt does not advance the stop
+generation used to observe late completions. If the original instance was
+unregistered or replaced, it returns `component_not_found` and leaves the replacement
+untouched. A refusal before taking ownership never invokes the force handler. Once the
+stop claims the component, re-entry from its unexpected-stop-handler clearing hook
+also sees a stop already in progress.
 
 ```typescript
 // Start a single component
@@ -962,6 +1072,10 @@ interface StartComponentOptions {
   // Normally blocked to prevent race conditions with dependency ordering.
   // Only needed for dynamic mid-startup registration. Most users never need this option.
 }
+// A dependency counts as running only while it is up: one that is stopping or
+// force-stopping is not, and a start on it fails with 'dependency_not_running' unless
+// the dependency is optional or allowNonRunningDependencies is set. A dependency that
+// goes down while the start reads the component's own getters is held to required.
 
 interface StopComponentOptions {
   forceImmediate?: boolean; // Skip graceful phase, go straight to force
@@ -995,7 +1109,7 @@ interface ComponentOperationResult {
 
 **Overlapping operations:** `startComponent()` refuses to run alongside the same component's other lifecycle work. A start already underway returns `component_already_starting`; a stop still in flight returns `component_already_stopping`. This holds even after a global shutdown timeout has already returned: `stopAllComponents()` settles at its deadline while a component's `stop()` or `onShutdownForce()` may still be running, and per-component state keeps the overlap blocked until that work finishes.
 
-Both codes are an immediate refusal: the call returns `success: false` without waiting for the in-flight operation to settle, and it does not start the component once that work finishes. To wait for a component to become startable again, poll `getComponentStatus(name).state` until it leaves `stopping` / `force-stopping`, then start it. To make concurrent callers of your own `start()` / `stop()` implementations share a single in-flight promise, see [Best Practice #7](#7-make-component-startup-idempotent-and-coordinate-with-shutdown). The manager only guards its own invocations, so that pattern is still required for the force phase, where `onShutdownForce()` runs concurrently with an unfinished `stop()` by design.
+Both codes are an immediate refusal: the call returns `success: false` without waiting for the in-flight operation to settle, and it does not start the component once that work finishes. To wait for a component to become startable again, poll `getComponentStatus(name).state` until it leaves `stopping` / `force-stopping`, then start it. `component:stopped` and `component:stalled` (recoverable with `forceStalled: true`) are useful prompts to re-check, but confirm with the state rather than relying on either event arriving. To make concurrent callers of your own `start()` / `stop()` implementations share a single in-flight promise, see [Best Practice #7](#7-make-component-startup-idempotent-and-coordinate-with-shutdown). The manager only guards its own invocations, so that pattern is still required for the force phase, where `onShutdownForce()` runs concurrently with an unfinished `stop()` by design.
 
 ### Component Messaging
 
@@ -1189,6 +1303,7 @@ interface HealthReport {
   durationMS: number;
   timedOut: boolean;
   code: 'ok' | 'degraded' | 'timeout' | 'error';
+  error?: Error; // Set when the check itself failed unexpectedly
 }
 ```
 
@@ -1229,6 +1344,8 @@ interface GetValueOptions {
 }
 ```
 
+`getValue()` is synchronous and never throws. A component's own `getValue()` handler that throws resolves as `code: 'error'`, and so does an unexpected failure in the lookup itself, which also carries the thrown value on `error` and is reported on the global `'error'` channel.
+
 ### Signal Integration
 
 #### `attachSignals()`
@@ -1248,15 +1365,29 @@ attachSignals(): void
 
 If `attachSignalsBeforeStartup` is enabled, handlers are auto-attached before
 `startAllComponents()` or `startComponent()` begins work, so the startup window
-is covered even if startup fails.
+is covered even if startup fails. If attaching fails, the start is refused with
+`code: 'signal_attach_failed'` before any work begins.
 
-If `attachSignalsOnStart` is enabled, handlers are auto-attached when the first
-component successfully starts.
+If `attachSignalsOnStart` is enabled, handlers are auto-attached when a
+component successfully starts and none are attached. If attaching fails, that component is stopped
+again and its start fails with `code: 'signal_attach_failed'` - a process
+configured to handle signals does not stay up without them. In
+`startAllComponents()` that fails the whole startup with the same code and
+rolls it back, whether or not the component is optional.
 
 If `detachSignalsOnStop` is enabled, currently attached handlers are detached
 when the last running component stops, whether they were attached manually or
 automatically. If startup fails before anything is running, handlers attached
-via `attachSignalsBeforeStartup` are detached during startup cleanup.
+via `attachSignalsBeforeStartup` are detached during startup cleanup. Handlers
+stay attached while any component is stalled - a stalled component is not
+counted as running, but Ctrl+C is how the operator retries or forces it - and
+come off once the last stall clears: by a later stop, by the original `stop()`
+or `onShutdownForce()` finishing late, or by unregistering it. They also stay
+while anything is still in flight - a startup or shutdown, a component starting
+or stopping - and come off once it ends, if nothing is left. A clean
+`stopAllComponents()` detaches them before it emits
+`lifecycle-manager:shutdown-completed`; a failed one keeps them, so the next
+Ctrl+C still reaches escalation.
 
 #### `detachSignals()`
 
@@ -1381,7 +1512,7 @@ triggerInfo(): Promise<SignalBroadcastResult>
 triggerDebug(): Promise<SignalBroadcastResult>
 ```
 
-**Note:** For programmatic shutdown, use [`stopAllComponents()`](#stopallcomponentsoptions) which returns a `ShutdownResult`.
+**Note:** For programmatic shutdown, use [`stopAllComponents()`](#stopallcomponentsoptions). It returns a `ShutdownResult`, and it is safe to start without awaiting - see [Running Operations in the Background](#running-operations-in-the-background).
 
 #### Custom Signal Handlers
 
@@ -1420,6 +1551,7 @@ Terminology used below:
 - **Escalation state** is the logical repeated-shutdown context for one shutdown cycle
 - **Armed window** is the short post-failure period after an unsuccessful shutdown returns, before the next retry starts
 - During an active retry, the escalation state is still preserved, but the armed window is not active because shutdown is running again
+- A `restartAllComponents()` stop phase does not start an escalation cycle of its own. The first shutdown signal during it is the operator's initial request: it cancels the restart and starts the cycle (`firstMethod` is that signal) without being counted. Signals after it count as presses, as they would against any running shutdown. A restart whose stop phase fails with no signal leaves nothing armed
 
 This applies to shutdown requests from:
 
@@ -1465,6 +1597,7 @@ const lifecycle = new LifecycleManager({
 - Additional shutdown requests received while shutdown is still in progress are treated as escalation requests
 - By default, only signal-style shutdown requests count toward escalation
 - Manual `stopAllComponents()` retries start a fresh escalation cycle unless `countManualRetriesTowardEscalation` is enabled
+- A shutdown request made from inside `onForceShutdown()` or a `lifecycle-manager:shutdown-escalation-forced` listener is treated as a continuation of the request that fired it, not as a new one, so it is never counted again
 - Escalation requests are counted inside a `withinMS` window
 - If a new escalation request arrives more than `withinMS` after the first escalation request in the current window, a new escalation window starts
 - `onForceShutdown()` fires once per escalation state when the count reaches `forceAfterCount`
@@ -1543,6 +1676,7 @@ enableLoggerExitHook(): void
 - When `logger.error('message', { exitCode: 1 })` is called, components shut down before exit
 - Uses the constructor's `shutdownOptions.timeoutMS` (default: 30000ms) to prevent hanging
 - Overwrites any existing `beforeExit` callback on the logger
+- An exit that lands while a shutdown is already running waits for it rather than starting a second pass - and if that shutdown is a [`restartAllComponents()`](#restartallcomponentsoptions) stop phase, it cancels the restart's startup phase, so nothing is started again behind the exit
 - **Exit behavior depends on logger configuration:** `logger.exit()` only calls `process.exit()` when the logger is created with `callProcessExit: true` (default). Test-optimized and frontend-optimized loggers disable process exit.
 
 **Constructor Options:**
@@ -1627,7 +1761,7 @@ If you want the process to exit automatically:
 
 - **Via signals**: Handle the exit explicitly in the application entrypoint by listening to the `lifecycle-manager:shutdown-completed` event (e.g., calling `logger.exit(0)` or `process.exit(0)`).
 - **Via logger hooks**: Enable logger exit hook integration (`enableLoggerExitHook: true`). When enabled, calling `logger.exit()` or logging a fatal error with `exitCode` will trigger `LifecycleManager` to stop all components first, and then delegate back to the logger to proceed with its configured exit behavior (respecting any overrides like `callProcessExit: false`). See [Exit Behavior in docs/logger.md](logger.md#exit-behavior) for details on configuring simulated exits.
-- **Via repeated signals (Ctrl+C escalation)**: Configure `repeatedShutdownRequestPolicy.onForceShutdown` to call `logger.exit(1)` or `process.exit(1)` when the threshold (like multiple Ctrl+C presses) is crossed.
+- **Via repeated signals (Ctrl+C escalation)**: Configure `repeatedShutdownRequestPolicy.onForceShutdown` to call `logger.exit(1)` or `process.exit(1)` when the threshold (like multiple Ctrl+C presses) is crossed. With `enableLoggerExitHook`, a `logger.exit()` made synchronously from `onForceShutdown` - before any `await` - proceeds at once instead of waiting for the running shutdown; one made later is deferred like any exit during a shutdown.
 
 #### Logger Requirements
 
@@ -1694,6 +1828,17 @@ Use `toError` rather than hand-rolling `error instanceof Error ? error : new Err
 The normalized `err` is also captured in `params` for structured sinks that need the full error object or stack trace. Because the pattern only wraps non-`Error` values, original `Error` stack traces are preserved when the thrown value was already an `Error`.
 
 **Note:** The LifecycleManager itself logs `error.message` inline when component lifecycle methods fail (e.g., `start()` throwing, shutdown errors). Avoid including sensitive details like connection strings or credentials in error messages thrown from lifecycle methods, as they will appear in plain log output.
+
+**A logger that fails cannot fail a lifecycle operation.**
+
+The logger is yours, so every line the manager writes runs code it does not own - inside OS signal handlers, timer callbacks, floating promise chains, and the middle of a startup or shutdown pass. The manager wraps its own service logger once, at construction, so this holds for every operation, not just for a particular path:
+
+- **A log method that throws, or that returns a rejecting promise, cannot fail or derail the operation that was logging.** Startup, shutdown, restart, and every per-component operation carry on and return their normal result. Before this, a throw inside the shutdown stop loop rejected the pass, leaving the components it had not reached running and every `lifecycle-manager:shutdown-completed` listener waiting on a pass that was already over. The guard keeps a logger failure off the pass's failure path in the first place, so it is not reported as a failed shutdown either.
+- **`logger.entity(name)` is covered too.** If `entity()` itself throws, the chain still gets something callable back - the line lands under the service name, without the entity scope.
+- **Failures are reported on the global `'error'` channel**, never back through the logger that just failed. See [safe-handle-callback](./safe-handle-callback.md). The report names the logger method (for example `lifecycle-manager logger.warn`) and carries the original failure on `cause`. Listen with `globalThis.addEventListener('error', handler)` and call `event.preventDefault()` to claim it.
+- **Your logger object is never wrapped or modified.** `rootLogger` stays the exact instance you passed in: `enableLoggerExitHook()`, `logger.exit()`, and the scoped logger every component builds all go through your object unchanged. Only the manager's own internal logging is guarded.
+
+This is a containment guarantee, not a repair: a logger that throws still loses those lines. It is worth fixing the logger.
 
 ### Status and Query Methods
 
@@ -1954,11 +2099,13 @@ interface DependencyValidationResult {
     missingDependency: string;
   }>;
   circularCycles: string[][];
+  unreadableDependencies: Array<{ componentName: string; error: Error }>; // getDependencies() threw or returned a non-array or non-string entry (a throwing isOptional() is read as required, not listed)
   summary: {
     totalMissingDependencies: number; // Total number of missing dependencies across all components
     requiredMissingDependencies: number; // Missing dependencies on required components (blocks startup)
     optionalMissingDependencies: number; // Missing dependencies on optional components (degrades functionality)
     totalCircularCycles: number; // Number of circular dependency cycles detected
+    totalUnreadableDependencies: number; // Number of unreadableDependencies entries
   };
 }
 ```
@@ -2225,6 +2372,50 @@ class ApiComponent extends BaseComponent {
 
 The LifecycleManager emits events for monitoring and observability. All events are typed via `LifecycleManagerEvents`.
 
+Manager-generated **state notifications** are queued during synchronous state
+transitions and delivered when the outermost transition finishes. Transitions include
+registry commits/removals and result publication, component state updates (including
+late and unexpected stops), startup-latch release, signal attachment/detachment, and
+shutdown acceptance, result publication, and escalation bookkeeping. No transition
+holds the queue across an `await`, and listener promises are not awaited.
+
+Three events are **synchronous control checkpoints**, including when called from
+another event listener:
+
+- `lifecycle-manager:signals-attached` lets listeners intervene before startup proceeds
+  when `attachSignalsBeforeStartup` is enabled. They find the startup latch or component
+  claim already installed. A listener can request shutdown to refuse the start, or
+  register an auto-start for a bulk startup that has not computed its order yet.
+- `signal:shutdown` runs before that request can invoke `onForceShutdown()`, so listeners
+  receive the signal even if the callback immediately calls `process.exit()`.
+- `lifecycle-manager:shutdown-escalation-forced` runs after `onForceShutdown()` returns,
+  while force and escalation guards remain active. A synchronous `logger.exit()` from
+  this listener proceeds without waiting for a blocked stop; nested shutdown requests
+  retain the current cycle. The event cannot run if `onForceShutdown()` itself exits.
+
+Control events can interrupt the remaining listeners of another event and overtake
+queued notifications. **There is no global FIFO across both kinds of event.** The
+control call sites establish the state listeners need before dispatch and retain their
+re-entry checks afterwards. Context guards cover synchronous listener execution;
+continuations after an async listener's `await` run outside those guards.
+
+State notifications retain FIFO emission order and listener registration order. A
+listener's new notifications wait behind those pending and the remaining listeners of
+the current event. Even an unexpected failure delivering one queued entry is reported
+without dropping later entries. Failed transitions still flush notifications already
+queued: these describe changes that happened, not a transaction log discarded on
+failure. Earlier listeners can change live state, so use payloads for the originating
+snapshot and status getters for the current state. Logging and component hooks remain
+synchronous, and their existing re-entry guards are still required.
+
+**Timing compatibility:** notification listeners see completed bookkeeping instead of
+intermediate writes. For example, `signals-detached` sees the stopped timestamp already
+recorded, an expiry notification during shutdown acceptance sees the accepted pass, and
+`shutdown-completed` sees escalation already settled while the pass latch remains held.
+Code that previously relied on interrupting a transition from these notifications must
+adapt. The three control checkpoints preserve their synchronous timing even during
+re-entrant delivery.
+
 ### Subscribing to Events
 
 ```typescript
@@ -2255,7 +2446,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `lifecycle-manager:shutdown-warning` - Global warning phase started
 - `lifecycle-manager:shutdown-warning-completed` - Warning phase completed
 - `lifecycle-manager:shutdown-warning-timeout` - Warning phase timed out
-- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. This is the best single event for centralized logging or follow-up policy when shutdown times out or leaves stalled components. If the global shutdown timeout was hit, the payload reflects the result at the moment the public call stopped waiting. A component stop already in flight is not cancelled: its per-component state continues to reject an overlapping start or stop, while the process-wide shutdown latch is released so exit handling and later shutdown/escalation attempts can proceed.
+- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. This is the best single event for centralized logging or follow-up policy when shutdown times out or leaves stalled components. If the global shutdown timeout was hit, the payload reflects the result at the moment the public call stopped waiting. A component stop already in flight is not cancelled: its per-component state continues to reject an overlapping start or stop, while the process-wide shutdown latch is released so exit handling and later shutdown/escalation attempts can proceed. It always pairs with `lifecycle-manager:shutdown-initiated`: a pass that throws outright still emits it with `success: false`, `code: 'unknown_error'` and a `reason` naming the cause - the same result `stopAllComponents()` resolves with - so a caller waiting on it is never left hanging. Listeners run while the pass still holds its shutdown latch: `getSystemState()` says `shutting-down` there, and any operation started from inside one - `stopAllComponents()`, `startAllComponents()`, a per-component start or stop - is refused (`already_in_progress` / `shutdown_in_progress`). To act on the result, defer out of the listener (`setImmediate`, `queueMicrotask`), or `await` the promise `stopAllComponents()` returned instead of listening.
 
 **Component Registration:**
 
@@ -2280,7 +2471,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `signal:reload` - Reload signal received
 - `signal:info` - Info signal received
 - `signal:debug` - Debug signal received
-- `lifecycle-manager:shutdown-escalation-armed` - Failed/timed-out shutdown left escalation armed briefly for follow-up force presses
+- `lifecycle-manager:shutdown-escalation-armed` - Failed/timed-out shutdown left escalation armed briefly for follow-up force presses. Like `shutdown-completed`, it fires while the failed pass still holds its shutdown latch, so defer any follow-up operation out of the listener.
 - `lifecycle-manager:shutdown-escalation-expired` - Armed escalation window expired and was cleared
 - `lifecycle-manager:shutdown-escalation-forced` - Repeated shutdown requests crossed the force threshold and `onForceShutdown()` was invoked. The payload includes `wasArmedAfterFailure` to indicate whether the threshold was crossed during an active shutdown or from the post-failure armed window
 
@@ -2391,9 +2582,49 @@ if (result.success && result.status) {
 }
 ```
 
+#### Promises Never Reject
+
+Every async method answers with a result object, including when something goes wrong that the manager did not plan for - a bug in the manager, or a component that breaks its contract with a getter (`getName()`, `getDependencies()`, `isOptional()`) that throws. The promise resolves with a failed result and the original error is reported on the global `'error'` channel (see [safe-handle-callback](./safe-handle-callback.md)):
+
+| Method                                                                   | Unexpected failure resolves with                                  |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------- |
+| `registerComponent()`, `insertComponentAt()`                             | `code: 'unknown_error'`, `registered`: whether this call added it |
+| `unregisterComponent()`                                                  | `code: 'unknown_error'`                                           |
+| `startAllComponents()`, `stopAllComponents()`, `restartAllComponents()`  | `code: 'unknown_error'` with `error`                              |
+| `startComponent()`, `stopComponent()`, `restartComponent()`              | `code: 'unknown_error'` with `error`                              |
+| `sendMessageToComponent()`, `checkComponentHealth()`, `checkAllHealth()` | `code: 'error'`                                                   |
+| `getValue()` (synchronous)                                               | `code: 'error'` with `error`                                      |
+| `triggerReload()`, `triggerInfo()`, `triggerDebug()`                     | `code: 'error'`, including when your callback throws              |
+| `broadcastMessage()`                                                     | an empty array                                                    |
+
+Branch on `code` as usual; `unknown_error` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around.
+
+Automatic signal handling follows the configuration. A start that is configured to attach process signals (`attachSignalsBeforeStartup`, `attachSignalsOnStart`) fails with `code: 'signal_attach_failed'` when attaching throws, rather than bringing the process up without them - see [`attachSignals()`](#attachsignals). A detach that throws once the last component stops (`detachSignalsOnStop`) does not fail the stop or unregister it follows: the operation carries on and the failure is logged and reported. An explicit `attachSignals()` / `detachSignals()` call still throws to its caller.
+
+#### Running Operations in the Background
+
+There is no `wait: false` option; there doesn't need to be. Because no promise rejects, you can start any operation without awaiting it and still read its result later from the same promise:
+
+```typescript
+// Inside an HTTP handler that must respond now
+const pending = lifecycle.stopAllComponents();
+
+res.status(202).send('shutting down');
+
+pending.then((result) => {
+  if (!result.success) {
+    console.error('Shutdown did not complete cleanly:', result.reason);
+  }
+});
+```
+
+If you don't need the result, `void lifecycle.stopAllComponents()` is safe too - there is no rejection to go unhandled. Events and state getters still report the outcome: `lifecycle-manager:shutdown-completed`, `getLastShutdownResult()`, and `getSystemState()`.
+
+A call that is refused - `already_in_progress`, `shutdown_in_progress`, and so on - resolves almost immediately, so you still find out quickly whether what you asked for was accepted.
+
 #### Exceptions (Programmer Errors)
 
-Exceptions are limited to invalid construction or unexpected internal bugs. In normal use of the public API, failures are returned as result objects.
+Exceptions are limited to invalid construction and explicit synchronous calls such as `attachSignals()`. The async public API never rejects - see [Promises Never Reject](#promises-never-reject).
 
 Explicit exceptions you may see:
 
@@ -2445,6 +2676,8 @@ type ComponentOperationFailureCode =
   | 'component_shutdown_timeout'
   | 'restart_stop_failed'
   | 'restart_start_failed'
+  | 'startup_rolled_back' // an auto-start whose bulk startup rolled back; stopped again
+  | 'signal_attach_failed'
   | 'unknown_error';
 
 // Registration failure codes
@@ -2462,8 +2695,11 @@ type RegistrationFailureCode =
 type UnregisterFailureCode =
   | 'component_not_found'
   | 'component_running'
+  | 'component_starting' // A start is in flight; wait for it to settle
+  | 'component_stopping' // A stop is in flight; wait for it to settle
   | 'stop_failed'
-  | 'bulk_operation_in_progress';
+  | 'bulk_operation_in_progress'
+  | 'unknown_error';
 
 // Startup order failure codes
 type StartupOrderFailureCode = 'dependency_cycle' | 'unknown_error';
@@ -3569,3 +3805,51 @@ How to reduce the risk:
 ### 3. No Atomic Restart
 
 `restartAllComponents()` is not atomic. There is a window where all components are stopped but none are started yet. For zero-downtime restarts, use rolling restarts with individual `restartComponent()` calls.
+
+### Logger contract
+
+The manager requires lifecycleion's concrete `Logger` and obtains its internal
+`LoggerService` through `logger.service()`. It is not a generic adapter for arbitrary
+third-party logging interfaces. The internal guard contains logger failures; it does
+not promise transparent behavior for arbitrary custom service implementations.
+In particular, entity children are cached by name (up to 256 per guarded service),
+which relies on the built-in `LoggerService.entity()` being context-independent.
+Passthrough getters and log methods use the original service as their receiver.
+
+Lifecycle hook results that must be awaited use promise adoption; synchronous APIs
+such as `getValue` classify returned values so they can reject an asynchronous result.
+Both paths share native own-`then` detection and thenable assimilation, including
+cross-realm promises. Their result shapes intentionally differ: awaited hooks reject
+on adoption failure, while synchronous classification identifies an unreadable return.
+
+Shutdown results describe the outcome recorded by that operation, not a promise
+that live status cannot subsequently change. Late graceful cleanup can change a stalled
+component to stopped after the stop call returned failure. Use `getComponentStatus()`
+to read current state; late completion never rewrites an already-returned result.
+
+| Shutdown outcome                                             | Later force rejection                                                                                |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| Graceful completion makes the pending stop operation succeed | One warning: force work was abandoned after graceful stop completed                                  |
+| The stop operation records failure, including timeout        | One error, even if late graceful cleanup subsequently changes current status to stopped              |
+| A retry or restart has begun                                 | The earlier operation may still report its rejection, but cannot overwrite the new operation's state |
+
+A rejection caused by `onGracefulStopTimeout()` or `onShutdownForceAborted()` can
+settle before the deferred timeout rejection. That hook failure remains `unknown_error`,
+with stall reason `error` (or `both` after a prior graceful timeout). Only the manager's
+own deadline error counts as a timeout. A `stop()` rejection using the exported
+`ComponentStopTimeoutError` class is still a hook failure, even when it names the same
+component. An `undefined` rejection is also a hook failure, never a timeout.
+A stalled retry without an `onShutdownForce` handler returns the normal stalled
+failure result.
+
+Each hook rejection is reported once. Reports say “after deadline fired” when appropriate
+rather than implying that the operation returned a timeout. Graceful-hook rejection
+reports use warning severity; force-hook reports follow the outcome table above.
+A timeout log and a later hook rejection describe separate facts, so a shutdown may
+produce both. Later cleanup and restart do not change the earlier operation's reporting
+severity.
+
+Shutdown warning selection reads each `onShutdownWarning` once and captures callable
+values with their component receiver. Both timed and fire-and-forget delivery invoke
+that captured hook; changing a getter's next return cannot create a completed warning
+for a hook that was never called. Non-callable values are not warning targets.

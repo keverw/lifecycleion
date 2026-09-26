@@ -80,7 +80,11 @@ import type { CookieJar } from './cookie-jar';
 // original value retained on cause for consumers of the normalized error.
 import { isErrorValue, toError as normalizeError } from '../to-error';
 import { readUnknownMember as readObjectMember } from '../internal/read-member';
-import { isPromise } from '../is-promise';
+import {
+  adoptPromise,
+  adoptResult,
+  UnreadableReturn,
+} from '../internal/adopt-promise';
 
 type RemoveFn = () => void;
 
@@ -1825,52 +1829,59 @@ export class BaseHTTPClient {
       uploadActivity.at = Date.now();
 
       try {
-        const rawAdapterResponse = await this._adapter.send({
-          requestURL: sentRequest.requestURL,
-          method: sentRequest.method,
-          headers: { ...sentRequest.headers },
-          body: sentRequest.body ?? null,
-          signal: attemptSignal,
-          // Forward the builder's streaming factory to each adapter attempt.
-          // NodeAdapter invokes it only for a 200 response, letting the caller
-          // create attempt-local writable state when a retry happens.
-          streamResponse: options.streamResponse,
-          // attemptNumber and requestID are passed so NodeAdapter can populate
-          // StreamResponseInfo without the adapter needing to track attempt state
-          // itself.
-          attemptNumber,
-          requestID: requestID,
-          // The origin the caller addressed, so an adapter can tell a redirect hop to
-          // another host from the request it was configured for. See
-          // `AdapterRequest.initialURL`.
-          initialURL: credentialScope.url,
-          // Always handed over for a bodied request, whether or not the caller asked for
-          // progress: the stamp is what lets the wait on `requestBodySettled` tell an
-          // upload that is still moving from one that has stalled. A bodiless request
-          // has no upload to watch, so the adapter is told nothing it was not told before.
-          onUploadProgress:
-            onUploadProgress || (sentRequest.body ?? null) !== null
-              ? (e) => {
-                  uploadActivity.at = Date.now();
+        // Adopted, not awaited as it is: `HTTPAdapter` is a public extension point, and
+        // an adapter answering with a native promise carrying its own `constructor` and
+        // a no-op `then` hung the request, its rejection unhandled. See `adoptPromise()`.
+        const rawAdapterResponse = await adoptPromise(
+          this._adapter.send({
+            requestURL: sentRequest.requestURL,
+            method: sentRequest.method,
+            headers: { ...sentRequest.headers },
+            body: sentRequest.body ?? null,
+            signal: attemptSignal,
+            // Forward the builder's streaming factory to each adapter attempt.
+            // NodeAdapter invokes it only for a 200 response, letting the caller
+            // create attempt-local writable state when a retry happens.
+            streamResponse: options.streamResponse,
+            // attemptNumber and requestID are passed so NodeAdapter can populate
+            // StreamResponseInfo without the adapter needing to track attempt state
+            // itself.
+            attemptNumber,
+            requestID: requestID,
+            // The origin the caller addressed, so an adapter can tell a redirect hop to
+            // another host from the request it was configured for. See
+            // `AdapterRequest.initialURL`.
+            initialURL: credentialScope.url,
+            // Always handed over for a bodied request, whether or not the caller asked for
+            // progress: the stamp is what lets the wait on `requestBodySettled` tell an
+            // upload that is still moving from one that has stalled. A bodiless request
+            // has no upload to watch, so the adapter is told nothing it was not told before.
+            onUploadProgress:
+              onUploadProgress || (sentRequest.body ?? null) !== null
+                ? (e) => {
+                    uploadActivity.at = Date.now();
 
-                  // Returned, so a caller's `async` hook that rejects still reaches the
-                  // adapter's guard as a promise and is reported, not dropped here.
-                  return onUploadProgress?.({
+                    // Returned, so a caller's `async` hook that rejects still reaches the
+                    // adapter's guard as a promise and is reported, not dropped here.
+                    return onUploadProgress?.({
+                      ...e,
+                      attemptNumber,
+                      ...(hopContext
+                        ? { hopNumber: hopContext.hopNumber }
+                        : {}),
+                    });
+                  }
+                : undefined,
+            onDownloadProgress: onDownloadProgress
+              ? (e) =>
+                  onDownloadProgress({
                     ...e,
                     attemptNumber,
                     ...(hopContext ? { hopNumber: hopContext.hopNumber } : {}),
-                  });
-                }
+                  })
               : undefined,
-          onDownloadProgress: onDownloadProgress
-            ? (e) =>
-                onDownloadProgress({
-                  ...e,
-                  attemptNumber,
-                  ...(hopContext ? { hopNumber: hopContext.hopNumber } : {}),
-                })
-            : undefined,
-        });
+          }),
+        );
 
         const adapterResponse: AdapterResponse = {
           ...rawAdapterResponse,
@@ -3498,26 +3509,14 @@ function getRequestBodySettled(
 function adoptRequestBodySettled(
   settled: unknown,
 ): Promise<Error | undefined> | undefined {
-  // Guarded, because deciding whether it is a thenable reads `.then` on a value the
-  // adapter made. A `Proxy` or an accessor that throws there threw out of
-  // `_buildResponse` - and out of a request that had already succeeded - turning a `200`
-  // into a synthetic failed status-0 response over a field documented as advisory.
-  // An unusable value is treated as absent, which is what "no adapter reported an upload
-  // outcome" already means. `Promise.resolve` reads `.then` once more below, but the
-  // specification has it reject the promise on a throwing read rather than throw.
-  let isThenable = false;
-
-  try {
-    isThenable = isPromise(settled);
-  } catch {
+  // Advisory metadata must not turn a successful request into failure. Classify
+  // once, preserving the captured then function; an unreadable return is absent,
+  // while a real async rejection becomes the upload's reported error.
+  const pending = adoptResult(settled);
+  if (pending === undefined || pending instanceof UnreadableReturn) {
     return undefined;
   }
-
-  if (!isThenable) {
-    return undefined;
-  }
-
-  return Promise.resolve(settled).then(
+  return pending.then(
     (value) => (value === undefined ? undefined : normalizeError(value)),
     (error: unknown) => normalizeError(error),
   );

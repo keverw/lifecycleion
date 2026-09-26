@@ -1,4 +1,3 @@
-import { isFunction } from '../is-function';
 import {
   installGlobalEventTarget,
   isGlobalEventTargetAvailable,
@@ -225,8 +224,10 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
   const dispatchEvent = readGlobal('dispatchEvent');
   const errorEventConstructor = readGlobal('ErrorEvent');
 
+  // `typeof`, not `isFunction()`: its `instanceof Function` fallback reads the value's
+  // prototype, which throws for a revoked proxy.
   if (
-    !isFunction(dispatchEvent) ||
+    typeof dispatchEvent !== 'function' ||
     typeof errorEventConstructor !== 'function'
   ) {
     return 'unavailable';
@@ -315,6 +316,19 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
  *
  * An unclaimed dispatch still falls through to `console.error`, mirroring the console
  * output a native `reportError()` produces when no listener cancels the event.
+ *
+ * Public through `lifecycleion/safe-handle-callback`. Reach for it when you already hold a
+ * well-formed `Error` - its own `cause` chain, its own `additionalInfo` - and want
+ * listeners to see exactly that. `reportCallbackError` is the normalizer for the other
+ * case: a raw thrown value (`throw 'boom'`, `throw 42`, a rejected promise carrying a
+ * string), which it wraps in an `Error` whose message names the callback. Passing an
+ * already-structured `Error` through that wrapper only adds a nesting level and a message
+ * describing the caller's callback name rather than what actually failed.
+ *
+ * @param error The report to publish. Already an `Error`; normalize with `toError` first
+ *              if what you hold might not be.
+ * @param renderForConsole Consulted only if the report reaches the console rung
+ *                         uncancelled, so a caller can control that rendering.
  */
 export function reportToHost(
   error: Error,
@@ -345,7 +359,8 @@ export function reportToHost(
     if (outcome === 'unavailable') {
       const reportError = readGlobal('reportError');
 
-      if (isFunction(reportError)) {
+      // `typeof`, for the reason `dispatchErrorEvent()` gives.
+      if (typeof reportError === 'function') {
         try {
           (reportError as (this: unknown, error: unknown) => void).call(
             globalThis,
@@ -369,6 +384,13 @@ export function reportToHost(
     // The last reporting rung, by design, and guarded by `reportToConsole`: neither
     // `safeHandleCallback` nor `safeHandleCallbackAndWait` may throw from this path.
     // `renderedReport` guards its own rendering and falls back to the error itself.
+    reportToConsole(renderedReport(error, renderForConsole));
+  } catch {
+    // Anything above reading a hostile global - an `ErrorEvent` constructor, a
+    // `dispatchEvent`, an installer - that throws has not reported anything. Callers
+    // reach here with nothing left to catch for them: `safeHandleCallback` hands it
+    // failures directly, and a throw from here would escape the one function whose
+    // contract is that it never throws.
     reportToConsole(renderedReport(error, renderForConsole));
   } finally {
     releaseHostReportLease(lease);
