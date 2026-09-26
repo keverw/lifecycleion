@@ -3815,3 +3815,9 @@ not promise transparent behavior for arbitrary custom service implementations.
 In particular, entity children are cached by name (up to 256 per guarded service),
 which relies on the built-in `LoggerService.entity()` being context-independent.
 Passthrough getters and log methods use the original service as their receiver.
+
+Lifecycle hook results that must be awaited use promise adoption; synchronous APIs
+such as `getValue` classify returned values so they can reject an asynchronous result.
+Both paths share native own-`then` detection and thenable assimilation, including
+cross-realm promises. Their result shapes intentionally differ: awaited hooks reject
+on adoption failure, while synchronous classification identifies an unreadable return.

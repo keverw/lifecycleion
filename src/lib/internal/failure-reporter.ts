@@ -42,10 +42,9 @@ export type ReportFailure = (error: unknown, subject: string) => void;
  *               a boolean cleared on return was cleared before an `async` handler had
  *               done anything, and the loop it guards against resumed on the far side of
  *               the handler's first `await`.
- * @param handlerName Names the handler in the one report that does not carry `line`: a
- *               return value whose `then` cannot be read, where the handler already
- *               delivered its report and repeating it would be wrong. Without it, that line
- *               uses `line` as context so an anonymous handler can still be identified.
+ * @param handlerName Identifies the handler alongside the original failure when its
+ *               return cannot be adopted. Delivery cannot be inferred from a return:
+ *               lazy handlers may not have done any reporting yet.
  */
 export function reportThroughHandler(
   invoke: (() => unknown) | undefined,
@@ -115,12 +114,15 @@ export function reportThroughHandler(
 
     const pending = adoptResult(result);
     if (pending instanceof UnreadableReturn) {
-      // Named handlers need no repeated original report. Otherwise preserve the
-      // caller's context so a terminal failure can still be traced to its source.
+      // A successful invocation does not establish delivery: lazy thenables may
+      // defer the handler's work until adoption. If then cannot be read, retain the
+      // original failure as well as the return-contract error, without claiming a
+      // synchronous throw. A possible duplicate is preferable to losing the failure.
       pending.report(
         handlerName === undefined
-          ? `Failure handler for: ${safeLine()}`
+          ? 'A failure handler'
           : `Failure handler (${handlerName})`,
+        safeLine(),
       );
       settle();
       return;

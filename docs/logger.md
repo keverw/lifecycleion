@@ -1687,7 +1687,10 @@ interface BeforeExitResult {
 
 #### Sink Error Handling
 
-Each log entry snapshots its sink destinations before delivery. If a sink adds or
+Logger copies `sinks` and `diagnosticSinks` at construction. Later changes to those
+input arrays do not change the logger; use `addSink`/`removeSink` and
+`addDiagnosticSink`/`removeDiagnosticSink`. These methods replace owned lists, so
+each log entry captures a stable destination list without copying it per entry. If a sink adds or
 removes destinations while handling that entry, the change affects subsequent entries;
 the current entry is delivered once to each destination in its original snapshot.
 
@@ -1698,7 +1701,9 @@ repeated. The report identifies the sink by its one-based position in the applic
 sink list. Diagnostics that fall back to ordinary log sinks retain the Log sink label.
 Close reports use the original log or diagnostic list, preferring the log list for a
 sink present in both. Sink close methods are read once and their results use the same
-guarded adoption, including native promises with overwritten own `then` properties.
+guarded adoption, including native promises from another realm with overwritten own
+`then` properties. The intrinsic native-promise probe precedes reading those overrides,
+so a throwing getter or non-function cannot hide the promise's rejection.
 Thenable accessors are read once; their captured method is invoked asynchronously with
 the original receiver. Actual sink throws and asynchronous rejections retain their
 normal handling.
@@ -1709,9 +1714,12 @@ Callback helpers (`runCallbackSafely`, `safeHandleCallback`, and
 failure and keeps the getter's thrown value as `cause`; the awaited helper returns
 `success: false`. This keeps event-listener and guarded-logger failures observable
 without labeling a completed invocation as a throw. A malformed return from the
-failure handler itself stays on the terminal console rung. Built-in sink, format, and
-truncation reporters name their handlers without repeating the original failure.
-An unnamed internal caller retains the report context as a fallback.
+failure handler itself stays on the terminal console rung. The report includes the
+original failure and identifies the handler. Returning successfully does not establish
+delivery: a lazy thenable can defer all reporting until adoption, which a broken getter
+prevents. This may duplicate an eagerly delivered failure, but avoids losing one that
+was never delivered. The malformed return is still distinguished from an invocation
+that threw.
 
 A sink whose `write()` or `close()` throws or rejects produces a logger diagnostic with
 `kind: 'sink'`, the normalized failure in `error`, the failing `sink`, and `context` set

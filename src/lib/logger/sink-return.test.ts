@@ -267,3 +267,39 @@ test('a write uses its initial sink snapshot when sinks remove and add destinati
   logger.info('next');
   expect(deliveries).toEqual(['second', 'added']);
 });
+
+test('logger owns both sink lists and mutations do not edit the caller arrays', async () => {
+  const deliveries: string[] = [];
+  const sink = {
+    write: (): void => {
+      deliveries.push('log');
+    },
+  };
+  const diagnostic = {
+    write: (): void => {
+      deliveries.push('diagnostic');
+    },
+  };
+  const sinks = [sink];
+  const diagnostics = [diagnostic];
+  const logger = new Logger({
+    callProcessExit: false,
+    sinks,
+    diagnosticSinks: diagnostics,
+  });
+  sinks.length = 0;
+  diagnostics.length = 0;
+  logger.info('entry');
+  expect(deliveries).toEqual(['log']);
+  expect(logger.getDiagnosticSinks()).toEqual([diagnostic]);
+  const extra = { write: (): void => {} };
+  logger.addSink(extra);
+  logger.addDiagnosticSink(extra);
+  expect(sinks).toEqual([]);
+  expect(diagnostics).toEqual([]);
+  expect(logger.removeSink(extra)).toBe(true);
+  expect(logger.removeDiagnosticSink(extra)).toBe(true);
+  expect(logger.getSinks()).toEqual([sink]);
+  expect(logger.getDiagnosticSinks()).toEqual([diagnostic]);
+  await logger.close();
+});

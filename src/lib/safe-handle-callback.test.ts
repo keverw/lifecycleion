@@ -1162,13 +1162,13 @@ describe('runCallbackSafely - a throwing onError is contained', () => {
       return entries;
     });
 
-    // The handler ran and delivered its report: its return is its own problem, reported
-    // as such, and the original failure is not repeated under a "threw" label.
+    // Invocation does not prove delivery: the handler could defer its work to then.
+    // Preserve the original failure without mislabeling the return as a thrown call.
     expect(captured.length).toBe(1);
     const printed = String(captured[0][0]);
     expect(printed).toContain('(onError for cb) returned a value');
     expect(printed).toContain('then could not be read');
-    expect(printed).not.toContain('original failure');
+    expect(printed).toContain('original failure');
   });
 
   it('contains a throwing onError on the not-a-function path', () => {

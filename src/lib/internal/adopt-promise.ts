@@ -106,12 +106,47 @@ function isPlainObject(value: object): boolean {
 export function adoptPromise<T>(
   value: T | PromiseLike<T>,
 ): Promise<Awaited<T>> {
-  return adopt(value);
+  return adoptOwnPromise(value) ?? adopt(value);
+}
+
+/**
+ * Probe an own-then value before reading its override. Promise.prototype.then uses
+ * the internal promise slot, so this also observes foreign-realm promises that fail
+ * instanceof and have a throwing or non-callable own then. Ordinary plain thenables
+ * skip the probe. A failed probe on a local promise is an adoption failure (for
+ * example a broken constructor/species); on other objects, normal thenable handling
+ * remains the fallback. This one boundary is shared by both adoption entry points.
+ */
+function adoptOwnPromise<T>(value: T): Promise<Awaited<T>> | undefined {
+  if (
+    value === null ||
+    (typeof value !== 'object' && typeof value !== 'function') ||
+    !hasOwnThen(value) ||
+    isPlainObject(value)
+  ) {
+    return undefined;
+  }
+  let didAdopt = false;
+  const pending = new Promise<Awaited<T>>((resolve, reject) => {
+    try {
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      Reflect.apply(Promise.prototype.then, value, [resolve, reject]);
+      didAdopt = true;
+    } catch (error) {
+      if (inheritsFromPromise(value)) {
+        didAdopt = true;
+        // Preserve the original rejection value, as adoption does.
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+        reject(error);
+      }
+    }
+  });
+  return didAdopt ? pending : undefined;
 }
 
 // A captured then belongs to the classification read. Reusing it keeps accessor side
-// effects and return-contract classification stable. Native own-then handling below
-// still takes precedence: it reads the promise's internal state, not that override.
+// effects and return-contract classification stable. Both entry points have already
+// tried native own-then handling before calling this shared assimilation function.
 function adopt<T>(
   value: T | PromiseLike<T>,
   capturedThen?: (...args: unknown[]) => unknown,
@@ -126,33 +161,6 @@ function adopt<T>(
       resolve(value as Awaited<T>);
 
       return;
-    }
-
-    // Only an own `then` is bypassed, so only then is the intrinsic tried - which also
-    // spares an object without one a thrown and caught `TypeError`, and its stack. So
-    // does a plain object literal's own `then` - the common thenable, on hot paths such
-    // as sink writes - since no native promise has `Object.prototype` above it. Anything
-    // else with an own `then` still tries the intrinsic first, for a native promise from
-    // another realm.
-    if (hasOwnThen(value) && !isPlainObject(value)) {
-      try {
-        // eslint-disable-next-line @typescript-eslint/unbound-method
-        Reflect.apply(Promise.prototype.then, value, [resolve, reject]);
-
-        return;
-      } catch (error) {
-        // Never through the own `then` for anything on the promise chain: see above.
-        // Decided by the value's shape, not by re-reading its `constructor`, which can
-        // answer differently each time.
-        if (inheritsFromPromise(value)) {
-          // As thrown - the getter's own value, like any rejection this passes through.
-          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
-          reject(error);
-
-          return;
-        }
-        // Not a native promise: a plain thenable, adopted below.
-      }
     }
 
     if (capturedThen !== undefined) {
@@ -189,9 +197,12 @@ export class UnreadableReturn extends Error {
   }
 
   /** Shared terminal wording, built only on failure rather than for every call. */
-  public report(subject: string): void {
+  public report(subject: string, originalFailure?: string): void {
+    const malformed = `${subject} returned a value whose then could not be read: ${describeError(this.cause)}`;
     reportToConsole(
-      `${subject} returned a value whose then could not be read: ${describeError(this.cause)}`,
+      originalFailure === undefined
+        ? malformed
+        : `${originalFailure}\n\n${malformed}`,
     );
   }
 }
@@ -208,8 +219,12 @@ export class UnreadableReturn extends Error {
 export function adoptResult(
   result: unknown,
 ): Promise<unknown> | UnreadableReturn | undefined {
+  const ownPromise = adoptOwnPromise(result);
+  if (ownPromise !== undefined) {
+    return ownPromise;
+  }
   if (inheritsFromPromise(result)) {
-    return adoptPromise(result);
+    return adopt(result);
   }
   if (
     result === null ||

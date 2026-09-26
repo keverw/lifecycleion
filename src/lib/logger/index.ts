@@ -244,8 +244,8 @@ export class Logger extends EventEmitter {
   constructor(options: LoggerOptions = {}) {
     super();
 
-    this.sinks = options.sinks || [];
-    this.diagnosticSinks = options.diagnosticSinks || [];
+    this.sinks = copySinkList(options.sinks);
+    this.diagnosticSinks = copySinkList(options.diagnosticSinks);
     this.redactFunction = options.redactFunction;
     this.callProcessExit = options.callProcessExit ?? true;
     this.beforeExitCallback = options.beforeExitCallback;
@@ -791,7 +791,7 @@ export class Logger extends EventEmitter {
    * Add a sink to the logger
    */
   public addSink(sink: LogSink): void {
-    this.sinks.push(sink);
+    this.sinks = [...this.sinks, sink];
   }
 
   /**
@@ -801,7 +801,7 @@ export class Logger extends EventEmitter {
   public removeSink(sink: LogSink): boolean {
     const index = this.sinks.indexOf(sink);
     if (index !== -1) {
-      this.sinks.splice(index, 1);
+      this.sinks = this.sinks.filter((_, sinkIndex) => sinkIndex !== index);
       return true;
     }
     return false;
@@ -816,7 +816,7 @@ export class Logger extends EventEmitter {
 
   /** Add a sink used only for failures raised by the logging system itself. */
   public addDiagnosticSink(sink: LogSink): void {
-    this.diagnosticSinks.push(sink);
+    this.diagnosticSinks = [...this.diagnosticSinks, sink];
   }
 
   /** Remove a diagnostic sink. */
@@ -827,7 +827,9 @@ export class Logger extends EventEmitter {
       return false;
     }
 
-    this.diagnosticSinks.splice(index, 1);
+    this.diagnosticSinks = this.diagnosticSinks.filter(
+      (_, sinkIndex) => sinkIndex !== index,
+    );
     return true;
   }
 
@@ -1274,18 +1276,9 @@ export class Logger extends EventEmitter {
 
     // Write to all sinks. Classify return values separately: a sink that returned
     // successfully did not throw just because its result has a broken then getter.
-    // A write may add or remove sinks synchronously. Each entry belongs to the
-    // destinations selected before delivery; mutations affect subsequent entries.
-    const configuredSinks = this.sinks;
-    const sinks: LogSink[] = [];
-    // Preserve numeric membership even if the supplied array overrides its iterator.
-    for (
-      let index = 0, length = configuredSinks.length;
-      index < length;
-      index++
-    ) {
-      sinks.push(configuredSinks[index]);
-    }
+    // Lists are owned and replaced on mutation, so capturing one reference gives
+    // stable membership without a per-entry copy. Re-entry affects later entries.
+    const sinks = this.sinks;
     // eslint-disable-next-line unicorn/no-for-loop
     for (let sinkIndex = 0; sinkIndex < sinks.length; sinkIndex++) {
       const sink = sinks[sinkIndex];
@@ -1488,7 +1481,9 @@ export class Logger extends EventEmitter {
   ): void {
     const hasDiagnosticSinks = this.diagnosticSinks.length > 0;
     const destinations = shouldDeliverToSinks
-      ? [...(hasDiagnosticSinks ? this.diagnosticSinks : this.sinks)]
+      ? hasDiagnosticSinks
+        ? this.diagnosticSinks
+        : this.sinks
       : [];
 
     void Promise.resolve().then(() => {
@@ -1578,3 +1573,14 @@ export * from './types';
 export { REDACTION_FAILED_MARKER } from './utils/redaction';
 export * from './sinks';
 export type { LoggerService } from './logger-service';
+
+/** Own the list by numeric membership; caller iterators do not select destinations. */
+function copySinkList(source: readonly LogSink[] | undefined): LogSink[] {
+  const sinks: LogSink[] = [];
+  if (source !== undefined) {
+    for (let index = 0, length = source.length; index < length; index++) {
+      sinks.push(source[index]);
+    }
+  }
+  return sinks;
+}

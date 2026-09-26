@@ -249,3 +249,34 @@ test('adoptResult preserves an unreadable first read as a return-contract error'
   expect(result).toBeInstanceOf(UnreadableReturn);
   expect((result as UnreadableReturn).cause).toBe(cause);
 });
+
+for (const mode of ['throwing getter', 'non-function'] as const) {
+  test(`adoptResult observes a foreign promise with an own ${mode}`, async () => {
+    const { runInNewContext } = await import('node:vm');
+    const promise = runInNewContext(
+      'Promise.reject(new Error("foreign rejection"))',
+    ) as object;
+    // Keep the broken baseline safe for the test runner. The assertion below must
+    // still observe the rejection through adoptResult, not through this safety catch.
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    void Reflect.apply(Promise.prototype.then, promise, [undefined, () => {}]);
+    expect(promise instanceof Promise).toBe(false);
+    let reads = 0;
+    Object.defineProperty(
+      promise,
+      'then',
+      mode === 'throwing getter'
+        ? {
+            get(): never {
+              reads++;
+              throw new Error('own then must not run');
+            },
+          }
+        : { value: 0 },
+    );
+    const pending = adoptResult(promise);
+    expect(pending).toBeInstanceOf(Promise);
+    expect(await settle(pending as Promise<unknown>)).toBe('foreign rejection');
+    expect(reads).toBe(0);
+  });
+}

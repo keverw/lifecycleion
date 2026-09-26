@@ -1,3 +1,4 @@
+import { describeError } from '../../to-error';
 import {
   defineEntry,
   describeContainer,
@@ -449,7 +450,10 @@ export class ArraySink implements LogSink {
 
       const settled = adoptResult(result);
       if (settled instanceof UnreadableReturn) {
-        settled.report('ArraySink onFormatError');
+        settled.report(
+          'ArraySink onFormatError',
+          `${kind} failed for ${path}: ${describeError(error)}`,
+        );
         this.formatReportsInFlight--;
         return undefined;
       }

@@ -238,7 +238,7 @@ test('an anonymous failure handler with an unreadable return retains the report 
   }
 });
 
-test('format failure handlers identify an unreadable return without repeating the original failure', () => {
+test('format failure handlers retain the original alongside an unreadable return', () => {
   const captured = muteConsoleError();
   try {
     const reporter = createFormatReporter('render', () => ({
@@ -250,8 +250,41 @@ test('format failure handlers identify an unreadable return without repeating th
     expect(captured).toHaveLength(1);
     expect(captured[0]).toContain('failure handler');
     expect(captured[0]).toContain('then could not be read');
-    expect(captured[0]).not.toContain('original delivered failure');
-    expect(captured[0]).not.toContain('params.secret');
+    expect(captured[0]).toContain('original delivered failure');
+    expect(captured[0]).toContain('params.secret');
+  } finally {
+    restoreConsoleError();
+  }
+});
+
+test('a lazy named handler with an unreadable then retains the undelivered failure', () => {
+  const captured = muteConsoleError();
+  let deliveries = 0;
+  try {
+    reportThroughHandler(
+      () =>
+        new Proxy(
+          {
+            then: (): void => {
+              deliveries++;
+            },
+          },
+          {
+            get(): never {
+              throw new Error('lazy adoption failed');
+            },
+          },
+        ),
+      () => 'original disk-write failure',
+      undefined,
+      'FileSink onError',
+    );
+    expect(deliveries).toBe(0);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('original disk-write failure');
+    expect(captured[0]).toContain('FileSink onError');
+    expect(captured[0]).toContain('lazy adoption failed');
+    expect(captured[0]).not.toContain('also threw');
   } finally {
     restoreConsoleError();
   }

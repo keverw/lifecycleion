@@ -2670,7 +2670,7 @@ export class LifecycleManager
     return this.withTransition(() => {
       // Remove from registry
       this.componentEntries = this.componentEntries.filter(
-        (c) => this.nameOf(c) !== name,
+        (c) => c !== component,
       );
 
       this.publishRegistry();
