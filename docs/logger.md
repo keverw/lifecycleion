@@ -1697,27 +1697,33 @@ each log entry captures a stable destination list without copying it per entry. 
 removes destinations while handling that entry, the change affects subsequent entries;
 the current entry is delivered once to each destination in its original snapshot.
 
-A sink that returns successfully but whose return value has a throwing `then` getter
-produces a terminal console report identifying the unreadable return value. This is not
-reported as a sink invocation failure, and an already-delivered diagnostic is not
-repeated. The report identifies the sink by its one-based position in the applicable
-sink list. Diagnostics that fall back to ordinary log sinks retain the Log sink label.
-Close reports use the original log or diagnostic list, preferring the log list for a
-sink present in both. Sink close methods are read once and their results use the same
-guarded adoption, including native promises from another realm with overwritten own
-`then` properties. The intrinsic native-promise probe precedes reading those overrides,
-so a throwing getter or non-function cannot hide the promise's rejection.
-Thenable accessors are read once; their captured method is invoked asynchronously with
-the original receiver. Actual sink throws and asynchronous rejections retain their
-normal handling.
+A sink's throwing `then` getter is a return-contract failure, distinguished from a
+throw during invocation. Ordinary `write()` and `close()` return-contract failures
+use the same logger diagnostic channel as thrown or rejected failures. Their error
+retains the getter's thrown value as `cause`, and their message identifies the sink
+by its one-based position in the applicable list. Close reports use the original log
+or diagnostic list, preferring the log list for a sink present in both.
 
-Malformed sink returns use the terminal console rather than generating a new
-logger diagnostic. The write invocation already returned; forwarding another entry
-through sinks can repeat delivered output, and diagnostic-delivery failures must
-terminate to prevent recursive reporting. Callback helpers have a different role:
-their configured error channel owns callback failures, so they route malformed
-returns through that channel. A malformed return from that error handler itself also
-terminates at the console.
+Routing depends on which operation failed, rather than whether it threw, rejected,
+or returned an unreadable value:
+
+| Failure boundary    | Destination                                                                                    |
+| ------------------- | ---------------------------------------------------------------------------------------------- |
+| Ordinary sink write | Diagnostic listeners and configured diagnostic sinks (ordinary sinks when none are configured) |
+| Sink close          | Diagnostic listeners; console when no listener exists, without writing to closing sinks        |
+| Diagnostic delivery | Terminal console, retaining the original diagnostic and the secondary failure                  |
+
+The terminal boundary prevents recursive diagnostic delivery. A successful invocation
+does not establish delivery: a lazy destination may do its work only when its returned
+thenable is adopted. Retaining the original context may repeat an eagerly delivered
+diagnostic, but avoids losing one that was never delivered. Diagnostics falling back
+to ordinary sinks retain the Log sink label.
+
+Sink close methods are read once and their results use guarded adoption, including
+native promises from another realm with overwritten own `then` properties. The
+intrinsic native-promise probe precedes reading those overrides, so a throwing getter
+or non-function cannot hide the promise's rejection. Thenable accessors are read once;
+their captured method is invoked asynchronously with the original receiver.
 
 Callback helpers (`runCallbackSafely`, `safeHandleCallback`, and
 `safeHandleCallbackAndWait`) report unreadable returns through the configured
@@ -1732,7 +1738,8 @@ prevents. This may duplicate an eagerly delivered failure, but avoids losing one
 was never delivered. The malformed return is still distinguished from an invocation
 that threw.
 
-A sink whose `write()` or `close()` throws or rejects produces a logger diagnostic with
+A sink whose `write()` or `close()` throws, rejects, or returns an unreadable thenable
+produces a logger diagnostic with
 `kind: 'sink'`, the normalized failure in `error`, the failing `sink`, and `context` set
 to `'write'` or `'close'`. It follows the same diagnostic route as logger formatting and
 event-handler failures. There is no separate logger callback API.

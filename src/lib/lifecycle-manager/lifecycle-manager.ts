@@ -5829,42 +5829,68 @@ export class LifecycleManager
   }
 
   /**
-   * Watch a stop that the manager already gave up waiting on - `stop()` or
-   * `onShutdownForce()` past its timeout - so that if it settles late, the stall it
-   * caused is cleared (`handleLateStopResolution`), and if it fails, that is logged.
+   * Reporting belongs to one observer per phase; state ownership is separate.
    *
-   * The first `catch` is there because `handleLateStopResolution` mutates state in
-   * sequence: a throw partway leaves the component half-transitioned, which is better
-   * said outright than inferred from a stuck state later. The chain ends in a terminal
-   * `catch` because nothing retains it: an unhandled rejection is fatal under Node's
-   * default `--unhandled-rejections=throw`, and logging is guarded, but a floating
-   * chain should not have to rely on that.
+   * Race window                 State/result owner        Rejection reporter
+   * Before deadline             Foreground claim          Foreground
+   * Timeout hook settles work   Foreground claim          Deadline observer
+   * Graceful wins during force  Graceful token + waiter    Abandoned-force observer*
+   * After stalled result        Matching stop token       Deadline observer
+   * After retry/restart         New claim/token           Old observer, logs only
+   * * The deadline observer keeps reporting ownership if already installed.
+   *
+   * Installing an observer transfers reporting before promise callbacks run. This
+   * includes abort-hook rejections that beat the deferred deadline. Foreground
+   * catches still record results/transitions; their snapshots are never rewritten
+   * by later reconciliation. Claims, generation tokens, and force waiters retain
+   * their distinct lifetimes and are deliberately not managed here.
    */
-  private observeLateStopResolution(
-    promise: Promise<unknown>,
-    name: string,
-    stopAttemptToken: string,
-    source: 'graceful' | 'force',
-    failureMessage: string,
-  ): void {
-    // Both callers pass the already-adopted graceful/force hook promise.
-    promise
-      .then(
-        () => this.handleLateStopResolution(name, stopAttemptToken, source),
-        (error: unknown) => {
-          this.logger.entity(name).warn(failureMessage, {
-            params: { error: toError(error) },
-          });
-        },
-      )
-      .catch((error: unknown) => {
-        this.logger.entity(name).warn('Late stop resolution failed', {
-          params: { error: toError(error) },
-        });
-      })
-      .catch(() => {
-        // Nothing left to report with.
+  private createStopPhaseObserver(name: string): {
+    reportForeground: (
+      error: unknown,
+      message: string,
+      level?: 'warn' | 'error',
+    ) => void;
+    observe: (
+      promise: Promise<unknown>,
+      message: string,
+      onResolved?: () => void,
+    ) => void;
+  } {
+    let isObserved = false;
+    const report = (
+      error: unknown,
+      message: string,
+      level: 'warn' | 'error' = 'warn',
+    ): void => {
+      this.logger.entity(name)[level](message, {
+        params: { error: toError(error) },
       });
+    };
+
+    return {
+      reportForeground: (error, message, level) => {
+        if (!isObserved) {
+          report(error, message, level);
+        }
+      },
+      observe: (promise, message, onResolved) => {
+        if (isObserved) {
+          return;
+        }
+        isObserved = true;
+        // Already-adopted hook promises only. One chain owns both late success
+        // reconciliation and rejection reporting, even when force is abandoned.
+        promise
+          .then(onResolved, (error: unknown) => report(error, message))
+          .catch((error: unknown) => {
+            report(error, 'Late stop resolution failed');
+          })
+          .catch(() => {
+            // Floating chains must remain contained even if reporting fails.
+          });
+      },
+    };
   }
 
   /**
@@ -7534,7 +7560,7 @@ export class LifecycleManager
       componentName: name,
       timeoutMS,
     });
-    let isGracefulOutcomeObservedAfterTimeout = false;
+    const outcomeObserver = this.createStopPhaseObserver(name);
 
     let timeoutHandle: NodeJS.Timeout | undefined;
 
@@ -7557,13 +7583,15 @@ export class LifecycleManager
             // can be cleared automatically without a manual retry. From here on
             // this observer owns rejection reporting, even if the abort hook makes
             // stop() reject before the deferred deadline wins the foreground race.
-            isGracefulOutcomeObservedAfterTimeout = true;
-            this.observeLateStopResolution(
+            outcomeObserver.observe(
               stopPromise,
-              name,
-              stopAttemptToken,
-              'graceful',
               'Component stop failed after timeout',
+              () =>
+                this.handleLateStopResolution(
+                  name,
+                  stopAttemptToken,
+                  'graceful',
+                ),
             );
             timeoutHandle = this.rejectAfterTimeoutHook(
               reject,
@@ -7620,13 +7648,10 @@ export class LifecycleManager
       } else {
         // Keep the failure result even when the timeout observer owns its log.
         // Otherwise a rejection from the abort hook is reported by both paths.
-        if (!isGracefulOutcomeObservedAfterTimeout) {
-          this.logger
-            .entity(name)
-            .warn('Graceful shutdown threw error: {{error.message}}', {
-              params: { error: err },
-            });
-        }
+        outcomeObserver.reportForeground(
+          err,
+          'Graceful shutdown threw error: {{error.message}}',
+        );
 
         return {
           success: false,
@@ -7779,14 +7804,9 @@ export class LifecycleManager
     const { promise: stoppedDuringForcePromise, cleanup: cleanupForceWaiter } =
       this.createPendingForceStopWaiter(name);
     let timeoutHandle: NodeJS.Timeout | undefined;
-    let isForceOutcomeObservedAfterTimeout = false;
-    const reportFailureAfterGracefulStop = (error: unknown): void => {
-      this.logger
-        .entity(name)
-        .warn('Force shutdown failed after graceful stop completed', {
-          params: { error: toError(error) },
-        });
-    };
+    const outcomeObserver = this.createStopPhaseObserver(name);
+    const abandonedForceMessage =
+      'Force shutdown failed after graceful stop completed';
 
     // This attempt's own timeout rejection, so the `catch` can tell it apart from
     // anything `onShutdownForce()` rejects with.
@@ -7801,10 +7821,9 @@ export class LifecycleManager
         Reflect.apply(onShutdownForce as () => unknown, component, []),
       );
 
-      // A late graceful completion can win the race and abandon this attempt. Observe
-      // its rejection immediately, including when the force timeout is disabled.
-      void forcePromise.catch(() => {});
-
+      // Both races attach rejection handlers in this turn, including when the
+      // timeout is disabled or graceful completion wins. No separate no-op catch
+      // is needed; the outcome observer below adds the abandoned hook's report.
       if (toTimerDelayMS(timeoutMS) > 0) {
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutHandle = setTimeout(() => {
@@ -7817,13 +7836,11 @@ export class LifecycleManager
 
             // Detect if onShutdownForce() eventually resolves after the timeout
             // so the stall can be cleared automatically, same as stop().
-            isForceOutcomeObservedAfterTimeout = true;
-            this.observeLateStopResolution(
+            outcomeObserver.observe(
               forcePromise,
-              name,
-              forceAttemptToken,
-              'force',
               'Force shutdown failed after timeout',
+              () =>
+                this.handleLateStopResolution(name, forceAttemptToken, 'force'),
             );
             timeoutHandle = this.rejectAfterTimeoutHook(
               reject,
@@ -7850,9 +7867,7 @@ export class LifecycleManager
         // changing this or a subsequent run's state.
         // A fired deadline already installed the late-outcome reporter. Keeping
         // both would report the same subsequent hook rejection twice.
-        if (!isForceOutcomeObservedAfterTimeout) {
-          void forcePromise.catch(reportFailureAfterGracefulStop);
-        }
+        outcomeObserver.observe(forcePromise, abandonedForceMessage);
         return {
           success: true,
           componentName: name,
@@ -7886,11 +7901,8 @@ export class LifecycleManager
         // A real force rejection can race graceful completion, but this attempt's
         // deadline is not a hook failure. Once the deadline observer is installed,
         // it alone reports any real late rejection, including a same-turn rejection.
-        if (
-          error !== forceTimeoutError &&
-          !isForceOutcomeObservedAfterTimeout
-        ) {
-          reportFailureAfterGracefulStop(error);
+        if (error !== forceTimeoutError) {
+          outcomeObserver.reportForeground(error, abandonedForceMessage);
         }
         return {
           success: true,
@@ -7932,14 +7944,12 @@ export class LifecycleManager
             params: { timeoutMS },
           });
           this.lifecycleEvents.componentShutdownForceTimeout(name, timeoutMS);
-        } else if (!isForceOutcomeObservedAfterTimeout) {
-          // The deadline observer owns any rejection after it is installed,
-          // including one caused by the abort hook before the deadline rejects.
-          this.logger
-            .entity(name)
-            .error('Force shutdown failed - stalled: {{error.message}}', {
-              params: { error: err },
-            });
+        } else {
+          outcomeObserver.reportForeground(
+            err,
+            'Force shutdown failed - stalled: {{error.message}}',
+            'error',
+          );
         }
 
         this.lifecycleEvents.componentStalled(name, stallInfo, {

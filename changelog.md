@@ -211,6 +211,18 @@
 
 ## Unreleased
 
+- Shutdown phases share one outcome observer for rejection-reporting ownership,
+  replacing separate graceful/force timeout flags and the independent abandoned-force
+  reporting chain. Claim, token, and force-waiter ownership are unchanged. Race coverage
+  distinguishes foreground result snapshots from later status reconciliation.
+
+- Logger routes ordinary sink unreadable-return failures through its diagnostic channel,
+  just like invocation throws and asynchronous rejections. Close failures remain
+  observable through diagnostic listeners without writing to closing sinks.
+  Diagnostic-delivery failures terminate at the console with the original failure
+  preserved, including when a lazy destination never delivered it. This replaces the
+  earlier console-only policy for ordinary malformed sink returns.
+
 - Graceful and force shutdown rejections triggered by timeout hooks are reported
   once: the late observer owns the rejection log after it is installed, while the
   foreground operation still records the failure and returns its result.
@@ -283,8 +295,8 @@
   rather than claiming the requested placement was not respected. Startup dependency
   reads retain the generation captured when read, using shared bookkeeping.
 - Logger sink return values with throwing `then` getters are reported as unreadable
-  return values, separately from sink invocation failures, without repeating a delivered
-  diagnostic.
+  return values, separately from sink invocation failures. Terminal diagnostic-delivery
+  reports retain the original context because a return does not establish delivery.
 
 - Registration hooks now run with a provisional entry excluded from all public
   registry operations and bulk startup. Names and instances remain reserved, preventing

@@ -1,53 +1,155 @@
 import { expect, spyOn, test } from 'bun:test';
 import { Logger } from './index';
+import type { LoggerDiagnostic } from './types';
 import { sleep } from '../sleep';
 
-for (const isDiagnostic of [false, true]) {
-  test(`${isDiagnostic ? 'diagnostic' : 'ordinary'} sink return classification does not claim the sink threw`, async () => {
+function unreadableReturn(cause: Error): Promise<void> {
+  return {
+    get then(): never {
+      throw cause;
+    },
+  } as unknown as Promise<void>;
+}
+
+for (const context of ['write', 'close'] as const) {
+  for (const failureKind of ['throw', 'reject', 'unreadable'] as const) {
+    test(`${context} ${failureKind} failures use the configured diagnostic channel`, async () => {
+      const output = spyOn(console, 'error').mockImplementation(() => {});
+      const failure = new Error('sink failure');
+      const diagnostics: LoggerDiagnostic[] = [];
+      const delivered: LoggerDiagnostic[] = [];
+      const fail = (): Promise<void> => {
+        if (failureKind === 'throw') {
+          throw failure;
+        }
+        return failureKind === 'reject'
+          ? Promise.reject(failure)
+          : unreadableReturn(failure);
+      };
+      const sink = {
+        write: context === 'write' ? fail : (): void => {},
+        close: context === 'close' ? fail : (): void => {},
+      };
+      const logger = new Logger({
+        callProcessExit: false,
+        sinks: [sink],
+        diagnosticSinks: [
+          {
+            write: (): void => {},
+            writeDiagnostic: (diagnostic: LoggerDiagnostic): void => {
+              delivered.push(diagnostic);
+            },
+          },
+        ],
+      });
+      logger.on('diagnostic', (diagnostic) => {
+        diagnostics.push(diagnostic as LoggerDiagnostic);
+      });
+      try {
+        if (context === 'close') {
+          await logger.close();
+        } else {
+          logger.info('entry');
+        }
+        await sleep(0);
+        expect(diagnostics).toHaveLength(1);
+        expect(diagnostics[0].kind).toBe('sink');
+        expect(diagnostics[0].context).toBe(context);
+        expect(diagnostics[0].sink).toBe(sink);
+        expect(delivered).toHaveLength(context === 'write' ? 1 : 0);
+        expect(output).not.toHaveBeenCalled();
+        if (failureKind === 'unreadable') {
+          expect(diagnostics[0].error.cause).toBe(failure);
+          expect(diagnostics[0].message).toContain('then could not be read');
+          expect(diagnostics[0].message).toContain('Log sink #1');
+        } else {
+          expect(diagnostics[0].error).toBe(failure);
+        }
+      } finally {
+        output.mockRestore();
+      }
+    });
+  }
+}
+
+for (const didDeliver of [false, true]) {
+  test(`unreadable diagnostic return retains original context (already delivered: ${didDeliver})`, async () => {
     const output = spyOn(console, 'error').mockImplementation(() => {});
     let deliveries = 0;
-    const delivered = (): Promise<void> => {
-      deliveries++;
-      // Deliberately violate the sink return contract after successful delivery.
-      return {
-        get then(): never {
-          throw new Error('unreadable return');
-        },
-      } as unknown as Promise<void>;
-    };
     const logger = new Logger({
       callProcessExit: false,
       sinks: [
         {
-          write: isDiagnostic
-            ? (): never => {
-                throw new Error('original failure');
-              }
-            : delivered,
+          write: (): never => {
+            throw new Error('original failure');
+          },
         },
       ],
-      diagnosticSinks: isDiagnostic
-        ? [{ write: () => {}, writeDiagnostic: delivered }]
-        : [],
+      diagnosticSinks: [
+        {
+          write: (): void => {},
+          writeDiagnostic: (): Promise<void> => {
+            if (didDeliver) {
+              deliveries++;
+            }
+            // Returning does not prove delivery. A lazy destination can wait until
+            // then is invoked, which never happens when reading it already fails.
+            return unreadableReturn(new Error('diagnostic return'));
+          },
+        },
+      ],
     });
     try {
       logger.info('entry');
       await sleep(0);
-      expect(deliveries).toBe(1);
+      expect(deliveries).toBe(didDeliver ? 1 : 0);
       expect(output).toHaveBeenCalledTimes(1);
       const message = String(output.mock.calls[0]?.[0]);
-      expect(message).toContain(
-        'returned a value whose then could not be read',
-      );
-      expect(message).toContain('unreadable return');
-      expect(message).toContain('sink #1');
+      // Previously eager-delivery coverage demanded omission of the original.
+      // Retaining it is necessary because the lazy case has no other report.
+      expect(message).toContain('original failure');
+      expect(message).toContain('Diagnostic sink #1 returned a value');
+      expect(message).toContain('diagnostic return');
       expect(message).not.toContain('also threw');
-      expect(message).not.toContain('original failure');
     } finally {
       output.mockRestore();
     }
   });
 }
+
+test('malformed ordinary returns use one bounded diagnostic fallback', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  let writes = 0;
+  let diagnostics = 0;
+  const logger = new Logger({
+    callProcessExit: false,
+    sinks: [
+      {
+        write: (): Promise<void> => {
+          writes++;
+          return unreadableReturn(
+            new Error(writes === 1 ? 'original return' : 'fallback return'),
+          );
+        },
+      },
+    ],
+  });
+  logger.on('diagnostic', () => {
+    diagnostics++;
+  });
+  try {
+    logger.info('entry');
+    await sleep(0);
+    expect(writes).toBe(2);
+    expect(diagnostics).toBe(1);
+    expect(output).toHaveBeenCalledTimes(1);
+    const message = String(output.mock.calls[0]?.[0]);
+    expect(message).toContain('original return');
+    expect(message).toContain('fallback return');
+  } finally {
+    output.mockRestore();
+  }
+});
 
 test('close adopts a hostile native promise and reads its method once', async () => {
   let closeReads = 0;

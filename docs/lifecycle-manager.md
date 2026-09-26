@@ -3833,3 +3833,30 @@ alone logs that hook rejection; the foreground path still records the failure an
 returns its result. Only the manager's own deadline error counts as a timeout.
 A `stop()` rejection using the exported `ComponentStopTimeoutError` class is still
 a hook failure (`unknown_error`), even when it names the same component.
+
+Shutdown state ownership and failure reporting have different lifetimes. An active
+claim prevents competing operations from taking a component; a stop token identifies
+late cleanup after the foreground operation has returned. A force waiter lets late
+graceful success complete a pending force operation. These guards remain separate
+from the shared phase observer that owns rejection reporting.
+
+| Race window                                               | State/result owner                                  | Hook-rejection reporter                                                 |
+| --------------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------- |
+| Before the deadline fires                                 | Foreground phase                                    | Foreground phase                                                        |
+| Timeout hook settles cleanup before the deferred deadline | Foreground phase                                    | Installed deadline observer                                             |
+| Graceful succeeds during force                            | Matching graceful token and force waiter            | Abandoned-force observer, or the deadline observer if already installed |
+| Cleanup settles after a stalled result                    | Matching stop token                                 | Deadline observer                                                       |
+| Old cleanup settles after retry/restart                   | New claim/token; old completion cannot overwrite it | Old observer may log its rejection without changing state               |
+
+One observer per phase accepts the transfer of reporting responsibility. Foreground
+catches continue to produce results and state transitions, but cannot independently
+report a hook rejection after that transfer. Timeout logs and a later hook rejection
+describe different facts; the guarantee is one report per hook rejection, not one
+log line for the entire shutdown.
+
+Operation results describe the outcome recorded by that operation, not a promise
+that live status cannot subsequently change. For example, a force hook can release
+graceful cleanup and then throw: the foreground failure result can retain its stalled
+status snapshot while late graceful completion has already reconciled the component
+to stopped by the time the caller resumes. Use `getComponentStatus()` to read current
+state. Late completion does not rewrite an already-returned result.

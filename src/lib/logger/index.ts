@@ -891,7 +891,10 @@ export class Logger extends EventEmitter {
           // Use the configured lists, not the merged/deduplicated close order.
           const logIndex = logSinks.indexOf(sink);
           const diagnosticIndex = diagnosticSinks.indexOf(sink);
-          pending.report(
+          this.handleSinkError(
+            pending,
+            'close',
+            sink,
             logIndex >= 0
               ? `Log sink #${logIndex + 1} close`
               : `Diagnostic sink #${diagnosticIndex + 1} close`,
@@ -1292,7 +1295,12 @@ export class Logger extends EventEmitter {
       }
       const pending = adoptResult(result);
       if (pending instanceof UnreadableReturn) {
-        pending.report(`Log sink #${sinkIndex + 1}`);
+        this.handleSinkError(
+          pending,
+          'write',
+          sink,
+          `Log sink #${sinkIndex + 1}`,
+        );
         continue;
       }
       void pending?.catch((error: unknown) => {
@@ -1442,6 +1450,7 @@ export class Logger extends EventEmitter {
     error: unknown,
     context: 'write' | 'close',
     sink: LogSink,
+    returnSubject?: string,
   ): void {
     // Normalized rather than trusted, for the same reason as a failing event handler: a
     // sink is user-supplied and free to throw or reject with any value, and reading
@@ -1449,8 +1458,14 @@ export class Logger extends EventEmitter {
     // it. Normalizing here also makes `LoggerDiagnostic.error` reliably an `Error`.
     const failure = toError(error);
 
+    // Routing depends on the boundary that failed, not how it failed. Invocation
+    // throws, rejected promises and unreadable returns all reach diagnostics for
+    // ordinary writes/closes. Only diagnostic delivery is terminal. Preserve the
+    // distinct return-contract wording without assuming the sink delivered first.
     const line = (): string =>
-      `Error ${context === 'write' ? 'writing to' : 'closing'} sink: ${describeError(failure)}`;
+      failure instanceof UnreadableReturn && returnSubject !== undefined
+        ? failure.describe(returnSubject)
+        : `Error ${context === 'write' ? 'writing to' : 'closing'} sink: ${describeError(failure)}`;
 
     this.reportDiagnostic(
       {
@@ -1525,12 +1540,15 @@ export class Logger extends EventEmitter {
           );
           continue;
         }
-        // The diagnostic was already delivered; identify a malformed return without
-        // repeating it. The index names the destination without reading sink getters.
+        // A returned value does not prove delivery: a lazy destination may wait
+        // until then is invoked. At this terminal boundary retain the original
+        // diagnostic as well as the secondary return failure, just as for a throw
+        // or rejection. Never emit another diagnostic from diagnostic delivery.
         const pending = adoptResult(result);
         if (pending instanceof UnreadableReturn) {
           pending.report(
             `${hasDiagnosticSinks ? 'Diagnostic' : 'Log'} sink #${sinkIndex + 1}`,
+            diagnostic.message,
           );
           continue;
         }

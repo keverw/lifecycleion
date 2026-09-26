@@ -196,9 +196,14 @@ export class UnreadableReturn extends Error {
     });
   }
 
+  /** Describe the return-contract failure without claiming the invocation threw. */
+  public describe(subject: string): string {
+    return `${subject} returned a value whose then could not be read: ${describeError(this.cause)}`;
+  }
+
   /** Shared terminal wording, built only on failure rather than for every call. */
   public report(subject: string, originalFailure?: string): void {
-    const malformed = `${subject} returned a value whose then could not be read: ${describeError(this.cause)}`;
+    const malformed = this.describe(subject);
     reportToConsole(
       originalFailure === undefined
         ? malformed
