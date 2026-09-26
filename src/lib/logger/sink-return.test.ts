@@ -303,3 +303,22 @@ test('logger owns both sink lists and mutations do not edit the caller arrays', 
   expect(logger.getDiagnosticSinks()).toEqual([diagnostic]);
   await logger.close();
 });
+
+for (const key of ['sinks', 'diagnosticSinks'] as const) {
+  test(`${key} accepts null as absent and rejects non-array input`, () => {
+    const options = (value: unknown) =>
+      ({ callProcessExit: false, [key]: value }) as ConstructorParameters<
+        typeof Logger
+      >[0];
+    const logger = new Logger(options(null));
+    expect(
+      key === 'sinks' ? logger.getSinks() : logger.getDiagnosticSinks(),
+    ).toEqual([]);
+    const sink = { write: (): void => {} };
+    for (const invalid of [new Set([sink]), { 0: sink, length: 1 }, false]) {
+      expect(() => new Logger(options(invalid))).toThrow(
+        'Logger sink lists must be arrays',
+      );
+    }
+  });
+}

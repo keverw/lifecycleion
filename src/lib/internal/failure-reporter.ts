@@ -35,23 +35,24 @@ export type ReportFailure = (error: unknown, subject: string) => void;
  * @param line   What the console rung should say. Built by the caller, since only it knows
  *               what its arguments mean. Evaluated lazily so an unset handler that
  *               succeeds costs nothing.
- * @param onSettled Called exactly once when the report is over: after a synchronous
+ * @param options Optional settlement callback and handler identity.
+ * @param options.onSettled Called exactly once when the report is over: after a synchronous
  *               handler returns or throws, after an `async` one resolves or rejects, or
  *               straight away when there is no handler. For a caller holding a re-entry
  *               guard across the report - the sinks hold one over a `'format'` failure -
  *               a boolean cleared on return was cleared before an `async` handler had
  *               done anything, and the loop it guards against resumed on the far side of
  *               the handler's first `await`.
- * @param handlerName Identifies the handler alongside the original failure when its
+ * @param options.handlerName Identifies the handler alongside the original failure when its
  *               return cannot be adopted. Delivery cannot be inferred from a return:
  *               lazy handlers may not have done any reporting yet.
  */
 export function reportThroughHandler(
   invoke: (() => unknown) | undefined,
   line: () => string,
-  onSettled?: () => void,
-  handlerName?: string,
+  options: { onSettled?: () => void; handlerName?: string } = {},
 ): void {
+  const { onSettled, handlerName } = options;
   // The line is the caller's to build, and may throw: rendered through this, a report
   // still goes out - and nothing throws, or rejects unhandled, out of the one function
   // whose contract is that reporting a failure may never raise one.
@@ -235,8 +236,7 @@ export function createFailureReporter(
       reportThroughHandler(
         () => handler(failure, subject),
         () => `${label} failed for ${subject}: ${describeError(failure)}`,
-        undefined,
-        `${label} failure handler`,
+        { handlerName: `${label} failure handler` },
       );
 
       return;

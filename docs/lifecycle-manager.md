@@ -3821,3 +3821,8 @@ such as `getValue` classify returned values so they can reject an asynchronous r
 Both paths share native own-`then` detection and thenable assimilation, including
 cross-realm promises. Their result shapes intentionally differ: awaited hooks reject
 on adoption failure, while synchronous classification identifies an unreadable return.
+
+If graceful completion wins while force shutdown is still pending, the component
+stays stopped. The force deadline is not reported as a force-hook rejection in that
+case; an actual later force rejection is reported once by its late-outcome observer.
+That observer retains the attempt token captured before force hooks run.

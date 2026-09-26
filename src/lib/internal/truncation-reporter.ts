@@ -68,8 +68,7 @@ export function createTruncationReporter(
       () => handler(info),
       () =>
         `Truncation of ${subject} (${info.reason}) could not be reported to onTruncate`,
-      undefined,
-      'onTruncate',
+      { handlerName: 'onTruncate' },
     );
   };
 }

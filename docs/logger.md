@@ -1687,7 +1687,10 @@ interface BeforeExitResult {
 
 #### Sink Error Handling
 
-Logger copies `sinks` and `diagnosticSinks` at construction. Later changes to those
+Logger copies `sinks` and `diagnosticSinks` at construction. The typed options accept
+arrays or `undefined`. For runtime compatibility, JavaScript callers passing `null`
+also get an empty list; other non-array values are rejected with a `TypeError`.
+Later changes to those
 input arrays do not change the logger; use `addSink`/`removeSink` and
 `addDiagnosticSink`/`removeDiagnosticSink`. These methods replace owned lists, so
 each log entry captures a stable destination list without copying it per entry. If a sink adds or
@@ -1707,6 +1710,14 @@ so a throwing getter or non-function cannot hide the promise's rejection.
 Thenable accessors are read once; their captured method is invoked asynchronously with
 the original receiver. Actual sink throws and asynchronous rejections retain their
 normal handling.
+
+Malformed sink returns use the terminal console rather than generating a new
+logger diagnostic. The write invocation already returned; forwarding another entry
+through sinks can repeat delivered output, and diagnostic-delivery failures must
+terminate to prevent recursive reporting. Callback helpers have a different role:
+their configured error channel owns callback failures, so they route malformed
+returns through that channel. A malformed return from that error handler itself also
+terminates at the console.
 
 Callback helpers (`runCallbackSafely`, `safeHandleCallback`, and
 `safeHandleCallbackAndWait`) report unreadable returns through the configured

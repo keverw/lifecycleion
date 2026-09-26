@@ -7697,6 +7697,11 @@ export class LifecycleManager
       this.issueStopAttemptToken(name);
     }
 
+    // Bind the late observer to this attempt before any overridable hook or log
+    // can run. Never borrow a newer run's token from the registry at timeout time.
+    const forceAttemptToken =
+      this.componentStopAttemptTokens.get(name) ?? ulid();
+
     // Claim before calling this overridable hook, just as in the graceful phase.
     // Property-read failures above still leave the unexpected-stop handler intact.
     this.clearUnexpectedStopHandler(component, 'force stop');
@@ -7767,6 +7772,7 @@ export class LifecycleManager
     const { promise: stoppedDuringForcePromise, cleanup: cleanupForceWaiter } =
       this.createPendingForceStopWaiter(name);
     let timeoutHandle: NodeJS.Timeout | undefined;
+    let isForceOutcomeObservedAfterTimeout = false;
     const reportFailureAfterGracefulStop = (error: unknown): void => {
       this.logger
         .entity(name)
@@ -7804,8 +7810,7 @@ export class LifecycleManager
 
             // Detect if onShutdownForce() eventually resolves after the timeout
             // so the stall can be cleared automatically, same as stop().
-            const forceAttemptToken =
-              this.componentStopAttemptTokens.get(name) ?? ulid();
+            isForceOutcomeObservedAfterTimeout = true;
             this.observeLateStopResolution(
               forcePromise,
               name,
@@ -7836,7 +7841,11 @@ export class LifecycleManager
       ) {
         // Graceful completion won. Report abandoned cleanup failures without
         // changing this or a subsequent run's state.
-        void forcePromise.catch(reportFailureAfterGracefulStop);
+        // A fired deadline already installed the late-outcome reporter. Keeping
+        // both would report the same subsequent hook rejection twice.
+        if (!isForceOutcomeObservedAfterTimeout) {
+          void forcePromise.catch(reportFailureAfterGracefulStop);
+        }
         return {
           success: true,
           componentName: name,
@@ -7867,9 +7876,15 @@ export class LifecycleManager
         (this.componentStates.get(name) === 'stopped' &&
           !this.runningComponents.has(name))
       ) {
-        // The force rejection can win Promise.race in the same turn that graceful
-        // completion marks the component stopped. It still needs to be reported.
-        reportFailureAfterGracefulStop(error);
+        // A real force rejection can race graceful completion, but this attempt's
+        // deadline is not a hook failure. Once the deadline observer is installed,
+        // it alone reports any real late rejection, including a same-turn rejection.
+        if (
+          error !== forceTimeoutError &&
+          !isForceOutcomeObservedAfterTimeout
+        ) {
+          reportFailureAfterGracefulStop(error);
+        }
         return {
           success: true,
           componentName: name,

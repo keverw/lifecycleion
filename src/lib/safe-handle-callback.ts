@@ -232,8 +232,7 @@ function reportToOnError(
     () =>
       `Error handler for ${callbackName} failed while reporting a failure${DOUBLE_EOL}` +
       `Original failure:${DOUBLE_EOL}${errorToString(error)}`,
-    undefined,
-    `onError for ${callbackName}`,
+    { handlerName: `onError for ${callbackName}` },
   );
 }
 

@@ -2708,8 +2708,7 @@ export class NamedPipeSink implements LogSink {
               disposition: options?.disposition ?? 'no_entry',
             }),
       () => `NamedPipeSink error (${kind}): ${describeError(failure)}`,
-      options?.onReported,
-      'NamedPipeSink onError',
+      { onSettled: options?.onReported, handlerName: 'NamedPipeSink onError' },
     );
   }
 

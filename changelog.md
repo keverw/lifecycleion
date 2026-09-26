@@ -211,6 +211,14 @@
 
 ## Unreleased
 
+- A force deadline superseded by late graceful completion is no longer reported as
+  a force-hook failure. The late force observer reports a subsequent rejection once,
+  even when graceful completion wins after the force deadline fires. Late observers
+  capture their force-attempt token before caller hooks run.
+- Logger treats null sink lists as absent and rejects other non-array values with
+  a clear TypeError, rather than silently dropping iterable destinations. The shared
+  failure reporter now takes named options for settlement and handler identity.
+
 - Return classification now observes cross-realm native promises with throwing or
   non-callable own `then` properties, using the same intrinsic adoption boundary as
   awaited component hooks. Malformed failure-handler returns preserve the original

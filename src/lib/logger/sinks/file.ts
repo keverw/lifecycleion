@@ -394,8 +394,7 @@ export class FileSink implements LogSink {
                   disposition: 'lost',
                 }),
           () => describeError(failure),
-          undefined,
-          'FileSink failure handler',
+          { handlerName: 'FileSink failure handler' },
         );
       }
 
@@ -650,8 +649,7 @@ export class FileSink implements LogSink {
                 disposition: 'no_entry',
               }),
         () => describeError(failure),
-        undefined,
-        'FileSink failure handler',
+        { handlerName: 'FileSink failure handler' },
       );
     }
   }
@@ -693,8 +691,7 @@ export class FileSink implements LogSink {
               disposition: 'no_entry',
             }),
       () => describeError(failure),
-      undefined,
-      'FileSink failure handler',
+      { handlerName: 'FileSink failure handler' },
     );
   }
 
@@ -827,8 +824,7 @@ export class FileSink implements LogSink {
               disposition: 'no_entry',
             }),
       () => describeError(failure),
-      undefined,
-      'FileSink failure handler',
+      { handlerName: 'FileSink failure handler' },
     );
   }
 
@@ -876,8 +872,7 @@ export class FileSink implements LogSink {
               disposition: 'lost',
             }),
       () => describeError(failure),
-      undefined,
-      'FileSink failure handler',
+      { handlerName: 'FileSink failure handler' },
     );
   }
 
@@ -943,8 +938,7 @@ export class FileSink implements LogSink {
                 disposition: 'retrying',
               }),
         () => describeError(failure),
-        undefined,
-        'FileSink failure handler',
+        { handlerName: 'FileSink failure handler' },
       );
     }
   }
@@ -1057,8 +1051,10 @@ export class FileSink implements LogSink {
                         }),
                   () =>
                     `FileSink error writing to ${this.currentLogFile ?? this.logDir}: ${describeError(err)}`,
-                  onReported,
-                  'FileSink failure handler',
+                  {
+                    onSettled: onReported,
+                    handlerName: 'FileSink failure handler',
+                  },
                 );
 
               if (kind === 'format') {
@@ -1297,8 +1293,7 @@ export class FileSink implements LogSink {
               disposition: 'lost',
             }),
       () => describeError(failure),
-      undefined,
-      'FileSink failure handler',
+      { handlerName: 'FileSink failure handler' },
     );
   }
 
@@ -1644,8 +1639,7 @@ export class FileSink implements LogSink {
                   disposition: 'no_entry',
                 }),
           () => describeError(failure),
-          undefined,
-          'FileSink failure handler',
+          { handlerName: 'FileSink failure handler' },
         );
       });
 
@@ -1863,8 +1857,7 @@ export class FileSink implements LogSink {
                   disposition: 'no_entry',
                 }),
           () => describeError(failure),
-          undefined,
-          'FileSink failure handler',
+          { handlerName: 'FileSink failure handler' },
         );
       }
 
@@ -1940,8 +1933,7 @@ export class FileSink implements LogSink {
               disposition: 'no_entry',
             }),
       () => describeError(failure),
-      undefined,
-      'FileSink failure handler',
+      { handlerName: 'FileSink failure handler' },
     );
 
     return candidate;
@@ -1978,8 +1970,7 @@ export class FileSink implements LogSink {
               }),
         () =>
           `FileSink error rendering an entry for ${this.currentLogFile ?? this.logDir}: ${describeError(failure)}`,
-        onReported,
-        'FileSink failure handler',
+        { onSettled: onReported, handlerName: 'FileSink failure handler' },
       );
     });
   }

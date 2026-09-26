@@ -181,9 +181,11 @@ describe('reportThroughHandler with a line that throws', () => {
       reportThroughHandler(
         () => undefined,
         () => 'a report',
-        () => {
-          calls++;
-          throw new Error('settle exploded');
+        {
+          onSettled: () => {
+            calls++;
+            throw new Error('settle exploded');
+          },
         },
       );
     }).not.toThrow();
@@ -224,8 +226,10 @@ test('an anonymous failure handler with an unreadable return retains the report 
         },
       }),
       () => 'FileSink /test/output failed writing original entry',
-      () => {
-        settlements++;
+      {
+        onSettled: () => {
+          settlements++;
+        },
       },
     );
     expect(settlements).toBe(1);
@@ -276,8 +280,7 @@ test('a lazy named handler with an unreadable then retains the undelivered failu
           },
         ),
       () => 'original disk-write failure',
-      undefined,
-      'FileSink onError',
+      { handlerName: 'FileSink onError' },
     );
     expect(deliveries).toBe(0);
     expect(captured).toHaveLength(1);

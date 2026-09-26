@@ -1575,12 +1575,19 @@ export * from './sinks';
 export type { LoggerService } from './logger-service';
 
 /** Own the list by numeric membership; caller iterators do not select destinations. */
-function copySinkList(source: readonly LogSink[] | undefined): LogSink[] {
+function copySinkList(
+  source: readonly LogSink[] | null | undefined,
+): LogSink[] {
+  if (source === null || source === undefined) {
+    return [];
+  }
+  const entries = source;
+  if (!Array.isArray(source)) {
+    throw new TypeError('Logger sink lists must be arrays');
+  }
   const sinks: LogSink[] = [];
-  if (source !== undefined) {
-    for (let index = 0, length = source.length; index < length; index++) {
-      sinks.push(source[index]);
-    }
+  for (let index = 0, length = source.length; index < length; index++) {
+    sinks.push(entries[index]);
   }
   return sinks;
 }
