@@ -1274,8 +1274,21 @@ export class Logger extends EventEmitter {
 
     // Write to all sinks. Classify return values separately: a sink that returned
     // successfully did not throw just because its result has a broken then getter.
-    for (let sinkIndex = 0; sinkIndex < this.sinks.length; sinkIndex++) {
-      const sink = this.sinks[sinkIndex];
+    // A write may add or remove sinks synchronously. Each entry belongs to the
+    // destinations selected before delivery; mutations affect subsequent entries.
+    const configuredSinks = this.sinks;
+    const sinks: LogSink[] = [];
+    // Preserve numeric membership even if the supplied array overrides its iterator.
+    for (
+      let index = 0, length = configuredSinks.length;
+      index < length;
+      index++
+    ) {
+      sinks.push(configuredSinks[index]);
+    }
+    // eslint-disable-next-line unicorn/no-for-loop
+    for (let sinkIndex = 0; sinkIndex < sinks.length; sinkIndex++) {
+      const sink = sinks[sinkIndex];
       let result: unknown;
       try {
         result = sink.write(entry);
@@ -1473,12 +1486,9 @@ export class Logger extends EventEmitter {
     diagnostic: LoggerDiagnostic,
     shouldDeliverToSinks = true,
   ): void {
+    const hasDiagnosticSinks = this.diagnosticSinks.length > 0;
     const destinations = shouldDeliverToSinks
-      ? [
-          ...(this.diagnosticSinks.length > 0
-            ? this.diagnosticSinks
-            : this.sinks),
-        ]
+      ? [...(hasDiagnosticSinks ? this.diagnosticSinks : this.sinks)]
       : [];
 
     void Promise.resolve().then(() => {
@@ -1523,7 +1533,9 @@ export class Logger extends EventEmitter {
         // repeating it. The index names the destination without reading sink getters.
         const pending = adoptResult(result);
         if (pending instanceof UnreadableReturn) {
-          pending.report(`Diagnostic sink #${sinkIndex + 1}`);
+          pending.report(
+            `${hasDiagnosticSinks ? 'Diagnostic' : 'Log'} sink #${sinkIndex + 1}`,
+          );
           continue;
         }
         void pending?.catch((deliveryError: unknown) => {

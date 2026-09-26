@@ -1002,13 +1002,16 @@ returns `target_not_found`, while a duplicate reserved name still returns
 `duplicate_name` with `registrationIndexBefore: null`: the index describes the
 committed registry. Reservation prevents conflicts but does not make the component a
 published target. Placement next to a committed target stays adjacent in the reserved
-order even when another registration is pending. Registration results and events capture startup order and manual-position metadata
-from the committed registry at publication, before queued listeners run. The order
-includes components committed by hooks and excludes enclosing provisional registrations.
-If dependency reads collected at different times form a cycle only in the report,
-registration remains successful and reports `startupOrder: []` with `manualPositionRespected: undefined` (unknown). It does not re-enter dependency getters after publication. Committed ordering is always recomputed from validated reads, even when hooks leave
-the registry unchanged: filtering a provisional order can preserve constraints from
-uncommitted components and produce a different ordering.
+order even when another registration is pending. Registration results and events capture
+startup order and manual-position metadata from the committed registry at publication,
+before queued listeners run. The order includes components committed by hooks and
+excludes enclosing provisional registrations. If a committed dependency read is
+unexpectedly unavailable, or reads collected at different times form a cycle only in the
+report, registration remains successful and reports `startupOrder: []` with
+`manualPositionRespected: undefined` (unknown). It does not re-enter dependency getters
+after publication. Committed ordering is always recomputed from validated reads, even
+when hooks leave the registry unchanged: filtering a provisional order can preserve
+constraints from uncommitted components and produce a different ordering.
 
 Successful hooks publish the registration before queued notifications are delivered.
 Lifecycle state maps are written only after the hooks and commit checks succeed.

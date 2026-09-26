@@ -211,6 +211,13 @@
 
 ## Unreleased
 
+- Log entries snapshot sink destinations so a write that adds or removes sinks cannot
+  skip or unexpectedly redirect the current entry. Diagnostic fallback reports name
+  the log-sink list they actually use. Registration reports mark ordering unavailable
+  if committed dependency metadata is unexpectedly missing instead of inventing an
+  empty dependency list. Late lifecycle completion monitors reuse the already-adopted
+  promise supplied by their callers.
+
 - Registration reports recompute startup order from committed components, using
   validated dependency reads without calling getters again; pending entries cannot
   distort reported ordering. Retry operations, advisory upload outcomes, getValue

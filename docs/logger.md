@@ -1687,13 +1687,21 @@ interface BeforeExitResult {
 
 #### Sink Error Handling
 
+Each log entry snapshots its sink destinations before delivery. If a sink adds or
+removes destinations while handling that entry, the change affects subsequent entries;
+the current entry is delivered once to each destination in its original snapshot.
+
 A sink that returns successfully but whose return value has a throwing `then` getter
-produces a terminal console report identifying the unreadable return value. This is
-not reported as a sink invocation failure, and an already-delivered diagnostic is not
+produces a terminal console report identifying the unreadable return value. This is not
+reported as a sink invocation failure, and an already-delivered diagnostic is not
 repeated. The report identifies the sink by its one-based position in the applicable
-sink list. Close reports use the original log or diagnostic list, preferring the log
-list for a sink present in both. Sink close methods are read once and their results use the same guarded
-adoption, including native promises with overwritten own `then` properties. Thenable accessors are read once; their captured method is invoked asynchronously with the original receiver. Actual sink throws and asynchronous rejections retain their normal handling.
+sink list. Diagnostics that fall back to ordinary log sinks retain the Log sink label.
+Close reports use the original log or diagnostic list, preferring the log list for a
+sink present in both. Sink close methods are read once and their results use the same
+guarded adoption, including native promises with overwritten own `then` properties.
+Thenable accessors are read once; their captured method is invoked asynchronously with
+the original receiver. Actual sink throws and asynchronous rejections retain their
+normal handling.
 
 Callback helpers (`runCallbackSafely`, `safeHandleCallback`, and
 `safeHandleCallbackAndWait`) report unreadable returns through the configured

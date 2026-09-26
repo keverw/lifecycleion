@@ -4526,22 +4526,30 @@ export class LifecycleManager
             // The pre-hook order was only the reserved-entry cycle check; hooks may
             // have committed more components. Merge their validated reads into this
             // report snapshot without invoking more caller code during publication.
-            const reportReads = new Map(
-              this.components.map((entry) => [
-                entry,
-                entry === component
-                  ? candidateRead
-                  : (this.currentReadOf(entry, dependencySnapshot) ?? {
-                      dependencies: [],
-                    }),
-              ]),
-            );
             try {
-              startupOrder = this.getStartupOrderInternal(
-                this.components,
-                undefined,
-                reportReads,
-              );
+              const reportReads = new Map<BaseComponent, DependencyRead>();
+              let hasCompleteReportReads = true;
+              for (const entry of this.components) {
+                const read =
+                  entry === component
+                    ? candidateRead
+                    : this.currentReadOf(entry, dependencySnapshot);
+                // Every committed entry receives metadata before publication. If
+                // this invariant ever breaks, the report is unavailable: inventing
+                // an empty list would report a plausible but unjustified order.
+                if (read === undefined) {
+                  hasCompleteReportReads = false;
+                  break;
+                }
+                reportReads.set(entry, read);
+              }
+              startupOrder = hasCompleteReportReads
+                ? this.getStartupOrderInternal(
+                    this.components,
+                    undefined,
+                    reportReads,
+                  )
+                : [];
             } catch {
               // This diagnostic cannot undo publication, regardless of why its
               // order is unavailable. Snapshots observed at different times can disagree even though
@@ -5833,13 +5841,14 @@ export class LifecycleManager
    * chain should not have to rely on that.
    */
   private observeLateStopResolution(
-    promise: unknown,
+    promise: Promise<unknown>,
     name: string,
     stopAttemptToken: string,
     source: 'graceful' | 'force',
     failureMessage: string,
   ): void {
-    adoptPromise(promise)
+    // Both callers pass the already-adopted graceful/force hook promise.
+    promise
       .then(
         () => this.handleLateStopResolution(name, stopAttemptToken, source),
         (error: unknown) => {
@@ -8263,14 +8272,15 @@ export class LifecycleManager
   private monitorLateStartupCompletion(
     name: string,
     component: BaseComponent,
-    startPromise: Promise<void> | void,
+    startPromise: Promise<void>,
     startAttemptToken: string,
   ): void {
     this.logger
       .entity(name)
       .warn('Startup timed out, stopping component if startup completes later');
 
-    adoptPromise(startPromise)
+    // Both callers pass the same adopted promise used by the startup race.
+    startPromise
       .then(
         async () => {
           // An abort hook can settle start() inside the timeout callback. Let the

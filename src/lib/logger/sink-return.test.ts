@@ -204,3 +204,66 @@ test('a sink thenable is adopted from one accessor read without a false sink fai
     output.mockRestore();
   }
 });
+
+test('diagnostic fallback identifies the original log sink list', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  const logger = new Logger({
+    callProcessExit: false,
+    sinks: [
+      {
+        write: () => {
+          throw new Error('write failed');
+        },
+        writeDiagnostic: () =>
+          ({
+            get then(): never {
+              throw new Error('return failed');
+            },
+          }) as unknown as Promise<void>,
+      },
+    ],
+  });
+  try {
+    logger.info('entry');
+    await sleep(0);
+    expect(output).toHaveBeenCalledTimes(1);
+    expect(String(output.mock.calls[0]?.[0])).toContain('Log sink #1');
+    expect(String(output.mock.calls[0]?.[0])).not.toContain('Diagnostic sink');
+  } finally {
+    output.mockRestore();
+  }
+});
+
+test('a write uses its initial sink snapshot when sinks remove and add destinations', () => {
+  const deliveries: string[] = [];
+  const configuredSinks: { write: () => void }[] = [];
+  // Numeric membership, not a caller-overridden iterator, defines destinations.
+  Object.defineProperty(configuredSinks, Symbol.iterator, {
+    value: () => [].values(),
+  });
+  const logger = new Logger({ callProcessExit: false, sinks: configuredSinks });
+  const added = {
+    write: () => {
+      deliveries.push('added');
+    },
+  };
+  const first = {
+    write: () => {
+      deliveries.push('first');
+      logger.removeSink(first);
+      logger.addSink(added);
+    },
+  };
+  const second = {
+    write: () => {
+      deliveries.push('second');
+    },
+  };
+  logger.addSink(first);
+  logger.addSink(second);
+  logger.info('initial');
+  expect(deliveries).toEqual(['first', 'second']);
+  deliveries.length = 0;
+  logger.info('next');
+  expect(deliveries).toEqual(['second', 'added']);
+});
