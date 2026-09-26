@@ -8618,8 +8618,29 @@ describe('LifecycleManager - Signal Integration', () => {
         },
       });
 
+      expect(lifecycle.getShutdownEscalationStatus()).toMatchObject({
+        forceAfterCount: 3,
+        withinMS: 2000,
+        armedAfterFailureMS: 6000,
+      });
+
+      // This tests policy normalization, not timer scheduling. A 100ms stop and
+      // 10ms sleeps raced on loaded macOS runners: shutdown could finish before
+      // the third repeated request. Hold cleanup explicitly and advance only the
+      // policy clock, so real scheduler delays cannot change which cycle we test.
+      const stopEntered = Promise.withResolvers<void>();
+      const releaseStop = Promise.withResolvers<void>();
+      class GatedStop extends BaseComponent {
+        // Bypass the constructor's minimum: this test owns completion explicitly.
+        public override readonly shutdownGracefulTimeoutMS = 0;
+        public start(): void {}
+        public stop(): Promise<void> {
+          stopEntered.resolve();
+          return releaseStop.promise;
+        }
+      }
       await lifecycle.registerComponent(
-        new SlowStopComponent(logger, 'slow-stop', 100),
+        new GatedStop(logger, { name: 'gated-stop' }),
       );
       await lifecycle.startAllComponents();
 
@@ -8628,28 +8649,35 @@ describe('LifecycleManager - Signal Integration', () => {
           resolve();
         });
       });
-
       (lifecycle as any).handleShutdownRequest('SIGINT');
-      await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
-      await sleep(10);
-      expect(forceShutdownCalls).toEqual([]);
+      await stopEntered.promise;
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
-      await sleep(10);
-      expect(forceShutdownCalls).toEqual([]);
+      // Do not install a global clock mock until stop() has actually begun.
+      let currentTime = Date.now();
+      const clock = spyOn(Date, 'now').mockImplementation(() => currentTime);
+      try {
+        currentTime += 10;
+        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        expect(forceShutdownCalls).toEqual([]);
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+        currentTime += 10;
+        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        expect(forceShutdownCalls).toEqual([]);
 
-      await shutdownCompleted;
-
-      expect(forceShutdownCalls).toEqual([
-        {
-          requestCount: 3,
-          firstMethod: 'SIGINT',
-          latestMethod: 'SIGTERM',
-        },
-      ]);
+        currentTime += 10;
+        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        expect(forceShutdownCalls).toEqual([
+          {
+            requestCount: 3,
+            firstMethod: 'SIGINT',
+            latestMethod: 'SIGTERM',
+          },
+        ]);
+      } finally {
+        releaseStop.resolve();
+        clock.mockRestore();
+        await shutdownCompleted;
+      }
     });
 
     test('should restart only the post-start escalation window when repeated requests are too far apart', async () => {
