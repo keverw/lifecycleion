@@ -46,11 +46,14 @@ for (const shouldDelayNotification of [false, true]) {
         entry.message.startsWith('Force shutdown failed'),
       );
     expect(failures()).toHaveLength(0);
+    // The abandoned classification must survive a new run replacing stopped state.
+    expect((await manager.startComponent('a')).success).toBe(true);
     force.reject(new Error('real late force rejection'));
     await sleep(10);
     expect(failures()).toHaveLength(1);
+    expect(failures()[0].type).toBe('warn');
     expect(failures()[0].message).toBe(
-      'Force shutdown failed after deadline fired',
+      'Force shutdown failed after graceful stop completed',
     );
   });
 }
@@ -124,3 +127,58 @@ test('a component-created stop timeout error is a hook failure, not this attempt
   expect(result.code).toBe('unknown_error');
   expect(result.error).toBe(failure);
 });
+
+test('same-turn graceful completion and force rejection use abandoned severity after a deadline', async () => {
+  const { logger, manager } = setup();
+  const sink = logger.getSinks()[0] as ArraySink;
+  const graceful = deferred();
+  const force = deferred();
+  const component = new Plain(logger, 'a');
+  component.stop = () => graceful.promise;
+  Object.assign(component, {
+    shutdownGracefulTimeoutMS: 5,
+    shutdownForceTimeoutMS: 5,
+    onShutdownForce: () => force.promise,
+    onShutdownForceAborted: () => {
+      graceful.resolve();
+      force.reject(new Error('abandoned cleanup'));
+    },
+  });
+  await manager.registerComponent(component);
+  await manager.startComponent('a');
+  const result = await manager.stopComponent('a');
+  await sleep(0);
+  expect(result.success).toBe(true);
+  expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+  const reports = sink.logs.filter((entry) =>
+    entry.message.startsWith('Force shutdown failed'),
+  );
+  expect(reports).toHaveLength(1);
+  expect(reports[0].type).toBe('warn');
+  expect(reports[0].message).toBe(
+    'Force shutdown failed after graceful stop completed',
+  );
+});
+
+for (const isForceImmediate of [false, true]) {
+  test(`undefined hook rejection before any deadline is not a timeout (force: ${isForceImmediate})`, async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    // Deliberately violate the hook error contract to exercise identity checks
+    // before the lazy deadline error exists.
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+    const reject = (): Promise<void> => Promise.reject();
+    component.stop = reject;
+    Object.assign(component, {
+      onShutdownForce: isForceImmediate ? reject : undefined,
+    });
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+    const result = await manager.stopComponent('a', {
+      forceImmediate: isForceImmediate,
+    });
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('unknown_error');
+    expect(result.status?.stallInfo?.reason).toBe('error');
+  });
+}

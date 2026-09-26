@@ -3865,7 +3865,20 @@ A fired deadline and a timeout result are distinct. An abort hook can cause clea
 to reject before the deferred timeout wins; that rejection remains `unknown_error`,
 with stall reason `error` (or `both` after a prior graceful timeout). Observed
 rejections say “after deadline fired” rather than implying the operation returned a
-timeout. Deadline-observed force-hook rejection reports use error severity;
-graceful-hook rejection reports use warning severity. This also applies to later
-rejections after the
-foreground result, without changing an already-recorded result or reconciled state.
+timeout. Deadline-observed force-hook rejections use error severity while the
+force attempt is failing; if graceful completion makes the operation succeed, the
+remaining force work is abandoned and its rejection uses warning severity and the
+“after graceful stop completed” message. That outcome remains fixed after a restart.
+Graceful-hook rejection reports use warning severity. This also applies to later
+rejections after the foreground result, without changing an already-recorded result or reconciled state.
+
+Shutdown warning selection reads each `onShutdownWarning` once and captures callable
+values with their component receiver. Both timed and fire-and-forget delivery invoke
+that captured hook; changing a getter's next return cannot create a completed warning
+for a hook that was never called. Non-callable values are not warning targets.
+
+A no-force-handler stalled retry does not require a stop token, because it has no
+force promise to observe. This also permits normal retry reporting after an internal
+crash before token issuance. Handler attempts still require the captured token.
+Deadline error objects are created only when their timers fire; rejection identity,
+including an undefined rejection before the deadline, remains distinct from timeout.

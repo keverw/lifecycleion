@@ -211,6 +211,14 @@
 
 ## Unreleased
 
+- Shutdown warnings capture callable hooks once and preserve their receiver in both
+  timed and fire-and-forget delivery. No-handler stalled retries no longer require an
+  unused stop token, including recovery from a crash before token issuance.
+- Force rejection severity follows the operation outcome: a failed attempt remains an
+  error, while force work abandoned after successful graceful completion reports a
+  warning even if the deadline already fired. Reporting remains single-owner across
+  same-turn settlement and restart. Deadline errors are now allocated only on expiry.
+
 - Deadline-observed force-hook rejections now log at error severity, including
   abort-triggered rejections that beat the deferred timeout. Graceful and force
   messages say “after deadline fired” so they do not imply a timeout result when

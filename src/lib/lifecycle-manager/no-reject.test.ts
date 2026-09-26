@@ -1921,3 +1921,37 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(result.code).toBe('error');
   });
 });
+
+test('a stalled retry without a force handler does not require a token from a crashed stop', async () => {
+  const { logger, manager } = setup();
+  const component = new Plain(logger, 'a');
+  Object.assign(component, { onShutdownForce: undefined });
+  await manager.registerComponent(component);
+  await manager.startComponent('a');
+  // Simulate the same pre-token internal crash as the safety-net coverage above.
+  // No ordinary path is known to throw here; recovery must still support its stall.
+  const internals = manager as unknown as {
+    issueStopAttemptToken: (name: string) => string;
+  };
+  const issueToken = internals.issueStopAttemptToken;
+  const { reports, release } = claimReports();
+  try {
+    internals.issueStopAttemptToken = () => {
+      throw new Error('token issuance failed');
+    };
+    expect((await manager.stopComponent('a')).code).toBe('unknown_error');
+    internals.issueStopAttemptToken = issueToken;
+    reports.length = 0;
+    for (let retry = 0; retry < 2; retry++) {
+      const result = await manager.stopAllComponents({ retryStalled: true });
+      expect(result.success).toBe(false);
+      expect(manager.getComponentStatus('a')?.stallInfo?.phase).toBe(
+        'graceful',
+      );
+      expect(reports).toHaveLength(0);
+    }
+  } finally {
+    internals.issueStopAttemptToken = issueToken;
+    release();
+  }
+});

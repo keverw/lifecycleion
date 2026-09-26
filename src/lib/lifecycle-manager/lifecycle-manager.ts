@@ -5857,7 +5857,11 @@ export class LifecycleManager
     observe: (
       promise: Promise<unknown>,
       message: string,
-      options?: { onResolved?: () => void; level?: 'warn' | 'error' },
+      options?: {
+        onResolved?: () => void;
+        level?: 'warn' | 'error';
+        getReport?: () => { message: string; level: 'warn' | 'error' };
+      },
     ) => void;
   } {
     let isObserved = false;
@@ -5885,9 +5889,14 @@ export class LifecycleManager
         // Already-adopted hook promises only. One chain owns both late success
         // reconciliation and rejection reporting, even when force is abandoned.
         promise
-          .then(options?.onResolved, (error: unknown) =>
-            report(error, message, options?.level),
-          )
+          .then(options?.onResolved, (error: unknown) => {
+            const selected = options?.getReport?.();
+            report(
+              error,
+              selected?.message ?? message,
+              selected?.level ?? options?.level,
+            );
+          })
           .catch((error: unknown) => {
             report(error, 'Late stop resolution failed');
           })
@@ -7365,8 +7374,11 @@ export class LifecycleManager
     }
 
     // Only target running components that implement onShutdownWarning().
-    const warningTargets: Array<{ name: string; component: BaseComponent }> =
-      [];
+    const warningTargets: Array<{
+      name: string;
+      component: BaseComponent;
+      hook: () => unknown;
+    }> = [];
 
     for (const name of componentNames) {
       const component = this.getComponent(name);
@@ -7375,12 +7387,13 @@ export class LifecycleManager
       // Contained per component: the read runs the component's code, and a getter that
       // threw here used to end the whole pass as `unknown_error` with every component
       // still running. That component just gets no warning; its stop still runs.
-      let hasWarningHook = false;
+      let warningHook: unknown;
 
       try {
-        hasWarningHook =
-          component !== undefined &&
-          Boolean(Reflect.get(component, 'onShutdownWarning'));
+        warningHook =
+          component === undefined
+            ? undefined
+            : Reflect.get(component, 'onShutdownWarning');
       } catch (error) {
         reportCallbackError(
           `lifecycle-manager shutdown warning for ${name}`,
@@ -7392,11 +7405,15 @@ export class LifecycleManager
       // be stopping. Do not run its warning hook alongside stop()/onShutdownForce().
       if (
         component !== undefined &&
-        hasWarningHook &&
+        typeof warningHook === 'function' &&
         state !== 'stopping' &&
         state !== 'force-stopping'
       ) {
-        warningTargets.push({ name, component });
+        warningTargets.push({
+          name,
+          component,
+          hook: warningHook as () => unknown,
+        });
       }
     }
 
@@ -7409,10 +7426,10 @@ export class LifecycleManager
 
     if (timeoutMS === 0) {
       // Fire-and-forget: broadcast warnings without waiting for completion
-      for (const { name, component } of warningTargets) {
+      for (const { name, component, hook } of warningTargets) {
         this.lifecycleEvents.componentShutdownWarning(name);
         Promise.resolve()
-          .then(() => adoptPromise(component.onShutdownWarning?.()))
+          .then(() => adoptPromise(Reflect.apply(hook, component, [])))
           .then(() => {
             this.lifecycleEvents.componentShutdownWarningCompleted(name);
           })
@@ -7448,12 +7465,12 @@ export class LifecycleManager
     const statuses = new Map<string, 'pending' | 'resolved' | 'rejected'>();
     const warningPromises: Promise<void>[] = [];
 
-    for (const { name, component } of warningTargets) {
+    for (const { name, component, hook } of warningTargets) {
       statuses.set(name, 'pending');
       this.lifecycleEvents.componentShutdownWarning(name);
 
       const warningPromise = Promise.resolve().then(() =>
-        adoptPromise(component.onShutdownWarning?.()),
+        adoptPromise(Reflect.apply(hook, component, [])),
       );
 
       warningPromises.push(
@@ -7561,10 +7578,7 @@ export class LifecycleManager
     const stopAttemptToken = this.issueStopAttemptToken(name);
     // Only this attempt's deadline is a timeout. A hook may reject with the same
     // exported error class and component name for an unrelated reason.
-    const gracefulTimeoutError = new ComponentStopTimeoutError({
-      componentName: name,
-      timeoutMS,
-    });
+    let gracefulTimeoutError: ComponentStopTimeoutError | undefined;
     const outcomeObserver = this.createStopPhaseObserver(name);
 
     let timeoutHandle: NodeJS.Timeout | undefined;
@@ -7577,6 +7591,10 @@ export class LifecycleManager
       if (toTimerDelayMS(timeoutMS) > 0) {
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutHandle = setTimeout(() => {
+            gracefulTimeoutError = new ComponentStopTimeoutError({
+              componentName: name,
+              timeoutMS,
+            });
             this.invokeAbortHook(
               component,
               onGracefulStopTimeout,
@@ -7635,7 +7653,10 @@ export class LifecycleManager
       this.componentErrors.set(name, err);
 
       // Check if it was a timeout
-      if (error === gracefulTimeoutError) {
+      if (
+        gracefulTimeoutError !== undefined &&
+        error === gracefulTimeoutError
+      ) {
         this.logger
           .entity(name)
           .warn(LIFECYCLE_MANAGER_MESSAGE_GRACEFUL_SHUTDOWN_TIMED_OUT);
@@ -7734,13 +7755,8 @@ export class LifecycleManager
         ? this.issueStopAttemptToken(name)
         : this.componentStopAttemptTokens.get(name);
 
-    // Bind the late observer before any overridable hook or log can run. Every
-    // continuing attempt already owns a token; inventing an unrecorded fallback
-    // would silently prevent its late completion from clearing the stall.
-    if (forceAttemptToken === undefined) {
-      throw new Error('Force stop attempt is missing its stop token');
-    }
-
+    // Capture before caller hooks/logs; require the token only below, where a
+    // force handler actually runs. A no-handler retry has no promise to observe.
     // Claim before calling this overridable hook, just as in the graceful phase.
     // Property-read failures above still leave the unexpected-stop handler intact.
     this.clearUnexpectedStopHandler(component, 'force stop');
@@ -7808,18 +7824,31 @@ export class LifecycleManager
       };
     }
 
+    // A no-handler retry never observes a hook promise and needs no token.
+    // A crash before token issuance can legitimately leave that recoverable stall.
+    if (forceAttemptToken === undefined) {
+      throw new Error('Force stop attempt is missing its stop token');
+    }
+
     const { promise: stoppedDuringForcePromise, cleanup: cleanupForceWaiter } =
       this.createPendingForceStopWaiter(name);
     let timeoutHandle: NodeJS.Timeout | undefined;
     const outcomeObserver = this.createStopPhaseObserver(name);
     const abandonedForceMessage =
       'Force shutdown failed after graceful stop completed';
+    // Severity follows the recorded outcome, not whether the deadline fired.
+    // Once a failed foreground returns, its released claim alone must not make
+    // that real failure look abandoned. Pending attempts may already have lost
+    // ownership to late graceful completion before their continuation resumes.
+    let forceOutcome: 'pending' | 'failed' | 'abandoned' = 'pending';
+    const isSuperseded = (): boolean =>
+      this.isForceAttemptSuperseded(name, component, claim) ||
+      (this.componentStates.get(name) === 'stopped' &&
+        !this.runningComponents.has(name));
 
     // This attempt's own timeout rejection, so the `catch` can tell it apart from
     // anything `onShutdownForce()` rejects with.
-    const forceTimeoutError = new Error(
-      LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
-    );
+    let forceTimeoutError: Error | undefined;
 
     try {
       // The value read and checked above, not a second read.
@@ -7834,6 +7863,9 @@ export class LifecycleManager
       if (toTimerDelayMS(timeoutMS) > 0) {
         const timeoutPromise = new Promise<never>((_, reject) => {
           timeoutHandle = setTimeout(() => {
+            forceTimeoutError = new Error(
+              LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
+            );
             this.invokeAbortHook(
               component,
               onShutdownForceAborted,
@@ -7847,7 +7879,14 @@ export class LifecycleManager
               forcePromise,
               'Force shutdown failed after deadline fired',
               {
-                level: 'error',
+                getReport: () =>
+                  forceOutcome === 'abandoned' ||
+                  (forceOutcome === 'pending' && isSuperseded())
+                    ? { message: abandonedForceMessage, level: 'warn' }
+                    : {
+                        message: 'Force shutdown failed after deadline fired',
+                        level: 'error',
+                      },
                 onResolved: () =>
                   this.handleLateStopResolution(
                     name,
@@ -7872,11 +7911,8 @@ export class LifecycleManager
         await Promise.race([forcePromise, stoppedDuringForcePromise]);
       }
 
-      if (
-        this.isForceAttemptSuperseded(name, component, claim) ||
-        (this.componentStates.get(name) === 'stopped' &&
-          !this.runningComponents.has(name))
-      ) {
+      if (isSuperseded()) {
+        forceOutcome = 'abandoned';
         // Graceful completion won. Report abandoned cleanup failures without
         // changing this or a subsequent run's state.
         // A fired deadline already installed the late-outcome reporter. Keeping
@@ -7907,15 +7943,12 @@ export class LifecycleManager
         };
       });
     } catch (error) {
-      if (
-        this.isForceAttemptSuperseded(name, component, claim) ||
-        (this.componentStates.get(name) === 'stopped' &&
-          !this.runningComponents.has(name))
-      ) {
+      if (isSuperseded()) {
+        forceOutcome = 'abandoned';
         // A real force rejection can race graceful completion, but this attempt's
         // deadline is not a hook failure. Once the deadline observer is installed,
         // it alone reports any real late rejection, including a same-turn rejection.
-        if (error !== forceTimeoutError) {
+        if (forceTimeoutError === undefined || error !== forceTimeoutError) {
           outcomeObserver.reportForeground(error, abandonedForceMessage);
         }
         return {
@@ -7925,6 +7958,7 @@ export class LifecycleManager
         };
       }
 
+      forceOutcome = 'failed';
       const err = toError(error);
 
       // Guarded: `toError` returns a brand-claiming value unchanged, so `.message` can
@@ -7935,7 +7969,8 @@ export class LifecycleManager
 
       // Determine if timeout or error - by identity, not by message: an
       // `onShutdownForce()` that rejected with the same text is still an error.
-      const isTimeout = error === forceTimeoutError;
+      const isTimeout =
+        forceTimeoutError !== undefined && error === forceTimeoutError;
 
       return this.withTransition<ComponentOperationResult>(() => {
         // Mark as stalled - force phase failed
