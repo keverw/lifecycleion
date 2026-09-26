@@ -863,10 +863,11 @@ export class Logger extends EventEmitter {
     this.unregisterReportErrorListener();
 
     // Close all sinks
-    // Snapshot identities and positions before any close hook can edit the lists.
+    // Capture owned lists, which add/remove replaces rather than mutates.
+    // This preserves identities and positions across re-entrant close hooks.
     // A later malformed return must still name the destination we actually closed.
-    const logSinks = [...this.sinks];
-    const diagnosticSinks = [...this.diagnosticSinks];
+    const logSinks = this.sinks;
+    const diagnosticSinks = this.diagnosticSinks;
     const sinksToClose = [...new Set([...logSinks, ...diagnosticSinks])];
 
     await Promise.all(

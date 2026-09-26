@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { ComponentStopTimeoutError } from './errors';
 import { sleep } from '../sleep';
 import type { ArraySink } from '../logger/sinks/array';
 import { deferred, Plain, setup } from './test-helpers';
@@ -51,3 +52,63 @@ for (const shouldDelayNotification of [false, true]) {
     expect(failures()[0].message).toBe('Force shutdown failed after timeout');
   });
 }
+
+for (const phase of ['graceful', 'force'] as const) {
+  test(`${phase} rejection from its timeout hook has one failure reporter`, async () => {
+    const { logger, manager } = setup();
+    const sink = logger.getSinks()[0] as ArraySink;
+    const pending = deferred();
+    const failure = new Error('cleanup rejected during abort');
+    const component = new Plain(logger, 'a');
+    component.stop = (): Promise<void> => pending.promise;
+    Object.assign(component, {
+      shutdownGracefulTimeoutMS: 5,
+      shutdownForceTimeoutMS: 5,
+      ...(phase === 'graceful'
+        ? {
+            onShutdownForce: undefined,
+            onGracefulStopTimeout: () => pending.reject(failure),
+          }
+        : {
+            onShutdownForce: () => pending.promise,
+            onShutdownForceAborted: () => pending.reject(failure),
+          }),
+    });
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+    const result = await manager.stopComponent('a', {
+      forceImmediate: phase === 'force',
+    });
+    await sleep(10);
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('unknown_error');
+    expect(result.error).toBe(failure);
+    expect(manager.getComponentStatus('a')?.state).toBe('stalled');
+    // The deadline observer owns the actual hook rejection once installed.
+    // The foreground catch must still update state and return the error.
+    const reports = sink.logs.filter((entry) =>
+      phase === 'graceful'
+        ? entry.message.startsWith('Graceful shutdown threw error') ||
+          entry.message === 'Component stop failed after timeout'
+        : entry.message.startsWith('Force shutdown failed'),
+    );
+    expect(reports).toHaveLength(1);
+  });
+}
+
+test('a component-created stop timeout error is a hook failure, not this attempt deadline', async () => {
+  const { logger, manager } = setup();
+  const component = new Plain(logger, 'a');
+  const failure = new ComponentStopTimeoutError({
+    componentName: 'a',
+    timeoutMS: 5,
+  });
+  component.stop = (): Promise<void> => Promise.reject(failure);
+  Object.assign(component, { onShutdownForce: undefined });
+  await manager.registerComponent(component);
+  await manager.startComponent('a');
+  const result = await manager.stopComponent('a');
+  expect(result.success).toBe(false);
+  expect(result.code).toBe('unknown_error');
+  expect(result.error).toBe(failure);
+});

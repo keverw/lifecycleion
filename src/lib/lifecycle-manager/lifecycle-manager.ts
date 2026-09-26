@@ -7528,6 +7528,13 @@ export class LifecycleManager
     this.lifecycleEvents.componentStopping(name);
 
     const stopAttemptToken = this.issueStopAttemptToken(name);
+    // Only this attempt's deadline is a timeout. A hook may reject with the same
+    // exported error class and component name for an unrelated reason.
+    const gracefulTimeoutError = new ComponentStopTimeoutError({
+      componentName: name,
+      timeoutMS,
+    });
+    let isGracefulOutcomeObservedAfterTimeout = false;
 
     let timeoutHandle: NodeJS.Timeout | undefined;
 
@@ -7547,7 +7554,10 @@ export class LifecycleManager
             );
 
             // Detect if stop() eventually resolves after the timeout so the stall
-            // can be cleared automatically without a manual retry.
+            // can be cleared automatically without a manual retry. From here on
+            // this observer owns rejection reporting, even if the abort hook makes
+            // stop() reject before the deferred deadline wins the foreground race.
+            isGracefulOutcomeObservedAfterTimeout = true;
             this.observeLateStopResolution(
               stopPromise,
               name,
@@ -7557,10 +7567,7 @@ export class LifecycleManager
             );
             timeoutHandle = this.rejectAfterTimeoutHook(
               reject,
-              new ComponentStopTimeoutError({
-                componentName: name,
-                timeoutMS,
-              }),
+              gracefulTimeoutError,
             );
           }, toTimerDelayMS(timeoutMS));
         });
@@ -7593,10 +7600,7 @@ export class LifecycleManager
       this.componentErrors.set(name, err);
 
       // Check if it was a timeout
-      if (
-        err instanceof ComponentStopTimeoutError &&
-        err.additionalInfo.componentName === name
-      ) {
+      if (error === gracefulTimeoutError) {
         this.logger
           .entity(name)
           .warn(LIFECYCLE_MANAGER_MESSAGE_GRACEFUL_SHUTDOWN_TIMED_OUT);
@@ -7614,12 +7618,15 @@ export class LifecycleManager
           status: this.getComponentStatus(name),
         };
       } else {
-        // Error during graceful stop
-        this.logger
-          .entity(name)
-          .warn('Graceful shutdown threw error: {{error.message}}', {
-            params: { error: err },
-          });
+        // Keep the failure result even when the timeout observer owns its log.
+        // Otherwise a rejection from the abort hook is reported by both paths.
+        if (!isGracefulOutcomeObservedAfterTimeout) {
+          this.logger
+            .entity(name)
+            .warn('Graceful shutdown threw error: {{error.message}}', {
+              params: { error: err },
+            });
+        }
 
         return {
           success: false,
@@ -7690,17 +7697,17 @@ export class LifecycleManager
     // A fresh force-immediate stop needs a token. A stalled retry only advances it
     // when a handler will actually run: without one, the old graceful promise may
     // still settle late and clear the stall. Graceful escalation keeps its token.
-    if (
-      !context.gracefulPhaseRan &&
-      (!context.isStalledRetry || hasForceHandler)
-    ) {
-      this.issueStopAttemptToken(name);
-    }
-
-    // Bind the late observer to this attempt before any overridable hook or log
-    // can run. Never borrow a newer run's token from the registry at timeout time.
     const forceAttemptToken =
-      this.componentStopAttemptTokens.get(name) ?? ulid();
+      !context.gracefulPhaseRan && (!context.isStalledRetry || hasForceHandler)
+        ? this.issueStopAttemptToken(name)
+        : this.componentStopAttemptTokens.get(name);
+
+    // Bind the late observer before any overridable hook or log can run. Every
+    // continuing attempt already owns a token; inventing an unrecorded fallback
+    // would silently prevent its late completion from clearing the stall.
+    if (forceAttemptToken === undefined) {
+      throw new Error('Force stop attempt is missing its stop token');
+    }
 
     // Claim before calling this overridable hook, just as in the graceful phase.
     // Property-read failures above still leave the unexpected-stop handler intact.
@@ -7925,7 +7932,9 @@ export class LifecycleManager
             params: { timeoutMS },
           });
           this.lifecycleEvents.componentShutdownForceTimeout(name, timeoutMS);
-        } else {
+        } else if (!isForceOutcomeObservedAfterTimeout) {
+          // The deadline observer owns any rejection after it is installed,
+          // including one caused by the abort hook before the deadline rejects.
           this.logger
             .entity(name)
             .error('Force shutdown failed - stalled: {{error.message}}', {

@@ -211,6 +211,14 @@
 
 ## Unreleased
 
+- Graceful and force shutdown rejections triggered by timeout hooks are reported
+  once: the late observer owns the rejection log after it is installed, while the
+  foreground operation still records the failure and returns its result.
+  A component-created `ComponentStopTimeoutError` is now classified as a hook error
+  (`unknown_error`); only the current graceful attempt's deadline is a timeout.
+- Force observers use the issued or inherited stop token without an unrecorded
+  fallback. Logger close reuses owned sink lists instead of copying them.
+
 - A force deadline superseded by late graceful completion is no longer reported as
   a force-hook failure. The late force observer reports a subsequent rejection once,
   even when graceful completion wins after the force deadline fires. Late observers

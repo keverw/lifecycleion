@@ -3826,3 +3826,10 @@ If graceful completion wins while force shutdown is still pending, the component
 stays stopped. The force deadline is not reported as a force-hook rejection in that
 case; an actual later force rejection is reported once by its late-outcome observer.
 That observer retains the attempt token captured before force hooks run.
+
+A rejection caused by `onGracefulStopTimeout()` or `onShutdownForceAborted()` can
+settle before the deferred timeout rejection. Once installed, the late observer
+alone logs that hook rejection; the foreground path still records the failure and
+returns its result. Only the manager's own deadline error counts as a timeout.
+A `stop()` rejection using the exported `ComponentStopTimeoutError` class is still
+a hook failure (`unknown_error`), even when it names the same component.
