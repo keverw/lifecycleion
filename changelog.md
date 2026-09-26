@@ -212,47 +212,26 @@
 ## Unreleased
 
 - Shutdown warnings capture callable hooks once and preserve their receiver in both
-  timed and fire-and-forget delivery. No-handler stalled retries no longer require an
-  unused stop token, including recovery from a crash before token issuance.
-- Force rejection severity follows the operation outcome: a failed attempt remains an
-  error, while force work abandoned after successful graceful completion reports a
-  warning even if the deadline already fired. Reporting remains single-owner across
-  same-turn settlement and restart. Deadline errors are now allocated only on expiry.
-
-- Deadline-observed force-hook rejections now log at error severity, including
-  abort-triggered rejections that beat the deferred timeout. Graceful and force
-  messages say “after deadline fired” so they do not imply a timeout result when
-  the real hook error won. Result codes and stall reasons are unchanged.
-- FileSink reuses its failure-handler options, and sink-list copying documents
-  its typed alias rather than losing type safety after runtime array validation.
-
-- Shutdown phases share one outcome observer for rejection-reporting ownership,
-  replacing separate graceful/force timeout flags and the independent abandoned-force
-  reporting chain. Claim, token, and force-waiter ownership are unchanged. Race coverage
-  distinguishes foreground result snapshots from later status reconciliation.
-
+  timed and fire-and-forget delivery. Stalled retries without a force handler retain
+  their normal failure result; invalid force attempts fail before announcing force work.
+- Graceful and force shutdown hook rejections are reported once, including rejections
+  released by timeout hooks. Messages distinguish a fired deadline from a timeout result.
+  Only the manager's own deadline error counts as a timeout: a component-created
+  `ComponentStopTimeoutError` is a hook failure (`unknown_error`).
+- Force rejection severity follows the foreground operation's outcome. Force work
+  abandoned because graceful completion makes that operation succeed reports a warning.
+  An operation that returned failure retains error-level force reporting even if late
+  graceful cleanup subsequently changes the live component status to stopped. Returned
+  result snapshots are not rewritten by late cleanup or restart.
 - Logger routes ordinary sink unreadable-return failures through its diagnostic channel,
-  just like invocation throws and asynchronous rejections. Close failures remain
-  observable through diagnostic listeners without writing to closing sinks.
-  Diagnostic-delivery failures terminate at the console with the original failure
-  preserved, including when a lazy destination never delivered it. This replaces the
-  earlier console-only policy for ordinary malformed sink returns.
-
-- Graceful and force shutdown rejections triggered by timeout hooks are reported
-  once: the late observer owns the rejection log after it is installed, while the
-  foreground operation still records the failure and returns its result.
-  A component-created `ComponentStopTimeoutError` is now classified as a hook error
-  (`unknown_error`); only the current graceful attempt's deadline is a timeout.
-- Force observers use the issued or inherited stop token without an unrecorded
-  fallback. Logger close reuses owned sink lists instead of copying them.
-
-- A force deadline superseded by late graceful completion is no longer reported as
-  a force-hook failure. The late force observer reports a subsequent rejection once,
-  even when graceful completion wins after the force deadline fires. Late observers
-  capture their force-attempt token before caller hooks run.
-- Logger treats null sink lists as absent and rejects other non-array values with
-  a clear TypeError, rather than silently dropping iterable destinations. The shared
-  failure reporter now takes named options for settlement and handler identity.
+  like invocation throws and asynchronous rejections. Close failures reach diagnostic
+  listeners without writing to closing sinks. Diagnostic-delivery failures terminate at
+  the console with the original failure preserved.
+- **Compatibility:** `addSink()` and `addDiagnosticSink()` now throw once logger closing
+  begins, including after close completes. Refused sinks remain the caller's responsibility
+  to close. Previously additions during close could be silently discarded without cleanup.
+- Logger treats null sink lists as absent and rejects other non-array values with a
+  clear TypeError rather than silently dropping iterable destinations.
 
 - Return classification now observes cross-realm native promises with throwing or
   non-callable own `then` properties, using the same intrinsic adoption boundary as

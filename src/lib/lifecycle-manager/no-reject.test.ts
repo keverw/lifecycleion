@@ -1955,3 +1955,40 @@ test('a stalled retry without a force handler does not require a token from a cr
     release();
   }
 });
+
+test('missing force-token invariant fails before publishing force-start side effects', async () => {
+  const { logger, manager } = setup();
+  const component = new Plain(logger, 'a');
+  let clears = 0;
+  let forceCalls = 0;
+  let forceEvents = 0;
+  await manager.registerComponent(component);
+  await manager.startComponent('a');
+  component._clearUnexpectedStopHandler = () => {
+    clears++;
+  };
+  component.onShutdownForce = () => {
+    forceCalls++;
+  };
+  manager.on('component:shutdown-force', () => {
+    forceEvents++;
+  });
+  // Invariant-failure injection, not a demonstrated ordinary way to lose a token.
+  const internals = manager as unknown as {
+    issueStopAttemptToken: (name: string) => string;
+  };
+  const original = internals.issueStopAttemptToken;
+  internals.issueStopAttemptToken = () => undefined as unknown as string;
+  const { release } = claimReports();
+  try {
+    expect(
+      (await manager.stopComponent('a', { forceImmediate: true })).code,
+    ).toBe('unknown_error');
+    expect(forceEvents).toBe(0);
+    expect(forceCalls).toBe(0);
+    expect(clears).toBe(0);
+  } finally {
+    internals.issueStopAttemptToken = original;
+    release();
+  }
+});

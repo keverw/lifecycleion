@@ -424,3 +424,54 @@ for (const key of ['sinks', 'diagnosticSinks'] as const) {
     }
   });
 }
+
+for (const addMethod of ['addSink', 'addDiagnosticSink'] as const) {
+  for (const when of ['during', 'after'] as const) {
+    test(`${addMethod} refuses new ownership ${when} close`, async () => {
+      const gate = Promise.withResolvers<void>();
+      const entered = Promise.withResolvers<void>();
+      let ownedCloses = 0;
+      let refusedCloses = 0;
+      const logger = new Logger({
+        callProcessExit: false,
+        sinks: [
+          {
+            write: () => {},
+            close: async () => {
+              ownedCloses++;
+              entered.resolve();
+              await gate.promise;
+            },
+          },
+        ],
+      });
+      const closing = logger.close();
+      await entered.promise;
+      const refused = {
+        write: () => {},
+        close: () => {
+          refusedCloses++;
+        },
+      };
+      try {
+        if (when === 'after') {
+          gate.resolve();
+          await closing;
+        }
+        expect(() => logger[addMethod](refused)).toThrow(
+          'Cannot add a sink to a closing or closed logger',
+        );
+        expect(logger.getSinks()).not.toContain(refused);
+        expect(logger.getDiagnosticSinks()).not.toContain(refused);
+        expect(refusedCloses).toBe(0);
+      } finally {
+        gate.resolve();
+        await closing;
+        // A refused sink never becomes logger-owned; its caller disposes it.
+        refused.close();
+      }
+      expect(ownedCloses).toBe(1);
+      expect(refusedCloses).toBe(1);
+    });
+  }
+}

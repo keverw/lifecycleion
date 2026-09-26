@@ -182,3 +182,34 @@ for (const isForceImmediate of [false, true]) {
     expect(result.status?.stallInfo?.reason).toBe('error');
   });
 }
+
+test('a recorded force timeout keeps its failure severity after late graceful reconciliation', async () => {
+  const { logger, manager } = setup();
+  const sink = logger.getSinks()[0] as ArraySink;
+  const graceful = deferred();
+  const force = deferred();
+  const component = new Plain(logger, 'a');
+  component.stop = () => graceful.promise;
+  Object.assign(component, {
+    shutdownGracefulTimeoutMS: 5,
+    shutdownForceTimeoutMS: 5,
+    onShutdownForce: () => force.promise,
+  });
+  await manager.registerComponent(component);
+  await manager.startComponent('a');
+  const result = await manager.stopComponent('a');
+  expect(result.success).toBe(false);
+  expect(result.code).toBe('component_shutdown_timeout');
+  expect(result.status?.state).toBe('stalled');
+  graceful.resolve();
+  await sleep(0);
+  expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+  force.reject(new Error('failed attempt cleanup'));
+  await sleep(0);
+  const reports = sink.logs.filter((entry) =>
+    entry.message.startsWith('Force shutdown failed'),
+  );
+  expect(reports).toHaveLength(1);
+  expect(reports[0].type).toBe('error');
+  expect(result.code).toBe('component_shutdown_timeout');
+});

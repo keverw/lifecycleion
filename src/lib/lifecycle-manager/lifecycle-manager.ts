@@ -7424,71 +7424,53 @@ export class LifecycleManager
     this.logger.info('Shutdown warning phase');
     this.lifecycleEvents.lifecycleManagerShutdownWarning(timeoutMS);
 
+    // Both delivery modes share the invocation boundary. Returning an explicit
+    // outcome lets the timed mode track rejections without starting a second
+    // reporting chain; the detached mode can safely ignore the settled promise.
+    const startWarning = ({
+      name,
+      component,
+      hook,
+    }: (typeof warningTargets)[number]): Promise<'resolved' | 'rejected'> => {
+      this.lifecycleEvents.componentShutdownWarning(name);
+      return Promise.resolve()
+        .then(() => adoptPromise(Reflect.apply(hook, component, [])))
+        .then(() => {
+          this.lifecycleEvents.componentShutdownWarningCompleted(name);
+          return 'resolved' as const;
+        })
+        .catch((error: unknown) => {
+          this.logger
+            .entity(name)
+            .warn('Shutdown warning phase failed: {{error.message}}', {
+              params: { error: toError(error) },
+            });
+          return 'rejected' as const;
+        })
+        .catch(() => {
+          // A detached chain must contain a failure even in its reporting path.
+          return 'rejected' as const;
+        });
+    };
+
     if (timeoutMS === 0) {
-      // Fire-and-forget: broadcast warnings without waiting for completion
-      for (const { name, component, hook } of warningTargets) {
-        this.lifecycleEvents.componentShutdownWarning(name);
-        Promise.resolve()
-          .then(() => adoptPromise(Reflect.apply(hook, component, [])))
-          .then(() => {
-            this.lifecycleEvents.componentShutdownWarningCompleted(name);
-          })
-          .catch((error) => {
-            const err = toError(error);
-
-            this.logger
-              .entity(name)
-              .warn('Shutdown warning phase failed: {{error.message}}', {
-                params: { error: err },
-              });
-          })
-          // Terminal, because this chain is deliberately not retained: unlike the
-          // timed branch below, nothing collects it into `Promise.allSettled`, so a
-          // throw from the reporting handler above would become an unhandled rejection
-          // mid-shutdown — fatal under Node's default `--unhandled-rejections=throw`.
-          // Logging is guarded, but a floating chain should not have to rely on that.
-          .catch(() => {
-            // Nothing left to report with.
-          });
+      for (const target of warningTargets) {
+        void startWarning(target);
       }
-
-      // Flush microtask queue to ensure promises start executing before emitting completion
+      // Start warning callbacks before publishing the fire-and-forget broadcast.
       await Promise.resolve();
-
-      // Now that warnings are executing, emit global completion event
       this.lifecycleEvents.lifecycleManagerShutdownWarningCompleted(timeoutMS);
-
       return;
     }
 
-    // Track completion so we can identify which components are still pending at timeout.
     const statuses = new Map<string, 'pending' | 'resolved' | 'rejected'>();
     const warningPromises: Promise<void>[] = [];
-
-    for (const { name, component, hook } of warningTargets) {
-      statuses.set(name, 'pending');
-      this.lifecycleEvents.componentShutdownWarning(name);
-
-      const warningPromise = Promise.resolve().then(() =>
-        adoptPromise(Reflect.apply(hook, component, [])),
-      );
-
+    for (const target of warningTargets) {
+      statuses.set(target.name, 'pending');
       warningPromises.push(
-        warningPromise
-          .then(() => {
-            statuses.set(name, 'resolved');
-            this.lifecycleEvents.componentShutdownWarningCompleted(name);
-          })
-          .catch((error) => {
-            statuses.set(name, 'rejected');
-            const err = toError(error);
-
-            this.logger
-              .entity(name)
-              .warn('Shutdown warning phase failed: {{error.message}}', {
-                params: { error: err },
-              });
-          }),
+        startWarning(target).then((status) => {
+          statuses.set(target.name, status);
+        }),
       );
     }
 
@@ -7755,8 +7737,12 @@ export class LifecycleManager
         ? this.issueStopAttemptToken(name)
         : this.componentStopAttemptTokens.get(name);
 
-    // Capture before caller hooks/logs; require the token only below, where a
-    // force handler actually runs. A no-handler retry has no promise to observe.
+    // Validate before publishing a force start or invoking any caller code.
+    // No-handler retries observe no promise and remain valid without a token.
+    if (hasForceHandler && forceAttemptToken === undefined) {
+      throw new Error('Force stop attempt is missing its stop token');
+    }
+
     // Claim before calling this overridable hook, just as in the graceful phase.
     // Property-read failures above still leave the unexpected-stop handler intact.
     this.clearUnexpectedStopHandler(component, 'force stop');
@@ -7824,12 +7810,6 @@ export class LifecycleManager
       };
     }
 
-    // A no-handler retry never observes a hook promise and needs no token.
-    // A crash before token issuance can legitimately leave that recoverable stall.
-    if (forceAttemptToken === undefined) {
-      throw new Error('Force stop attempt is missing its stop token');
-    }
-
     const { promise: stoppedDuringForcePromise, cleanup: cleanupForceWaiter } =
       this.createPendingForceStopWaiter(name);
     let timeoutHandle: NodeJS.Timeout | undefined;
@@ -7890,7 +7870,7 @@ export class LifecycleManager
                 onResolved: () =>
                   this.handleLateStopResolution(
                     name,
-                    forceAttemptToken,
+                    forceAttemptToken as string,
                     'force',
                   ),
               },

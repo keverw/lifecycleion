@@ -3822,63 +3822,34 @@ Both paths share native own-`then` detection and thenable assimilation, includin
 cross-realm promises. Their result shapes intentionally differ: awaited hooks reject
 on adoption failure, while synchronous classification identifies an unreadable return.
 
-If graceful completion wins while force shutdown is still pending, the component
-stays stopped. The force deadline is not reported as a force-hook rejection in that
-case; an actual later force rejection is reported once by its late-outcome observer.
-That observer retains the attempt token captured before force hooks run.
+Shutdown results describe the outcome recorded by that operation, not a promise
+that live status cannot subsequently change. Late graceful cleanup can change a stalled
+component to stopped after the stop call returned failure. Use `getComponentStatus()`
+to read current state; late completion never rewrites an already-returned result.
+
+| Shutdown outcome                                             | Later force rejection                                                                                |
+| ------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------- |
+| Graceful completion makes the pending stop operation succeed | One warning: force work was abandoned after graceful stop completed                                  |
+| The stop operation records failure, including timeout        | One error, even if late graceful cleanup subsequently changes current status to stopped              |
+| A retry or restart has begun                                 | The earlier operation may still report its rejection, but cannot overwrite the new operation's state |
 
 A rejection caused by `onGracefulStopTimeout()` or `onShutdownForceAborted()` can
-settle before the deferred timeout rejection. Once installed, the late observer
-alone logs that hook rejection; the foreground path still records the failure and
-returns its result. Only the manager's own deadline error counts as a timeout.
-A `stop()` rejection using the exported `ComponentStopTimeoutError` class is still
-a hook failure (`unknown_error`), even when it names the same component.
+settle before the deferred timeout rejection. That hook failure remains `unknown_error`,
+with stall reason `error` (or `both` after a prior graceful timeout). Only the manager's
+own deadline error counts as a timeout. A `stop()` rejection using the exported
+`ComponentStopTimeoutError` class is still a hook failure, even when it names the same
+component. An `undefined` rejection is also a hook failure, never a timeout.
+A stalled retry without an `onShutdownForce` handler returns the normal stalled
+failure result.
 
-Shutdown state ownership and failure reporting have different lifetimes. An active
-claim prevents competing operations from taking a component; a stop token identifies
-late cleanup after the foreground operation has returned. A force waiter lets late
-graceful success complete a pending force operation. These guards remain separate
-from the shared phase observer that owns rejection reporting.
-
-| Race window                                               | State/result owner                                  | Hook-rejection reporter                                                 |
-| --------------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------------------------- |
-| Before the deadline fires                                 | Foreground phase                                    | Foreground phase                                                        |
-| Timeout hook settles cleanup before the deferred deadline | Foreground phase                                    | Installed deadline observer                                             |
-| Graceful succeeds during force                            | Matching graceful token and force waiter            | Abandoned-force observer, or the deadline observer if already installed |
-| Cleanup settles after a stalled result                    | Matching stop token                                 | Deadline observer                                                       |
-| Old cleanup settles after retry/restart                   | New claim/token; old completion cannot overwrite it | Old observer may log its rejection without changing state               |
-
-One observer per phase accepts the transfer of reporting responsibility. Foreground
-catches continue to produce results and state transitions, but cannot independently
-report a hook rejection after that transfer. Timeout logs and a later hook rejection
-describe different facts; the guarantee is one report per hook rejection, not one
-log line for the entire shutdown.
-
-Operation results describe the outcome recorded by that operation, not a promise
-that live status cannot subsequently change. For example, a force hook can release
-graceful cleanup and then throw: the foreground failure result can retain its stalled
-status snapshot while late graceful completion has already reconciled the component
-to stopped by the time the caller resumes. Use `getComponentStatus()` to read current
-state. Late completion does not rewrite an already-returned result.
-
-A fired deadline and a timeout result are distinct. An abort hook can cause cleanup
-to reject before the deferred timeout wins; that rejection remains `unknown_error`,
-with stall reason `error` (or `both` after a prior graceful timeout). Observed
-rejections say “after deadline fired” rather than implying the operation returned a
-timeout. Deadline-observed force-hook rejections use error severity while the
-force attempt is failing; if graceful completion makes the operation succeed, the
-remaining force work is abandoned and its rejection uses warning severity and the
-“after graceful stop completed” message. That outcome remains fixed after a restart.
-Graceful-hook rejection reports use warning severity. This also applies to later
-rejections after the foreground result, without changing an already-recorded result or reconciled state.
+Each hook rejection is reported once. Reports say “after deadline fired” when appropriate
+rather than implying that the operation returned a timeout. Graceful-hook rejection
+reports use warning severity; force-hook reports follow the outcome table above.
+A timeout log and a later hook rejection describe separate facts, so a shutdown may
+produce both. Later cleanup and restart do not change the earlier operation's reporting
+severity.
 
 Shutdown warning selection reads each `onShutdownWarning` once and captures callable
 values with their component receiver. Both timed and fire-and-forget delivery invoke
 that captured hook; changing a getter's next return cannot create a completed warning
 for a hook that was never called. Non-callable values are not warning targets.
-
-A no-force-handler stalled retry does not require a stop token, because it has no
-force promise to observe. This also permits normal retry reporting after an internal
-crash before token issuance. Handler attempts still require the captured token.
-Deadline error objects are created only when their timers fire; rejection identity,
-including an undefined rejection before the deadline, remains distinct from timeout.

@@ -788,9 +788,11 @@ export class Logger extends EventEmitter {
   }
 
   /**
-   * Add a sink to the logger
+   * Add a sink to the logger. Throws once closing begins; a refused sink remains
+   * the caller's responsibility to close.
    */
   public addSink(sink: LogSink): void {
+    this.assertCanAddSink();
     this.sinks = [...this.sinks, sink];
   }
 
@@ -814,8 +816,12 @@ export class Logger extends EventEmitter {
     return [...this.sinks];
   }
 
-  /** Add a sink used only for failures raised by the logging system itself. */
+  /**
+   * Add a sink used only for failures raised by the logging system itself.
+   * Throws once closing begins; refused sinks remain caller-owned.
+   */
   public addDiagnosticSink(sink: LogSink): void {
+    this.assertCanAddSink();
     this.diagnosticSinks = [...this.diagnosticSinks, sink];
   }
 
@@ -1434,6 +1440,19 @@ export class Logger extends EventEmitter {
       // none - the marker lands in the output a reader already sees.
       maxRenderLength: MAX_RENDER_LENGTH,
     });
+  }
+
+  /**
+   * Closing commits the set of resources the logger owns. Accepting a new sink
+   * during an awaited close would discard it at the final list clear without
+   * closing it. Refuse before taking ownership; callers must dispose refused sinks.
+   * This also keeps a close hook from extending shutdown with an unbounded stream
+   * of new destinations.
+   */
+  private assertCanAddSink(): void {
+    if (this._closed) {
+      throw new Error('Cannot add a sink to a closing or closed logger');
+    }
   }
 
   /**
