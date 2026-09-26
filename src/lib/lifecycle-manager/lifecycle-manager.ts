@@ -5842,8 +5842,11 @@ export class LifecycleManager
    * Installing an observer transfers reporting before promise callbacks run. This
    * includes abort-hook rejections that beat the deferred deadline. Foreground
    * catches still record results/transitions; their snapshots are never rewritten
-   * by later reconciliation. Claims, generation tokens, and force waiters retain
-   * their distinct lifetimes and are deliberately not managed here.
+   * by later reconciliation. An observed rejection is still a hook error: a fired
+   * deadline does not mean its deferred timeout won the race. The caller supplies
+   * phase-appropriate severity independently of who owns reporting.
+   * Claims, generation tokens, and force waiters retain their distinct lifetimes
+   * and are deliberately not managed here.
    */
   private createStopPhaseObserver(name: string): {
     reportForeground: (
@@ -5854,7 +5857,7 @@ export class LifecycleManager
     observe: (
       promise: Promise<unknown>,
       message: string,
-      onResolved?: () => void,
+      options?: { onResolved?: () => void; level?: 'warn' | 'error' },
     ) => void;
   } {
     let isObserved = false;
@@ -5874,7 +5877,7 @@ export class LifecycleManager
           report(error, message, level);
         }
       },
-      observe: (promise, message, onResolved) => {
+      observe: (promise, message, options) => {
         if (isObserved) {
           return;
         }
@@ -5882,7 +5885,9 @@ export class LifecycleManager
         // Already-adopted hook promises only. One chain owns both late success
         // reconciliation and rejection reporting, even when force is abandoned.
         promise
-          .then(onResolved, (error: unknown) => report(error, message))
+          .then(options?.onResolved, (error: unknown) =>
+            report(error, message, options?.level),
+          )
           .catch((error: unknown) => {
             report(error, 'Late stop resolution failed');
           })
@@ -7585,13 +7590,15 @@ export class LifecycleManager
             // stop() reject before the deferred deadline wins the foreground race.
             outcomeObserver.observe(
               stopPromise,
-              'Component stop failed after timeout',
-              () =>
-                this.handleLateStopResolution(
-                  name,
-                  stopAttemptToken,
-                  'graceful',
-                ),
+              'Component stop failed after deadline fired',
+              {
+                onResolved: () =>
+                  this.handleLateStopResolution(
+                    name,
+                    stopAttemptToken,
+                    'graceful',
+                  ),
+              },
             );
             timeoutHandle = this.rejectAfterTimeoutHook(
               reject,
@@ -7838,9 +7845,16 @@ export class LifecycleManager
             // so the stall can be cleared automatically, same as stop().
             outcomeObserver.observe(
               forcePromise,
-              'Force shutdown failed after timeout',
-              () =>
-                this.handleLateStopResolution(name, forceAttemptToken, 'force'),
+              'Force shutdown failed after deadline fired',
+              {
+                level: 'error',
+                onResolved: () =>
+                  this.handleLateStopResolution(
+                    name,
+                    forceAttemptToken,
+                    'force',
+                  ),
+              },
             );
             timeoutHandle = this.rejectAfterTimeoutHook(
               reject,

@@ -3860,3 +3860,12 @@ graceful cleanup and then throw: the foreground failure result can retain its st
 status snapshot while late graceful completion has already reconciled the component
 to stopped by the time the caller resumes. Use `getComponentStatus()` to read current
 state. Late completion does not rewrite an already-returned result.
+
+A fired deadline and a timeout result are distinct. An abort hook can cause cleanup
+to reject before the deferred timeout wins; that rejection remains `unknown_error`,
+with stall reason `error` (or `both` after a prior graceful timeout). Observed
+rejections say “after deadline fired” rather than implying the operation returned a
+timeout. Deadline-observed force-hook rejection reports use error severity;
+graceful-hook rejection reports use warning severity. This also applies to later
+rejections after the
+foreground result, without changing an already-recorded result or reconciled state.

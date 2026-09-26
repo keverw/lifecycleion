@@ -49,18 +49,21 @@ for (const shouldDelayNotification of [false, true]) {
     force.reject(new Error('real late force rejection'));
     await sleep(10);
     expect(failures()).toHaveLength(1);
-    expect(failures()[0].message).toBe('Force shutdown failed after timeout');
+    expect(failures()[0].message).toBe(
+      'Force shutdown failed after deadline fired',
+    );
   });
 }
 
-for (const phase of ['graceful', 'force'] as const) {
+for (const phase of ['graceful', 'force', 'escalated-force'] as const) {
   test(`${phase} rejection from its timeout hook has one failure reporter`, async () => {
     const { logger, manager } = setup();
     const sink = logger.getSinks()[0] as ArraySink;
     const pending = deferred();
     const failure = new Error('cleanup rejected during abort');
     const component = new Plain(logger, 'a');
-    component.stop = (): Promise<void> => pending.promise;
+    component.stop = (): Promise<void> =>
+      phase === 'escalated-force' ? new Promise(() => {}) : pending.promise;
     Object.assign(component, {
       shutdownGracefulTimeoutMS: 5,
       shutdownForceTimeoutMS: 5,
@@ -89,10 +92,19 @@ for (const phase of ['graceful', 'force'] as const) {
     const reports = sink.logs.filter((entry) =>
       phase === 'graceful'
         ? entry.message.startsWith('Graceful shutdown threw error') ||
-          entry.message === 'Component stop failed after timeout'
+          entry.message.startsWith('Component stop failed after')
         : entry.message.startsWith('Force shutdown failed'),
     );
     expect(reports).toHaveLength(1);
+    expect(result.status?.stallInfo?.reason).toBe(
+      phase === 'escalated-force' ? 'both' : 'error',
+    );
+    expect(reports[0].type).toBe(phase === 'graceful' ? 'warn' : 'error');
+    expect(reports[0].message).toBe(
+      phase === 'graceful'
+        ? 'Component stop failed after deadline fired'
+        : 'Force shutdown failed after deadline fired',
+    );
   });
 }
 

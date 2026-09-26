@@ -97,7 +97,7 @@ for (const phase of ['graceful', 'force'] as const) {
         const failures = sink.logs.filter((entry) =>
           phase === 'graceful'
             ? entry.message.startsWith('Graceful shutdown threw error') ||
-              entry.message === 'Component stop failed after timeout'
+              entry.message === 'Component stop failed after deadline fired'
             : entry.message.startsWith('Force shutdown failed'),
         );
         expect(failures).toHaveLength(outcome === 'reject' ? 1 : 0);

@@ -1600,12 +1600,13 @@ function copySinkList(
   if (source === null || source === undefined) {
     return [];
   }
+  // Preserve the typed view: Array.isArray narrows source to any[] in TypeScript.
   const entries = source;
   if (!Array.isArray(source)) {
     throw new TypeError('Logger sink lists must be arrays');
   }
   const sinks: LogSink[] = [];
-  for (let index = 0, length = source.length; index < length; index++) {
+  for (let index = 0, length = entries.length; index < length; index++) {
     sinks.push(entries[index]);
   }
   return sinks;

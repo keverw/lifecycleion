@@ -472,7 +472,7 @@ describe('LifecycleManager - hostile thrown values', () => {
 
     const report = await untilLogged(
       arraySink,
-      'Component stop failed after timeout',
+      'Component stop failed after deadline fired',
       1000,
     );
 
@@ -514,7 +514,7 @@ describe('LifecycleManager - hostile thrown values', () => {
 
     const report = await untilLogged(
       arraySink,
-      'Force shutdown failed after timeout',
+      'Force shutdown failed after deadline fired',
       1000,
     );
 

@@ -211,6 +211,13 @@
 
 ## Unreleased
 
+- Deadline-observed force-hook rejections now log at error severity, including
+  abort-triggered rejections that beat the deferred timeout. Graceful and force
+  messages say “after deadline fired” so they do not imply a timeout result when
+  the real hook error won. Result codes and stall reasons are unchanged.
+- FileSink reuses its failure-handler options, and sink-list copying documents
+  its typed alias rather than losing type safety after runtime array validation.
+
 - Shutdown phases share one outcome observer for rejection-reporting ownership,
   replacing separate graceful/force timeout flags and the independent abandoned-force
   reporting chain. Claim, token, and force-waiter ownership are unchanged. Race coverage
