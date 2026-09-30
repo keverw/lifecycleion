@@ -1,3 +1,5 @@
+import { clamp } from '../clamp';
+
 /**
  * The longest delay a timer can be given and still fire when it was asked to.
  *
@@ -69,14 +71,20 @@ export function resolveTimeoutMS(
   return toTimerDelayMS(requested ?? defaultMS, label);
 }
 
+/** Clamp a numeric delay after the caller validates and interprets its sentinels.
+ * NaN is deliberately not repaired here. Math.max normalizes negative zero.
+ */
+export function clampTimerDelayMS(delayMS: number): number {
+  return clamp(delayMS, 0, MAX_TIMER_MS);
+}
+
 /** Validate a required lifecycle duration with no implicit fallback. */
 export function toTimerDelayMS(requested: number, label = 'Timeout'): number {
   assertDurationMS(requested, label);
   if (requested < 0) {
     throw invalidTimeoutRange(label);
   }
-  // Math.max converts -0 to +0; downstream zero checks have one representation.
-  return Math.max(0, Math.min(requested, MAX_TIMER_MS));
+  return clampTimerDelayMS(requested);
 }
 
 /**

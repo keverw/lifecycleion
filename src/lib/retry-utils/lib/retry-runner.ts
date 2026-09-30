@@ -7,7 +7,7 @@ import { isString } from '../../strings';
 import { isPlainObject } from '../../is-plain-object';
 import { isFunction } from '../../is-function';
 import { RetryPolicy } from './retry-policy';
-import { MAX_TIMER_MS, toTimerDelayMS } from '../../internal/timer-limits';
+import { clampTimerDelayMS, toTimerDelayMS } from '../../internal/timer-limits';
 import type {
   RetryPolicyOptions,
   RetryPolicyValidated,
@@ -1185,7 +1185,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
             // so an unbounded number reaching this line turns "wait a month" into a busy
             // retry loop. The same clamped value is recorded, so the remaining-time
             // bookkeeping describes the timer that actually exists.
-            const delayMS = Math.min(shouldRetryQuery.delayMS, MAX_TIMER_MS);
+            const delayMS = clampTimerDelayMS(shouldRetryQuery.delayMS);
 
             this.currentState.retryTimeoutStartTime = Date.now();
             this.currentState.retryTimeoutDelayMS = delayMS;

@@ -1,5 +1,5 @@
 import { isNullish } from '../internal/is-nullish';
-import { assertDurationMS, MAX_TIMER_MS } from '../internal/timer-limits';
+import { assertDurationMS, clampTimerDelayMS } from '../internal/timer-limits';
 import type { HTTPMethod } from './types';
 
 /**
@@ -99,7 +99,7 @@ export function resolveRequestTimeoutMS(
     return 0;
   }
 
-  return Math.min(requested, MAX_TIMER_MS);
+  return clampTimerDelayMS(requested);
 }
 
 export const DEFAULT_REQUEST_ID_HEADER = 'x-local-client-request-id';

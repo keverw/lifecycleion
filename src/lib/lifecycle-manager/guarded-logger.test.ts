@@ -278,62 +278,36 @@ describe('createGuardedLoggerService', () => {
     expect(sink.logs.at(-1)?.entityName).toBe('ent');
   });
 
-  test('the entity cache is capped, dropping the oldest name first', () => {
+  test('custom entity factories refresh context for a reused name', () => {
     const sink = new ArraySink();
     const logger = new Logger({ sinks: [sink], callProcessExit: false });
     const service = logger.service('svc');
-    const originalEntity = service.entity.bind(service);
-    const calls: string[] = [];
-
-    service.entity = (name: string): LoggerService => {
-      calls.push(name);
-
-      return originalEntity(name);
-    };
-
+    let generation = 1;
+    service.entity = (name: string): LoggerService =>
+      logger.service(`generation-${generation}`).entity(name);
     const guarded = createGuardedLoggerService(service);
-
-    for (let index = 0; index <= 256; index++) {
-      guarded.entity(`job-${index}`);
-    }
-
-    calls.length = 0;
-
-    // The newest is still cached; the oldest was evicted and is rebuilt.
-    guarded.entity('job-256');
-    guarded.entity('job-0');
-
-    expect(calls).toEqual(['job-0']);
+    guarded.entity('worker').info('first registration');
+    generation = 2;
+    guarded.entity('worker').info('second registration');
+    expect(sink.logs.map((entry) => entry.serviceName)).toEqual([
+      'generation-1',
+      'generation-2',
+    ]);
   });
 
-  test('the entity cache evicts the least recently used name', () => {
-    const sink = new ArraySink();
-    const logger = new Logger({ sinks: [sink], callProcessExit: false });
-    const service = logger.service('svc');
-    const originalEntity = service.entity.bind(service);
-    const calls: string[] = [];
-
-    service.entity = (name: string): LoggerService => {
-      calls.push(name);
-
-      return originalEntity(name);
-    };
-
-    const guarded = createGuardedLoggerService(service);
-
-    for (let index = 0; index < 256; index++) {
+  test('the built-in entity cache is bounded and least recently used', () => {
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    const guarded = createGuardedLoggerService(logger.service('svc'));
+    const oldest = guarded.entity('job-0');
+    const next = guarded.entity('job-1');
+    for (let index = 2; index < 256; index++) {
       guarded.entity(`job-${index}`);
     }
-
-    // A hit moves `job-0` to the back, so the next new name evicts `job-1` instead.
-    guarded.entity('job-0');
-    guarded.entity('job-256');
-    calls.length = 0;
-
-    guarded.entity('job-0');
-    guarded.entity('job-1');
-
-    expect(calls).toEqual(['job-1']);
+    expect(guarded.entity('job-0')).toBe(oldest);
+    const newest = guarded.entity('job-256');
+    expect(guarded.entity('job-256')).toBe(newest);
+    expect(guarded.entity('job-0')).toBe(oldest);
+    expect(guarded.entity('job-1')).not.toBe(next);
   });
 
   test('a frozen log method is still guarded', async () => {
@@ -531,15 +505,15 @@ describe('createGuardedLoggerService', () => {
     const reports = await collectReports(() => {
       guarded.entity('ent').info('fallback');
       guarded.entity('ent').info('recovered');
-      guarded.entity('ent').info('cached');
+      guarded.entity('ent').info('refreshed');
     });
     expect(reports).toHaveLength(1);
-    expect(calls).toBe(2);
+    expect(calls).toBe(3);
     expect(
       sink.logs.find((entry) => entry.message === 'recovered')?.entityName,
     ).toBe('ent');
     expect(
-      sink.logs.find((entry) => entry.message === 'cached')?.entityName,
+      sink.logs.find((entry) => entry.message === 'refreshed')?.entityName,
     ).toBe('ent');
     await logger.close();
   });

@@ -141,7 +141,10 @@ export function adoptPromise<T>(
  * instanceof and have a throwing or non-callable own then. Ordinary plain thenables
  * skip the probe. A failed probe on a local promise is an adoption failure (for
  * example a broken constructor/species); on other objects, normal thenable handling
- * remains the fallback. This one boundary is shared by both adoption entry points.
+ * remains the fallback. Do not skip class or null prototypes: real native promises
+ * can acquire either through setPrototypeOf, and foreign promises fail instanceof.
+ * The intrinsic slot probe is necessary to keep their own then from hiding failures.
+ * This one boundary is shared by both adoption entry points.
  */
 function adoptOwnPromise<T>(value: T): Promise<Awaited<T>> | undefined {
   if (!isObjectLike(value) || !hasOwnThen(value) || hasObjectPrototype(value)) {

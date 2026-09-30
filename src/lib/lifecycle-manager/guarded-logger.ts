@@ -1,5 +1,5 @@
 import { isObjectLike } from '../internal/is-object-like';
-import type { LoggerService } from '../logger/logger-service';
+import { LoggerService } from '../logger/logger-service';
 import { adoptResult, UnreadableReturn } from '../internal/adopt-promise';
 import {
   applyIntrinsic,
@@ -31,6 +31,9 @@ const GUARDED_LOGGER_LABEL = 'lifecycle-manager logger';
  * recently used name is dropped and simply rebuilt if it is logged about again.
  */
 const MAX_CACHED_ENTITY_CHILDREN = 256;
+// Captured for identity comparison only; invocation always preserves the receiver.
+// eslint-disable-next-line @typescript-eslint/unbound-method
+const builtinEntity = LoggerService.prototype.entity;
 
 /**
  * Every `LoggerService` method whose call is routed through `runCallbackSafely`.
@@ -192,6 +195,15 @@ export function createGuardedLoggerService(
       }
 
       if (property === 'entity') {
+        // Custom factories may capture request or registration context even when
+        // their method identity and entity name stay unchanged. Only the built-in
+        // name-scoping implementation has the contract needed for memoization.
+        if (method !== builtinEntity) {
+          entityCache = null;
+          return (entityName: string): LoggerService =>
+            guardEntity(target, method, entityName, guarded);
+        }
+
         if (entityCache === null || entityCache.method !== method) {
           // A plain `Map` kept in recency order, not the repo's `LRUCache`: that one
           // sizes every value it stores, which for a logger child means

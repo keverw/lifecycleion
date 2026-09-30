@@ -1,5 +1,5 @@
 import { promiseConstructorIntrinsic } from './internal/intrinsics';
-import { assertDurationMS, MAX_TIMER_MS } from './internal/timer-limits';
+import { assertDurationMS, clampTimerDelayMS } from './internal/timer-limits';
 /**
  * Sleeps the function for the specified number of milliseconds
  * Zero and negative delays resume on the next timer turn, never synchronously.
@@ -13,7 +13,7 @@ import { assertDurationMS, MAX_TIMER_MS } from './internal/timer-limits';
 
 export async function sleep(time: number): Promise<void> {
   assertDurationMS(time, 'Sleep duration');
-  const delayMS = Math.max(0, Math.min(time, MAX_TIMER_MS));
+  const delayMS = clampTimerDelayMS(time);
   return await new promiseConstructorIntrinsic<void>(function (resolve) {
     setTimeout(function () {
       resolve();

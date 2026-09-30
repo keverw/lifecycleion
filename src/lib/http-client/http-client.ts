@@ -343,26 +343,34 @@ export class BaseHTTPClient {
   ): HTTPClientConfig {
     // Undefined overrides inherit; explicit null retains each option's policy
     // (notably cookieJar: null disables the jar, while a null timeout inherits).
-    const overrideValues = new Map(Object.entries(overrides));
-    // Explicit option reads also honor inherited and non-enumerable properties.
-    // Memoize at the read site so a new explicit option needs no separate key list.
-    const readOverride = <K extends keyof SubClientConfig>(
-      key: K,
-    ): SubClientConfig[K] => {
-      if (!overrideValues.has(key)) {
-        overrideValues.set(key, overrides[key]);
-      }
-      return overrideValues.get(key) as SubClientConfig[K];
-    };
-    const shouldFollowRedirectsOverride = readOverride('followRedirects');
-    const defaultHeadersStrategy = readOverride('defaultHeadersStrategy');
-    const overrideHeaders = readOverride('defaultHeaders');
-    const timeout = readOverride('timeout');
-    const adapter = readOverride('adapter');
-    const cookieJar = readOverride('cookieJar');
-    const maxRedirects = readOverride('maxRedirects');
+    // Capture every documented field through its original receiver, regardless of
+    // enumerability or prototype placement. Keep this list exhaustive as options grow.
+    const snapshot = {
+      adapter: overrides.adapter,
+      baseURL: overrides.baseURL,
+      defaultHeaders: overrides.defaultHeaders,
+      defaultHeadersStrategy: overrides.defaultHeadersStrategy,
+      timeout: overrides.timeout,
+      cookieJar: overrides.cookieJar,
+      retryPolicy: overrides.retryPolicy,
+      retryNonIdempotentMethods: overrides.retryNonIdempotentMethods,
+      includeRequestID: overrides.includeRequestID,
+      includeAttemptHeader: overrides.includeAttemptHeader,
+      userAgent: overrides.userAgent,
+      followRedirects: overrides.followRedirects,
+      maxRedirects: overrides.maxRedirects,
+    } satisfies Record<keyof SubClientConfig, unknown>;
+    const {
+      followRedirects: shouldFollowRedirectsOverride,
+      defaultHeadersStrategy,
+      defaultHeaders: overrideHeaders,
+      timeout,
+      adapter,
+      cookieJar,
+      maxRedirects,
+    } = snapshot;
     const definedOverrides = Object.fromEntries(
-      [...overrideValues].filter(([, value]) => value !== undefined),
+      Object.entries(snapshot).filter(([, value]) => value !== undefined),
     );
     const shouldFollowRedirects =
       shouldFollowRedirectsOverride ?? this._config.followRedirects;

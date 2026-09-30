@@ -364,3 +364,17 @@ for (const mode of ['throwing getter', 'non-function'] as const) {
     expect(reads).toBe(0);
   });
 }
+
+for (const prototype of [null, new (class Deferred {})()]) {
+  test(`own-then native promise keeps rejection with ${prototype === null ? 'null' : 'class'} prototype`, async () => {
+    const failure = new Error('native rejection');
+    const promise = Promise.reject(failure);
+    void Object.setPrototypeOf(promise, prototype);
+    void Object.defineProperty(promise, 'then', {
+      value: (): never => {
+        throw new Error('own then must not run');
+      },
+    });
+    expect(await settle(adoptPromise(promise))).toBe(failure.message);
+  });
+}

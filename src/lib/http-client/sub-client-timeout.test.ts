@@ -4,7 +4,7 @@ import type { HTTPAdapter, SubClientConfig } from './types';
 import { CookieJar } from './cookie-jar';
 
 test.each(['own', 'inherited', 'non-enumerable'] as const)(
-  'sub-client reads %s special overrides once with their original receiver',
+  'sub-client reads all %s overrides once with their original receiver',
   (placement) => {
     const parentAdapter: HTTPAdapter = {
       getType: () => 'node',
@@ -27,6 +27,12 @@ test.each(['own', 'inherited', 'non-enumerable'] as const)(
       cookieJar: null,
       followRedirects: true,
       maxRedirects: 3,
+      baseURL: 'https://child.example/',
+      retryPolicy: { strategy: 'fixed', delayMS: 5, maxRetryAttempts: 1 },
+      retryNonIdempotentMethods: true,
+      includeRequestID: true,
+      includeAttemptHeader: true,
+      userAgent: 'child-agent',
     } satisfies SubClientConfig;
     const owner = {};
     const overrides = (
@@ -58,6 +64,16 @@ test.each(['own', 'inherited', 'non-enumerable'] as const)(
     expect(config.cookieJar).toBeNull();
     expect(config.followRedirects).toBe(true);
     expect(config.maxRedirects).toBe(3);
+    for (const key of [
+      'baseURL',
+      'retryPolicy',
+      'retryNonIdempotentMethods',
+      'includeRequestID',
+      'includeAttemptHeader',
+      'userAgent',
+    ] as const) {
+      expect(config[key]).toEqual(values[key]);
+    }
     expect(reads).toEqual(
       Object.fromEntries(Object.keys(values).map((key) => [key, 1])),
     );
@@ -80,42 +96,54 @@ test.each([null, undefined, 0, 250])(
   },
 );
 
-test('undefined special getters are read once and inherit parent values', () => {
-  const parent = new HTTPClient({
-    timeout: 1000,
-    defaultHeaders: { 'x-parent': 'parent' },
-    cookieJar: new CookieJar(),
-    followRedirects: true,
-    maxRedirects: 8,
-  });
-  const overrides: SubClientConfig = {};
-  const reads: Record<string, number> = {};
-  for (const key of [
-    'adapter',
-    'timeout',
-    'defaultHeaders',
-    'defaultHeadersStrategy',
-    'cookieJar',
-    'followRedirects',
-    'maxRedirects',
-  ]) {
-    Object.defineProperty(overrides, key, {
-      enumerable: true,
-      get() {
-        reads[key] = (reads[key] ?? 0) + 1;
-        if (reads[key] > 1) {
-          throw new Error('undefined override read twice');
-        }
-        return undefined;
-      },
+test.each(['own', 'inherited', 'non-enumerable'] as const)(
+  'undefined %s getters are read once and inherit parent values',
+  (placement) => {
+    const parent = new HTTPClient({
+      timeout: 1000,
+      defaultHeaders: { 'x-parent': 'parent' },
+      cookieJar: new CookieJar(),
+      followRedirects: true,
+      maxRedirects: 8,
     });
-  }
-  const child = parent.createSubClient(overrides);
-  const configOf = (client: unknown) =>
-    (client as { _config: unknown })._config;
-  expect(configOf(child)).toEqual(configOf(parent));
-  expect(Object.values(reads)).toEqual([1, 1, 1, 1, 1, 1, 1]);
-});
+    const owner = {};
+    const overrides = (
+      placement === 'inherited' ? Object.create(owner) : owner
+    ) as SubClientConfig;
+    const reads: Record<string, number> = {};
+    for (const key of [
+      'adapter',
+      'timeout',
+      'defaultHeaders',
+      'defaultHeadersStrategy',
+      'cookieJar',
+      'followRedirects',
+      'maxRedirects',
+      'baseURL',
+      'retryPolicy',
+      'retryNonIdempotentMethods',
+      'includeRequestID',
+      'includeAttemptHeader',
+      'userAgent',
+    ]) {
+      Object.defineProperty(owner, key, {
+        enumerable: placement !== 'non-enumerable',
+        get() {
+          reads[key] = (reads[key] ?? 0) + 1;
+          if (reads[key] > 1) {
+            throw new Error('undefined override read twice');
+          }
+          return undefined;
+        },
+      });
+    }
+    const child = parent.createSubClient(overrides);
+    const configOf = (client: unknown) =>
+      (client as { _config: unknown })._config;
+    expect(configOf(child)).toEqual(configOf(parent));
+    expect(Object.values(reads)).toEqual(Array.from({ length: 13 }, () => 1));
+  },
+);
 
 test('undefined sub-client overrides inherit configured values', () => {
   const parent = new HTTPClient({

@@ -1,6 +1,53 @@
 import { expect, test } from 'bun:test';
 import { HTTPClient } from './http-client';
 import { MockAdapter } from './adapters/mock-adapter';
+import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
+import type { RetryPolicyOptions } from '../retry-utils';
+
+test('sub-clients reuse only immutable validated retry snapshots', () => {
+  const callerPolicy = {
+    strategy: 'fixed' as const,
+    delayMS: 5,
+    maxRetryAttempts: 1,
+  };
+  const parent = new HTTPClient({ retryPolicy: callerPolicy });
+  const child = parent.createSubClient();
+  const policyOf = (client: unknown) =>
+    (client as { _config: { retryPolicy: RetryPolicyOptions } })._config
+      .retryPolicy;
+  const validated = policyOf(parent);
+  expect(policyOf(child)).toBe(validated);
+  expect(validated).not.toBe(callerPolicy);
+  expect(Object.isFrozen(validated)).toBe(true);
+  callerPolicy.delayMS = NaN;
+  expect(policyOf(child)).toEqual({
+    strategy: 'fixed',
+    delayMS: 5,
+    maxRetryAttempts: 1,
+  });
+  expect(() => Reflect.set(validated, 'delayMS', NaN)).not.toThrow();
+  expect(Reflect.set(validated, 'delayMS', NaN)).toBe(false);
+  expect(() => parent.createSubClient({ retryPolicy: callerPolicy })).toThrow(
+    TypeError,
+  );
+  expect(() =>
+    snapshotRetryPolicyOptions(
+      Object.freeze({ strategy: 'fixed', delayMS: NaN }),
+    ),
+  ).toThrow(TypeError);
+  expect(snapshotRetryPolicyOptions(validated)).toBe(validated);
+});
+
+test('inherited null retry policy disables parent retries', () => {
+  const parent = new HTTPClient({
+    retryPolicy: { strategy: 'fixed', delayMS: 5 },
+  });
+  const child = parent.createSubClient(Object.create({ retryPolicy: null }));
+  expect(
+    (child as unknown as { _config: { retryPolicy: unknown } })._config
+      .retryPolicy,
+  ).toBeUndefined();
+});
 
 test('invalid client retry policy fails before requests or interceptors', () => {
   const adapter = new MockAdapter();
