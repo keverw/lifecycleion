@@ -1,12 +1,13 @@
+import { awaitBoxedPromise } from '../../internal/intrinsics';
 import { PromiseProtectedResolver } from '../../promise-protected-resolver';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { generateID } from '../../id-helpers';
-import { isPromise } from '../../is-promise';
+import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { isString } from '../../strings';
 import { isPlainObject } from '../../is-plain-object';
 import { isFunction } from '../../is-function';
 import { RetryPolicy } from './retry-policy';
-import { MAX_TIMER_MS } from '../../internal/timer-limits';
+import { MAX_TIMER_MS, toTimerDelayMS } from '../../internal/timer-limits';
 import type {
   RetryPolicyOptions,
   RetryPolicyValidated,
@@ -167,6 +168,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   private policy: RetryPolicy;
   // Prevents concurrent run/resume/forceTry calls.
   private _isOperationLocked = false;
+  // Terminal events run before their completion promise is resolved. Reentrant
+  // reset/forceTry must wait until that old operation finishes publishing.
+  private terminalDispatchDepth = 0;
   // Mutable runtime state for the current operation.
   private currentState: RetryRunnerCurrentState = this.getEmptyCurrentState();
   // Grace period for cancellation before we force-complete.
@@ -367,16 +371,12 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
    * Set the grace period for cancellation in milliseconds
    *
    * Overrides the default grace period of 1000ms
-   * Non-finite or negative values default to 1000ms. Finite values are capped at the
-   * runtime timer ceiling. Use 0 for immediate force-cancel.
+   * Invalid values throw. Infinity and oversized values use the runtime timer ceiling.
+   * Use 0 for immediate force-cancel.
    */
 
   public overrideGraceCancelPeriodMS(value: number): void {
-    if (!isFinite(value) || value < 0) {
-      this._gracePeriodMS = 1000;
-    } else {
-      this._gracePeriodMS = Math.min(value, MAX_TIMER_MS);
-    }
+    this._gracePeriodMS = toTimerDelayMS(value, 'Cancellation grace period');
   }
 
   public async waitForCompletion(): Promise<RunResult<T>> {
@@ -387,11 +387,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       case 'stopped':
         // If the operation has already completed, exhausted, encountered a fatal error, or was stopped,
         // return the last result
-        return this.currentOperationResolver.promise;
+        return await this.currentOperationResolver.promise;
       case 'running':
       case 'stopping':
         // If the operation is currently running or in the process of stopping, wait for it to complete
-        return this.currentOperationResolver.promise;
+        return await this.currentOperationResolver.promise;
       case 'not-started':
         // If the operation has not started yet, return an appropriate result
         return {
@@ -408,8 +408,148 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   }
 
   public async run(shouldWaitForCompletion = false): Promise<RunResult<T>> {
+    return await this.runOperation(shouldWaitForCompletion);
+  }
+
+  public async cancel(): Promise<CancelResult> {
+    // The attempt has already chosen a terminal result, even though its handled
+    // event still presents the pre-terminal state to listeners.
+    if (
+      this.terminalDispatchDepth > 0 &&
+      this.currentState.runnerState === 'running'
+    ) {
+      return 'not-running';
+    }
+    // operation is either running or stopping (so just wait to cancel it here)
+    if (
+      this.currentState.runnerState === 'running' ||
+      this.currentState.runnerState === 'stopping'
+    ) {
+      const cancellationPromiseProtectedResolver =
+        new PromiseProtectedResolver<CancelResult>();
+
+      this.cancelResolvers.add(cancellationPromiseProtectedResolver);
+
+      // Check if cancellation is already pending to avoid multiple abort signals
+      if (this.currentState.runnerState !== 'stopping') {
+        this.currentState.runnerState = 'stopping';
+
+        this.cleanupTimers();
+
+        if (
+          !this.currentState.currentAttemptContext ||
+          this.currentState.currentAttemptContext.handled
+        ) {
+          // No active attempt, can confirm immediately.
+          this.confirmCancellation('stopped', {
+            status: 'canceled',
+          });
+        } else {
+          // Signal the running attempt to abort.
+          const context = this.currentState.currentAttemptContext;
+          context.abortController.abort();
+
+          // Grace period: if operation doesn't acknowledge abort, force it.
+          // An abort listener may call reportResult synchronously, settling this
+          // cancellation before abort() returns. In that case there is no timer to arm.
+          if (
+            this.currentState.runnerState === 'stopping' &&
+            this.currentState.currentAttemptContext === context &&
+            !context.handled
+          ) {
+            this.currentState.cancellationTimeoutHandle = setTimeout(() => {
+              if (
+                this.currentState.currentAttemptContext instanceof
+                  AttemptContext &&
+                !this.currentState.currentAttemptContext.handled
+              ) {
+                if (this.currentState.runnerState === 'stopping') {
+                  const context = this.currentState.currentAttemptContext;
+
+                  // Mark handled and detach the current context
+                  context.handled = true;
+                  this.currentState.currentAttemptContext = null;
+
+                  // Cleanup timers before emitting
+                  this.cleanupTimers();
+
+                  // Cache the attempt duration and emit attempt-handled for consistency
+                  const attemptTimeElapsedMS = Date.now() - context.startTime;
+                  this.currentState.lastAttemptTimeTakenMS =
+                    attemptTimeElapsedMS;
+
+                  this.terminalDispatchDepth++;
+                  try {
+                    this.emit(ATTEMPT_HANDLED, {
+                      attemptID: context.id,
+                      status: 'skip',
+                      data: undefined,
+                      error: undefined,
+                      operationTimeElapsedMS: this.timeTakenMS,
+                      attemptTimeElapsedMS,
+                      wasCanceled: true,
+                    } satisfies OnAttemptHandledInfo<T>);
+
+                    // Force completion after grace period expired.
+                    this.confirmCancellation(
+                      'stopped',
+                      {
+                        status: 'canceled',
+                      },
+                      true,
+                    );
+                  } finally {
+                    this.terminalDispatchDepth--;
+                  }
+                }
+              }
+            }, this._gracePeriodMS);
+          }
+        }
+      }
+
+      // return the promise
+      return await cancellationPromiseProtectedResolver.promise;
+    } else {
+      return 'not-running';
+    }
+  }
+
+  public async reset(): Promise<void> {
+    if (this.terminalDispatchDepth > 0) {
+      await this.currentOperationResolver.promise;
+    }
+    // If an operation is running or pending stopping, cancel it first.
+    if (
+      this.currentState.runnerState === 'running' ||
+      this.currentState.runnerState === 'stopping'
+    ) {
+      // Cancel any in-flight work before resetting state.
+      await this.cancel();
+    }
+
+    // Reset the internal state to its initial values.
+    this.currentState = this.getEmptyCurrentState();
+
+    // Also, reset the policy itself if needed.
+    this.policy.reset();
+  }
+
+  public async resume(shouldWaitForCompletion = false): Promise<RunResult<T>> {
+    return await this.resumeOperation(shouldWaitForCompletion);
+  }
+
+  public async forceTry(options?: ForceTryOptions): Promise<RunResult<T>> {
+    return await this.forceTryOperation(options);
+  }
+
+  // Keep the lock around synchronous dispatch, not the caller's wait for completion.
+  // The public async wrapper awaits only after this method's finally released it.
+  private runOperation(
+    shouldWaitForCompletion: boolean,
+  ): RunResult<T> | Promise<RunResult<T>> {
     // Simple lock check
-    if (this._isOperationLocked) {
+    if (this._isOperationLocked || this.terminalDispatchDepth > 0) {
       return {
         status: 'pre_operation_error',
         code: 'lock_error',
@@ -446,19 +586,20 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         this.currentState.operationStartTime = Date.now();
         this.currentState.finalTimeTakenMS = null;
 
-        // emit the operation started event
-        this.emit(OPERATION_STARTED, { operationType: 'initial' });
-
         // Create a new resolver for the current operation
-        this.currentOperationResolver = new PromiseProtectedResolver<
-          RunResult<T>
-        >();
+        const operationResolver = new PromiseProtectedResolver<RunResult<T>>();
+        this.currentOperationResolver = operationResolver;
+
+        this.emit(OPERATION_STARTED, { operationType: 'initial' });
+        if (this.currentState.runnerState !== 'running') {
+          return operationResolver.promise;
+        }
 
         // Start the initial operation
         void this.attemptOperation(false);
 
         if (shouldWaitForCompletion) {
-          return this.currentOperationResolver.promise;
+          return operationResolver.promise;
         } else {
           return { status: 'running' };
         }
@@ -487,106 +628,10 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     }
   }
 
-  public async cancel(): Promise<CancelResult> {
-    // operation is either running or stopping (so just wait to cancel it here)
-    if (
-      this.currentState.runnerState === 'running' ||
-      this.currentState.runnerState === 'stopping'
-    ) {
-      const cancellationPromiseProtectedResolver =
-        new PromiseProtectedResolver<CancelResult>();
-
-      this.cancelResolvers.add(cancellationPromiseProtectedResolver);
-
-      // Check if cancellation is already pending to avoid multiple abort signals
-      if (this.currentState.runnerState !== 'stopping') {
-        this.currentState.runnerState = 'stopping';
-
-        this.cleanupTimers();
-
-        if (
-          !this.currentState.currentAttemptContext ||
-          this.currentState.currentAttemptContext.handled
-        ) {
-          // No active attempt, can confirm immediately.
-          this.confirmCancellation('stopped', {
-            status: 'canceled',
-          });
-        } else {
-          // Signal the running attempt to abort.
-          this.currentState.currentAttemptContext.abortController.abort();
-
-          // Grace period: if operation doesn't acknowledge abort, force it.
-          this.currentState.cancellationTimeoutHandle = setTimeout(() => {
-            if (
-              this.currentState.currentAttemptContext instanceof
-                AttemptContext &&
-              !this.currentState.currentAttemptContext.handled
-            ) {
-              if (this.currentState.runnerState === 'stopping') {
-                const context = this.currentState.currentAttemptContext;
-
-                // Mark handled and detach the current context
-                context.handled = true;
-                this.currentState.currentAttemptContext = null;
-
-                // Cleanup timers before emitting
-                this.cleanupTimers();
-
-                // Cache the attempt duration and emit attempt-handled for consistency
-                const attemptTimeElapsedMS = Date.now() - context.startTime;
-                this.currentState.lastAttemptTimeTakenMS = attemptTimeElapsedMS;
-
-                this.emit(ATTEMPT_HANDLED, {
-                  attemptID: context.id,
-                  status: 'skip',
-                  data: undefined,
-                  error: undefined,
-                  operationTimeElapsedMS: this.timeTakenMS,
-                  attemptTimeElapsedMS,
-                  wasCanceled: true,
-                } satisfies OnAttemptHandledInfo<T>);
-
-                // Force completion after grace period expired.
-                this.confirmCancellation(
-                  'stopped',
-                  {
-                    status: 'canceled',
-                  },
-                  true,
-                );
-              }
-            }
-          }, this._gracePeriodMS);
-        }
-      }
-
-      // return the promise
-      return cancellationPromiseProtectedResolver.promise;
-    } else {
-      return 'not-running';
-    }
-  }
-
-  public async reset(): Promise<void> {
-    // If an operation is running or pending stopping, cancel it first.
-    if (
-      this.currentState.runnerState === 'running' ||
-      this.currentState.runnerState === 'stopping'
-    ) {
-      // Cancel any in-flight work before resetting state.
-      await this.cancel();
-    }
-
-    // Reset the internal state to its initial values.
-    this.currentState = this.getEmptyCurrentState();
-
-    // Also, reset the policy itself if needed.
-    this.policy.reset();
-  }
-
-  public async resume(shouldWaitForCompletion = false): Promise<RunResult<T>> {
-    if (this._isOperationLocked) {
+  private resumeOperation(
+    shouldWaitForCompletion: boolean,
+  ): RunResult<T> | Promise<RunResult<T>> {
+    if (this._isOperationLocked || this.terminalDispatchDepth > 0) {
       return {
         status: 'pre_operation_error',
         code: 'lock_error',
@@ -622,18 +667,19 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         this.currentState.operationStartTime = Date.now();
         this.currentState.finalTimeTakenMS = null;
 
-        // emit the operation started event
-        this.emit(OPERATION_STARTED, { operationType: 'resume' });
+        const operationResolver = new PromiseProtectedResolver<RunResult<T>>();
+        this.currentOperationResolver = operationResolver;
 
-        this.currentOperationResolver = new PromiseProtectedResolver<
-          RunResult<T>
-        >();
+        this.emit(OPERATION_STARTED, { operationType: 'resume' });
+        if (this.currentState.runnerState !== 'running') {
+          return operationResolver.promise;
+        }
 
         // Restart the initial operation
         void this.attemptOperation(false);
 
         if (shouldWaitForCompletion) {
-          return this.currentOperationResolver.promise;
+          return operationResolver.promise;
         } else {
           return { status: 'running' };
         }
@@ -649,11 +695,13 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     }
   }
 
-  public async forceTry(options?: ForceTryOptions): Promise<RunResult<T>> {
+  private forceTryOperation(
+    options?: ForceTryOptions,
+  ): RunResult<T> | Promise<RunResult<T>> {
     const shouldWaitForCompletion = options?.shouldWaitForCompletion ?? false;
     const shouldAbortRunning = options?.shouldAbortRunning ?? false;
 
-    if (this._isOperationLocked) {
+    if (this._isOperationLocked || this.terminalDispatchDepth > 0) {
       return {
         status: 'pre_operation_error',
         code: 'lock_error',
@@ -737,8 +785,6 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         this.currentState.operationStartTime = Date.now();
         this.currentState.finalTimeTakenMS = null;
 
-        this.emit(OPERATION_STARTED, { operationType: 'force' });
-
         if (
           !this.currentOperationResolver ||
           this.currentOperationResolver.hasResolved
@@ -748,11 +794,17 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
             RunResult<T>
           >();
         }
+        const operationResolver = this.currentOperationResolver;
+
+        this.emit(OPERATION_STARTED, { operationType: 'force' });
+        if (this.currentState.runnerState !== 'running') {
+          return operationResolver.promise;
+        }
 
         void this.attemptOperation(true);
 
         if (shouldWaitForCompletion) {
-          return this.currentOperationResolver.promise;
+          return operationResolver.promise;
         } else {
           return { status: 'running', reattached: false };
         }
@@ -915,57 +967,67 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     resolveInfo: ConfirmCancellationResolveInfo<T>,
     wasForced = false,
   ): void {
-    // Resolve cancel promises and finalize operation state transitions.
-    if (this.currentState.runnerState === 'stopping') {
-      this.cleanupTimers();
-
-      this.currentState.runnerState = runnerState;
-
-      // resolve all cancel promises
-      for (const resolver of this.cancelResolvers) {
-        resolver.resolveOnce(wasForced ? 'forced' : 'canceled');
-        this.cancelResolvers.delete(resolver);
-      }
-    } else {
-      this.currentState.runnerState = runnerState;
+    const isTerminal = runnerState !== 'running';
+    if (isTerminal) {
+      this.terminalDispatchDepth++;
     }
+    try {
+      // Resolve cancel promises and finalize operation state transitions.
+      if (this.currentState.runnerState === 'stopping') {
+        this.cleanupTimers();
 
-    if (runnerState !== 'running') {
-      // Freeze timeTakenMS for terminal states
-      this.currentState.finalTimeTakenMS =
-        this.currentState.operationStartTime !== null
-          ? Date.now() - this.currentState.operationStartTime
-          : -1;
+        this.currentState.runnerState = runnerState;
 
-      // emit the operation ended event
-      this.emit(OPERATION_ENDED, {
-        runnerState,
-        timeTakenMS: this.timeTakenMS,
-      });
-
-      if (resolveInfo.status !== null) {
-        if (resolveInfo.status === 'attempt_success') {
-          this.currentOperationResolver.resolveOnce({
-            status: 'attempt_success',
-            ...(resolveInfo.data !== undefined
-              ? { data: resolveInfo.data }
-              : {}),
-          });
-        } else {
-          const nonSuccessResult: RunResultNonSuccess = {
-            status: resolveInfo.status,
-          };
-
-          if (resolveInfo.code !== undefined) {
-            nonSuccessResult.code = resolveInfo.code;
-          }
-
-          if (resolveInfo.error !== undefined) {
-            nonSuccessResult.error = resolveInfo.error;
-          }
-
-          this.currentOperationResolver.resolveOnce(nonSuccessResult);
+        // resolve all cancel promises
+        for (const resolver of this.cancelResolvers) {
+          resolver.resolveOnce(wasForced ? 'forced' : 'canceled');
+          this.cancelResolvers.delete(resolver);
         }
+      } else {
+        this.currentState.runnerState = runnerState;
+      }
+
+      if (runnerState !== 'running') {
+        // Freeze timeTakenMS for terminal states
+        this.currentState.finalTimeTakenMS =
+          this.currentState.operationStartTime !== null
+            ? Date.now() - this.currentState.operationStartTime
+            : -1;
+
+        // emit the operation ended event
+        this.emit(OPERATION_ENDED, {
+          runnerState,
+          timeTakenMS: this.timeTakenMS,
+        });
+
+        if (resolveInfo.status !== null) {
+          if (resolveInfo.status === 'attempt_success') {
+            this.currentOperationResolver.resolveOnce({
+              status: 'attempt_success',
+              ...(resolveInfo.data !== undefined
+                ? { data: resolveInfo.data }
+                : {}),
+            });
+          } else {
+            const nonSuccessResult: RunResultNonSuccess = {
+              status: resolveInfo.status,
+            };
+
+            if (resolveInfo.code !== undefined) {
+              nonSuccessResult.code = resolveInfo.code;
+            }
+
+            if (resolveInfo.error !== undefined) {
+              nonSuccessResult.error = resolveInfo.error;
+            }
+
+            this.currentOperationResolver.resolveOnce(nonSuccessResult);
+          }
+        }
+      }
+    } finally {
+      if (isTerminal) {
+        this.terminalDispatchDepth--;
       }
     }
   }
@@ -1154,36 +1216,37 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     const attemptTimeElapsedMS = Date.now() - context.startTime;
     this.currentState.lastAttemptTimeTakenMS = attemptTimeElapsedMS;
 
-    // emit the attempt handled event
-    this.emit(ATTEMPT_HANDLED, {
-      attemptID: context.id,
-      status,
-      data: valueInfo.data,
-      error: valueInfo.error,
-      operationTimeElapsedMS: this.timeTakenMS,
-      attemptTimeElapsedMS,
-      wasCanceled:
-        this.currentState.runnerState === 'stopping' ||
-        this.currentState.runnerState === 'stopped',
-    } satisfies OnAttemptHandledInfo<T>);
-
-    // if a confirm cancel should run
-    if (
+    const terminalRunnerState = confirmCancellationInfo.runnerState;
+    const terminalResolveInfo = confirmCancellationInfo.resolveInfo;
+    const isTerminalReport =
       confirmCancellationInfo.run &&
-      confirmCancellationInfo.runnerState !== null &&
-      confirmCancellationInfo.resolveInfo !== null
-    ) {
-      this.confirmCancellation(
-        confirmCancellationInfo.runnerState,
-        confirmCancellationInfo.resolveInfo,
-      );
+      terminalRunnerState !== null &&
+      terminalResolveInfo !== null;
+    if (isTerminalReport) {
+      this.terminalDispatchDepth++;
     }
+    try {
+      // emit the attempt handled event
+      this.emit(ATTEMPT_HANDLED, {
+        attemptID: context.id,
+        status,
+        data: valueInfo.data,
+        error: valueInfo.error,
+        operationTimeElapsedMS: this.timeTakenMS,
+        attemptTimeElapsedMS,
+        wasCanceled:
+          this.currentState.runnerState === 'stopping' ||
+          this.currentState.runnerState === 'stopped',
+      } satisfies OnAttemptHandledInfo<T>);
 
-    // if cancellation is pending, confirm it since we're not rescheduling anything
-    if (this.currentState.runnerState === 'stopping') {
-      this.confirmCancellation('stopped', {
-        status: null,
-      });
+      // if a confirm cancel should run
+      if (isTerminalReport) {
+        this.confirmCancellation(terminalRunnerState, terminalResolveInfo);
+      }
+    } finally {
+      if (isTerminalReport) {
+        this.terminalDispatchDepth--;
+      }
     }
   }
 
@@ -1242,8 +1305,17 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           context.abortController.signal,
         );
 
-        if (isPromise(result)) {
-          await result;
+        // Adopted, not awaited as it is: a native promise whose own `then` is not a
+        // function failed `isPromise()`, so its rejection was never awaited and went
+        // unhandled, and `await` calls an own `then` on one carrying its own
+        // `constructor`. Classification and adoption share one captured then read.
+        const pending = adoptResult(result);
+        if (pending instanceof UnreadableReturn) {
+          // Match await's rejection reason and preserve reported-error identity.
+          throw pending.cause;
+        }
+        if (pending !== undefined) {
+          await awaitBoxedPromise(pending);
         }
       } catch (error) {
         // A rethrow of what was already reported is not a second outcome, and reporting it

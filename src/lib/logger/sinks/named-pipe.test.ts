@@ -517,6 +517,51 @@ describe('NamedPipeSink', () => {
     await tmpDir.cleanup();
   }, hookTimeoutMS);
 
+  test('close settles after global Promise and its methods are replaced', async () => {
+    const pipePath = `${tmpDir.path}/patched-promises.pipe`;
+    await createNamedPipe(pipePath);
+    const reader = startPipeReader(pipePath);
+    const sink = new NamedPipeSink({ pipePath, closeTimeoutMS: 50 });
+    expect(await waitForOpenPipe(sink)).toBe(true);
+    const originalPromise = Promise;
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const originalThen = Promise.prototype.then;
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const originalRace = Promise.race;
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const originalResolve = Promise.resolve;
+    let didClose = false;
+    try {
+      originalPromise.prototype.then = function () {
+        return new originalPromise(() => {});
+      };
+      originalPromise.race = function () {
+        return new originalPromise(() => {});
+      };
+      originalPromise.resolve = (() =>
+        new originalPromise(() => {})) as typeof Promise.resolve;
+      globalThis.Promise = (() => {
+        throw new Error('live Promise constructor used');
+      }) as unknown as PromiseConstructor;
+      const closing = sink.close();
+      void Reflect.apply(originalThen, closing, [
+        () => {
+          didClose = true;
+        },
+        () => {},
+      ]);
+      await new originalPromise((resolve) => setTimeout(resolve, 150));
+      expect(didClose).toBe(true);
+    } finally {
+      globalThis.Promise = originalPromise;
+      originalPromise.prototype.then = originalThen;
+      originalPromise.race = originalRace;
+      originalPromise.resolve = originalResolve;
+      await sink.close();
+      reader.stop();
+    }
+  });
+
   test('should write log entry to named pipe', async () => {
     const pipePath = `${tmpDir.path}/test.pipe`;
     await createNamedPipe(pipePath);
@@ -1135,30 +1180,81 @@ describe('NamedPipeSink', () => {
     await sink.close();
   });
 
-  test('an unusable closeTimeoutMS takes the default and Infinity is bounded', async () => {
-    // The same resolution `FileSink` applies, so the two sinks read the option alike:
-    // `NaN` hung the drain loop for good and `Infinity` fired the init deadline at once.
-    const pipePath = `${tmpDir.path}/timeout-option.pipe`;
-    await createNamedPipe(pipePath);
+  test('invalid closeTimeoutMS rejects before initialization', () => {
+    const initialize = spyOn(
+      NamedPipeSink.prototype as unknown as { initializePipe(): Promise<void> },
+      'initializePipe',
+    ).mockResolvedValue();
+    const timer = spyOn(globalThis, 'setTimeout');
+    try {
+      for (const requested of [
+        Number.NaN,
+        -1,
+        -Infinity,
+        '12',
+        false,
+        {},
+        Symbol('timeout'),
+      ]) {
+        expect(
+          () =>
+            new NamedPipeSink({
+              pipePath: `${tmpDir.path}/timeout-option.pipe`,
+              closeTimeoutMS: requested as number,
+            }),
+        ).toThrow(
+          typeof requested === 'number' && requested < 0
+            ? RangeError
+            : TypeError,
+        );
+      }
+      expect(initialize).not.toHaveBeenCalled();
+      expect(timer).not.toHaveBeenCalled();
+    } finally {
+      initialize.mockRestore();
+      timer.mockRestore();
+    }
+  });
 
-    const reader = startPipeReader(pipePath);
+  test.each([NaN, -1])(
+    'invalid pipe close budget %s identifies its option',
+    (closeTimeoutMS) => {
+      expect(
+        () =>
+          new NamedPipeSink({
+            pipePath: `${tmpDir.path}/invalid-budget.pipe`,
+            closeTimeoutMS,
+          }),
+      ).toThrow('NamedPipeSink closeTimeoutMS');
+    },
+  );
 
-    const read = (sink: NamedPipeSink): number =>
-      (sink as unknown as { closeTimeoutMS: number }).closeTimeoutMS;
-
-    const nan = new NamedPipeSink({ pipePath, closeTimeoutMS: Number.NaN });
-    const negative = new NamedPipeSink({ pipePath, closeTimeoutMS: -5 });
-    const infinite = new NamedPipeSink({
-      pipePath,
-      closeTimeoutMS: Number.POSITIVE_INFINITY,
-    });
-
-    expect(read(nan)).toBe(30_000);
-    expect(read(negative)).toBe(30_000);
-    expect(read(infinite)).toBe(2_147_483_647);
-
-    await Promise.all([nan.close(), negative.close(), infinite.close()]);
-    reader.stop();
+  test('nullish, zero, finite and infinite close budgets keep their meanings', async () => {
+    const initialize = spyOn(
+      NamedPipeSink.prototype as unknown as { initializePipe(): Promise<void> },
+      'initializePipe',
+    ).mockResolvedValue();
+    try {
+      for (const [requested, expected] of [
+        [undefined, 30_000],
+        [null, 30_000],
+        [0, 0],
+        [12, 12],
+        [Infinity, 2_147_483_647],
+        [3e9, 2_147_483_647],
+      ] as const) {
+        const sink = new NamedPipeSink({
+          pipePath: `${tmpDir.path}/timeout-option.pipe`,
+          closeTimeoutMS: requested,
+        });
+        expect(
+          (sink as unknown as { closeTimeoutMS: number }).closeTimeoutMS,
+        ).toBe(expected);
+        await sink.close();
+      }
+    } finally {
+      initialize.mockRestore();
+    }
   });
 
   test('getHealth() reports unhealthy for the whole of a close', async () => {

@@ -8,7 +8,7 @@ import type {
   ComponentValueResult,
 } from './types';
 import { InvalidComponentNameError } from './errors';
-import { finiteClampMin } from '../clamp';
+import { resolveTimeoutMS } from '../internal/timer-limits';
 
 /**
  * Abstract base class for all lifecycle-managed components
@@ -130,22 +130,39 @@ export abstract class BaseComponent {
     this.dependencies = options.dependencies ?? [];
     this.optional = options.optional ?? false;
 
-    // Timeout configuration with defaults
-    this.startupTimeoutMS = options.startupTimeoutMS ?? 30000;
-    this.healthCheckTimeoutMS = options.healthCheckTimeoutMS ?? 5000;
-    this.signalTimeoutMS = options.signalTimeoutMS ?? 5000;
-
-    // Enforce minimums for shutdown timeouts (using finiteClampMin to handle edge cases)
-    this.shutdownGracefulTimeoutMS = finiteClampMin(
-      options.shutdownGracefulTimeoutMS,
-      1000, // Minimum 1 second
-      5000, // Default if undefined/null/non-finite
+    // Null or omitted configuration selects defaults. Validate before any lifecycle
+    // operation can acquire resources; shutdown durations retain their documented
+    // minimums after validation, while Infinity is bounded at the timer ceiling.
+    this.startupTimeoutMS = resolveTimeoutMS(
+      options.startupTimeoutMS,
+      30000,
+      'startupTimeoutMS',
     );
-
-    this.shutdownForceTimeoutMS = finiteClampMin(
-      options.shutdownForceTimeoutMS,
-      500, // Minimum 500ms
-      2000, // Default if undefined/null/non-finite
+    this.healthCheckTimeoutMS = resolveTimeoutMS(
+      options.healthCheckTimeoutMS,
+      5000,
+      'healthCheckTimeoutMS',
+    );
+    this.signalTimeoutMS = resolveTimeoutMS(
+      options.signalTimeoutMS,
+      5000,
+      'signalTimeoutMS',
+    );
+    this.shutdownGracefulTimeoutMS = Math.max(
+      1000,
+      resolveTimeoutMS(
+        options.shutdownGracefulTimeoutMS,
+        5000,
+        'shutdownGracefulTimeoutMS',
+      ),
+    );
+    this.shutdownForceTimeoutMS = Math.max(
+      500,
+      resolveTimeoutMS(
+        options.shutdownForceTimeoutMS,
+        2000,
+        'shutdownForceTimeoutMS',
+      ),
     );
   }
 

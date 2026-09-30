@@ -4,8 +4,7 @@ import {
 } from './safe-handle-callback';
 import { ulid } from 'ulid';
 import readline from 'readline';
-import { finiteClamp } from './clamp';
-import { MAX_TIMER_MS } from './internal/timer-limits';
+import { resolveTimeoutMS } from './internal/timer-limits';
 
 /**
  * The shutdown signal types that can trigger the shutdown callback
@@ -263,11 +262,14 @@ export interface ProcessSignalManagerOptions {
    * Process signals are never throttled as they may come from external sources
    * that expect immediate handling.
    *
+   * Null or undefined uses the default. Zero disables throttling. Infinity and
+   * values above 2,147,483,647ms use that cap (about 24.8 days between triggers
+   * of the same keyboard action); Infinity does not select the default.
    * @default 200 (200ms throttle, allowing 5 triggers per second maximum)
    * @example 300 // Custom 300ms throttle (3.33 triggers per second max)
    * @example 0 // Disable throttling entirely
    */
-  keypressThrottleMS?: number;
+  keypressThrottleMS?: number | null;
 }
 
 /**
@@ -334,11 +336,10 @@ export class ProcessSignalManager {
     this.infoCallbackName = options.infoCallbackName ?? 'onInfoRequested';
     this.debugCallbackName = options.debugCallbackName ?? 'onDebugRequested';
     // Default to 200ms throttle (leading-edge rate limiting), 0 disables
-    this.keypressThrottleMS = finiteClamp(
-      options.keypressThrottleMS ?? 200,
-      0,
-      MAX_TIMER_MS,
+    this.keypressThrottleMS = resolveTimeoutMS(
+      options.keypressThrottleMS,
       200,
+      'keypressThrottleMS',
     );
 
     // Initialize shutdown signal handlers if callback is provided (not yet registered with process)

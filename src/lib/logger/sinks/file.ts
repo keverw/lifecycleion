@@ -1,3 +1,4 @@
+import { raceDeadline } from '../../internal/race-deadline';
 import fs, { promises as fsPromises } from 'fs';
 import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
@@ -21,6 +22,12 @@ import {
 import type { LogEntry, LogSink, LoggerDiagnostic } from '../types';
 import { LogLevel, getLogLevel } from '../types';
 import { diagnosticEntry } from '../internal/diagnostic-entry';
+import { sleep } from '../../sleep';
+import {
+  observePromise,
+  promiseConstructorIntrinsic,
+  promiseResolveIntrinsic,
+} from '../../internal/intrinsics';
 
 export type {
   SinkErrorHandler,
@@ -38,6 +45,10 @@ export type {
  * is what a close can overshoot by, against a default of thirty.
  */
 const MIN_CLOSE_FLUSH_MS = 100;
+
+const FAILURE_REPORT_OPTIONS = {
+  handlerName: 'FileSink failure handler',
+} as const;
 
 /**
  * How many names one rotation will try before it accepts a collision.
@@ -142,7 +153,12 @@ export interface FileSinkOptions {
   maxSizeMB?: number;
   jsonFormat?: boolean;
   maxRetries?: number;
-  closeTimeoutMS?: number;
+  /**
+   * Close budget in ms (default: 30000). Null or undefined uses the default.
+   * NaN/other non-numbers throw TypeError; negatives throw RangeError.
+   * Zero retains the final-flush minimum; Infinity is timer-capped.
+   */
+  closeTimeoutMS?: number | null;
   minLevel?: LogLevel;
   /**
    * Cap on entries waiting to be written. Defaults to 10,000; pass `-1` to hold
@@ -271,7 +287,7 @@ export class FileSink implements LogSink {
   private flushBaselineWritten = 0;
   private flushBaselineDropped = 0;
   /** The flush in flight, if any; see {@link flush}. Never rejects. */
-  private pendingFlush: Promise<void> = Promise.resolve();
+  private pendingFlush: Promise<void> = promiseResolveIntrinsic(undefined);
   private didReportDrop = false;
   private isInitialized = false;
   private initPromise?: Promise<void>;
@@ -334,15 +350,17 @@ export class FileSink implements LogSink {
   private deferredFormatReport?: (onReported: () => void) => void;
 
   constructor(options: FileSinkOptions) {
+    this.closeTimeoutMS = resolveTimeoutMS(
+      options.closeTimeoutMS,
+      DEFAULT_CLOSE_TIMEOUT_MS,
+      'FileSink closeTimeoutMS',
+    );
+
     this.logDir = options.logDir;
     this.basename = resolveBasename(options.basename);
     this.maxSizeMB = resolveMaxSizeMB(options.maxSizeMB);
     this.jsonFormat = options.jsonFormat ?? false;
     this.maxRetries = resolveMaxRetries(options.maxRetries);
-    this.closeTimeoutMS = resolveTimeoutMS(
-      options.closeTimeoutMS,
-      DEFAULT_CLOSE_TIMEOUT_MS,
-    );
     this.minLevel = options.minLevel ?? LogLevel.INFO;
     this.onError = options.onError;
     this.maxQueueSize = resolveMaxQueueSize(options.maxQueueSize);
@@ -394,6 +412,7 @@ export class FileSink implements LogSink {
                   disposition: 'lost',
                 }),
           () => describeError(failure),
+          FAILURE_REPORT_OPTIONS,
         );
       }
 
@@ -425,7 +444,15 @@ export class FileSink implements LogSink {
     if (this.isInitialized) {
       void this.processQueue();
     } else if (this.initPromise) {
-      void this.initPromise.then(() => this.processQueue());
+      void observePromise(
+        this.initPromise,
+        () => {
+          void this.processQueue();
+        },
+        () => {
+          // Initialization failure is reported by initialize().
+        },
+      );
     }
   }
 
@@ -471,18 +498,19 @@ export class FileSink implements LogSink {
    * Flush all pending writes and wait for completion
    * Returns statistics about the flush operation
    * @param requestedTimeoutMS Maximum time to wait in milliseconds (default: 30000ms /
-   *        30s). `NaN`, a non-number, or a negative value takes the default; `Infinity`
-   *        waits as long as a timer can.
+   *        30s). Null or undefined uses the default. Invalid values reject before a
+   *        flush starts: `NaN` and other non-numbers produce TypeError; negative
+   *        values produce RangeError. `Infinity` is capped
+   *        at the largest timer delay; zero keeps its immediate deadline semantics.
    */
   public async flush(
-    requestedTimeoutMS: number = DEFAULT_CLOSE_TIMEOUT_MS,
+    requestedTimeoutMS: number | null = DEFAULT_CLOSE_TIMEOUT_MS,
   ): Promise<FlushResult> {
-    // Resolved rather than used literally, for the reason `closeTimeoutMS` is: `NaN` made
-    // the deadline check below never true, so `flush(Number(process.env.UNSET))` waited on
-    // a stalled queue for good, and `Infinity` made the init race below give up at once.
+    // Validate before joining the flush queue or advancing any counting window.
     const timeoutMS = resolveTimeoutMS(
       requestedTimeoutMS,
       DEFAULT_CLOSE_TIMEOUT_MS,
+      'FileSink flush timeoutMS',
     );
 
     // The clock starts here, before the wait below rather than after it: `timeoutMS` is
@@ -500,38 +528,33 @@ export class FileSink implements LogSink {
     // flush that waited behind another still answers within its own timeout.
     const previous = this.pendingFlush;
     const run = (async (): Promise<FlushResult> => {
-      let timer: NodeJS.Timeout | undefined;
-      try {
-        const isReady = await Promise.race([
-          previous.then(() => true),
-          new Promise<false>((resolve) => {
-            timer = setTimeout(() => resolve(false), timeoutMS);
-          }),
-        ]);
-        if (!isReady) {
-          // This caller never owned a counting window. Leave the counters for the
-          // active flush, and do not run an abandoned window later.
-          return {
-            success: false,
-            entriesWritten: 0,
-            entriesFailed: 0,
-            timedOut: true,
-          };
-        }
-      } finally {
-        clearTimeout(timer);
+      const { value: isReady } = await raceDeadline(
+        observePromise(previous, () => true),
+        timeoutMS,
+        () => false,
+      );
+      if (!isReady) {
+        // This caller never owned a counting window. Its budget includes queueing.
+        return {
+          success: false,
+          entriesWritten: 0,
+          entriesFailed: 0,
+          timedOut: true,
+        };
       }
-      return this.flushWindow(timeoutMS, startTime);
+      return await this.flushWindow(timeoutMS, startTime);
     })();
 
-    this.pendingFlush = previous
-      .then(() => run)
-      .then(
-        () => undefined,
-        () => undefined,
-      );
+    this.pendingFlush = (async (): Promise<void> => {
+      try {
+        await previous;
+        await run;
+      } catch {
+        // An unsuccessful flush must not strand the next caller's turn.
+      }
+    })();
 
-    return run;
+    return await run;
   }
 
   /**
@@ -544,36 +567,12 @@ export class FileSink implements LogSink {
 
     // Wait for initialization with timeout
     if (this.initPromise) {
-      let timeoutHandle: NodeJS.Timeout | undefined;
-      const timeoutSentinel = { timedOut: true } as const;
-
-      try {
-        const timeoutPromise = new Promise<typeof timeoutSentinel>(
-          (resolve) => {
-            timeoutHandle = setTimeout(
-              () => resolve(timeoutSentinel),
-              this.closeTimeoutMS,
-            );
-          },
-        );
-
-        const result = await Promise.race([
-          this.initPromise.then(() => undefined),
-          timeoutPromise,
-        ]);
-
-        // Check if timeout fired
-        if (result === timeoutSentinel) {
-          // Timeout fired - prevent unhandled rejection if initPromise fails later
-          Promise.resolve(this.initPromise).catch(() => {
-            // Intentionally ignore errors after timeout
-          });
-        }
-      } finally {
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-        }
-      }
+      // Losing initialization remains observed after the deadline.
+      await raceDeadline(
+        this.initPromise,
+        this.closeTimeoutMS,
+        () => undefined,
+      );
     }
 
     // Whether the drain gave up with a write still in flight, rather than with only a
@@ -589,7 +588,7 @@ export class FileSink implements LogSink {
 
         break;
       }
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await sleep(10);
     }
 
     this.closed = true;
@@ -648,6 +647,7 @@ export class FileSink implements LogSink {
                 disposition: 'no_entry',
               }),
         () => describeError(failure),
+        FAILURE_REPORT_OPTIONS,
       );
     }
   }
@@ -689,6 +689,7 @@ export class FileSink implements LogSink {
               disposition: 'no_entry',
             }),
       () => describeError(failure),
+      FAILURE_REPORT_OPTIONS,
     );
   }
 
@@ -707,29 +708,15 @@ export class FileSink implements LogSink {
   private async endStreamWithin(timeoutMS: number): Promise<number> {
     const stream = this.logFileStream;
 
-    let flushTimeout: NodeJS.Timeout | undefined;
-
-    try {
-      await Promise.race([
-        this.endStream(),
-        new Promise<void>((resolve) => {
-          flushTimeout = setTimeout(
-            resolve,
-            Math.max(MIN_CLOSE_FLUSH_MS, timeoutMS),
-          );
-
-          // Never a reason to hold the process up, as every timer in `NamedPipeSink` is
-          // not. This is armed on ordinary size- and date-triggered rotations too, not
-          // only on `close()`, so on a stalled mount a rotation would otherwise keep the
-          // event loop alive for the whole `closeTimeoutMS` and block exit.
-          flushTimeout.unref?.();
-        }),
-      ]);
-    } finally {
-      if (flushTimeout) {
-        clearTimeout(flushTimeout);
-      }
-    }
+    // Rotations run outside close too: a stalled mount must not keep the process
+    // alive just for this deadline. Retain the flush floor, while sharing timer
+    // cleanup and boxed outcomes with the other bounded sink waits.
+    await raceDeadline(
+      this.endStream(),
+      Math.max(MIN_CLOSE_FLUSH_MS, timeoutMS),
+      () => undefined,
+      { shouldUnref: true },
+    );
 
     // Whatever `end()` did not manage in that window is not going to happen: the descriptor
     // is released rather than held for the life of the process. Cleared only if it is still
@@ -769,7 +756,7 @@ export class FileSink implements LogSink {
       return;
     }
 
-    await new Promise<void>((resolve) => {
+    await new promiseConstructorIntrinsic<void>((resolve) => {
       stream.end(() => {
         resolve();
       });
@@ -821,6 +808,7 @@ export class FileSink implements LogSink {
               disposition: 'no_entry',
             }),
       () => describeError(failure),
+      FAILURE_REPORT_OPTIONS,
     );
   }
 
@@ -868,6 +856,7 @@ export class FileSink implements LogSink {
               disposition: 'lost',
             }),
       () => describeError(failure),
+      FAILURE_REPORT_OPTIONS,
     );
   }
 
@@ -933,6 +922,7 @@ export class FileSink implements LogSink {
                 disposition: 'retrying',
               }),
         () => describeError(failure),
+        FAILURE_REPORT_OPTIONS,
       );
     }
   }
@@ -1045,7 +1035,10 @@ export class FileSink implements LogSink {
                         }),
                   () =>
                     `FileSink error writing to ${this.currentLogFile ?? this.logDir}: ${describeError(err)}`,
-                  onReported,
+                  {
+                    onSettled: onReported,
+                    ...FAILURE_REPORT_OPTIONS,
+                  },
                 );
 
               if (kind === 'format') {
@@ -1135,44 +1128,20 @@ export class FileSink implements LogSink {
     // shape a timeout exists to rule out.
     if (this.initPromise) {
       const initPromise = this.initPromise;
-      let timeoutHandle: NodeJS.Timeout | undefined;
       const timeoutSentinel = { timedOut: true } as const;
-
-      try {
-        const timeoutPromise = new Promise<typeof timeoutSentinel>(
-          (resolve) => {
-            timeoutHandle = setTimeout(
-              () => resolve(timeoutSentinel),
-              // What is left of this call's budget, not the whole of it: the clock
-              // started in `flush()`, and this call may have waited behind another.
-              Math.max(0, timeoutMS - (Date.now() - startTime)),
-            );
-          },
-        );
-
-        const result = await Promise.race([
-          initPromise.then(() => undefined),
-          timeoutPromise,
-        ]);
-
-        if (result === timeoutSentinel) {
-          // Prevent an unhandled rejection if the init fails after this returns, exactly
-          // as `close()` does on the same race.
-          Promise.resolve(initPromise).catch(() => {
-            // Intentionally ignored after the timeout.
-          });
-
-          return this.settleFlush({
-            success: false,
-            entriesWritten: this.totalEntriesWritten - startWritten,
-            entriesFailed: this.droppedEntries - startFailed,
-            timedOut: true,
-          });
-        }
-      } finally {
-        if (timeoutHandle) {
-          clearTimeout(timeoutHandle);
-        }
+      const { value: result } = await raceDeadline(
+        initPromise,
+        // This call's budget includes time spent waiting behind another flush.
+        Math.max(0, timeoutMS - (Date.now() - startTime)),
+        () => timeoutSentinel,
+      );
+      if (result === timeoutSentinel) {
+        return this.settleFlush({
+          success: false,
+          entriesWritten: this.totalEntriesWritten - startWritten,
+          entriesFailed: this.droppedEntries - startFailed,
+          timedOut: true,
+        });
       }
     }
 
@@ -1191,7 +1160,7 @@ export class FileSink implements LogSink {
         });
       }
 
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await sleep(10);
     }
 
     const entriesWritten = this.totalEntriesWritten - startWritten;
@@ -1284,6 +1253,7 @@ export class FileSink implements LogSink {
               disposition: 'lost',
             }),
       () => describeError(failure),
+      FAILURE_REPORT_OPTIONS,
     );
   }
 
@@ -1395,7 +1365,7 @@ export class FileSink implements LogSink {
     }
 
     // Write to file
-    return new Promise<void>((resolve, reject) => {
+    return await new promiseConstructorIntrinsic<void>((resolve, reject) => {
       // Rejected, not resolved. The stream can disappear *after* the check above: its
       // `'error'` handler calls `destroyStream` on a `nextTick`, which lands while this
       // method is suspended in `rotateIfNeeded` or `rotateFile` - both awaited after that
@@ -1629,6 +1599,7 @@ export class FileSink implements LogSink {
                   disposition: 'no_entry',
                 }),
           () => describeError(failure),
+          FAILURE_REPORT_OPTIONS,
         );
       });
 
@@ -1846,6 +1817,7 @@ export class FileSink implements LogSink {
                   disposition: 'no_entry',
                 }),
           () => describeError(failure),
+          FAILURE_REPORT_OPTIONS,
         );
       }
 
@@ -1921,6 +1893,7 @@ export class FileSink implements LogSink {
               disposition: 'no_entry',
             }),
       () => describeError(failure),
+      FAILURE_REPORT_OPTIONS,
     );
 
     return candidate;
@@ -1957,7 +1930,7 @@ export class FileSink implements LogSink {
               }),
         () =>
           `FileSink error rendering an entry for ${this.currentLogFile ?? this.logDir}: ${describeError(failure)}`,
-        onReported,
+        { ...FAILURE_REPORT_OPTIONS, onSettled: onReported },
       );
     });
   }

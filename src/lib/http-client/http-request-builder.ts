@@ -1,4 +1,7 @@
+import { isNullish } from '../internal/is-nullish';
 import { generateID } from '../id-helpers';
+import { resolveRequestTimeoutMS } from './consts';
+import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import type {
   HTTPMethod,
   HTTPResponse,
@@ -47,7 +50,7 @@ export class HTTPRequestBuilder<T = unknown> {
   private _headers: Record<string, string | string[]> = {};
   private _params?: Record<string, unknown>;
   private _body?: unknown;
-  private _timeout?: number;
+  private _timeout?: number | null;
   private _signal?: AbortSignal;
   private _retryPolicy?: RetryPolicyOptions | null;
   private _retryNonIdempotentMethods?: boolean;
@@ -127,8 +130,9 @@ export class HTTPRequestBuilder<T = unknown> {
     return this;
   }
 
-  public timeout(ms: number): this {
+  public timeout(ms: number | null): this {
     this._assertNotSent('timeout');
+    resolveRequestTimeoutMS(ms);
     this._timeout = ms;
     return this;
   }
@@ -152,9 +156,11 @@ export class HTTPRequestBuilder<T = unknown> {
     return this;
   }
 
-  public retryPolicy(options: RetryPolicyOptions | null): this {
+  public retryPolicy(options: RetryPolicyOptions | null | undefined): this {
     this._assertNotSent('retryPolicy');
-    this._retryPolicy = options;
+    this._retryPolicy = isNullish(options)
+      ? options
+      : snapshotRetryPolicyOptions(options);
     return this;
   }
 
@@ -378,69 +384,84 @@ export class HTTPRequestBuilder<T = unknown> {
   // --- Private helpers ---
 
   private _applyOptions(opts: HTTPRequestOptions): void {
+    // Options may be getters. Capture each value once, then apply it before reading
+    // the next: validation failures must not run later getters as a side effect.
     // Request headers merged on top of any defaults
-    if (opts.headers) {
-      this.headers(opts.headers);
+    const headers = opts.headers;
+    if (headers) {
+      this.headers(headers);
     }
 
     // URL query params
-    if (opts.params) {
-      this.params(opts.params);
+    const params = opts.params;
+    if (params) {
+      this.params(params);
     }
 
     // Body — type determines serialization (FormData → multipart, string → text/plain, object → JSON).
     // A custom content-type header overrides the auto-detected one.
-    if (opts.body !== undefined) {
-      this.body(opts.body);
+    const body = opts.body;
+    if (body !== undefined) {
+      this.body(body);
     }
 
     // Request-level timeout in ms
-    if (opts.timeout !== undefined) {
-      this.timeout(opts.timeout);
+    const timeout = opts.timeout;
+    if (timeout !== undefined) {
+      this.timeout(timeout);
     }
 
     // External abort signal — merged with the internal one so both can cancel
-    if (opts.signal) {
-      this.signal(opts.signal);
+    const signal = opts.signal;
+    if (signal) {
+      this.signal(signal);
     }
 
     // Retry behavior — null explicitly disables retrying
-    if (opts.retryPolicy !== undefined) {
-      this.retryPolicy(opts.retryPolicy);
+    const retryPolicy = opts.retryPolicy;
+    if (retryPolicy !== undefined) {
+      this.retryPolicy(retryPolicy);
     }
 
-    if (opts.retryNonIdempotentMethods !== undefined) {
-      this.retryNonIdempotentMethods(opts.retryNonIdempotentMethods);
+    const allowRetryNonIdempotentMethods = opts.retryNonIdempotentMethods;
+    if (allowRetryNonIdempotentMethods !== undefined) {
+      this.retryNonIdempotentMethods(allowRetryNonIdempotentMethods);
     }
 
     // Tracking label for cancel/list filtering
-    if (opts.label !== undefined) {
-      this.label(opts.label);
+    const label = opts.label;
+    if (label !== undefined) {
+      this.label(label);
     }
 
     // Progress callbacks - upload
-    if (opts.onUploadProgress) {
-      this.onUploadProgress(opts.onUploadProgress);
+    const onUploadProgress = opts.onUploadProgress;
+    if (onUploadProgress) {
+      this.onUploadProgress(onUploadProgress);
     }
 
     // Progress callbacks - download
-    if (opts.onDownloadProgress) {
-      this.onDownloadProgress(opts.onDownloadProgress);
+    const onDownloadProgress = opts.onDownloadProgress;
+    if (onDownloadProgress) {
+      this.onDownloadProgress(onDownloadProgress);
     }
 
     // Called before each attempt (including retries)
-    if (opts.onAttemptStart) {
-      this.onAttemptStart(opts.onAttemptStart);
+    const onAttemptStart = opts.onAttemptStart;
+    if (onAttemptStart) {
+      this.onAttemptStart(onAttemptStart);
     }
 
     // Called after each attempt (including retries)
-    if (opts.onAttemptEnd) {
-      this.onAttemptEnd(opts.onAttemptEnd);
+    const onAttemptEnd = opts.onAttemptEnd;
+    if (onAttemptEnd) {
+      this.onAttemptEnd(onAttemptEnd);
     }
 
     // NodeAdapter response streaming factory
-    if (opts.streamResponse) {
-      this.streamResponse(opts.streamResponse);
+    const streamResponse = opts.streamResponse;
+    if (streamResponse) {
+      this.streamResponse(streamResponse);
     }
   }
 

@@ -127,7 +127,13 @@ await manager.stopAllComponents();
 await logger.close();
 ```
 
-Tip: listen for `lifecycle-manager:shutdown-completed` when you want one place to react to shutdown results from manual stops, signals like `SIGINT` / `SIGTERM`, or logger-exit hooks. This is the centralized hook for logging or follow-up policy when `timedOut` is `true` or `stalledComponents` is non-empty. If `timedOut` is `true`, the payload reflects the result when the manager stopped waiting. A stop already in flight remains protected against per-component overlap, while exit handling and later shutdown/escalation attempts may proceed. Use repeated shutdown escalation separately when you want additional shutdown requests to retry or force behavior.
+Lifecycle operations report failures in their results, including unexpected errors;
+check `success` and `code` after awaiting them. A completed shutdown attempt can leave
+components running or stalled, and `logger.close()` can finish at its cleanup deadline
+with buffered output unflushed. Configure shutdown and logger cleanup budgets for your
+application and monitor their results/diagnostics.
+
+Tip: listen for `lifecycle-manager:shutdown-completed` when you want one place to react to shutdown results from manual stops, signals like `SIGINT` / `SIGTERM`, or logger-exit hooks. This is the centralized hook for logging or follow-up policy when `success` is `false`, including `code: 'cleanup_incomplete'`, timeouts, and stalled components. If `timedOut` is `true`, the payload reflects the result when the manager stopped waiting. A stop already in flight remains protected against per-component overlap, while exit handling and later shutdown/escalation attempts may proceed. Use repeated shutdown escalation separately when you want additional shutdown requests to retry or force behavior.
 
 ## Available Libraries
 

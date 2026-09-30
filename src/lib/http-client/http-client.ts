@@ -1,3 +1,12 @@
+import { isNullish } from '../internal/is-nullish';
+import {
+  promiseConstructorIntrinsic,
+  observePromise,
+  observeBoxed,
+  awaitBoxedPromise,
+  racePromises,
+  promiseResolveIntrinsic,
+} from '../internal/intrinsics';
 import { generateID } from '../id-helpers';
 import { safeHandleCallback } from '../safe-handle-callback';
 import { reportToHost } from '../internal/report-to-host';
@@ -32,6 +41,7 @@ import {
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_USER_AGENT,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
+  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_FACTORY_CANCEL_KEY,
@@ -80,7 +90,12 @@ import type { CookieJar } from './cookie-jar';
 // original value retained on cause for consumers of the normalized error.
 import { isErrorValue, toError as normalizeError } from '../to-error';
 import { readUnknownMember as readObjectMember } from '../internal/read-member';
-import { isPromise } from '../is-promise';
+import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
+import {
+  adoptPromise,
+  adoptResult,
+  UnreadableReturn,
+} from '../internal/adopt-promise';
 
 type RemoveFn = () => void;
 
@@ -102,7 +117,7 @@ export class BaseHTTPClient {
       | 'retryNonIdempotentMethods'
     >
   > &
-    HTTPClientConfig;
+    HTTPClientConfig & { timeout: number };
 
   protected _adapter: NonNullable<HTTPClientConfig['adapter']>;
   protected _tracker: RequestTracker;
@@ -129,6 +144,7 @@ export class BaseHTTPClient {
     );
     this._tracker = internal.tracker ?? new RequestTracker();
     this._parentClient = internal.parentClient ?? null;
+    const configuredRetryPolicy = config.retryPolicy;
 
     this._config = {
       adapter: this._adapter,
@@ -136,7 +152,9 @@ export class BaseHTTPClient {
       defaultHeaders: config.defaultHeaders ?? {},
       timeout: resolveRequestTimeoutMS(config.timeout),
       cookieJar: config.cookieJar,
-      retryPolicy: config.retryPolicy,
+      retryPolicy: isNullish(configuredRetryPolicy)
+        ? undefined
+        : snapshotRetryPolicyOptions(configuredRetryPolicy),
       retryNonIdempotentMethods: config.retryNonIdempotentMethods ?? false,
       includeRequestID: config.includeRequestID ?? false,
       includeAttemptHeader: config.includeAttemptHeader ?? false,
@@ -323,29 +341,47 @@ export class BaseHTTPClient {
   protected _buildSubClientConfig(
     overrides: SubClientConfig = {},
   ): HTTPClientConfig {
+    // Undefined overrides inherit; explicit null retains each option's policy
+    // (notably cookieJar: null disables the jar, while a null timeout inherits).
+    const overrideValues = new Map(Object.entries(overrides));
+    // Explicit option reads also honor inherited and non-enumerable properties.
+    // Memoize at the read site so a new explicit option needs no separate key list.
+    const readOverride = <K extends keyof SubClientConfig>(
+      key: K,
+    ): SubClientConfig[K] => {
+      if (!overrideValues.has(key)) {
+        overrideValues.set(key, overrides[key]);
+      }
+      return overrideValues.get(key) as SubClientConfig[K];
+    };
+    const shouldFollowRedirectsOverride = readOverride('followRedirects');
+    const defaultHeadersStrategy = readOverride('defaultHeadersStrategy');
+    const overrideHeaders = readOverride('defaultHeaders');
+    const timeout = readOverride('timeout');
+    const adapter = readOverride('adapter');
+    const cookieJar = readOverride('cookieJar');
+    const maxRedirects = readOverride('maxRedirects');
+    const definedOverrides = Object.fromEntries(
+      [...overrideValues].filter(([, value]) => value !== undefined),
+    );
     const shouldFollowRedirects =
-      overrides.followRedirects ?? this._config.followRedirects;
+      shouldFollowRedirectsOverride ?? this._config.followRedirects;
     const defaultHeaders =
-      overrides.defaultHeadersStrategy === 'merge'
-        ? mergeHeaders(this._config.defaultHeaders, overrides.defaultHeaders)
-        : (overrides.defaultHeaders ?? this._config.defaultHeaders);
+      defaultHeadersStrategy === 'merge'
+        ? mergeHeaders(this._config.defaultHeaders, overrideHeaders)
+        : (overrideHeaders ?? this._config.defaultHeaders);
 
     const config: HTTPClientConfig = {
       ...this._config,
-      ...overrides,
+      ...definedOverrides,
+      timeout: timeout ?? this._config.timeout,
       defaultHeaders,
       followRedirects: shouldFollowRedirects,
-      adapter: overrides.adapter ?? this._adapter,
-      cookieJar:
-        overrides.cookieJar !== undefined
-          ? overrides.cookieJar
-          : this._config.cookieJar,
+      adapter: adapter ?? this._adapter,
+      cookieJar: cookieJar !== undefined ? cookieJar : this._config.cookieJar,
     };
 
-    if (
-      shouldFollowRedirects === false &&
-      overrides.maxRedirects === undefined
-    ) {
+    if (shouldFollowRedirects === false && maxRedirects === undefined) {
       delete config.maxRedirects;
     }
 
@@ -399,8 +435,8 @@ export class BaseHTTPClient {
       effectiveBaseURL,
       this._isBrowserRuntime,
     );
-    // Resolved here as well as in the constructor: a per-request `.timeout(n)` is the
-    // caller's number too, and `NaN` or `Infinity` from it broke the same two timers.
+    // Resolved here as well as in the constructor: nullish values inherit the client
+    // value. Invalid numbers fail before dispatch; Infinity disables the timer.
     const timeout = resolveRequestTimeoutMS(
       options.timeout,
       this._config.timeout,
@@ -1227,7 +1263,8 @@ export class BaseHTTPClient {
             // which the branches above reach with `adapterResponse: null` and so
             // cannot read for themselves.
             ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
-            ...(attemptResult.errorCode === 'interceptor_error' ||
+            ...(attemptResult.errorCode === 'request_setup_error' ||
+            attemptResult.errorCode === 'interceptor_error' ||
             attemptResult.errorCode === 'stream_setup_error' ||
             attemptResult.errorCode === 'redirect_disabled'
               ? { isNetworkErrorOverride: false }
@@ -1801,12 +1838,37 @@ export class BaseHTTPClient {
         credentialScope.url = attemptRequest.requestURL;
       }
 
-      const sentRequest = this._buildAttemptRequest(attemptRequest, {
-        requestID,
-        timeout,
-        attemptNumber,
-        cookieJar,
-      });
+      let sentRequest: AttemptRequest;
+      try {
+        sentRequest = this._buildAttemptRequest(attemptRequest, {
+          requestID,
+          timeout,
+          attemptNumber,
+          cookieJar,
+        });
+      } catch (error) {
+        // Serialization and cookie/header preparation precede adapter dispatch,
+        // but the attempt timer and start event already belong to this attempt.
+        clearTimeout(timeoutID);
+        emitAttemptEnd({ willRetry: false, status: 0 });
+        return {
+          adapterResponse: null,
+          ...(previousUploadOutcome
+            ? { requestBodySettled: previousUploadOutcome }
+            : {}),
+          sentRequest: this._bestEffortAttemptRequestFromPending(
+            attemptRequest,
+            timeout,
+            requestID,
+          ),
+          attemptCount: attemptNumber,
+          wasCancelled: false,
+          wasTimeout: false,
+          isRetriesExhausted: false,
+          errorCode: 'request_setup_error',
+          adapterCause: normalizeError(error),
+        };
+      }
 
       // This attempt's own outcome takes over from here; see the declaration.
       previousUploadOutcome = undefined;
@@ -1815,6 +1877,7 @@ export class BaseHTTPClient {
       const onDownloadProgress = options.onDownloadProgress;
 
       let observedSentRequest: AttemptRequest = sentRequest;
+      let responseUploadOutcome: Promise<Error | undefined> | undefined;
 
       // Dispatch counts as activity, so the settle wait's stall clock starts from the
       // moment this attempt's upload could have begun rather than from a report on some
@@ -1825,64 +1888,107 @@ export class BaseHTTPClient {
       uploadActivity.at = Date.now();
 
       try {
-        const rawAdapterResponse = await this._adapter.send({
-          requestURL: sentRequest.requestURL,
-          method: sentRequest.method,
-          headers: { ...sentRequest.headers },
-          body: sentRequest.body ?? null,
-          signal: attemptSignal,
-          // Forward the builder's streaming factory to each adapter attempt.
-          // NodeAdapter invokes it only for a 200 response, letting the caller
-          // create attempt-local writable state when a retry happens.
-          streamResponse: options.streamResponse,
-          // attemptNumber and requestID are passed so NodeAdapter can populate
-          // StreamResponseInfo without the adapter needing to track attempt state
-          // itself.
-          attemptNumber,
-          requestID: requestID,
-          // The origin the caller addressed, so an adapter can tell a redirect hop to
-          // another host from the request it was configured for. See
-          // `AdapterRequest.initialURL`.
-          initialURL: credentialScope.url,
-          // Always handed over for a bodied request, whether or not the caller asked for
-          // progress: the stamp is what lets the wait on `requestBodySettled` tell an
-          // upload that is still moving from one that has stalled. A bodiless request
-          // has no upload to watch, so the adapter is told nothing it was not told before.
-          onUploadProgress:
-            onUploadProgress || (sentRequest.body ?? null) !== null
-              ? (e) => {
-                  uploadActivity.at = Date.now();
+        // Adopted, not awaited as it is: `HTTPAdapter` is a public extension point, and
+        // an adapter answering with a native promise carrying its own `constructor` and
+        // a no-op `then` hung the request, its rejection unhandled. See `adoptPromise()`.
+        const adapterPromise = adoptPromise(
+          this._adapter.send({
+            requestURL: sentRequest.requestURL,
+            method: sentRequest.method,
+            headers: { ...sentRequest.headers },
+            body: sentRequest.body ?? null,
+            signal: attemptSignal,
+            // Forward the builder's streaming factory to each adapter attempt.
+            // NodeAdapter invokes it only for a 200 response, letting the caller
+            // create attempt-local writable state when a retry happens.
+            streamResponse: options.streamResponse,
+            // attemptNumber and requestID are passed so NodeAdapter can populate
+            // StreamResponseInfo without the adapter needing to track attempt state
+            // itself.
+            attemptNumber,
+            requestID: requestID,
+            // The origin the caller addressed, so an adapter can tell a redirect hop to
+            // another host from the request it was configured for. See
+            // `AdapterRequest.initialURL`.
+            initialURL: credentialScope.url,
+            // Always handed over for a bodied request, whether or not the caller asked for
+            // progress: the stamp is what lets the wait on `requestBodySettled` tell an
+            // upload that is still moving from one that has stalled. A bodiless request
+            // has no upload to watch, so the adapter is told nothing it was not told before.
+            onUploadProgress:
+              onUploadProgress || (sentRequest.body ?? null) !== null
+                ? (e) => {
+                    uploadActivity.at = Date.now();
 
-                  // Returned, so a caller's `async` hook that rejects still reaches the
-                  // adapter's guard as a promise and is reported, not dropped here.
-                  return onUploadProgress?.({
+                    // Returned, so a caller's `async` hook that rejects still reaches the
+                    // adapter's guard as a promise and is reported, not dropped here.
+                    return onUploadProgress?.({
+                      ...e,
+                      attemptNumber,
+                      ...(hopContext
+                        ? { hopNumber: hopContext.hopNumber }
+                        : {}),
+                    });
+                  }
+                : undefined,
+            onDownloadProgress: onDownloadProgress
+              ? (e) =>
+                  onDownloadProgress({
                     ...e,
                     attemptNumber,
                     ...(hopContext ? { hopNumber: hopContext.hopNumber } : {}),
-                  });
-                }
+                  })
               : undefined,
-          onDownloadProgress: onDownloadProgress
-            ? (e) =>
-                onDownloadProgress({
-                  ...e,
-                  attemptNumber,
-                  ...(hopContext ? { hopNumber: hopContext.hopNumber } : {}),
-                })
-            : undefined,
-        });
+          }),
+        );
+        const { value: rawAdapterResponse } =
+          await awaitBoxedPromise(adapterPromise);
 
-        const adapterResponse: AdapterResponse = {
-          ...rawAdapterResponse,
-          headers: normalizeAdapterResponseHeaders(rawAdapterResponse.headers),
-        };
+        // Observe the upload before any other response getter or normalization can
+        // throw. Keep it outside this try so failures still expose the upload outcome.
+        const rawUploadOutcome = rawAdapterResponse.requestBodySettled;
+        if (rawUploadOutcome !== undefined) {
+          responseUploadOutcome = adoptRequestBodySettled(rawUploadOutcome);
+        }
+        const headers = rawAdapterResponse.headers;
+        const effectiveRequestHeaders =
+          rawAdapterResponse.effectiveRequestHeaders;
+        // Copy enumerable fields with their original receiver, excluding the three
+        // fields already read. A spread would invoke the upload getter twice.
+        const adapterResponse = {
+          headers,
+          effectiveRequestHeaders,
+          ...(responseUploadOutcome
+            ? { requestBodySettled: responseUploadOutcome }
+            : {}),
+        } as AdapterResponse;
+        for (const key of Reflect.ownKeys(rawAdapterResponse)) {
+          if (
+            key === 'requestBodySettled' ||
+            key === 'headers' ||
+            key === 'effectiveRequestHeaders'
+          ) {
+            continue;
+          }
+          if (
+            Object.getOwnPropertyDescriptor(rawAdapterResponse, key)?.enumerable
+          ) {
+            Object.defineProperty(adapterResponse, key, {
+              value: Reflect.get(rawAdapterResponse, key),
+              enumerable: true,
+              configurable: true,
+              writable: true,
+            });
+          }
+        }
+        adapterResponse.headers = normalizeAdapterResponseHeaders(headers);
 
-        observedSentRequest = rawAdapterResponse.effectiveRequestHeaders
+        observedSentRequest = effectiveRequestHeaders
           ? {
               ...sentRequest,
               headers: mergeObservedHeaders(
                 sentRequest.headers,
-                rawAdapterResponse.effectiveRequestHeaders,
+                effectiveRequestHeaders,
               ),
             }
           : sentRequest;
@@ -2035,9 +2141,7 @@ export class BaseHTTPClient {
               timeout,
               () => uploadActivity.at,
             );
-            previousUploadOutcome = adoptRequestBodySettled(
-              adapterResponse.requestBodySettled,
-            );
+            previousUploadOutcome = adapterResponse.requestBodySettled;
 
             // A deadline fails the request as a timeout, for the reason the redirect
             // path gives: the retry would put the body on the wire beside an upload
@@ -2154,7 +2258,8 @@ export class BaseHTTPClient {
          * body made it, and an absent field answers `undefined`, which is what a
          * *completed* upload resolves with.
          */
-        const uploadOutcome = getRequestBodySettled(error);
+        const uploadOutcome =
+          responseUploadOutcome ?? getRequestBodySettled(error);
 
         // Before any classification: if the adapter attached the response it had
         // already received, the Set-Cookie on those headers belongs in the jar.
@@ -2436,8 +2541,14 @@ export class BaseHTTPClient {
         const didTimeoutThisAttempt = isAbortError(error) && isTimedOut;
         const isNonRetryableClientCallbackFailure =
           isNonRetryableClientCallbackError(error);
+        const isNonRetryableAdapterFailure =
+          readObjectMember(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG) ===
+          true;
 
-        if (isNonRetryableClientCallbackFailure) {
+        if (
+          isNonRetryableClientCallbackFailure ||
+          isNonRetryableAdapterFailure
+        ) {
           emitAttemptEnd({
             willRetry: false,
             nextRetryDelayMS: undefined,
@@ -2460,9 +2571,11 @@ export class BaseHTTPClient {
             wasCancelled: false,
             wasTimeout: didTimeoutThisAttempt,
             isRetriesExhausted: false,
-            errorCode: isStreamFactoryError
-              ? 'stream_setup_error'
-              : 'interceptor_error',
+            errorCode: isNonRetryableAdapterFailure
+              ? 'adapter_error'
+              : isStreamFactoryError
+                ? 'stream_setup_error'
+                : 'interceptor_error',
             adapterCause: normalizeError(error),
           };
         }
@@ -2621,10 +2734,10 @@ export class BaseHTTPClient {
    */
   private _cancellableDelay(ms: number, signal: AbortSignal): Promise<void> {
     if (signal.aborted) {
-      return Promise.resolve();
+      return promiseResolveIntrinsic(undefined);
     }
 
-    return new Promise<void>((resolve) => {
+    return new promiseConstructorIntrinsic<void>((resolve) => {
       const onAbort = () => {
         clearTimeout(id);
         resolve();
@@ -2684,12 +2797,12 @@ export class BaseHTTPClient {
     // response's own field, which is right for a single hop and wrong after a
     // followed redirect: the final hop's response is usually a bodiless `GET` with
     // nothing on it, while the parameter carries the outcome from the hop that
-    // actually uploaded. Adopted either way, for the reason `getRequestBodySettled`
-    // gives: the field came from an adapter and may not be a promise this client
-    // can trust.
-    const settled = adoptRequestBodySettled(
-      requestBodySettled ?? adapterResponse?.requestBodySettled,
-    );
+    // actually uploaded. Every non-null response here is the private attempt runner's
+    // snapshot or a synthetic response carrying its outcome. The attempt runner adopts
+    // raw adapter metadata before publication; getRequestBodySettled does the same for
+    // thrown outcomes. Keep those owned promises intact here rather than re-adopting
+    // them and maintaining a separate identity registry just to undo that work.
+    const settled = requestBodySettled ?? adapterResponse?.requestBodySettled;
 
     if (!adapterResponse) {
       return {
@@ -2983,7 +3096,7 @@ export class BaseHTTPClient {
       }
     }
 
-    return this._requestInterceptors.run(current, phase, context);
+    return await this._requestInterceptors.run(current, phase, context);
   }
 
   /**
@@ -3498,29 +3611,90 @@ function getRequestBodySettled(
 function adoptRequestBodySettled(
   settled: unknown,
 ): Promise<Error | undefined> | undefined {
-  // Guarded, because deciding whether it is a thenable reads `.then` on a value the
-  // adapter made. A `Proxy` or an accessor that throws there threw out of
-  // `_buildResponse` - and out of a request that had already succeeded - turning a `200`
-  // into a synthetic failed status-0 response over a field documented as advisory.
-  // An unusable value is treated as absent, which is what "no adapter reported an upload
-  // outcome" already means. `Promise.resolve` reads `.then` once more below, but the
-  // specification has it reject the promise on a throwing read rather than throw.
-  let isThenable = false;
-
-  try {
-    isThenable = isPromise(settled);
-  } catch {
+  // Advisory metadata must not turn a successful request into failure. Classify
+  // once, preserving the captured then function; an unreadable return is absent,
+  // while a real async rejection becomes the upload's reported error.
+  const pending = adoptResult(settled);
+  if (pending === undefined || pending instanceof UnreadableReturn) {
     return undefined;
   }
-
-  if (!isThenable) {
-    return undefined;
-  }
-
-  return Promise.resolve(settled).then(
+  const boxed = observeBoxed(
+    pending,
     (value) => (value === undefined ? undefined : normalizeError(value)),
     (error: unknown) => normalizeError(error),
   );
+  // Stabilize immediately before publishing the raw Error at this public API
+  // boundary, not one promise reaction earlier while the boxed data can still
+  // change. Internal mapping itself never re-adopts the adapter's value.
+  return observePromise(boxed, (result) =>
+    result.value === undefined ? undefined : stableUploadError(result.value),
+  );
+}
+
+/** Avoid invoking a caller Error's `then` while resolving the public outcome promise. */
+function stableUploadError(error: Error): Error {
+  try {
+    let object: object | null = error;
+    let hasNonCallableDataThen = false;
+    for (let depth = 0; object !== null && depth < 32; depth++) {
+      const descriptor = Object.getOwnPropertyDescriptor(object, 'then');
+      if (descriptor !== undefined) {
+        // Plain non-callable data cannot start promise assimilation. Preserve the
+        // subclass and custom fields in that case, including an already-safe wrapper.
+        // Accessors still require wrapping: reading one to classify it and then again
+        // during native resolution could produce a different value on the second read.
+        hasNonCallableDataThen =
+          Object.hasOwn(descriptor, 'value') &&
+          typeof descriptor.value !== 'function';
+        break;
+      }
+      object = Object.getPrototypeOf(object) as object | null;
+    }
+    // A proxy can synthesize a property without exposing a descriptor. Check that
+    // ordinary lookup agrees before retaining identity; an unreadable property is
+    // also wrapped. Descriptor-backed getters were already detected without running.
+    if (
+      (object === null || hasNonCallableDataThen) &&
+      typeof Reflect.get(error, 'then', error) !== 'function'
+    ) {
+      return error;
+    }
+  } catch {
+    // A proxy may refuse inspection; preserve it as the cause of a safe Error.
+  }
+  const message = readObjectMember(error, 'message');
+  const wrapped = new Error(
+    typeof message === 'string' ? message : 'Upload failed',
+    { cause: error },
+  );
+  const name = readObjectMember(error, 'name');
+  if (typeof name === 'string') {
+    wrapped.name = name;
+  }
+  // Wrapping is required for safe promise resolution, but the upload's diagnostic
+  // code and original stack still describe the failure better than this wrapper's
+  // construction site. Snapshot only these known fields with guarded reads; copying
+  // arbitrary properties would run unrelated getters and could copy then back in.
+  // Define own data properties so inherited setters cannot intercept the copies.
+  const code = readObjectMember(error, 'code');
+  if (code !== undefined) {
+    Object.defineProperty(wrapped, 'code', {
+      value: code,
+      writable: true,
+      configurable: true,
+      enumerable: true,
+    });
+  }
+  const stack = readObjectMember(error, 'stack');
+  if (typeof stack === 'string') {
+    Object.defineProperty(wrapped, 'stack', {
+      value: stack,
+      writable: true,
+      configurable: true,
+    });
+  }
+  Object.defineProperty(wrapped, 'then', { value: undefined });
+  return wrapped;
 }
 
 /** How a wait on the previous attempt's upload ended. */
@@ -3552,7 +3726,7 @@ interface UploadActivity {
  * dispatching a second upload beside one that may still be going out.
  */
 async function settleUploadBeforeNextDispatch(
-  settled: unknown,
+  settled: Promise<Error | undefined> | undefined,
   cancelSignal: AbortSignal,
   stallMS: number,
   lastActivityAt: () => number,
@@ -3565,60 +3739,64 @@ async function settleUploadBeforeNextDispatch(
     return 'cancelled';
   }
 
-  const adopted = adoptRequestBodySettled(settled);
-
-  if (adopted === undefined) {
+  // All callers pass the attempt runner's already-adopted upload outcome. This
+  // wait observes completion only; it must not normalize the public Error again.
+  if (settled === undefined) {
     return 'settled';
   }
 
   let onAbort: (() => void) | undefined;
   let deadlineID: ReturnType<typeof setTimeout> | undefined;
 
-  const cancelled = new Promise<UploadSettleWait>((resolve) => {
-    onAbort = () => resolve('cancelled');
-    cancelSignal.addEventListener('abort', onAbort, { once: true });
-  });
+  const cancelled = new promiseConstructorIntrinsic<UploadSettleWait>(
+    (resolve) => {
+      onAbort = () => resolve('cancelled');
+      cancelSignal.addEventListener('abort', onAbort, { once: true });
+    },
+  );
 
-  const expired = new Promise<UploadSettleWait>((resolve) => {
-    if (stallMS <= 0) {
-      return;
-    }
+  const expired = new promiseConstructorIntrinsic<UploadSettleWait>(
+    (resolve) => {
+      if (stallMS <= 0) {
+        return;
+      }
 
-    // Re-armed rather than reset on every report: a timer touched from inside a progress
-    // callback would run on the adapter's cadence. When it fires, the question is only
-    // whether anything moved since the wait was last armed - if so, the stall is
-    // measured from that report, and the timer sleeps for the remainder.
-    const arm = (sinceMS: number): void => {
-      deadlineID = setTimeout(
-        () => {
-          const quietForMS = Date.now() - lastActivityAt();
+      // Re-armed rather than reset on every report: a timer touched from inside a progress
+      // callback would run on the adapter's cadence. When it fires, the question is only
+      // whether anything moved since the wait was last armed - if so, the stall is
+      // measured from that report, and the timer sleeps for the remainder.
+      const arm = (sinceMS: number): void => {
+        deadlineID = setTimeout(
+          () => {
+            const quietForMS = Date.now() - lastActivityAt();
 
-          if (quietForMS >= stallMS) {
-            resolve('deadline');
+            if (quietForMS >= stallMS) {
+              resolve('deadline');
 
-            return;
-          }
+              return;
+            }
 
-          arm(stallMS - quietForMS);
-        },
-        Math.min(Math.max(0, sinceMS), MAX_TIMER_MS),
-      );
-    };
+            arm(stallMS - quietForMS);
+          },
+          Math.min(Math.max(0, sinceMS), MAX_TIMER_MS),
+        );
+      };
 
-    // Count silence before this wait, including retry backoff. Even an overdue check
-    // runs through the timer: an already-completed upload must get its promise callbacks
-    // processed before we declare it stalled. A pending upload is checked next tick,
-    // without granting it another full stall window.
-    const quietOnEntryMS = Date.now() - lastActivityAt();
-    arm(stallMS - Math.max(0, quietOnEntryMS));
-  });
+      // Count silence before this wait, including retry backoff. Even an overdue check
+      // runs through the timer: an already-completed upload must get its promise callbacks
+      // processed before we declare it stalled. A pending upload is checked next tick,
+      // without granting it another full stall window.
+      const quietOnEntryMS = Date.now() - lastActivityAt();
+      arm(stallMS - Math.max(0, quietOnEntryMS));
+    },
+  );
 
+  const uploadSettled = observePromise(
+    settled,
+    (): UploadSettleWait => 'settled',
+  );
   try {
-    return await Promise.race([
-      adopted.then((): UploadSettleWait => 'settled'),
-      cancelled,
-      expired,
-    ]);
+    return (await racePromises([uploadSettled, cancelled, expired])).value;
   } finally {
     if (onAbort !== undefined) {
       cancelSignal.removeEventListener('abort', onAbort);

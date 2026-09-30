@@ -46,19 +46,26 @@ describe('ProcessSignalManager', () => {
   });
 
   describe('constructor', () => {
-    test('normalizes non-finite keypress throttles to the default window', () => {
-      for (const keypressThrottleMS of [Infinity, NaN]) {
+    test.each([null, undefined])(
+      'nullish throttle %s uses the default',
+      (keypressThrottleMS) => {
         manager = new ProcessSignalManager({ keypressThrottleMS });
-        const internal = manager as unknown as {
-          keypressThrottleMS: number;
-          lastActionTimes: { reload: number };
-          shouldThrottle(action: 'reload'): boolean;
-        };
+        expect(
+          (manager as unknown as { keypressThrottleMS: number })
+            .keypressThrottleMS,
+        ).toBe(200);
+      },
+    );
 
-        expect(internal.keypressThrottleMS).toBe(200);
-        internal.lastActionTimes.reload = Date.now() - 201;
-        expect(internal.shouldThrottle('reload')).toBe(false);
+    test('rejects invalid throttles and caps Infinity', () => {
+      for (const keypressThrottleMS of [NaN, -1, '200' as unknown as number]) {
+        expect(
+          () => new ProcessSignalManager({ keypressThrottleMS }),
+        ).toThrow();
       }
+      manager = new ProcessSignalManager({ keypressThrottleMS: Infinity });
+      const internal = manager as unknown as { keypressThrottleMS: number };
+      expect(internal.keypressThrottleMS).toBe(2_147_483_647);
     });
 
     test('creates instance with no callbacks', () => {
@@ -997,7 +1004,7 @@ describe('ProcessSignalManager', () => {
   });
 
   describe('keyboard event handling', () => {
-    test('non-finite throttles still allow a second keypress after the default window', async () => {
+    test('an Infinity throttle suppresses repeats until the capped window expires', async () => {
       const wasOriginallyTTY = process.stdin.isTTY;
       // eslint-disable-next-line @typescript-eslint/unbound-method
       const savedSetRawMode = process.stdin.setRawMode;
@@ -1009,28 +1016,23 @@ describe('ProcessSignalManager', () => {
       (process.stdin as any).pause = mock(() => {});
 
       try {
-        let expectedCalls = 0;
-
-        for (const keypressThrottleMS of [Infinity, NaN]) {
-          manager = new ProcessSignalManager({
-            onReloadRequested: reloadCallback,
-            keypressThrottleMS,
-          });
-          manager.attach();
-
-          process.stdin.emit('keypress', 'r', { name: 'r' });
-          expectedCalls++;
-          const internal = manager as unknown as {
-            lastActionTimes: { reload: number };
-          };
-          internal.lastActionTimes.reload = Date.now() - 201;
-          process.stdin.emit('keypress', 'r', { name: 'r' });
-          expectedCalls++;
-          await sleep(1);
-
-          expect(reloadCallback).toHaveBeenCalledTimes(expectedCalls);
-          manager.detach();
-        }
+        manager = new ProcessSignalManager({
+          onReloadRequested: reloadCallback,
+          keypressThrottleMS: Infinity,
+        });
+        manager.attach();
+        process.stdin.emit('keypress', 'r', { name: 'r' });
+        const internal = manager as unknown as {
+          lastActionTimes: { reload: number };
+        };
+        internal.lastActionTimes.reload = Date.now() - 201;
+        process.stdin.emit('keypress', 'r', { name: 'r' });
+        await sleep(1);
+        expect(reloadCallback).toHaveBeenCalledTimes(1);
+        internal.lastActionTimes.reload = Date.now() - 2_147_483_647;
+        process.stdin.emit('keypress', 'r', { name: 'r' });
+        await sleep(1);
+        expect(reloadCallback).toHaveBeenCalledTimes(2);
       } finally {
         manager.detach();
         (process.stdin as any).isTTY = wasOriginallyTTY;

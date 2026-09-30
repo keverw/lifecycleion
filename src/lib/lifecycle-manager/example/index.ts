@@ -182,7 +182,7 @@ async function main() {
 
   // Note: With enableLoggerExitHook enabled, fatal errors will also trigger graceful shutdown:
   // logger.error('Database connection lost', { exitCode: 1 });
-  // This would gracefully stop all components before exiting with code 1
+  // This requests shutdown; the demo exits according to the shutdown result.
 }
 
 main().catch((error: unknown) => {

@@ -47,3 +47,9 @@ describe('isFunction', () => {
     expect(isFunction(undefined)).toBe(false);
   });
 });
+
+it('returns false for a revoked object proxy', () => {
+  const { proxy, revoke } = Proxy.revocable({}, {});
+  revoke();
+  expect(isFunction(proxy)).toBe(false);
+});

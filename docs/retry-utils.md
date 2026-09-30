@@ -105,9 +105,17 @@ randomOffset = (Math.random() * 2 - 1) * (delay * dispersion);
 finalDelay = clamp(delay + randomOffset, minTimeoutMS, maxTimeoutMS);
 ```
 
-> All numeric options are clamped to their documented ranges. Values outside the allowed range are silently adjusted. `maxRetryAttempts` is additionally floored to an integer after clamping. Additionally, if `maxTimeoutMS < minTimeoutMS`, the values are automatically swapped to ensure `maxTimeoutMS >= minTimeoutMS`.
+> Retry durations use their defaults when omitted, `null`, or `undefined`. Explicit `NaN`, non-number,
+> and negative `delayMS`, `minTimeoutMS`, or `maxTimeoutMS` values throw at construction.
+> Zero keeps the existing 1 ms minimum; positive `Infinity` selects the timer ceiling.
+> This strict rule applies to the three duration fields only. The count,
+> multiplier, and jitter fraction retain their earlier normalization:
+> `maxRetryAttempts` accepts `Infinity` and defaults `NaN`; `factor` accepts
+> `Infinity` and defaults `NaN`; non-finite `dispersion` uses its default.
+> `maxRetryAttempts` is additionally floored to an integer after clamping. If
+> `maxTimeoutMS < minTimeoutMS`, the values are swapped.
 
-> **Delays are capped at 2,147,483,647 ms (about 24.8 days).** `delayMS`, `minTimeoutMS` and `maxTimeoutMS` are each bounded there, and so is every delay computed from them. `setTimeout` keeps its delay in a signed 32-bit integer and reads anything larger as `1` ms, so an uncapped `delayMS: 3e9` would read as "wait 34 days" and retry roughly every millisecond instead. `NaN` falls back to the documented default and `Infinity` is refused for the same reason. `maxRetryAttempts` is not a duration and `Infinity` remains a supported value there.
+> **Delays are capped at 2,147,483,647 ms (about 24.8 days).** `delayMS`, `minTimeoutMS` and `maxTimeoutMS` are each bounded there, and so is every delay computed from them. `setTimeout` keeps its delay in a signed 32-bit integer and reads anything larger as `1` ms, so an uncapped `delayMS: 3e9` would read as "wait 34 days" and retry roughly every millisecond instead. `maxRetryAttempts` is not a duration and `Infinity` remains a supported value there.
 
 ## RetryPolicy
 
@@ -119,7 +127,8 @@ The `RetryPolicy` class provides low-level control over retry behavior. It track
 new RetryPolicy(options: RetryPolicyOptions)
 ```
 
-Throws `RetryUtilsErrPolicyConfigInvalidStrategy` if an invalid strategy is provided.
+Throws `RetryUtilsErrPolicyConfigInvalidStrategy` for an invalid strategy, and
+`TypeError` or `RangeError` for invalid explicit retry durations.
 
 ### Methods
 
@@ -388,7 +397,7 @@ Returns `Promise<CancelResult>`:
 const cancelResult = await runner.cancel();
 ```
 
-**Cancellation grace period:** When canceling, the runner sends an abort signal to the operation and waits up to 1000ms (default) for it to call `reportResult`. If the operation doesn't respond in time, the cancel is forced. Use `overrideGraceCancelPeriodMS(ms)` to change this timeout.
+**Cancellation grace period:** When canceling, the runner sends an abort signal to the operation and waits up to 1000ms (default) for it to call `reportResult`. If the operation doesn't respond in time, the cancel is forced. Use `overrideGraceCancelPeriodMS(ms)` to change this timeout. Invalid values throw; `0` forces cancellation on the next timer turn, and `Infinity` uses the timer ceiling.
 
 #### `reset()`
 
@@ -399,6 +408,10 @@ Fully resets the runner so it can be used again from scratch. This:
 3. Resets the underlying retry policy (clears all tracked errors, attempt counts, and success state)
 
 Returns `Promise<void>`.
+
+A reset requested by a terminal event listener waits for that operation's result
+before clearing state. A replacement attempt started by an `attempt-handled` listener
+has its own cancellation acknowledgement and grace period.
 
 ```typescript
 await runner.reset();
@@ -470,7 +483,11 @@ const result = await runner.forceTry({
 
 #### `overrideGraceCancelPeriodMS(ms)`
 
-Overrides the default 1000ms cancellation grace period. Non-finite or negative values default to 1000ms. A value of `0` will force-cancel immediately without waiting for the operation to acknowledge the abort signal.
+Overrides the default 1000ms cancellation grace period. This setter requires a numeric
+argument: `null`, `undefined`, an omitted argument, or `NaN` throws `TypeError`; negative
+values throw `RangeError`. To restore the default, pass `1000` explicitly. `Infinity`
+selects the timer ceiling. A value of `0` force-cancels on the next timer turn without waiting for the operation to acknowledge
+the abort signal.
 
 ### Events
 
@@ -494,7 +511,7 @@ Subscribe using the `on` method or provide handlers in the constructor.
 
 - `attemptID` - A unique [ULID](https://github.com/ulid/spec) (Universally Unique Lexicographically Sortable Identifier) generated for each attempt. ULIDs are 26-character strings that are timestamp-based and sortable by creation time (e.g., `"01ARZ3NDEKTSV4RRFFQ69G5FAV"`).
 
-> **Event ordering:** `attempt-handled` fires before the runner transitions to its terminal state and before `operation-ended`. If you need to react to the final `runnerState`, use the `operation-ended` event.
+> **Event ordering:** `attempt-handled` fires before the runner transitions to its terminal state and before `operation-ended`. If you need to react to the final `runnerState`, use the `operation-ended` event. During terminal outcome publication, re-entrant `cancel()` cannot replace the committed outcome; `run()`, `resume()` and `forceTry()` return `lock_error`, and `reset()` waits for that outcome to settle. An `operation-started` listener can call `waitForCompletion()` for the operation being announced.
 
 ```typescript
 const runner = new RetryRunner(policy, operation, {

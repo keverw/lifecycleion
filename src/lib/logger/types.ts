@@ -215,6 +215,15 @@ export interface LoggerOptions {
 
   // Behavior
   callProcessExit?: boolean;
+  /**
+   * Maximum time `close()` waits for all owned sinks together, in milliseconds.
+   * Defaults to 60,000. Zero waits through the current microtasks only; Infinity
+   * and larger values are bounded by the longest usable timer delay. Invalid
+   * values throw during construction: TypeError for NaN/non-numbers, RangeError
+   * for negatives. Null or undefined uses the default. A deadline reports
+   * still-pending sink cleanup as unconfirmed and lets the logger finish closing.
+   */
+  closeTimeoutMS?: number | null;
   beforeExitCallback?: (
     exitCode: number,
     isFirstExit: boolean,

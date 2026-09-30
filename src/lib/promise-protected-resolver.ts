@@ -1,3 +1,4 @@
+import { promiseConstructorIntrinsic } from './internal/intrinsics';
 import { safeHandleCallback } from './safe-handle-callback';
 
 interface PromiseProtectedResolverOptions {
@@ -21,7 +22,7 @@ export class PromiseProtectedResolver<T> {
 
   constructor(options: PromiseProtectedResolverOptions = {}) {
     this.options = options;
-    this.promise = new Promise<T>((resolve, reject) => {
+    this.promise = new promiseConstructorIntrinsic<T>((resolve, reject) => {
       this.resolveHandler = resolve;
       this.rejectHandler = reject;
     });

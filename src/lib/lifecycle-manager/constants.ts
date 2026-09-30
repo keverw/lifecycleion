@@ -13,10 +13,12 @@ export const LIFECYCLE_MANAGER_MESSAGE_BULK_STARTUP_IN_PROGRESS =
   'Bulk startup in progress';
 export const LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS =
   'Shutdown in progress';
+export const LIFECYCLE_MANAGER_MESSAGE_TIMED_OUT_STARTUP_CLEANUP =
+  'Timed-out startup is still awaiting completion or cleanup';
 export const LIFECYCLE_MANAGER_MESSAGE_UNKNOWN_ERROR = 'Unknown error';
 
 export const LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP =
-  'Auto-detaching process signals on last component stop';
+  'Auto-detached process signals on last component stop';
 export const LIFECYCLE_MANAGER_LOG_LOGGER_EXIT_DURING_SHUTDOWN =
   'Logger exit called during shutdown, waiting...';
 export const LIFECYCLE_MANAGER_LOG_MESSAGE_HANDLER_FAILED =
