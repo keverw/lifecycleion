@@ -222,6 +222,8 @@ export interface LoggerOptions {
    * values throw during construction: TypeError for NaN/non-numbers, RangeError
    * for negatives. Null or undefined uses the default. A deadline reports
    * still-pending sink cleanup as unconfirmed and lets the logger finish closing.
+   * This cap overrides longer sink close budgets; exit() may then terminate with
+   * buffered output unflushed. Raise this budget too when a sink needs more time.
    */
   closeTimeoutMS?: number | null;
   beforeExitCallback?: (
