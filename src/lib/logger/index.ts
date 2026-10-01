@@ -308,13 +308,12 @@ export class Logger extends EventEmitter {
     // closed logger. Simulated exits keep the requested code for inspection.
     const isInvalidExitCode =
       this.callProcessExit && !Number.isSafeInteger(code);
-    const exitCode = isInvalidExitCode ? 1 : code;
     if (isInvalidExitCode) {
       reportToConsole(
         `Logger exit code ${String(code)} is invalid; exiting with code 1`,
       );
+      code = 1;
     }
-    code = exitCode;
 
     const isFirstExit = !this._exitRequested;
     this._exitRequested = true;

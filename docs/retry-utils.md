@@ -401,17 +401,23 @@ const cancelResult = await runner.cancel();
 
 #### `reset()`
 
-Fully resets the runner so it can be used again from scratch. This:
+Resets the current operation so the runner can be used again from scratch, unless a newer operation supersedes the request while it waits. This:
 
 1. Cancels the current operation first if the runner is in `'running'` or `'stopping'` state (awaits cancellation)
-2. Resets all runner state (`runnerState` back to `'not-started'`, clears timers, etc.)
-3. Resets the underlying retry policy (clears all tracked errors, attempt counts, and success state)
+2. Unless superseded by a newer operation while waiting, resets all runner state (`runnerState` back to `'not-started'`, clears timers, etc.)
+3. Unless superseded, resets the underlying retry policy (clears all tracked errors, attempt counts, and success state)
 
 Returns `Promise<void>`.
 
-A reset requested by a terminal event listener waits for that operation's result
-before clearing state. If a newer operation starts while reset is waiting, the older reset leaves it untouched. A replacement attempt started by an `attempt-handled` listener
-has its own cancellation acknowledgement and grace period.
+Reset applies to the operation current when it is requested. This includes an ordinary
+reset waiting for cancellation and a reset requested by a terminal event listener.
+If a newer operation starts before that wait ends, reset resolves without clearing or
+canceling the newer operation. Its `Promise<void>` does not distinguish this superseded
+case; completion alone does not guarantee `runnerState === 'not-started'` when calls
+race. Serialize reset and start/force calls if you need that guarantee.
+
+A terminal listener's reset waits for its operation's result before clearing state.
+A replacement attempt has its own cancellation acknowledgement and grace period.
 
 ```typescript
 await runner.reset();
@@ -449,16 +455,17 @@ Forces an immediate retry attempt, bypassing policy limits. Works in all states 
 
 - If called from `'not-started'`, it acts as the first try. If a retry delay is pending, it fires immediately.
 - If called while the runner is in `'stopping'` or `'stopped'` state, any pending cancel promises are resolved and the runner transitions back to `'running'`.
+- **Abort-listener outcomes:** If an abort listener reports success synchronously, `forceTry()` returns `pre_operation_error` with `code: 'already_completed'` and starts no replacement. A newer `cancel()` or `reset()` requested by an abort listener also wins: `forceTry()` joins that operation's result rather than restarting, even when `shouldWaitForCompletion` is false. A force request made after cancellation was requested can still intentionally restart it.
 - **Timer behavior:** `timeTakenMS` resets when starting a new attempt from terminal states (`'not-started'`, `'exhausted'`, `'fatal-error'`, `'stopped'`) but does NOT reset when accelerating a pending retry (operation already running, just clearing the delay timer).
 
 Options:
 
 - **`shouldWaitForCompletion`** (`boolean`, default: `false`) - Whether to wait for the attempt to complete before resolving.
-- **`shouldAbortRunning`** (`boolean`, default: `false`) - What to do if an attempt is already in-flight. When `false`, attaches to the current operation and waits for its result. When `true`, aborts the running attempt and starts a new one.
+- **`shouldAbortRunning`** (`boolean`, default: `false`) - What to do if an attempt is already in-flight. When `false`, attaches to the current operation (waiting only if `shouldWaitForCompletion` is true). When `true`, aborts the running attempt and starts a new one unless an abort listener completes it or requests cancellation/reset, as described above.
 
 Returns `Promise<RunResult<T>>`:
 
-- If `shouldWaitForCompletion` is `false`: resolves immediately with `{ status: 'running', reattached: boolean }` where `reattached` indicates whether it attached to an already-running attempt (`true`) or started a new one (`false`).
+- If `shouldWaitForCompletion` is `false`: normally resolves immediately with `{ status: 'running', reattached: boolean }` where `reattached` indicates whether it attached to an already-running attempt (`true`) or started a new one (`false`). The abort-listener cancellation/reset case above instead joins the existing operation's result.
 - If `shouldWaitForCompletion` is `true`: same completion statuses as `run()`.
 
 On pre-operation error: `{ status: 'pre_operation_error', code, error }` with codes:

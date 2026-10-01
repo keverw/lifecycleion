@@ -416,3 +416,45 @@ test('reset leaves an operation resumed before its cancellation continuation alo
     data: 'resumed',
   });
 });
+
+for (const request of ['cancel', 'reset'] as const) {
+  test.each([false, true])(
+    `forceTry honors ${request} requested by abort (synchronous acknowledgement: %s)`,
+    async (isSynchronous) => {
+      let attempts = 0;
+      let report: ReportResult | undefined;
+      let requested: Promise<unknown> | undefined;
+      const runner = new RetryRunner(policy, (reportResult, signal) => {
+        attempts++;
+        report = reportResult;
+        signal.addEventListener(
+          'abort',
+          () => {
+            requested = request === 'cancel' ? runner.cancel() : runner.reset();
+            if (isSynchronous) {
+              reportResult('skip');
+            }
+          },
+          { once: true },
+        );
+      });
+      runner.overrideGraceCancelPeriodMS(10);
+      const original = runner.run(true);
+      const forced = runner.forceTry({ shouldAbortRunning: true });
+      if (!isSynchronous) {
+        report?.('skip');
+      }
+      try {
+        await requested;
+        expect(attempts).toBe(1);
+        expect(runner.runnerState).toBe(
+          request === 'cancel' ? 'stopped' : 'not-started',
+        );
+        expect(await forced).toMatchObject({ status: 'canceled' });
+        expect(await original).toMatchObject({ status: 'canceled' });
+      } finally {
+        await runner.cancel();
+      }
+    },
+  );
+}

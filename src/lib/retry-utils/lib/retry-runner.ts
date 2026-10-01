@@ -174,6 +174,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   // A forced restart can retain the completion resolver for existing waiters.
   // Ownership therefore needs an identity independent of that shared promise.
   private operationToken = Symbol();
+  // A newer stop request made by an abort listener takes precedence over the
+  // force request that invoked it, even if cancellation settles synchronously.
+  private stopRequestToken = Symbol();
   // Mutable runtime state for the current operation.
   private currentState: RetryRunnerCurrentState = this.getEmptyCurrentState();
   // Grace period for cancellation before we force-complete.
@@ -428,6 +431,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       this.currentState.runnerState === 'running' ||
       this.currentState.runnerState === 'stopping'
     ) {
+      this.stopRequestToken = Symbol();
       const cancellationPromiseProtectedResolver =
         new PromiseProtectedResolver<CancelResult>();
 
@@ -519,6 +523,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   }
 
   public async reset(): Promise<void> {
+    this.stopRequestToken = Symbol();
     const operationToken = this.operationToken;
     if (this.terminalDispatchDepth > 0) {
       await this.currentOperationResolver.promise;
@@ -719,6 +724,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     }
   }
 
+  private checkForceTryPreconditions(): RunResult<T> | undefined {
+    return this.checkForDisallowedPerOperationStates('forceTry', ['completed'])
+      .runResult;
+  }
+
   private forceTryOperation(
     options?: ForceTryOptions,
   ): RunResult<T> | Promise<RunResult<T>> {
@@ -736,16 +746,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     this._isOperationLocked = true;
 
     try {
-      const checkDisallowedStates = this.checkForDisallowedPerOperationStates(
-        'forceTry',
-        ['completed'],
-      );
-
-      if (
-        checkDisallowedStates.wasDisallowed &&
-        checkDisallowedStates.runResult
-      ) {
-        return checkDisallowedStates.runResult;
+      const refusal = this.checkForceTryPreconditions();
+      if (refusal) {
+        return refusal;
       }
 
       // If an attempt is already running and we don't want to abort it,
@@ -769,15 +772,18 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
       // If an attempt is currently running and we want to abort it, do so.
       if (this.isAttemptRunning && this.currentState.currentAttemptContext) {
+        const stopRequestToken = this.stopRequestToken;
+        const operationResolver = this.currentOperationResolver;
         this.currentState.currentAttemptContext.abortController.abort();
-        // Abort listeners can report success synchronously. Respect the same
-        // completed-state refusal as entry before starting another attempt.
-        const afterAbort = this.checkForDisallowedPerOperationStates(
-          'forceTry',
-          ['completed'],
-        );
-        if (afterAbort.wasDisallowed && afterAbort.runResult) {
-          return afterAbort.runResult;
+        // A cancel/reset requested inside abort is newer than this force request.
+        // Join its outcome instead of reviving work it has just stopped. A force
+        // requested later can still intentionally supersede a pending reset.
+        if (this.stopRequestToken !== stopRequestToken) {
+          return operationResolver.promise;
+        }
+        const afterAbort = this.checkForceTryPreconditions();
+        if (afterAbort) {
+          return afterAbort;
         }
       }
 
