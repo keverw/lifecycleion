@@ -1965,7 +1965,9 @@ export class BaseHTTPClient {
         // fields already read. A spread would invoke the upload getter twice.
         const adapterResponse = {
           headers,
-          effectiveRequestHeaders,
+          ...(effectiveRequestHeaders !== undefined
+            ? { effectiveRequestHeaders }
+            : {}),
           ...(responseUploadOutcome
             ? { requestBodySettled: responseUploadOutcome }
             : {}),

@@ -19,7 +19,10 @@ import {
   LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
   LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_RUNNING,
 } from '../constants';
-import { toTimerDelayMS, isTimeoutValidationError } from './operation-policy';
+import {
+  toOperationTimerDelayMS,
+  isOperationTimeoutValidationError,
+} from './operation-policy';
 
 export interface SignalBroadcastDescriptor {
   signal: 'reload' | 'info' | 'debug';
@@ -87,7 +90,7 @@ export async function checkComponentHealthOperation(
     // A component without a health handler does not need timeout configuration.
     if (typeof healthCheckHandler === 'function') {
       readFailureMessage = 'Health check timeout could not be read';
-      timeoutMS = toTimerDelayMS(
+      timeoutMS = toOperationTimerDelayMS(
         component.healthCheckTimeoutMS,
         `${name}.healthCheckTimeoutMS`,
       );
@@ -95,7 +98,7 @@ export async function checkComponentHealthOperation(
   } catch (error) {
     const err = toError(error);
 
-    if (!isTimeoutValidationError(error)) {
+    if (!isOperationTimeoutValidationError(error)) {
       reportCallbackError('lifecycle-manager checkComponentHealth', error);
     }
     // Logged and announced as every other failed check is - `started` first, so a
@@ -111,14 +114,16 @@ export async function checkComponentHealthOperation(
     return {
       name,
       healthy: false,
-      message: isTimeoutValidationError(error)
+      message: isOperationTimeoutValidationError(error)
         ? describeError(error)
         : readFailureMessage,
       checkedAt: startTime,
       durationMS: Date.now() - startTime,
       error: err,
       timedOut: false,
-      code: isTimeoutValidationError(error) ? 'invalid_options' : 'error',
+      code: isOperationTimeoutValidationError(error)
+        ? 'invalid_options'
+        : 'error',
     };
   }
 
@@ -401,7 +406,7 @@ export async function runSignalBroadcast(
       // Only when there is a handler to time: a component without one answers
       // `no_handler`, whatever its timeout getter would have done.
       if (typeof handler === 'function') {
-        timeoutMS = toTimerDelayMS(
+        timeoutMS = toOperationTimerDelayMS(
           component.signalTimeoutMS,
           `${name}.signalTimeoutMS`,
         );
@@ -418,7 +423,9 @@ export async function runSignalBroadcast(
         called: false,
         error: err,
         timedOut: false,
-        code: isTimeoutValidationError(error) ? 'invalid_options' : 'error',
+        code: isOperationTimeoutValidationError(error)
+          ? 'invalid_options'
+          : 'error',
       });
       continue;
     }

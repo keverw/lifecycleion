@@ -340,7 +340,7 @@ settlement through the global `'error'` channel. `timeout: 0`, negative values, 
 must settle it and honor cancellation.
 A `null` or omitted request timeout inherits the client timeout. Explicit `NaN` or another non-number
 throws before dispatch; finite negative values and either infinity retain the documented
-disabled-timeout behavior.
+disabled-timeout behavior. Do not pass an expired `deadline - Date.now()` directly: a zero or negative result disables the timer, rather than timing out immediately. Check whether the deadline has passed before sending the request.
 
 `NodeAdapter` also watches uploads left running after an early response closes. It checks
 socket progress at roughly five-second intervals and allows a pending multipart source

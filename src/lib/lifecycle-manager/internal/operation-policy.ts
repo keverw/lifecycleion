@@ -1,9 +1,9 @@
 import { describeError, toError } from '../../to-error';
 import { reportCallbackError } from '../../safe-handle-callback';
 import {
-  isTimeoutValidationError as isSharedTimeoutValidationError,
-  resolveTimeoutMS as resolveSharedTimeoutMS,
-  toTimerDelayMS as toSharedTimerDelayMS,
+  isTimeoutValidationError,
+  resolveTimeoutMS,
+  toTimerDelayMS,
 } from '../../internal/timer-limits';
 import type {
   StartupResult,
@@ -22,14 +22,16 @@ function validateLifecycleDuration<T>(validate: () => T): T {
   try {
     return validate();
   } catch (error) {
-    if (isSharedTimeoutValidationError(error)) {
+    if (isTimeoutValidationError(error)) {
       lifecycleTimeoutValidationErrors.add(error);
     }
     throw error;
   }
 }
 
-export function isTimeoutValidationError(error: unknown): error is Error {
+export function isOperationTimeoutValidationError(
+  error: unknown,
+): error is Error {
   return (
     typeof error === 'object' &&
     error !== null &&
@@ -37,20 +39,21 @@ export function isTimeoutValidationError(error: unknown): error is Error {
   );
 }
 
-export function resolveTimeoutMS(
+export function resolveOperationTimeoutMS(
   requested: number | null | undefined,
   defaultMS: number,
   label = 'Timeout',
 ): number {
   return validateLifecycleDuration(() =>
-    resolveSharedTimeoutMS(requested, defaultMS, label),
+    resolveTimeoutMS(requested, defaultMS, label),
   );
 }
 
-export function toTimerDelayMS(requested: number, label = 'Timeout'): number {
-  return validateLifecycleDuration(() =>
-    toSharedTimerDelayMS(requested, label),
-  );
+export function toOperationTimerDelayMS(
+  requested: number,
+  label = 'Timeout',
+): number {
+  return validateLifecycleDuration(() => toTimerDelayMS(requested, label));
 }
 
 /**
@@ -97,7 +100,7 @@ export async function settleOperation<T>(
   try {
     return await run();
   } catch (error) {
-    if (isTimeoutValidationError(error)) {
+    if (isOperationTimeoutValidationError(error)) {
       return toFailure(
         error,
         `${operation}() refused: ${describeError(error)}`,
@@ -124,7 +127,9 @@ export function crashedStartupResult(
 ): StartupResult {
   return {
     ...refusedStartupResult(
-      isTimeoutValidationError(error) ? 'invalid_options' : 'unknown_error',
+      isOperationTimeoutValidationError(error)
+        ? 'invalid_options'
+        : 'unknown_error',
       reason,
       durationMS,
     ),
@@ -147,7 +152,9 @@ export function crashedShutdownResult(
     stalledComponents: [],
     durationMS: 0,
     reason,
-    code: isTimeoutValidationError(error) ? 'invalid_options' : 'unknown_error',
+    code: isOperationTimeoutValidationError(error)
+      ? 'invalid_options'
+      : 'unknown_error',
     error,
   };
 }
@@ -196,7 +203,9 @@ export function crashedComponentResult(
     success: false,
     componentName: name,
     reason,
-    code: isTimeoutValidationError(error) ? 'invalid_options' : 'unknown_error',
+    code: isOperationTimeoutValidationError(error)
+      ? 'invalid_options'
+      : 'unknown_error',
     error,
   };
 }

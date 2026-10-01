@@ -24,9 +24,9 @@ import {
   findAllCircularCycles,
 } from './internal/dependency-policy';
 import {
-  isTimeoutValidationError,
-  resolveTimeoutMS,
-  toTimerDelayMS,
+  isOperationTimeoutValidationError,
+  resolveOperationTimeoutMS,
+  toOperationTimerDelayMS,
   settleOperation,
   refusedShutdownResult,
   crashedStartupResult,
@@ -150,10 +150,10 @@ import { createGuardedLoggerService } from './guarded-logger';
 import { describeError, isErrorValue, toError } from '../to-error';
 import { finiteClampMin } from '../clamp';
 import {
-  assertDurationMS as assertSharedDurationMS,
-  resolveTimeoutMS as resolveSharedTimeoutMS,
+  assertDurationMS,
+  resolveTimeoutMS,
   optionalValidatedTimerDelayMS,
-  toTimerDelayMS as toSharedTimerDelayMS,
+  toTimerDelayMS,
 } from '../internal/timer-limits';
 
 /**
@@ -175,7 +175,7 @@ import {
  * happen on the side of the latch where a throw costs nothing.
  */
 interface ShutdownPassOptions {
-  /** Already clamped to a usable timer delay by `toTimerDelayMS()`; `0` means no timer. */
+  /** Already clamped to a usable timer delay by `toOperationTimerDelayMS()`; `0` means no timer. */
   readonly timeoutMS: number;
   readonly retryStalled: boolean;
   readonly haltOnStall: boolean;
@@ -485,15 +485,15 @@ export class LifecycleManager
     // Constructor failures are synchronous and have no lifecycle result net to
     // classify. Do not mark them as this manager's operation refusals: a caller
     // can construct another manager inside a component getter.
-    assertSharedDurationMS(warningTimeout, 'shutdownWarningTimeoutMS');
+    assertDurationMS(warningTimeout, 'shutdownWarningTimeoutMS');
     this.shutdownWarningTimeoutMS =
-      warningTimeout < 0 ? -1 : toSharedTimerDelayMS(warningTimeout);
-    this.messageTimeoutMS = resolveSharedTimeoutMS(
+      warningTimeout < 0 ? -1 : toTimerDelayMS(warningTimeout);
+    this.messageTimeoutMS = resolveTimeoutMS(
       options.messageTimeoutMS,
       5000,
       'messageTimeoutMS',
     );
-    this.startupTimeoutMS = resolveSharedTimeoutMS(
+    this.startupTimeoutMS = resolveTimeoutMS(
       options.startupTimeoutMS,
       60000,
       'startupTimeoutMS',
@@ -507,7 +507,7 @@ export class LifecycleManager
       haltOnStall: shutdownOptions.haltOnStall ?? true,
       allowStopWithPendingStarts:
         shutdownOptions.allowStopWithPendingStarts === true,
-      timeoutMS: resolveSharedTimeoutMS(
+      timeoutMS: resolveTimeoutMS(
         shutdownOptions.timeoutMS,
         30000,
         'shutdownOptions.timeoutMS',
@@ -531,14 +531,14 @@ export class LifecycleManager
       );
       // A zero-width window is valid and counts only same-tick requests. Invalid
       // explicit durations fail instead of changing the operator's escalation policy.
-      const withinMS = resolveSharedTimeoutMS(
+      const withinMS = resolveTimeoutMS(
         repeatedShutdownRequestPolicy.withinMS,
         2000,
         'repeatedShutdownRequestPolicy.withinMS',
       );
-      const armedAfterFailureMS = resolveSharedTimeoutMS(
+      const armedAfterFailureMS = resolveTimeoutMS(
         requestedArmedAfterFailureMS,
-        toSharedTimerDelayMS(withinMS * forceAfterCount),
+        toTimerDelayMS(withinMS * forceAfterCount),
         'repeatedShutdownRequestPolicy.armedAfterFailureMS',
       );
       this.repeatedShutdownRequestPolicy = {
@@ -1808,7 +1808,9 @@ export class LifecycleManager
         data: undefined,
         error,
         timedOut: false,
-        code: isTimeoutValidationError(error) ? 'invalid_options' : 'error',
+        code: isOperationTimeoutValidationError(error)
+          ? 'invalid_options'
+          : 'error',
       }),
     );
   }
@@ -1833,7 +1835,7 @@ export class LifecycleManager
         // but make an invalid budget visible through the configured logger instead
         // of silently looking like an empty recipient list. This is not a callback
         // crash and must not enter the global callback-error channel.
-        if (isTimeoutValidationError(error)) {
+        if (isOperationTimeoutValidationError(error)) {
           this.logger.warn('Broadcast refused: {{error.message}}', {
             params: { error },
           });
@@ -2272,7 +2274,7 @@ export class LifecycleManager
     // for good.
     const shouldIgnoreStalledComponents =
       options?.ignoreStalledComponents === true;
-    const effectiveTimeout = resolveTimeoutMS(
+    const effectiveTimeout = resolveOperationTimeoutMS(
       options?.timeoutMS,
       this.startupTimeoutMS,
       'startAllComponents timeoutMS',
@@ -3479,7 +3481,7 @@ export class LifecycleManager
     if (afterStartupTimeoutRead) {
       return afterStartupTimeoutRead;
     }
-    const startupTimeoutMS = resolveTimeoutMS(
+    const startupTimeoutMS = resolveOperationTimeoutMS(
       requestedStartupTimeoutMS,
       this.startupTimeoutMS,
       'restartAllComponents startupOptions.timeoutMS',
@@ -3499,7 +3501,7 @@ export class LifecycleManager
     if (afterShutdownTimeoutRead) {
       return afterShutdownTimeoutRead;
     }
-    const shutdownTimeoutMS = resolveTimeoutMS(
+    const shutdownTimeoutMS = resolveOperationTimeoutMS(
       requestedShutdownTimeoutMS,
       this.shutdownOptions.timeoutMS,
       'restartAllComponents shutdownTimeoutMS',
@@ -3521,7 +3523,7 @@ export class LifecycleManager
       restartSnapshots.set(name, {
         component,
         generation,
-        timeoutMS: toTimerDelayMS(
+        timeoutMS: toOperationTimerDelayMS(
           requestedComponentTimeoutMS,
           `${name}.startupTimeoutMS`,
         ),
@@ -3966,7 +3968,7 @@ export class LifecycleManager
     const startSnapshot: RestartStartSnapshot = {
       component,
       generation: this.registrationReads.currentGeneration(component),
-      timeoutMS: toTimerDelayMS(
+      timeoutMS: toOperationTimerDelayMS(
         component.startupTimeoutMS,
         `${name}.startupTimeoutMS`,
       ),
@@ -4994,7 +4996,7 @@ export class LifecycleManager
       const passOptions: ShutdownPassOptions = {
         // The one place a pass's options meet the manager's `shutdownOptions` defaults:
         // callers pass only their own overrides.
-        timeoutMS: resolveTimeoutMS(
+        timeoutMS: resolveOperationTimeoutMS(
           options?.timeoutMS,
           this.shutdownOptions.timeoutMS,
           'stopAllComponents timeoutMS',
@@ -6234,7 +6236,10 @@ export class LifecycleManager
           restartSnapshot,
         );
       } catch (error) {
-        if (isTimeoutValidationError(error) && !this.ownsClaim(name, claim)) {
+        if (
+          isOperationTimeoutValidationError(error) &&
+          !this.ownsClaim(name, claim)
+        ) {
           return crashedComponentResult(
             name,
             error,
@@ -6583,7 +6588,10 @@ export class LifecycleManager
     // with no terminal event.
     const componentTimeout =
       restartSnapshot?.timeoutMS ??
-      toTimerDelayMS(component.startupTimeoutMS, `${name}.startupTimeoutMS`);
+      toOperationTimerDelayMS(
+        component.startupTimeoutMS,
+        `${name}.startupTimeoutMS`,
+      );
     // Read here for the same reason, and because the timer callback that uses it runs
     // outside every guard: a getter that threw there was an uncaught exception - fatal
     // to a Node process - and skipped the late-completion monitor as well.
@@ -7207,7 +7215,10 @@ export class LifecycleManager
       try {
         return await run(claim);
       } catch (error) {
-        if (isTimeoutValidationError(error) && !this.ownsClaim(name, claim)) {
+        if (
+          isOperationTimeoutValidationError(error) &&
+          !this.ownsClaim(name, claim)
+        ) {
           return crashedComponentResult(
             name,
             error,
@@ -7415,7 +7426,7 @@ export class LifecycleManager
     );
     const requestedTimeoutMS = options?.timeout;
     const isUsingComponentTimeout = isNullish(requestedTimeoutMS);
-    const timeoutMS = toTimerDelayMS(
+    const timeoutMS = toOperationTimerDelayMS(
       isUsingComponentTimeout
         ? component.shutdownGracefulTimeoutMS
         : requestedTimeoutMS,
@@ -7733,7 +7744,7 @@ export class LifecycleManager
     const onShutdownForce: unknown = Reflect.get(component, 'onShutdownForce');
     const hasForceHandler = typeof onShutdownForce === 'function';
     const timeoutMS = hasForceHandler
-      ? toTimerDelayMS(
+      ? toOperationTimerDelayMS(
           component.shutdownForceTimeoutMS,
           `${name}.shutdownForceTimeoutMS`,
         )

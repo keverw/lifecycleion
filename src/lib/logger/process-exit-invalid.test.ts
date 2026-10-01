@@ -8,7 +8,18 @@ test('a fractional real exit code falls back to one and still exits after close'
   const loggerURL = new URL('./index.ts', import.meta.url).href;
   const script = `
     const { Logger } = await import(${JSON.stringify(loggerURL)});
-    const logger = new Logger({ sinks: [], callProcessExit: true });
+    const logger = new Logger({
+      sinks: [], callProcessExit: true,
+      beforeExitCallback(code) {
+        process.stdout.write('before:' + code + '\\n');
+        return { action: 'proceed' };
+      },
+    });
+    logger.on('logger', ({ eventType, code }) => {
+      if (eventType === 'exit-called' || eventType === 'exit-process') {
+        process.stdout.write(eventType + ':' + code + '\\n');
+      }
+    });
     logger.exit(1.5);
     setTimeout(() => process.stdout.write('survived'), 100);
   `;
@@ -23,7 +34,11 @@ test('a fractional real exit code falls back to one and still exits after close'
   ]);
 
   expect(exitCode).toBe(1);
-  expect(stdout).toBe('');
+  expect(stdout.trim().split('\n')).toEqual([
+    'exit-called:1',
+    'before:1',
+    'exit-process:1',
+  ]);
   expect(stderr).toContain('exit code 1.5 is invalid');
 });
 

@@ -303,6 +303,17 @@ export class Logger extends EventEmitter {
    * Exit the process with the specified code
    */
   public exit(code: number): void {
+    // process.exit rejects fractional and other non-integer codes. Decide before
+    // closing sinks so a bad caller value cannot strand a live process with a
+    // closed logger. Simulated exits keep the requested code for inspection.
+    const exitCode = this.callProcessExit && !Number.isInteger(code) ? 1 : code;
+    if (exitCode !== code) {
+      reportToConsole(
+        `Logger exit code ${String(code)} is invalid; exiting with code 1`,
+      );
+    }
+    code = exitCode;
+
     const isFirstExit = !this._exitRequested;
     this._exitRequested = true;
 
@@ -1763,16 +1774,7 @@ export class Logger extends EventEmitter {
   /**
    * Process the exit
    */
-  private processExit(code: number): void {
-    // process.exit rejects fractional and other non-integer codes. Decide before
-    // closing sinks so a bad caller value cannot strand a live process with a
-    // closed logger. Simulated exits keep the requested code for inspection.
-    const exitCode = this.callProcessExit && !Number.isInteger(code) ? 1 : code;
-    if (exitCode !== code) {
-      reportToConsole(
-        `Logger exit code ${String(code)} is invalid; exiting with code 1`,
-      );
-    }
+  private processExit(exitCode: number): void {
     this._didExit = true;
     this._exitCode = exitCode;
     this._isPendingExit = false;

@@ -1390,6 +1390,8 @@ recorded in `lastError`, but it does not mark the sink unhealthy. Queue overflow
 also leaves destination health unchanged. Monitor `droppedByKind.queue_full`
 and `droppedEntries` as well as `isHealthy` to detect log loss.
 
+The logger has a separate overall close budget. Raising a sink’s `closeTimeoutMS` does not raise `LoggerOptions.closeTimeoutMS` (60 seconds by default); raise the logger budget too or exit may proceed before the sink finishes flushing.
+
 The FileSink and NamedPipeSink `closeTimeoutMS` options use 30,000ms when omitted, `null`,
 or `undefined`. Constructors reject negative values with `RangeError` and NaN or
 other non-number values with `TypeError` before starting initialization.

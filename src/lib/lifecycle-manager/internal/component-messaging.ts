@@ -19,7 +19,10 @@ import {
 } from '../../internal/adopt-promise';
 import { toError } from '../../to-error';
 import { LIFECYCLE_MANAGER_LOG_MESSAGE_HANDLER_FAILED } from '../constants';
-import { resolveTimeoutMS, isTimeoutValidationError } from './operation-policy';
+import {
+  resolveOperationTimeoutMS,
+  isOperationTimeoutValidationError,
+} from './operation-policy';
 
 function readAvailability(
   context: ComponentAccessContext,
@@ -166,13 +169,13 @@ export async function sendMessageInternal(
   // up front: a throwing getter must not leave `message-sent` without its pair.
   let timeoutMS: number;
   try {
-    timeoutMS = resolveTimeoutMS(
+    timeoutMS = resolveOperationTimeoutMS(
       options?.timeout,
       context.messageTimeoutMS,
       'sendMessageToComponent timeout',
     );
   } catch (error) {
-    if (!isTimeoutValidationError(error)) {
+    if (!isOperationTimeoutValidationError(error)) {
       throw error;
     }
     return {
@@ -368,7 +371,7 @@ export async function broadcastMessageInternal(
   // sent the same values, and a getter on the caller's object runs once rather than
   // once per component.
   const messageOptions: SendMessageOptions = {
-    timeout: resolveTimeoutMS(
+    timeout: resolveOperationTimeoutMS(
       options?.timeout,
       context.messageTimeoutMS,
       'broadcastMessage timeout',

@@ -211,6 +211,8 @@
 
 ## Unreleased
 
+- Real logger exits normalize invalid exit codes before `exit-called` and `beforeExitCallback`, so both observe the same fallback code as `exit-process`. Simulated exits retain the requested code.
+
 - Lifecycle manager logging caches entity children only for the built-in name-scoped factory. Custom `entity()` implementations run on each call so reused component names can pick up fresh context.
 
 - Added `StopAllOptions.allowStopWithPendingStarts` (default `false`) as an explicit shutdown escape hatch. Enabled passes skip waiting for unresolved starts and may stop their dependencies, leaving the budget for cleanup; unfinished startup still reports an unsuccessful result, and existing late-start cleanup behavior is unchanged. Existing stop failures and cleanup already underway retain protection, including cleanup that begins between dependency stops. Protection checkpoints re-read transitive dependencies, so changes beneath an already-protected component cannot leave a newly declared dependency unprotected. The option also follows configured `shutdownOptions` defaults and can be disabled per call. Restart always disables it to preserve dependencies until old startup work is finished.

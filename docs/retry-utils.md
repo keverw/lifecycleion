@@ -391,7 +391,7 @@ Returns `Promise<CancelResult>`:
 
 - `'canceled'` - operation acknowledged the abort signal and stopped
 - `'forced'` - operation did not acknowledge within the grace period and was force-stopped
-- `'not-running'` - nothing was running
+- `'not-running'` - no cancelable operation remains, including a terminal outcome already being published
 
 ```typescript
 const cancelResult = await runner.cancel();
@@ -511,7 +511,7 @@ Subscribe using the `on` method or provide handlers in the constructor.
 
 - `attemptID` - A unique [ULID](https://github.com/ulid/spec) (Universally Unique Lexicographically Sortable Identifier) generated for each attempt. ULIDs are 26-character strings that are timestamp-based and sortable by creation time (e.g., `"01ARZ3NDEKTSV4RRFFQ69G5FAV"`).
 
-> **Event ordering:** `attempt-handled` fires before the runner transitions to its terminal state and before `operation-ended`. If you need to react to the final `runnerState`, use the `operation-ended` event. During terminal outcome publication, re-entrant `cancel()` cannot replace the committed outcome; `run()`, `resume()` and `forceTry()` return `lock_error`, and `reset()` waits for that outcome to settle. An `operation-started` listener can call `waitForCompletion()` for the operation being announced.
+> **Event ordering:** `attempt-handled` fires before the runner transitions to its terminal state and before `operation-ended`. If you need to react to the final `runnerState`, use the `operation-ended` event. During terminal outcome publication, re-entrant `cancel()` returns `not-running` because it cannot replace the committed outcome, even though an `attempt-handled` listener can still observe `runnerState: running` and `isRunning: true`; `run()`, `resume()` and `forceTry()` return `lock_error`, and `reset()` waits for that outcome to settle. An `operation-started` listener can call `waitForCompletion()` for the operation being announced.
 
 ```typescript
 const runner = new RetryRunner(policy, operation, {
