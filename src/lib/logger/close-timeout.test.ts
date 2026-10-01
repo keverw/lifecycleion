@@ -580,3 +580,46 @@ for (const boundary of ['setup', 'failure reporting'] as const) {
     }
   });
 }
+
+test.each([false, true])(
+  'late write failures avoid closing sinks (dedicated diagnostics: %s)',
+  async (hasDiagnosticSink) => {
+    const writing = Promise.withResolvers<void>();
+    const closing = Promise.withResolvers<void>();
+    const closeStarted = Promise.withResolvers<void>();
+    const observed = Promise.withResolvers<LoggerDiagnostic>();
+    let diagnosticWrites = 0;
+    const sink: LogSink = {
+      write: () => writing.promise,
+      writeDiagnostic: () => {
+        diagnosticWrites++;
+      },
+      close: () => {
+        closeStarted.resolve();
+        return closing.promise;
+      },
+    };
+    const logger = new Logger({
+      sinks: [sink],
+      diagnosticSinks: hasDiagnosticSink ? [sink] : undefined,
+      callProcessExit: false,
+    });
+    logger.on<LoggerDiagnostic>('diagnostic', (diagnostic) =>
+      observed.resolve(diagnostic),
+    );
+    logger.info('queued write');
+    const cleanup = logger.close();
+    await closeStarted.promise;
+    const failure = new Error('late write failed');
+    writing.reject(failure);
+    try {
+      const diagnostic = await observed.promise;
+      expect(diagnostic.error).toBe(failure);
+      expect(diagnostic.context).toBe('write');
+      expect(diagnosticWrites).toBe(0);
+    } finally {
+      closing.resolve();
+      await cleanup;
+    }
+  },
+);

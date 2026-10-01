@@ -410,7 +410,7 @@ Fully resets the runner so it can be used again from scratch. This:
 Returns `Promise<void>`.
 
 A reset requested by a terminal event listener waits for that operation's result
-before clearing state. A replacement attempt started by an `attempt-handled` listener
+before clearing state. If a newer operation starts while reset is waiting, the older reset leaves it untouched. A replacement attempt started by an `attempt-handled` listener
 has its own cancellation acknowledgement and grace period.
 
 ```typescript

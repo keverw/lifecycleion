@@ -32,11 +32,7 @@ function validateLifecycleDuration<T>(validate: () => T): T {
 export function isOperationTimeoutValidationError(
   error: unknown,
 ): error is Error {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    lifecycleTimeoutValidationErrors.has(error as Error)
-  );
+  return lifecycleTimeoutValidationErrors.has(error as Error);
 }
 
 export function resolveOperationTimeoutMS(

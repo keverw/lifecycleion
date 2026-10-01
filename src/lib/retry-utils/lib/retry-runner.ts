@@ -516,8 +516,14 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   }
 
   public async reset(): Promise<void> {
+    const operation = this.currentOperationResolver;
     if (this.terminalDispatchDepth > 0) {
-      await this.currentOperationResolver.promise;
+      await operation.promise;
+      // A terminal listener's reset belongs to that operation, not a replacement
+      // started while its continuation was queued.
+      if (this.currentOperationResolver !== operation) {
+        return;
+      }
     }
     // If an operation is running or pending stopping, cancel it first.
     if (
@@ -526,6 +532,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     ) {
       // Cancel any in-flight work before resetting state.
       await this.cancel();
+      if (this.currentOperationResolver !== operation) {
+        return;
+      }
     }
 
     // Reset the internal state to its initial values.

@@ -22,11 +22,7 @@ const timeoutValidationErrors = new WeakSet<Error>();
 
 /** Whether this module itself rejected a timeout or delay value. */
 export function isTimeoutValidationError(error: unknown): error is Error {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    timeoutValidationErrors.has(error as Error)
-  );
+  return timeoutValidationErrors.has(error as Error);
 }
 
 function invalidTimeoutType(label: string): TypeError {

@@ -977,22 +977,18 @@ export class Logger extends EventEmitter {
       ? new ConsoleSink({ muted: options?.muteConsole ?? true })
       : undefined;
 
-    const sinks: LogSink[] = [arraySink];
-
+    // The constructor validates and owns the caller list once. Prepend only our
+    // factory-created sinks to that private copy, preserving delivery order.
+    const logger = new Logger({
+      sinks: options?.sinks,
+      callProcessExit: false,
+    });
     if (consoleSink) {
-      sinks.push(consoleSink);
+      logger.sinks.unshift(arraySink, consoleSink);
+    } else {
+      logger.sinks.unshift(arraySink);
     }
-
-    sinks.push(...copySinkList(options?.sinks));
-
-    return {
-      logger: new Logger({
-        sinks,
-        callProcessExit: false,
-      }),
-      arraySink,
-      consoleSink,
-    };
+    return { logger, arraySink, consoleSink };
   }
 
   /**
@@ -1008,13 +1004,12 @@ export class Logger extends EventEmitter {
       muted: options?.muteConsole ?? false,
     });
 
-    return {
-      logger: new Logger({
-        sinks: [consoleSink, ...copySinkList(options?.sinks)],
-        callProcessExit: false,
-      }),
-      consoleSink,
-    };
+    const logger = new Logger({
+      sinks: options?.sinks,
+      callProcessExit: false,
+    });
+    logger.sinks.unshift(consoleSink);
+    return { logger, consoleSink };
   }
 
   /**
@@ -1834,7 +1829,7 @@ export type { LoggerService } from './logger-service';
 function copySinkList(
   source: readonly LogSink[] | null | undefined,
 ): LogSink[] {
-  if (source === null || source === undefined) {
+  if (isNullish(source)) {
     return [];
   }
   // Preserve the typed view: Array.isArray narrows source to any[] in TypeScript.

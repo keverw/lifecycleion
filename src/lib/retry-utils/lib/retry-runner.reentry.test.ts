@@ -312,3 +312,36 @@ test.each([0, 1000])(
     }
   },
 );
+
+test('a deferred terminal reset does not cancel a newer forced operation', async () => {
+  let report: ReportResult | undefined;
+  let attempts = 0;
+  let wasAborted = false;
+  const runner = new RetryRunner(policy, (reportResult, signal) => {
+    attempts++;
+    report = reportResult;
+    signal.addEventListener('abort', () => {
+      wasAborted = true;
+      reportResult('skip');
+    });
+  });
+  await runner.run();
+  let resetting: Promise<void> | undefined;
+  let replacement: Promise<RunResult<unknown>> | undefined;
+  runner.once(ATTEMPT_HANDLED, () => {
+    queueMicrotask(() => {
+      replacement = runner.forceTry({ shouldWaitForCompletion: true });
+    });
+    resetting = runner.reset();
+  });
+  report?.('fatal', new Error('old operation'));
+  await resetting;
+  expect(attempts).toBe(2);
+  expect(wasAborted).toBe(false);
+  expect(runner.runnerState).toBe('running');
+  report?.('success', 'replacement');
+  expect(await replacement).toMatchObject({
+    status: 'attempt_success',
+    data: 'replacement',
+  });
+});
