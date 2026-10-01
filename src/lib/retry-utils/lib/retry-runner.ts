@@ -555,6 +555,23 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     return await this.forceTryOperation(options);
   }
 
+  /** Claim new work, optionally retaining the result promise for existing waiters. */
+  private beginOperation(
+    shouldKeepPendingResolver = false,
+  ): PromiseProtectedResolver<RunResult<T>> {
+    this.operationToken = Symbol();
+    if (
+      !shouldKeepPendingResolver ||
+      !this.currentOperationResolver ||
+      this.currentOperationResolver.hasResolved
+    ) {
+      this.currentOperationResolver = new PromiseProtectedResolver<
+        RunResult<T>
+      >();
+    }
+    return this.currentOperationResolver;
+  }
+
   // Keep the lock around synchronous dispatch, not the caller's wait for completion.
   // The public async wrapper awaits only after this method's finally released it.
   private runOperation(
@@ -592,16 +609,12 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       ) {
         return checkDisallowedStates.runResult;
       } else if (this.policy.shouldDoFirstTry()) {
-        this.operationToken = Symbol();
+        const operationResolver = this.beginOperation();
         this.currentState.runnerState = 'running';
 
         // Start timing
         this.currentState.operationStartTime = Date.now();
         this.currentState.finalTimeTakenMS = null;
-
-        // Create a new resolver for the current operation
-        const operationResolver = new PromiseProtectedResolver<RunResult<T>>();
-        this.currentOperationResolver = operationResolver;
 
         this.emit(OPERATION_STARTED, { operationType: 'initial' });
         if (this.currentState.runnerState !== 'running') {
@@ -676,13 +689,10 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         }
 
         // Resume from the paused/stopped state.
-        this.operationToken = Symbol();
+        const operationResolver = this.beginOperation();
         this.currentState.runnerState = 'running';
         this.currentState.operationStartTime = Date.now();
         this.currentState.finalTimeTakenMS = null;
-
-        const operationResolver = new PromiseProtectedResolver<RunResult<T>>();
-        this.currentOperationResolver = operationResolver;
 
         this.emit(OPERATION_STARTED, { operationType: 'resume' });
         if (this.currentState.runnerState !== 'running') {
@@ -760,6 +770,15 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // If an attempt is currently running and we want to abort it, do so.
       if (this.isAttemptRunning && this.currentState.currentAttemptContext) {
         this.currentState.currentAttemptContext.abortController.abort();
+        // Abort listeners can report success synchronously. Respect the same
+        // completed-state refusal as entry before starting another attempt.
+        const afterAbort = this.checkForDisallowedPerOperationStates(
+          'forceTry',
+          ['completed'],
+        );
+        if (afterAbort.wasDisallowed && afterAbort.runResult) {
+          return afterAbort.runResult;
+        }
       }
 
       // Case 1: Retry is scheduled (pending timeout), force it to run now.
@@ -781,8 +800,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         }
       } else {
         // Case 2: No pending retry, start a brand-new forced attempt.
-        // Claim before cancellation notifications can schedule a reset continuation.
-        this.operationToken = Symbol();
+        // The abort above has already dispatched caller code. This new identity
+        // makes resets from that old attempt leave the accepted restart alone.
+        const operationResolver = this.beginOperation(true);
         if (this.currentState.runnerState === 'not-started') {
           // Treat as a first try so the policy tracks the initial attempt.
           this.policy.shouldDoFirstTry();
@@ -800,17 +820,6 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         this.currentState.runnerState = 'running';
         this.currentState.operationStartTime = Date.now();
         this.currentState.finalTimeTakenMS = null;
-
-        if (
-          !this.currentOperationResolver ||
-          this.currentOperationResolver.hasResolved
-        ) {
-          // Create a new resolver for the forced operation.
-          this.currentOperationResolver = new PromiseProtectedResolver<
-            RunResult<T>
-          >();
-        }
-        const operationResolver = this.currentOperationResolver;
 
         this.emit(OPERATION_STARTED, { operationType: 'force' });
         if (this.currentState.runnerState !== 'running') {

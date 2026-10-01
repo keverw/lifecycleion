@@ -372,3 +372,47 @@ test('reset does not clear a forced restart that reuses its unresolved result', 
     data: 'replacement',
   });
 });
+
+test('forceTry respects success reported synchronously by its abort listener', async () => {
+  let attempts = 0;
+  const runner = new RetryRunner(policy, (reportResult, signal) => {
+    attempts++;
+    signal.addEventListener('abort', () =>
+      reportResult('success', 'finished on abort'),
+    );
+  });
+  const original = runner.run(true);
+  const forced = await runner.forceTry({ shouldAbortRunning: true });
+  expect(forced).toMatchObject({ code: 'already_completed' });
+  expect(await original).toMatchObject({
+    status: 'attempt_success',
+    data: 'finished on abort',
+  });
+  expect(attempts).toBe(1);
+  expect(runner.runnerState).toBe('completed');
+});
+
+test('reset leaves an operation resumed before its cancellation continuation alone', async () => {
+  const reports: ReportResult[] = [];
+  const runner = new RetryRunner(policy, (reportResult) => {
+    reports.push(reportResult);
+  });
+  await runner.run();
+  let resumed: Promise<RunResult<unknown>> | undefined;
+  runner.once(OPERATION_ENDED, () => {
+    // Terminal listeners intentionally cannot resume until dispatch has finished.
+    queueMicrotask(() => {
+      resumed = runner.resume(true);
+    });
+  });
+  const resetting = runner.reset();
+  reports[0]('skip');
+  await resetting;
+  expect(reports).toHaveLength(2);
+  expect(runner.runnerState).toBe('running');
+  reports[1]('success', 'resumed');
+  expect(await resumed).toMatchObject({
+    status: 'attempt_success',
+    data: 'resumed',
+  });
+});

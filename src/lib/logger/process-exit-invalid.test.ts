@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -133,4 +133,26 @@ test('simulated exits retain a fractional code for inspection', () => {
   const logger = new Logger({ sinks: [], callProcessExit: false });
   logger.exit(1.5);
   expect(logger.exitCode).toBe(1.5);
+});
+
+test('simulated NaN exit retains its code without claiming a fallback', () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    const codes: number[] = [];
+    logger.on<{ eventType: string; code: number }>(
+      'logger',
+      ({ eventType, code }) => {
+        if (eventType === 'exit-called' || eventType === 'exit-process') {
+          codes.push(code);
+        }
+      },
+    );
+    logger.exit(NaN);
+    expect(logger.exitCode).toBeNaN();
+    expect(codes).toEqual([NaN, NaN]);
+    expect(output).not.toHaveBeenCalled();
+  } finally {
+    output.mockRestore();
+  }
 });

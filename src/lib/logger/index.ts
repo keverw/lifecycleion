@@ -306,9 +306,10 @@ export class Logger extends EventEmitter {
     // process.exit rejects fractional and unsafe integer codes. Decide before
     // closing sinks so a bad caller value cannot strand a live process with a
     // closed logger. Simulated exits keep the requested code for inspection.
-    const exitCode =
-      this.callProcessExit && !Number.isSafeInteger(code) ? 1 : code;
-    if (exitCode !== code) {
+    const isInvalidExitCode =
+      this.callProcessExit && !Number.isSafeInteger(code);
+    const exitCode = isInvalidExitCode ? 1 : code;
+    if (isInvalidExitCode) {
       reportToConsole(
         `Logger exit code ${String(code)} is invalid; exiting with code 1`,
       );

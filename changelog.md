@@ -211,6 +211,8 @@
 
 ## Unreleased
 
+- `forceTry({ shouldAbortRunning: true })` refuses an already-completed operation when its abort listener reports success synchronously, instead of starting another attempt. Simulated `exit(NaN)` retains NaN without falsely reporting a fallback to code 1.
+
 - A deferred RetryRunner reset applies only to the operation it was requested for; it no longer cancels or clears a replacement operation started while reset was waiting, including a forced restart that retains the earlier completion promise.
 
 - Real logger exits normalize invalid exit codes (including unsafe integers) before `exit-called` and `beforeExitCallback`, so both observe the same fallback code as `exit-process`. Simulated exits retain the requested code.
