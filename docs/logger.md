@@ -1861,8 +1861,8 @@ The cleanup deadline starts when sink cleanup begins; it does not bound an await
 `beforeExitCallback` or override its explicit `{ action: 'wait' }` decision.
 
 **Exit Code Validation:** `exit(code: number)` accepts numeric codes, not numeric strings. Non-numeric `exitCode` values on log entries are ignored.
-For a real exit, a non-integer code is reported to the guarded console and replaced
-with 1 before cleanup. If `process.exit()` throws, the logger reports that failure
+For a real exit, a code that is not a safe integer is reported to the guarded console and replaced
+with 1 before `exit-called`, `beforeExitCallback`, and cleanup. If `process.exit()` throws, the logger reports that failure
 and makes one fallback call with code 1, including when 1 was requested originally.
 A second failure is reported without recursive retries. Simulated exits retain the
 requested code.

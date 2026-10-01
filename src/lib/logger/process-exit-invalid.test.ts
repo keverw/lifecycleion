@@ -4,9 +4,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Logger } from './index';
 
-test('a fractional real exit code falls back to one and still exits after close', async () => {
-  const loggerURL = new URL('./index.ts', import.meta.url).href;
-  const script = `
+test.each([1.5, 1e20])(
+  'invalid real exit code %s is normalized before notifications',
+  async (requestedCode) => {
+    const loggerURL = new URL('./index.ts', import.meta.url).href;
+    const script = `
     const { Logger } = await import(${JSON.stringify(loggerURL)});
     const logger = new Logger({
       sinks: [], callProcessExit: true,
@@ -20,27 +22,28 @@ test('a fractional real exit code falls back to one and still exits after close'
         process.stdout.write(eventType + ':' + code + '\\n');
       }
     });
-    logger.exit(1.5);
+    logger.exit(${requestedCode});
     setTimeout(() => process.stdout.write('survived'), 100);
   `;
-  const child = Bun.spawn([process.execPath, '-e', script], {
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  const [exitCode, stdout, stderr] = await Promise.all([
-    child.exited,
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-  ]);
+    const child = Bun.spawn([process.execPath, '-e', script], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [exitCode, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
 
-  expect(exitCode).toBe(1);
-  expect(stdout.trim().split('\n')).toEqual([
-    'exit-called:1',
-    'before:1',
-    'exit-process:1',
-  ]);
-  expect(stderr).toContain('exit code 1.5 is invalid');
-});
+    expect(exitCode).toBe(1);
+    expect(stdout.trim().split('\n')).toEqual([
+      'exit-called:1',
+      'before:1',
+      'exit-process:1',
+    ]);
+    expect(stderr).toContain(`exit code ${requestedCode} is invalid`);
+  },
+);
 
 test('a throwing process.exit gets one bounded fallback without an unhandled rejection', async () => {
   const loggerURL = new URL('./index.ts', import.meta.url).href;

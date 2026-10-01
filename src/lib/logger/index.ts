@@ -303,10 +303,11 @@ export class Logger extends EventEmitter {
    * Exit the process with the specified code
    */
   public exit(code: number): void {
-    // process.exit rejects fractional and other non-integer codes. Decide before
+    // process.exit rejects fractional and unsafe integer codes. Decide before
     // closing sinks so a bad caller value cannot strand a live process with a
     // closed logger. Simulated exits keep the requested code for inspection.
-    const exitCode = this.callProcessExit && !Number.isInteger(code) ? 1 : code;
+    const exitCode =
+      this.callProcessExit && !Number.isSafeInteger(code) ? 1 : code;
     if (exitCode !== code) {
       reportToConsole(
         `Logger exit code ${String(code)} is invalid; exiting with code 1`,
@@ -978,16 +979,14 @@ export class Logger extends EventEmitter {
       : undefined;
 
     // The constructor validates and owns the caller list once. Prepend only our
-    // factory-created sinks to that private copy, preserving delivery order.
+    // factory-created sinks with replace-on-write, preserving delivery order.
     const logger = new Logger({
       sinks: options?.sinks,
       callProcessExit: false,
     });
-    if (consoleSink) {
-      logger.sinks.unshift(arraySink, consoleSink);
-    } else {
-      logger.sinks.unshift(arraySink);
-    }
+    logger.sinks = consoleSink
+      ? [arraySink, consoleSink, ...logger.sinks]
+      : [arraySink, ...logger.sinks];
     return { logger, arraySink, consoleSink };
   }
 
@@ -1008,7 +1007,7 @@ export class Logger extends EventEmitter {
       sinks: options?.sinks,
       callProcessExit: false,
     });
-    logger.sinks.unshift(consoleSink);
+    logger.sinks = [consoleSink, ...logger.sinks];
     return { logger, consoleSink };
   }
 

@@ -345,3 +345,30 @@ test('a deferred terminal reset does not cancel a newer forced operation', async
     data: 'replacement',
   });
 });
+
+test('reset does not clear a forced restart that reuses its unresolved result', async () => {
+  const reports: ReportResult[] = [];
+  const runner = new RetryRunner(policy, (reportResult) => {
+    reports.push(reportResult);
+  });
+  const originalResult = runner.run(true);
+  const resetting = runner.reset();
+  expect(runner.runnerState).toBe('stopping');
+  const replacement = runner.forceTry({
+    shouldAbortRunning: true,
+    shouldWaitForCompletion: true,
+  });
+  await resetting;
+  expect(reports).toHaveLength(2);
+  expect(runner.runnerState).toBe('running');
+  reports[0]('success', 'stale');
+  reports[1]('success', 'replacement');
+  expect(await replacement).toMatchObject({
+    status: 'attempt_success',
+    data: 'replacement',
+  });
+  expect(await originalResult).toMatchObject({
+    status: 'attempt_success',
+    data: 'replacement',
+  });
+});

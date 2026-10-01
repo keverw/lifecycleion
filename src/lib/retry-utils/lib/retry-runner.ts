@@ -171,6 +171,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   // Terminal events run before their completion promise is resolved. Reentrant
   // reset/forceTry must wait until that old operation finishes publishing.
   private terminalDispatchDepth = 0;
+  // A forced restart can retain the completion resolver for existing waiters.
+  // Ownership therefore needs an identity independent of that shared promise.
+  private operationToken = Symbol();
   // Mutable runtime state for the current operation.
   private currentState: RetryRunnerCurrentState = this.getEmptyCurrentState();
   // Grace period for cancellation before we force-complete.
@@ -516,12 +519,12 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   }
 
   public async reset(): Promise<void> {
-    const operation = this.currentOperationResolver;
+    const operationToken = this.operationToken;
     if (this.terminalDispatchDepth > 0) {
-      await operation.promise;
+      await this.currentOperationResolver.promise;
       // A terminal listener's reset belongs to that operation, not a replacement
       // started while its continuation was queued.
-      if (this.currentOperationResolver !== operation) {
+      if (this.operationToken !== operationToken) {
         return;
       }
     }
@@ -532,7 +535,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     ) {
       // Cancel any in-flight work before resetting state.
       await this.cancel();
-      if (this.currentOperationResolver !== operation) {
+      if (this.operationToken !== operationToken) {
         return;
       }
     }
@@ -589,6 +592,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       ) {
         return checkDisallowedStates.runResult;
       } else if (this.policy.shouldDoFirstTry()) {
+        this.operationToken = Symbol();
         this.currentState.runnerState = 'running';
 
         // Start timing
@@ -672,6 +676,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         }
 
         // Resume from the paused/stopped state.
+        this.operationToken = Symbol();
         this.currentState.runnerState = 'running';
         this.currentState.operationStartTime = Date.now();
         this.currentState.finalTimeTakenMS = null;
@@ -776,6 +781,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         }
       } else {
         // Case 2: No pending retry, start a brand-new forced attempt.
+        // Claim before cancellation notifications can schedule a reset continuation.
+        this.operationToken = Symbol();
         if (this.currentState.runnerState === 'not-started') {
           // Treat as a first try so the policy tracks the initial attempt.
           this.policy.shouldDoFirstTry();
