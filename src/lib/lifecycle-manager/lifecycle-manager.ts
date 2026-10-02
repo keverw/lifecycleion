@@ -2092,14 +2092,40 @@ export class LifecycleManager
           wasRegistered: true,
         };
       }
+    }
 
-      // Checked again after the stop's `await`: a bulk startup or shutdown that began
-      // while this component was stopping now owns the registry, and removing a
-      // component from under it is what the guard at the top exists to prevent. The
-      // component stays registered, stopped.
-      if (this.isBulkOperationBlockingUnregister(name)) {
-        return this.refuseUnregisterForBulkOperation(name, true, true);
-      }
+    // Last check before anything is removed, for both paths. `component` was captured
+    // before `options?.stopIfRunning` was read, and that read runs caller code: a getter
+    // that unregistered this component and registered a replacement under the same name
+    // left the capture stale with no `await` anywhere to re-check it. The registry entry
+    // below is removed by instance, but every state map is keyed by name, so a stale
+    // instance wipes the replacement's state while leaving it registered - and reports
+    // success for a removal it never made.
+    if (this.getComponent(name) !== component) {
+      return {
+        success: false,
+        componentName: name,
+        reason:
+          'Component was unregistered while this unregister was in progress',
+        code: 'component_not_found',
+        wasStopped: progress.wasStopped,
+        // Registered when this call started, which is what this field reports - the
+        // name may belong to a replacement by now, which is not this call's component.
+        wasRegistered: true,
+      };
+    }
+
+    // Checked again here rather than only at the top: a bulk startup or shutdown that
+    // began while this component was stopping - or inside that same option getter - now
+    // owns the registry, and removing a component from under it is what the guard at the
+    // top exists to prevent. The component stays registered, in whatever state it
+    // reached: stopped on the stop path, untouched on the one that had nothing to stop.
+    if (this.isBulkOperationBlockingUnregister(name)) {
+      return this.refuseUnregisterForBulkOperation(
+        name,
+        progress.wasStopped,
+        true,
+      );
     }
 
     return this.withTransition(() => {

@@ -3716,9 +3716,10 @@ interface UploadActivity {
  * Wait for an attempt's upload to settle before the next dispatch - the next redirect hop,
  * or the retry that replaces it.
  *
- * Never throws and never rejects, whatever the adapter handed over: the outcome is adopted
- * first, and a cancel ends the wait rather than the request - the dispatch that follows
- * sees the signal for itself.
+ * Never throws and never rejects, whatever the adapter handed over: adoption happens at
+ * the attempt runner, and this wait observes the adopted outcome's settlement either way,
+ * never its value. A cancel ends the wait rather than the request - the dispatch that
+ * follows sees the signal for itself.
  *
  * Bounded by `stallMS`, the request's own per-attempt timeout, as a *stall* bound: the
  * clock restarts every time the upload reports progress, so what fails is an upload that
@@ -3795,8 +3796,12 @@ async function settleUploadBeforeNextDispatch(
     },
   );
 
+  // Settlement, not outcome: a rejection counts as settled too. Every caller passes the
+  // attempt runner's already-adopted outcome, which cannot reject, but the "never rejects"
+  // guarantee above is this function's own and must not rest on that precondition.
   const uploadSettled = observePromise(
     settled,
+    (): UploadSettleWait => 'settled',
     (): UploadSettleWait => 'settled',
   );
   try {

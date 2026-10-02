@@ -14,7 +14,10 @@ import {
 } from '../internal/intrinsics';
 import { EventEmitter } from '../event-emitter';
 import { ms } from '../unix-time-helpers';
-import { safeHandleCallbackAndWait } from '../safe-handle-callback';
+import {
+  reportCallbackError,
+  safeHandleCallbackAndWait,
+} from '../safe-handle-callback';
 import {
   installGlobalEventTarget,
   isGlobalEventTargetAvailable,
@@ -361,6 +364,14 @@ export class Logger extends EventEmitter {
           );
           return;
         }
+        // The failure that got us here is reported either way. `safeHandleCallbackAndWait`
+        // already reports a callback that threw or rejected, so the only value reaching
+        // here is a throw from reading `action` off the result it returned - a
+        // `beforeExit` contract violation that exited silently, leaving an operator
+        // nothing to read. Reported on the standard host path, as the documented
+        // `beforeExit` error contract says: global `'error'` first, console only as the
+        // fall-through rung.
+        reportCallbackError('beforeExit result', error);
         try {
           this.processExit(code);
         } catch (exitError) {

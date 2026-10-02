@@ -846,3 +846,79 @@ test('a violated committed-read invariant yields an unavailable registration rep
   expect(result.startupOrder).toEqual([]);
   expect(result.manualPositionRespected).toBeUndefined();
 });
+
+describe('LifecycleManager unregister instance ownership', () => {
+  test('a replacement registered from the stopIfRunning getter keeps its state', async () => {
+    const { logger, manager } = setup();
+    const original = new Plain(logger, 'a');
+    const replacement = new Plain(logger, 'a');
+    await manager.registerComponent(original);
+
+    const unregistered: string[] = [];
+    manager.on('component:unregistered', (event: { name: string }) => {
+      unregistered.push(event.name);
+    });
+
+    let didReenter = false;
+    const result = await manager.unregisterComponent('a', {
+      // Read after the instance is captured and before anything is removed: the only
+      // place a caller can swap the registration out with no `await` to re-check it.
+      get stopIfRunning(): boolean {
+        if (!didReenter) {
+          didReenter = true;
+          void manager.unregisterComponent('a', { stopIfRunning: false });
+          void manager.registerComponent(replacement);
+        }
+
+        return false;
+      },
+    });
+
+    expect(didReenter).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('component_not_found');
+    expect(result.wasStopped).toBe(false);
+    expect(result.wasRegistered).toBe(true);
+    // Exactly one removal happened, so exactly one event describes it.
+    expect(unregistered).toEqual(['a']);
+    expect(manager.hasComponent('a')).toBe(true);
+    expect(manager.getComponentStatus('a')?.state).toBe('registered');
+
+    // The replacement still owns the name: its state was not wiped out from under it,
+    // so a start it owns still runs and a second registration is still a duplicate.
+    const duplicate = await manager.registerComponent(new Plain(logger, 'a'));
+    expect(duplicate.registered).toBe(false);
+    expect(duplicate.code).toBe('duplicate_name');
+
+    const started = await manager.startComponent('a');
+    expect(started.success).toBe(true);
+    expect(manager.isComponentRunning('a')).toBe(true);
+
+    await manager.stopComponent('a');
+    const removed = await manager.unregisterComponent('a');
+    expect(removed.success).toBe(true);
+    expect(manager.hasComponent('a')).toBe(false);
+  });
+
+  test('a bulk shutdown started from the stopIfRunning getter is refused', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+
+    let didReenter = false;
+    const result = await manager.unregisterComponent('a', {
+      get stopIfRunning(): boolean {
+        if (!didReenter) {
+          didReenter = true;
+          void manager.stopAllComponents();
+        }
+
+        return false;
+      },
+    });
+
+    expect(didReenter).toBe(true);
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('bulk_operation_in_progress');
+    expect(manager.hasComponent('a')).toBe(true);
+  });
+});
