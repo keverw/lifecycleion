@@ -31,6 +31,21 @@ class HangsWithoutForce extends BaseComponent {
   }
 }
 
+// `stop()` never settles and the force handler throws until it is removed.
+class HangsThenForceThrows extends BaseComponent {
+  constructor(logger: Logger, name: string) {
+    super(logger, { name, shutdownGracefulTimeoutMS: 20 });
+  }
+
+  public async start(): Promise<void> {}
+  public stop(): Promise<void> {
+    return new Promise(() => {});
+  }
+  public onShutdownForce?(): void {
+    throw new Error('force failed');
+  }
+}
+
 // Every `stop()` fails; the force handler fails until `isForceFixed` is set.
 class ForceRecovers extends Plain {
   public isForceFixed = false;
@@ -130,6 +145,28 @@ describe('LifecycleManager - stall retry and rollback', () => {
     expect(manager.getStalledComponentNames()).toEqual([]);
     expect(resolved.map((info) => info.name)).toEqual(['flaky']);
     expect(events).toEqual(['force-completed', 'stalled-resolved', 'stopped']);
+  });
+
+  test('a stalled retry without onShutdownForce keeps a timeout-then-error stall an error', async () => {
+    const { logger, manager } = setup();
+    const component = new HangsThenForceThrows(logger, 'both');
+    await manager.registerComponent(component);
+    await manager.startComponent('both');
+
+    const first = await manager.stopComponent('both');
+    expect(first.code).toBe('unknown_error');
+    expect(manager.getStalledComponents()[0].reason).toBe('both');
+
+    Object.defineProperty(component, 'onShutdownForce', { value: undefined });
+    const codes: unknown[] = [];
+    manager.on('component:stalled', (event: { code?: unknown }) => {
+      codes.push(event.code);
+    });
+    const retry = await manager.stopAllComponents();
+
+    expect(retry.success).toBe(false);
+    expect(retry.stalledComponents[0].reason).toBe('both');
+    expect(codes).toEqual(['unknown_error']);
   });
 
   test('detachSignals still announces the detach when a listener removal throws', () => {

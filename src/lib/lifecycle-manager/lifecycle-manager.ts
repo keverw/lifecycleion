@@ -7908,7 +7908,9 @@ export class LifecycleManager
         stalledAt: Date.now(),
         error: context.gracefulError,
       };
-      const didStallTimeOut = stallInfo.reason !== 'error';
+      // Match the force phase's classification: only a pure timeout reports as one;
+      // 'both' (graceful timed out, then force threw) carries the force error.
+      const didStallTimeOut = stallInfo.reason === 'timeout';
       const stallError = stallInfo.error;
 
       this.markComponentStalled(name, stallInfo);
