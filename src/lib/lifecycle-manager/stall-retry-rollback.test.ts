@@ -458,4 +458,64 @@ describe('LifecycleManager - stall retry and rollback', () => {
       reason: 'error',
     });
   });
+
+  test('a no-handler retry of a crash-recorded stall answers with the crash result', async () => {
+    const { logger, manager } = setup();
+    const component = new HangsThenForceThrows(logger, 'crash');
+    await manager.registerComponent(component);
+    await manager.startComponent('crash');
+
+    crashNextCall(manager, 'createPendingForceStopWaiter');
+    const { release } = claimReports();
+    let crashed: ComponentOperationResult;
+    try {
+      crashed = await manager.stopComponent('crash');
+    } finally {
+      release();
+    }
+    const stall = manager.getStalledComponents()[0];
+
+    component.onShutdownForce = undefined;
+    const stalledEvents: unknown[] = [];
+    manager.on('component:stalled', (event) => {
+      stalledEvents.push(event);
+    });
+    const retried = await retryStalled(manager, 'crash');
+
+    expect(retried).toMatchObject({
+      success: false,
+      code: crashed.code,
+      reason: crashed.reason,
+      error: crashed.error,
+    });
+    expect(retried.reason).toContain('Stop failed unexpectedly');
+    expect(manager.getStalledComponents()[0]).toBe(stall);
+    expect(stalledEvents).toEqual([]);
+  });
+
+  test('a forceImmediate stop without a force handler records a force-phase stall', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new HangsWithoutForce(logger, 'hang'));
+    await manager.startComponent('hang');
+
+    const result = await manager.stopComponent('hang', {
+      forceImmediate: true,
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      code: 'unknown_error',
+      reason: 'Force shutdown failed',
+    });
+    expect(manager.getStalledComponents()[0]).toMatchObject({
+      phase: 'force',
+      reason: 'error',
+    });
+    expect(logMessages(logger)).toContain(
+      'Component stalled - no force handler to run',
+    );
+    expect(logMessages(logger)).not.toContain(
+      'Component stalled - graceful shutdown failed',
+    );
+  });
 });

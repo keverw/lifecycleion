@@ -1783,6 +1783,62 @@ describe('ProcessSignalManager', () => {
       expect(counts()).toEqual(before);
     });
 
+    test('an attach from a detach cleanup report is not undone by that detach', () => {
+      manager = new ProcessSignalManager({
+        onShutdownRequested: shutdownCallback,
+        onReloadRequested: reloadCallback,
+        onInfoRequested: infoCallback,
+        onDebugRequested: debugCallback,
+      });
+      const counts = (): number[] =>
+        ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGUSR1', 'SIGUSR2'].map((signal) =>
+          process.listenerCount(signal),
+        );
+      const before = counts();
+      manager.attach();
+
+      // Two removals fail, so detach has a later failure to report.
+      const originalOff = process.off.bind(process);
+      const failure = new Error('off failed');
+      const failingSignals = new Set(['SIGINT', 'SIGTERM']);
+      const offSpy = spyOn(process, 'off').mockImplementation(((
+        event: string,
+        listener: (...args: unknown[]) => void,
+      ) => {
+        originalOff(event, listener);
+        if (failingSignals.delete(event)) {
+          throw failure;
+        }
+        return process;
+      }) as typeof process.off);
+
+      let wasAttachedDuringReport: boolean | undefined;
+      const onGlobalError = (event: Event): void => {
+        event.preventDefault();
+        if (wasAttachedDuringReport === undefined) {
+          wasAttachedDuringReport = manager.isAttached;
+          manager.attach();
+        }
+      };
+      globalThis.addEventListener('error', onGlobalError);
+
+      try {
+        expect(() => manager.detach()).toThrow(failure);
+      } finally {
+        globalThis.removeEventListener('error', onGlobalError);
+        offSpy.mockRestore();
+      }
+
+      // The report came after detach finished, so the listener's attach took effect
+      // and nothing removed its listeners afterward.
+      expect(wasAttachedDuringReport).toBe(false);
+      expect(manager.isAttached).toBe(true);
+      expect(counts()).toEqual(before.map((count) => count + 1));
+
+      manager.detach();
+      expect(counts()).toEqual(before);
+    });
+
     test('a cleanup failure during attach keeps the registration error', () => {
       manager = new ProcessSignalManager({
         onShutdownRequested: shutdownCallback,
