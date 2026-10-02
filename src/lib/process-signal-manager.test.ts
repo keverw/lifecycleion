@@ -1819,8 +1819,8 @@ describe('ProcessSignalManager', () => {
 
       expect(manager.getStatus().isAttached).toBe(false);
       expect(process.listenerCount('SIGINT')).toBe(before);
-      // Every cleanup failure is reported rather than lost behind the rethrow: the
-      // later ones as they happen, the first by attach once cleanup has finished.
+      // Every cleanup failure is reported rather than lost behind the rethrow, once
+      // cleanup has finished: the later ones first, then the first by attach.
       expect(reports.length).toBeGreaterThan(1);
       for (const report of reports) {
         expect((report as Error).cause).toMatchObject({
