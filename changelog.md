@@ -211,11 +211,11 @@
 
 ## Unreleased
 
-- `forceTry({ shouldAbortRunning: true })` refuses an already-completed operation when its abort listener reports success synchronously, instead of starting another attempt. A newer `cancel()` or `reset()` requested by that abort listener also takes precedence: the force call joins the existing operation’s result without restarting.
+- `forceTry({ shouldAbortRunning: true })` refuses an already-completed operation when its abort listener reports success synchronously, instead of starting another attempt. A newer `cancel()` or `reset()` requested by that abort listener also takes precedence: waiting force calls join the existing operation’s result without restarting; non-waiting calls immediately return `pre_operation_error` / `force_try_superseded` without waiting for cancellation.
 
 - A deferred RetryRunner reset applies only to the operation it was requested for; it no longer cancels or clears a replacement operation started while reset was waiting, including a forced restart that retains the earlier completion promise.
 
-- Real logger exits normalize invalid exit codes (including unsafe integers) before `exit-called` and `beforeExitCallback`, so both observe the same fallback code as `exit-process`. Simulated exits retain the requested code; `exit(NaN)` does not falsely report a fallback to code 1.
+- **BREAKING:** Real logger exits require integer codes in the portable range `0–255`; other values normalize to 1 (preventing nonzero values such as 256 from wrapping to success) before `exit-called` and `beforeExitCallback`, so both observe the same fallback code as `exit-process`. Simulated exits retain the requested code; `exit(NaN)` does not falsely report a fallback to code 1.
 
 - Lifecycle manager logging caches entity children only for the built-in name-scoped factory. Custom `entity()` implementations run on each call so reused component names can pick up fresh context.
 

@@ -303,11 +303,13 @@ export class Logger extends EventEmitter {
    * Exit the process with the specified code
    */
   public exit(code: number): void {
-    // process.exit rejects fractional and unsafe integer codes. Decide before
+    // Keep real exits in the portable 0–255 range; larger codes can wrap to
+    // success at the OS boundary. Decide before
     // closing sinks so a bad caller value cannot strand a live process with a
     // closed logger. Simulated exits keep the requested code for inspection.
     const isInvalidExitCode =
-      this.callProcessExit && !Number.isSafeInteger(code);
+      this.callProcessExit &&
+      (!Number.isInteger(code) || code < 0 || code > 255);
     if (isInvalidExitCode) {
       reportToConsole(
         `Logger exit code ${String(code)} is invalid; exiting with code 1`,

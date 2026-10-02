@@ -440,7 +440,10 @@ for (const request of ['cancel', 'reset'] as const) {
       });
       runner.overrideGraceCancelPeriodMS(10);
       const original = runner.run(true);
-      const forced = runner.forceTry({ shouldAbortRunning: true });
+      const forced = runner.forceTry({
+        shouldAbortRunning: true,
+        shouldWaitForCompletion: true,
+      });
       if (!isSynchronous) {
         report?.('skip');
       }
@@ -457,4 +460,111 @@ for (const request of ['cancel', 'reset'] as const) {
       }
     },
   );
+}
+
+test.each(['cancel', 'reset'] as const)(
+  'non-waiting force returns before abort-listener %s settles',
+  async (request) => {
+    let report: ReportResult | undefined;
+    let stopped: Promise<unknown> | undefined;
+    const runner = new RetryRunner(policy, (reportResult, signal) => {
+      report = reportResult;
+      signal.addEventListener(
+        'abort',
+        () => {
+          stopped = request === 'cancel' ? runner.cancel() : runner.reset();
+        },
+        { once: true },
+      );
+    });
+    const original = runner.run(true);
+    let result: RunResult<unknown> | undefined;
+    const forced = runner
+      .forceTry({ shouldAbortRunning: true })
+      .then((value) => {
+        result = value;
+      });
+    try {
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(result).toMatchObject({
+        status: 'pre_operation_error',
+        code: 'force_try_superseded',
+      });
+      expect(runner.runnerState).toBe('stopping');
+    } finally {
+      report?.('skip');
+      await stopped;
+      await original;
+      await forced;
+    }
+  },
+);
+
+for (const outcome of ['skip', 'error', 'fatal', 'exhausted'] as const) {
+  test(`forceTry chooses the live branch after abort reports ${outcome}`, async () => {
+    const reports: ReportResult[] = [];
+    const retryStarted = Promise.withResolvers<void>();
+    let hasInitialEnded = false;
+    const runner = new RetryRunner(
+      {
+        strategy: 'fixed',
+        maxRetryAttempts: outcome === 'exhausted' ? 1 : 5,
+        delayMS: outcome === 'exhausted' ? 5 : 1000,
+      },
+      (report, signal) => {
+        reports.push(report);
+        if (reports.length === 2) {
+          retryStarted.resolve();
+        }
+        signal.addEventListener(
+          'abort',
+          () => {
+            const failure = new Error('abort outcome');
+            if (outcome === 'skip') {
+              report('skip');
+            } else if (outcome === 'fatal') {
+              report('fatal', failure);
+            } else {
+              report('error', failure);
+            }
+          },
+          { once: true },
+        );
+      },
+    );
+    runner.on(OPERATION_ENDED, () => {
+      hasInitialEnded = true;
+    });
+    const original = runner.run(true);
+    if (outcome === 'exhausted') {
+      reports[0]('error', new Error('initial failure'));
+      await retryStarted.promise;
+    }
+    const beforeForce = reports.length;
+    const forced = runner.forceTry({
+      shouldAbortRunning: true,
+      shouldWaitForCompletion: true,
+    });
+    expect(reports).toHaveLength(beforeForce + 1);
+    expect(runner.wasLastAttemptForced).toBe(true);
+    expect(runner.isAttemptRunning).toBe(true);
+    expect(hasInitialEnded).toBe(
+      outcome === 'fatal' || outcome === 'exhausted',
+    );
+    reports[beforeForce]('success', 'forced result');
+    expect(await forced).toMatchObject({
+      status: 'attempt_success',
+      data: 'forced result',
+    });
+    expect(await original).toMatchObject(
+      outcome === 'fatal'
+        ? { status: 'attempt_fatal' }
+        : outcome === 'exhausted'
+          ? { status: 'attempts_exhausted' }
+          : { status: 'attempt_success', data: 'forced result' },
+    );
+    expect(reports).toHaveLength(beforeForce + 1);
+  });
 }

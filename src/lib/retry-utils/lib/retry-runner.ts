@@ -20,6 +20,7 @@ import {
   RetryUtilsErrRunnerAttemptsExhausted,
   RetryUtilsErrRunnerCancelPending,
   RetryUtilsErrRunnerForceTryRetryInProgress,
+  RetryUtilsErrRunnerForceTrySuperseded,
   RetryUtilsErrRunnerLastRetryFatallyFailed,
   RetryUtilsErrRunnerLockAcquisitionError,
   RetryUtilsErrRunnerNotPaused,
@@ -776,10 +777,16 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         const operationResolver = this.currentOperationResolver;
         this.currentState.currentAttemptContext.abortController.abort();
         // A cancel/reset requested inside abort is newer than this force request.
-        // Join its outcome instead of reviving work it has just stopped. A force
-        // requested later can still intentionally supersede a pending reset.
+        // Waiting calls join its outcome; non-waiting calls report supersession
+        // immediately. Neither revives work the newer request wants stopped.
         if (this.stopRequestToken !== stopRequestToken) {
-          return operationResolver.promise;
+          return shouldWaitForCompletion
+            ? operationResolver.promise
+            : {
+                status: 'pre_operation_error',
+                code: 'force_try_superseded',
+                error: new RetryUtilsErrRunnerForceTrySuperseded(),
+              };
         }
         const afterAbort = this.checkForceTryPreconditions();
         if (afterAbort) {
@@ -787,6 +794,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         }
       }
 
+      // Branch on the live post-abort state: skip/error may have scheduled a
+      // retry, while fatal/exhaustion may have settled the previous resolver.
       // Case 1: Retry is scheduled (pending timeout), force it to run now.
       // This starts a NEW ATTEMPT (attempt timer resets) but keeps the SAME OPERATION
       // (operation timer continues - we're just accelerating a scheduled retry, not starting over).

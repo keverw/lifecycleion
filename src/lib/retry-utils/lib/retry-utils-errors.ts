@@ -36,6 +36,13 @@ export class RetryUtilsErrRunnerForceTryRetryInProgress extends Error {
   }
 }
 
+export class RetryUtilsErrRunnerForceTrySuperseded extends Error {
+  constructor() {
+    super('A newer cancel or reset request superseded this forced retry.');
+    this.name = 'RetryUtilsErrRunnerForceTrySuperseded';
+  }
+}
+
 export class RetryUtilsErrRunnerNotPaused extends Error {
   constructor(public invokedMethod: 'resume') {
     super(

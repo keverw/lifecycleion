@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Logger } from './index';
 
-test.each([1.5, 1e20])(
+test.each([1.5, 1e20, -1, 256, 2 ** 40])(
   'invalid real exit code %s is normalized before notifications',
   async (requestedCode) => {
     const loggerURL = new URL('./index.ts', import.meta.url).href;
@@ -129,11 +129,14 @@ test('a real Node exit listener that throws cannot strand the closed logger', as
   }
 });
 
-test('simulated exits retain a fractional code for inspection', () => {
-  const logger = new Logger({ sinks: [], callProcessExit: false });
-  logger.exit(1.5);
-  expect(logger.exitCode).toBe(1.5);
-});
+test.each([1.5, -1, 256, 2 ** 40])(
+  'simulated exits retain code %s for inspection',
+  (code) => {
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    logger.exit(code);
+    expect(logger.exitCode).toBe(code);
+  },
+);
 
 test('simulated NaN exit retains its code without claiming a fallback', () => {
   const output = spyOn(console, 'error').mockImplementation(() => {});
@@ -155,4 +158,23 @@ test('simulated NaN exit retains its code without claiming a fallback', () => {
   } finally {
     output.mockRestore();
   }
+});
+
+test.each([0, 255])('portable exit boundary %s is retained', async (code) => {
+  const loggerURL = new URL('./index.ts', import.meta.url).href;
+  const script = `
+    const { Logger } = await import(${JSON.stringify(loggerURL)});
+    const logger = new Logger({ sinks: [], callProcessExit: true });
+    logger.exit(${code});
+  `;
+  const child = Bun.spawn([process.execPath, '-e', script], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const [exitCode, stderr] = await Promise.all([
+    child.exited,
+    new Response(child.stderr).text(),
+  ]);
+  expect(exitCode).toBe(code);
+  expect(stderr).toBe('');
 });

@@ -50,6 +50,7 @@ export type RunnerErrorCode =
   | 'attempts_exhausted'
   | 'cancel_pending'
   | 'force_try_in_progress'
+  | 'force_try_superseded'
   | 'fatally_failed'
   | 'lock_error'
   | 'not_paused'

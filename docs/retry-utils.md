@@ -455,7 +455,7 @@ Forces an immediate retry attempt, bypassing policy limits. Works in all states 
 
 - If called from `'not-started'`, it acts as the first try. If a retry delay is pending, it fires immediately.
 - If called while the runner is in `'stopping'` or `'stopped'` state, any pending cancel promises are resolved and the runner transitions back to `'running'`.
-- **Abort-listener outcomes:** If an abort listener reports success synchronously, `forceTry()` returns `pre_operation_error` with `code: 'already_completed'` and starts no replacement. A newer `cancel()` or `reset()` requested by an abort listener also wins: `forceTry()` joins that operation's result rather than restarting, even when `shouldWaitForCompletion` is false. A force request made after cancellation was requested can still intentionally restart it.
+- **Abort-listener outcomes:** If an abort listener reports success synchronously, `forceTry()` returns `pre_operation_error` with `code: 'already_completed'` and starts no replacement. A newer `cancel()` or `reset()` requested by an abort listener also wins: Waiting force calls join that operation's result rather than restarting. Non-waiting calls return immediately with `pre_operation_error` / `force_try_superseded`, without claiming that cancellation has finished. A force request made after cancellation was requested can still intentionally restart it.
 - **Timer behavior:** `timeTakenMS` resets when starting a new attempt from terminal states (`'not-started'`, `'exhausted'`, `'fatal-error'`, `'stopped'`) but does NOT reset when accelerating a pending retry (operation already running, just clearing the delay timer).
 
 Options:
@@ -465,12 +465,13 @@ Options:
 
 Returns `Promise<RunResult<T>>`:
 
-- If `shouldWaitForCompletion` is `false`: normally resolves immediately with `{ status: 'running', reattached: boolean }` where `reattached` indicates whether it attached to an already-running attempt (`true`) or started a new one (`false`). The abort-listener cancellation/reset case above instead joins the existing operation's result.
+- If `shouldWaitForCompletion` is `false`: normally resolves immediately with `{ status: 'running', reattached: boolean }` where `reattached` indicates whether it attached to an already-running attempt (`true`) or started a new one (`false`). The abort-listener cancellation/reset case above instead returns `pre_operation_error` / `force_try_superseded` immediately.
 - If `shouldWaitForCompletion` is `true`: same completion statuses as `run()`.
 
 On pre-operation error: `{ status: 'pre_operation_error', code, error }` with codes:
 
 - `'already_completed'` - operation already finished (call `reset()` first)
+- `'force_try_superseded'` - an abort listener requested cancel/reset after this non-waiting force request
 - `'force_try_in_progress'` - a forced attempt with `shouldAbortRunning: true` is already running
 - `'lock_error'` - concurrent operation call detected
 - `'unexpected_error'` - an unexpected internal error occurred
@@ -656,6 +657,7 @@ All error classes are exported and can be used for `instanceof` checks:
 | `RetryUtilsErrRunnerNotRunning`              | `not_running`             | Runner has not been started (for `waitForCompletion`)                                | `"The operation is not currently running."`                                                                                                            |
 | `RetryUtilsErrRunnerUnknownState`            | Internal                  | Unknown runner state encountered (should not occur in normal usage)                  | `"An unknown runner state was encountered."`                                                                                                           |
 | `RetryUtilsErrRunnerForceTryRetryInProgress` | `force_try_in_progress`   | A forced attempt is already running                                                  | `"Force try retry is already in progress."`                                                                                                            |
+| `RetryUtilsErrRunnerForceTrySuperseded`      | `force_try_superseded`    | A newer abort-listener cancel/reset prevented a non-waiting forced retry             | `"A newer cancel or reset request superseded this forced retry."`                                                                                      |
 | `RetryUtilsErrRunnerUnexpectedError`         | `unexpected_error`        | An unexpected internal error occurred                                                | `"An unexpected error occurred."`                                                                                                                      |
 
 > **Note:** All error instances include detailed messages with guidance on how to recover (e.g., which methods to call to resolve the error state).
