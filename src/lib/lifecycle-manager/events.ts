@@ -198,6 +198,12 @@ export interface LifecycleManagerEventMap {
   };
   'component:shutdown-force': {
     name: string;
+    /**
+     * `gracefulPhaseRan` says whether this attempt ran `stop()`. `gracefulTimedOut`
+     * describes the stop as a whole: a stalled retry runs no graceful phase
+     * (`gracefulPhaseRan: false`) but reports `true` when the stop it continues
+     * timed out gracefully, so count graceful timeouts only where the phase ran.
+     */
     context: { gracefulPhaseRan: boolean; gracefulTimedOut: boolean };
   };
   'component:stalled': {

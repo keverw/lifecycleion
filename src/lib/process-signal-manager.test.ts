@@ -1819,14 +1819,20 @@ describe('ProcessSignalManager', () => {
 
       expect(manager.getStatus().isAttached).toBe(false);
       expect(process.listenerCount('SIGINT')).toBe(before);
-      // The cleanup failure is reported rather than lost behind the rethrow.
-      expect(reports).toHaveLength(1);
-      expect((reports[0] as Error).message).toContain(
+      // Every cleanup failure is reported rather than lost behind the rethrow: the
+      // later ones as they happen, the first by attach once cleanup has finished.
+      expect(reports.length).toBeGreaterThan(1);
+      for (const report of reports) {
+        expect((report as Error).cause).toMatchObject({
+          message: 'off failed',
+        });
+      }
+      expect((reports.at(-1) as Error).message).toContain(
         'ProcessSignalManager attach cleanup',
       );
-      expect((reports[0] as Error).cause).toMatchObject({
-        message: 'off failed',
-      });
+      expect((reports[0] as Error).message).toContain(
+        'ProcessSignalManager listener cleanup',
+      );
     });
 
     test('handles error in shutdown callback gracefully', () => {

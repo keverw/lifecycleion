@@ -652,7 +652,8 @@ export class ProcessSignalManager {
   /**
    * Run every removal step even when an earlier one throws, so one failed removal
    * cannot leave the remaining handlers - or raw-mode stdin - in place behind a
-   * detached status. Returns the first failure for the caller to decide on.
+   * detached status. Returns the first failure for the caller to decide on; any later
+   * one is reported here, since the caller surfaces only one.
    */
   private releaseListeners(): { error: unknown } | undefined {
     let failure: { error: unknown } | undefined;
@@ -660,7 +661,11 @@ export class ProcessSignalManager {
       try {
         step();
       } catch (error) {
-        failure ??= { error };
+        if (failure) {
+          reportCallbackError('ProcessSignalManager listener cleanup', error);
+        } else {
+          failure = { error };
+        }
       }
     };
 
