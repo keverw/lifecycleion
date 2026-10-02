@@ -1,4 +1,5 @@
 import { isNullish } from '../internal/is-nullish';
+import { clampTimerDelayMS } from '../internal/timer-limits';
 import {
   promiseConstructorIntrinsic,
   observePromise,
@@ -51,7 +52,6 @@ import {
   NON_IDEMPOTENT_METHODS,
   REDIRECT_STATUS_CODES,
   DEFAULT_MAX_REDIRECTS,
-  MAX_TIMER_MS,
 } from './consts';
 import type {
   AttemptEndEvent,
@@ -2753,15 +2753,12 @@ export class BaseHTTPClient {
         resolve();
       };
 
-      // `MAX_TIMER_MS` or the timer would read a longer wait as 1ms and resolve at once,
+      // Bound the delay or the timer would read a longer wait as 1ms and resolve at once,
       // which on the retry path is a retry storm rather than a long pause.
-      const id = setTimeout(
-        () => {
-          signal.removeEventListener('abort', onAbort);
-          resolve();
-        },
-        Math.min(ms, MAX_TIMER_MS),
-      );
+      const id = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, clampTimerDelayMS(ms));
 
       signal.addEventListener('abort', onAbort, { once: true });
     });
@@ -3776,20 +3773,17 @@ async function settleUploadBeforeNextDispatch(
       // whether anything moved since the wait was last armed - if so, the stall is
       // measured from that report, and the timer sleeps for the remainder.
       const arm = (sinceMS: number): void => {
-        deadlineID = setTimeout(
-          () => {
-            const quietForMS = Date.now() - lastActivityAt();
+        deadlineID = setTimeout(() => {
+          const quietForMS = Date.now() - lastActivityAt();
 
-            if (quietForMS >= stallMS) {
-              resolve('deadline');
+          if (quietForMS >= stallMS) {
+            resolve('deadline');
 
-              return;
-            }
+            return;
+          }
 
-            arm(stallMS - quietForMS);
-          },
-          Math.min(Math.max(0, sinceMS), MAX_TIMER_MS),
-        );
+          arm(stallMS - quietForMS);
+        }, clampTimerDelayMS(sinceMS));
       };
 
       // Count silence before this wait, including retry backoff. Even an overdue check
