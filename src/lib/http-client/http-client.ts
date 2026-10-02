@@ -3213,7 +3213,17 @@ export class BaseHTTPClient {
     // intentionally — they are applied at dispatch time, and since no attempt ever
     // went out, including them would be misleading. Unsupported body types are caught
     // and swallowed here; the real error is reported via request_setup_error instead.
-    const headers = mergeHeaders(request.headers);
+    // If any header value fails string conversion, the snapshot carries no headers
+    // for the same reason: this runs inside failure handlers and must not replace
+    // their result.
+    let headers: Record<string, string | string[]>;
+
+    try {
+      headers = mergeHeaders(request.headers);
+    } catch {
+      headers = {};
+    }
+
     let clonedBodies: Pick<AttemptRequest, 'body' | 'rawBody'>;
 
     try {

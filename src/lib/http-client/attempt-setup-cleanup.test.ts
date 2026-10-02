@@ -206,3 +206,34 @@ test('retry setup failure retains the prior upload outcome and attempt count', a
   expect(await response.requestBodySettled).toBe(uploadError);
   expect(request.attemptCount).toBe(2);
 });
+
+test('unstringifiable interceptor header stays a contained request_setup_error', async () => {
+  let sends = 0;
+  let conversions = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: () => {
+      sends++;
+      return Promise.resolve({ status: 200, headers: {}, body: null });
+    },
+  };
+  const client = new HTTPClient({ adapter });
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    headers: {
+      ...request.headers,
+      bad: {
+        toString() {
+          conversions++;
+          throw new Error('header conversion failed');
+        },
+      } as unknown as string,
+    },
+  }));
+  const request = client.get('https://example.com/');
+  await request.send();
+  expect(request.error?.code).toBe('request_setup_error');
+  expect(request.attemptCount).toBe(1);
+  expect(sends).toBe(0);
+  expect(conversions).toBe(2);
+});
