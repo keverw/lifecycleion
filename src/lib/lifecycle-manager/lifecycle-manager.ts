@@ -1980,8 +1980,41 @@ export class LifecycleManager
       };
     }
 
+    // `component` is captured before any caller code runs, and every step below acts on
+    // the name. Option getters and the stop's `await` all run caller code that can
+    // unregister this component and register a replacement under the same name, so
+    // ownership is checked again after each, before anything acts on the name: the
+    // in-flight and running checks would answer for the replacement, `stopComponent()`
+    // would stop it, and removal - by instance from the registry, but by name from every
+    // state map - would wipe its state while leaving it registered, and report success
+    // for a removal it never made.
+    const refuseIfReplaced = (): UnregisterComponentResult | undefined => {
+      if (this.getComponent(name) === component) {
+        return undefined;
+      }
+
+      return {
+        success: false,
+        componentName: name,
+        reason: progress.wasStopped
+          ? 'Component was unregistered while it was being stopped'
+          : 'Component was unregistered while this unregister was in progress',
+        code: 'component_not_found',
+        wasStopped: progress.wasStopped,
+        // Registered when this call started, which is what this field reports - the
+        // name may belong to a replacement by now, which is not this call's component.
+        wasRegistered: true,
+      };
+    };
+
     // Default stopIfRunning to true (opt-out behavior)
     const shouldStopIfRunning = options?.stopIfRunning !== false;
+
+    const replacedAfterOptions = refuseIfReplaced();
+
+    if (replacedAfterOptions !== undefined) {
+      return replacedAfterOptions;
+    }
 
     const inFlightRefusal = this.refuseUnregisterWhileInFlight(name, false);
 
@@ -2030,8 +2063,16 @@ export class LifecycleManager
     // If running and stopIfRunning is true (default), stop first
     if (isRunning && shouldStopIfRunning) {
       this.logger.entity(name).info('Stopping component before unregistering');
+      const allowStopWithRunningDependents = options?.forceStop;
+
+      const replacedBeforeStop = refuseIfReplaced();
+
+      if (replacedBeforeStop !== undefined) {
+        return replacedBeforeStop;
+      }
+
       const stopResult = await this.stopComponent(name, {
-        allowStopWithRunningDependents: options?.forceStop,
+        allowStopWithRunningDependents,
       });
 
       // If stop fails and leaves the component stalled, do NOT unregister.
@@ -2072,28 +2113,12 @@ export class LifecycleManager
       progress.wasStopped = true;
     }
 
-    // Before anything else acts on the name, for both paths. `component` was captured
-    // before `options?.stopIfRunning` was read, and that read runs caller code: a getter
-    // that unregistered this component and registered a replacement under the same name
-    // left the capture stale with no `await` anywhere to re-check it. The stop's `await`
-    // let other code run as well - a `component:stopped` listener doing the same. The
-    // registry entry below is removed by instance, but every state map is keyed by name,
-    // so a stale instance wipes the replacement's state while leaving it registered - and
-    // reports success for a removal it never made. Checked before the in-flight checks
-    // below, which would otherwise answer for the replacement.
-    if (this.getComponent(name) !== component) {
-      return {
-        success: false,
-        componentName: name,
-        reason: progress.wasStopped
-          ? 'Component was unregistered while it was being stopped'
-          : 'Component was unregistered while this unregister was in progress',
-        code: 'component_not_found',
-        wasStopped: progress.wasStopped,
-        // Registered when this call started, which is what this field reports - the
-        // name may belong to a replacement by now, which is not this call's component.
-        wasRegistered: true,
-      };
+    // After the stop's `await` - a `component:stopped` listener can do the same - and
+    // before the post-stop checks below, which would otherwise answer for a replacement.
+    const replacedAfterStop = refuseIfReplaced();
+
+    if (replacedAfterStop !== undefined) {
+      return replacedAfterStop;
     }
 
     if (progress.wasStopped) {

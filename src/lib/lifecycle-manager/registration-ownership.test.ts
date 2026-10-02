@@ -922,3 +922,88 @@ describe('LifecycleManager unregister instance ownership', () => {
     expect(manager.hasComponent('a')).toBe(true);
   });
 });
+
+describe('LifecycleManager unregister acts only on its own instance', () => {
+  class Crashes extends Plain {
+    public crash(): boolean {
+      return this.reportUnexpectedStop();
+    }
+  }
+
+  test('a replacement starting from the stopIfRunning getter is not answered for', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    const replacement = new Plain(logger, 'a');
+    const gate = deferred();
+    replacement.start = (): Promise<void> => gate.promise;
+
+    let replacementStart: Promise<unknown> | undefined;
+    const result = await manager.unregisterComponent('a', {
+      get stopIfRunning(): boolean {
+        if (replacementStart === undefined) {
+          void manager.unregisterComponent('a', { stopIfRunning: false });
+          void manager.registerComponent(replacement);
+          replacementStart = manager.startComponent('a');
+        }
+
+        return true;
+      },
+    });
+
+    expect(manager.getComponentStatus('a')?.state).toBe('starting');
+    // The refusal is about this call's instance, not the replacement's start.
+    expect(result).toMatchObject({
+      success: false,
+      code: 'component_not_found',
+      wasStopped: false,
+      wasRegistered: true,
+    });
+
+    gate.resolve();
+    expect(await replacementStart).toMatchObject({ success: true });
+    expect(manager.isComponentRunning('a')).toBe(true);
+  });
+
+  test('a replacement registered from the forceStop getter is not stopped', async () => {
+    const { logger, manager } = setup();
+    const original = new Crashes(logger, 'a');
+    await manager.registerComponent(original);
+    await manager.startComponent('a');
+    const replacement = new Plain(logger, 'a');
+    const gate = deferred();
+    replacement.start = (): Promise<void> => gate.promise;
+    let replacementStops = 0;
+    replacement.stop = (): Promise<void> => {
+      replacementStops++;
+      return Promise.resolve();
+    };
+
+    let replacementStart: Promise<unknown> | undefined;
+    const result = await manager.unregisterComponent('a', {
+      get forceStop(): boolean {
+        if (replacementStart === undefined) {
+          // Read after the running checks and before the stop: take the original
+          // down, swap the registration, and start the replacement.
+          original.crash();
+          void manager.unregisterComponent('a', { stopIfRunning: false });
+          void manager.registerComponent(replacement);
+          replacementStart = manager.startComponent('a');
+        }
+
+        return false;
+      },
+    });
+
+    expect(result).toMatchObject({
+      success: false,
+      code: 'component_not_found',
+      wasStopped: false,
+      wasRegistered: true,
+    });
+
+    gate.resolve();
+    expect(await replacementStart).toMatchObject({ success: true });
+    expect(replacementStops).toBe(0);
+    expect(manager.isComponentRunning('a')).toBe(true);
+  });
+});
