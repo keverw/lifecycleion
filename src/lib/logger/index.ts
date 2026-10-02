@@ -304,9 +304,9 @@ export class Logger extends EventEmitter {
    */
   public exit(code: number): void {
     // Keep real exits in the portable 0–255 range; larger codes can wrap to
-    // success at the OS boundary. Decide before
-    // closing sinks so a bad caller value cannot strand a live process with a
-    // closed logger. Simulated exits keep the requested code for inspection.
+    // success at the OS boundary. Decide before closing sinks so a bad caller
+    // value cannot strand a live process with a closed logger. Simulated exits
+    // keep the requested code for inspection.
     const isInvalidExitCode =
       this.callProcessExit &&
       (!Number.isInteger(code) || code < 0 || code > 255);

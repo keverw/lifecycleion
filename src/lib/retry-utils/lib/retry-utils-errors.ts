@@ -37,8 +37,12 @@ export class RetryUtilsErrRunnerForceTryRetryInProgress extends Error {
 }
 
 export class RetryUtilsErrRunnerForceTrySuperseded extends Error {
+  public readonly invokedMethod = 'forceTry' as const;
+
   constructor() {
-    super('A newer cancel or reset request superseded this forced retry.');
+    super(
+      'A newer cancel or reset request superseded this forced retry after abort was sent. Await that request before deciding whether to retry with forceTry() or reset() and run().',
+    );
     this.name = 'RetryUtilsErrRunnerForceTrySuperseded';
   }
 }

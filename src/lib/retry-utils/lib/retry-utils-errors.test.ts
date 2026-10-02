@@ -74,3 +74,9 @@ describe('retry-utils errors', () => {
     expect(unknownState.runnerState).toBe('weird');
   });
 });
+
+test('superseded force error identifies the method and recovery', () => {
+  const error = new RetryUtilsErrRunnerForceTrySuperseded();
+  expect(error.invokedMethod).toBe('forceTry');
+  expect(error.message).toContain('Await');
+});

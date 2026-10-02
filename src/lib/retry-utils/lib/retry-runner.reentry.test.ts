@@ -478,16 +478,9 @@ test.each(['cancel', 'reset'] as const)(
       );
     });
     const original = runner.run(true);
-    let result: RunResult<unknown> | undefined;
-    const forced = runner
-      .forceTry({ shouldAbortRunning: true })
-      .then((value) => {
-        result = value;
-      });
+    const forced = runner.forceTry({ shouldAbortRunning: true });
     try {
-      await Promise.resolve();
-      await Promise.resolve();
-      await Promise.resolve();
+      const result = await forced;
       expect(result).toMatchObject({
         status: 'pre_operation_error',
         code: 'force_try_superseded',
@@ -567,4 +560,46 @@ for (const outcome of ['skip', 'error', 'fatal', 'exhausted'] as const) {
     );
     expect(reports).toHaveLength(beforeForce + 1);
   });
+}
+
+for (const request of ['cancel', 'reset'] as const) {
+  test.each([false, true])(
+    `abort success followed by ${request} preserves precedence (wait: %s)`,
+    async (shouldWaitForCompletion) => {
+      let attempts = 0;
+      let stopped: Promise<unknown> | undefined;
+      const runner = new RetryRunner(policy, (report, signal) => {
+        attempts++;
+        signal.addEventListener(
+          'abort',
+          () => {
+            report('success', 'finished');
+            stopped = request === 'cancel' ? runner.cancel() : runner.reset();
+          },
+          { once: true },
+        );
+      });
+      const original = runner.run(true);
+      const result = await runner.forceTry({
+        shouldAbortRunning: true,
+        shouldWaitForCompletion,
+      });
+      await stopped;
+      expect(await original).toMatchObject({
+        status: 'attempt_success',
+        data: 'finished',
+      });
+      expect(attempts).toBe(1);
+      expect(result).toMatchObject(
+        request === 'reset'
+          ? shouldWaitForCompletion
+            ? { status: 'attempt_success', data: 'finished' }
+            : { status: 'pre_operation_error', code: 'force_try_superseded' }
+          : { status: 'pre_operation_error', code: 'already_completed' },
+      );
+      expect(runner.runnerState).toBe(
+        request === 'reset' ? 'not-started' : 'completed',
+      );
+    },
+  );
 }
