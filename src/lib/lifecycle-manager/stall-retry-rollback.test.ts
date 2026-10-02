@@ -3,7 +3,7 @@ import { BaseComponent } from './base-component';
 import type { ArraySink, Logger } from '../logger';
 import { LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT } from './constants';
 import type { LifecycleManager } from './lifecycle-manager';
-import { Plain, setup, Stalls } from './test-helpers';
+import { claimReports, Plain, setup, Stalls } from './test-helpers';
 import type { ComponentOperationResult, ComponentStallInfo } from './types';
 
 class CountsStops extends Plain {
@@ -77,6 +77,20 @@ function retryStalled(
       retryStalledComponent(name: string): Promise<ComponentOperationResult>;
     }
   ).retryStalledComponent(name);
+}
+
+/**
+ * Make the next call of a private manager step throw, as a crash in the stop's own
+ * bookkeeping would, then restore it.
+ */
+function crashNextCall(manager: LifecycleManager, method: string): void {
+  Object.defineProperty(manager, method, {
+    configurable: true,
+    value: (): never => {
+      Reflect.deleteProperty(manager, method);
+      throw new Error('bookkeeping crashed');
+    },
+  });
 }
 
 function logMessages(logger: Logger): string[] {
@@ -358,5 +372,90 @@ describe('LifecycleManager - stall retry and rollback', () => {
 
     expect(manager.getSignalStatus().isAttached).toBe(false);
     expect(detachedEvents).toBe(1);
+  });
+  test('a force-phase crash after a graceful timeout records both, with the stop start time', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new HangsThenForceThrows(logger, 'crash'));
+    await manager.startComponent('crash');
+    const stalledEvents: unknown[] = [];
+    manager.on('component:stalled', (event: { reason?: string }) => {
+      stalledEvents.push(event.reason);
+    });
+
+    crashNextCall(manager, 'createPendingForceStopWaiter');
+    const { reports, release } = claimReports();
+    const beforeStop = Date.now();
+    let result: ComponentOperationResult;
+    try {
+      result = await manager.stopComponent('crash');
+    } finally {
+      release();
+    }
+
+    expect(result.code).toBe('unknown_error');
+    expect(result.reason).toContain('Stop failed unexpectedly');
+    expect(reports).toHaveLength(1);
+    const stall = manager.getStalledComponents()[0];
+    expect(stall).toMatchObject({ phase: 'force', reason: 'both' });
+    expect(stall.startedAt).toBeGreaterThanOrEqual(beforeStop);
+    // Includes the graceful phase's 20ms timeout: the stop's start, not the crash's.
+    expect(stall.stalledAt - stall.startedAt).toBeGreaterThanOrEqual(15);
+    expect(stalledEvents).toEqual(['both']);
+  });
+
+  test('a stalled retry that crashes keeps the original stall start time and timeout', async () => {
+    const { logger, manager } = setup();
+    const component = new HangsThroughForce(logger, 'slow');
+    await manager.registerComponent(component);
+    await manager.startComponent('slow');
+    await manager.stopComponent('slow');
+    const original = manager.getStalledComponents()[0];
+    expect(original).toMatchObject({ phase: 'force', reason: 'timeout' });
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    crashNextCall(manager, 'createPendingForceStopWaiter');
+    const { release } = claimReports();
+    let crashed: ComponentOperationResult;
+    try {
+      crashed = await retryStalled(manager, 'slow');
+    } finally {
+      release();
+    }
+
+    expect(crashed.reason).toContain('Stop failed unexpectedly');
+    expect(manager.getStalledComponents()[0]).toMatchObject({
+      phase: 'force',
+      reason: 'both',
+      startedAt: original.startedAt,
+    });
+
+    component.onShutdownForce = (): Promise<void> =>
+      Promise.reject(new Error('force failed'));
+    await retryStalled(manager, 'slow');
+
+    expect(manager.getStalledComponents()[0]).toMatchObject({
+      phase: 'force',
+      reason: 'both',
+      startedAt: original.startedAt,
+    });
+  });
+
+  test('a graceful-phase crash still records an error stall', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'plain'));
+    await manager.startComponent('plain');
+
+    crashNextCall(manager, 'createStopPhaseObserver');
+    const { release } = claimReports();
+    try {
+      await manager.stopComponent('plain');
+    } finally {
+      release();
+    }
+
+    expect(manager.getStalledComponents()[0]).toMatchObject({
+      phase: 'graceful',
+      reason: 'error',
+    });
   });
 });
