@@ -615,3 +615,36 @@ for (const request of ['cancel', 'reset'] as const) {
     },
   );
 }
+
+test('cancel does not arm its grace timer over a replacement started by its abort listener', async () => {
+  let attempts = 0;
+  let replacementReport: ReportResult<string> | undefined;
+  let forced: Promise<RunResult<string>> | undefined;
+  const runner = new RetryRunner<string>(policy, (report, signal) => {
+    attempts++;
+    if (attempts === 1) {
+      signal.addEventListener('abort', () => {
+        forced = runner.forceTry({ shouldAbortRunning: true });
+      });
+    } else {
+      replacementReport = report;
+    }
+  });
+  const original = runner.run(true);
+  const timers = spyOn(globalThis, 'setTimeout');
+  try {
+    expect(await runner.cancel()).toBe('canceled');
+    expect(await forced).toMatchObject({ status: 'running' });
+    expect(attempts).toBe(2);
+    expect(runner.runnerState).toBe('running');
+    expect(timers).not.toHaveBeenCalled();
+    replacementReport?.('success', 'replacement');
+    expect(await original).toMatchObject({
+      status: 'attempt_success',
+      data: 'replacement',
+    });
+  } finally {
+    timers.mockRestore();
+    replacementReport?.('success', 'cleanup');
+  }
+});

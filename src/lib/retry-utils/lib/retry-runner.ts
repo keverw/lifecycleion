@@ -454,16 +454,16 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           });
         } else {
           // Signal the running attempt to abort.
-          const context = this.currentState.currentAttemptContext;
-          context.abortController.abort();
+          const afterAbort = this.abortAttemptAndReadOwnership(
+            this.currentState.currentAttemptContext,
+          );
 
           // Grace period: if operation doesn't acknowledge abort, force it.
           // An abort listener may call reportResult synchronously, settling this
           // cancellation before abort() returns. In that case there is no timer to arm.
           if (
             this.currentState.runnerState === 'stopping' &&
-            this.currentState.currentAttemptContext === context &&
-            !context.handled
+            afterAbort.isAttemptActive
           ) {
             this.currentState.cancellationTimeoutHandle = setTimeout(() => {
               if (
@@ -561,6 +561,27 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
   public async forceTry(options?: ForceTryOptions): Promise<RunResult<T>> {
     return await this.forceTryOperation(options);
+  }
+
+  /**
+   * Abort dispatch runs caller code synchronously. Capture its operation first,
+   * then read ownership after listeners finish. Consume this snapshot without
+   * another callback or await; cancel and forceTry apply their own outcome rules.
+   */
+  private abortAttemptAndReadOwnership(context: AttemptContext): {
+    operationResolver: PromiseProtectedResolver<RunResult<T>>;
+    isAttemptActive: boolean;
+    hasNewStopRequest: boolean;
+  } {
+    const operationResolver = this.currentOperationResolver;
+    const stopRequestToken = this.stopRequestToken;
+    context.abortController.abort();
+    return {
+      operationResolver,
+      isAttemptActive:
+        this.currentState.currentAttemptContext === context && !context.handled,
+      hasNewStopRequest: this.stopRequestToken !== stopRequestToken,
+    };
   }
 
   /** Claim new work, optionally retaining the result promise for existing waiters. */
@@ -766,13 +787,14 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
       // If an attempt is currently running and we want to abort it, do so.
       if (this.isAttemptRunning && this.currentState.currentAttemptContext) {
-        const stopRequestToken = this.stopRequestToken;
-        const operationResolver = this.currentOperationResolver;
-        this.currentState.currentAttemptContext.abortController.abort();
+        const { operationResolver, hasNewStopRequest } =
+          this.abortAttemptAndReadOwnership(
+            this.currentState.currentAttemptContext,
+          );
         // A cancel/reset requested inside abort is newer than this force request.
         // Waiting calls join its outcome; non-waiting calls report supersession
         // immediately. Neither revives work the newer request wants stopped.
-        if (this.stopRequestToken !== stopRequestToken) {
+        if (hasNewStopRequest) {
           return shouldWaitForCompletion
             ? operationResolver.promise
             : {
