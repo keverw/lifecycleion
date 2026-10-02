@@ -27,6 +27,7 @@ import {
   isBrowserEnvironment,
   mergeObservedHeaders,
   mergeHeaders,
+  normalizeMergedHeaderValue,
   normalizeAdapterResponseHeaders,
   parseContentType,
   resolveAbsoluteURL,
@@ -3202,7 +3203,9 @@ export class BaseHTTPClient {
 
     for (const name of headerNames) {
       try {
-        Object.assign(headers, mergeHeaders({ [name]: request.headers[name] }));
+        headers[name.toLowerCase()] = normalizeMergedHeaderValue(
+          request.headers[name],
+        );
       } catch {
         // Skip only this entry.
       }

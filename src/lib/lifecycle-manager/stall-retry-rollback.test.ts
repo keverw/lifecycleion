@@ -219,10 +219,16 @@ describe('LifecycleManager - stall retry and rollback', () => {
         stalls.push(event.stallInfo);
       },
     );
+    let forceStarts = 0;
+    manager.on('component:shutdown-force', () => {
+      forceStarts++;
+    });
     const retry = await retryStalled(manager, 'hang');
     await manager.stopAllComponents();
 
     expect(stalls).toEqual([]);
+    // Nothing is attempted, so no force start is announced that nothing would end.
+    expect(forceStarts).toBe(0);
     expect(retry).toMatchObject({
       success: false,
       code: first.code,
@@ -262,6 +268,52 @@ describe('LifecycleManager - stall retry and rollback', () => {
     expect(retryLogs).toContain(
       'Stalled component has no force handler to retry',
     );
+  });
+
+  test('a failed retry after graceful and force timeouts still reports both', async () => {
+    const { logger, manager } = setup();
+    const component = new HangsThroughForce(logger, 'slow');
+    await manager.registerComponent(component);
+    await manager.startComponent('slow');
+    await manager.stopComponent('slow');
+    const original = manager.getStalledComponents()[0];
+    expect(original).toMatchObject({ phase: 'force', reason: 'timeout' });
+
+    component.onShutdownForce = (): Promise<void> =>
+      Promise.reject(new Error('force failed'));
+    const contexts: unknown[] = [];
+    manager.on('component:shutdown-force', (event: { context: unknown }) => {
+      contexts.push(event.context);
+    });
+    const retry = await retryStalled(manager, 'slow');
+
+    expect(retry).toMatchObject({ success: false, code: 'unknown_error' });
+    expect(contexts).toEqual([
+      { gracefulPhaseRan: false, gracefulTimedOut: true },
+    ]);
+    expect(manager.getStalledComponents()[0]).toMatchObject({
+      phase: 'force',
+      reason: 'both',
+      startedAt: original.startedAt,
+    });
+  });
+
+  test('a stalled retry announces the original graceful timeout in its force event', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new HangsThenForceThrows(logger, 'both'));
+    await manager.startComponent('both');
+    await manager.stopComponent('both');
+
+    const contexts: unknown[] = [];
+    manager.on('component:shutdown-force', (event: { context: unknown }) => {
+      contexts.push(event.context);
+    });
+    await retryStalled(manager, 'both');
+
+    expect(contexts).toEqual([
+      { gracefulPhaseRan: false, gracefulTimedOut: true },
+    ]);
+    expect(manager.getStalledComponents()[0].reason).toBe('both');
   });
 
   test('a failed force retry keeps the original start time and timeout-then-error reason', async () => {

@@ -319,6 +319,11 @@ export class LifecycleManager
   private runningComponents: Set<string> = new Set();
   private componentStates: Map<string, ComponentState> = new Map();
   private stalledComponents: Map<string, ComponentStallInfo> = new Map();
+  // Force-phase stall records whose stop had already timed out gracefully. A force
+  // timeout reports `reason: 'timeout'` and would otherwise lose that, so a retry that
+  // fails could not report `'both'`. Keyed by record: a retry reuses it by identity.
+  private readonly stallsAfterGracefulTimeout =
+    new WeakSet<ComponentStallInfo>();
 
   // State tracking for individual components
   private componentTimestamps: Map<
@@ -5963,7 +5968,8 @@ export class LifecycleManager
     }
     const { component } = preconditions;
 
-    if (!this.stalledComponents.has(name)) {
+    const priorStall = this.stalledComponents.get(name);
+    if (!priorStall) {
       return await this.stopComponentInternal(name);
     }
 
@@ -5971,14 +5977,16 @@ export class LifecycleManager
       .entity(name)
       .warn('Retrying stalled component shutdown (force phase)');
 
+    // A retry continues the stop that stalled: it keeps when that stop began and
+    // whether its graceful phase timed out, for its force event and any new stall.
     return await this.shutdownComponentForce(
       name,
       component,
       {
         gracefulPhaseRan: false,
-        gracefulTimedOut: false,
+        gracefulTimedOut: this.didStallGracefulTimeOut(priorStall),
         gracefulError: undefined,
-        startedAt: Date.now(),
+        startedAt: priorStall.startedAt,
         isStalledRetry: true,
       },
       claim,
@@ -7858,16 +7866,25 @@ export class LifecycleManager
       return recheck;
     }
 
+    // A stalled retry without a handler attempts nothing new, so the stall it found
+    // stands as recorded: no claim, no force-start notification that nothing would
+    // end, and no second `component:stalled`. It answers as the stop that recorded it.
+    const priorStall = context.isStalledRetry
+      ? this.stalledComponents.get(name)
+      : undefined;
+    if (!hasForceHandler && priorStall) {
+      this.logger
+        .entity(name)
+        .warn('Stalled component has no force handler to retry', {
+          params: { phase: priorStall.phase, reason: priorStall.reason },
+        });
+      return this.stalledStopResult(name, priorStall);
+    }
+
     this.claimComponent(name, 'force-stopping', claim);
     if (stopContext) {
       stopContext.claimed = true;
     }
-    // The stall a retry was asked to clear. Its reason, error and timing describe the
-    // stop that failed, which a retry keeps whether it attempts nothing (no handler)
-    // or fails again.
-    const priorStall = context.isStalledRetry
-      ? this.stalledComponents.get(name)
-      : undefined;
     // A fresh force-immediate stop needs a token. A stalled retry only advances it
     // when a handler will actually run: without one, the old graceful promise may
     // still settle late and clear the stall. Graceful escalation keeps its token.
@@ -7905,19 +7922,6 @@ export class LifecycleManager
 
     // If component doesn't implement onShutdownForce, mark as stalled immediately
     if (!hasForceHandler) {
-      if (priorStall) {
-        // A retry without a handler attempts nothing new, so the stall it found
-        // stands as recorded. Restore the stalled state the claim replaced without
-        // announcing that same stall again, and answer as the stop that recorded it.
-        this.markComponentStalled(name, priorStall);
-        this.logger
-          .entity(name)
-          .warn('Stalled component has no force handler to retry', {
-            params: { phase: priorStall.phase, reason: priorStall.reason },
-          });
-        return this.stalledStopResult(name, priorStall);
-      }
-
       const stallInfo: ComponentStallInfo = {
         name,
         phase: 'graceful', // Failed in graceful phase
@@ -8107,20 +8111,21 @@ export class LifecycleManager
 
       return this.withTransition<ComponentOperationResult>(() => {
         // Mark as stalled - force phase failed
-        // A failed retry keeps what the original stall knew: when that stop began,
-        // and whether its graceful phase had timed out.
-        const didGracefulTimeOut = priorStall
-          ? priorStall.reason === 'both' ||
-            (priorStall.phase === 'graceful' && priorStall.reason === 'timeout')
-          : context.gracefulTimedOut;
         const stallInfo: ComponentStallInfo = {
           name,
           phase: 'force',
-          reason: isTimeout ? 'timeout' : didGracefulTimeOut ? 'both' : 'error',
-          startedAt: priorStall?.startedAt ?? context.startedAt,
+          reason: isTimeout
+            ? 'timeout'
+            : context.gracefulTimedOut
+              ? 'both'
+              : 'error',
+          startedAt: context.startedAt,
           stalledAt: Date.now(),
           error: err,
         };
+        if (context.gracefulTimedOut) {
+          this.stallsAfterGracefulTimeout.add(stallInfo);
+        }
         this.markComponentStalled(name, stallInfo, err);
 
         if (isTimeout) {
@@ -8158,6 +8163,15 @@ export class LifecycleManager
         clearTimeout(timeoutHandle);
       }
     }
+  }
+
+  /** Whether the stop a stall record describes had its graceful phase time out. */
+  private didStallGracefulTimeOut(stallInfo: ComponentStallInfo): boolean {
+    return (
+      this.stallsAfterGracefulTimeout.has(stallInfo) ||
+      stallInfo.reason === 'both' ||
+      (stallInfo.phase === 'graceful' && stallInfo.reason === 'timeout')
+    );
   }
 
   /**

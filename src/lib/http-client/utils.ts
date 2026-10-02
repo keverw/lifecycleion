@@ -337,13 +337,20 @@ export function mergeHeaders(
     }
 
     for (const [key, value] of Object.entries(headers)) {
-      result[key.toLowerCase()] = Array.isArray(value)
-        ? normalizeMergedHeaderArray(value)
-        : String(value);
+      result[key.toLowerCase()] = normalizeMergedHeaderValue(value);
     }
   }
 
   return result;
+}
+
+/** One header value as {@link mergeHeaders} stores it. Throws if conversion does. */
+export function normalizeMergedHeaderValue(
+  value: string | string[],
+): string | string[] {
+  return Array.isArray(value)
+    ? normalizeMergedHeaderArray(value)
+    : String(value);
 }
 
 function normalizeMergedHeaderArray(value: string[]): string | string[] {

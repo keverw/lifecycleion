@@ -1802,15 +1802,31 @@ describe('ProcessSignalManager', () => {
         throw new Error('off failed');
       }) as typeof process.off);
 
+      const reports: unknown[] = [];
+      const onGlobalError = (event: Event): void => {
+        reports.push((event as ErrorEvent).error);
+        event.preventDefault();
+      };
+      globalThis.addEventListener('error', onGlobalError);
+
       try {
         expect(() => manager.attach()).toThrow(registrationError);
       } finally {
+        globalThis.removeEventListener('error', onGlobalError);
         onSpy.mockRestore();
         offSpy.mockRestore();
       }
 
       expect(manager.getStatus().isAttached).toBe(false);
       expect(process.listenerCount('SIGINT')).toBe(before);
+      // The cleanup failure is reported rather than lost behind the rethrow.
+      expect(reports).toHaveLength(1);
+      expect((reports[0] as Error).message).toContain(
+        'ProcessSignalManager attach cleanup',
+      );
+      expect((reports[0] as Error).cause).toMatchObject({
+        message: 'off failed',
+      });
     });
 
     test('handles error in shutdown callback gracefully', () => {

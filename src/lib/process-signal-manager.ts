@@ -445,8 +445,15 @@ export class ProcessSignalManager {
     } catch (error) {
       // If any listener registration fails, clean up any handlers that were already registered
       // This prevents partial registration and ensures consistent state. A cleanup failure
-      // must not replace the registration error that got us here.
-      this.releaseListeners();
+      // must not replace the registration error that got us here, but a listener it left
+      // on `process` must not go unreported either.
+      const cleanupFailure = this.releaseListeners();
+      if (cleanupFailure) {
+        reportCallbackError(
+          'ProcessSignalManager attach cleanup',
+          cleanupFailure.error,
+        );
+      }
       throw error;
     }
   }
