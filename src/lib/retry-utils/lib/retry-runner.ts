@@ -859,9 +859,10 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           this.currentState.operationStartTime = Date.now();
           this.currentState.finalTimeTakenMS = null;
           this.emit(OPERATION_STARTED, { operationType: 'force' });
-        }
-        if (this.currentState.runnerState !== 'running') {
-          return operationResolver.promise;
+          // The start listener is the only caller code since the state was set.
+          if (this.currentState.runnerState !== 'running') {
+            return operationResolver.promise;
+          }
         }
 
         void this.attemptOperation(true);

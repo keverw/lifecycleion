@@ -1,8 +1,10 @@
 import { describe, test, expect } from 'bun:test';
 import { BaseComponent } from './base-component';
-import type { Logger } from '../logger';
+import type { ArraySink, Logger } from '../logger';
+import { LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT } from './constants';
+import type { LifecycleManager } from './lifecycle-manager';
 import { Plain, setup, Stalls } from './test-helpers';
-import type { ComponentStallInfo } from './types';
+import type { ComponentOperationResult, ComponentStallInfo } from './types';
 
 class CountsStops extends Plain {
   public stopCalls = 0;
@@ -44,6 +46,42 @@ class HangsThenForceThrows extends BaseComponent {
   public onShutdownForce?(): void {
     throw new Error('force failed');
   }
+}
+
+// `stop()` and the force handler both hang, so the stall is a force-phase timeout.
+class HangsThroughForce extends BaseComponent {
+  constructor(logger: Logger, name: string) {
+    super(logger, {
+      name,
+      shutdownGracefulTimeoutMS: 20,
+      shutdownForceTimeoutMS: 20,
+    });
+  }
+
+  public async start(): Promise<void> {}
+  public stop(): Promise<void> {
+    return new Promise(() => {});
+  }
+  public onShutdownForce?(): Promise<void> {
+    return new Promise(() => {});
+  }
+}
+
+/** The force-phase retry a shutdown pass runs for a stalled component. */
+function retryStalled(
+  manager: LifecycleManager,
+  name: string,
+): Promise<ComponentOperationResult> {
+  return (
+    manager as unknown as {
+      retryStalledComponent(name: string): Promise<ComponentOperationResult>;
+    }
+  ).retryStalledComponent(name);
+}
+
+function logMessages(logger: Logger): string[] {
+  const sink = logger.getSinks()[0] as ArraySink;
+  return sink.logs.map((entry) => entry.message);
 }
 
 // Every `stop()` fails; the force handler fails until `isForceFixed` is set.
@@ -158,15 +196,93 @@ describe('LifecycleManager - stall retry and rollback', () => {
     expect(manager.getStalledComponents()[0].reason).toBe('both');
 
     Object.defineProperty(component, 'onShutdownForce', { value: undefined });
-    const codes: unknown[] = [];
-    manager.on('component:stalled', (event: { code?: unknown }) => {
-      codes.push(event.code);
-    });
-    const retry = await manager.stopAllComponents();
+    const retry = await retryStalled(manager, 'both');
 
-    expect(retry.success).toBe(false);
-    expect(retry.stalledComponents[0].reason).toBe('both');
-    expect(codes).toEqual(['unknown_error']);
+    expect(retry).toMatchObject({
+      success: false,
+      code: 'unknown_error',
+      reason: first.reason,
+    });
+    expect(manager.getStalledComponents()[0].reason).toBe('both');
+  });
+
+  test('a stalled retry without onShutdownForce does not re-announce the stall', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new HangsWithoutForce(logger, 'hang'));
+    await manager.startComponent('hang');
+    const first = await manager.stopComponent('hang');
+
+    const stalls: ComponentStallInfo[] = [];
+    manager.on(
+      'component:stalled',
+      (event: { stallInfo: ComponentStallInfo }) => {
+        stalls.push(event.stallInfo);
+      },
+    );
+    const retry = await retryStalled(manager, 'hang');
+    await manager.stopAllComponents();
+
+    expect(stalls).toEqual([]);
+    expect(retry).toMatchObject({
+      success: false,
+      code: first.code,
+      reason: first.reason,
+    });
+    expect(manager.getComponentStatus('hang')?.state).toBe('stalled');
+  });
+
+  test('a reused force-phase stall answers as a force timeout, not a graceful failure', async () => {
+    const { logger, manager } = setup();
+    const component = new HangsThroughForce(logger, 'force');
+    await manager.registerComponent(component);
+    await manager.startComponent('force');
+
+    const first = await manager.stopComponent('force');
+    expect(first.reason).toBe(
+      LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
+    );
+    expect(manager.getStalledComponents()[0]).toMatchObject({
+      phase: 'force',
+      reason: 'timeout',
+    });
+
+    Object.defineProperty(component, 'onShutdownForce', { value: undefined });
+    const before = logMessages(logger).length;
+    const retry = await retryStalled(manager, 'force');
+
+    expect(retry).toMatchObject({
+      success: false,
+      code: 'component_shutdown_timeout',
+      reason: LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
+    });
+    const retryLogs = logMessages(logger).slice(before);
+    expect(retryLogs).not.toContain(
+      'Component stalled - graceful shutdown failed',
+    );
+    expect(retryLogs).toContain(
+      'Stalled component has no force handler to retry',
+    );
+  });
+
+  test('a failed force retry keeps the original start time and timeout-then-error reason', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new HangsThenForceThrows(logger, 'both'));
+    await manager.startComponent('both');
+    await manager.stopComponent('both');
+    const original = manager.getStalledComponents()[0];
+    expect(original.reason).toBe('both');
+
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const retry = await retryStalled(manager, 'both');
+
+    expect(retry).toMatchObject({ success: false, code: 'unknown_error' });
+    const after = manager.getStalledComponents()[0];
+    expect(after).toMatchObject({
+      phase: 'force',
+      reason: 'both',
+      startedAt: original.startedAt,
+    });
+    expect(after.stalledAt).toBeGreaterThan(original.stalledAt);
   });
 
   test('detachSignals still announces the detach when a listener removal throws', () => {

@@ -213,6 +213,17 @@ interface RestartStartSnapshot {
   readonly timeoutMS: number;
 }
 
+/** What a dependent is doing that keeps an individual stop from removing its dependency. */
+type DependentWork = 'running' | 'starting' | 'pending' | 'stalled';
+
+/** Refusal wording per kind of dependent work, in reporting order. */
+const DEPENDENT_WORK_LABELS: Record<DependentWork, string> = {
+  running: 'running dependents',
+  starting: 'starting dependents',
+  pending: 'dependents with pending startup work',
+  stalled: 'stalled dependents',
+};
+
 /** Call-local policy and claim history for an individual stop or restart. */
 interface IndividualStopContext {
   readonly operation: 'stop' | 'restart';
@@ -2059,24 +2070,33 @@ export class LifecycleManager
       }
 
       progress.wasStopped = true;
+    }
 
-      // The stop's `await` let other code run. A `component:stopped` listener may have
-      // unregistered this component already - and registered a replacement under the
-      // same name - so nothing below may act on the name alone: it would remove the
-      // replacement and wipe its state.
-      if (this.getComponent(name) !== component) {
-        return {
-          success: false,
-          componentName: name,
-          reason: 'Component was unregistered while it was being stopped',
-          code: 'component_not_found',
-          wasStopped: true,
-          // Registered when this call started, which is what this field reports - the
-          // name may belong to a replacement by now, which is not this call's component.
-          wasRegistered: true,
-        };
-      }
+    // Before anything else acts on the name, for both paths. `component` was captured
+    // before `options?.stopIfRunning` was read, and that read runs caller code: a getter
+    // that unregistered this component and registered a replacement under the same name
+    // left the capture stale with no `await` anywhere to re-check it. The stop's `await`
+    // let other code run as well - a `component:stopped` listener doing the same. The
+    // registry entry below is removed by instance, but every state map is keyed by name,
+    // so a stale instance wipes the replacement's state while leaving it registered - and
+    // reports success for a removal it never made. Checked before the in-flight checks
+    // below, which would otherwise answer for the replacement.
+    if (this.getComponent(name) !== component) {
+      return {
+        success: false,
+        componentName: name,
+        reason: progress.wasStopped
+          ? 'Component was unregistered while it was being stopped'
+          : 'Component was unregistered while this unregister was in progress',
+        code: 'component_not_found',
+        wasStopped: progress.wasStopped,
+        // Registered when this call started, which is what this field reports - the
+        // name may belong to a replacement by now, which is not this call's component.
+        wasRegistered: true,
+      };
+    }
 
+    if (progress.wasStopped) {
       // A `component:stopped` listener may also have started it again, or begun another
       // stop. Removing it now would orphan that operation: a start that finished on an
       // unregistered component left whatever it brought up running, owned by nothing.
@@ -2102,27 +2122,6 @@ export class LifecycleManager
           wasRegistered: true,
         };
       }
-    }
-
-    // Last check before anything is removed, for both paths. `component` was captured
-    // before `options?.stopIfRunning` was read, and that read runs caller code: a getter
-    // that unregistered this component and registered a replacement under the same name
-    // left the capture stale with no `await` anywhere to re-check it. The registry entry
-    // below is removed by instance, but every state map is keyed by name, so a stale
-    // instance wipes the replacement's state while leaving it registered - and reports
-    // success for a removal it never made.
-    if (this.getComponent(name) !== component) {
-      return {
-        success: false,
-        componentName: name,
-        reason:
-          'Component was unregistered while this unregister was in progress',
-        code: 'component_not_found',
-        wasStopped: progress.wasStopped,
-        // Registered when this call started, which is what this field reports - the
-        // name may belong to a replacement by now, which is not this call's component.
-        wasRegistered: true,
-      };
     }
 
     // Checked again here rather than only at the top: a bulk startup or shutdown that
@@ -3860,10 +3859,7 @@ export class LifecycleManager
     // registry read rather than an array captured before those getters ran. If
     // caller code keeps changing registrations beyond the bounded read, an unread
     // active component is not evidence that stopping its dependency is safe.
-    const readActiveWork = (): Map<
-      BaseComponent,
-      'running' | 'starting' | 'pending' | 'stalled'
-    > => {
+    const readActiveWork = (): Map<BaseComponent, DependentWork> => {
       const current = new Map(
         this.components.map((component) => [this.nameOf(component), component]),
       );
@@ -3879,10 +3875,7 @@ export class LifecycleManager
           pending.add(settlement.component);
         }
       }
-      const activity = new Map<
-        BaseComponent,
-        'running' | 'starting' | 'pending' | 'stalled'
-      >();
+      const activity = new Map<BaseComponent, DependentWork>();
       for (const [dependent, component] of current) {
         if (this.isComponentRunning(dependent)) {
           activity.set(component, 'running');
@@ -3920,38 +3913,22 @@ export class LifecycleManager
     if (dependents.length === 0) {
       return undefined;
     }
-    const runningDependents: string[] = [];
-    const startingDependents: string[] = [];
-    const pendingStartupDependents: string[] = [];
-    const stalledDependents: string[] = [];
+    const byWork: Record<DependentWork, string[]> = {
+      running: [],
+      starting: [],
+      pending: [],
+      stalled: [],
+    };
     for (const component of dependents) {
-      const dependent = this.nameOf(component);
-      const work = activeWork.get(component);
-      if (work === 'running') {
-        runningDependents.push(dependent);
-      } else if (work === 'starting') {
-        startingDependents.push(dependent);
-      } else if (work === 'stalled') {
-        stalledDependents.push(dependent);
-      } else {
-        pendingStartupDependents.push(dependent);
-      }
+      byWork[activeWork.get(component) ?? 'pending'].push(
+        this.nameOf(component),
+      );
     }
-    const activity = [
-      runningDependents.length
-        ? `running dependents: ${runningDependents.join(', ')}`
-        : undefined,
-      startingDependents.length
-        ? `starting dependents: ${startingDependents.join(', ')}`
-        : undefined,
-      pendingStartupDependents.length
-        ? `dependents with pending startup work: ${pendingStartupDependents.join(', ')}`
-        : undefined,
-      stalledDependents.length
-        ? `stalled dependents: ${stalledDependents.join(', ')}`
-        : undefined,
-    ]
-      .filter(Boolean)
+    const activity = (Object.keys(DEPENDENT_WORK_LABELS) as DependentWork[])
+      .filter((work) => byWork[work].length > 0)
+      .map(
+        (work) => `${DEPENDENT_WORK_LABELS[work]}: ${byWork[work].join(', ')}`,
+      )
       .join('; ');
     const result: ComponentOperationResult = {
       success: false,
@@ -3963,10 +3940,12 @@ export class LifecycleManager
       .entity(name)
       .warn('Cannot stop component with active dependents', {
         params: {
-          runningDependents,
-          startingDependents,
-          pendingStartupDependents,
-          ...(stalledDependents.length ? { stalledDependents } : {}),
+          runningDependents: byWork.running,
+          startingDependents: byWork.starting,
+          pendingStartupDependents: byWork.pending,
+          ...(byWork.stalled.length
+            ? { stalledDependents: byWork.stalled }
+            : {}),
         },
       });
     return result;
@@ -7858,6 +7837,12 @@ export class LifecycleManager
     if (stopContext) {
       stopContext.claimed = true;
     }
+    // The stall a retry was asked to clear. Its reason, error and timing describe the
+    // stop that failed, which a retry keeps whether it attempts nothing (no handler)
+    // or fails again.
+    const priorStall = context.isStalledRetry
+      ? this.stalledComponents.get(name)
+      : undefined;
     // A fresh force-immediate stop needs a token. A stalled retry only advances it
     // when a handler will actually run: without one, the old graceful promise may
     // still settle late and clear the stall. Graceful escalation keeps its token.
@@ -7895,12 +7880,20 @@ export class LifecycleManager
 
     // If component doesn't implement onShutdownForce, mark as stalled immediately
     if (!hasForceHandler) {
-      // A retry without a handler attempts nothing new, so it keeps the original
-      // stall record: its reason, error and timing describe the stop that failed.
-      const priorStall = context.isStalledRetry
-        ? this.stalledComponents.get(name)
-        : undefined;
-      const stallInfo: ComponentStallInfo = priorStall ?? {
+      if (priorStall) {
+        // A retry without a handler attempts nothing new, so the stall it found
+        // stands as recorded. Restore the stalled state the claim replaced without
+        // announcing that same stall again, and answer as the stop that recorded it.
+        this.markComponentStalled(name, priorStall);
+        this.logger
+          .entity(name)
+          .warn('Stalled component has no force handler to retry', {
+            params: { phase: priorStall.phase, reason: priorStall.reason },
+          });
+        return this.stalledStopResult(name, priorStall);
+      }
+
+      const stallInfo: ComponentStallInfo = {
         name,
         phase: 'graceful', // Failed in graceful phase
         reason: context.gracefulTimedOut ? 'timeout' : 'error',
@@ -7908,10 +7901,6 @@ export class LifecycleManager
         stalledAt: Date.now(),
         error: context.gracefulError,
       };
-      // Match the force phase's classification: only a pure timeout reports as one;
-      // 'both' (graceful timed out, then force threw) carries the force error.
-      const didStallTimeOut = stallInfo.reason === 'timeout';
-      const stallError = stallInfo.error;
 
       this.markComponentStalled(name, stallInfo);
 
@@ -7919,31 +7908,21 @@ export class LifecycleManager
         .entity(name)
         .error('Component stalled - graceful shutdown failed', {
           params: {
-            reason: didStallTimeOut ? 'timeout' : 'error',
+            reason: stallInfo.reason,
             hasForceHandler: false,
           },
         });
 
       this.lifecycleEvents.componentStalled(name, stallInfo, {
         reason: stallInfo.reason,
-        code: didStallTimeOut ? 'component_shutdown_timeout' : 'unknown_error',
+        code:
+          stallInfo.reason === 'timeout'
+            ? 'component_shutdown_timeout'
+            : 'unknown_error',
       });
 
       // Return the original graceful phase error
-      return {
-        success: false,
-        componentName: name,
-        reason: didStallTimeOut
-          ? 'Component stop timed out'
-          : // Guarded: the stall error is a `toError` result carried over from the
-            // graceful phase, so its `message` can be an accessor that throws.
-            ((stallError === undefined
-              ? undefined
-              : describeError(stallError)) ?? 'Graceful shutdown failed'),
-        code: didStallTimeOut ? 'component_shutdown_timeout' : 'unknown_error',
-        error: stallError,
-        status: this.getComponentStatus(name),
-      };
+      return this.stalledStopResult(name, stallInfo);
     }
 
     const { promise: stoppedDuringForcePromise, cleanup: cleanupForceWaiter } =
@@ -8103,15 +8082,17 @@ export class LifecycleManager
 
       return this.withTransition<ComponentOperationResult>(() => {
         // Mark as stalled - force phase failed
+        // A failed retry keeps what the original stall knew: when that stop began,
+        // and whether its graceful phase had timed out.
+        const didGracefulTimeOut = priorStall
+          ? priorStall.reason === 'both' ||
+            (priorStall.phase === 'graceful' && priorStall.reason === 'timeout')
+          : context.gracefulTimedOut;
         const stallInfo: ComponentStallInfo = {
           name,
           phase: 'force',
-          reason: isTimeout
-            ? 'timeout'
-            : context.gracefulTimedOut
-              ? 'both'
-              : 'error',
-          startedAt: context.startedAt,
+          reason: isTimeout ? 'timeout' : didGracefulTimeOut ? 'both' : 'error',
+          startedAt: priorStall?.startedAt ?? context.startedAt,
           stalledAt: Date.now(),
           error: err,
         };
@@ -8152,6 +8133,38 @@ export class LifecycleManager
         clearTimeout(timeoutHandle);
       }
     }
+  }
+
+  /**
+   * The result a stop that stalled answers with, derived from its stall record so a
+   * retry that attempts nothing answers exactly as the stop that recorded it did.
+   */
+  private stalledStopResult(
+    name: string,
+    stallInfo: ComponentStallInfo,
+  ): ComponentOperationResult {
+    const isForcePhase = stallInfo.phase === 'force';
+    const didTimeOut = stallInfo.reason === 'timeout';
+    const error = stallInfo.error;
+
+    return {
+      success: false,
+      componentName: name,
+      reason: didTimeOut
+        ? isForcePhase
+          ? LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT
+          : 'Component stop timed out'
+        : // Guarded: the stall error is a `toError` result, so its `message` can be
+          // an accessor that throws.
+          error !== undefined
+          ? describeError(error)
+          : isForcePhase
+            ? 'Force shutdown failed'
+            : 'Graceful shutdown failed',
+      code: didTimeOut ? 'component_shutdown_timeout' : 'unknown_error',
+      error,
+      status: this.getComponentStatus(name),
+    };
   }
 
   // ============================================================================

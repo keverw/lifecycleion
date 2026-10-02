@@ -1744,6 +1744,75 @@ describe('ProcessSignalManager', () => {
   });
 
   describe('error handling', () => {
+    test('detach removes every listener when an earlier removal throws', () => {
+      manager = new ProcessSignalManager({
+        onShutdownRequested: shutdownCallback,
+        onReloadRequested: reloadCallback,
+        onInfoRequested: infoCallback,
+        onDebugRequested: debugCallback,
+      });
+      const counts = (): number[] =>
+        ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGUSR1', 'SIGUSR2'].map((signal) =>
+          process.listenerCount(signal),
+        );
+      const before = counts();
+      manager.attach();
+
+      const originalOff = process.off.bind(process);
+      const failure = new Error('off failed');
+      let hasThrown = false;
+      const offSpy = spyOn(process, 'off').mockImplementation(((
+        event: string,
+        listener: (...args: unknown[]) => void,
+      ) => {
+        originalOff(event, listener);
+        if (event === 'SIGINT' && !hasThrown) {
+          hasThrown = true;
+          throw failure;
+        }
+        return process;
+      }) as typeof process.off);
+
+      try {
+        expect(() => manager.detach()).toThrow(failure);
+      } finally {
+        offSpy.mockRestore();
+      }
+
+      expect(manager.getStatus().isAttached).toBe(false);
+      expect(counts()).toEqual(before);
+    });
+
+    test('a cleanup failure during attach keeps the registration error', () => {
+      manager = new ProcessSignalManager({
+        onShutdownRequested: shutdownCallback,
+        onReloadRequested: reloadCallback,
+      });
+      const before = process.listenerCount('SIGINT');
+      const registrationError = new Error('on failed');
+      const onSpy = spyOn(process, 'on').mockImplementation(((
+        event: string,
+      ) => {
+        if (event === 'SIGHUP') {
+          throw registrationError;
+        }
+        return process;
+      }) as typeof process.on);
+      const offSpy = spyOn(process, 'off').mockImplementation((() => {
+        throw new Error('off failed');
+      }) as typeof process.off);
+
+      try {
+        expect(() => manager.attach()).toThrow(registrationError);
+      } finally {
+        onSpy.mockRestore();
+        offSpy.mockRestore();
+      }
+
+      expect(manager.getStatus().isAttached).toBe(false);
+      expect(process.listenerCount('SIGINT')).toBe(before);
+    });
+
     test('handles error in shutdown callback gracefully', () => {
       const errorCallback = mock(() => {
         throw new Error('Test error');

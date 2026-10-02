@@ -1731,6 +1731,39 @@ export class BaseHTTPClient {
         signalReleasers,
       );
 
+      // End an attempt that never reached the adapter - a retry interceptor that
+      // cancelled or threw, or request setup that failed. Its timer and start event
+      // already belong to it, and the prior upload outcome carries over.
+      const endBeforeDispatch = (
+        pendingRequest: InterceptedRequest,
+        outcome: {
+          wasCancelled?: boolean;
+          errorCode?: HTTPClientError['code'];
+          adapterCause?: Error;
+          cancelReason?: string;
+        },
+      ) => {
+        clearTimeout(timeoutID);
+        emitAttemptEnd({ willRetry: false, status: 0 });
+
+        return {
+          adapterResponse: null,
+          ...(previousUploadOutcome
+            ? { requestBodySettled: previousUploadOutcome }
+            : {}),
+          sentRequest: this._bestEffortAttemptRequestFromPending(
+            pendingRequest,
+            timeout,
+            requestID,
+          ),
+          attemptCount: attemptNumber,
+          wasCancelled: false,
+          wasTimeout: false,
+          isRetriesExhausted: false,
+          ...outcome,
+        };
+      };
+
       // Set internal headers unconditionally on every attempt — this is
       // simpler than relying on them surviving cross-origin header stripping
       // during redirects. Both are always re-applied here so the redirect
@@ -1769,64 +1802,21 @@ export class BaseHTTPClient {
             this._assertInterceptorResolvedURL(retryIntercept.requestURL);
           }
         } catch (error) {
-          clearTimeout(timeoutID);
-
-          emitAttemptEnd({
-            willRetry: false,
-            nextRetryDelayMS: undefined,
-            nextRetryAt: undefined,
-            status: 0,
-          });
-
           // Terminal failure — no further attempts. _execute notifies error observers
           // with phase `final` (same as all settled errors), not `retry`.
-          return {
-            adapterResponse: null,
-            ...(previousUploadOutcome
-              ? { requestBodySettled: previousUploadOutcome }
-              : {}),
-            sentRequest: this._bestEffortAttemptRequestFromPending(
-              failedRetryRequest,
-              timeout,
-              requestID,
-            ),
-            attemptCount: attemptNumber,
-            wasCancelled: false,
-            wasTimeout: false,
-            isRetriesExhausted: false,
+          return endBeforeDispatch(failedRetryRequest, {
             errorCode: 'interceptor_error',
             adapterCause: normalizeError(error),
-          };
+          });
         }
 
         if ('cancel' in retryIntercept) {
-          clearTimeout(timeoutID);
-
-          emitAttemptEnd({
-            willRetry: false,
-            nextRetryDelayMS: undefined,
-            nextRetryAt: undefined,
-            status: 0,
-          });
-
-          return {
-            adapterResponse: null,
-            ...(previousUploadOutcome
-              ? { requestBodySettled: previousUploadOutcome }
-              : {}),
-            sentRequest: this._bestEffortAttemptRequestFromPending(
-              baseRequest,
-              timeout,
-              requestID,
-            ),
-            attemptCount: attemptNumber,
+          return endBeforeDispatch(baseRequest, {
             wasCancelled: true,
-            wasTimeout: false,
-            isRetriesExhausted: false,
             ...(retryIntercept.reason !== undefined
               ? { cancelReason: retryIntercept.reason }
               : {}),
-          };
+          });
         }
 
         attemptRequest = retryIntercept;
@@ -1855,27 +1845,11 @@ export class BaseHTTPClient {
           cookieJar,
         });
       } catch (error) {
-        // Serialization and cookie/header preparation precede adapter dispatch,
-        // but the attempt timer and start event already belong to this attempt.
-        clearTimeout(timeoutID);
-        emitAttemptEnd({ willRetry: false, status: 0 });
-        return {
-          adapterResponse: null,
-          ...(previousUploadOutcome
-            ? { requestBodySettled: previousUploadOutcome }
-            : {}),
-          sentRequest: this._bestEffortAttemptRequestFromPending(
-            attemptRequest,
-            timeout,
-            requestID,
-          ),
-          attemptCount: attemptNumber,
-          wasCancelled: false,
-          wasTimeout: false,
-          isRetriesExhausted: false,
+        // Serialization and cookie/header preparation precede adapter dispatch.
+        return endBeforeDispatch(attemptRequest, {
           errorCode: 'request_setup_error',
           adapterCause: normalizeError(error),
-        };
+        });
       }
 
       // This attempt's own outcome takes over from here; see the declaration.
@@ -3213,15 +3187,25 @@ export class BaseHTTPClient {
     // intentionally — they are applied at dispatch time, and since no attempt ever
     // went out, including them would be misleading. Unsupported body types are caught
     // and swallowed here; the real error is reported via request_setup_error instead.
-    // If any header value fails string conversion, the snapshot carries no headers
-    // for the same reason: this runs inside failure handlers and must not replace
-    // their result.
-    let headers: Record<string, string | string[]>;
+    // Headers are merged one at a time for the same reason: this runs inside failure
+    // handlers and must not replace their result, so a value whose string conversion
+    // throws (or a getter that does) drops only that entry, keeping the rest for
+    // diagnosis.
+    const headers: Record<string, string | string[]> = {};
+    let headerNames: string[] = [];
 
     try {
-      headers = mergeHeaders(request.headers);
+      headerNames = Object.keys(request.headers ?? {});
     } catch {
-      headers = {};
+      // An unreadable header object leaves the snapshot without headers.
+    }
+
+    for (const name of headerNames) {
+      try {
+        Object.assign(headers, mergeHeaders({ [name]: request.headers[name] }));
+      } catch {
+        // Skip only this entry.
+      }
     }
 
     let clonedBodies: Pick<AttemptRequest, 'body' | 'rawBody'>;

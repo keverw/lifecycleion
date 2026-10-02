@@ -444,12 +444,9 @@ export class ProcessSignalManager {
       this._isAttached = true;
     } catch (error) {
       // If any listener registration fails, clean up any handlers that were already registered
-      // This prevents partial registration and ensures consistent state
-      this.stopListeningForShutdownSignals();
-      this.stopListeningForReloadSignal();
-      this.stopListeningForInfoSignal();
-      this.stopListeningForDebugSignal();
-      this.restoreStdin();
+      // This prevents partial registration and ensures consistent state. A cleanup failure
+      // must not replace the registration error that got us here.
+      this.releaseListeners();
       throw error;
     }
   }
@@ -465,17 +462,15 @@ export class ProcessSignalManager {
       return;
     }
 
-    try {
-      this.stopListeningForShutdownSignals();
-      this.stopListeningForReloadSignal();
-      this.stopListeningForInfoSignal();
-      this.stopListeningForDebugSignal();
-      this.restoreStdin();
-    } finally {
-      // Always mark as detached, even if cleanup threw an error
-      // This prevents the manager from being stuck in an "attached" state
-      // that blocks re-attachment attempts
-      this._isAttached = false;
+    const failure = this.releaseListeners();
+
+    // Always mark as detached, even if cleanup threw an error
+    // This prevents the manager from being stuck in an "attached" state
+    // that blocks re-attachment attempts
+    this._isAttached = false;
+
+    if (failure) {
+      throw failure.error;
     }
   }
 
@@ -588,20 +583,6 @@ export class ProcessSignalManager {
   }
 
   /**
-   * Remove handlers for all shutdown signals if they were registered.
-   * Uses the same function references to ensure proper cleanup.
-   */
-  private stopListeningForShutdownSignals(): void {
-    if (this.shutdownSignalListeners) {
-      for (const signal of Object.keys(
-        this.shutdownSignalListeners,
-      ) as ShutdownSignal[]) {
-        process.off(signal, this.shutdownSignalListeners[signal]);
-      }
-    }
-  }
-
-  /**
    * Register handler for SIGHUP signal if reload callback is provided.
    * SIGHUP is commonly used to trigger configuration reloads.
    */
@@ -659,6 +640,36 @@ export class ProcessSignalManager {
     if (this.debugSignalListener) {
       process.off('SIGUSR2', this.debugSignalListener);
     }
+  }
+
+  /**
+   * Run every removal step even when an earlier one throws, so one failed removal
+   * cannot leave the remaining handlers - or raw-mode stdin - in place behind a
+   * detached status. Returns the first failure for the caller to decide on.
+   */
+  private releaseListeners(): { error: unknown } | undefined {
+    let failure: { error: unknown } | undefined;
+    const attempt = (step: () => void): void => {
+      try {
+        step();
+      } catch (error) {
+        failure ??= { error };
+      }
+    };
+
+    const shutdownListeners = this.shutdownSignalListeners;
+    if (shutdownListeners) {
+      for (const signal of Object.keys(shutdownListeners) as ShutdownSignal[]) {
+        attempt(() => process.off(signal, shutdownListeners[signal]));
+      }
+    }
+
+    attempt(() => this.stopListeningForReloadSignal());
+    attempt(() => this.stopListeningForInfoSignal());
+    attempt(() => this.stopListeningForDebugSignal());
+    attempt(() => this.restoreStdin());
+
+    return failure;
   }
 
   /**

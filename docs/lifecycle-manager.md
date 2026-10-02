@@ -1026,7 +1026,7 @@ interface StopAllOptions {
 
 **Option Details:**
 
-- `retryStalled`: If `true`, attempts to stop components that are currently in the `stalled` state from previous shutdown attempts. If `false`, skips components already marked as stalled. **Note:** retry goes directly to the force phase (`onShutdownForce`), not the graceful phase. `stop()` is not called again. The assumption is that graceful already had its chance, and the retry is an escalation.
+- `retryStalled`: If `true`, attempts to stop components that are currently in the `stalled` state from previous shutdown attempts. If `false`, skips components already marked as stalled. **Note:** retry goes directly to the force phase (`onShutdownForce`), not the graceful phase. `stop()` is not called again. The assumption is that graceful already had its chance, and the retry is an escalation. A retry keeps the original stall's start time: a component without `onShutdownForce` attempts nothing new, so it stays stalled under its original record and answers with that stop's result without emitting `component:stalled` again; a force handler that fails again records a fresh force-phase stall that keeps `reason: 'both'` when the original graceful phase timed out.
 - `haltOnStall`: If `true`, stops processing remaining components after a stop failure or refusal, including invalid configuration. If `false`, continues independent cleanup. Dependencies of any component still running after a failed stop remain protected, including when a getter throws before cleanup starts. The aggregate result stays unsuccessful; validation refusals retain `invalid_options`.
 
 **Timeout Behavior:**

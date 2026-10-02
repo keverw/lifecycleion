@@ -230,10 +230,20 @@ test('unstringifiable interceptor header stays a contained request_setup_error',
       } as unknown as string,
     },
   }));
-  const request = client.get('https://example.com/');
+  const observed: Array<Record<string, string | string[]>> = [];
+  client.addErrorObserver((_error, attemptRequest) => {
+    observed.push(attemptRequest.headers);
+  });
+  const request = client.get('https://example.com/').headers({
+    'X-Trace': 'abc',
+  });
   await request.send();
   expect(request.error?.code).toBe('request_setup_error');
   expect(request.attemptCount).toBe(1);
   expect(sends).toBe(0);
   expect(conversions).toBe(2);
+  // Only the unconvertible entry is dropped from the best-effort snapshot.
+  expect(observed).toHaveLength(1);
+  expect(observed[0]['x-trace']).toBe('abc');
+  expect(observed[0]).not.toHaveProperty('bad');
 });
