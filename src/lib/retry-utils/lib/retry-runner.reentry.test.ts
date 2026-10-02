@@ -373,24 +373,34 @@ test('reset does not clear a forced restart that reuses its unresolved result', 
   });
 });
 
-test('forceTry respects success reported synchronously by its abort listener', async () => {
-  let attempts = 0;
-  const runner = new RetryRunner(policy, (reportResult, signal) => {
-    attempts++;
-    signal.addEventListener('abort', () =>
-      reportResult('success', 'finished on abort'),
+test.each([false, true])(
+  'forceTry respects synchronous abort success (waiting: %s)',
+  async (shouldWaitForCompletion) => {
+    let attempts = 0;
+    const runner = new RetryRunner(policy, (reportResult, signal) => {
+      attempts++;
+      signal.addEventListener('abort', () =>
+        reportResult('success', 'finished on abort'),
+      );
+    });
+    const original = runner.run(true);
+    const forced = await runner.forceTry({
+      shouldAbortRunning: true,
+      shouldWaitForCompletion,
+    });
+    expect(forced).toMatchObject(
+      shouldWaitForCompletion
+        ? { status: 'attempt_success', data: 'finished on abort' }
+        : { code: 'already_completed' },
     );
-  });
-  const original = runner.run(true);
-  const forced = await runner.forceTry({ shouldAbortRunning: true });
-  expect(forced).toMatchObject({ code: 'already_completed' });
-  expect(await original).toMatchObject({
-    status: 'attempt_success',
-    data: 'finished on abort',
-  });
-  expect(attempts).toBe(1);
-  expect(runner.runnerState).toBe('completed');
-});
+    expect(await original).toMatchObject({
+      status: 'attempt_success',
+      data: 'finished on abort',
+    });
+    expect(attempts).toBe(1);
+    expect(runner.runnerState).toBe('completed');
+  },
+);
 
 test('reset leaves an operation resumed before its cancellation continuation alone', async () => {
   const reports: ReportResult[] = [];
@@ -595,7 +605,9 @@ for (const request of ['cancel', 'reset'] as const) {
           ? shouldWaitForCompletion
             ? { status: 'attempt_success', data: 'finished' }
             : { status: 'pre_operation_error', code: 'force_try_superseded' }
-          : { status: 'pre_operation_error', code: 'already_completed' },
+          : shouldWaitForCompletion
+            ? { status: 'attempt_success', data: 'finished' }
+            : { status: 'pre_operation_error', code: 'already_completed' },
       );
       expect(runner.runnerState).toBe(
         request === 'reset' ? 'not-started' : 'completed',

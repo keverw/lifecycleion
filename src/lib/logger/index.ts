@@ -303,6 +303,7 @@ export class Logger extends EventEmitter {
    * Exit the process with the specified code
    */
   public exit(code: number): void {
+    const isFirstExit = !this._exitRequested;
     // Keep real exits in the portable 0–255 range; larger codes can wrap to
     // success at the OS boundary. Decide before closing sinks so a bad caller
     // value cannot strand a live process with a closed logger. Simulated exits
@@ -311,13 +312,14 @@ export class Logger extends EventEmitter {
       this.callProcessExit &&
       (!Number.isInteger(code) || code < 0 || code > 255);
     if (isInvalidExitCode) {
-      reportToConsole(
-        `Logger exit code ${String(code)} is invalid; exiting with code 1`,
-      );
+      if (isFirstExit) {
+        reportToConsole(
+          `Logger exit code ${String(code)} is invalid; exiting with code 1`,
+        );
+      }
       code = 1;
     }
 
-    const isFirstExit = !this._exitRequested;
     this._exitRequested = true;
 
     if (!this._didExit) {

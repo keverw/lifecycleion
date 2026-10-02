@@ -524,6 +524,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   }
 
   public async reset(): Promise<void> {
+    // Record stop intent before awaiting cancellation. A later operation may
+    // supersede this reset, but an older force request must still yield to it.
     this.stopRequestToken = Symbol();
     const operationToken = this.operationToken;
     if (this.terminalDispatchDepth > 0) {
@@ -609,11 +611,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         ],
       );
 
-      if (
-        checkDisallowedStates.wasDisallowed &&
-        checkDisallowedStates.runResult
-      ) {
-        return checkDisallowedStates.runResult;
+      if (checkDisallowedStates) {
+        return checkDisallowedStates;
       } else if (this.policy.shouldDoFirstTry()) {
         const operationResolver = this.beginOperation();
         this.currentState.runnerState = 'running';
@@ -680,11 +679,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         ['completed', 'running', 'stopping', 'fatal-error', 'exhausted'],
       );
 
-      if (
-        checkDisallowedStates.wasDisallowed &&
-        checkDisallowedStates.runResult
-      ) {
-        return checkDisallowedStates.runResult;
+      if (checkDisallowedStates) {
+        return checkDisallowedStates;
       } else {
         if (this.currentState.runnerState !== 'stopped') {
           return {
@@ -725,11 +721,6 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     }
   }
 
-  private checkForceTryPreconditions(): RunResult<T> | undefined {
-    return this.checkForDisallowedPerOperationStates('forceTry', ['completed'])
-      .runResult;
-  }
-
   private forceTryOperation(
     options?: ForceTryOptions,
   ): RunResult<T> | Promise<RunResult<T>> {
@@ -747,7 +738,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     this._isOperationLocked = true;
 
     try {
-      const refusal = this.checkForceTryPreconditions();
+      const refusal = this.checkForDisallowedPerOperationStates('forceTry', [
+        'completed',
+      ]);
       if (refusal) {
         return refusal;
       }
@@ -788,9 +781,16 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
                 error: new RetryUtilsErrRunnerForceTrySuperseded(),
               };
         }
-        const afterAbort = this.checkForceTryPreconditions();
+        const afterAbort = this.checkForDisallowedPerOperationStates(
+          'forceTry',
+          ['completed'],
+        );
         if (afterAbort) {
-          return afterAbort;
+          // The call was admitted before abort completed this operation.
+          // Waiting callers retain its result; no replacement is started.
+          return shouldWaitForCompletion
+            ? operationResolver.promise
+            : afterAbort;
         }
       }
 
@@ -893,10 +893,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       | 'fatal-error'
       | 'exhausted'
     >,
-  ): {
-    wasDisallowed: boolean;
-    runResult?: RunResult<T>;
-  } {
+  ): RunResult<T> | undefined {
     // Preflight state checks to normalize errors for each entrypoint.
     for (const checkForState of disallowedStates) {
       if (
@@ -904,66 +901,51 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         this.currentState.runnerState === 'completed'
       ) {
         return {
-          wasDisallowed: true,
-          runResult: {
-            status: 'pre_operation_error',
-            code: 'already_completed',
-            error: new RetryUtilsErrRunnerAlreadyCompleted(methodName),
-          },
+          status: 'pre_operation_error',
+          code: 'already_completed',
+          error: new RetryUtilsErrRunnerAlreadyCompleted(methodName),
         };
       } else if (
         checkForState === 'running' &&
         this.currentState.runnerState === 'running'
       ) {
         return {
-          wasDisallowed: true,
-          runResult: {
-            status: 'pre_operation_error',
-            code: 'already_running',
-            error: new RetryUtilsErrRunnerAlreadyRunning(
-              methodName as 'run' | 'resume',
-            ),
-          },
+          status: 'pre_operation_error',
+          code: 'already_running',
+          error: new RetryUtilsErrRunnerAlreadyRunning(
+            methodName as 'run' | 'resume',
+          ),
         };
       } else if (
         checkForState === 'stopping' &&
         this.currentState.runnerState === 'stopping'
       ) {
         return {
-          wasDisallowed: true,
-          runResult: {
-            status: 'pre_operation_error',
-            code: 'cancel_pending',
-            error: new RetryUtilsErrRunnerCancelPending(
-              methodName as 'run' | 'resume',
-            ),
-          },
+          status: 'pre_operation_error',
+          code: 'cancel_pending',
+          error: new RetryUtilsErrRunnerCancelPending(
+            methodName as 'run' | 'resume',
+          ),
         };
       } else if (
         checkForState === 'stopped' &&
         this.currentState.runnerState === 'stopped'
       ) {
         return {
-          wasDisallowed: true,
-          runResult: {
-            status: 'pre_operation_error',
-            code: 'retry_canceled',
-            error: new RetryUtilsErrRunnerRetryCanceled('run'),
-          },
+          status: 'pre_operation_error',
+          code: 'retry_canceled',
+          error: new RetryUtilsErrRunnerRetryCanceled('run'),
         };
       } else if (
         checkForState === 'fatal-error' &&
         this.currentState.runnerState === 'fatal-error'
       ) {
         return {
-          wasDisallowed: true,
-          runResult: {
-            status: 'pre_operation_error',
-            code: 'fatally_failed',
-            error: new RetryUtilsErrRunnerLastRetryFatallyFailed(
-              methodName as 'run' | 'resume',
-            ),
-          },
+          status: 'pre_operation_error',
+          code: 'fatally_failed',
+          error: new RetryUtilsErrRunnerLastRetryFatallyFailed(
+            methodName as 'run' | 'resume',
+          ),
         };
       } else if (
         checkForState === 'exhausted' &&
@@ -971,20 +953,17 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           this.policy.areAttemptsExhausted)
       ) {
         return {
-          wasDisallowed: true,
-          runResult: {
-            status: 'pre_operation_error',
-            code: 'attempts_exhausted',
-            error: new RetryUtilsErrRunnerAttemptsExhausted(
-              methodName as 'run' | 'resume',
-            ),
-          },
+          status: 'pre_operation_error',
+          code: 'attempts_exhausted',
+          error: new RetryUtilsErrRunnerAttemptsExhausted(
+            methodName as 'run' | 'resume',
+          ),
         };
       }
     }
 
     // if no disallowed states were found
-    return { wasDisallowed: false };
+    return undefined;
   }
 
   private cleanupTimers(): void {

@@ -178,3 +178,29 @@ test.each([0, 255])('portable exit boundary %s is retained', async (code) => {
   expect(exitCode).toBe(code);
   expect(stderr).toBe('');
 });
+
+test('repeated invalid exits normalize notifications but report invalidity only once', () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({
+      sinks: [],
+      callProcessExit: true,
+      beforeExitCallback: () => ({ action: 'wait' }),
+    });
+    const codes: number[] = [];
+    logger.on<{ eventType: string; code: number }>(
+      'logger',
+      ({ eventType, code }) => {
+        if (eventType === 'exit-called') {
+          codes.push(code);
+        }
+      },
+    );
+    logger.exit(300);
+    logger.exit(301);
+    expect(codes).toEqual([1, 1]);
+    expect(output).toHaveBeenCalledTimes(1);
+  } finally {
+    output.mockRestore();
+  }
+});

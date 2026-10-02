@@ -163,7 +163,7 @@ const client = new HTTPClient({
 | `followRedirects` | Not supported          | Not supported        | Supported             | Supported            | Supported   |
 
 The constructor throws immediately on unsupported combinations so failures are caught at startup, not at request time.
-Client `retryPolicy` is validated and copied at construction. A per-request
+Client `retryPolicy` is validated and copied at construction. The internal snapshot is frozen and may be shared with sub-clients. Subclasses must not mutate `this._config.retryPolicy` in place; supply a new policy through client or sub-client configuration instead. A per-request
 `.retryPolicy(options)` is validated and copied when called, before request interceptors
 run. Invalid retry durations throw there, and later mutations to the supplied object do
 not change the policy. Each request starts with a fresh retry budget; `null` on the
