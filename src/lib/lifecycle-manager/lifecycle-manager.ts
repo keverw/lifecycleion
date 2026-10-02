@@ -220,6 +220,8 @@ interface IndividualStopContext {
   claimed: boolean;
   allowStopWithRunningDependents?: boolean;
   isStartupRollback?: boolean;
+  /** Components this startup's rollback has already reached; see dependents check. */
+  rolledBackNames?: ReadonlySet<string>;
   hasShutdownBegun?: () => boolean;
 }
 
@@ -1324,8 +1326,16 @@ export class LifecycleManager
         return; // Not attached
       }
 
-      this.processSignalManager.detach();
-      this.lifecycleEvents.lifecycleManagerSignalsDetached();
+      const signalManager = this.processSignalManager;
+      try {
+        signalManager.detach();
+      } finally {
+        // detach() marks itself detached even when a listener removal throws, so
+        // announce it whenever the handlers are no longer attached.
+        if (!signalManager.getStatus().isAttached) {
+          this.lifecycleEvents.lifecycleManagerSignalsDetached();
+        }
+      }
     });
   }
 
@@ -3852,7 +3862,7 @@ export class LifecycleManager
     // active component is not evidence that stopping its dependency is safe.
     const readActiveWork = (): Map<
       BaseComponent,
-      'running' | 'starting' | 'pending'
+      'running' | 'starting' | 'pending' | 'stalled'
     > => {
       const current = new Map(
         this.components.map((component) => [this.nameOf(component), component]),
@@ -3871,7 +3881,7 @@ export class LifecycleManager
       }
       const activity = new Map<
         BaseComponent,
-        'running' | 'starting' | 'pending'
+        'running' | 'starting' | 'pending' | 'stalled'
       >();
       for (const [dependent, component] of current) {
         if (this.isComponentRunning(dependent)) {
@@ -3880,6 +3890,14 @@ export class LifecycleManager
           activity.set(component, 'starting');
         } else if (pending.has(component)) {
           activity.set(component, 'pending');
+        } else if (
+          // Rollback leaves dependencies of unfinished cleanup running: a dependent
+          // whose rollback stop stalled may still be using this component. A stall
+          // from before this startup does not hold back what this startup started.
+          context.rolledBackNames?.has(dependent) === true &&
+          this.stalledComponents.has(dependent)
+        ) {
+          activity.set(component, 'stalled');
         }
       }
       return activity;
@@ -3905,12 +3923,16 @@ export class LifecycleManager
     const runningDependents: string[] = [];
     const startingDependents: string[] = [];
     const pendingStartupDependents: string[] = [];
+    const stalledDependents: string[] = [];
     for (const component of dependents) {
       const dependent = this.nameOf(component);
-      if (activeWork.get(component) === 'running') {
+      const work = activeWork.get(component);
+      if (work === 'running') {
         runningDependents.push(dependent);
-      } else if (activeWork.get(component) === 'starting') {
+      } else if (work === 'starting') {
         startingDependents.push(dependent);
+      } else if (work === 'stalled') {
+        stalledDependents.push(dependent);
       } else {
         pendingStartupDependents.push(dependent);
       }
@@ -3924,6 +3946,9 @@ export class LifecycleManager
         : undefined,
       pendingStartupDependents.length
         ? `dependents with pending startup work: ${pendingStartupDependents.join(', ')}`
+        : undefined,
+      stalledDependents.length
+        ? `stalled dependents: ${stalledDependents.join(', ')}`
         : undefined,
     ]
       .filter(Boolean)
@@ -3941,6 +3966,7 @@ export class LifecycleManager
           runningDependents,
           startingDependents,
           pendingStartupDependents,
+          ...(stalledDependents.length ? { stalledDependents } : {}),
         },
       });
     return result;
@@ -7869,7 +7895,12 @@ export class LifecycleManager
 
     // If component doesn't implement onShutdownForce, mark as stalled immediately
     if (!hasForceHandler) {
-      const stallInfo: ComponentStallInfo = {
+      // A retry without a handler attempts nothing new, so it keeps the original
+      // stall record: its reason, error and timing describe the stop that failed.
+      const priorStall = context.isStalledRetry
+        ? this.stalledComponents.get(name)
+        : undefined;
+      const stallInfo: ComponentStallInfo = priorStall ?? {
         name,
         phase: 'graceful', // Failed in graceful phase
         reason: context.gracefulTimedOut ? 'timeout' : 'error',
@@ -7877,6 +7908,8 @@ export class LifecycleManager
         stalledAt: Date.now(),
         error: context.gracefulError,
       };
+      const didStallTimeOut = stallInfo.reason !== 'error';
+      const stallError = stallInfo.error;
 
       this.markComponentStalled(name, stallInfo);
 
@@ -7884,34 +7917,29 @@ export class LifecycleManager
         .entity(name)
         .error('Component stalled - graceful shutdown failed', {
           params: {
-            reason: context.gracefulTimedOut ? 'timeout' : 'error',
+            reason: didStallTimeOut ? 'timeout' : 'error',
             hasForceHandler: false,
           },
         });
 
       this.lifecycleEvents.componentStalled(name, stallInfo, {
         reason: stallInfo.reason,
-        code: context.gracefulTimedOut
-          ? 'component_shutdown_timeout'
-          : 'unknown_error',
+        code: didStallTimeOut ? 'component_shutdown_timeout' : 'unknown_error',
       });
 
       // Return the original graceful phase error
       return {
         success: false,
         componentName: name,
-        reason: context.gracefulTimedOut
+        reason: didStallTimeOut
           ? 'Component stop timed out'
-          : // Guarded: `gracefulError` is the `toError` result carried over from the
+          : // Guarded: the stall error is a `toError` result carried over from the
             // graceful phase, so its `message` can be an accessor that throws.
-            ((context.gracefulError === undefined
+            ((stallError === undefined
               ? undefined
-              : describeError(context.gracefulError)) ??
-            'Graceful shutdown failed'),
-        code: context.gracefulTimedOut
-          ? 'component_shutdown_timeout'
-          : 'unknown_error',
-        error: context.gracefulError,
+              : describeError(stallError)) ?? 'Graceful shutdown failed'),
+        code: didStallTimeOut ? 'component_shutdown_timeout' : 'unknown_error',
+        error: stallError,
         status: this.getComponentStatus(name),
       };
     }
@@ -8015,11 +8043,21 @@ export class LifecycleManager
       }
 
       return this.withTransition(() => {
+        // A stalled retry clears its stall here; announce that as the late paths do.
+        const clearedStall = this.stalledComponents.get(name);
+
         // Update state - force succeeded
         this.markComponentStopped(name);
 
         this.logger.entity(name).success('Component force stopped');
         this.lifecycleEvents.componentShutdownForceCompleted(name);
+        if (clearedStall) {
+          this.lifecycleEvents.componentStalledResolved(
+            name,
+            clearedStall,
+            Date.now() - clearedStall.stalledAt,
+          );
+        }
         this.lifecycleEvents.componentStopped(
           name,
           this.getComponentStatus(name),
@@ -8204,6 +8242,7 @@ export class LifecycleManager
         operation: 'stop',
         claimed: false,
         isStartupRollback: true,
+        rolledBackNames,
         hasShutdownBegun,
       });
       if (!result.success) {
