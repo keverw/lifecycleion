@@ -390,6 +390,7 @@ Cancels the current operation and any scheduled retries.
 Returns `Promise<CancelResult>`:
 
 - `'canceled'` - operation acknowledged the abort signal and stopped
+- `'superseded'` - a newer forced restart took over while cancellation was pending; the runner may still be running
 - `'forced'` - operation did not acknowledge within the grace period and was force-stopped
 - `'not-running'` - no cancelable operation remains, including a terminal outcome already being published
 
@@ -421,7 +422,7 @@ A replacement attempt has its own cancellation acknowledgement and grace period.
 
 ```typescript
 await runner.reset();
-// Runner is now in 'not-started' state with zero errors/attempts
+// With reset/start calls serialized, state is now 'not-started' with zero errors/attempts
 await runner.run(true);
 ```
 
@@ -684,7 +685,7 @@ The following types are exported for use in consuming code:
 | `RunnerState`                           | Union of all runner lifecycle states                                                                                                                 |
 | `ReportResult<T>`                       | Type of the `reportResult` callback passed to the operation                                                                                          |
 | `ReportResultStatus`                    | Union of report result statuses: `'success' \| 'error' \| 'fatal' \| 'skip'`                                                                         |
-| `CancelResult`                          | Return type of `cancel()`: `'canceled' \| 'forced' \| 'not-running'`                                                                                 |
+| `CancelResult`                          | Return type of `cancel()`: `'canceled' \| 'forced' \| 'not-running' \| 'superseded'`                                                                 |
 | `ForceTryOptions`                       | Options for `forceTry()`                                                                                                                             |
 | `RetryRunnerOptions<T>`                 | Options for the `RetryRunner` constructor (operation label and event handlers)                                                                       |
 | `OnOperationStartedInfo`                | Payload for the `operation-started` event                                                                                                            |

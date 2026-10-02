@@ -211,11 +211,13 @@
 
 ## Unreleased
 
+- **BREAKING: RetryRunner cancellation returns `'superseded'` when a newer forced restart takes over a pending cancel.** All pending cancel callers receive that outcome instead of `'canceled'`; the forced operation continues and existing operation waiters retain its result.
+
 - `forceTry({ shouldAbortRunning: true })` starts no replacement when its abort listener reports success synchronously: waiting callers receive the successful result, and non-waiting callers receive `already_completed`. A newer `cancel()` or `reset()` requested by that abort listener also takes precedence: waiting force calls join the existing operation’s result without restarting; non-waiting calls immediately return `pre_operation_error` / `force_try_superseded` without waiting for cancellation. This refusal is returned after the abort signal was sent, so it does not mean no side effects occurred. If the listener reports success and then resets, the newer reset wins; waiting callers retain the original successful outcome.
 
 - A deferred RetryRunner reset applies only to the operation it was requested for; it no longer cancels or clears a replacement operation started while reset was waiting, including a forced restart that retains the earlier completion promise.
 
-- **BREAKING: Real logger exits require integer codes in the portable range `0–255` on every platform, including Windows.** Other values (including Windows-specific codes above 255) normalize to 1 (preventing nonzero values such as 256 from wrapping to success) before `exit-called` and `beforeExitCallback`, so both observe the same fallback code as `exit-process`. Invalid-code diagnostics are reported only for the first exit request; repeated notifications still use normalized codes. Simulated exits retain the requested code; `exit(NaN)` does not falsely report a fallback to code 1.
+- **BREAKING: Real logger exits require integer codes in the portable range `0–255` on every platform, including Windows.** Other values (including Windows-specific codes above 255) normalize to 1 (preventing nonzero values such as 256 from wrapping to success) before `exit-called` and `beforeExitCallback`, so both observe the same fallback code as `exit-process`. Invalid-code diagnostics are reported once per logger, on its first invalid real exit request (even after valid requests); repeated notifications still use normalized codes. Simulated exits retain the requested code; `exit(NaN)` does not falsely report a fallback to code 1.
 
 - Lifecycle manager logging caches entity children only for the built-in name-scoped factory. Custom `entity()` implementations run on each call so reused component names can pick up fresh context.
 

@@ -633,7 +633,7 @@ test('cancel does not arm its grace timer over a replacement started by its abor
   const original = runner.run(true);
   const timers = spyOn(globalThis, 'setTimeout');
   try {
-    expect(await runner.cancel()).toBe('canceled');
+    expect(await runner.cancel()).toBe('superseded');
     expect(await forced).toMatchObject({ status: 'running' });
     expect(attempts).toBe(2);
     expect(runner.runnerState).toBe('running');
@@ -646,5 +646,39 @@ test('cancel does not arm its grace timer over a replacement started by its abor
   } finally {
     timers.mockRestore();
     replacementReport?.('success', 'cleanup');
+  }
+});
+
+test('a forced restart reports supersession to every pending cancel caller', async () => {
+  const reports: ReportResult<string>[] = [];
+  const runner = new RetryRunner<string>(policy, (report) => {
+    reports.push(report);
+  });
+  const original = runner.run(true);
+  const firstCancel = runner.cancel();
+  const secondCancel = runner.cancel();
+  expect(runner.runnerState).toBe('stopping');
+  try {
+    const forced = runner.forceTry({
+      shouldAbortRunning: true,
+      shouldWaitForCompletion: true,
+    });
+    expect(await firstCancel).toBe('superseded');
+    expect(await secondCancel).toBe('superseded');
+    expect(runner.runnerState).toBe('running');
+    expect(reports).toHaveLength(2);
+    reports[0]('success', 'obsolete');
+    reports[1]('success', 'replacement');
+    expect(await forced).toMatchObject({
+      status: 'attempt_success',
+      data: 'replacement',
+    });
+    expect(await original).toMatchObject({
+      status: 'attempt_success',
+      data: 'replacement',
+    });
+  } finally {
+    reports.at(-1)?.('success', 'cleanup');
+    await runner.cancel();
   }
 });

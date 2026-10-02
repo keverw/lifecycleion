@@ -251,6 +251,7 @@ export class Logger extends EventEmitter {
   private _didExit = false;
   private _exitCode: number = 0;
   private _exitRequested = false;
+  private _didReportInvalidExitCode = false;
   private _isPendingExit = false;
   private _closed = false;
 
@@ -312,7 +313,8 @@ export class Logger extends EventEmitter {
       this.callProcessExit &&
       (!Number.isInteger(code) || code < 0 || code > 255);
     if (isInvalidExitCode) {
-      if (isFirstExit) {
+      if (!this._didReportInvalidExitCode) {
+        this._didReportInvalidExitCode = true;
         reportToConsole(
           `Logger exit code ${String(code)} is invalid; exiting with code 1`,
         );

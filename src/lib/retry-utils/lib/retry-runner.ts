@@ -62,7 +62,7 @@ export interface RunResultNonSuccess {
 
 export type RunResult<T> = RunResultSuccess<T> | RunResultNonSuccess;
 
-export type CancelResult = 'canceled' | 'forced' | 'not-running';
+export type CancelResult = 'canceled' | 'forced' | 'not-running' | 'superseded';
 
 class AttemptContext {
   public handled = false;
@@ -1021,7 +1021,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
         // resolve all cancel promises
         for (const resolver of this.cancelResolvers) {
-          resolver.resolveOnce(wasForced ? 'forced' : 'canceled');
+          resolver.resolveOnce(
+            !isTerminal ? 'superseded' : wasForced ? 'forced' : 'canceled',
+          );
           this.cancelResolvers.delete(resolver);
         }
       } else {

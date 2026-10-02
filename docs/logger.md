@@ -1860,6 +1860,8 @@ When a log includes an `exitCode`, the logger will:
 The cleanup deadline starts when sink cleanup begins; it does not bound an awaited
 `beforeExitCallback` or override its explicit `{ action: 'wait' }` decision.
 
+Invalid real exit codes produce one diagnostic per logger, on the first invalid request even if earlier requests used valid codes. Further invalid-code diagnostics are suppressed; each request still uses the normalized code.
+
 **Exit Code Validation:** `exit(code: number)` accepts numeric codes, not numeric strings. Non-numeric `exitCode` values on log entries are ignored.
 For a real exit, codes must be integers in the portable range `0–255` on every platform, including Windows. This deliberately excludes Windows-specific exit codes above 255; they normalize to 1 too. Any other value is reported to the guarded console and replaced
 with 1 before `exit-called`, `beforeExitCallback`, and cleanup. This prevents codes such as 256 from wrapping to success (status 0) at the OS boundary. If `process.exit()` throws, the logger reports that failure
