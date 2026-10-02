@@ -392,7 +392,7 @@ Returns `Promise<CancelResult>`:
 - `'canceled'` - operation acknowledged the abort signal and stopped
 - `'superseded'` - a newer forced restart took over while cancellation was pending; the runner may still be running
 - `'forced'` - operation did not acknowledge within the grace period and was force-stopped
-- `'not-running'` - no cancelable operation remains, including a terminal outcome already being published
+- `'not-running'` - no cancelable operation remains, including a terminal outcome already being published or success/fatal completion that wins while cancellation is pending. Use `waitForCompletion()` for that operation's result.
 
 ```typescript
 const cancelResult = await runner.cancel();
@@ -460,6 +460,7 @@ Forces an immediate retry attempt, bypassing policy limits. Works in all states 
 - **Supersession has side effects:** `force_try_superseded` is an exception to the usual pre-operation refusal: the running attempt has already received its abort signal, but no replacement was started. Keep the original `run(true)` or `waitForCompletion()` promise if you need its final outcome. Await the newer cancel/reset before deciding whether to start more work.
 - **Combined outcomes:** If a listener reports success and then calls `reset()`, the newer reset takes precedence: a non-waiting force returns `force_try_superseded`, while a waiting force returns the captured operation's successful result. A `cancel()` after success is a no-op, so waiting calls retain success and non-waiting calls return `already_completed`. Neither combination starts a replacement.
 - **Fatal/exhausted abort outcomes:** If the abort listener reports fatal failure or exhausts the retry budget, original waiters receive that terminal result. The accepted force request then starts a new operation, just as an explicit force from those states does. Its waiting caller receives the new operation's result. The retry budget is not reset.
+- **Replacing an active attempt:** Force-aborting an attempt in a running operation (including pending cancellation) retains the operation's elapsed time and completion promise. It starts a new attempt without another `operation-started` event; the eventual terminal result emits the matching `operation-ended`.
 - **Timer behavior:** `timeTakenMS` resets when starting a new attempt from terminal states (`'not-started'`, `'exhausted'`, `'fatal-error'`, `'stopped'`) but does NOT reset when accelerating a pending retry (operation already running, just clearing the delay timer).
 
 Options:

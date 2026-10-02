@@ -682,3 +682,74 @@ test('a forced restart reports supersession to every pending cancel caller', asy
     await runner.cancel();
   }
 });
+
+test.each(['success', 'fatal'] as const)(
+  'cancel reports not-running when the attempt instead reports %s',
+  async (outcome) => {
+    let report: ReportResult<string> | undefined;
+    const runner = new RetryRunner<string>(policy, (callback) => {
+      report = callback;
+    });
+    const original = runner.run(true);
+    const cancellation = runner.cancel();
+    if (outcome === 'success') {
+      report?.('success', 'finished');
+    } else {
+      report?.('fatal', 'finished');
+    }
+    expect(await cancellation).toBe('not-running');
+    expect(await original).toMatchObject({
+      status: outcome === 'success' ? 'attempt_success' : 'attempt_fatal',
+    });
+    expect(runner.runnerState).toBe(
+      outcome === 'success' ? 'completed' : 'fatal-error',
+    );
+  },
+);
+
+test.each([false, true])(
+  'force replacement preserves operation events and time (cancel pending: %s)',
+  async (shouldCancel) => {
+    let now = 1000;
+    const clock = spyOn(Date, 'now').mockImplementation(() => now);
+    const reports: ReportResult<string>[] = [];
+    const runner = new RetryRunner<string>(policy, (report) => {
+      reports.push(report);
+    });
+    const events: string[] = [];
+    runner.on(OPERATION_STARTED, () => {
+      events.push('started');
+    });
+    runner.on(OPERATION_ENDED, () => {
+      events.push('ended');
+    });
+    try {
+      const original = runner.run(true);
+      const cancellation = shouldCancel ? runner.cancel() : undefined;
+      now = 1250;
+      const forced = runner.forceTry({
+        shouldAbortRunning: true,
+        shouldWaitForCompletion: true,
+      });
+      expect(runner.timeTakenMS).toBe(250);
+      expect(events).toEqual(['started']);
+      reports[1]('success', 'replacement');
+      expect(await forced).toMatchObject({
+        status: 'attempt_success',
+        data: 'replacement',
+      });
+      expect(await original).toMatchObject({
+        status: 'attempt_success',
+        data: 'replacement',
+      });
+      if (cancellation) {
+        expect(await cancellation).toBe('superseded');
+      }
+      expect(events).toEqual(['started', 'ended']);
+    } finally {
+      reports.at(-1)?.('success', 'cleanup');
+      await runner.cancel();
+      clock.mockRestore();
+    }
+  },
+);

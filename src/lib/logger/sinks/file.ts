@@ -545,6 +545,8 @@ export class FileSink implements LogSink {
       return await this.flushWindow(timeoutMS, startTime);
     })();
 
+    // run may time out while previous still owns its counting window. Keep
+    // previous in the queue barrier so a third flush cannot overtake it.
     this.pendingFlush = (async (): Promise<void> => {
       try {
         await previous;

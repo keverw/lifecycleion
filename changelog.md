@@ -211,6 +211,9 @@
 
 ## Unreleased
 
+- **BREAKING: Pending RetryRunner cancellation returns `'not-running'` when success or fatal completion wins instead of cancellation.** The operation result remains available through `waitForCompletion()`. Force-aborting an active attempt now preserves the continuing operation's timer and start/end event pairing, including when it overrides pending cancellation.
+- Logger exit-code normalization requires a callable runtime `process.exit`; browser/worker exits without it retain the requested code without a misleading fallback warning.
+
 - **BREAKING: RetryRunner cancellation returns `'superseded'` when a newer forced restart takes over a pending cancel.** All pending cancel callers receive that outcome instead of `'canceled'`; the forced operation continues and existing operation waiters retain its result.
 
 - `forceTry({ shouldAbortRunning: true })` starts no replacement when its abort listener reports success synchronously: waiting callers receive the successful result, and non-waiting callers receive `already_completed`. A newer `cancel()` or `reset()` requested by that abort listener also takes precedence: waiting force calls join the existing operation’s result without restarting; non-waiting calls immediately return `pre_operation_error` / `force_try_superseded` without waiting for cancellation. This refusal is returned after the abort signal was sent, so it does not mean no side effects occurred. If the listener reports success and then resets, the newer reset wins; waiting callers retain the original successful outcome.

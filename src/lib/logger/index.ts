@@ -311,6 +311,7 @@ export class Logger extends EventEmitter {
     // keep the requested code for inspection.
     const isInvalidExitCode =
       this.callProcessExit &&
+      typeof globalThis.process?.exit === 'function' &&
       (!Number.isInteger(code) || code < 0 || code > 255);
     if (isInvalidExitCode) {
       if (!this._didReportInvalidExitCode) {

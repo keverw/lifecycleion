@@ -486,8 +486,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
                   this.currentState.lastAttemptTimeTakenMS =
                     attemptTimeElapsedMS;
 
-                  this.terminalDispatchDepth++;
-                  try {
+                  this.withTerminalDispatch(true, () => {
                     this.emit(ATTEMPT_HANDLED, {
                       attemptID: context.id,
                       status: 'skip',
@@ -506,9 +505,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
                       },
                       true,
                     );
-                  } finally {
-                    this.terminalDispatchDepth--;
-                  }
+                  });
                 }
               }
             }, this._gracePeriodMS);
@@ -839,6 +836,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         // Case 2: No pending retry, start a brand-new forced attempt.
         // The abort above has already dispatched caller code. This new identity
         // makes resets from that old attempt leave the accepted restart alone.
+        const isContinuingOperation =
+          this.currentState.runnerState === 'running' ||
+          this.currentState.runnerState === 'stopping';
         const operationResolver = this.beginOperation(true);
         if (this.currentState.runnerState === 'not-started') {
           // Treat as a first try so the policy tracks the initial attempt.
@@ -855,10 +855,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         }
 
         this.currentState.runnerState = 'running';
-        this.currentState.operationStartTime = Date.now();
-        this.currentState.finalTimeTakenMS = null;
-
-        this.emit(OPERATION_STARTED, { operationType: 'force' });
+        if (!isContinuingOperation) {
+          this.currentState.operationStartTime = Date.now();
+          this.currentState.finalTimeTakenMS = null;
+          this.emit(OPERATION_STARTED, { operationType: 'force' });
+        }
         if (this.currentState.runnerState !== 'running') {
           return operationResolver.promise;
         }
@@ -1003,16 +1004,30 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     }
   }
 
+  /** Keep terminal notifications and result publication in one reentry scope. */
+  private withTerminalDispatch(
+    isTerminal: boolean,
+    dispatch: () => void,
+  ): void {
+    if (isTerminal) {
+      this.terminalDispatchDepth++;
+    }
+    try {
+      dispatch();
+    } finally {
+      if (isTerminal) {
+        this.terminalDispatchDepth--;
+      }
+    }
+  }
+
   private confirmCancellation(
     runnerState: RunnerState,
     resolveInfo: ConfirmCancellationResolveInfo<T>,
     wasForced = false,
   ): void {
     const isTerminal = runnerState !== 'running';
-    if (isTerminal) {
-      this.terminalDispatchDepth++;
-    }
-    try {
+    this.withTerminalDispatch(isTerminal, () => {
       // Resolve cancel promises and finalize operation state transitions.
       if (this.currentState.runnerState === 'stopping') {
         this.cleanupTimers();
@@ -1022,7 +1037,13 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         // resolve all cancel promises
         for (const resolver of this.cancelResolvers) {
           resolver.resolveOnce(
-            !isTerminal ? 'superseded' : wasForced ? 'forced' : 'canceled',
+            !isTerminal
+              ? 'superseded'
+              : runnerState !== 'stopped'
+                ? 'not-running'
+                : wasForced
+                  ? 'forced'
+                  : 'canceled',
           );
           this.cancelResolvers.delete(resolver);
         }
@@ -1068,11 +1089,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           }
         }
       }
-    } finally {
-      if (isTerminal) {
-        this.terminalDispatchDepth--;
-      }
-    }
+    });
   }
 
   private handleReportResult(
@@ -1265,10 +1282,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       confirmCancellationInfo.run &&
       terminalRunnerState !== null &&
       terminalResolveInfo !== null;
-    if (isTerminalReport) {
-      this.terminalDispatchDepth++;
-    }
-    try {
+    this.withTerminalDispatch(isTerminalReport, () => {
       // emit the attempt handled event
       this.emit(ATTEMPT_HANDLED, {
         attemptID: context.id,
@@ -1286,11 +1300,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       if (isTerminalReport) {
         this.confirmCancellation(terminalRunnerState, terminalResolveInfo);
       }
-    } finally {
-      if (isTerminalReport) {
-        this.terminalDispatchDepth--;
-      }
-    }
+    });
   }
 
   private async attemptOperation(wasForced: boolean): Promise<void> {
