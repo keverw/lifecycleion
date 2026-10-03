@@ -7356,7 +7356,12 @@ export class LifecycleManager
           this.resolvePendingForceStopWaiters(name);
           this.lifecycleEvents.componentStalled(name, stallInfo, {
             reason: stallInfo.reason,
-            code: 'unknown_error',
+            // Paired with the reason as every other stall is: a graceful timeout the
+            // stop recorded before crashing stays a timeout.
+            code:
+              stallInfo.reason === 'timeout'
+                ? 'component_shutdown_timeout'
+                : 'unknown_error',
           });
         }
 

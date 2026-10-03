@@ -5,7 +5,7 @@ import {
 import { ulid } from 'ulid';
 import readline from 'readline';
 import { resolveTimeoutMS } from './internal/timer-limits';
-import { observePromise, promiseResolveIntrinsic } from './internal/intrinsics';
+import { queueMicrotaskIntrinsic } from './internal/intrinsics';
 
 /**
  * The shutdown signal types that can trigger the shutdown callback
@@ -707,8 +707,7 @@ export class ProcessSignalManager {
       return;
     }
 
-    // Captured intrinsics, not the replaceable `queueMicrotask` global.
-    void observePromise(promiseResolveIntrinsic(undefined), () => {
+    queueMicrotaskIntrinsic(() => {
       for (const [callbackName, failure] of reports) {
         reportCallbackError(callbackName, failure.error);
       }
@@ -996,17 +995,12 @@ export class ProcessSignalManager {
         // Reported for the reason `restoreStdin`'s twin is: a terminal left in raw mode is
         // the user's shell broken, and this said nothing about it.
         //
-        // Reported *after* the ownership repair above, not before it. The report runs a
-        // global `'error'` listener synchronously, and a listener that calls `attach()`
-        // from there observed the shared state half-repaired - no attached instances,
-        // `rawModeEnabledByManager` still true, and no owner to adopt. The twin at
-        // `restoreStdin` does have work after its report - it pauses stdin - and answers
-        // the same hazard the other way, by re-reading `attachedInstances` rather than
-        // trusting the flag it computed before reporting.
-        reportCallbackError(
-          'ProcessSignalManager stdin raw mode restore',
-          error,
-        );
+        // Deferred, as the twin is: this runs inside a failing `attach()`, and a listener
+        // that attaches from the report must not have that attach's error thrown over its
+        // own, nor observe the shared state before the ownership repair above.
+        this.reportCleanupFailuresLater([
+          ['ProcessSignalManager stdin raw mode restore', { error }],
+        ]);
       }
     }
   }
@@ -1082,24 +1076,23 @@ export class ProcessSignalManager {
         shared.rawModeOwner = null;
         shared.rawModeEnabledByManager = false;
       } catch (error) {
-        // The owner stays set so a future detach can retry - but this is reported now
+        // The owner stays set so a future detach can retry - but this is reported
         // rather than left to the exit. "Restored on process exit anyway" is true of a
         // script and false of the long-lived process this library exists for: `detach()`
         // returns normally, `getStatus().isAttached` reads `false`, and the terminal is
         // still in raw mode, so the user's shell is broken and nothing anywhere said so.
-        reportCallbackError(
-          'ProcessSignalManager stdin raw mode restore',
-          error,
-        );
+        // Deferred like every other cleanup report: a listener that attaches from it
+        // must find this attach/detach already final, not be undone by it.
+        this.reportCleanupFailuresLater([
+          ['ProcessSignalManager stdin raw mode restore', { error }],
+        ]);
       }
     }
 
     // Pause stdin when last instance detaches - re-checked here rather than trusted from
-    // the `isLastInstance` read above. `reportCallbackError` dispatches a global `'error'`
-    // *synchronously*, so a listener that calls `attach()` from inside the restore report
-    // above returns here with an instance freshly attached, and the stale flag then paused
-    // stdin under it: the new instance's keypress handler was registered and silent. The
-    // set is the live answer.
+    // the `isLastInstance` read above. Nothing above reports synchronously any more, but
+    // the set is the live answer: a stale flag paused stdin under a freshly attached
+    // instance, leaving its keypress handler registered and silent.
     if (
       (wasAttachedToStdin || didResume) &&
       isLastInstance &&

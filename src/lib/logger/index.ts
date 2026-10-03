@@ -7,6 +7,7 @@ import {
   promiseRejectIntrinsic,
   promiseResolveIntrinsic,
   observePromise,
+  queueMicrotaskIntrinsic,
   racePromises,
   boxPromiseValue,
   type PromiseResultBox,
@@ -1716,71 +1717,73 @@ export class Logger extends EventEmitter {
         : this.sinks
       : [];
 
-    const delivered = observePromise(promiseResolveIntrinsic(undefined), () => {
-      const hasListeners = this.hasListeners('diagnostic');
+    queueMicrotaskIntrinsic(
+      () => {
+        const hasListeners = this.hasListeners('diagnostic');
 
-      this.emit('diagnostic', diagnostic);
+        this.emit('diagnostic', diagnostic);
 
-      // A diagnostic queued by a failing write can run after close() has marked the
-      // logger closed but before (or after) its sinks finish closing. Built-in sinks
-      // refuse diagnostic writes in that state, and their void return cannot tell us
-      // that nothing was delivered. Treat a closed logger like one with no destination
-      // so a terminal write failure is not silently lost. This deliberately does not
-      // apply to an open, muted ConsoleSink: muting remains an explicit request for
-      // silence.
-      if (destinations.length === 0 || this._closed) {
-        if (!hasListeners) {
-          reportToConsole(diagnostic.message);
+        // A diagnostic queued by a failing write can run after close() has marked the
+        // logger closed but before (or after) its sinks finish closing. Built-in sinks
+        // refuse diagnostic writes in that state, and their void return cannot tell us
+        // that nothing was delivered. Treat a closed logger like one with no destination
+        // so a terminal write failure is not silently lost. This deliberately does not
+        // apply to an open, muted ConsoleSink: muting remains an explicit request for
+        // silence.
+        if (destinations.length === 0 || this._closed) {
+          if (!hasListeners) {
+            reportToConsole(diagnostic.message);
+          }
+          return;
         }
-        return;
-      }
 
-      const entry = diagnosticEntry(diagnostic);
+        const entry = diagnosticEntry(diagnostic);
 
-      // Keep the configured destination index without allocating entries tuples.
-      // eslint-disable-next-line unicorn/no-for-loop
-      for (let sinkIndex = 0; sinkIndex < destinations.length; sinkIndex++) {
-        const sink = destinations[sinkIndex];
-        let result: unknown;
-        try {
-          // Read the hook once without consulting caller-owned bind/call properties.
-          // eslint-disable-next-line @typescript-eslint/unbound-method
-          const writeDiagnostic = sink.writeDiagnostic;
-          result = isNullish(writeDiagnostic)
-            ? sink.write(entry)
-            : applyIntrinsic(writeDiagnostic, sink, [diagnostic]);
-        } catch (deliveryError) {
-          reportToConsole(
-            `${diagnostic.message} (diagnostic sink also threw: ${describeError(deliveryError)})`,
-          );
-          continue;
-        }
-        // A returned value does not prove delivery: a lazy destination may wait
-        // until then is invoked. At this terminal boundary retain the original
-        // diagnostic as well as the secondary return failure, just as for a throw
-        // or rejection. Never emit another diagnostic from diagnostic delivery.
-        const pending = adoptResult(result);
-        if (pending instanceof UnreadableReturn) {
-          pending.report(
-            `${hasDiagnosticSinks ? 'Diagnostic' : 'Log'} sink #${sinkIndex + 1}`,
-            diagnostic.message,
-          );
-          continue;
-        }
-        if (pending !== undefined) {
-          observeRejection(pending, (deliveryError: unknown) => {
+        // Keep the configured destination index without allocating entries tuples.
+        // eslint-disable-next-line unicorn/no-for-loop
+        for (let sinkIndex = 0; sinkIndex < destinations.length; sinkIndex++) {
+          const sink = destinations[sinkIndex];
+          let result: unknown;
+          try {
+            // Read the hook once without consulting caller-owned bind/call properties.
+            // eslint-disable-next-line @typescript-eslint/unbound-method
+            const writeDiagnostic = sink.writeDiagnostic;
+            result = isNullish(writeDiagnostic)
+              ? sink.write(entry)
+              : applyIntrinsic(writeDiagnostic, sink, [diagnostic]);
+          } catch (deliveryError) {
             reportToConsole(
-              `${diagnostic.message} (diagnostic sink also rejected: ${describeError(deliveryError)})`,
+              `${diagnostic.message} (diagnostic sink also threw: ${describeError(deliveryError)})`,
             );
-          });
+            continue;
+          }
+          // A returned value does not prove delivery: a lazy destination may wait
+          // until then is invoked. At this terminal boundary retain the original
+          // diagnostic as well as the secondary return failure, just as for a throw
+          // or rejection. Never emit another diagnostic from diagnostic delivery.
+          const pending = adoptResult(result);
+          if (pending instanceof UnreadableReturn) {
+            pending.report(
+              `${hasDiagnosticSinks ? 'Diagnostic' : 'Log'} sink #${sinkIndex + 1}`,
+              diagnostic.message,
+            );
+            continue;
+          }
+          if (pending !== undefined) {
+            observeRejection(pending, (deliveryError: unknown) => {
+              reportToConsole(
+                `${diagnostic.message} (diagnostic sink also rejected: ${describeError(deliveryError)})`,
+              );
+            });
+          }
         }
-      }
-    });
-    observeRejection(delivered, (error: unknown) => {
-      reportToConsole(
-        `${diagnostic.message} (diagnostic dispatch failed: ${describeError(error)})`,
-      );
-    });
+      },
+      (error: unknown) => {
+        reportToConsole(
+          `${diagnostic.message} (diagnostic dispatch failed: ${describeError(error)})`,
+        );
+      },
+    );
   }
 
   /**

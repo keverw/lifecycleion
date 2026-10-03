@@ -1455,7 +1455,7 @@ describe('ProcessSignalManager', () => {
       shared.rawModeEnabledByManager = false;
     }
 
-    test('a detach whose setRawMode(false) throws reports it and keeps ownership so a later instance can retry', () => {
+    test('a detach whose setRawMode(false) throws reports it and keeps ownership so a later instance can retry', async () => {
       // A terminal left in raw mode is the user's shell broken, and this said nothing
       // about it. Reported on the global `'error'` channel, with the shared state left in
       // the shape a later `attach()` can adopt and repair from.
@@ -1506,6 +1506,10 @@ describe('ProcessSignalManager', () => {
 
         manager.detach();
 
+        // Reported on a microtask, once the detach is final.
+        expect(events).toHaveLength(0);
+        await Promise.resolve();
+
         expect(events).toHaveLength(1);
         expect((events[0]?.error as Error).message).toContain(
           'stdin raw mode restore',
@@ -1532,6 +1536,7 @@ describe('ProcessSignalManager', () => {
 
         later.attach();
         later.detach();
+        await Promise.resolve();
 
         expect(isRaw).toBe(false);
         expect(readShared()?.rawModeEnabledByManager).toBe(false);
@@ -1552,12 +1557,10 @@ describe('ProcessSignalManager', () => {
       }
     });
 
-    test('an attach() from inside the restore report does not have stdin paused under it by the detach that raised it', () => {
-      // `reportCallbackError` dispatches the global `'error'` synchronously, so a listener
-      // that answers a broken restore by attaching a fresh instance returns into the
-      // middle of `restoreStdin`. The stale `isLastInstance` read then paused stdin under
-      // the new instance, whose keypress handler was registered and silent. The pause is
-      // gated on the live set, and this is the path that pins it.
+    test('an attach() from inside the restore report does not have stdin paused under it by the detach that raised it', async () => {
+      // The restore report is deferred until the detach that raised it is final, so a
+      // listener that answers a broken restore by attaching a fresh instance does so
+      // after that detach has paused stdin, and its own attach resumes it.
       const wasOriginallyTTY = process.stdin.isTTY;
       const wasOriginallyRaw = (process.stdin as any).isRaw;
       // eslint-disable-next-line @typescript-eslint/unbound-method
@@ -1582,9 +1585,14 @@ describe('ProcessSignalManager', () => {
 
         isRaw = enableRaw;
       });
-      const pause = mock(() => {});
+      const stdinCalls: string[] = [];
+      const pause = mock(() => {
+        stdinCalls.push('pause');
+      });
       (process.stdin as any).pause = pause;
-      (process.stdin as any).resume = mock(() => {});
+      (process.stdin as any).resume = mock(() => {
+        stdinCalls.push('resume');
+      });
 
       let replacement: ProcessSignalManager | undefined;
       const events: ErrorEvent[] = [];
@@ -1616,11 +1624,16 @@ describe('ProcessSignalManager', () => {
         manager.attach();
         manager.detach();
 
+        expect(replacement).toBeUndefined();
+        expect(pause).toHaveBeenCalledTimes(1);
+        await Promise.resolve();
+
         expect(events).toHaveLength(1);
         expect(replacement?.getStatus().isAttached).toBe(true);
         expect(readShared()?.attachedInstances.size).toBe(1);
-        // The whole point: stdin was left running for the instance now on it.
-        expect(pause).not.toHaveBeenCalled();
+        // The detach finished - and paused stdin - before the replacement attached, and
+        // the replacement's attach resumed it: stdin is running for the instance on it.
+        expect(stdinCalls).toEqual(['resume', 'pause', 'resume']);
         // And the replacement adopted the raw-mode ownership the failed restore left.
         expect(readShared()?.rawModeEnabledByManager).toBe(true);
         expect(
@@ -1629,9 +1642,10 @@ describe('ProcessSignalManager', () => {
 
         shouldFailDisable = false;
         replacement?.detach();
+        await Promise.resolve();
 
         expect(isRaw).toBe(false);
-        expect(pause).toHaveBeenCalledTimes(1);
+        expect(pause).toHaveBeenCalledTimes(2);
         expect(readShared()?.attachedInstances.size).toBe(0);
         expect(events).toHaveLength(1);
       } finally {
@@ -1649,12 +1663,13 @@ describe('ProcessSignalManager', () => {
       }
     });
 
-    test('a failed attach whose raw-mode rollback also fails reports after the shared state is repaired', () => {
+    test('a failed attach whose raw-mode rollback also fails reports after the shared state is repaired', async () => {
       // `setRawMode(true)` can throw after actually enabling raw mode, and the rollback's
-      // own `setRawMode(false)` can fail too. The report runs a global `'error'` listener
-      // synchronously, and a listener that reads the shared state from there must see it
-      // already repaired - an owner on record and the manager flag set - rather than the
-      // half-way shape where nothing is attached and nothing can be adopted.
+      // own `setRawMode(false)` can fail too. The report is deferred until the failed
+      // attach has reached its caller, and a listener that reads the shared state from
+      // there must see it already repaired - an owner on record and the manager flag set
+      // - rather than the half-way shape where nothing is attached and nothing can be
+      // adopted.
       const wasOriginallyTTY = process.stdin.isTTY;
       const wasOriginallyRaw = (process.stdin as any).isRaw;
       // eslint-disable-next-line @typescript-eslint/unbound-method
@@ -1712,6 +1727,8 @@ describe('ProcessSignalManager', () => {
 
         expect(() => failing.attach()).toThrow('enable threw late');
         expect(failing.isAttached).toBe(false);
+        expect(seenDuringReport).toHaveLength(0);
+        await Promise.resolve();
 
         // Two reports, not one: the rollback inside `listenForKeyPresses` tries the
         // restore and fails, and `attach`'s own catch runs `restoreStdin`, which retries

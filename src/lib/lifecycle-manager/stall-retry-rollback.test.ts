@@ -458,6 +458,10 @@ describe('LifecycleManager - stall retry and rollback', () => {
       },
     });
 
+    const stalledCodes: unknown[] = [];
+    manager.on('component:stalled', (event) => {
+      stalledCodes.push((event as { code?: unknown }).code);
+    });
     const { release } = claimReports();
     const beforeStop = Date.now();
     try {
@@ -468,6 +472,8 @@ describe('LifecycleManager - stall retry and rollback', () => {
 
     const stall = manager.getStalledComponents()[0];
     expect(stall).toMatchObject({ phase: 'graceful', reason: 'timeout' });
+    // The event's code agrees with the timeout reason it carries.
+    expect(stalledCodes).toEqual(['component_shutdown_timeout']);
     expect(stall.startedAt).toBeGreaterThanOrEqual(beforeStop);
 
     // A retry that fails again still knows the graceful phase timed out.

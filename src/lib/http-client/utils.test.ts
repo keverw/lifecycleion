@@ -313,6 +313,19 @@ describe('mergeHeaders', () => {
     });
   });
 
+  test('keeps a __proto__ header as an own key', () => {
+    const source = JSON.parse(
+      '{"__proto__": ["a", "b"], "x-ok": "1"}',
+    ) as Record<string, string | string[]>;
+    const merged = mergeHeaders(source);
+
+    expect(Object.getPrototypeOf(merged)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(merged, '__proto__')?.value).toEqual(
+      ['a', 'b'],
+    );
+    expect(merged['x-ok']).toBe('1');
+  });
+
   test('skips undefined sets', () => {
     expect(mergeHeaders({ 'content-type': 'text/plain' }, undefined)).toEqual({
       'content-type': 'text/plain',

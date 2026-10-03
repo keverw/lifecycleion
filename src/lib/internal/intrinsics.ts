@@ -66,6 +66,21 @@ export function observeRejection(
   );
 }
 
+/**
+ * Run `task` on a microtask through captured intrinsics, not the replaceable
+ * `queueMicrotask` global. A throw from `task` goes to `onError`, or is contained
+ * when none is given, so the derived promise never rejects unobserved.
+ */
+export function queueMicrotaskIntrinsic(
+  task: () => void,
+  onError: (error: unknown) => unknown = () => undefined,
+): void {
+  observeRejection(
+    observePromise(promiseResolveIntrinsic(undefined), task),
+    onError,
+  );
+}
+
 // eslint-disable-next-line @typescript-eslint/unbound-method
 const promiseRejectMethodIntrinsic = promiseConstructorIntrinsic.reject;
 

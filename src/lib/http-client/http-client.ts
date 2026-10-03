@@ -28,6 +28,7 @@ import {
   mergeObservedHeaders,
   mergeHeaders,
   normalizeMergedHeaderValue,
+  setOwnHeader,
   normalizeAdapterResponseHeaders,
   parseContentType,
   resolveAbsoluteURL,
@@ -3203,8 +3204,10 @@ export class BaseHTTPClient {
 
     for (const name of headerNames) {
       try {
-        headers[name.toLowerCase()] = normalizeMergedHeaderValue(
-          request.headers[name],
+        setOwnHeader(
+          headers,
+          name.toLowerCase(),
+          normalizeMergedHeaderValue(request.headers[name]),
         );
       } catch {
         // Skip only this entry.
@@ -3505,12 +3508,12 @@ function snapshotHeaderRecord(
 
     for (const [name, headerValue] of Object.entries(value)) {
       if (typeof headerValue === 'string') {
-        snapshot[name] = headerValue;
+        setOwnHeader(snapshot, name, headerValue);
       } else if (
         Array.isArray(headerValue) &&
         headerValue.every((item) => typeof item === 'string')
       ) {
-        snapshot[name] = [...headerValue];
+        setOwnHeader(snapshot, name, [...headerValue]);
       } else {
         return undefined;
       }

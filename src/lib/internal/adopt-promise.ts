@@ -1,7 +1,7 @@
 import {
   promiseConstructorIntrinsic,
   applyIntrinsic,
-  observePromise,
+  queueMicrotaskIntrinsic,
   promiseResolveIntrinsic,
   promiseRejectIntrinsic,
   promiseThenIntrinsic,
@@ -191,7 +191,7 @@ function adopt<T>(
   return new promiseConstructorIntrinsic<Awaited<T>>((resolve, reject) => {
     // Thenable invocation is a microtask, just like Promise.resolve assimilation.
     // Ignore its return: only the supplied resolve/reject callbacks settle adoption.
-    void observePromise(promiseResolveIntrinsic(undefined), () => {
+    queueMicrotaskIntrinsic(() => {
       try {
         applyIntrinsic(capturedThen, value, [resolve, reject]);
       } catch (error) {
