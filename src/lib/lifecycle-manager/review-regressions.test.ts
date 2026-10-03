@@ -4699,3 +4699,272 @@ test('health timeout getter failure is a configuration failure before invocation
     await logger.close();
   }
 });
+
+describe('LifecycleManager - round two review regressions', () => {
+  test('an unexpected stop during a forced start keeps the old stall retryable', async () => {
+    const { logger, manager } = setup();
+    const oldStop = deferred();
+    const startGate = deferred();
+    const a = new Plain(logger, 'a');
+    let stops = 0;
+    a.stop = (): Promise<void> => {
+      stops++;
+      return stops === 1 ? oldStop.promise : Promise.resolve();
+    };
+    (a as unknown as { onShutdownForce: undefined }).onShutdownForce =
+      undefined;
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+    await manager.stopComponent('a', { timeout: 5 });
+    expect(manager.getComponentStatus('a')?.state).toBe('stalled');
+
+    a.start = (): Promise<void> => startGate.promise;
+    const forced = manager.startComponent('a', { forceStalled: true });
+    await sleep(1);
+    (
+      a as unknown as { reportUnexpectedStop: () => boolean }
+    ).reportUnexpectedStop();
+    startGate.resolve();
+
+    const result = await forced;
+    expect(result.code).toBe('component_unexpected_stop');
+    expect(manager.getComponentStatus('a')?.state).toBe('stalled');
+    expect(manager.getStalledComponentNames()).toEqual(['a']);
+
+    // The old stop finishing still resolves the stall as a late completion.
+    const resolved: string[] = [];
+    manager.on('component:stalled-resolved', (data: { name: string }) => {
+      resolved.push(data.name);
+    });
+    oldStop.resolve();
+    await sleep(5);
+    expect(resolved).toEqual(['a']);
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+    expect(manager.getStalledComponentNames()).toEqual([]);
+    await logger.close();
+  });
+
+  test('an auto-start whose own log line starts the bulk startup is started once', async () => {
+    // eslint-disable-next-line prefer-const -- assigned after the sink that reads it
+    let manager!: LifecycleManager;
+    let startup: ReturnType<LifecycleManager['startAllComponents']> | undefined;
+    let isArmed = false;
+    const logger = new Logger({
+      sinks: [
+        {
+          write: (entry): void => {
+            if (
+              isArmed &&
+              startup === undefined &&
+              entry.message === 'Component registered'
+            ) {
+              startup = manager.startAllComponents();
+            }
+          },
+        },
+      ],
+      callProcessExit: false,
+    });
+    manager = new LifecycleManager({ logger, shutdownWarningTimeoutMS: -1 });
+    await manager.registerComponent(new Plain(logger, 'a'));
+    const late = new Plain(logger, 'late');
+    let starts = 0;
+    late.start = (): Promise<void> => {
+      starts++;
+      return Promise.resolve();
+    };
+
+    isArmed = true;
+    const registration = await manager.registerComponent(late, {
+      autoStart: true,
+    });
+    expect(registration.autoStartDeferred).toBe(true);
+
+    const result = await startup;
+    expect(result?.success).toBe(true);
+    expect(result?.startedComponents).toEqual(['a', 'late']);
+    expect(starts).toBe(1);
+    await manager.stopAllComponents();
+    await logger.close();
+  });
+
+  test('a forced start that reports an unexpected stop and then times out is left to late cleanup', async () => {
+    const { logger, manager } = setup();
+    const oldStop = deferred();
+    const startGate = deferred();
+    const a = new Plain(logger, 'a');
+    let stops = 0;
+    a.stop = (): Promise<void> => {
+      stops++;
+      return stops === 1 ? oldStop.promise : Promise.resolve();
+    };
+    (a as unknown as { onShutdownForce: undefined }).onShutdownForce =
+      undefined;
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+    await manager.stopComponent('a', { timeout: 5 });
+
+    a.start = (): Promise<void> => startGate.promise;
+    (a as unknown as { startupTimeoutMS: number }).startupTimeoutMS = 30;
+    const forced = manager.startComponent('a', { forceStalled: true });
+    await sleep(1);
+    (
+      a as unknown as { reportUnexpectedStop: () => boolean }
+    ).reportUnexpectedStop();
+    expect((await forced).code).toBe('component_unexpected_stop');
+
+    startGate.resolve();
+    await sleep(20);
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+    expect(manager.getStartTimedOutComponentNames()).toEqual([]);
+    expect(manager.getStalledComponentNames()).toEqual([]);
+    oldStop.resolve();
+    await logger.close();
+  });
+
+  test('an initial-order auto-start is not reported as unattempted after a rollback', async () => {
+    const entries: { message: string; params?: unknown }[] = [];
+    // eslint-disable-next-line prefer-const -- assigned after the sink that reads it
+    let manager!: LifecycleManager;
+    let startup: ReturnType<LifecycleManager['startAllComponents']> | undefined;
+    let isArmed = false;
+    const logger = new Logger({
+      sinks: [
+        {
+          write: (entry): void => {
+            entries.push(entry);
+            if (
+              isArmed &&
+              startup === undefined &&
+              entry.message === 'Component registered'
+            ) {
+              startup = manager.startAllComponents();
+            }
+          },
+        },
+      ],
+      callProcessExit: false,
+    });
+    manager = new LifecycleManager({ logger, shutdownWarningTimeoutMS: -1 });
+    const dependent = new Plain(logger, 'dependent', ['late']);
+    dependent.start = (): Promise<void> => Promise.reject(new Error('no'));
+    await manager.registerComponent(dependent);
+    const late = new Plain(logger, 'late');
+    let starts = 0;
+    late.start = (): Promise<void> => {
+      starts++;
+      return Promise.resolve();
+    };
+
+    isArmed = true;
+    await manager.registerComponent(late, { autoStart: true });
+    const result = await startup;
+    expect(result?.code).toBe('required_component_failed');
+    expect(starts).toBe(1);
+    expect(
+      entries.filter((entry) => entry.message.includes('were not attempted')),
+    ).toEqual([]);
+    await logger.close();
+  });
+
+  test("a previous run's reporter cannot end a new start from a starting listener", async () => {
+    const { logger, manager } = setup();
+
+    class Reporting extends Plain {
+      public staleReporter?: () => boolean;
+
+      public override start(): Promise<void> {
+        this.staleReporter = this.getUnexpectedStopReporter();
+        return Promise.resolve();
+      }
+    }
+
+    const a = new Reporting(logger, 'a');
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+    (
+      a as unknown as { reportUnexpectedStop: () => boolean }
+    ).reportUnexpectedStop();
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+
+    const staleReporter = a.staleReporter;
+    let didStaleReportStop: boolean | undefined;
+    manager.on('component:starting', () => {
+      didStaleReportStop = staleReporter?.();
+    });
+
+    const result = await manager.startComponent('a');
+    expect(didStaleReportStop).toBe(false);
+    expect(result.success).toBe(true);
+    expect(manager.getComponentStatus('a')?.state).toBe('running');
+    await manager.stopAllComponents();
+    await logger.close();
+  });
+
+  test('the logger exit hook waits for a shutdown its own log line started', async () => {
+    // eslint-disable-next-line prefer-const -- assigned after the sink that reads it
+    let manager!: LifecycleManager;
+    let isArmed = false;
+    const logger = new Logger({
+      sinks: [
+        {
+          write: (entry): void => {
+            if (
+              isArmed &&
+              entry.message === 'Logger exit triggered, stopping components...'
+            ) {
+              void manager.stopAllComponents();
+            }
+          },
+        },
+      ],
+      callProcessExit: false,
+    });
+    manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      enableLoggerExitHook: true,
+    });
+    const stopGate = deferred();
+    const a = new Plain(logger, 'a');
+    a.stop = (): Promise<void> => stopGate.promise;
+    await manager.registerComponent(a);
+    await manager.startAllComponents();
+
+    isArmed = true;
+    logger.exit(2);
+    await sleep(20);
+    expect(manager.getSystemState()).toBe('shutting-down');
+    expect(logger.didExit).toBe(false);
+
+    stopGate.resolve();
+    await sleep(20);
+    expect(logger.didExit).toBe(true);
+  });
+
+  test('a component in both stop lists is named once in the shutdown reason', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    Object.defineProperty(a, 'shutdownGracefulTimeoutMS', {
+      value: Number.NaN,
+    });
+    await manager.registerComponent(a);
+
+    let shutdown: ReturnType<LifecycleManager['stopAllComponents']> | undefined;
+    manager.on('component:started', () => {
+      shutdown ??= manager.stopAllComponents();
+    });
+    const { release } = claimReports();
+
+    try {
+      await manager.startComponent('a');
+      const result = await shutdown;
+      expect(result?.success).toBe(false);
+      expect(result?.reason).toContain('Failed to stop: a;');
+      expect(result?.reason).not.toContain('a, a');
+    } finally {
+      release();
+      await logger.close();
+    }
+  });
+});

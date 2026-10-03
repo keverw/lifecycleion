@@ -397,6 +397,8 @@ export class LifecycleManager
     isOrdering: boolean;
     // Registrations from terminal notifications start independently of this pass.
     isCompleting: boolean;
+    // Filled once ordering ends. Those names are this pass's to start already.
+    readonly initialOrderNames: Set<string>;
   } | null = null;
   private isStarted = false;
   // Unique token used to detect shutdowns that happened during async start().
@@ -1514,7 +1516,7 @@ export class LifecycleManager
         // Defer the first logger.exit() that arrives during an already-running
         // shutdown. Later duplicate exit calls stay ignored so they cannot
         // override the eventual exit code after shutdown completes.
-        if (this.isShuttingDown) {
+        const waitForRunningShutdown = async (): Promise<BeforeExitResult> => {
           // The process is on its way out, so a restart stopping right now must not
           // start everything back up behind the exit.
           this.noteShutdownRequestDuringActivePass();
@@ -1539,6 +1541,10 @@ export class LifecycleManager
           });
 
           return { action: 'wait' as const };
+        };
+
+        if (this.isShuttingDown) {
+          return await waitForRunningShutdown();
         }
 
         if (isFirstExit) {
@@ -1547,7 +1553,16 @@ export class LifecycleManager
           });
 
           // Stop all components with the manager's `shutdownOptions` defaults
-          await this.stopAllComponents();
+          const shutdownResult = await this.stopAllComponents();
+
+          // A sink behind the log line above can start the shutdown first. This call
+          // was then refused, and the exit waits for that pass like any other.
+          if (
+            shutdownResult.code === 'already_in_progress' &&
+            this.isShuttingDown
+          ) {
+            return await waitForRunningShutdown();
+          }
         }
 
         // Proceed with exit
@@ -2648,6 +2663,7 @@ export class LifecycleManager
       isRollingBack: false,
       isOrdering: true,
       isCompleting: false,
+      initialOrderNames: new Set<string>(),
     };
     const rollBackOnce = async (names: string[]): Promise<void> => {
       if (hasShutdownBegun()) {
@@ -2784,6 +2800,9 @@ export class LifecycleManager
             startupReads,
           );
           bulkStartup.isOrdering = false;
+          for (const name of startupOrder) {
+            bulkStartup.initialOrderNames.add(name);
+          }
           // Freeze deferred registrations included in the initial order too. Their
           // start is now this loop's responsibility, but it may leave before them.
           for (const name of this.deferredAutoStartNames) {
@@ -2815,9 +2834,9 @@ export class LifecycleManager
             failedOptionalComponents: [],
             skippedDueToDependency: [],
             // `describeError`, not `err.message`, for the reason `getStartupOrder` uses it:
-            // a brand-claiming throw can make `message` an accessor that throws, and this
-            // `try` has only a `finally` above it, so that would reject `startAllComponents`
-            // instead of returning a failed `StartupResult`.
+            // a brand-claiming throw can make `message` an accessor that throws, and that
+            // throw would reach the outer `catch` and be reported as `operation_crashed`
+            // instead of this order's own `code`.
             reason: describeError(err),
             code,
             error: err,
@@ -4671,7 +4690,12 @@ export class LifecycleManager
           // Reserve before logging: a sink can synchronously register more components.
           // The initial order or a follow-up batch owns this start and its outcome.
           progress.isAutoStartDeferred = true;
-          this.deferredAutoStartNames.add(componentName);
+          // A startup this registration's own log line began has ordered it already.
+          // Queued as well, it was started twice and, after a rollback, also reported
+          // as an auto-start the startup never attempted.
+          if (!bulkStartup?.initialOrderNames.has(componentName)) {
+            this.deferredAutoStartNames.add(componentName);
+          }
           this.logger
             .entity(componentName)
             .info('AutoStart: left to the bulk startup about to run');
@@ -5042,7 +5066,8 @@ export class LifecycleManager
    *
    * Everything that can throw is on this side of the latch, so a throw is a synchronous
    * throw to the caller with no pass started and nothing to release - which the public
-   * callers' {@link settleOperation} net turns into an `operation_crashed` result. The pass takes the
+   * callers' {@link settleOperation} net turns into a result: `invalid_options` for a rejected
+   * timeout, `operation_crashed` for any other throw. The pass takes the
    * latch itself, as the first statement inside its `try`.
    *
    * `isRequestToStayDown` says whether a refusal should be recorded on the running pass
@@ -5731,10 +5756,11 @@ export class LifecycleManager
         }
       }
 
-      const stillRunningComponents = [
-        ...runningComponentsToStop,
-        ...startingAtPassStart,
-      ].filter(
+      // A set first: a component that came up while its start was still settling is in
+      // both lists, and would be named twice in the failure reason.
+      const stillRunningComponents = Array.from(
+        new Set([...runningComponentsToStop, ...startingAtPassStart]),
+      ).filter(
         (name) =>
           this.runningComponents.has(name) &&
           !stoppingComponents.has(name) &&
@@ -6255,6 +6281,14 @@ export class LifecycleManager
     }
   }
 
+  private releaseStartSettlements(name: string, exceptClaim?: symbol): void {
+    for (const [claim, settlement] of this.startSettlements) {
+      if (settlement.name === name && claim !== exceptClaim) {
+        settlement.finish();
+      }
+    }
+  }
+
   /**
    * `startComponentAttempt()` with a net under it that settles the component's state.
    *
@@ -6266,14 +6300,6 @@ export class LifecycleManager
    * is put back to the state it had before the attempt; one already running is left
    * running, which is what the registry says.
    */
-  private releaseStartSettlements(name: string, exceptClaim?: symbol): void {
-    for (const [claim, settlement] of this.startSettlements) {
-      if (settlement.name === name && claim !== exceptClaim) {
-        settlement.finish();
-      }
-    }
-  }
-
   private async startComponentInternal(
     name: string,
     options?: StartComponentOptions,
@@ -6771,6 +6797,10 @@ export class LifecycleManager
     };
 
     this.claimComponent(name, 'starting', claim);
+    // The previous run's handler is still keyed to its token, which this attempt only
+    // replaces after the logs and listeners below run caller code. A reporter kept from
+    // that run and called there would otherwise end this start as its unexpected stop.
+    this.clearUnexpectedStopHandler(component, 'start');
 
     for (const warning of skippedDependencyWarnings) {
       this.logger.entity(name).warn(warning);
@@ -6817,8 +6847,8 @@ export class LifecycleManager
       };
     }
 
-    // The unexpected-stop record from the previous run is cleared with the `starting`
-    // claim above: that flag describes a stop that already happened, and a start that
+    // The unexpected-stop record from the previous run is cleared once the attach checks
+    // are past: that flag describes a stop that already happened, and a start that
     // reads it later would take an old failure for a new one.
     this.componentUnexpectedStopHadError.delete(name);
     const shutdownTokenAtStart = shutdownTokenBeforeAttach;
@@ -7029,6 +7059,7 @@ export class LifecycleManager
         !this.runningComponents.has(name)
       ) {
         this.clearUnexpectedStopHandler(component, 'start');
+        this.restoreStallAfterUnexpectedStop(name);
         const error =
           this.componentErrors.get(name) ??
           new Error(`Component "${name}" stopped unexpectedly during startup`);
@@ -7225,6 +7256,11 @@ export class LifecycleManager
         (isStartupTimeout ||
           this.componentUnexpectedStopHadError.get(name) === true)
       ) {
+        // A timed-out attempt has handed `start()` to late cleanup, which retires the
+        // stall itself and maps a `stalled` state to `starting-timed-out`.
+        if (!isStartupTimeout) {
+          this.restoreStallAfterUnexpectedStop(name);
+        }
         return {
           success: false,
           componentName: name,
@@ -9279,6 +9315,21 @@ export class LifecycleManager
       );
       return true;
     });
+  }
+
+  /**
+   * A forced start's unexpected stop ends only the new run: the stop that stalled is still
+   * unfinished. Put `stalled` back, as a failed forced start does, so the stalled refusal,
+   * `retryStalled` and signal detach keep agreeing with the stall record.
+   */
+  private restoreStallAfterUnexpectedStop(name: string): void {
+    if (
+      this.stalledComponents.has(name) &&
+      this.componentStates.get(name) === 'stopped' &&
+      !this.runningComponents.has(name)
+    ) {
+      this.componentStates.set(name, 'stalled');
+    }
   }
 
   private handleComponentUnexpectedStop(
