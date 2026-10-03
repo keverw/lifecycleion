@@ -5443,7 +5443,10 @@ export class LifecycleManager
       const concurrentOwners = new Set<string>();
       const concurrentlyProtectedSkips = new Set<string>();
       const isProtectedByConcurrentOwner = (name: string): boolean => {
-        for (const owner of [...concurrentOwners, ...concurrentlyProtectedSkips]) {
+        for (const owner of [
+          ...concurrentOwners,
+          ...concurrentlyProtectedSkips,
+        ]) {
           if (
             this.runningComponents.has(owner) ||
             this.isComponentInFlight(owner) ||
