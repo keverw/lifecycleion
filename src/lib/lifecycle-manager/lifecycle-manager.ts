@@ -5434,6 +5434,29 @@ export class LifecycleManager
           }
         }
       };
+      // Components a concurrent stop or start owned when the loop reached them. Their
+      // dependencies stay protected only while that owner is still running, in flight,
+      // or has a start still unfinished:
+      // one whose stop has since stalled releases them, as a component this pass stalls
+      // itself does.
+      const concurrentOwners = new Set<string>();
+      const concurrentlyProtectedSkips = new Set<string>();
+      const isProtectedByConcurrentOwner = (name: string): boolean => {
+        for (const owner of concurrentOwners) {
+          if (
+            this.runningComponents.has(owner) ||
+            this.isComponentInFlight(owner) ||
+            isStartUnfinished(currentStarts.get(owner))
+          ) {
+            const ownerDependencies = new Set<string>();
+            protectDependencies(owner, ownerDependencies);
+            if (ownerDependencies.has(name)) {
+              return true;
+            }
+          }
+        }
+        return false;
+      };
       // Start global timeout clock (halts further stop attempts after it fires)
       const timeoutPromise =
         effectiveTimeout > 0
@@ -5616,6 +5639,11 @@ export class LifecycleManager
             stoppingComponents.add(name);
             continue;
           }
+          if (isProtectedByConcurrentOwner(name)) {
+            stoppingComponents.add(name);
+            concurrentlyProtectedSkips.add(name);
+            continue;
+          }
 
           this.logger.entity(name).info('Stopping component');
 
@@ -5623,6 +5651,11 @@ export class LifecycleManager
           protectActiveStartupDependencies();
           if (protectedDependencies.has(name)) {
             stoppingComponents.add(name);
+            continue;
+          }
+          if (isProtectedByConcurrentOwner(name)) {
+            stoppingComponents.add(name);
+            concurrentlyProtectedSkips.add(name);
             continue;
           }
 
@@ -5682,7 +5715,7 @@ export class LifecycleManager
             // Preserve reverse dependency order. A concurrent stop still owns this
             // component; its dependencies must remain available until it settles.
             stoppingComponents.add(name);
-            protectDependencies(name);
+            concurrentOwners.add(name);
             if (shouldHaltOnStall) {
               break;
             }
@@ -5758,6 +5791,17 @@ export class LifecycleManager
           (!this.runningComponents.has(name) &&
             !this.isComponentInFlight(name) &&
             !this.stalledComponents.has(name))
+        ) {
+          stoppingComponents.delete(name);
+        }
+      }
+      // A dependency skipped for a concurrent owner whose stop has since stalled is
+      // no longer held for anything; still running, it is reported as not stopped.
+      for (const name of concurrentlyProtectedSkips) {
+        if (
+          !protectedDependencies.has(name) &&
+          !isProtectedByConcurrentOwner(name) &&
+          !this.isComponentInFlight(name)
         ) {
           stoppingComponents.delete(name);
         }
@@ -6037,7 +6081,7 @@ export class LifecycleManager
     }
 
     // A retry continues the stop that stalled: it keeps when that stop began and
-    // whether its graceful phase timed out, for its force event and any new stall.
+    // whether its graceful phase timed out, for any new stall.
     return await this.shutdownComponentForce(
       name,
       component,
@@ -6312,8 +6356,8 @@ export class LifecycleManager
    * `try`. The public safety net would still answer with `operation_crashed`, but it cannot
    * see the component, which stayed `starting` for good: every later start answered
    * `component_already_starting`. A start that crashes before the component is running
-   * is put back to the state it had before the attempt; one already running is left
-   * running, which is what the registry says.
+   * is put back to the state it had before the attempt; one already running is stopped
+   * again, since a failed start means a component that is not running.
    */
   private async startComponentInternal(
     name: string,

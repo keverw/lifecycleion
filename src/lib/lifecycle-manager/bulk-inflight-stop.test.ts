@@ -123,3 +123,44 @@ test('a concurrent stop that stalls during the pass is reported as stalled, not 
   });
   expect(result.stalledComponents.map((info) => info.name)).toEqual(['stalls']);
 });
+
+test('a dependency of a concurrent stop that stalled mid-pass is stopped, not held as still in progress', async () => {
+  const logger = new Logger({
+    sinks: [new ArraySink()],
+    callProcessExit: false,
+  });
+  const manager = new LifecycleManager({
+    logger,
+    shutdownWarningTimeoutMS: -1,
+  });
+  const database = new Plain(logger, 'database');
+  const slow = new Plain(logger, 'slow', ['database']);
+  const stalls = new Stalls(logger, 'stalls', ['database']);
+  // The pass reaches `stalls` while its concurrent stop is still running, then spends
+  // long enough on `slow` for that stop to stall before it reaches `database`.
+  slow.stop = () => new Promise<void>((resolve) => setTimeout(resolve, 200));
+  stalls.stop = () =>
+    new Promise<void>((_resolve, reject) =>
+      setTimeout(() => reject(new Error('stop failed')), 20),
+    );
+  await manager.registerComponent(database);
+  await manager.registerComponent(slow);
+  await manager.registerComponent(stalls);
+  await manager.startAllComponents();
+
+  const individual = manager.stopComponent('stalls');
+  const result = await manager.stopAllComponents({
+    timeoutMS: 0,
+    haltOnStall: false,
+  });
+
+  expect((await individual).success).toBe(false);
+  expect(result).toMatchObject({
+    success: false,
+    code: 'partial_state',
+    reason: 'Stalled: stalls',
+  });
+  expect([...result.stoppedComponents].sort()).toEqual(['database', 'slow']);
+  expect(result.stalledComponents.map((info) => info.name)).toEqual(['stalls']);
+  expect(manager.getComponentStatus('database')?.state).toBe('stopped');
+});

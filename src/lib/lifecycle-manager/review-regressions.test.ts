@@ -1178,14 +1178,15 @@ describe('LifecycleManager - review regressions', () => {
     await manager.registerComponent(api);
     await manager.startAllComponents();
 
-    // A concurrent stop owns `api`, so the pass protects its dependencies.
+    // A concurrent stop owns `api`, so the pass protects its dependencies: it reads them
+    // when it reaches `db`, which the default `haltOnStall` break would never get to.
     const apiStop = manager.stopComponent('api');
 
     const { reports, release } = claimReports();
     let result;
 
     try {
-      result = await manager.stopAllComponents();
+      result = await manager.stopAllComponents({ haltOnStall: false });
     } finally {
       stopGate.resolve();
       await apiStop;
