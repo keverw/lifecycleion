@@ -186,8 +186,9 @@ test('a dependency skipped for a concurrent stop keeps its own dependencies up a
       setTimeout(() => reject(new Error('stop failed')), 20),
     );
   let wasCacheRunningAtDatabaseStop: boolean | undefined;
-  database.stop = async () => {
+  database.stop = () => {
     wasCacheRunningAtDatabaseStop = manager.isComponentRunning('cache');
+    return Promise.resolve();
   };
   await manager.registerComponent(database);
   await manager.registerComponent(slow);
