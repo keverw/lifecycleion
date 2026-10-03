@@ -562,6 +562,33 @@ describe('runCallbackSafely', () => {
       globalThis.removeEventListener('error', onGlobalError);
     }
   });
+
+  it('routes a constructor that throws on observation to onError instead of throwing', () => {
+    const failure = new Error('species read');
+    const returned = Promise.resolve('value');
+    let reads = 0;
+    // `Promise.resolve()` reads it once and gets `Promise`; observing then reads it again.
+    void Object.defineProperty(returned, 'constructor', {
+      get() {
+        reads++;
+        if (reads > 1) {
+          throw failure;
+        }
+        return Promise;
+      },
+    });
+    const failures: unknown[] = [];
+
+    expect(() =>
+      runCallbackSafely(
+        'cb',
+        () => returned,
+        [],
+        (error) => failures.push(error),
+      ),
+    ).not.toThrow();
+    expect(failures).toEqual([failure]);
+  });
 });
 
 describe('reportCallbackError', () => {

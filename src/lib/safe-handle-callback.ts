@@ -199,9 +199,15 @@ function invokeCallbackSafely(
     return;
   }
   if (pending !== undefined) {
-    observeRejection(pending, (error: unknown) => {
+    try {
+      observeRejection(pending, (error: unknown) => {
+        reportToOnError(callbackName, error, onError);
+      });
+    } catch (error) {
+      // Native `then` reads the returned promise's `constructor`/species, which can
+      // throw synchronously; that is this callback's failure, not the caller's.
       reportToOnError(callbackName, error, onError);
-    });
+    }
   }
 }
 

@@ -544,8 +544,7 @@ export interface BroadcastResult {
   /** Machine-readable outcome code */
   code:
     | 'sent'
-    // Unregistered while the broadcast was running.
-    | 'not_found'
+    // Also a target unregistered while the broadcast was running.
     | 'stopped'
     | 'stalled'
     | 'no_handler'

@@ -6851,6 +6851,8 @@ export class LifecycleManager
     // Whether the failure is `start()`'s own - `error` - rather than the attempt's own
     // bookkeeping crashing around it - `operation_crashed`.
     let didStartHookFail = false;
+    // Set once `start()` has resolved: the component holds whatever it brought up.
+    let didStartResolve = false;
 
     try {
       // Inside the `try`, so a failure here is a failed start like any other - reported
@@ -6990,6 +6992,7 @@ export class LifecycleManager
           throw error;
         }
       }
+      didStartResolve = true;
 
       // The startup deadline no longer applies once start() has settled.
       clearTimeout(timeoutHandle);
@@ -7160,6 +7163,25 @@ export class LifecycleManager
       // component again so the failed start it reports is true.
       if (this.runningComponents.has(name)) {
         throw error;
+      }
+
+      // `start()` resolved and the bookkeeping after it threw before marking it running.
+      // Answered as `registered`, what it brought up would be owned by nothing. Mark it
+      // running so `startComponentInternal()` stops it again, as it does above. A
+      // deadline that already won hands a fulfilled start to late cleanup instead.
+      if (
+        didStartResolve &&
+        !(startupTimeoutError !== undefined && error === startupTimeoutError) &&
+        this.componentStates.get(name) === 'starting'
+      ) {
+        try {
+          this.withTransition(() => this.markComponentRunning(name));
+        } catch {
+          // Left to the failed-start path below.
+        }
+        if (this.runningComponents.has(name)) {
+          throw error;
+        }
       }
 
       // Contained, as unregister contains it: an override that throws here escaped to the

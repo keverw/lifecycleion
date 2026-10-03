@@ -1479,8 +1479,7 @@ interface BroadcastResult {
   timedOut: boolean;
   code:
     | 'sent'
-    | 'not_found' // Unregistered while the broadcast was running
-    | 'stopped'
+    | 'stopped' // Also a target unregistered while the broadcast was running
     | 'stalled'
     | 'no_handler'
     | 'timeout'

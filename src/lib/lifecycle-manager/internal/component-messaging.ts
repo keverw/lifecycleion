@@ -380,28 +380,25 @@ export async function broadcastMessageInternal(
     includeStalled: allowStalled,
   };
 
-  // Filter by running/stalled/stopped state unless explicitly included
-  if (!allowStopped && !allowStalled && !hasExplicitTargets) {
-    targetComponents = targetComponents.filter((c) =>
-      context.isComponentRunning(context.nameOf(c)),
+  // The one eligibility rule for both the selection and each send: running, or a
+  // non-running state the caller opted into. Finer refusals - startup, teardown - are
+  // `sendMessageInternal()`'s.
+  const skipCodeFor = (name: string): 'stalled' | 'stopped' | undefined => {
+    if (context.isComponentRunning(name)) {
+      return undefined;
+    }
+    const isStalled = context.stalledComponents.has(name);
+    if (isStalled ? allowStalled : allowStopped) {
+      return undefined;
+    }
+    return isStalled ? 'stalled' : 'stopped';
+  };
+
+  // Explicit targets are all reported, eligible or not; otherwise only eligible ones.
+  if (!hasExplicitTargets) {
+    targetComponents = targetComponents.filter(
+      (c) => skipCodeFor(context.nameOf(c)) === undefined,
     );
-  } else if (!hasExplicitTargets) {
-    targetComponents = targetComponents.filter((c) => {
-      const name = context.nameOf(c);
-      const isRunning = context.isComponentRunning(name);
-
-      if (isRunning) {
-        return true;
-      }
-
-      const isStalled = context.stalledComponents.has(name);
-
-      if (isStalled) {
-        return allowStalled;
-      }
-
-      return allowStopped;
-    });
   }
 
   context.lifecycleEvents.componentBroadcastStarted(from, payload);
@@ -415,14 +412,9 @@ export async function broadcastMessageInternal(
     for (const component of targetComponents) {
       // The recorded name, so no component's own `getName()` runs mid-broadcast.
       const name = context.nameOf(component);
-      const isRunning = context.isComponentRunning(name);
-      const isStalled = context.stalledComponents.has(name);
-      const isStopped = !isRunning && !isStalled;
-      const allowNonRunning =
-        (isStalled && allowStalled) || (isStopped && allowStopped);
+      const skipCode = skipCodeFor(name);
 
-      // Skip if not running and not explicitly allowed
-      if (!isRunning && !allowNonRunning) {
+      if (skipCode !== undefined) {
         results.push({
           name,
           sent: false,
@@ -430,7 +422,7 @@ export async function broadcastMessageInternal(
           data: undefined,
           error: null,
           timedOut: false,
-          code: isStalled ? 'stalled' : 'stopped',
+          code: skipCode,
         });
         continue;
       }
