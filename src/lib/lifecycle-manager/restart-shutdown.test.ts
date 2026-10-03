@@ -990,3 +990,38 @@ describe('LifecycleManager - shutdown during restartComponent()', () => {
     expect(manager.getComponentStatus('gated')?.state).toBe('stopped');
   });
 });
+
+describe('LifecycleManager - shutdown refused by a concurrent restart during restartComponent()', () => {
+  test('a stay-down request recorded on a concurrent restart pass skips the start', async () => {
+    const { logger, manager } = setup();
+    const gated = new GatedStop(logger, 'gated');
+    const other = new GatedStop(logger, 'other');
+    await manager.registerComponent(gated);
+    await manager.registerComponent(other);
+    await manager.startAllComponents();
+
+    const restart = manager.restartComponent('gated');
+    await gated.stopping.promise;
+
+    // The bulk restart's pass parks on `other` first, in reverse registration order.
+    const restartAll = manager.restartAllComponents();
+    await other.stopping.promise;
+
+    // Refused, but recorded on the running restart pass as a request to stay down.
+    const refused = await manager.stopAllComponents();
+    expect(refused.code).toBe('already_in_progress');
+
+    other.releaseStop();
+    const restartAllResult = await restartAll;
+    expect(restartAllResult.startupSkippedByShutdownRequest).toBe(true);
+    expect(manager.getStatus().isShuttingDown).toBe(false);
+
+    gated.releaseStop();
+    const result = await restart;
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('restart_start_failed');
+    expect(gated.startCount).toBe(1);
+    expect(manager.isComponentRunning('gated')).toBe(false);
+  });
+});

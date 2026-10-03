@@ -414,6 +414,10 @@ export class LifecycleManager
   // How many shutdown passes that asked the process to stay down have been accepted. A
   // restart compares it across its stop phase: see `restartAllComponentsOperation()`.
   private stayDownPassCount = 0;
+  // How many requests to stay down have arrived, whether accepted as a pass or refused
+  // and recorded on a running one. An individual restart owns no pass for a refusal to
+  // land on, so it compares this across its stop: see `restartComponentOperation()`.
+  private stayDownRequestCount = 0;
   // Each registered component's name, read once when it is committed to the registry.
   // See {@link nameOf}.
   private readonly registeredNames = new WeakMap<BaseComponent, string>();
@@ -4129,8 +4133,10 @@ export class LifecycleManager
       claimed: false,
     };
     // A shutdown that asks the process to stay down can be accepted and finish while
-    // the stop awaits, so the start below would no longer find it running.
-    const stayDownPassCountAtStop = this.stayDownPassCount;
+    // the stop awaits, so the start below would no longer find it running. A request
+    // refused by a concurrent restart's stop phase asks the same, and leaves no pass
+    // running either once that restart skips its startup.
+    const stayDownRequestCountAtStop = this.stayDownRequestCount;
     const stopResult = await this.settleOperation(
       'stopComponent',
       () => this.stopComponentOperation(name, stopOptions, stopContext),
@@ -4163,7 +4169,7 @@ export class LifecycleManager
       };
     }
 
-    if (this.stayDownPassCount !== stayDownPassCountAtStop) {
+    if (this.stayDownRequestCount !== stayDownRequestCountAtStop) {
       return {
         success: false,
         componentName: name,
@@ -5227,6 +5233,7 @@ export class LifecycleManager
 
       if (isRequestToStayDown) {
         this.stayDownPassCount++;
+        this.stayDownRequestCount++;
       }
 
       if (pendingRestartAutoStarts !== undefined) {
@@ -10038,7 +10045,8 @@ export class LifecycleManager
    * shutdown the requester gets, and starting a second pass on top of it would be wrong.
    * What must not happen is a `restartAllComponents()` whose stop phase that pass is
    * starting everything back up afterwards, so the request is recorded on the pass and
-   * phase 2 is skipped instead.
+   * phase 2 is skipped instead. It is also counted in `stayDownRequestCount`, so an
+   * individual `restartComponent()` stopping a component meanwhile skips its start too.
    *
    * Reached from `acceptShutdownPass()`'s refusals for every request that asks to stay
    * down (its `isRequestToStayDown`), and directly from the two places that see a running
@@ -10049,6 +10057,7 @@ export class LifecycleManager
   private noteShutdownRequestDuringActivePass(): void {
     if (this.activeShutdownPass !== null) {
       this.activeShutdownPass.shutdownRequested = true;
+      this.stayDownRequestCount++;
     }
   }
 
