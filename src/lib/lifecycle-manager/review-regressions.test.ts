@@ -978,7 +978,7 @@ describe('LifecycleManager - review regressions', () => {
       release();
     }
 
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('error');
     expect(manager.getStalledComponents()[0]?.reason).toBe('error');
     expect(forceTimeoutEvents).toBe(0);
   });
@@ -1084,7 +1084,7 @@ describe('LifecycleManager - review regressions', () => {
       release();
     }
 
-    expect(result.code).not.toBe('unknown_error');
+    expect(result.code).not.toBe('operation_crashed');
     expect(hasReport(reports, 'shutdown dependencies of api')).toBe(true);
   });
 

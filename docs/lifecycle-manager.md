@@ -1389,7 +1389,8 @@ interface MessageResult {
     | 'stalled'
     | 'no_handler'
     | 'timeout'
-    | 'error';
+    | 'error' // The component's handler (or its getter) threw
+    | 'operation_crashed'; // The call itself crashed - a bug to report
 }
 ```
 
@@ -1482,7 +1483,8 @@ interface BroadcastResult {
     | 'no_handler'
     | 'timeout'
     | 'invalid_options'
-    | 'error';
+    | 'error' // The component's handler (or its getter) threw
+    | 'operation_crashed'; // The call itself crashed - a bug to report
 }
 ```
 
@@ -1535,7 +1537,8 @@ interface HealthCheckResult {
     | 'stalled'
     | 'no_handler'
     | 'timeout'
-    | 'error';
+    | 'error' // The component's handler (or its getter) threw
+    | 'operation_crashed'; // The call itself crashed - a bug to report
 }
 
 interface HealthReport {
@@ -1544,8 +1547,8 @@ interface HealthReport {
   checkedAt: number;
   durationMS: number;
   timedOut: boolean;
-  code: 'ok' | 'degraded' | 'timeout' | 'error';
-  error?: Error; // Set when the check itself failed unexpectedly
+  code: 'ok' | 'degraded' | 'timeout' | 'error' | 'operation_crashed';
+  error?: Error; // Set when the check itself failed unexpectedly (operation_crashed)
 }
 ```
 
@@ -1586,7 +1589,7 @@ interface GetValueOptions {
 }
 ```
 
-`getValue()` is synchronous and never throws. A component's own `getValue()` handler that throws returns `code: 'error'`, and so does an unexpected failure in the lookup itself, which also carries the thrown value on `error` and is reported on the global `'error'` channel.
+`getValue()` is synchronous and never throws. A component's own `getValue()` handler that throws returns `code: 'error'`. An unexpected failure in the lookup itself returns `code: 'operation_crashed'`, carries the thrown value on `error`, and is reported on the global `'error'` channel.
 
 ### Signal Integration
 
@@ -2840,9 +2843,9 @@ Every async method answers with a result object, including when something goes w
 | `startAllComponents()`, `stopAllComponents()`, `restartAllComponents()`  | `code: 'operation_crashed'` with `error`                              |
 | `startComponent()`, `stopComponent()`, `restartComponent()`              | `code: 'operation_crashed'` with `error`                              |
 | `getStartupOrder()` (synchronous)                                        | `code: 'operation_crashed'` with `error`                              |
-| `sendMessageToComponent()`, `checkComponentHealth()`, `checkAllHealth()` | `code: 'error'`                                                       |
-| `getValue()` (synchronous)                                               | `code: 'error'` with `error`                                          |
-| `triggerReload()`, `triggerInfo()`, `triggerDebug()`                     | `code: 'error'`, including when your callback throws                  |
+| `sendMessageToComponent()`, `checkComponentHealth()`, `checkAllHealth()` | `code: 'operation_crashed'`                                           |
+| `getValue()` (synchronous)                                               | `code: 'operation_crashed'` with `error`                              |
+| `triggerReload()`, `triggerInfo()`, `triggerDebug()`                     | `code: 'operation_crashed'` with `error`                              |
 | `broadcastMessage()`                                                     | an empty array                                                        |
 
 Invalid timeout values are expected refusals (`invalid_options`) and do not use the
@@ -2851,7 +2854,7 @@ global callback-error channel; inspect their `error` for the named option. The a
 a warning instead. The table above describes unexpected failures, including ordinary
 exceptions thrown by getters.
 
-Branch on `code` as usual; `operation_crashed` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around. It is distinct from `unknown_error`, which a per-component operation answers when the component's own `start()`, `stop()`, or `onShutdownForce()` throws or rejects - an ordinary failure of that component, not of the manager.
+Branch on `code` as usual; `operation_crashed` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around. Every call uses the same pair of codes: `operation_crashed` when the call itself fails, and `error` when your own code does - a component's `start()`, `stop()`, `onShutdownForce()`, `healthCheck()`, `onMessage()` or `getValue()` throwing or rejecting, or a custom `onReloadRequested` / `onInfoRequested` / `onDebugRequested` callback doing so. An `error` is an ordinary failure of that code, not of the manager.
 
 A stop that crashes still records the component as stalled, so it can be retried or unregistered. Its result carries `status`, whose `stallInfo` describes that stall, and its `reason` says so when the graceful phase had already timed out first. Its `component:stalled` event uses `component_shutdown_timeout` in that case and `operation_crashed` otherwise.
 
@@ -2935,7 +2938,7 @@ type ComponentOperationFailureCode =
   | 'restart_start_failed'
   | 'startup_rolled_back' // auto-start refused because bulk startup is rolling back
   | 'signal_attach_failed'
-  | 'unknown_error' // The component's own start(), stop(), or onShutdownForce() failed
+  | 'error' // The component's own start(), stop(), or onShutdownForce() failed
   | 'operation_crashed'; // The operation itself threw - a bug to report
 
 // Registration failure codes
@@ -4091,7 +4094,7 @@ Shutdown results record that operation's outcome. Late cleanup can change a stal
 component to stopped without rewriting an earlier failure result. Use
 `getComponentStatus()` for current state. Late failures remain reported, but an older
 attempt cannot overwrite a retry or replacement. A hook that throws
-`ComponentStopTimeoutError` still reports a hook failure (`unknown_error`); only the
+`ComponentStopTimeoutError` still reports a hook failure (`error`); only the
 manager's own deadline counts as a timeout.
 
 Shutdown warnings target running components, or stalled components included through

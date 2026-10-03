@@ -373,7 +373,7 @@ test('a value fallback does not report a provisional component as found', async 
   };
   try {
     await manager.registerComponent(component);
-    expect(result?.code).toBe('error');
+    expect(result?.code).toBe('operation_crashed');
     expect(result?.componentFound).toBe(false);
   } finally {
     release();

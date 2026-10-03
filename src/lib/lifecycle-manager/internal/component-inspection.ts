@@ -340,7 +340,10 @@ export async function checkAllHealthOperation(
   const isOverallHealthy = results.every((r) => r.healthy);
   const hasTimeout = results.some((r) => r.timedOut);
   const hasError = results.some(
-    (r) => r.code === 'error' || r.code === 'invalid_options',
+    (r) =>
+      r.code === 'error' ||
+      r.code === 'operation_crashed' ||
+      r.code === 'invalid_options',
   );
   // "no_handler" is treated as healthy by design (implicit OK).
   const hasDegraded = results.some(

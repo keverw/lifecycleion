@@ -156,11 +156,27 @@ export function crashedShutdownResult(
 }
 
 /**
- * The `SignalBroadcastResult` for a `trigger*()` call that failed as a whole - its
- * custom `on*Requested` callback threw or rejected, or the call itself crashed - so
- * there are no per-component results to report.
+ * The `SignalBroadcastResult` for a `trigger*()` call that crashed as a whole, so there
+ * are no per-component results to report.
  */
 export function crashedSignalBroadcastResult(
+  signal: SignalBroadcastResult['signal'],
+  error: Error,
+): SignalBroadcastResult {
+  return {
+    signal,
+    results: [],
+    timedOut: false,
+    code: 'operation_crashed',
+    error,
+  };
+}
+
+/**
+ * The `SignalBroadcastResult` for a `trigger*()` call whose custom `on*Requested`
+ * callback threw or rejected: the caller's own code failed, so `error`, not a crash.
+ */
+export function failedSignalCallbackResult(
   signal: SignalBroadcastResult['signal'],
   error: Error,
 ): SignalBroadcastResult {
@@ -182,7 +198,7 @@ export function crashedHealthCheckResult(
     durationMS: 0,
     error,
     timedOut: false,
-    code: 'error',
+    code: 'operation_crashed',
   };
 }
 

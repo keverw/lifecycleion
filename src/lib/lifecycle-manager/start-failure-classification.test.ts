@@ -121,7 +121,7 @@ test('component-thrown startup timeout error is a handler failure', async () => 
   const { release } = claimReports();
   try {
     const result = await manager.startComponent('a');
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('error');
     expect(result.error).toBe(failure);
     expect(manager.getComponentStatus('a')?.state).toBe('registered');
     expect(timeouts).toBe(0);

@@ -87,7 +87,7 @@ for (const phase of ['graceful', 'force', 'escalated-force'] as const) {
     });
     await sleep(10);
     expect(result.success).toBe(false);
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('error');
     expect(result.error).toBe(failure);
     expect(manager.getComponentStatus('a')?.state).toBe('stalled');
     // The deadline observer owns the actual hook rejection once installed.
@@ -124,7 +124,7 @@ test('a component-created stop timeout error is a hook failure, not this attempt
   await manager.startComponent('a');
   const result = await manager.stopComponent('a');
   expect(result.success).toBe(false);
-  expect(result.code).toBe('unknown_error');
+  expect(result.code).toBe('error');
   expect(result.error).toBe(failure);
 });
 
@@ -178,7 +178,7 @@ for (const isForceImmediate of [false, true]) {
       forceImmediate: isForceImmediate,
     });
     expect(result.success).toBe(false);
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('error');
     expect(result.status?.stallInfo?.reason).toBe('error');
   });
 }

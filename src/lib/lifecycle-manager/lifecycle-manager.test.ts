@@ -2469,7 +2469,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.message).toBe('Stop error');
-      expect(result.code).toBe('unknown_error');
+      expect(result.code).toBe('error');
 
       const status = lifecycle.getComponentStatus('failing');
       const definedStatus = requireDefined(status, 'status');
@@ -2506,7 +2506,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
 
       expect(result.success).toBe(false);
       expect(result.error?.message).toBe('Force stop error');
-      expect(result.code).toBe('unknown_error');
+      expect(result.code).toBe('error');
 
       const status = lifecycle.getComponentStatus('failing-force');
       const definedStatus = requireDefined(status, 'status');
@@ -2789,7 +2789,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
 
       expect(flags.has('restart')).toBe(false);
       expect(result.success).toBe(false);
-      expect(result.code).toBe('unknown_error');
+      expect(result.code).toBe('error');
       expect(result.reason).toBe('start rejected on restart');
     });
 
@@ -2888,7 +2888,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       const result = await lifecycle.startComponent('self-stop');
 
       expect(result.success).toBe(false);
-      expect(result.code).toBe('unknown_error');
+      expect(result.code).toBe('error');
       expect(result.reason).toBe('start rejected after stop signal');
       expect(result.error?.message).toBe('start rejected after stop signal');
       expect(lifecycle.isComponentRunning('self-stop')).toBe(false);
@@ -4740,7 +4740,7 @@ describe('LifecycleManager - Bulk Operations', () => {
       const stopResult = await stopPromise;
 
       expect(startResult.success).toBe(false);
-      expect(startResult.code).toBe('unknown_error');
+      expect(startResult.code).toBe('error');
       expect(startResult.reason).toBe(
         'Cannot start while shutdown is in progress',
       );
@@ -4803,7 +4803,7 @@ describe('LifecycleManager - Bulk Operations', () => {
       const stopResult = await stopPromise;
 
       expect(startResult.success).toBe(false);
-      expect(startResult.code).toBe('unknown_error');
+      expect(startResult.code).toBe('error');
       expect(stopResult.success).toBe(false);
       expect(lifecycle.getStalledComponentCount()).toBe(0);
       expect(lifecycle.getComponentStatus('failing-restart')?.state).toBe(

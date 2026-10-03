@@ -197,7 +197,7 @@ describe('LifecycleManager - public methods never reject', () => {
     expect((await manager.unregisterComponent('a')).success).toBe(true);
   });
 
-  test('registering something that is not a component resolves with unknown_error', async () => {
+  test('registering something that is not a component resolves with operation_crashed', async () => {
     const { manager } = setup();
     const { release } = claimReports();
     let result;
@@ -856,7 +856,7 @@ describe('LifecycleManager - public methods never reject', () => {
 
     try {
       await manager.triggerReload();
-      expect((await fired)?.code).toBe('error');
+      expect((await fired)?.code).toBe('operation_crashed');
     } finally {
       release();
     }
@@ -1074,7 +1074,7 @@ describe('LifecycleManager - public methods never reject', () => {
       release();
     }
 
-    expect(result.code).not.toBe('unknown_error');
+    expect(result.code).not.toBe('operation_crashed');
     expect(result.stoppedComponents).toContain('other');
     expect(manager.getComponentStatus('stalled')?.state).toBe('stalled');
   });

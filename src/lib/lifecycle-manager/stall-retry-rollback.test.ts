@@ -206,7 +206,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
     await manager.startComponent('both');
 
     const first = await manager.stopComponent('both');
-    expect(first.code).toBe('unknown_error');
+    expect(first.code).toBe('error');
     expect(manager.getStalledComponents()[0].reason).toBe('both');
 
     Object.defineProperty(component, 'onShutdownForce', { value: undefined });
@@ -214,7 +214,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
 
     expect(retry).toMatchObject({
       success: false,
-      code: 'unknown_error',
+      code: 'error',
       reason: first.reason,
     });
     expect(manager.getStalledComponents()[0].reason).toBe('both');
@@ -307,7 +307,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
     });
     const retry = await retryStalled(manager, 'slow');
 
-    expect(retry).toMatchObject({ success: false, code: 'unknown_error' });
+    expect(retry).toMatchObject({ success: false, code: 'error' });
     expect(contexts).toEqual([
       { gracefulPhaseRan: false, gracefulTimedOut: false },
     ]);
@@ -347,7 +347,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
     await new Promise((resolve) => setTimeout(resolve, 5));
     const retry = await retryStalled(manager, 'both');
 
-    expect(retry).toMatchObject({ success: false, code: 'unknown_error' });
+    expect(retry).toMatchObject({ success: false, code: 'error' });
     const after = manager.getStalledComponents()[0];
     expect(after).toMatchObject({
       phase: 'force',
@@ -597,7 +597,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
 
     expect(result).toMatchObject({
       success: false,
-      code: 'unknown_error',
+      code: 'error',
       reason: 'Force shutdown failed',
     });
     expect(manager.getStalledComponents()[0]).toMatchObject({

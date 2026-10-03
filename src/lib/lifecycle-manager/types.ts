@@ -213,10 +213,10 @@ export interface RestartComponentOptions {
 /**
  * Stable, machine-readable failure codes for individual component operations.
  * `invalid_options` is an expected timeout-validation refusal, not a callback crash.
- * `unknown_error` is a component's own hook failing (`start()` or `stop()` threw or
- * rejected, `onShutdownForce()` failed). `operation_crashed` is the operation itself
- * throwing - a bug in the manager, or a component getter that broke its contract - and
- * is never an expected outcome.
+ * `error` is a component's own hook failing (`start()` or `stop()` threw or rejected,
+ * `onShutdownForce()` failed), as `error` is for every other call that runs your code.
+ * `operation_crashed` is the operation itself throwing - a bug in the manager, or a
+ * component getter that broke its contract - and is never an expected outcome.
  */
 export type ComponentOperationFailureCode =
   | 'invalid_options'
@@ -239,7 +239,7 @@ export type ComponentOperationFailureCode =
   | 'signal_attach_failed'
   // An auto-start refused because the active bulk startup is already rolling back.
   | 'startup_rolled_back'
-  | 'unknown_error'
+  | 'error'
   | 'operation_crashed';
 
 /**
@@ -465,7 +465,8 @@ export interface MessageResult {
     | 'no_handler'
     | 'timeout'
     | 'invalid_options'
-    | 'error';
+    | 'error'
+    | 'operation_crashed';
 }
 
 /**
@@ -543,7 +544,8 @@ export interface BroadcastResult {
     | 'no_handler'
     | 'timeout'
     | 'invalid_options'
-    | 'error';
+    | 'error'
+    | 'operation_crashed';
 }
 
 /**
@@ -597,7 +599,8 @@ export interface HealthCheckResult {
     | 'no_handler'
     | 'timeout'
     | 'invalid_options'
-    | 'error';
+    | 'error'
+    | 'operation_crashed';
 }
 
 /**
@@ -620,9 +623,9 @@ export interface HealthReport {
   timedOut: boolean;
 
   /** Machine-readable outcome code */
-  code: 'ok' | 'degraded' | 'timeout' | 'error';
+  code: 'ok' | 'degraded' | 'timeout' | 'error' | 'operation_crashed';
 
-  /** The thrown value, when the check itself failed unexpectedly (`code: 'error'`) */
+  /** The thrown value, when the check itself failed unexpectedly (`code: 'operation_crashed'`) */
   error?: Error;
 }
 
@@ -640,12 +643,19 @@ export interface SignalBroadcastResult {
   timedOut: boolean;
 
   /** Machine-readable outcome code */
-  code: 'ok' | 'partial_timeout' | 'timeout' | 'partial_error' | 'error';
+  code:
+    | 'ok'
+    | 'partial_timeout'
+    | 'timeout'
+    | 'partial_error'
+    | 'error'
+    | 'operation_crashed';
 
   /**
-   * The thrown value, when the broadcast itself failed rather than a component's handler
-   * - a custom `on*Requested` callback that threw or rejected, or an unexpected failure
-   * (`code: 'error'`). Per-component failures are on `results`.
+   * The thrown value, when the broadcast itself failed rather than a component's handler:
+   * a custom `on*Requested` callback that threw or rejected (`code: 'error'`), or an
+   * unexpected failure of the call (`code: 'operation_crashed'`). Per-component failures
+   * are on `results`.
    */
   error?: Error;
 }
@@ -711,11 +721,19 @@ export interface ValueResult<T = unknown> {
   requestedBy: string | null;
 
   /** Machine-readable outcome code */
-  code: 'found' | 'not_found' | 'stopped' | 'stalled' | 'no_handler' | 'error';
+  code:
+    | 'found'
+    | 'not_found'
+    | 'stopped'
+    | 'stalled'
+    | 'no_handler'
+    | 'error'
+    | 'operation_crashed';
 
   /**
-   * The failure behind `code: 'error'`: what the component's `getValue()` handler threw, or
-   * what the lookup itself threw unexpectedly.
+   * The failure behind `code: 'error'` - what the component's `getValue()` handler (or its
+   * getter) threw - or behind `code: 'operation_crashed'`, what the lookup itself threw
+   * unexpectedly.
    */
   error?: Error;
 }

@@ -32,6 +32,7 @@ import {
   crashedStartupResult,
   crashedShutdownResult,
   crashedSignalBroadcastResult,
+  failedSignalCallbackResult,
   crashedHealthCheckResult,
   crashedComponentResult,
   refusedStartupResult,
@@ -1670,7 +1671,7 @@ export class LifecycleManager
         checkedAt: Date.now(),
         durationMS: 0,
         timedOut: false,
-        code: 'error',
+        code: 'operation_crashed',
         error,
       }),
     );
@@ -1796,7 +1797,7 @@ export class LifecycleManager
    * `getValueInternal()` under a synchronous version of the public-method safety net
    * (see {@link settleOperation}): `getValue()` answers synchronously, so it gets a
    * `try`/`catch` rather than a settled promise, but the same promise - an unexpected
-   * failure comes back as `code: 'error'` with the original on `error`, and is reported
+   * failure comes back as `code: 'operation_crashed'` with the original on `error`, and is reported
    * on the global `'error'` channel. Shared by `getValue()` and the component-scoped
    * `ComponentLifecycle.getValue()`.
    */
@@ -1818,7 +1819,7 @@ export class LifecycleManager
         componentRunning: this.runningComponents.has(componentName),
         handlerImplemented: false,
         requestedBy: from,
-        code: 'error',
+        code: 'operation_crashed',
         error: toError(error),
       };
     }
@@ -1849,7 +1850,7 @@ export class LifecycleManager
         timedOut: false,
         code: isOperationTimeoutValidationError(error)
           ? 'invalid_options'
-          : 'error',
+          : 'operation_crashed',
       }),
     );
   }
@@ -7247,9 +7248,7 @@ export class LifecycleManager
           success: false,
           componentName: name,
           reason,
-          code: isStartupTimeout
-            ? 'component_startup_timeout'
-            : 'unknown_error',
+          code: isStartupTimeout ? 'component_startup_timeout' : 'error',
           error: err,
           status: this.getComponentStatus(name),
         };
@@ -7827,7 +7826,7 @@ export class LifecycleManager
           // brand-claiming value unchanged, so a `message` accessor that throws
           // here escapes as a rejection instead of this failure result.
           reason: describeError(err),
-          code: 'unknown_error',
+          code: 'error',
           error: err,
           status: this.getComponentStatus(name),
         };
@@ -8005,7 +8004,7 @@ export class LifecycleManager
         code:
           stallInfo.reason === 'timeout'
             ? 'component_shutdown_timeout'
-            : 'unknown_error',
+            : 'error',
       });
 
       // Answers with the original graceful phase error, if it ran
@@ -8196,7 +8195,7 @@ export class LifecycleManager
 
         this.lifecycleEvents.componentStalled(name, stallInfo, {
           reason: stallInfo.reason,
-          code: isTimeout ? 'component_shutdown_timeout' : 'unknown_error',
+          code: isTimeout ? 'component_shutdown_timeout' : 'error',
         });
 
         return {
@@ -8205,7 +8204,7 @@ export class LifecycleManager
           reason: isTimeout
             ? LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT
             : message,
-          code: isTimeout ? 'component_shutdown_timeout' : 'unknown_error',
+          code: isTimeout ? 'component_shutdown_timeout' : 'error',
           error: err,
           status: this.getComponentStatus(name),
         };
@@ -8319,7 +8318,7 @@ export class LifecycleManager
           : isForcePhase
             ? 'Force shutdown failed'
             : 'Graceful shutdown failed',
-      code: didTimeOut ? 'component_shutdown_timeout' : 'unknown_error',
+      code: didTimeOut ? 'component_shutdown_timeout' : 'error',
       error,
       status: this.getComponentStatus(name),
     };
@@ -10299,7 +10298,7 @@ export class LifecycleManager
       );
 
       if (!outcome.success) {
-        return crashedSignalBroadcastResult(descriptor.signal, outcome.error);
+        return failedSignalCallbackResult(descriptor.signal, outcome.error);
       }
 
       // Return empty result (custom callback handled it)

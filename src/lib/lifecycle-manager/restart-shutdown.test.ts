@@ -610,7 +610,7 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     });
 
     // The bookkeeping the acceptance step runs before it takes the latch. A throw there
-    // is a manager bug, and it reaches the caller as one - an `unknown_error` result
+    // is a manager bug, and it reaches the caller as one - an `operation_crashed` result
     // carrying the thrown value - rather than as a pass that started or a refusal that
     // did not happen.
     const internals = manager as unknown as {

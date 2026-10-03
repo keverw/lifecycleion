@@ -983,7 +983,7 @@ describe('LifecycleManager - hostile thrown values', () => {
     const result = await lifecycle.startComponent('unreadable-start');
 
     expect(result.success).toBe(false);
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('error');
     expect(result.reason).toBe('<error message could not be read>');
     expect(events).toEqual(['start-failed']);
     expect(lifecycle.getComponentStatus('unreadable-start')?.state).toBe(
@@ -1018,7 +1018,7 @@ describe('LifecycleManager - hostile thrown values', () => {
     const result = await lifecycle.stopComponent('unreadable-stop');
 
     expect(result.success).toBe(false);
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('error');
     expect(result.reason).toBe('<error message could not be read>');
     expect(events).toEqual(['stalled']);
     expect(lifecycle.getComponentStatus('unreadable-stop')?.state).toBe(
@@ -1080,7 +1080,7 @@ describe('LifecycleManager - hostile thrown values', () => {
     const result = await lifecycle.stopComponent('unreadable-force');
 
     expect(result.success).toBe(false);
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('error');
     expect(result.reason).toBe('<error message could not be read>');
     expect(events).toEqual(['stalled']);
     expect(lifecycle.getComponentStatus('unreadable-force')?.state).toBe(

@@ -53,7 +53,7 @@ for (const phase of ['graceful', 'force'] as const) {
         expect(stalled).toBe(result.success ? 0 : 1);
         if (!result.success) {
           expect(result.code).toBe(
-            isLate ? 'component_shutdown_timeout' : 'unknown_error',
+            isLate ? 'component_shutdown_timeout' : 'error',
           );
           if (!isLate) {
             expect(result.error).toBe(failure);
