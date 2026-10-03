@@ -7169,13 +7169,20 @@ export class LifecycleManager
       // Answered as `registered`, what it brought up would be owned by nothing. Mark it
       // running so `startComponentInternal()` stops it again, as it does above. A
       // deadline that already won hands a fulfilled start to late cleanup instead.
+      // A forced start retires the old stall's stop token, as the success path does, so a
+      // late stop from that stall cannot settle this run before the net stops it.
       if (
         didStartResolve &&
         !(startupTimeoutError !== undefined && error === startupTimeoutError) &&
         this.componentStates.get(name) === 'starting'
       ) {
         try {
-          this.withTransition(() => this.markComponentRunning(name));
+          this.withTransition(() => {
+            if (flags.forceStalled) {
+              this.issueStopAttemptToken(name);
+            }
+            this.markComponentRunning(name);
+          });
         } catch {
           // Left to the failed-start path below.
         }

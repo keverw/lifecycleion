@@ -1047,6 +1047,53 @@ describe('LifecycleManager - review regressions', () => {
     });
   });
 
+  test('a resolved start whose bookkeeping crashes before running is stopped again, not left registered', async () => {
+    const { logger, manager } = setup();
+    let stops = 0;
+    const a = new Plain(logger, 'a');
+    a.stop = (): Promise<void> => {
+      stops++;
+      return Promise.resolve();
+    };
+    await manager.registerComponent(a);
+    const internals = manager as unknown as {
+      markComponentRunning: (name: string) => void;
+    };
+    const original = internals.markComponentRunning.bind(manager);
+    let hasCrashed = false;
+    internals.markComponentRunning = (name: string): void => {
+      if (!hasCrashed) {
+        hasCrashed = true;
+        throw new Error('bookkeeping exploded');
+      }
+      original(name);
+    };
+    const events: string[] = [];
+    manager.on('component:started', () => {
+      events.push('started');
+    });
+    manager.on('component:stopped', () => {
+      events.push('stopped');
+    });
+
+    const { reports, release } = claimReports();
+    let result;
+    try {
+      result = await manager.startComponent('a');
+    } finally {
+      release();
+    }
+
+    expect(result).toMatchObject({
+      success: false,
+      code: 'operation_crashed',
+    });
+    expect(hasReport(reports, 'component start')).toBe(true);
+    expect(stops).toBe(1);
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+    expect(events).toEqual(['stopped']);
+  });
+
   test('a start or stop releases its claim once it settles, crash paths included', async () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new Plain(logger, 'a'));

@@ -35,16 +35,28 @@ export function promiseResolveIntrinsic<T>(
  * This protects observation, not assimilation of a promise returned by a callback.
  * Internal asynchronous continuations should await their owned promises instead of
  * returning them from these callbacks; their native resolution would read then again.
+ *
+ * Never throws. Adoption can hand back the caller's own native promise, and the
+ * intrinsic `then` reads its `constructor`/species again - a getter that throws on that
+ * read is observed as a rejection with its error, so `onrejected` still hears of it.
  */
 export function observePromise<T, TResult1 = T, TResult2 = never>(
   promise: Promise<T>,
   onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
   onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
 ): Promise<TResult1 | TResult2> {
-  return applyIntrinsic(promiseThenIntrinsic, promise, [
-    onfulfilled,
-    onrejected,
-  ]) as Promise<TResult1 | TResult2>;
+  const reactions = [onfulfilled, onrejected];
+  try {
+    return applyIntrinsic(promiseThenIntrinsic, promise, reactions) as Promise<
+      TResult1 | TResult2
+    >;
+  } catch (error) {
+    return applyIntrinsic(
+      promiseThenIntrinsic,
+      promiseRejectIntrinsic(error),
+      reactions,
+    ) as Promise<TResult1 | TResult2>;
+  }
 }
 
 /**

@@ -563,7 +563,7 @@ describe('runCallbackSafely', () => {
     }
   });
 
-  it('routes a constructor that throws on observation to onError instead of throwing', () => {
+  it('routes a constructor that throws on observation to onError instead of throwing', async () => {
     const failure = new Error('species read');
     const returned = Promise.resolve('value');
     let reads = 0;
@@ -587,6 +587,7 @@ describe('runCallbackSafely', () => {
         (error) => failures.push(error),
       ),
     ).not.toThrow();
+    await Promise.resolve();
     expect(failures).toEqual([failure]);
   });
 });

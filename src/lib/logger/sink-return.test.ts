@@ -957,3 +957,41 @@ for (const factory of ['test', 'frontend'] as const) {
     }
   });
 }
+
+test('a sink promise whose species read throws is a sink error, not a throw from the log call', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  const failure = new Error('species read');
+  const returned = Promise.resolve();
+  let reads = 0;
+  // `Promise.resolve()` reads it once and gets `Promise`; observing then reads it again.
+  void Object.defineProperty(returned, 'constructor', {
+    get() {
+      reads++;
+      if (reads > 1) {
+        throw failure;
+      }
+      return Promise;
+    },
+  });
+  const written: string[] = [];
+  const diagnostics: LoggerDiagnostic[] = [];
+  const logger = new Logger({
+    callProcessExit: false,
+    sinks: [
+      { write: (): Promise<void> => returned },
+      { write: (entry): void => void written.push(entry.message) },
+    ],
+  });
+  logger.on('diagnostic', (diagnostic) => {
+    diagnostics.push(diagnostic as LoggerDiagnostic);
+  });
+  try {
+    expect(() => logger.info('entry')).not.toThrow();
+    expect(written).toEqual(['entry']);
+    await sleep(0);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0].error).toBe(failure);
+  } finally {
+    output.mockRestore();
+  }
+});
