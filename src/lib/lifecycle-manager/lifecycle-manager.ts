@@ -5438,11 +5438,12 @@ export class LifecycleManager
       // dependencies stay protected only while that owner is still running, in flight,
       // or has a start still unfinished:
       // one whose stop has since stalled releases them, as a component this pass stalls
-      // itself does.
+      // itself does. A dependency skipped on their account holds its own dependencies the
+      // same way: the loop does not come back to it, so it may still be running on them.
       const concurrentOwners = new Set<string>();
       const concurrentlyProtectedSkips = new Set<string>();
       const isProtectedByConcurrentOwner = (name: string): boolean => {
-        for (const owner of concurrentOwners) {
+        for (const owner of [...concurrentOwners, ...concurrentlyProtectedSkips]) {
           if (
             this.runningComponents.has(owner) ||
             this.isComponentInFlight(owner) ||

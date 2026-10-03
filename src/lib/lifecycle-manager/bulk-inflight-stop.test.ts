@@ -164,3 +164,47 @@ test('a dependency of a concurrent stop that stalled mid-pass is stopped, not he
   expect(result.stalledComponents.map((info) => info.name)).toEqual(['stalls']);
   expect(manager.getComponentStatus('database')?.state).toBe('stopped');
 });
+
+test('a dependency skipped for a concurrent stop keeps its own dependencies up after that stop stalls', async () => {
+  const logger = new Logger({
+    sinks: [new ArraySink()],
+    callProcessExit: false,
+  });
+  const manager = new LifecycleManager({
+    logger,
+    shutdownWarningTimeoutMS: -1,
+  });
+  const database = new Plain(logger, 'database');
+  const slow = new Plain(logger, 'slow', ['database']);
+  const cache = new Plain(logger, 'cache', ['database']);
+  const stalls = new Stalls(logger, 'stalls', ['cache']);
+  // `cache` is skipped while the concurrent stop of `stalls` runs; that stop then
+  // stalls while the pass is on `slow`, before it reaches `database`.
+  slow.stop = () => new Promise<void>((resolve) => setTimeout(resolve, 200));
+  stalls.stop = () =>
+    new Promise<void>((_resolve, reject) =>
+      setTimeout(() => reject(new Error('stop failed')), 20),
+    );
+  let wasCacheRunningAtDatabaseStop: boolean | undefined;
+  database.stop = async () => {
+    wasCacheRunningAtDatabaseStop = manager.isComponentRunning('cache');
+  };
+  await manager.registerComponent(database);
+  await manager.registerComponent(slow);
+  await manager.registerComponent(cache);
+  await manager.registerComponent(stalls);
+  await manager.startAllComponents();
+
+  const individual = manager.stopComponent('stalls');
+  const result = await manager.stopAllComponents({
+    timeoutMS: 0,
+    haltOnStall: false,
+  });
+
+  expect((await individual).success).toBe(false);
+  expect(result.success).toBe(false);
+  expect(wasCacheRunningAtDatabaseStop).toBeUndefined();
+  expect(manager.getComponentStatus('cache')?.state).toBe('running');
+  expect(manager.getComponentStatus('database')?.state).toBe('running');
+  expect(result.stalledComponents.map((info) => info.name)).toEqual(['stalls']);
+});
