@@ -147,7 +147,7 @@ test('an empty follow-up order violates the progress invariant and rolls back im
   const { reports, release } = claimReports();
   try {
     const result = await manager.startAllComponents({ timeoutMS: 0 });
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.error?.message).toBe(
       'Deferred auto-starts were absent from the follow-up startup order',
     );

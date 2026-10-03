@@ -164,7 +164,7 @@ describe('LifecycleManager - public methods never reject', () => {
     }
 
     expect(result.success).toBe(false);
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.componentName).toBe('a');
     expect(result.error?.message).toBe('getter exploded');
     expect(hasReport(reports, 'lifecycle-manager component start')).toBe(true);
@@ -212,7 +212,7 @@ describe('LifecycleManager - public methods never reject', () => {
 
     expect(result.success).toBe(false);
     expect(result.registered).toBe(false);
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.componentName).toBe('<unknown>');
     expect(manager.getComponentCount()).toBe(0);
   });
@@ -234,7 +234,7 @@ describe('LifecycleManager - public methods never reject', () => {
     });
 
     expect(result.success).toBe(false);
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.registered).toBe(true);
     expect(result.registrationIndexAfter).toBe(0);
     expect(manager.hasComponent('a')).toBe(true);
@@ -293,7 +293,7 @@ describe('LifecycleManager - public methods never reject', () => {
     }
 
     expect(result.success).toBe(false);
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.error?.message).toBe('getter exploded');
     // Rolled back, and the result matches: nothing is claimed that is not running, and
     // nothing is left running that is not claimed.
@@ -447,7 +447,7 @@ describe('LifecycleManager - public methods never reject', () => {
     }
 
     expect(result.success).toBe(false);
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
 
     // `stalled` rather than stuck in `stopping`: it can be retried or unregistered.
     expect(manager.getComponentStatus('a')?.state).toBe('stalled');
@@ -546,7 +546,7 @@ describe('LifecycleManager - public methods never reject', () => {
       release();
     }
 
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(manager.getComponentStatus('a')?.state).toBe('stopped');
   });
 
@@ -618,7 +618,7 @@ describe('LifecycleManager - public methods never reject', () => {
 
     // A failed start means a component that is not running.
     expect(result.success).toBe(false);
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.reason).toContain('component stopped again');
     expect(manager.isComponentRunning('a')).toBe(false);
   });
@@ -718,7 +718,7 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(result.success).toBe(false);
     expect(result.shutdownResult.success).toBe(false);
     expect(result.shutdownResult.stoppedComponents).toEqual([]);
-    expect(result.startupResult.code).toBe('unknown_error');
+    expect(result.startupResult.code).toBe('operation_crashed');
     expect(manager.isComponentRunning('a')).toBe(true);
     expect(hasReport(reports, 'lifecycle-manager restartAllComponents')).toBe(
       true,
@@ -789,7 +789,7 @@ describe('LifecycleManager - public methods never reject', () => {
       release();
     }
 
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     // This attempt never ran the component, so it must not stop the run it found.
     expect(manager.isComponentRunning('a')).toBe(true);
   });
@@ -831,7 +831,7 @@ describe('LifecycleManager - public methods never reject', () => {
       release();
     }
 
-    expect(second.code).toBe('unknown_error');
+    expect(second.code).toBe('operation_crashed');
     expect(manager.getComponentStatus('a')?.state).toBe('stopping');
 
     finishStop();
@@ -920,7 +920,7 @@ describe('LifecycleManager - public methods never reject', () => {
       release();
     }
 
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(manager.getSystemState()).not.toBe('starting');
     expect((await manager.startAllComponents()).success).toBe(true);
   });
@@ -956,7 +956,7 @@ describe('LifecycleManager - public methods never reject', () => {
     }
 
     // Nothing was claimed, attached, or announced for a start that never began.
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(attachCalls).toBe(0);
     expect(starting).toEqual([]);
     expect(manager.getComponentStatus('a')?.state).toBe('registered');
@@ -1253,7 +1253,7 @@ describe('LifecycleManager - public methods never reject', () => {
       const first = manager.startComponent('a');
       const second = manager.startComponent('a');
 
-      expect((await first).code).toBe('unknown_error');
+      expect((await first).code).toBe('operation_crashed');
 
       // The second start claimed the component while the first was crashing; the first
       // did not own it, so it did not reset it under the second.
@@ -1379,7 +1379,7 @@ describe('LifecycleManager - public methods never reject', () => {
     }
 
     // Read before the start, so it fails there - not later, inside the timer.
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(manager.getComponentStatus('a')?.state).toBe('registered');
   });
 
@@ -1469,7 +1469,7 @@ describe('LifecycleManager - public methods never reject', () => {
       release();
     }
 
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(manager.getComponentStatus('a')?.state).toBe('running');
   });
 
@@ -1552,7 +1552,7 @@ describe('LifecycleManager - public methods never reject', () => {
       release();
     }
 
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.wasStopped).toBe(true);
   });
 
@@ -1584,7 +1584,7 @@ describe('LifecycleManager - public methods never reject', () => {
     }
 
     // Not stalled: `stop()` never ran, so the component is still running as it was.
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(stopCalls).toBe(0);
     expect(manager.getComponentStatus('a')?.state).toBe('running');
   });
@@ -1944,7 +1944,7 @@ test('a stalled retry without a force handler does not require a token from a cr
     internals.issueStopAttemptToken = () => {
       throw new Error('token issuance failed');
     };
-    expect((await manager.stopComponent('a')).code).toBe('unknown_error');
+    expect((await manager.stopComponent('a')).code).toBe('operation_crashed');
     internals.issueStopAttemptToken = issueToken;
     reports.length = 0;
     for (let retry = 0; retry < 2; retry++) {
@@ -1988,7 +1988,7 @@ test('missing force-token invariant fails before publishing force-start side eff
   try {
     expect(
       (await manager.stopComponent('a', { forceImmediate: true })).code,
-    ).toBe('unknown_error');
+    ).toBe('operation_crashed');
     expect(forceEvents).toBe(0);
     expect(forceCalls).toBe(0);
     expect(clears).toBe(0);

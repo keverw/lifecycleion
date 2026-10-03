@@ -693,7 +693,7 @@ describe('LifecycleManager - shutdown hardening', () => {
 
     // Resolves with the failure rather than rejecting, and reports it.
     expect(crashed.success).toBe(false);
-    expect(crashed.code).toBe('unknown_error');
+    expect(crashed.code).toBe('operation_crashed');
     expect(crashed.error?.message).toBe('setup exploded');
     expect(hasReport(reports, 'shutdown after manual')).toBe(true);
     expect(manager.getSystemState()).not.toBe('shutting-down');
@@ -738,11 +738,11 @@ describe('LifecycleManager - shutdown hardening', () => {
     }
 
     // The caller, the event, and `getLastShutdownResult()` all get the same answer.
-    expect(crashed.code).toBe('unknown_error');
+    expect(crashed.code).toBe('operation_crashed');
     expect(completedResults).toHaveLength(1);
     expect(completedResults[0]).toMatchObject({
       success: false,
-      code: 'unknown_error',
+      code: 'operation_crashed',
     });
     expect(manager.getLastShutdownResult()).toBe(crashed);
     expect(hasReport(reports, 'shutdown after manual')).toBe(true);
@@ -798,7 +798,7 @@ describe('LifecycleManager - shutdown hardening', () => {
     }
 
     // The pass started, so the call gets the pass's own failure, never a rejection.
-    expect(crashed.code).toBe('unknown_error');
+    expect(crashed.code).toBe('operation_crashed');
 
     // `shutdown-initiated` never made it out, but the pass still owes a result: a
     // listener with nothing to pair the completion to beats a pass that reports nothing.
@@ -806,7 +806,7 @@ describe('LifecycleManager - shutdown hardening', () => {
 
     const failed = manager.getLastShutdownResult();
     expect(failed?.success).toBe(false);
-    expect(failed?.code).toBe('unknown_error');
+    expect(failed?.code).toBe('operation_crashed');
     expect(failed?.reason).toContain('seed exploded');
 
     // A failed pass normally arms the escalation window, but seeding is what threw here,
@@ -874,7 +874,7 @@ describe('LifecycleManager - shutdown hardening', () => {
     expect(result.error?.message).toBe('stop loop exploded');
     expect(manager.getLastShutdownResult()).toBe(result);
     expect(result?.success).toBe(false);
-    expect(result?.code).toBe('unknown_error');
+    expect(result?.code).toBe('operation_crashed');
     expect(result?.stoppedComponents.length).toBe(1);
 
     // Scoped to this pass's own stop list, exactly as a pass that finishes scopes it.
@@ -928,7 +928,9 @@ describe('LifecycleManager - shutdown hardening', () => {
     const { release } = claimReports();
 
     try {
-      expect((await manager.stopAllComponents()).code).toBe('unknown_error');
+      expect((await manager.stopAllComponents()).code).toBe(
+        'operation_crashed',
+      );
     } finally {
       internals.isComponentRunning = original;
       release();
@@ -984,7 +986,7 @@ describe('LifecycleManager - shutdown hardening', () => {
       internals.handleShutdownRequest('SIGTERM');
       await done;
 
-      expect(manager.getLastShutdownResult()?.code).toBe('unknown_error');
+      expect(manager.getLastShutdownResult()?.code).toBe('operation_crashed');
       expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
 
       // The second press opens the escalation window at 1 and retries; the third
@@ -1058,7 +1060,7 @@ describe('LifecycleManager - shutdown hardening', () => {
     // The stall predates this pass and was never in its view, so it stays with the
     // result that did report it rather than being restated as this crash's doing.
     const crashed = manager.getLastShutdownResult();
-    expect(crashed?.code).toBe('unknown_error');
+    expect(crashed?.code).toBe('operation_crashed');
     expect(crashed?.stalledComponents).toEqual([]);
     expect(manager.getStalledComponents().length).toBe(1);
   });
@@ -1130,7 +1132,7 @@ describe('LifecycleManager - shutdown hardening', () => {
     // Both paths run the same reconciliation sweep, so the crash reports what the
     // manager actually has as stopped rather than only what the loop got to announce.
     const crashed = manager.getLastShutdownResult();
-    expect(crashed?.code).toBe('unknown_error');
+    expect(crashed?.code).toBe('operation_crashed');
     expect(crashed?.stoppedComponents).toEqual(['first']);
     expect(manager.getComponentStatus('first')?.state).toBe('stopped');
   });

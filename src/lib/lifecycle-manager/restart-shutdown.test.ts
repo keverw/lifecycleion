@@ -642,7 +642,7 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     }
 
     expect(crashed.success).toBe(false);
-    expect(crashed.code).toBe('unknown_error');
+    expect(crashed.code).toBe('operation_crashed');
     expect(crashed.error?.message).toBe('acceptance exploded');
     expect(crashed.stoppedComponents).toEqual([]);
     expect(
@@ -813,9 +813,9 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     // Resolves rather than rejects, with the pass's own failure, and never starts
     // anything on top of a stop phase nobody can vouch for.
     expect(crashed.success).toBe(false);
-    expect(crashed.shutdownResult.code).toBe('unknown_error');
+    expect(crashed.shutdownResult.code).toBe('operation_crashed');
     expect(crashed.shutdownResult.error?.message).toBe('stop phase exploded');
-    expect(crashed.startupResult.code).toBe('unknown_error');
+    expect(crashed.startupResult.code).toBe('operation_crashed');
     expect(crashed.startupResult.startedComponents).toEqual([]);
     expect(component.startCount).toBe(1);
 

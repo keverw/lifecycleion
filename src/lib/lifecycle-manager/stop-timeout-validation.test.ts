@@ -200,7 +200,7 @@ test('a force-timeout getter throwing its own TypeError is still a callback fail
   const { reports, release } = claimReports();
   try {
     const result = await manager.stopComponent('a');
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.error).toBe(error);
     expect(reports).toHaveLength(1);
     expect(manager.getComponentStatus('a')?.state).toBe('running');

@@ -93,7 +93,7 @@ test.each(['cancel', 'throw', 'refuse'] as const)(
       mode === 'cancel'
         ? 'shutdown_requested_during_restart'
         : mode === 'throw'
-          ? 'unknown_error'
+          ? 'operation_crashed'
           : 'no_components_registered',
     );
     expect(await registration).toMatchObject({

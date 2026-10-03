@@ -321,7 +321,7 @@ describe('LifecycleManager - review regressions', () => {
     }
 
     expect(registration.success).toBe(false);
-    expect(registration.code).toBe('unknown_error');
+    expect(registration.code).toBe('operation_crashed');
     expect(manager.getComponentNames()).toEqual([]);
 
     // Nothing recorded, so nothing later can fall through to the throwing getName().
@@ -587,8 +587,8 @@ describe('LifecycleManager - review regressions', () => {
       release();
     }
 
-    expect(restart.shutdownResult.code).toBe('unknown_error');
-    expect(restart.startupResult.code).toBe('unknown_error');
+    expect(restart.shutdownResult.code).toBe('operation_crashed');
+    expect(restart.startupResult.code).toBe('operation_crashed');
     expect(restart.startupResult.error).toBeInstanceOf(Error);
   });
 
@@ -1039,7 +1039,7 @@ describe('LifecycleManager - review regressions', () => {
 
     try {
       const stop = await manager.stopComponent('a');
-      expect(stop.code).toBe('unknown_error');
+      expect(stop.code).toBe('operation_crashed');
     } finally {
       release();
     }
@@ -1503,7 +1503,7 @@ describe('LifecycleManager - review regressions', () => {
 
     try {
       const stop = await manager.stopComponent('a', { forceImmediate: true });
-      expect(stop.code).toBe('unknown_error');
+      expect(stop.code).toBe('operation_crashed');
     } finally {
       release();
     }
@@ -1554,7 +1554,7 @@ describe('LifecycleManager - review regressions', () => {
 
     try {
       const registration = await manager.registerComponent(hostile);
-      expect(registration.code).toBe('unknown_error');
+      expect(registration.code).toBe('operation_crashed');
       expect(hasReport(reports, 'lifecycle-manager registerComponent')).toBe(
         true,
       );
@@ -1618,7 +1618,7 @@ describe('LifecycleManager - review regressions', () => {
       release();
     }
 
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.wasRegistered).toBe(true);
   });
 
@@ -2345,7 +2345,7 @@ describe('LifecycleManager - review regressions', () => {
       }
 
       expect(registration.success).toBe(false);
-      expect(registration.code).toBe('unknown_error');
+      expect(registration.code).toBe('operation_crashed');
     },
     { timeout: 2000 },
   );
@@ -3006,7 +3006,7 @@ describe('LifecycleManager - review regressions', () => {
       release();
     }
 
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.reason).toContain('kept changing');
     expect(manager.getComponentNames()).not.toContain('x');
     expect(hasReport(reports, 'lifecycle-manager registerComponent')).toBe(
@@ -3159,7 +3159,7 @@ describe('LifecycleManager - review regressions', () => {
       release();
     }
 
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(rejected).toHaveLength(1);
   });
 
@@ -3793,7 +3793,7 @@ describe('LifecycleManager - review regressions', () => {
     }
 
     expect(manager.getComponentNames()).toEqual(['c']);
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.registered).toBe(false);
     expect(result.registrationIndexAfter).toBeNull();
   });
@@ -3928,7 +3928,7 @@ describe('LifecycleManager - review regressions', () => {
         release();
       }
 
-      expect(result.code).toBe('unknown_error');
+      expect(result.code).toBe('operation_crashed');
       expect(rejected).toHaveLength(1);
     },
   );

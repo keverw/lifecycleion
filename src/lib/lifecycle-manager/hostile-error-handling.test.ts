@@ -1046,7 +1046,7 @@ describe('LifecycleManager - hostile thrown values', () => {
     );
 
     expect(result.success).toBe(false);
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.reason).toBe('<error message could not be read>');
   });
 

@@ -398,7 +398,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
       release();
     }
 
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.reason).toContain('Stop failed unexpectedly');
     expect(reports).toHaveLength(1);
     const stall = manager.getStalledComponents()[0];
@@ -476,7 +476,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
     // Still a crash by code; the reason and status say the timeout came first.
     expect(result).toMatchObject({
       success: false,
-      code: 'unknown_error',
+      code: 'operation_crashed',
       reason:
         'Stop failed unexpectedly after its graceful phase timed out: abort hook read crashed',
       status: {
@@ -517,7 +517,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
       reason: 'error',
     });
     expect(result).toMatchObject({
-      code: 'unknown_error',
+      code: 'operation_crashed',
       reason: 'Stop failed unexpectedly: bookkeeping crashed',
       status: { state: 'stalled', stallInfo: { reason: 'error' } },
     });
@@ -545,7 +545,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
 
     expect(result).toMatchObject({
       success: false,
-      code: 'unknown_error',
+      code: 'operation_crashed',
       reason: 'Stop failed unexpectedly: status read crashed',
     });
     expect(result.status).toBeUndefined();

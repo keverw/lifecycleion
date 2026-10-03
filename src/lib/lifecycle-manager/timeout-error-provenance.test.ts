@@ -19,7 +19,7 @@ test('component startup getter throwing a shared timeout error remains a reporte
   const { reports, release } = claimReports();
   try {
     const result = await manager.startComponent('component');
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.reason).toContain('Start failed unexpectedly');
     expect(reports).toHaveLength(1);
     expect((reports[0] as Error).cause).toBe(result.error);
@@ -43,7 +43,7 @@ test('a Logger constructor failure in a lifecycle getter stays a reported crash'
   const { reports, release } = claimReports();
   try {
     const result = await manager.startComponent('component');
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.error?.message).toContain('Logger closeTimeoutMS');
     expect(reports).toHaveLength(1);
     expect((reports[0] as Error).cause).toBe(result.error);
@@ -66,7 +66,7 @@ test('a nested LifecycleManager constructor failure stays a reported getter cras
   const { reports, release } = claimReports();
   try {
     const result = await manager.startComponent('component');
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.error?.message).toContain('startupTimeoutMS');
     expect(reports).toHaveLength(1);
     expect((reports[0] as Error).cause).toBe(result.error);
@@ -87,7 +87,7 @@ test('caller option getter throwing a shared timeout error remains a reported cr
   const { reports, release } = claimReports();
   try {
     const result = await manager.startAllComponents(options);
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(reports).toHaveLength(1);
     expect((reports[0] as Error).cause).toBe(result.error);
     expect(manager.getComponentStatus('component')?.state).toBe('registered');
@@ -108,7 +108,7 @@ test('component stop getter throwing a shared timeout error remains a reported c
   const { reports, release } = claimReports();
   try {
     const result = await manager.stopComponent('component');
-    expect(result.code).toBe('unknown_error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.reason).toContain('Stop failed unexpectedly');
     expect(reports).toHaveLength(1);
     expect((reports[0] as Error).cause).toBe(result.error);

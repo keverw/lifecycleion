@@ -697,7 +697,7 @@ export class LifecycleManager
         success: false,
         componentName: name,
         reason,
-        code: 'unknown_error',
+        code: 'operation_crashed',
         error,
         wasStopped: progress.wasStopped,
         wasRegistered: progress.wasRegistered,
@@ -949,13 +949,13 @@ export class LifecycleManager
       const code =
         err instanceof DependencyCycleError
           ? 'dependency_cycle'
-          : 'unknown_error';
+          : 'operation_crashed';
 
       // A cycle is the caller's configuration, answered by its code; anything else is
       // unplanned - dependency lists are read tolerantly here, so not a broken
       // `getDependencies()`, which fails only that component's own start - and is
-      // reported on the global channel, as every other `unknown_error` is.
-      if (code === 'unknown_error') {
+      // reported on the global channel, as every other `operation_crashed` is.
+      if (code === 'operation_crashed') {
         reportCallbackError('lifecycle-manager getStartupOrder', error);
       }
 
@@ -1169,7 +1169,7 @@ export class LifecycleManager
    * Components stop in reverse topological order (dependents before dependencies).
    *
    * Never rejects. Stalls and timeouts are reported in the resolved `ShutdownResult`, and
-   * so is a pass that throws outright: it resolves with `code: 'unknown_error'` and the
+   * so is a pass that throws outright: it resolves with `code: 'operation_crashed'` and the
    * thrown value on `error`, and is reported on the global `'error'` channel. Such a pass
    * still emits `lifecycle-manager:shutdown-completed` with the same result and updates
    * `getLastShutdownResult()`, so listeners are never left waiting on it either.
@@ -1207,7 +1207,7 @@ export class LifecycleManager
    * Restart all components (stop then start)
    *
    * Never rejects: see {@link stopAllComponents}. A stop phase that throws outright
-   * resolves with its `unknown_error` result and the startup phase is skipped, since
+   * resolves with its `operation_crashed` result and the startup phase is skipped, since
    * nothing can be said about what state it left the components in.
    *
    * A shutdown request that arrives while the stop phase is running wins: the startup
@@ -2788,10 +2788,10 @@ export class LifecycleManager
           const code =
             err instanceof DependencyCycleError
               ? 'dependency_cycle'
-              : 'unknown_error';
+              : 'operation_crashed';
 
           // Reported for the reason `getStartupOrder()` reports it.
-          if (code === 'unknown_error') {
+          if (code === 'operation_crashed') {
             reportCallbackError('lifecycle-manager startAllComponents', error);
           }
 
@@ -3750,7 +3750,7 @@ export class LifecycleManager
       // A crashed stop or invalid stop configuration cannot confirm cleanup. Do not
       // initiate startup on top of components that this restart could not stop.
       if (
-        shutdownResult.code === 'unknown_error' ||
+        shutdownResult.code === 'operation_crashed' ||
         shutdownResult.code === 'invalid_options'
       ) {
         this.logger.warn('Restart abandoned: the shutdown phase failed', {
@@ -4192,7 +4192,7 @@ export class LifecycleManager
     // The name is recorded here and trusted from then on - see `nameOf()` - so a
     // `getName()` that breaks its contract is refused now rather than recorded as a
     // name every later lookup would fall through. Thrown, and answered like a throwing
-    // `getName()`: with `unknown_error`.
+    // `getName()`: with `operation_crashed`.
     if (typeof componentName !== 'string') {
       throw new TypeError(
         `Component getName() must return a string, got ${typeof componentName}`,
@@ -4797,11 +4797,11 @@ export class LifecycleManager
       });
 
       const code: RegistrationFailureCode =
-        cycle !== undefined ? 'dependency_cycle' : 'unknown_error';
+        cycle !== undefined ? 'dependency_cycle' : 'operation_crashed';
 
       // Reported for the reason `getStartupOrder()` reports it; a cycle is the caller's
       // configuration, answered by the result.
-      if (code === 'unknown_error' && !input.isErrorReported) {
+      if (code === 'operation_crashed' && !input.isErrorReported) {
         reportCallbackError('lifecycle-manager registerComponent', input.error);
       }
 
@@ -5035,7 +5035,7 @@ export class LifecycleManager
    *
    * Everything that can throw is on this side of the latch, so a throw is a synchronous
    * throw to the caller with no pass started and nothing to release - which the public
-   * callers' {@link settleOperation} net turns into an `unknown_error` result. The pass takes the
+   * callers' {@link settleOperation} net turns into an `operation_crashed` result. The pass takes the
    * latch itself, as the first statement inside its `try`.
    *
    * `isRequestToStayDown` says whether a refusal should be recorded on the running pass
@@ -5874,7 +5874,7 @@ export class LifecycleManager
         // Not a stall or a timeout: the pass itself threw, which points at a bug in
         // the manager (or a component that broke its contract) rather than at a
         // component's stop.
-        code: 'unknown_error',
+        code: 'operation_crashed',
         error: toError(error),
       };
 
@@ -6253,7 +6253,7 @@ export class LifecycleManager
    *
    * The attempt validates its timeout before claiming `starting`, but later work
    * still runs component-owned handlers and not all of that sits inside the attempt's own
-   * `try`. The public safety net would still answer with `unknown_error`, but it cannot
+   * `try`. The public safety net would still answer with `operation_crashed`, but it cannot
    * see the component, which stayed `starting` for good: every later start answered
    * `component_already_starting`. A start that crashes before the component is running
    * is put back to the state it had before the attempt; one already running is left
@@ -7360,11 +7360,11 @@ export class LifecycleManager
           this.lifecycleEvents.componentStalled(name, stallInfo, {
             reason: stallInfo.reason,
             // Paired with the reason as every other stall is: a graceful timeout the
-            // stop recorded before crashing stays a timeout.
+            // stop recorded before crashing stays a timeout; otherwise it was the crash.
             code:
               stallInfo.reason === 'timeout'
                 ? 'component_shutdown_timeout'
-                : 'unknown_error',
+                : 'operation_crashed',
           });
         }
 

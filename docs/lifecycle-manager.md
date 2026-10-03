@@ -857,8 +857,8 @@ interface StartupResult {
     | 'signal_attach_failed' // attachSignalsBeforeStartup / attachSignalsOnStart could not attach process signals
     | 'startup_timeout'
     | 'invalid_options'
-    | 'unknown_error';
-  error?: Error; // Error object (when success is false due to dependency cycle or unknown error)
+    | 'operation_crashed'; // The startup itself threw - see "Promises Never Reject"
+  error?: Error; // Error object (when success is false due to dependency cycle or a crash)
 }
 ```
 
@@ -1110,14 +1110,14 @@ interface ShutdownResult {
     | 'cleanup_incomplete'
     | 'partial_state' // Preparation refused, or shutdown left stalled/running components
     | 'invalid_options'
-    | 'unknown_error';
-  error?: Error; // The thrown value, when the pass itself failed (unknown_error)
+    | 'operation_crashed';
+  error?: Error; // The thrown value, when the pass itself failed (operation_crashed)
 }
 ```
 
 **Note:** If `timedOut` is `true`, `success` will be `false` even if no components stalled.
 
-A pass that throws outright - a bug in the manager, or a component getter that throws - resolves with `code: 'unknown_error'` and the thrown value on `error`, rather than rejecting. It still emits `lifecycle-manager:shutdown-completed` with the same result and updates `getLastShutdownResult()`, lists the components it had already stopped, and arms the escalation window like any other failed pass.
+A pass that throws outright - a bug in the manager, or a component getter that throws - resolves with `code: 'operation_crashed'` and the thrown value on `error`, rather than rejecting. It still emits `lifecycle-manager:shutdown-completed` with the same result and updates `getLastShutdownResult()`, lists the components it had already stopped, and arms the escalation window like any other failed pass.
 
 **From inside shutdown listeners:** `lifecycle-manager:shutdown-completed` and `shutdown-escalation-armed` run while the pass still holds its latch, so a call made from one returns `already_in_progress`. Defer it (`setImmediate`, `queueMicrotask`) or `await` this method's promise instead.
 
@@ -1233,7 +1233,7 @@ registration alone does not mean the component started successfully.
 
 **A shutdown request during the shutdown phase wins.** A `SIGINT`/`SIGTERM`, a `logger.exit()` under [`enableLoggerExitHook()`](#enableloggerexithook), or a direct `stopAllComponents()` call made while the restart is stopping asks the process to stay down, so the restart skips its startup phase instead of bringing every component back up. The result then carries `startupSkippedByShutdownRequest: true`, `startupResult.code` is `shutdown_requested_during_restart`, and `success` is `false` - the restart did not complete. This is checked before the shutdown phase's own outcome, so a stalled or failed stop phase paired with a request still reports the request. `getLastShutdownResult()` is left in place (a completed restart clears it), so the shutdown phase's outcome is still readable afterwards. Skipping startup does not stop anything the shutdown phase could not: if `shutdownResult.success` is `false` - a stall or a timeout - some components may still be running, exactly as after any failed shutdown.
 
-**A shutdown phase that throws outright** resolves the restart rather than rejecting it: `shutdownResult` carries the pass's `unknown_error` result, and the startup phase is skipped - with `startupResult.code` also `unknown_error` - since nothing can be said about the state the components were left in.
+**A shutdown phase that throws outright** resolves the restart rather than rejecting it: `shutdownResult` carries the pass's `operation_crashed` result, and the startup phase is skipped - with `startupResult.code` also `operation_crashed` - since nothing can be said about the state the components were left in.
 
 Only the restart that actually runs the shutdown phase can be cancelled this way. A `restartAllComponents()` call made while a shutdown is already running - including one started by another restart - logs a warning and has its own shutdown phase refused with `already_in_progress` and startup refused with `shutdown_in_progress`, before reading unused options or component startup getters. The same early refusal applies if a logger sink starts shutdown from the restart info log; neither restart phase runs. It never reports `startupSkippedByShutdownRequest`, and it does not disturb the restart whose shutdown phase is running. The reverse holds too: every restart that does run a shutdown phase is cancellable on its own terms, including one that starts in the moment between a previous pass finishing and the restart that owned it resuming.
 
@@ -2306,8 +2306,8 @@ interface StartupOrderResult {
   success: boolean;
   startupOrder: string[]; // Resolved dependency order (empty array if !success)
   reason?: string; // Human-readable explanation when !success
-  code?: StartupOrderFailureCode; // 'dependency_cycle' | 'unknown_error'
-  error?: Error; // Error object (present for dependency_cycle and unknown_error)
+  code?: StartupOrderFailureCode; // 'dependency_cycle' | 'operation_crashed'
+  error?: Error; // Error object (present for dependency_cycle and operation_crashed)
 }
 ```
 
@@ -2690,7 +2690,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `lifecycle-manager:shutdown-warning` - Global warning phase started
 - `lifecycle-manager:shutdown-warning-completed` - Warning phase completed
 - `lifecycle-manager:shutdown-warning-timeout` - Warning phase timed out
-- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. This is the best single event for centralized logging or follow-up policy when shutdown times out or leaves stalled components. If the global shutdown timeout was hit, the payload reflects the result at the moment the public call stopped waiting. A component stop already in flight is not cancelled: its per-component state continues to reject an overlapping start or stop, while the process-wide shutdown latch is released so exit handling and later shutdown/escalation attempts can proceed. It always pairs with `lifecycle-manager:shutdown-initiated`: a pass that throws outright still emits it with `success: false`, `code: 'unknown_error'` and a `reason` naming the cause - the same result `stopAllComponents()` resolves with - so a caller waiting on it is never left hanging. Listeners run while the pass still holds its shutdown latch: `getSystemState()` says `shutting-down` there, and any operation started from inside one - `stopAllComponents()`, `startAllComponents()`, a per-component start or stop - is refused (`already_in_progress` / `shutdown_in_progress`). To act on the result, defer out of the listener (`setImmediate`, `queueMicrotask`), or `await` the promise `stopAllComponents()` returned instead of listening.
+- `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. This is the best single event for centralized logging or follow-up policy when shutdown times out or leaves stalled components. If the global shutdown timeout was hit, the payload reflects the result at the moment the public call stopped waiting. A component stop already in flight is not cancelled: its per-component state continues to reject an overlapping start or stop, while the process-wide shutdown latch is released so exit handling and later shutdown/escalation attempts can proceed. It always pairs with `lifecycle-manager:shutdown-initiated`: a pass that throws outright still emits it with `success: false`, `code: 'operation_crashed'` and a `reason` naming the cause - the same result `stopAllComponents()` resolves with - so a caller waiting on it is never left hanging. Listeners run while the pass still holds its shutdown latch: `getSystemState()` says `shutting-down` there, and any operation started from inside one - `stopAllComponents()`, `startAllComponents()`, a per-component start or stop - is refused (`already_in_progress` / `shutdown_in_progress`). To act on the result, defer out of the listener (`setImmediate`, `queueMicrotask`), or `await` the promise `stopAllComponents()` returned instead of listening.
 
 **Component Registration:**
 
@@ -2833,16 +2833,17 @@ if (result.success && result.status) {
 
 Every async method answers with a result object, including when something goes wrong that the manager did not plan for - a bug in the manager, or a component that breaks its contract with a getter (`getName()`, `getDependencies()`, `isOptional()`) that throws. The promise resolves with a failed result and the original error is reported on the global `'error'` channel (see [safe-handle-callback](./safe-handle-callback.md)):
 
-| Method                                                                   | Unexpected failure resolves with                                  |
-| ------------------------------------------------------------------------ | ----------------------------------------------------------------- |
-| `registerComponent()`, `insertComponentAt()`                             | `code: 'unknown_error'`, `registered`: whether this call added it |
-| `unregisterComponent()`                                                  | `code: 'unknown_error'`                                           |
-| `startAllComponents()`, `stopAllComponents()`, `restartAllComponents()`  | `code: 'unknown_error'` with `error`                              |
-| `startComponent()`, `stopComponent()`, `restartComponent()`              | `code: 'unknown_error'` with `error`                              |
-| `sendMessageToComponent()`, `checkComponentHealth()`, `checkAllHealth()` | `code: 'error'`                                                   |
-| `getValue()` (synchronous)                                               | `code: 'error'` with `error`                                      |
-| `triggerReload()`, `triggerInfo()`, `triggerDebug()`                     | `code: 'error'`, including when your callback throws              |
-| `broadcastMessage()`                                                     | an empty array                                                    |
+| Method                                                                   | Unexpected failure resolves with                                      |
+| ------------------------------------------------------------------------ | --------------------------------------------------------------------- |
+| `registerComponent()`, `insertComponentAt()`                             | `code: 'operation_crashed'`, `registered`: whether this call added it |
+| `unregisterComponent()`                                                  | `code: 'operation_crashed'`                                           |
+| `startAllComponents()`, `stopAllComponents()`, `restartAllComponents()`  | `code: 'operation_crashed'` with `error`                              |
+| `startComponent()`, `stopComponent()`, `restartComponent()`              | `code: 'operation_crashed'` with `error`                              |
+| `getStartupOrder()` (synchronous)                                        | `code: 'operation_crashed'` with `error`                              |
+| `sendMessageToComponent()`, `checkComponentHealth()`, `checkAllHealth()` | `code: 'error'`                                                       |
+| `getValue()` (synchronous)                                               | `code: 'error'` with `error`                                          |
+| `triggerReload()`, `triggerInfo()`, `triggerDebug()`                     | `code: 'error'`, including when your callback throws                  |
+| `broadcastMessage()`                                                     | an empty array                                                        |
 
 Invalid timeout values are expected refusals (`invalid_options`) and do not use the
 global callback-error channel; inspect their `error` for the named option. The array-only
@@ -2850,7 +2851,9 @@ global callback-error channel; inspect their `error` for the named option. The a
 a warning instead. The table above describes unexpected failures, including ordinary
 exceptions thrown by getters.
 
-Branch on `code` as usual; `unknown_error` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around.
+Branch on `code` as usual; `operation_crashed` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around. It is distinct from `unknown_error`, which a per-component operation answers when the component's own `start()`, `stop()`, or `onShutdownForce()` throws or rejects - an ordinary failure of that component, not of the manager.
+
+A stop that crashes still records the component as stalled, so it can be retried or unregistered. Its result carries `status`, whose `stallInfo` describes that stall, and its `reason` says so when the graceful phase had already timed out first. Its `component:stalled` event uses `component_shutdown_timeout` in that case and `operation_crashed` otherwise.
 
 Automatic signal handling follows the configuration. A start that is configured to attach process signals (`attachSignalsBeforeStartup`, `attachSignalsOnStart`) fails with `code: 'signal_attach_failed'` when attaching throws, rather than bringing the process up without them - see [`attachSignals()`](#attachsignals). A detach that throws once the last component stops (`detachSignalsOnStop`) does not fail the stop or unregister it follows: the operation carries on and the failure is logged and reported. An explicit `attachSignals()` / `detachSignals()` call still throws to its caller.
 
@@ -2932,7 +2935,8 @@ type ComponentOperationFailureCode =
   | 'restart_start_failed'
   | 'startup_rolled_back' // auto-start refused because bulk startup is rolling back
   | 'signal_attach_failed'
-  | 'unknown_error';
+  | 'unknown_error' // The component's own start(), stop(), or onShutdownForce() failed
+  | 'operation_crashed'; // The operation itself threw - a bug to report
 
 // Registration failure codes
 type RegistrationFailureCode =
@@ -2943,7 +2947,7 @@ type RegistrationFailureCode =
   | 'target_not_found'
   | 'invalid_position'
   | 'dependency_cycle'
-  | 'unknown_error';
+  | 'operation_crashed';
 
 // Unregister failure codes
 type UnregisterFailureCode =
@@ -2953,10 +2957,10 @@ type UnregisterFailureCode =
   | 'component_stopping' // A stop is in flight; wait for it to settle
   | 'stop_failed'
   | 'bulk_operation_in_progress'
-  | 'unknown_error';
+  | 'operation_crashed';
 
 // Startup order failure codes
-type StartupOrderFailureCode = 'dependency_cycle' | 'unknown_error';
+type StartupOrderFailureCode = 'dependency_cycle' | 'operation_crashed';
 ```
 
 ## Advanced Usage

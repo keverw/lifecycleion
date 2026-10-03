@@ -69,7 +69,7 @@ test('raw shared timeout failures and caller errors remain reported operation cr
       },
     ]) {
       const result = await settleOperation('start', run, crashedStartupResult);
-      expect(result.code).toBe('unknown_error');
+      expect(result.code).toBe('operation_crashed');
       expect(result.reason).toContain('start() failed unexpectedly:');
       expect(isOperationTimeoutValidationError(result.error)).toBe(false);
       expect((reports.at(-1) as Error).cause).toBe(result.error);

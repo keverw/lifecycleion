@@ -236,7 +236,7 @@ test('restart keeps an unexpected pre-stop option error without stop-failed wrap
   }
 
   expect(result.success).toBe(false);
-  expect(result.code).toBe('unknown_error');
+  expect(result.code).toBe('operation_crashed');
   expect(component.stops).toBe(0);
   await manager.stopAllComponents();
 });
@@ -263,7 +263,7 @@ test('nested stop cannot make a failed outer option read look like its own attem
   await nestedStop;
 
   expect(result.success).toBe(false);
-  expect(result.code).toBe('unknown_error');
+  expect(result.code).toBe('operation_crashed');
   expect(component.stops).toBe(1);
 });
 

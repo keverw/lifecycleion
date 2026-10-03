@@ -213,6 +213,10 @@ export interface RestartComponentOptions {
 /**
  * Stable, machine-readable failure codes for individual component operations.
  * `invalid_options` is an expected timeout-validation refusal, not a callback crash.
+ * `unknown_error` is a component's own hook failing (`start()` or `stop()` threw or
+ * rejected, `onShutdownForce()` failed). `operation_crashed` is the operation itself
+ * throwing - a bug in the manager, or a component getter that broke its contract - and
+ * is never an expected outcome.
  */
 export type ComponentOperationFailureCode =
   | 'invalid_options'
@@ -235,7 +239,8 @@ export type ComponentOperationFailureCode =
   | 'signal_attach_failed'
   // An auto-start refused because the active bulk startup is already rolling back.
   | 'startup_rolled_back'
-  | 'unknown_error';
+  | 'unknown_error'
+  | 'operation_crashed';
 
 /**
  * Failure codes for unregister operations
@@ -247,7 +252,7 @@ export type UnregisterFailureCode =
   | 'component_stopping'
   | 'stop_failed'
   | 'bulk_operation_in_progress'
-  | 'unknown_error';
+  | 'operation_crashed';
 
 /**
  * Additional details for why unregister stop failed
@@ -323,7 +328,7 @@ export interface StartupResult {
     | 'signal_attach_failed'
     | 'startup_timeout'
     | 'invalid_options'
-    | 'unknown_error';
+    | 'operation_crashed';
 
   /** Error object for invalid options, dependency cycles, or unexpected failures. */
   error?: Error;
@@ -369,7 +374,7 @@ export interface ShutdownResult {
     | 'shutdown_timeout'
     | 'cleanup_incomplete'
     | 'invalid_options'
-    | 'unknown_error';
+    | 'operation_crashed';
 
   /** The validation error or thrown value when the pass itself failed. */
   error?: Error;
@@ -946,7 +951,7 @@ export type RegistrationFailureCode =
   | 'target_not_found'
   | 'invalid_position'
   | 'dependency_cycle'
-  | 'unknown_error';
+  | 'operation_crashed';
 
 /**
  * Common result shape for component registration operations
@@ -979,7 +984,7 @@ export interface RegistrationResultBase extends BaseOperationResult {
    * Resolved startup order after applying dependency constraints. On a refusal it is the
    * order of the registry as it stands, or empty when the registration was refused before
    * it had read every registered component's dependencies - an invalid position, or a
-   * shutdown in progress. Also empty for an `unknown_error` failure before the commit.
+   * shutdown in progress. Also empty for an `operation_crashed` failure before the commit.
    */
   startupOrder: string[];
 
@@ -1015,7 +1020,7 @@ export interface RegistrationResultBase extends BaseOperationResult {
 /**
  * Stable, machine-readable failure codes for getStartupOrder()
  */
-export type StartupOrderFailureCode = 'dependency_cycle' | 'unknown_error';
+export type StartupOrderFailureCode = 'dependency_cycle' | 'operation_crashed';
 
 /**
  * Result of getStartupOrder()

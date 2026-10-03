@@ -43,7 +43,7 @@ export async function runShutdownWarningPhase(
     const state = context.componentStates.get(name);
 
     // Contained per component: the read runs the component's code, and a getter that
-    // threw here used to end the whole pass as `unknown_error` with every component
+    // threw here used to end the whole pass as `operation_crashed` with every component
     // still running. That component just gets no warning; its stop still runs.
     let warningHook: unknown;
 

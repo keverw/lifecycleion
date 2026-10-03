@@ -125,7 +125,7 @@ export function crashedStartupResult(
     ...refusedStartupResult(
       isOperationTimeoutValidationError(error)
         ? 'invalid_options'
-        : 'unknown_error',
+        : 'operation_crashed',
       reason,
       durationMS,
     ),
@@ -150,7 +150,7 @@ export function crashedShutdownResult(
     reason,
     code: isOperationTimeoutValidationError(error)
       ? 'invalid_options'
-      : 'unknown_error',
+      : 'operation_crashed',
     error,
   };
 }
@@ -202,7 +202,7 @@ export function crashedComponentResult(
     reason,
     code: isOperationTimeoutValidationError(error)
       ? 'invalid_options'
-      : 'unknown_error',
+      : 'operation_crashed',
     error,
   };
 }

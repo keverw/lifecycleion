@@ -137,7 +137,7 @@ test('a registration from a follow-up ordering crash report cannot escape rollba
   };
   globalThis.addEventListener('error', onError);
   try {
-    expect((await manager.startAllComponents()).code).toBe('unknown_error');
+    expect((await manager.startAllComponents()).code).toBe('operation_crashed');
     expect(await registration).toMatchObject({ autoStartDeferred: true });
     expect(reports).toHaveLength(1);
     expect(late.starts).toBe(0);
