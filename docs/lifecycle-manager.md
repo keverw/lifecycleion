@@ -1443,7 +1443,7 @@ if (result.sent) {
 #### `broadcastMessage(payload, options?)`
 
 Broadcast a message to multiple components.
-By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`.
+By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`, as does a target unregistered mid-broadcast.
 A non-empty `componentNames` array limits the targets; `null`, omitted, or empty arrays use all eligible components. Stopped/stalled explicit targets are reported but not sent unless explicitly included. Non-array filters refuse the whole broadcast before delivery, return `[]`, and report a `TypeError` through the global error channel.
 
 An invalid shared timeout also refuses the whole broadcast before delivery, returning `[]` with a warning rather than per-recipient `invalid_options` rows. The array alone cannot distinguish these refusals from no recipients; use the diagnostics for that distinction. The `invalid_options` result-code member remains in the public type for compatibility.
