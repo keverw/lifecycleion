@@ -450,16 +450,20 @@ export class ProcessSignalManager {
       // on `process` must not go unreported either. Reported in order, after this
       // failed attach has reached its caller: a listener that attaches from a report
       // must not have this attach's error thrown over its own successful attach.
-      const [firstFailure, ...laterFailures] = this.releaseListeners();
-      if (firstFailure) {
-        this.reportCleanupFailuresLater([
-          ['ProcessSignalManager attach cleanup', firstFailure],
-          ...laterFailures.map(
-            (failure) =>
-              ['ProcessSignalManager listener cleanup', failure] as const,
-          ),
-        ]);
-      }
+      const {
+        failures: [firstFailure, ...laterFailures],
+        rawModeRestoreFailure,
+      } = this.releaseListeners();
+      this.reportCleanupFailuresLater([
+        ...(firstFailure
+          ? [['ProcessSignalManager attach cleanup', firstFailure] as const]
+          : []),
+        ...laterFailures.map(
+          (failure) =>
+            ['ProcessSignalManager listener cleanup', failure] as const,
+        ),
+        ...rawModeRestoreReport(rawModeRestoreFailure),
+      ]);
       throw error;
     }
   }
@@ -475,7 +479,10 @@ export class ProcessSignalManager {
       return;
     }
 
-    const [firstFailure, ...laterFailures] = this.releaseListeners();
+    const {
+      failures: [firstFailure, ...laterFailures],
+      rawModeRestoreFailure,
+    } = this.releaseListeners();
 
     // Always mark as detached, even if cleanup threw an error
     // This prevents the manager from being stuck in an "attached" state
@@ -485,12 +492,13 @@ export class ProcessSignalManager {
     // Reported after the first failure reaches the caller, so they follow it in order
     // and a listener that attaches from a report does so after the caller has seen
     // this detach finish.
-    this.reportCleanupFailuresLater(
-      laterFailures.map(
+    this.reportCleanupFailuresLater([
+      ...laterFailures.map(
         (failure) =>
           ['ProcessSignalManager listener cleanup', failure] as const,
       ),
-    );
+      ...rawModeRestoreReport(rawModeRestoreFailure),
+    ]);
 
     if (firstFailure) {
       throw firstFailure.error;
@@ -669,10 +677,16 @@ export class ProcessSignalManager {
    * Run every removal step even when an earlier one throws, so one failed removal
    * cannot leave the remaining handlers - or raw-mode stdin - in place behind a
    * detached status. Returns every failure in order, reporting none: the caller
-   * surfaces the first and reports the rest once its own state is final.
+   * surfaces the first and reports the rest once its own state is final. A raw-mode
+   * restore failure comes back separately: it is reported, never thrown, as `detach()`
+   * has always returned normally over it, and it follows the rest, as the last step.
    */
-  private releaseListeners(): Array<{ error: unknown }> {
+  private releaseListeners(): {
+    failures: Array<{ error: unknown }>;
+    rawModeRestoreFailure: { error: unknown } | undefined;
+  } {
     const failures: Array<{ error: unknown }> = [];
+    let rawModeRestoreFailure: { error: unknown } | undefined;
     const attempt = (step: () => void): void => {
       try {
         step();
@@ -691,9 +705,11 @@ export class ProcessSignalManager {
     attempt(() => this.stopListeningForReloadSignal());
     attempt(() => this.stopListeningForInfoSignal());
     attempt(() => this.stopListeningForDebugSignal());
-    attempt(() => this.restoreStdin());
+    attempt(() => {
+      rawModeRestoreFailure = this.restoreStdin();
+    });
 
-    return failures;
+    return { failures, rawModeRestoreFailure };
   }
 
   /**
@@ -1015,10 +1031,12 @@ export class ProcessSignalManager {
    * In that case, we still update shared state and attempt terminal restoration if we
    * were the recorded raw mode owner.
    */
-  private restoreStdin(): void {
+  /** Returns a raw-mode restore failure for the caller to report with its others. */
+  private restoreStdin(): { error: unknown } | undefined {
     const shared = getSharedState();
     const didResume = this.didResumeStdin;
     this.didResumeStdin = false;
+    let rawModeRestoreFailure: { error: unknown } | undefined;
 
     // Remove handler if it exists
     if (this.keypressHandler) {
@@ -1081,18 +1099,18 @@ export class ProcessSignalManager {
         // script and false of the long-lived process this library exists for: `detach()`
         // returns normally, `getStatus().isAttached` reads `false`, and the terminal is
         // still in raw mode, so the user's shell is broken and nothing anywhere said so.
-        // Deferred like every other cleanup report: a listener that attaches from it
-        // must find this attach/detach already final, not be undone by it.
-        this.reportCleanupFailuresLater([
-          ['ProcessSignalManager stdin raw mode restore', { error }],
-        ]);
+        // Returned, not reported here: the caller reports it after its other cleanup
+        // failures, once its attach/detach is final, so a listener that attaches from
+        // the report is not undone by it.
+        rawModeRestoreFailure = { error };
       }
     }
 
     // Pause stdin when last instance detaches - re-checked here rather than trusted from
-    // the `isLastInstance` read above. Nothing above reports synchronously any more, but
-    // the set is the live answer: a stale flag paused stdin under a freshly attached
-    // instance, leaving its keypress handler registered and silent.
+    // the `isLastInstance` read above. `setRawMode()` is stdin's own code and can run
+    // anything, including an `attach()`: the set is the live answer, and a stale flag
+    // paused stdin under a freshly attached instance, leaving its keypress handler
+    // registered and silent.
     if (
       (wasAttachedToStdin || didResume) &&
       isLastInstance &&
@@ -1104,5 +1122,16 @@ export class ProcessSignalManager {
         // Best effort - stdin staying active without handlers is harmless
       }
     }
+
+    return rawModeRestoreFailure;
   }
+}
+
+/** The report for a raw-mode restore failure, if there was one. */
+function rawModeRestoreReport(
+  failure: { error: unknown } | undefined,
+): Array<readonly [string, { error: unknown }]> {
+  return failure
+    ? [['ProcessSignalManager stdin raw mode restore', failure]]
+    : [];
 }
