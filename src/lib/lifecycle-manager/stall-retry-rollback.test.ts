@@ -464,14 +464,26 @@ describe('LifecycleManager - stall retry and rollback', () => {
     });
     const { release } = claimReports();
     const beforeStop = Date.now();
+    let result: ComponentOperationResult;
     try {
-      await manager.stopComponent('early');
+      result = await manager.stopComponent('early');
     } finally {
       release();
     }
 
     const stall = manager.getStalledComponents()[0];
     expect(stall).toMatchObject({ phase: 'graceful', reason: 'timeout' });
+    // Still a crash by code; the reason and status say the timeout came first.
+    expect(result).toMatchObject({
+      success: false,
+      code: 'unknown_error',
+      reason:
+        'Stop failed unexpectedly after its graceful phase timed out: abort hook read crashed',
+      status: {
+        state: 'stalled',
+        stallInfo: { phase: 'graceful', reason: 'timeout' },
+      },
+    });
     // The event's code agrees with the timeout reason it carries.
     expect(stalledCodes).toEqual(['component_shutdown_timeout']);
     expect(stall.startedAt).toBeGreaterThanOrEqual(beforeStop);
@@ -493,8 +505,9 @@ describe('LifecycleManager - stall retry and rollback', () => {
 
     crashNextCall(manager, 'createStopPhaseObserver');
     const { release } = claimReports();
+    let result: ComponentOperationResult;
     try {
-      await manager.stopComponent('plain');
+      result = await manager.stopComponent('plain');
     } finally {
       release();
     }
@@ -503,6 +516,39 @@ describe('LifecycleManager - stall retry and rollback', () => {
       phase: 'graceful',
       reason: 'error',
     });
+    expect(result).toMatchObject({
+      code: 'unknown_error',
+      reason: 'Stop failed unexpectedly: bookkeeping crashed',
+      status: { state: 'stalled', stallInfo: { reason: 'error' } },
+    });
+  });
+
+  test('a crashed stop whose status cannot be read answers without one', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'plain'));
+    await manager.startComponent('plain');
+
+    Object.defineProperty(manager, 'getComponentStatus', {
+      configurable: true,
+      value: (): never => {
+        throw new Error('status read crashed');
+      },
+    });
+    const { release } = claimReports();
+    let result: ComponentOperationResult;
+    try {
+      result = await manager.stopComponent('plain');
+    } finally {
+      release();
+      Reflect.deleteProperty(manager, 'getComponentStatus');
+    }
+
+    expect(result).toMatchObject({
+      success: false,
+      code: 'unknown_error',
+      reason: 'Stop failed unexpectedly: status read crashed',
+    });
+    expect(result.status).toBeUndefined();
   });
 
   test('a no-handler retry of a crash-recorded stall answers with the crash result', async () => {
@@ -535,6 +581,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
       error: crashed.error,
     });
     expect(retried.reason).toContain('Stop failed unexpectedly');
+    expect(retried.status?.stallInfo).toBe(stall);
     expect(manager.getStalledComponents()[0]).toBe(stall);
     expect(stalledEvents).toEqual([]);
   });

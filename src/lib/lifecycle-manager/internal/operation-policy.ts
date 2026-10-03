@@ -188,7 +188,8 @@ export function crashedHealthCheckResult(
 
 /**
  * The `ComponentOperationResult` for a per-component operation that crashed. Carries no
- * `status`: building one reads component state through code that may be what threw.
+ * `status`: building one reads component state through code that may be what threw. A
+ * caller that can read it safely adds it, as a crashed stop does.
  */
 export function crashedComponentResult(
   name: string,

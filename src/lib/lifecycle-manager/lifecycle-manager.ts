@@ -7323,6 +7323,8 @@ export class LifecycleManager
         // `stalled` means, and a stalled component can be retried or unregistered.
         const err = toError(error);
         const state = this.componentStates.get(name);
+        // Set only once this crash is recorded as the stop's stall below.
+        let didGracefulTimeOut = false;
 
         // Only a stop this attempt claimed: a `stopping` it did not claim belongs to a
         // concurrent stop - one that got in while this attempt was awaiting, before its
@@ -7350,6 +7352,7 @@ export class LifecycleManager
             gracefulTimedOut: stop.gracefulTimedOut,
             crashed: true,
           });
+          didGracefulTimeOut = stop.gracefulTimedOut;
           // A force-stop waiter for this name is released. Signals stay attached, as they
           // do for every other stall: a stalled component was not confirmed stopped, and
           // during a shutdown the operator's next Ctrl+C still has to reach escalation.
@@ -7367,11 +7370,7 @@ export class LifecycleManager
 
         reportCallbackError('lifecycle-manager component stop', error);
 
-        return crashedComponentResult(
-          name,
-          err,
-          `Stop failed unexpectedly: ${describeError(error)}`,
-        );
+        return this.crashedStopResult(name, err, didGracefulTimeOut);
       }
     } finally {
       this.releaseClaim(name, claim);
@@ -8247,6 +8246,38 @@ export class LifecycleManager
     };
   }
 
+  /**
+   * The result a stop that crashed answers with. The code stays the crash's own; the
+   * reason says when the graceful phase had already timed out, and `status` carries the
+   * stall the crash left. Read guarded: the crash may have come from reading state, and
+   * this runs where nothing above is left to catch, so a status that cannot be read is
+   * left out.
+   */
+  private crashedStopResult(
+    name: string,
+    error: Error,
+    didGracefulTimeOut: boolean,
+  ): ComponentOperationResult {
+    const result = crashedComponentResult(
+      name,
+      error,
+      didGracefulTimeOut
+        ? `Stop failed unexpectedly after its graceful phase timed out: ${describeError(error)}`
+        : `Stop failed unexpectedly: ${describeError(error)}`,
+    );
+
+    try {
+      const status = this.getComponentStatus(name);
+      if (status !== undefined) {
+        result.status = status;
+      }
+    } catch {
+      // Left out, as `crashedComponentResult()` leaves it out everywhere else.
+    }
+
+    return result;
+  }
+
   /** Whether the stop that left `name` stalled had its graceful phase time out. */
   private didStallGracefulTimeOut(name: string): boolean {
     const stallInfo = this.stalledComponents.get(name);
@@ -8269,15 +8300,9 @@ export class LifecycleManager
     const error = stallInfo.error;
 
     // The stop net recorded this stall after a crash, and answered with its crash result.
-    if (
-      this.stallDetails.get(stallInfo)?.crashed === true &&
-      error !== undefined
-    ) {
-      return crashedComponentResult(
-        name,
-        error,
-        `Stop failed unexpectedly: ${describeError(error)}`,
-      );
+    const details = this.stallDetails.get(stallInfo);
+    if (details?.crashed === true && error !== undefined) {
+      return this.crashedStopResult(name, error, details.gracefulTimedOut);
     }
 
     return {
