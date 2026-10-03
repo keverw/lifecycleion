@@ -1389,8 +1389,8 @@ interface MessageResult {
     | 'stalled'
     | 'no_handler'
     | 'timeout'
-    | 'error' // The component's handler (or its getter) threw
-    | 'operation_crashed'; // The call itself crashed - a bug to report
+    | 'error' // The component's handler threw or rejected
+    | 'operation_crashed'; // A handler getter threw, or the call itself crashed - a bug to report
 }
 ```
 
@@ -1483,8 +1483,8 @@ interface BroadcastResult {
     | 'no_handler'
     | 'timeout'
     | 'invalid_options'
-    | 'error' // The component's handler (or its getter) threw
-    | 'operation_crashed'; // The call itself crashed - a bug to report
+    | 'error' // The component's handler threw or rejected
+    | 'operation_crashed'; // A handler getter threw, or the call itself crashed - a bug to report
 }
 ```
 
@@ -1537,8 +1537,8 @@ interface HealthCheckResult {
     | 'stalled'
     | 'no_handler'
     | 'timeout'
-    | 'error' // The component's handler (or its getter) threw
-    | 'operation_crashed'; // The call itself crashed - a bug to report
+    | 'error' // The component's handler threw or rejected
+    | 'operation_crashed'; // A handler getter threw, or the call itself crashed - a bug to report
 }
 
 interface HealthReport {
@@ -2491,7 +2491,7 @@ return false; // Wrapped to { healthy: false, message: undefined, details: undef
 **Note:** Boolean returns are automatically normalized to `ComponentHealthResult` format by the manager. Return result rich objects directly for more detailed health information.
 
 Health handlers and their timeout configuration are read before invocation. A throwing
-`healthCheckTimeoutMS` getter returns `code: 'error'` with "Health check timeout could
+`healthCheckTimeoutMS` getter returns `code: 'operation_crashed'` with "Health check timeout could
 not be read"; it does not call the handler. Failed configuration reads still emit the
 paired health-check started/failed notifications used to count completed checks.
 
@@ -2854,7 +2854,7 @@ global callback-error channel; inspect their `error` for the named option. The a
 a warning instead. The table above describes unexpected failures, including ordinary
 exceptions thrown by getters.
 
-Branch on `code` as usual; `operation_crashed` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around. Every call uses the same pair of codes: `operation_crashed` when the call itself fails, and `error` when your own code does - a component's `start()`, `stop()`, `onShutdownForce()`, `healthCheck()`, `onMessage()` or `getValue()` throwing or rejecting, or a custom `onReloadRequested` / `onInfoRequested` / `onDebugRequested` callback doing so. An `error` is an ordinary failure of that code, not of the manager.
+Branch on `code` as usual; `operation_crashed` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around. Every call uses the same pair of codes. `error` means a method you wrote ran and failed: a component's `start()`, `stop()`, `onShutdownForce()`, `healthCheck()`, `onMessage()` or `getValue()` threw, rejected, or (for `healthCheck()`) returned a malformed result, or a custom `onReloadRequested` / `onInfoRequested` / `onDebugRequested` callback threw or rejected. That is an ordinary failure of that code, not of the manager. `operation_crashed` means something that should never throw did: the manager itself, or a property getter on a component - a handler such as `onMessage`, a timeout such as `healthCheckTimeoutMS`, or `getName()` / `getDependencies()`.
 
 A stop that crashes still records the component as stalled, so it can be retried or unregistered. Its result carries `status`, whose `stallInfo` describes that stall, and its `reason` says so when the graceful phase had already timed out first. Its `component:stalled` event uses `component_shutdown_timeout` in that case and `operation_crashed` otherwise.
 

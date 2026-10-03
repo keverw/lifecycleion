@@ -585,7 +585,7 @@ describe('LifecycleManager - public methods never reject', () => {
       release();
     }
 
-    expect(result.code).toBe('error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.error?.message).toBe('getter exploded');
   });
 
@@ -690,7 +690,9 @@ describe('LifecycleManager - public methods never reject', () => {
 
     expect(received).toEqual(['hi']);
     expect(results.find((entry) => entry.name === 'good')?.data).toBe('ok');
-    expect(results.find((entry) => entry.name === 'bad')?.code).toBe('error');
+    expect(results.find((entry) => entry.name === 'bad')?.code).toBe(
+      'operation_crashed',
+    );
   });
 
   test('a restart with an unreadable startup option leaves components running', async () => {
@@ -1101,7 +1103,7 @@ describe('LifecycleManager - public methods never reject', () => {
 
     expect(wasReloaded).toBe(true);
     expect(result.results.find((entry) => entry.name === 'bad')?.code).toBe(
-      'error',
+      'operation_crashed',
     );
     expect(result.results.find((entry) => entry.name === 'good')?.code).toBe(
       'called',
@@ -1834,7 +1836,7 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(detachCalls).toBe(1);
   });
 
-  test('getValue() resolves an unexpected failure as an error result', async () => {
+  test('getValue() resolves an unexpected failure as an operation_crashed result', async () => {
     const { logger, manager } = setup();
     const component = new Plain(logger, 'a');
     await manager.registerComponent(component);
@@ -1855,7 +1857,7 @@ describe('LifecycleManager - public methods never reject', () => {
       release();
     }
 
-    expect(result.code).toBe('error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.error?.message).toBe('getter exploded');
     expect(hasReport(reports, 'lifecycle-manager getValue')).toBe(true);
   });

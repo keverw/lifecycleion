@@ -121,9 +121,10 @@ export async function checkComponentHealthOperation(
       durationMS: Date.now() - startTime,
       error: err,
       timedOut: false,
+      // A getter that throws broke the component's contract: not a failed check.
       code: isOperationTimeoutValidationError(error)
         ? 'invalid_options'
-        : 'error',
+        : 'operation_crashed',
     };
   }
 
@@ -398,8 +399,8 @@ export async function runSignalBroadcast(
     }
     // The handler, and its timeout when there is one, are the component's own
     // properties, so they are read here, per component: one that throws becomes that
-    // component's `error` entry, before any `*-started` event for it, rather than
-    // ending the broadcast for every component after it.
+    // component's `operation_crashed` entry, before any `*-started` event for it, rather
+    // than ending the broadcast for every component after it.
     let handler: unknown;
     let timeoutMS = 0;
 
@@ -428,7 +429,7 @@ export async function runSignalBroadcast(
         timedOut: false,
         code: isOperationTimeoutValidationError(error)
           ? 'invalid_options'
-          : 'error',
+          : 'operation_crashed',
       });
       continue;
     }
@@ -530,6 +531,7 @@ export async function runSignalBroadcast(
     (result) =>
       result.called ||
       result.code === 'error' ||
+      result.code === 'operation_crashed' ||
       result.code === 'invalid_options' ||
       result.code === 'unavailable',
   );

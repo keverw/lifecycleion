@@ -118,7 +118,7 @@ test('component stop getter throwing a shared timeout error remains a reported c
   }
 });
 
-test('health timeout getter throwing a shared timeout error is reported as a check error', async () => {
+test('health timeout getter throwing a shared timeout error is reported as a crash, not invalid_options', async () => {
   const { logger, manager } = setup();
   const component = new Plain(logger, 'component');
   Object.defineProperty(component, 'healthCheck', {
@@ -133,7 +133,7 @@ test('health timeout getter throwing a shared timeout error is reported as a che
   const { reports, release } = claimReports();
   try {
     const result = await manager.checkComponentHealth('component');
-    expect(result.code).toBe('error');
+    expect(result.code).toBe('operation_crashed');
     expect(reports).toHaveLength(1);
     expect((reports[0] as Error).cause).toBe(result.error);
   } finally {

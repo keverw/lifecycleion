@@ -1695,7 +1695,7 @@ describe('LifecycleManager - review regressions', () => {
     const { release } = claimReports();
 
     try {
-      expect(manager.getValue('a', 'k').code).toBe('error');
+      expect(manager.getValue('a', 'k').code).toBe('operation_crashed');
     } finally {
       release();
     }
@@ -2074,9 +2074,11 @@ describe('LifecycleManager - review regressions', () => {
     const { release } = claimReports();
 
     try {
-      expect((await manager.checkComponentHealth('a')).code).toBe('error');
+      expect((await manager.checkComponentHealth('a')).code).toBe(
+        'operation_crashed',
+      );
       expect((await manager.sendMessageToComponent('a', 'hi')).code).toBe(
-        'error',
+        'operation_crashed',
       );
     } finally {
       release();
@@ -4578,7 +4580,7 @@ test('health timeout getter failure is a configuration failure before invocation
     const result = await manager.checkComponentHealth(
       'unreadable-health-timeout',
     );
-    expect(result.code).toBe('error');
+    expect(result.code).toBe('operation_crashed');
     expect(result.message).toBe('Health check timeout could not be read');
     expect(result.error).toBe(cause);
     expect(result.timedOut).toBe(false);

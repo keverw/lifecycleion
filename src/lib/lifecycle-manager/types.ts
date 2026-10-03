@@ -683,7 +683,8 @@ export interface ComponentSignalResult {
     | 'unavailable'
     | 'timeout'
     | 'invalid_options'
-    | 'error';
+    | 'error'
+    | 'operation_crashed';
 }
 
 /**
@@ -731,9 +732,9 @@ export interface ValueResult<T = unknown> {
     | 'operation_crashed';
 
   /**
-   * The failure behind `code: 'error'` - what the component's `getValue()` handler (or its
-   * getter) threw - or behind `code: 'operation_crashed'`, what the lookup itself threw
-   * unexpectedly.
+   * The failure behind `code: 'error'` - what the component's `getValue()` handler threw -
+   * or behind `code: 'operation_crashed'`: what its `getValue` getter or the lookup itself
+   * threw unexpectedly.
    */
   error?: Error;
 }

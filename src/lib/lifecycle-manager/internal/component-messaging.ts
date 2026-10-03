@@ -130,7 +130,7 @@ export async function sendMessageInternal(
       });
     context.lifecycleEvents.componentMessageFailed(componentName, from, err, {
       timedOut: false,
-      code: 'error',
+      code: 'operation_crashed',
       componentFound: true,
       componentRunning: isRunning,
       handlerImplemented: false,
@@ -145,7 +145,7 @@ export async function sendMessageInternal(
       data: undefined,
       error: err,
       timedOut: false,
-      code: 'error',
+      code: 'operation_crashed',
     };
   }
 
@@ -551,9 +551,10 @@ export function getValueInternal<T = unknown>(
 
   // Read once, and inside a guard: the read runs the component's code, and it comes
   // after `value-requested`, so a getter that threw left that event without its
-  // `value-returned` pair. A throwing read is answered like a throwing handler - with
-  // `code: 'error'` if still available - and reported even if the getter removed
-  // the component or began teardown.
+  // `value-returned` pair. A throwing read is answered with `code: 'operation_crashed'`
+  // if still available - a getter that throws broke the component's contract, unlike a
+  // handler that throws - and reported even if the getter removed the component or
+  // began teardown.
   let getValueHandler: unknown;
 
   try {
@@ -581,7 +582,7 @@ export function getValueInternal<T = unknown>(
       componentRunning: isRunning,
       handlerImplemented: false,
       requestedBy: from,
-      code: 'error',
+      code: 'operation_crashed',
     });
 
     return {
@@ -591,7 +592,7 @@ export function getValueInternal<T = unknown>(
       componentRunning: isRunning,
       handlerImplemented: false,
       requestedBy: from,
-      code: 'error',
+      code: 'operation_crashed',
       error: err,
     };
   }
