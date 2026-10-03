@@ -2122,7 +2122,9 @@ export class LifecycleManager
           stopFailureReason:
             stopResult.code === 'component_shutdown_timeout'
               ? 'timeout'
-              : 'error',
+              : stopResult.code === 'operation_crashed'
+                ? 'operation_crashed'
+                : 'error',
           error: stopResult.error,
           wasStopped: false,
           wasRegistered: true,
@@ -6843,6 +6845,9 @@ export class LifecycleManager
 
     let timeoutHandle: NodeJS.Timeout | undefined;
     let startupTimeoutError: ComponentStartTimeoutError | undefined;
+    // Whether the failure is `start()`'s own - `error` - rather than the attempt's own
+    // bookkeeping crashing around it - `operation_crashed`.
+    let didStartHookFail = false;
 
     try {
       // Inside the `try`, so a failure here is a failed start like any other - reported
@@ -6894,6 +6899,7 @@ export class LifecycleManager
         if (settlement) {
           settlement.rawStartPending = false;
         }
+        didStartHookFail = true;
         throw error;
       } finally {
         if (settlement) {
@@ -6964,9 +6970,22 @@ export class LifecycleManager
           },
         );
 
-        await racePromises([startPromise, timeoutPromise]);
+        try {
+          await racePromises([startPromise, timeoutPromise]);
+        } catch (error) {
+          // Before the timer fires its error is `undefined`, which a start() may
+          // reject with too.
+          didStartHookFail =
+            startupTimeoutError === undefined || error !== startupTimeoutError;
+          throw error;
+        }
       } else {
-        await awaitBoxedPromise(startPromise);
+        try {
+          await awaitBoxedPromise(startPromise);
+        } catch (error) {
+          didStartHookFail = true;
+          throw error;
+        }
       }
 
       // The startup deadline no longer applies once start() has settled.
@@ -7200,7 +7219,12 @@ export class LifecycleManager
         };
       }
 
-      return this.withTransition<ComponentOperationResult>(() => {
+      const code = isStartupTimeout
+        ? 'component_startup_timeout'
+        : didStartHookFail
+          ? 'error'
+          : 'operation_crashed';
+      const result = this.withTransition<ComponentOperationResult>(() => {
         // Store error
         this.componentErrors.set(name, err);
 
@@ -7248,11 +7272,19 @@ export class LifecycleManager
           success: false,
           componentName: name,
           reason,
-          code: isStartupTimeout ? 'component_startup_timeout' : 'error',
+          code,
           error: err,
           status: this.getComponentStatus(name),
         };
       });
+
+      // Reported once the result is built: a throw building it reaches the start net,
+      // which reports it there instead.
+      if (code === 'operation_crashed') {
+        reportCallbackError('lifecycle-manager component start', error);
+      }
+
+      return result;
     } finally {
       // Ensure we always clean up the timeout handle, even if component.start()
       // rejects (non-timeout failure). Otherwise onStartupAborted() can fire
@@ -7323,7 +7355,7 @@ export class LifecycleManager
         const err = toError(error);
         const state = this.componentStates.get(name);
         // Set only once this crash is recorded as the stop's stall below.
-        let didGracefulTimeOut = false;
+        let stall: { gracefulTimedOut: boolean } | undefined;
 
         // Only a stop this attempt claimed: a `stopping` it did not claim belongs to a
         // concurrent stop - one that got in while this attempt was awaiting, before its
@@ -7351,7 +7383,7 @@ export class LifecycleManager
             gracefulTimedOut: stop.gracefulTimedOut,
             crashed: true,
           });
-          didGracefulTimeOut = stop.gracefulTimedOut;
+          stall = { gracefulTimedOut: stop.gracefulTimedOut };
           // A force-stop waiter for this name is released. Signals stay attached, as they
           // do for every other stall: a stalled component was not confirmed stopped, and
           // during a shutdown the operator's next Ctrl+C still has to reach escalation.
@@ -7369,7 +7401,7 @@ export class LifecycleManager
 
         reportCallbackError('lifecycle-manager component stop', error);
 
-        return this.crashedStopResult(name, err, didGracefulTimeOut);
+        return this.crashedStopResult(name, err, stall);
       }
     } finally {
       this.releaseClaim(name, claim);
@@ -7715,6 +7747,9 @@ export class LifecycleManager
     const outcomeObserver = this.createStopPhaseObserver(name);
 
     let timeoutHandle: NodeJS.Timeout | undefined;
+    // Set once `stop()` has resolved: a throw after that is the bookkeeping's, not the
+    // stop's, and must not be answered as a failed graceful phase and escalated.
+    let didStopResolve = false;
 
     try {
       // Race against graceful timeout
@@ -7767,6 +7802,7 @@ export class LifecycleManager
       } else {
         await awaitBoxedPromise(stopPromise);
       }
+      didStopResolve = true;
 
       return this.withTransition(() => {
         // Update state - graceful succeeded
@@ -7785,6 +7821,11 @@ export class LifecycleManager
         };
       });
     } catch (error) {
+      // Left to the stop net, which answers `operation_crashed`.
+      if (didStopResolve) {
+        throw error;
+      }
+
       const err = toError(error);
 
       // Store error
@@ -8246,24 +8287,28 @@ export class LifecycleManager
   }
 
   /**
-   * The result a stop that crashed answers with. The code stays the crash's own; the
-   * reason says when the graceful phase had already timed out, and `status` carries the
-   * stall the crash left. Read guarded: the crash may have come from reading state, and
-   * this runs where nothing above is left to catch, so a status that cannot be read is
-   * left out.
+   * The result a stop that crashed answers with. The code stays the crash's own -
+   * `operation_crashed` once the crash left a stall, even for a timeout validation
+   * error, since the stop did change state; the reason says when the graceful phase had
+   * already timed out, and `status` carries the stall the crash left. Read guarded: the
+   * crash may have come from reading state, and this runs where nothing above is left to
+   * catch, so a status that cannot be read is left out.
    */
   private crashedStopResult(
     name: string,
     error: Error,
-    didGracefulTimeOut: boolean,
+    stall: { gracefulTimedOut: boolean } | undefined,
   ): ComponentOperationResult {
     const result = crashedComponentResult(
       name,
       error,
-      didGracefulTimeOut
+      stall?.gracefulTimedOut === true
         ? `Stop failed unexpectedly after its graceful phase timed out: ${describeError(error)}`
         : `Stop failed unexpectedly: ${describeError(error)}`,
     );
+    if (stall !== undefined) {
+      result.code = 'operation_crashed';
+    }
 
     try {
       const status = this.getComponentStatus(name);
@@ -8301,7 +8346,7 @@ export class LifecycleManager
     // The stop net recorded this stall after a crash, and answered with its crash result.
     const details = this.stallDetails.get(stallInfo);
     if (details?.crashed === true && error !== undefined) {
-      return this.crashedStopResult(name, error, details.gracefulTimedOut);
+      return this.crashedStopResult(name, error, details);
     }
 
     return {

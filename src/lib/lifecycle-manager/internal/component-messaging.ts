@@ -450,7 +450,7 @@ export async function broadcastMessageInternal(
         data: messageResult.data,
         error: messageResult.error,
         timedOut: messageResult.timedOut,
-        code: messageResult.code === 'not_found' ? 'error' : messageResult.code,
+        code: messageResult.code,
       });
     }
   } catch (error) {

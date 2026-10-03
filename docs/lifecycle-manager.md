@@ -812,6 +812,7 @@ interface UnregisterComponentResult {
 - `'stalled'` - Component stalled during stop
 - `'timeout'` - Component stop timed out
 - `'error'` - Component stop threw an error
+- `'operation_crashed'` - The stop itself crashed; the component may be left stalled or still running
 
 ### Lifecycle Operations
 
@@ -1478,6 +1479,7 @@ interface BroadcastResult {
   timedOut: boolean;
   code:
     | 'sent'
+    | 'not_found' // Unregistered while the broadcast was running
     | 'stopped'
     | 'stalled'
     | 'no_handler'

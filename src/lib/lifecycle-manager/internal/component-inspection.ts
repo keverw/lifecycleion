@@ -340,12 +340,8 @@ export async function checkAllHealthOperation(
   // Overall healthy only if all components are healthy
   const isOverallHealthy = results.every((r) => r.healthy);
   const hasTimeout = results.some((r) => r.timedOut);
-  const hasError = results.some(
-    (r) =>
-      r.code === 'error' ||
-      r.code === 'operation_crashed' ||
-      r.code === 'invalid_options',
-  );
+  // Every failing entry carries its error; no other entry does.
+  const hasError = results.some((r) => r.error !== null);
   // "no_handler" is treated as healthy by design (implicit OK).
   const hasDegraded = results.some(
     (r) =>
@@ -418,6 +414,12 @@ export async function runSignalBroadcast(
     } catch (error) {
       const err = toError(error);
 
+      if (!isOperationTimeoutValidationError(error)) {
+        reportCallbackError(
+          `lifecycle-manager ${descriptor.signal} broadcast`,
+          error,
+        );
+      }
       context.logger.entity(name).error(descriptor.errorLog, {
         params: { error: err },
       });
@@ -526,14 +528,10 @@ export async function runSignalBroadcast(
     }
   }
 
-  // Called handlers, plus any component that failed before its handler could be called.
+  // Called handlers, plus any component that failed before its handler could be called:
+  // only those carry an error without being called.
   const calledResults = results.filter(
-    (result) =>
-      result.called ||
-      result.code === 'error' ||
-      result.code === 'operation_crashed' ||
-      result.code === 'invalid_options' ||
-      result.code === 'unavailable',
+    (result) => result.called || result.error !== null,
   );
   const hasError = calledResults.some((result) => result.error);
   const isAllError =

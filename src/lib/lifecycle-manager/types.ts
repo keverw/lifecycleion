@@ -257,7 +257,12 @@ export type UnregisterFailureCode =
 /**
  * Additional details for why unregister stop failed
  */
-export type UnregisterStopFailureReason = 'stalled' | 'timeout' | 'error';
+export type UnregisterStopFailureReason =
+  | 'stalled'
+  | 'timeout'
+  | 'error'
+  // The stop itself crashed; the component may be left stalled or still running.
+  | 'operation_crashed';
 
 /**
  * Result of unregistering a component
@@ -539,6 +544,8 @@ export interface BroadcastResult {
   /** Machine-readable outcome code */
   code:
     | 'sent'
+    // Unregistered while the broadcast was running.
+    | 'not_found'
     | 'stopped'
     | 'stalled'
     | 'no_handler'
