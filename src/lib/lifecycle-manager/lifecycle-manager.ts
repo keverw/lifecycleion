@@ -399,6 +399,10 @@ export class LifecycleManager
     isCompleting: boolean;
     // Filled once ordering ends. Those names are this pass's to start already.
     readonly initialOrderNames: Set<string>;
+    // Names the loop has taken past its deadline check, attempted or skipped.
+    readonly reachedNames: Set<string>;
+    // Deferred auto-starts this pass owns and has not reached yet.
+    readonly frozenAutoStarts: Set<string>;
   } | null = null;
   private isStarted = false;
   // Unique token used to detect shutdowns that happened during async start().
@@ -680,7 +684,7 @@ export class LifecycleManager
    * - Set stopIfRunning: false to require manual stop before unregister
    * - If stopIfRunning is true and stop fails, unregister is aborted
    * - If stopIfRunning is true and the component is stalled, unregister is aborted
-   * @returns True if component was unregistered, false otherwise
+   * @returns The outcome: `success`, a `code` on failure, and `wasStopped` / `wasRegistered`
    */
   public unregisterComponent(
     name: string,
@@ -2664,6 +2668,8 @@ export class LifecycleManager
       isOrdering: true,
       isCompleting: false,
       initialOrderNames: new Set<string>(),
+      reachedNames: new Set<string>(),
+      frozenAutoStarts: new Set<string>(),
     };
     const rollBackOnce = async (names: string[]): Promise<void> => {
       if (hasShutdownBegun()) {
@@ -2764,7 +2770,7 @@ export class LifecycleManager
         const startupReads = bulkStartup.dependencyReads;
         // Deferred registrations included in any frozen batch still need an
         // abandonment warning if the loop ends before it attempts them.
-        const frozenAutoStarts = new Set<string>();
+        const frozenAutoStarts = bulkStartup.frozenAutoStarts;
 
         try {
           // Every component's list, including those of components the reads themselves
@@ -2923,6 +2929,7 @@ export class LifecycleManager
               );
               break;
             }
+            bulkStartup.reachedNames.add(name);
 
             const component = this.getComponent(name);
             if (!component) {
@@ -4692,9 +4699,12 @@ export class LifecycleManager
           progress.isAutoStartDeferred = true;
           // A startup this registration's own log line began has ordered it already.
           // Queued as well, it was started twice and, after a rollback, also reported
-          // as an auto-start the startup never attempted.
+          // as an auto-start the startup never attempted. Frozen with the initial
+          // order's deferred names instead, so one the loop never reaches is.
           if (!bulkStartup?.initialOrderNames.has(componentName)) {
             this.deferredAutoStartNames.add(componentName);
+          } else if (!bulkStartup.reachedNames.has(componentName)) {
+            bulkStartup.frozenAutoStarts.add(componentName);
           }
           this.logger
             .entity(componentName)
@@ -7256,11 +7266,10 @@ export class LifecycleManager
         (isStartupTimeout ||
           this.componentUnexpectedStopHadError.get(name) === true)
       ) {
-        // A timed-out attempt has handed `start()` to late cleanup, which retires the
-        // stall itself and maps a `stalled` state to `starting-timed-out`.
-        if (!isStartupTimeout) {
-          this.restoreStallAfterUnexpectedStop(name);
-        }
+        // A timed-out attempt too: late cleanup runs only if `start()` later fulfills
+        // (and not at all with an abort hook outside a bulk deadline), and it accepts a
+        // forced start's `stalled` state as its own.
+        this.restoreStallAfterUnexpectedStop(name);
         return {
           success: false,
           componentName: name,
@@ -8793,6 +8802,9 @@ export class LifecycleManager
         await promiseResolveIntrinsic(undefined);
         const timeoutState = this.componentStates.get(name);
         const timeoutError = this.componentErrors.get(name) ?? null;
+        // A forced start that reported an unexpected stop before its deadline ended as
+        // that stop, not as a timeout. Read before cleanup's own stop clears it.
+        const didStopUnexpectedly = this.componentUnexpectedStopHadError.has(name);
 
         // A forced start still owes cleanup if the old stalled stop finished first.
         // The instance and startup token must still belong to this attempt.
@@ -8869,7 +8881,11 @@ export class LifecycleManager
         // Successful cleanup retired any pre-existing stall from a forced start.
         this.componentStates.set(
           name,
-          timeoutState === 'stalled' ? 'starting-timed-out' : timeoutState,
+          timeoutState === 'stalled'
+            ? didStopUnexpectedly
+              ? 'stopped'
+              : 'starting-timed-out'
+            : timeoutState,
         );
         this.componentErrors.set(name, timeoutError);
       } catch (error) {
