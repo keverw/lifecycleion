@@ -358,9 +358,9 @@ describe('LifecycleManager Integration Tests', () => {
         stopPromise,
       ]);
 
-      // Startup may have succeeded or been interrupted
-      // Either way, shutdown should complete
+      // The same shutdown pass waits for startup cleanup and stops dependencies.
       expect(stopResult.success).toBe(true);
+      expect(lifecycle.getRunningComponentNames()).toEqual([]);
     });
 
     test('should track stalled components during shutdown', async () => {

@@ -10,6 +10,8 @@ Safely execute sync or async callbacks with automatic error reporting on the sta
   - [safeHandleCallbackAndWait](#safehandlecallbackandwait)
   - [reportCallbackError](#reportcallbackerror)
   - [runCallbackSafely](#runcallbacksafely)
+  - [reportToHost](#reporttohost)
+  - [Keeping `this`](#keeping-this)
 - [The Reporting Pattern](#the-reporting-pattern)
 - [Runtime Support](#runtime-support)
 
@@ -74,10 +76,18 @@ if (result.success) {
 }
 ```
 
-**Returns:** `Promise<{ success: boolean; value?: T; error?: Error }>`
+**Returns:** `Promise<CallbackResult<T>>`, a discriminated union:
+
+```typescript
+type CallbackResult<T = unknown> =
+  | { success: true; value: T; error?: undefined }
+  | { success: false; error: Error; value?: undefined };
+```
 
 - `success: true` - callback completed without throwing, and `value` holds the return value
 - `success: false` - callback threw or was not a function, and `error` holds the failure
+
+Checking `result.success` narrows the type, so neither field needs a non-null assertion afterwards. `T` cannot be inferred from the callback (it is typed `unknown`) and defaults to `unknown`; supply it explicitly when you know what the callback returns.
 
 `error` is always a real `Error`, even when the callback did something like `throw null`: the value is normalized with [`toError`](./to-error.md), which keeps whatever was actually thrown on `error.cause`. Reading `result.error.message` is therefore safe against a non-`Error` throw - though see the note below about errors whose `message` accessor itself throws.
 
@@ -97,12 +107,27 @@ function runCallbackSafely(
   callback: unknown,
   args: unknown[],
   onError: (error: unknown) => void,
+  thisArg?: unknown,
 ): void;
 ```
 
-Runs a callback without awaiting it, forwarding a synchronous throw, a returned promise's rejection, or a synthesized non-function error to `onError`. The `onError` callback runs on the final failure path and must not throw.
+Runs a callback without awaiting it, forwarding a synchronous throw, a returned promise's rejection, or a synthesized non-function error to `onError`. The `onError` callback runs on the final failure path and should not throw; one that does is contained (see below).
 
-This is the lower-level invocation helper used by `safeHandleCallback()`. Choose `safeHandleCallback()` for the standard global error reporting and fallback chain. Choose `runCallbackSafely()` when you need to route failures yourself, such as to logger diagnostics or a local fallback. It does not report failures globally unless your `onError` handler does so. Keep that handler synchronous and non-throwing, because its own returned promise is not followed. Use `safeHandleCallbackAndWait()` when you need to await completion and receive a result.
+This is the lower-level invocation helper used by `safeHandleCallback()`. Choose `safeHandleCallback()` for the standard global error reporting and fallback chain. Choose `runCallbackSafely()` when you need to route failures yourself, such as to logger diagnostics or a local fallback. It does not report failures globally unless your `onError` handler does so. That handler should not throw, but one that throws - or is `async` and rejects - is contained: its failure goes to the console alongside the original, never escaping or becoming an unhandled rejection. Use `safeHandleCallbackAndWait()` when you need to await completion and receive a result.
+
+`thisArg` is the receiver the callback is invoked with. Omit it for a plain function or a closure, and supply the owning object when passing an extracted method.
+
+### reportToHost
+
+```typescript
+function reportToHost(error: Error, renderForConsole?: () => string): void;
+```
+
+Publishes an `Error` you already hold on the standard `'error'` channel, with the same dispatch-first fallback chain `reportCallbackError()` uses (see [The Reporting Pattern](#the-reporting-pattern)). Use it when the `Error` is already well-formed - its own `cause` chain, its own details - and listeners should see exactly that. `reportCallbackError()` is the normalizer for the other case: a raw thrown value, which it wraps in an `Error` whose message names the callback. `renderForConsole` is consulted only when the report reaches the console uncancelled.
+
+### Keeping `this`
+
+`safeHandleCallback()` and `safeHandleCallbackAndWait()` invoke the callback without a receiver, so an extracted method such as `logger.info` loses `logger`, and any `this.x` inside it throws. That throw arrives as an ordinary callback failure rather than a `TypeError` at the call site, so a method that only reports through this path can look like it ran. Pass `() => logger.info(a, b)` or `logger.info.bind(logger)` instead, or use `runCallbackSafely()` with `thisArg`.
 
 ## The Reporting Pattern
 

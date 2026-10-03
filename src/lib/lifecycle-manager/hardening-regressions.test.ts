@@ -132,7 +132,9 @@ describe('LifecycleManager hardening regressions', () => {
       const startedAt = Date.now();
       const result = await manager.startAllComponents({ timeoutMS: 20 });
       try {
-        expect(Date.now() - startedAt).toBeLessThan(250);
+        // Returns at its deadline rather than waiting on the hung start, which never
+        // settles on its own. Loose, for slow CI runners: a macOS runner took 288ms.
+        expect(Date.now() - startedAt).toBeLessThan(2_000);
         expect(result).toMatchObject({
           success: false,
           timedOut: true,

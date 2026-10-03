@@ -4,8 +4,8 @@ import {
 } from './safe-handle-callback';
 import { ulid } from 'ulid';
 import readline from 'readline';
-import { finiteClamp } from './clamp';
-import { MAX_TIMER_MS } from './internal/timer-limits';
+import { resolveTimeoutMS } from './internal/timer-limits';
+import { queueMicrotaskIntrinsic } from './internal/intrinsics';
 
 /**
  * The shutdown signal types that can trigger the shutdown callback
@@ -263,11 +263,14 @@ export interface ProcessSignalManagerOptions {
    * Process signals are never throttled as they may come from external sources
    * that expect immediate handling.
    *
+   * Null or undefined uses the default. Zero disables throttling. Infinity and
+   * values above 2,147,483,647ms use that cap (about 24.8 days between triggers
+   * of the same keyboard action); Infinity does not select the default.
    * @default 200 (200ms throttle, allowing 5 triggers per second maximum)
    * @example 300 // Custom 300ms throttle (3.33 triggers per second max)
    * @example 0 // Disable throttling entirely
    */
-  keypressThrottleMS?: number;
+  keypressThrottleMS?: number | null;
 }
 
 /**
@@ -334,11 +337,10 @@ export class ProcessSignalManager {
     this.infoCallbackName = options.infoCallbackName ?? 'onInfoRequested';
     this.debugCallbackName = options.debugCallbackName ?? 'onDebugRequested';
     // Default to 200ms throttle (leading-edge rate limiting), 0 disables
-    this.keypressThrottleMS = finiteClamp(
-      options.keypressThrottleMS ?? 200,
-      0,
-      MAX_TIMER_MS,
+    this.keypressThrottleMS = resolveTimeoutMS(
+      options.keypressThrottleMS,
       200,
+      'keypressThrottleMS',
     );
 
     // Initialize shutdown signal handlers if callback is provided (not yet registered with process)
@@ -443,12 +445,25 @@ export class ProcessSignalManager {
       this._isAttached = true;
     } catch (error) {
       // If any listener registration fails, clean up any handlers that were already registered
-      // This prevents partial registration and ensures consistent state
-      this.stopListeningForShutdownSignals();
-      this.stopListeningForReloadSignal();
-      this.stopListeningForInfoSignal();
-      this.stopListeningForDebugSignal();
-      this.restoreStdin();
+      // This prevents partial registration and ensures consistent state. A cleanup failure
+      // must not replace the registration error that got us here, but a listener it left
+      // on `process` must not go unreported either. Reported in order, after this
+      // failed attach has reached its caller: a listener that attaches from a report
+      // must not have this attach's error thrown over its own successful attach.
+      const {
+        failures: [firstFailure, ...laterFailures],
+        rawModeRestoreFailure,
+      } = this.releaseListeners();
+      this.reportCleanupFailuresLater([
+        ...(firstFailure
+          ? [['ProcessSignalManager attach cleanup', firstFailure] as const]
+          : []),
+        ...laterFailures.map(
+          (failure) =>
+            ['ProcessSignalManager listener cleanup', failure] as const,
+        ),
+        ...rawModeRestoreReport(rawModeRestoreFailure),
+      ]);
       throw error;
     }
   }
@@ -464,17 +479,29 @@ export class ProcessSignalManager {
       return;
     }
 
-    try {
-      this.stopListeningForShutdownSignals();
-      this.stopListeningForReloadSignal();
-      this.stopListeningForInfoSignal();
-      this.stopListeningForDebugSignal();
-      this.restoreStdin();
-    } finally {
-      // Always mark as detached, even if cleanup threw an error
-      // This prevents the manager from being stuck in an "attached" state
-      // that blocks re-attachment attempts
-      this._isAttached = false;
+    const {
+      failures: [firstFailure, ...laterFailures],
+      rawModeRestoreFailure,
+    } = this.releaseListeners();
+
+    // Always mark as detached, even if cleanup threw an error
+    // This prevents the manager from being stuck in an "attached" state
+    // that blocks re-attachment attempts
+    this._isAttached = false;
+
+    // Reported after the first failure reaches the caller, so they follow it in order
+    // and a listener that attaches from a report does so after the caller has seen
+    // this detach finish.
+    this.reportCleanupFailuresLater([
+      ...laterFailures.map(
+        (failure) =>
+          ['ProcessSignalManager listener cleanup', failure] as const,
+      ),
+      ...rawModeRestoreReport(rawModeRestoreFailure),
+    ]);
+
+    if (firstFailure) {
+      throw firstFailure.error;
     }
   }
 
@@ -587,20 +614,6 @@ export class ProcessSignalManager {
   }
 
   /**
-   * Remove handlers for all shutdown signals if they were registered.
-   * Uses the same function references to ensure proper cleanup.
-   */
-  private stopListeningForShutdownSignals(): void {
-    if (this.shutdownSignalListeners) {
-      for (const signal of Object.keys(
-        this.shutdownSignalListeners,
-      ) as ShutdownSignal[]) {
-        process.off(signal, this.shutdownSignalListeners[signal]);
-      }
-    }
-  }
-
-  /**
    * Register handler for SIGHUP signal if reload callback is provided.
    * SIGHUP is commonly used to trigger configuration reloads.
    */
@@ -658,6 +671,63 @@ export class ProcessSignalManager {
     if (this.debugSignalListener) {
       process.off('SIGUSR2', this.debugSignalListener);
     }
+  }
+
+  /**
+   * Run every removal step even when an earlier one throws, so one failed removal
+   * cannot leave the remaining handlers - or raw-mode stdin - in place behind a
+   * detached status. Returns every failure in order, reporting none: the caller
+   * surfaces the first and reports the rest once its own state is final. A raw-mode
+   * restore failure comes back separately: it is reported, never thrown, as `detach()`
+   * has always returned normally over it, and it follows the rest, as the last step.
+   */
+  private releaseListeners(): {
+    failures: Array<{ error: unknown }>;
+    rawModeRestoreFailure: { error: unknown } | undefined;
+  } {
+    const failures: Array<{ error: unknown }> = [];
+    let rawModeRestoreFailure: { error: unknown } | undefined;
+    const attempt = (step: () => void): void => {
+      try {
+        step();
+      } catch (error) {
+        failures.push({ error });
+      }
+    };
+
+    const shutdownListeners = this.shutdownSignalListeners;
+    if (shutdownListeners) {
+      for (const signal of Object.keys(shutdownListeners) as ShutdownSignal[]) {
+        attempt(() => process.off(signal, shutdownListeners[signal]));
+      }
+    }
+
+    attempt(() => this.stopListeningForReloadSignal());
+    attempt(() => this.stopListeningForInfoSignal());
+    attempt(() => this.stopListeningForDebugSignal());
+    attempt(() => {
+      rawModeRestoreFailure = this.restoreStdin();
+    });
+
+    return { failures, rawModeRestoreFailure };
+  }
+
+  /**
+   * Report cleanup failures in order, in a microtask: after the throw that ends the
+   * current `attach()` / `detach()` has reached its caller.
+   */
+  private reportCleanupFailuresLater(
+    reports: ReadonlyArray<readonly [string, { error: unknown }]>,
+  ): void {
+    if (reports.length === 0) {
+      return;
+    }
+
+    queueMicrotaskIntrinsic(() => {
+      for (const [callbackName, failure] of reports) {
+        reportCallbackError(callbackName, failure.error);
+      }
+    });
   }
 
   /**
@@ -941,17 +1011,12 @@ export class ProcessSignalManager {
         // Reported for the reason `restoreStdin`'s twin is: a terminal left in raw mode is
         // the user's shell broken, and this said nothing about it.
         //
-        // Reported *after* the ownership repair above, not before it. The report runs a
-        // global `'error'` listener synchronously, and a listener that calls `attach()`
-        // from there observed the shared state half-repaired - no attached instances,
-        // `rawModeEnabledByManager` still true, and no owner to adopt. The twin at
-        // `restoreStdin` does have work after its report - it pauses stdin - and answers
-        // the same hazard the other way, by re-reading `attachedInstances` rather than
-        // trusting the flag it computed before reporting.
-        reportCallbackError(
-          'ProcessSignalManager stdin raw mode restore',
-          error,
-        );
+        // Deferred, as the twin is: this runs inside a failing `attach()`, and a listener
+        // that attaches from the report must not have that attach's error thrown over its
+        // own, nor observe the shared state before the ownership repair above.
+        this.reportCleanupFailuresLater([
+          ['ProcessSignalManager stdin raw mode restore', { error }],
+        ]);
       }
     }
   }
@@ -966,10 +1031,12 @@ export class ProcessSignalManager {
    * In that case, we still update shared state and attempt terminal restoration if we
    * were the recorded raw mode owner.
    */
-  private restoreStdin(): void {
+  /** Returns a raw-mode restore failure for the caller to report with its others. */
+  private restoreStdin(): { error: unknown } | undefined {
     const shared = getSharedState();
     const didResume = this.didResumeStdin;
     this.didResumeStdin = false;
+    let rawModeRestoreFailure: { error: unknown } | undefined;
 
     // Remove handler if it exists
     if (this.keypressHandler) {
@@ -1027,24 +1094,23 @@ export class ProcessSignalManager {
         shared.rawModeOwner = null;
         shared.rawModeEnabledByManager = false;
       } catch (error) {
-        // The owner stays set so a future detach can retry - but this is reported now
+        // The owner stays set so a future detach can retry - but this is reported
         // rather than left to the exit. "Restored on process exit anyway" is true of a
         // script and false of the long-lived process this library exists for: `detach()`
         // returns normally, `getStatus().isAttached` reads `false`, and the terminal is
         // still in raw mode, so the user's shell is broken and nothing anywhere said so.
-        reportCallbackError(
-          'ProcessSignalManager stdin raw mode restore',
-          error,
-        );
+        // Returned, not reported here: the caller reports it after its other cleanup
+        // failures, once its attach/detach is final, so a listener that attaches from
+        // the report is not undone by it.
+        rawModeRestoreFailure = { error };
       }
     }
 
     // Pause stdin when last instance detaches - re-checked here rather than trusted from
-    // the `isLastInstance` read above. `reportCallbackError` dispatches a global `'error'`
-    // *synchronously*, so a listener that calls `attach()` from inside the restore report
-    // above returns here with an instance freshly attached, and the stale flag then paused
-    // stdin under it: the new instance's keypress handler was registered and silent. The
-    // set is the live answer.
+    // the `isLastInstance` read above. `setRawMode()` is stdin's own code and can run
+    // anything, including an `attach()`: the set is the live answer, and a stale flag
+    // paused stdin under a freshly attached instance, leaving its keypress handler
+    // registered and silent.
     if (
       (wasAttachedToStdin || didResume) &&
       isLastInstance &&
@@ -1056,5 +1122,16 @@ export class ProcessSignalManager {
         // Best effort - stdin staying active without handlers is harmless
       }
     }
+
+    return rawModeRestoreFailure;
   }
+}
+
+/** The report for a raw-mode restore failure, if there was one. */
+function rawModeRestoreReport(
+  failure: { error: unknown } | undefined,
+): Array<readonly [string, { error: unknown }]> {
+  return failure
+    ? [['ProcessSignalManager stdin raw mode restore', failure]]
+    : [];
 }

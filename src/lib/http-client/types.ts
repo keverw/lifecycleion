@@ -431,7 +431,8 @@ export interface HTTPClientConfig {
    */
   baseURL?: string;
   defaultHeaders?: Record<string, string | string[]>;
-  timeout?: number;
+  /** Null or undefined selects the default timeout. */
+  timeout?: number | null;
   cookieJar?: CookieJar | null;
   retryPolicy?: RetryPolicyOptions;
   /**
@@ -474,7 +475,8 @@ export interface HTTPRequestOptions {
   headers?: Record<string, string | string[]>;
   params?: Record<string, unknown>;
   body?: unknown;
-  timeout?: number;
+  /** Null or undefined selects the default timeout. */
+  timeout?: number | null;
   signal?: AbortSignal;
   retryPolicy?: RetryPolicyOptions | null;
   /**

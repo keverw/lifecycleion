@@ -20,6 +20,7 @@ import {
   RetryUtilsErrRunnerNotRunning,
 } from './retry-utils-errors';
 import { MAX_TIMER_MS } from '../../internal/timer-limits';
+import { hostileRejections } from '../../internal/hostile-promise-test-utils';
 
 interface CustomResult {
   message: string;
@@ -74,8 +75,25 @@ describe('RetryRunner', () => {
     runner.overrideGraceCancelPeriodMS(500);
     expect(runner.graceCancelPeriodMS).toBe(500);
 
-    runner.overrideGraceCancelPeriodMS(-1);
-    expect(runner.graceCancelPeriodMS).toBe(1000);
+    expect(() => runner.overrideGraceCancelPeriodMS(-1)).toThrow(RangeError);
+    expect(runner.graceCancelPeriodMS).toBe(500);
+
+    expect(() => runner.overrideGraceCancelPeriodMS(Number.NaN)).toThrow(
+      TypeError,
+    );
+    expect(() =>
+      runner.overrideGraceCancelPeriodMS('500' as unknown as number),
+    ).toThrow(TypeError);
+
+    for (const value of [null, undefined]) {
+      expect(() =>
+        runner.overrideGraceCancelPeriodMS(value as unknown as number),
+      ).toThrow(TypeError);
+      expect(runner.graceCancelPeriodMS).toBe(500);
+    }
+
+    runner.overrideGraceCancelPeriodMS(Infinity);
+    expect(runner.graceCancelPeriodMS).toBe(MAX_TIMER_MS);
 
     runner.overrideGraceCancelPeriodMS(3e9);
     expect(runner.graceCancelPeriodMS).toBe(MAX_TIMER_MS);
@@ -1088,3 +1106,164 @@ describe('RetryRunner', () => {
     });
   });
 });
+
+describe('RetryRunner - an operation returning a hostile rejected promise', () => {
+  test.each(hostileRejections)(
+    'one with %s fails the attempt',
+    async (_label, make) => {
+      // The failure is reported; kept out of the run output.
+      muteConsoleError();
+      const runner = new RetryRunner(
+        { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 1 },
+        () => make(new Error('operation rejected')),
+      );
+
+      try {
+        const outcome = await Promise.race([
+          runner.run(true).then(() => 'settled'),
+          sleep(200).then(() => 'hung'),
+        ]);
+
+        expect(outcome).toBe('settled');
+        expect(runner.lastError).toBeInstanceOf(Error);
+        expect((runner.lastError as Error).message).toBe('operation rejected');
+      } finally {
+        restoreConsoleError();
+      }
+    },
+  );
+});
+
+test('operation thenable uses its first then read and observes rejection', async () => {
+  muteConsoleError();
+  let reads = 0;
+  let attempts = 0;
+  const failure = new Error('operation failed');
+  const runner = new RetryRunner(
+    { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 1 },
+    () => {
+      attempts++;
+      let resultReads = 0;
+      return {
+        get then() {
+          reads++;
+          if (++resultReads > 1) {
+            return undefined;
+          }
+          return (
+            _resolve: unknown,
+            reject: (reason: unknown) => void,
+          ): void => {
+            reject(failure);
+          };
+        },
+      } as unknown as Promise<void>;
+    },
+  );
+  try {
+    const outcome = await Promise.race([
+      runner.run(true).then(() => 'settled'),
+      sleep(200).then(() => 'hung'),
+    ]);
+    expect(outcome).toBe('settled');
+    expect(reads).toBe(attempts);
+    expect(runner.lastError).toBe(failure);
+  } finally {
+    restoreConsoleError();
+  }
+});
+
+test('waiting for completion does not retain the dispatch lock', async () => {
+  const gate = Promise.withResolvers<void>();
+  const runner = new RetryRunner(
+    { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 0 },
+    async (report) => {
+      await gate.promise;
+      report('success');
+    },
+  );
+  const pending = runner.run(true);
+  try {
+    // An indiscriminate return-await inside run's try/finally would hold the lock
+    // for the whole attempt and wrongly refuse this legitimate attachment.
+    expect(await runner.forceTry({ shouldWaitForCompletion: false })).toEqual({
+      status: 'running',
+      reattached: true,
+    });
+  } finally {
+    gate.resolve();
+    await pending;
+  }
+});
+
+test('operation then getter failure preserves its original error identity', async () => {
+  class FatalError extends Error {
+    public readonly code = 'FATAL';
+  }
+  const failure = new FatalError('cannot read operation then');
+  const handledErrors: unknown[] = [];
+  const runner = new RetryRunner(
+    { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 0 },
+    () =>
+      ({
+        get then() {
+          throw failure;
+        },
+      }) as unknown as Promise<void>,
+    { onAttemptHandled: (info) => handledErrors.push(info.error) },
+  );
+
+  const result = await runner.run(true);
+
+  expect(result.status).toBe('attempts_exhausted');
+  expect('error' in result && result.error).toBe(failure);
+  expect(runner.lastError).toBe(failure);
+  expect(handledErrors.length).toBeGreaterThan(0);
+  for (const error of handledErrors) {
+    expect(error).toBe(failure);
+  }
+});
+
+test.each(['error', 'fatal'] as const)(
+  'operation then getter rethrow of reported %s is not a second outcome',
+  async (status) => {
+    const captured = muteConsoleError();
+    const events: unknown[] = [];
+    const onGlobalError = (event: unknown): void => {
+      events.push(event);
+    };
+    globalThis.addEventListener?.('error', onGlobalError);
+
+    try {
+      const failure = new Error('already reported');
+      const runner = new RetryRunner(
+        { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 0 },
+        (reportResult) => {
+          if (status === 'fatal') {
+            reportResult('fatal', failure);
+          } else {
+            reportResult('error', failure);
+          }
+          return {
+            get then() {
+              throw failure;
+            },
+          } as unknown as Promise<void>;
+        },
+      );
+
+      const result = await runner.run(true);
+      await sleep(10);
+
+      expect(result.status).toBe(
+        status === 'fatal' ? 'attempt_fatal' : 'attempts_exhausted',
+      );
+      expect(runner.lastError).toBe(failure);
+      expect(captured).toEqual([]);
+      expect(events).toEqual([]);
+    } finally {
+      globalThis.removeEventListener?.('error', onGlobalError);
+      restoreConsoleError();
+    }
+  },
+);

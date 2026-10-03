@@ -194,6 +194,40 @@ describe('XHRAdapter', () => {
     expect(new XHRAdapter().getType()).toBe('xhr');
   });
 
+  test('uses the captured Promise constructor after the global is replaced', async () => {
+    const originalPromise = globalThis.Promise;
+    let replacementCalls = 0;
+    let promise: ReturnType<XHRAdapter['send']>;
+
+    globalThis.Promise = new Proxy(originalPromise, {
+      construct() {
+        replacementCalls += 1;
+        throw new Error('Replacement Promise constructor must not be called');
+      },
+    });
+
+    try {
+      promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: 'GET',
+        headers: {},
+      });
+      lastXHR.status = 200;
+      lastXHR.response = textBody('ok');
+      lastXHR.getAllResponseHeadersResult = 'Content-Type: text/plain\r\n';
+      lastXHR.simulateLoad();
+    } finally {
+      globalThis.Promise = originalPromise;
+    }
+
+    expect(await promise).toEqual({
+      status: 200,
+      headers: { 'content-type': 'text/plain' },
+      body: new TextEncoder().encode('ok'),
+    });
+    expect(replacementCalls).toBe(0);
+  });
+
   test('opens XHR with correct method and URL', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({

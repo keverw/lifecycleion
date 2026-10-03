@@ -1,3 +1,4 @@
+import { promiseConstructorIntrinsic } from '../../internal/intrinsics';
 // cspell:ignore WHATWG
 /**
  * Multipart/form-data serialization for Node.js HTTP requests.
@@ -286,7 +287,7 @@ export async function serializeMultipartFormData(
   let uploadedBytes = 0;
 
   const write = (data: string | Buffer | Uint8Array): Promise<void> =>
-    new Promise<void>((resolve, reject) => {
+    new promiseConstructorIntrinsic<void>((resolve, reject) => {
       let hasWriteReturned = false;
       let isWriteCallbackDone = false;
       let isDrainDone = true;

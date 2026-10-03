@@ -1,4 +1,3 @@
-import { MAX_TIMER_MS } from '../../../internal/timer-limits';
 /**
  * What a queueing sink does when it cannot write, in one place.
  *
@@ -55,36 +54,7 @@ export const DEFAULT_CLOSE_TIMEOUT_MS = 30_000;
  */
 export { MAX_TIMER_MS } from '../../../internal/timer-limits';
 
-/**
- * A wait bound a sink can actually enforce, from whatever the caller asked for.
- *
- * `closeTimeoutMS` and `flush(timeoutMS)` were used literally by both sinks, and two
- * spellings broke them in opposite directions. `NaN` - `Number(process.env.X)` with the
- * variable unset - made every `Date.now() - startTime > timeoutMS` comparison false, so
- * the drain loop that follows the init wait could never time out and `close()` or
- * `flush()` hung for good on a stalled destination: the shape a bound exists to rule out.
- * `Infinity` did the reverse, because `setTimeout` reads it as `1`: the init wait gave up
- * a millisecond in while the loop after it waited forever.
- *
- * So: `NaN`, a non-number, and a negative value name no usable wait and take the default;
- * `0` is honoured as "do not wait"; `Infinity` is bounded at {@link MAX_TIMER_MS}, which
- * is the longest wait a timer can keep. One rule for both sinks, the way the queue
- * options already have one.
- */
-export function resolveTimeoutMS(
-  requested: number | undefined,
-  defaultMS: number,
-): number {
-  if (
-    typeof requested !== 'number' ||
-    Number.isNaN(requested) ||
-    requested < 0
-  ) {
-    return defaultMS;
-  }
-
-  return Math.min(requested, MAX_TIMER_MS);
-}
+export { resolveTimeoutMS } from '../../../internal/timer-limits';
 
 /**
  * The cap a sink should enforce, or `undefined` for unlimited.

@@ -11,13 +11,15 @@ import {
 } from './queue-policy';
 
 describe('resolveTimeoutMS', () => {
-  test('takes the default for an absent or unusable request', () => {
+  test('defaults only an omitted timeout and rejects invalid explicit requests', () => {
     // `NaN` made every `elapsed > timeoutMS` comparison false, so a drain loop bounded
     // by it never timed out and `close()` hung on a stalled destination.
     expect(resolveTimeoutMS(undefined, 30_000)).toBe(30_000);
-    expect(resolveTimeoutMS(Number.NaN, 30_000)).toBe(30_000);
-    expect(resolveTimeoutMS('5000' as unknown as number, 30_000)).toBe(30_000);
-    expect(resolveTimeoutMS(-1, 30_000)).toBe(30_000);
+    expect(() => resolveTimeoutMS(Number.NaN, 30_000)).toThrow(TypeError);
+    expect(() => resolveTimeoutMS('5000' as unknown as number, 30_000)).toThrow(
+      TypeError,
+    );
+    expect(() => resolveTimeoutMS(-1, 30_000)).toThrow(RangeError);
   });
 
   test('honours zero and any finite wait', () => {

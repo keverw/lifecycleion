@@ -126,8 +126,8 @@ interface HTTPClientConfig {
   adapter?: HTTPAdapter; // Default: FetchAdapter
   baseURL?: string; // Origin / prefix for relative paths. If set, MockAdapter, NodeAdapter, and server-side FetchAdapter require an absolute http(s):// URL.
   defaultHeaders?: Record<string, string | string[]>;
-  timeout?: number; // Default: 30,000 ms; <= 0 disables the per-attempt timeout.
-  // NaN or a non-number takes the default; Infinity disables it like 0 does.
+  timeout?: number | null; // Default: 30,000 ms; <= 0 disables the per-attempt timeout.
+  // NaN or a non-number throws; Infinity disables it like 0 does.
   // Same rules for the per-request override, whose default is this value.
   cookieJar?: CookieJar | null; // Cookie management (null disables)
   retryPolicy?: RetryPolicyOptions; // Retry strategy (disabled by default)
@@ -163,6 +163,11 @@ const client = new HTTPClient({
 | `followRedirects` | Not supported          | Not supported        | Supported             | Supported            | Supported   |
 
 The constructor throws immediately on unsupported combinations so failures are caught at startup, not at request time.
+Client `retryPolicy` is validated and copied at construction. The internal snapshot is frozen and may be shared with sub-clients. Subclasses must not mutate `this._config.retryPolicy` in place; supply a new policy through client or sub-client configuration instead. A per-request
+`.retryPolicy(options)` is validated and copied when called, before request interceptors
+run. Invalid retry durations throw there, and later mutations to the supplied object do
+not change the policy. Each request starts with a fresh retry budget; `null` on the
+builder disables retries inherited from the client.
 
 ## Making Requests
 
@@ -298,7 +303,11 @@ In browsers, `XHRAdapter` adds upload progress but currently does not expose `re
 if the adapter finished writing it. It never rejects. For `NodeAdapter`, it is available
 once a supported body has entered the adapter's upload tracking, including when the
 response arrives after the upload has finished. It does not prove that the server
-processed or committed the data.
+processed or committed the data. The same outcome is shared by the attempt's retry,
+redirect, and response handling. Ordinary upload Errors retain their identity. If an
+Error's `then` property makes it unsafe to return through a promise, the outcome uses a
+wrapper with the original in `cause` and its readable `message`, `name`, `code`, and
+`stack`. Inspect `cause` for other custom fields.
 
 Check that the field exists before interpreting its resolution:
 
@@ -329,6 +338,9 @@ On expiry, the client returns a timeout, aborts the attempt, and reports the sta
 settlement through the global `'error'` channel. `timeout: 0`, negative values, and
 `Infinity` disable this client wait bound. A custom adapter that supplies the promise
 must settle it and honor cancellation.
+A `null` or omitted request timeout inherits the client timeout. Explicit `NaN` or another non-number
+throws before dispatch; finite negative values and either infinity retain the documented
+disabled-timeout behavior. Do not pass an expired `deadline - Date.now()` directly: a zero or negative result disables the timer, rather than timing out immediately. Check whether the deadline has passed before sending the request.
 
 `NodeAdapter` also watches uploads left running after an early response closes. It checks
 socket progress at roughly five-second intervals and allows a pending multipart source
@@ -415,6 +427,10 @@ interface HTTPClientError {
 | `stream_setup_error`    | The StreamResponseFactory threw an error during setup                                                                                                          |
 
 ## Request Interceptors
+
+Interceptor and response/error observer dispatches snapshot their registrations.
+Adding or removing a callback during a dispatch affects the next dispatch; removing
+an earlier callback cannot skip a later one in the current snapshot.
 
 Interceptors run **before** an adapter attempt and can mutate the outgoing request (headers, URL, body) or cancel it entirely. They are the right place for auth token injection, URL rewriting, or pre-flight validation.
 
@@ -1057,7 +1073,7 @@ const authClient = client.createSubClient({
 - `'replace'` (default): the sub-client's `defaultHeaders` replace the parent's entirely.
 - `'merge'`: the sub-client's `defaultHeaders` are layered on top of the parent's.
 
-Any `HTTPClientConfig` field can be overridden. When `cookieJar` is set to `null` it disables cookies for that sub-client even if the parent has one.
+Any `HTTPClientConfig` field can be overridden. An omitted or explicitly `undefined` field inherits the parent value. `null` follows the individual option: a null `timeout` inherits, while `cookieJar: null` disables cookies for that sub-client even if the parent has one.
 
 Sub-clients inherit the parent's interceptors and observers. The parent chain runs first, then the sub-client's own. This means shared concerns like auth headers or global logging happen before sub-client-specific logic. Adding interceptors or observers to a sub-client does not affect the parent.
 
@@ -1332,13 +1348,30 @@ expect(response.body).toEqual({ id: '1', name: 'Alice' });
 
 ```typescript
 interface MockAdapterConfig {
-  defaultDelay?: number; // Milliseconds delay added to all responses
+  defaultDelay?: number | null; // Non-negative milliseconds added to all responses; 0 disables
   onHandlerError?: (
     req: MockRequest,
     error: unknown,
   ) => MockResponse | Promise<MockResponse>;
 }
 ```
+
+Changes to the supplied config's `defaultDelay` or `onHandlerError` affect later
+requests. Inherited error handlers are supported and receive the config as `this`.
+The default delay is validated at construction and when a response uses it;
+a response-specific `delay` takes precedence.
+
+A `null` or omitted mock default delay uses zero. A `null` or omitted response delay
+inherits the current default delay. Explicit `NaN`, other non-number, or negative delays throw;
+`Infinity` and oversized durations use the timer ceiling. A route's response `delay`
+overrides `defaultDelay` and is validated before its response is sent. An invalid
+response delay fails that attempt with `adapter_error` and its original validation
+error as the cause, without retrying the route handler even when retries are enabled.
+
+`onHandlerError` receives the original thrown or rejected value, including non-Error
+values, regardless of whether the request has an AbortSignal. If a route or error
+handler aborts its own request, the request ends with AbortError while its returned
+promise remains observed so a later rejection cannot become unhandled.
 
 `mock.routes.clear()` removes all registered mock routes.
 
@@ -1364,7 +1397,7 @@ interface MockResponse {
   body?: unknown; // Supports objects (JSON), strings, Uint8Array, ArrayBuffer
   headers?: Record<string, string | string[]>;
   contentType?: 'json' | 'text' | 'binary'; // Overrides auto-detection
-  delay?: number; // Millisecond delay for this response
+  delay?: number | null; // Millisecond delay for this response
   cookies?: Record<string, string | MockCookieOptions | null>;
   streamError?: boolean | 'stream_write_error' | 'stream_response_error'; // Simulate a body failure after headers arrived
   transportError?: boolean | MockTransportErrorOptions; // Simulate a failure with no response at all
@@ -1661,7 +1694,10 @@ Since the client treats anything other than `false` as retryable, an unset value
 
 It is absent when a retry was scheduled, when no policy is configured, when the policy has no attempts left, or when the status was never retryable in the first place. In those cases nothing was suppressed, so naming a cause would misdescribe why the request stopped.
 
-`adapter_veto` does not occur with a real transport. `NodeAdapter` and `FetchAdapter` set `isRetryable: false` only for a rejected TLS certificate, and pair it with `495`, which is not a retryable status, so the status ends the request before the veto is consulted, and nothing was suppressed to report. It is reachable from `MockAdapter` via `transportError: { isRetryable: false }`, whose default `status: 0` _is_ retryable (that is what the [`/secure` example above](#failures-before-a-response) exercises), and from a custom adapter that vetoes a status the client would otherwise retry.
+The built-in real transport adapters do not currently produce `adapter_veto`: their
+TLS-certificate veto uses status `495`, which is already non-retryable. `MockAdapter`
+can produce it with `transportError: { isRetryable: false }` at the default status `0`;
+a custom adapter can also veto a status the client would otherwise retry.
 
 ```typescript
 await client
@@ -1680,9 +1716,9 @@ Adapter evidence answers "did this reach the server?". The request method answer
 
 `POST` and `PATCH` are the methods RFC 9110 does not define as idempotent, so replaying one may apply the same change twice. By default `HTTPClient` will not retry them:
 
-- **After a real HTTP response**, never. A retryable status like `500` is not evidence of a failed delivery. It is the opposite, since the server responded, so the handler ran and may have committed.
+- **After a real HTTP response**, never by default. A retryable status like `500` does not prove that the write failed: the server may already have applied it.
 - **After a transport failure**, only when the adapter reports `wasDefinitelyNotSent: true`, proving that no request bytes reached the server. An adapter that cannot tell reports nothing, which is treated as unsafe. The transport condition is part of the rule: on a real response delivery is already settled the other way, so nothing can unlock a replay there.
-- **After a thrown adapter error** (including a per-attempt timeout), never. There is no response to draw evidence from, and a timeout in particular means the request was sent and the answer never came back.
+- **After a thrown adapter error** (including a per-attempt timeout), never by default. The client has no proof of non-delivery, so retrying could duplicate a write.
 
 `PUT` and `DELETE` are _not_ affected, even though they mutate. Both are idempotent by definition: repeating one leaves the resource in the same state as doing it once, which is exactly what makes replay safe.
 

@@ -1,8 +1,20 @@
+import {
+  applyIntrinsic,
+  promiseConstructorIntrinsic,
+  observePromise,
+  awaitBoxedPromise,
+  boxPromiseValue,
+  type PromiseResultBox,
+} from '../../internal/intrinsics';
 import Router from 'find-my-way';
 import { guardProgressCallback } from '../internal/progress';
 import qs from 'qs';
 import { sleep } from '../../sleep';
-import { REDIRECT_STATUS_CODES } from '../consts';
+import { adoptPromise } from '../../internal/adopt-promise';
+import {
+  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
+  REDIRECT_STATUS_CODES,
+} from '../consts';
 import {
   isPlainJSONBodyObject,
   normalizeAdapterResponseHeaders,
@@ -17,12 +29,13 @@ import type {
   ContentType,
   QueryObject,
 } from '../types';
-// Shared error normalization preserves Error instances and wraps other thrown values.
-// Non-Error values receive a "Non-error value thrown: <description>" message, with the
-// original value retained on cause for consumers of the normalized error.
-import { isErrorValue, toError as normalizeError } from '../../to-error';
+import { isErrorValue } from '../../to-error';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { readUnknownMember as readObjectMember } from '../../internal/read-member';
+import {
+  isTimeoutValidationError,
+  resolveTimeoutMS,
+} from '../../internal/timer-limits';
 
 export interface MockFormData {
   /** String fields from the multipart body */
@@ -86,7 +99,8 @@ export interface MockResponse {
    */
   headers?: Record<string, string | string[]>;
   contentType?: ContentType;
-  delay?: number;
+  /** Null or undefined uses the adapter default delay. */
+  delay?: number | null;
   /**
    * Shorthand for setting / deleting cookies without writing raw Set-Cookie
    * strings. Merged with any `set-cookie` entries already in `headers`.
@@ -154,9 +168,12 @@ export type MockRouteHandler = (
 ) => MockResponse | Promise<MockResponse>;
 
 export interface MockAdapterConfig {
-  defaultDelay?: number;
+  /** Default latency in milliseconds; null or undefined uses zero. */
+  defaultDelay?: number | null;
   /**
-   * Called when a route handler throws. Return a `MockResponse` to customize
+   * Called when a route handler throws or rejects. The original rejection reason
+   * is preserved, including non-Error values, with or without an AbortSignal.
+   * Return a `MockResponse` to customize
    * the error response — similar to Fastify's `setErrorHandler`. Falls back to
    * the default `{ status: 500, body: { message: 'Internal Server Error' } }`
    * if this handler is not set or if it also throws.
@@ -217,7 +234,10 @@ export class MockAdapter implements HTTPAdapter {
   private readonly config: MockAdapterConfig;
 
   constructor(config?: MockAdapterConfig) {
+    // Preserve inherited handlers, their receiver, and live config updates.
+    // Validate now and again when a response selects the current default delay.
     this.config = config ?? {};
+    resolveTimeoutMS(this.config.defaultDelay, 0, 'MockAdapter defaultDelay');
 
     this.router = Router({
       ignoreTrailingSlash: true,
@@ -324,21 +344,26 @@ export class MockAdapter implements HTTPAdapter {
       try {
         // Match real network semantics more closely: once the caller aborts,
         // stop waiting on an async mock handler and reject immediately.
-        mockResponse = await awaitAbortable(
-          handler(mockRequest),
-          request.signal,
-        );
+        mockResponse = (
+          await awaitAbortable(handler(mockRequest), request.signal)
+        ).value;
       } catch (handlerError) {
         if (isInternalAbortError(handlerError)) {
           throwAbortError();
         }
 
-        if (this.config.onHandlerError) {
+        const onHandlerError = this.config.onHandlerError;
+        if (onHandlerError) {
           try {
-            mockResponse = await awaitAbortable(
-              this.config.onHandlerError(mockRequest, handlerError),
-              request.signal,
-            );
+            mockResponse = (
+              await awaitAbortable(
+                applyIntrinsic(onHandlerError, this.config, [
+                  mockRequest,
+                  handlerError,
+                ]),
+                request.signal,
+              )
+            ).value;
           } catch (error) {
             if (isInternalAbortError(error)) {
               throwAbortError();
@@ -369,7 +394,25 @@ export class MockAdapter implements HTTPAdapter {
     // Simulates network latency. Per-response delay takes priority over the
     // adapter default. When a signal is present, the sleep is abort-aware and
     // throws AbortError immediately instead of waiting out the full duration.
-    const delay = mockResponse.delay ?? this.config.defaultDelay ?? 0;
+    const requestedDelay = mockResponse.delay;
+    let delay: number;
+    try {
+      delay = resolveTimeoutMS(
+        requestedDelay ?? this.config.defaultDelay,
+        0,
+        'MockAdapter response delay',
+      );
+    } catch (error) {
+      // The route has already run. Retrying a bad delay would repeat its side effects
+      // without repairing the configuration. Only our validation error is terminal;
+      // the caller-owned delay getter above keeps its usual adapter-error behavior.
+      if (isTimeoutValidationError(error)) {
+        Object.defineProperty(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG, {
+          value: true,
+        });
+      }
+      throw error;
+    }
 
     if (delay > 0) {
       // Use abort-aware sleep when a signal is present so cancellation throws
@@ -783,7 +826,12 @@ class InternalMockAbortError extends Error {
 }
 
 function isInternalAbortError(error: unknown): error is InternalMockAbortError {
-  return error instanceof InternalMockAbortError;
+  try {
+    return error instanceof InternalMockAbortError;
+  } catch {
+    // Rejection reasons can be proxies whose prototype inspection throws.
+    return false;
+  }
 }
 
 function throwAbortError(): never {
@@ -799,38 +847,50 @@ function shouldOmitResponseBody(method: string, status: number): boolean {
 function awaitAbortable<T>(
   value: T | Promise<T>,
   signal: AbortSignal | undefined,
-): Promise<T> {
+): Promise<PromiseResultBox<T>> {
+  // `adoptPromise()`, not `Promise.resolve()`, for a handler's promise here and below:
+  // `Promise.resolve()` hands a native promise back with its own `then`, and a no-op one
+  // hung the request.
+  const adopted = adoptPromise(value);
   if (!signal) {
-    return Promise.resolve(value);
+    return awaitBoxedPromise(adopted);
   }
 
-  if (signal.aborted) {
-    throw new InternalMockAbortError();
-  }
-
-  return new Promise<T>((resolve, reject) => {
-    // Cancellation should reject immediately with AbortError, even if the
-    // wrapped handler/onHandlerError promise is still pending.
-    const onAbort = () => {
-      signal.removeEventListener('abort', onAbort);
-      reject(new InternalMockAbortError());
-    };
-
-    signal.addEventListener('abort', onAbort, { once: true });
-
-    Promise.resolve(value).then(
-      (result) => {
+  return new promiseConstructorIntrinsic<PromiseResultBox<T>>(
+    (resolve, reject) => {
+      // Cancellation should reject immediately with AbortError, even if the
+      // wrapped handler/onHandlerError promise is still pending.
+      const onAbort = () => {
         signal.removeEventListener('abort', onAbort);
-        resolve(result);
-      },
-      (error) => {
-        signal.removeEventListener('abort', onAbort);
-        // Preserve real handler failures, only normalize non-Error rejections
-        // so promise rejection values stay lint-safe and predictable.
-        reject(normalizeError(error));
-      },
-    );
-  });
+        reject(new InternalMockAbortError());
+      };
+
+      signal.addEventListener('abort', onAbort, { once: true });
+
+      void observePromise(
+        adopted,
+        (result) => {
+          signal.removeEventListener('abort', onAbort);
+          // Cancellation changes the wait, not adoption of the handler's data.
+          // Keep the raw response inside a box so this extra boundary cannot read
+          // its then property again only when an AbortSignal happens to be present.
+          resolve(boxPromiseValue(result));
+        },
+        (error) => {
+          signal.removeEventListener('abort', onAbort);
+          // onHandlerError receives the original reason with or without a signal.
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+          reject(error);
+        },
+      );
+
+      // A handler can abort synchronously before returning its promise. Observe
+      // that promise before ending the wait so its rejection is still consumed.
+      if (signal.aborted) {
+        onAbort();
+      }
+    },
+  );
 }
 
 /**
@@ -843,7 +903,7 @@ function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
     throw new InternalMockAbortError();
   }
 
-  return new Promise<void>((resolve, reject) => {
+  return new promiseConstructorIntrinsic<void>((resolve, reject) => {
     const onAbort = () => {
       clearTimeout(id);
       reject(new InternalMockAbortError());

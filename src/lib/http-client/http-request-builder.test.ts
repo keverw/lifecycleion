@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { HTTPRequestBuilder } from './http-request-builder';
 import type { BuilderSendContext } from './http-request-builder';
-import type { HTTPResponse } from './types';
+import type { HTTPRequestOptions, HTTPResponse } from './types';
 
 // Captures the context passed to sendFn so tests can inspect it.
 function makeSendFn(
@@ -291,6 +291,86 @@ describe('HTTPRequestBuilder', () => {
   });
 
   describe('constructor options', () => {
+    const firstValues = {
+      headers: { 'x-first': 'yes' },
+      params: { page: 1 },
+      body: { first: true },
+      timeout: 1000,
+      signal: new AbortController().signal,
+      retryPolicy: null,
+      retryNonIdempotentMethods: false,
+      label: 'first-label',
+      onUploadProgress: () => {},
+      onDownloadProgress: () => {},
+      onAttemptStart: () => {},
+      onAttemptEnd: () => {},
+      streamResponse: () => null,
+    } satisfies Required<HTTPRequestOptions>;
+
+    test.each(Object.keys(firstValues) as (keyof typeof firstValues)[])(
+      'captures the first value of the %s getter exactly once',
+      async (key) => {
+        const { sendFn, requireContext } = makeSendFn();
+        let reads = 0;
+        const options: HTTPRequestOptions = {};
+        Object.defineProperty(options, key, {
+          get() {
+            reads += 1;
+            return reads === 1 ? firstValues[key] : undefined;
+          },
+        });
+
+        const builder = new HTTPRequestBuilder('GET', '/test', sendFn, options);
+        await builder.send();
+
+        expect(reads).toBe(1);
+        expect(requireContext().options[key]).toEqual(firstValues[key]);
+      },
+    );
+
+    test('applies each option before reading the next and stops on validation failure', () => {
+      const { sendFn } = makeSendFn();
+      const events: string[] = [];
+      const options: HTTPRequestOptions = {
+        get headers() {
+          events.push('read headers');
+          return {
+            get 'x-first'() {
+              events.push('apply headers');
+              return 'yes';
+            },
+          };
+        },
+        get params() {
+          events.push('read params');
+          return undefined;
+        },
+        get body() {
+          events.push('read body');
+          return undefined;
+        },
+        get timeout() {
+          events.push('read timeout');
+          return Number.NaN;
+        },
+        get signal() {
+          events.push('read signal');
+          return undefined;
+        },
+      };
+
+      expect(
+        () => new HTTPRequestBuilder('GET', '/test', sendFn, options),
+      ).toThrow();
+      expect(events).toEqual([
+        'read headers',
+        'apply headers',
+        'read params',
+        'read body',
+        'read timeout',
+      ]);
+    });
+
     test('applies options passed to constructor', async () => {
       const { sendFn, requireContext } = makeSendFn();
       const builder = new HTTPRequestBuilder('GET', '/test', sendFn, {

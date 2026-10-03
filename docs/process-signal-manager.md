@@ -474,14 +474,15 @@ Creates a new ProcessSignalManager instance.
   - `debugCallbackName?`: `string` **(optional)**
     - Custom name for the debug callback used in error reporting
     - Default: `'onDebugRequested'`
-  - `keypressThrottleMS?`: `number` **(optional)**
+  - `keypressThrottleMS?`: `number | null` **(optional)**
     - Throttle interval in milliseconds for keyboard events (uses leading-edge rate limiting)
     - Allows an action to trigger at most once per interval
     - First press fires immediately, subsequent presses within the window are ignored
     - Prevents accidental double-triggers while allowing predictable repeated actions
     - Only affects keyboard events, not process signals (signals are never throttled)
     - Set to `0` to disable throttling entirely
-    - Default: `200` (200ms, allowing 5 triggers per second maximum)
+    - Default: `200` (200ms, allowing 5 triggers per second maximum); `null` and `undefined` select this default
+    - Explicit `NaN`, non-number, or negative values throw; `Infinity` and oversized values cap the interval at 2,147,483,647ms (about 24.8 days per keyboard action). `Infinity` does not select the 200ms default; the first trigger still runs immediately.
 
 **Returns:** `ProcessSignalManager` instance
 

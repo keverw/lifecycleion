@@ -46,7 +46,8 @@ export class ResponseObserverManager {
     request: AttemptRequest,
     phase: ResponseObserverPhase,
   ): Promise<void> {
-    for (const { fn, filter } of this.observers) {
+    // Registration changes during an await apply to the next run.
+    for (const { fn, filter } of [...this.observers]) {
       if (
         !matchesFilter(
           filter ?? {},
@@ -106,7 +107,8 @@ export class ErrorObserverManager {
     request: AttemptRequest,
     phase: ErrorObserverPhase,
   ): Promise<void> {
-    for (const { fn, filter } of this.observers) {
+    // Registration changes during an await apply to the next run.
+    for (const { fn, filter } of [...this.observers]) {
       if (
         !matchesFilter(
           filter ?? {},

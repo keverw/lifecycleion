@@ -1,4 +1,5 @@
-import { MAX_TIMER_MS } from '../internal/timer-limits';
+import { isNullish } from '../internal/is-nullish';
+import { assertDurationMS, clampTimerDelayMS } from '../internal/timer-limits';
 import type { HTTPMethod } from './types';
 
 /**
@@ -78,7 +79,8 @@ export { MAX_TIMER_MS } from '../internal/timer-limits';
  * passed both the `> 0` check that arms the timer and the `<= 0` check that disables the
  * upload-settle wait, so the attempt ran with no timer while the wait re-armed a `NaN`
  * timer every millisecond and could never expire; `Infinity` did the same to the wait and
- * fired the attempt timer after 1 ms. `NaN` and a non-number now take the default.
+ * fired the attempt timer after 1 ms. `NaN` and non-nullish non-numbers fail clearly.
+ * Null and undefined select the configured default.
  * `Infinity` is what a caller writes to mean "no timeout", and that is what `0` already
  * means, so it disables the timer rather than being bounded at a number nobody chose. A
  * finite value past {@link MAX_TIMER_MS} is clamped there, the closest wait a timer can
@@ -88,15 +90,16 @@ export function resolveRequestTimeoutMS(
   requested: unknown,
   defaultMS: number = DEFAULT_TIMEOUT_MS,
 ): number {
-  if (typeof requested !== 'number' || Number.isNaN(requested)) {
+  if (isNullish(requested)) {
     return defaultMS;
   }
+  assertDurationMS(requested, 'HTTP request timeout');
 
   if (requested <= 0 || requested === Number.POSITIVE_INFINITY) {
     return 0;
   }
 
-  return Math.min(requested, MAX_TIMER_MS);
+  return clampTimerDelayMS(requested);
 }
 
 export const DEFAULT_REQUEST_ID_HEADER = 'x-local-client-request-id';
@@ -107,6 +110,10 @@ export const DEFAULT_USER_AGENT = 'lifecycleion-http-client';
 
 export const NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG =
   '_lifecycleion_non_retryable_http_client_callback_error';
+
+/** Terminal adapter configuration failures retain adapter_error classification. */
+export const NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG =
+  '_lifecycleion_non_retryable_http_adapter_error';
 
 export const STREAM_FACTORY_ERROR_FLAG = '_lifecycleion_stream_factory_error';
 
