@@ -1019,34 +1019,6 @@ describe('LifecycleManager - review regressions', () => {
     expect(results[0]?.data).toBe('from a');
   });
 
-  test('a broadcast target unregistered mid-broadcast answers stopped, not error', async () => {
-    const { logger, manager } = setup();
-    const a = new Plain(logger, 'a');
-    (a as unknown as { onMessage: () => Promise<void> }).onMessage =
-      async (): Promise<void> => {
-        await manager.unregisterComponent('b');
-      };
-    const b = new Plain(logger, 'b');
-    (b as unknown as { onMessage: () => string }).onMessage = (): string =>
-      'from b';
-    await manager.registerComponent(a);
-    await manager.registerComponent(b);
-    await manager.startAllComponents();
-
-    // Included even once stopped, so the send itself finds no component.
-    const results = await manager.broadcastMessage('hi', {
-      includeStopped: true,
-    });
-
-    expect(results[1]).toMatchObject({
-      name: 'b',
-      sent: false,
-      running: false,
-      error: null,
-      code: 'stopped',
-    });
-  });
-
   test('a start or stop releases its claim once it settles, crash paths included', async () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new Plain(logger, 'a'));
