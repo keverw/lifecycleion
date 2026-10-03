@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { Logger } from '../logger';
 import { ArraySink } from '../logger/sinks/array';
 import { LifecycleManager } from './lifecycle-manager';
-import { deferred, fakeSignals, Plain } from './test-helpers';
+import { deferred, fakeSignals, Plain, Stalls } from './test-helpers';
 
 test.each([false, true])(
   'follow-up automatic signal-attachment cleanup returns partial state without rollback (optional: %s)',
@@ -86,3 +86,40 @@ test.each([false, true])(
     }
   },
 );
+
+test('a concurrent stop that stalls during the pass is reported as stalled, not still in progress', async () => {
+  const logger = new Logger({
+    sinks: [new ArraySink()],
+    callProcessExit: false,
+  });
+  const manager = new LifecycleManager({
+    logger,
+    shutdownWarningTimeoutMS: -1,
+  });
+  const slow = new Plain(logger, 'slow');
+  const stalls = new Stalls(logger, 'stalls');
+  // Still stopping `slow` when the concurrent stop of `stalls` fails and stalls.
+  slow.stop = () => new Promise<void>((resolve) => setTimeout(resolve, 200));
+  stalls.stop = () =>
+    new Promise<void>((_resolve, reject) =>
+      setTimeout(() => reject(new Error('stop failed')), 20),
+    );
+  await manager.registerComponent(slow);
+  await manager.registerComponent(stalls);
+  await manager.startAllComponents();
+
+  const individual = manager.stopComponent('stalls');
+  const result = await manager.stopAllComponents({
+    timeoutMS: 0,
+    haltOnStall: false,
+  });
+
+  expect((await individual).success).toBe(false);
+  expect(result).toMatchObject({
+    success: false,
+    code: 'partial_state',
+    reason: 'Stalled: stalls',
+    stoppedComponents: ['slow'],
+  });
+  expect(result.stalledComponents.map((info) => info.name)).toEqual(['stalls']);
+});

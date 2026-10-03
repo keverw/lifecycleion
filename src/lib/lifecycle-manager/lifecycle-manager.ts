@@ -5747,12 +5747,15 @@ export class LifecycleManager
       // A component another stop owned is settled once that stop is done, however it
       // left it: a late-startup cleanup puts it back to `failed` or `starting-timed-out`
       // rather than `stopped`, which `collectStoppedComponents()` alone would take for
-      // "still in progress".
+      // "still in progress". One that stop left stalled is reported under
+      // `stalledComponents` alone, as if this pass had stopped it - unless its start is
+      // still unfinished, which keeps it in progress too.
       for (const name of Array.from(stoppingComponents)) {
         if (
-          !this.runningComponents.has(name) &&
-          !this.isComponentInFlight(name) &&
-          !this.stalledComponents.has(name)
+          (finalStalledNames.has(name) && !isStartStillInProgress(name)) ||
+          (!this.runningComponents.has(name) &&
+            !this.isComponentInFlight(name) &&
+            !this.stalledComponents.has(name))
         ) {
           stoppingComponents.delete(name);
         }

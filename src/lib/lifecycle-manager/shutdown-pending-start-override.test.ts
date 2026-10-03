@@ -387,6 +387,9 @@ for (const isForceImmediate of [false, true]) {
         allowStopWithPendingStarts: true,
       });
       expect(result.success).toBe(false);
+      // Stalled and still starting: its unfinished start keeps it in progress.
+      expect(result.code).toBe('cleanup_incomplete');
+      expect(result.reason).toMatch(/still in progress for: .*\bworker\b/);
       expect(result.stoppedComponents).not.toContain('database');
       expect(manager.getComponentStatus('database')?.state).toBe('running');
       expect(order).toEqual([]);
