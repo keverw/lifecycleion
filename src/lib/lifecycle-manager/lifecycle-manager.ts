@@ -530,17 +530,20 @@ export class LifecycleManager
       60000,
       'startupTimeoutMS',
     );
-    const shutdownOptions = {
-      ...options.shutdownOptions,
-    };
+    // Each field read once, off the caller's object itself: a spread copy dropped
+    // inherited and non-enumerable ones, so a class getter's timeout became the default.
+    const {
+      timeoutMS: shutdownTimeoutMS,
+      retryStalled: shouldRetryStalled,
+      haltOnStall: shouldHaltOnStall,
+      allowStopWithPendingStarts,
+    } = options.shutdownOptions ?? {};
     this.shutdownOptions = {
-      ...shutdownOptions,
-      retryStalled: shutdownOptions.retryStalled ?? true,
-      haltOnStall: shutdownOptions.haltOnStall ?? true,
-      allowStopWithPendingStarts:
-        shutdownOptions.allowStopWithPendingStarts === true,
+      retryStalled: shouldRetryStalled ?? true,
+      haltOnStall: shouldHaltOnStall ?? true,
+      allowStopWithPendingStarts: allowStopWithPendingStarts === true,
       timeoutMS: resolveTimeoutMS(
-        shutdownOptions.timeoutMS,
+        shutdownTimeoutMS,
         30000,
         'shutdownOptions.timeoutMS',
       ),

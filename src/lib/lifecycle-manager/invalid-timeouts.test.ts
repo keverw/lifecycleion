@@ -4,7 +4,7 @@ import { MAX_TIMER_MS } from '../internal/timer-limits';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
 import type { LifecycleManagerOptions } from './types';
-import { claimReports } from './test-helpers';
+import { claimReports, Plain, setup } from './test-helpers';
 
 const logger = new Logger({ sinks: [], callProcessExit: false });
 
@@ -296,6 +296,37 @@ test.each(['shutdownWarningTimeoutMS', 'shutdownOptions.timeoutMS'] as const)(
     expect(reads).toBe(1);
   },
 );
+
+test('constructor reads inherited shutdown options once, through their getters', async () => {
+  let reads = 0;
+  class InheritedShutdownOptions {
+    public get timeoutMS(): number {
+      reads++;
+      return 5;
+    }
+  }
+  const { logger: componentLogger, manager } = setup({
+    shutdownOptions: new InheritedShutdownOptions(),
+  });
+  expect(reads).toBe(1);
+  const component = new Plain(componentLogger, 'slow');
+  component.stop = (): Promise<void> =>
+    new Promise((resolve) => setTimeout(resolve, 80));
+  await manager.registerComponent(component);
+  await manager.startComponent('slow');
+
+  const { release } = claimReports();
+  try {
+    const startedAt = Date.now();
+    const result = await manager.stopAllComponents();
+    expect(result.code).toBe('shutdown_timeout');
+    expect(Date.now() - startedAt).toBeLessThan(60);
+  } finally {
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  expect(reads).toBe(1);
+});
 
 test('explicit Infinity policy arming is reported as explicit', () => {
   const manager = new LifecycleManager({
