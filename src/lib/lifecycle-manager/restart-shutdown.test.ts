@@ -963,3 +963,30 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     await restart;
   });
 });
+
+describe('LifecycleManager - shutdown during restartComponent()', () => {
+  test('a shutdown that finishes while the restart stops the component skips its start', async () => {
+    const { logger, manager } = setup();
+    const component = new GatedStop(logger, 'gated');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+    expect(component.startCount).toBe(1);
+
+    const restart = manager.restartComponent('gated');
+    await component.stopping.promise;
+
+    // The pass finds the restart's stop still in flight and ends before it settles.
+    const shutdown = await manager.stopAllComponents();
+    expect(shutdown.success).toBe(false);
+    expect(manager.getStatus().isShuttingDown).toBe(false);
+
+    component.releaseStop();
+    const result = await restart;
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('restart_start_failed');
+    expect(component.startCount).toBe(1);
+    expect(manager.isComponentRunning('gated')).toBe(false);
+    expect(manager.getComponentStatus('gated')?.state).toBe('stopped');
+  });
+});

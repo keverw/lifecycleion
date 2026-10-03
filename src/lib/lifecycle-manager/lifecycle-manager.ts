@@ -4128,6 +4128,9 @@ export class LifecycleManager
       operation: 'restart',
       claimed: false,
     };
+    // A shutdown that asks the process to stay down can be accepted and finish while
+    // the stop awaits, so the start below would no longer find it running.
+    const stayDownPassCountAtStop = this.stayDownPassCount;
     const stopResult = await this.settleOperation(
       'stopComponent',
       () => this.stopComponentOperation(name, stopOptions, stopContext),
@@ -4157,6 +4160,17 @@ export class LifecycleManager
         componentName: name,
         reason: 'Component changed while restart was stopping it',
         code: 'restart_start_failed',
+      };
+    }
+
+    if (this.stayDownPassCount !== stayDownPassCountAtStop) {
+      return {
+        success: false,
+        componentName: name,
+        reason:
+          'Shutdown requested while restart was stopping the component; startup skipped',
+        code: 'restart_start_failed',
+        status: this.getComponentStatus(name),
       };
     }
 
