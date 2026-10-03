@@ -54,6 +54,7 @@ import {
   promiseConstructorIntrinsic,
   applyIntrinsic,
   promiseResolveIntrinsic,
+  promiseThenIntrinsic,
   racePromises,
 } from '../internal/intrinsics';
 import { EventEmitterProtected } from '../event-emitter';
@@ -6894,11 +6895,14 @@ export class LifecycleManager
               this.startSettlements.delete(claim);
             }
           };
-          void observePromise(
-            startPromise,
+          // The intrinsic directly, not `observePromise()`: a `constructor`/species
+          // read that throws here must fail this start, as it did before. Observed as
+          // a rejection instead, it cleared `rawStartPending` a microtask later while
+          // a later read let the race keep waiting on the still-running start().
+          void applyIntrinsic(promiseThenIntrinsic, startPromise, [
             markRawStartSettled,
             markRawStartSettled,
-          );
+          ]);
         }
       } catch (error) {
         if (settlement) {

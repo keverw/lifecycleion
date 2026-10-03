@@ -1390,6 +1390,7 @@ interface MessageResult {
     | 'stalled'
     | 'no_handler'
     | 'timeout'
+    | 'invalid_options' // The per-call timeout was invalid; the handler was not called
     | 'error' // The component's handler threw or rejected
     | 'operation_crashed'; // A handler getter threw, or the call itself crashed - a bug to report
 }
@@ -1538,6 +1539,7 @@ interface HealthCheckResult {
     | 'stalled'
     | 'no_handler'
     | 'timeout'
+    | 'invalid_options' // The component's health-check timeout was invalid; the check did not run
     | 'error' // The component's handler threw or rejected
     | 'operation_crashed'; // A handler getter threw, or the call itself crashed - a bug to report
 }

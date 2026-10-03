@@ -1094,6 +1094,39 @@ describe('LifecycleManager - review regressions', () => {
     expect(events).toEqual(['stopped']);
   });
 
+  test('a start() promise whose constructor throws only when observed fails the start', async () => {
+    const { logger, manager } = setup();
+    const gate = deferred();
+    const failure = new Error('species read');
+    const a = new Plain(logger, 'a');
+    a.start = (): Promise<void> => {
+      const pending = gate.promise.then(() => undefined);
+      let reads = 0;
+      // Adoption reads it once and gets `Promise`; observing the raw start reads it
+      // again. Later reads succeed, so a race attached after that waits normally.
+      void Object.defineProperty(pending, 'constructor', {
+        get() {
+          reads++;
+          if (reads === 2) {
+            throw failure;
+          }
+          return Promise;
+        },
+      });
+      return pending;
+    };
+    await manager.registerComponent(a);
+
+    const starting = manager.startComponent('a');
+    await sleep(0);
+    gate.resolve();
+    const result = await starting;
+
+    expect(result).toMatchObject({ success: false, code: 'error' });
+    expect(result.error).toBe(failure);
+    expect(manager.getComponentStatus('a')?.state).not.toBe('running');
+  });
+
   test('a start or stop releases its claim once it settles, crash paths included', async () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new Plain(logger, 'a'));
