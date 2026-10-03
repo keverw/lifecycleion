@@ -5442,11 +5442,14 @@ export class LifecycleManager
       // same way: the loop does not come back to it, so it may still be running on them.
       const concurrentOwners = new Set<string>();
       const concurrentlyProtectedSkips = new Set<string>();
-      const isProtectedByConcurrentOwner = (name: string): boolean => {
-        for (const owner of [
+      const isProtectedByConcurrentOwner = (
+        name: string,
+        owners: Iterable<string> = [
           ...concurrentOwners,
           ...concurrentlyProtectedSkips,
-        ]) {
+        ],
+      ): boolean => {
+        for (const owner of owners) {
           if (
             this.runningComponents.has(owner) ||
             this.isComponentInFlight(owner) ||
@@ -5799,12 +5802,19 @@ export class LifecycleManager
           stoppingComponents.delete(name);
         }
       }
-      // A dependency skipped for a concurrent owner whose stop has since stalled is
-      // no longer held for anything; still running, it is reported as not stopped.
+      // A dependency skipped for a concurrent owner that is no longer running or in
+      // flight is no longer held for anything; still running, it is reported as not
+      // stopped. A skip counts as an owner here only while its own stop or start is
+      // still in progress: one that is merely running holds its dependencies up, but
+      // nothing in progress needs them, however far down the chain they sit.
+      const inProgressOwners = [
+        ...concurrentOwners,
+        ...[...concurrentlyProtectedSkips].filter(isStartStillInProgress),
+      ];
       for (const name of concurrentlyProtectedSkips) {
         if (
           !protectedDependencies.has(name) &&
-          !isProtectedByConcurrentOwner(name) &&
+          !isProtectedByConcurrentOwner(name, inProgressOwners) &&
           !this.isComponentInFlight(name)
         ) {
           stoppingComponents.delete(name);
