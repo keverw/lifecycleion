@@ -450,7 +450,10 @@ export async function broadcastMessageInternal(
         data: messageResult.data,
         error: messageResult.error,
         timedOut: messageResult.timedOut,
-        code: messageResult.code,
+        // A target unregistered mid-broadcast is no longer running; `error` would claim
+        // its handler ran and failed.
+        code:
+          messageResult.code === 'not_found' ? 'stopped' : messageResult.code,
       });
     }
   } catch (error) {
