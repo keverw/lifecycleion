@@ -1026,6 +1026,86 @@ describe('LifecycleManager - hostile thrown values', () => {
     );
   });
 
+  test('a start getter that throws is a reported crash, not a failed start()', async () => {
+    const lifecycle = new LifecycleManager({ logger });
+
+    class Plain extends BaseComponent {
+      public start(): void {}
+      public stop(): void {}
+    }
+
+    const component = new Plain(logger, { name: 'start-getter' });
+    await lifecycle.registerComponent(component);
+    Object.defineProperty(component, 'start', {
+      get: (): never => {
+        throw new Error('start getter exploded');
+      },
+    });
+
+    const reported: string[] = [];
+    const onGlobalError = (event: Event): void => {
+      event.preventDefault();
+      reported.push(String(((event as ErrorEvent).error as Error)?.message));
+    };
+    globalThis.addEventListener('error', onGlobalError);
+
+    let result;
+    try {
+      result = await lifecycle.startComponent('start-getter');
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('operation_crashed');
+    expect(result.reason).toBe('start getter exploded');
+    expect(reported).toEqual([
+      'Error in a callback lifecycle-manager component start',
+    ]);
+    expect(lifecycle.getComponentStatus('start-getter')?.state).toBe(
+      'registered',
+    );
+  });
+
+  test('a stop getter that throws is a reported crash, not a failed stop()', async () => {
+    const lifecycle = new LifecycleManager({ logger });
+
+    class Plain extends BaseComponent {
+      public start(): void {}
+      public stop(): void {}
+    }
+
+    const component = new Plain(logger, { name: 'stop-getter' });
+    await lifecycle.registerComponent(component);
+    await lifecycle.startComponent('stop-getter');
+    Object.defineProperty(component, 'stop', {
+      get: (): never => {
+        throw new Error('stop getter exploded');
+      },
+    });
+
+    const reported: string[] = [];
+    const onGlobalError = (event: Event): void => {
+      event.preventDefault();
+      reported.push(String(((event as ErrorEvent).error as Error)?.message));
+    };
+    globalThis.addEventListener('error', onGlobalError);
+
+    let result;
+    try {
+      result = await lifecycle.stopComponent('stop-getter');
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('operation_crashed');
+    expect(reported).toEqual([
+      'Error in a callback lifecycle-manager component stop',
+    ]);
+    expect(lifecycle.getComponentStatus('stop-getter')?.state).toBe('stalled');
+  });
+
   test('an unreadable error thrown while registering settles as a rejected result', async () => {
     // The registration `catch` read `err.message` unguarded. `toError` returns a
     // brand-claiming value unchanged, so a `message` accessor that throws reached it and

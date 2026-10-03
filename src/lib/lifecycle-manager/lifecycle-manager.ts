@@ -6923,11 +6923,22 @@ export class LifecycleManager
       if (settlement) {
         this.invokingStarts.add(settlement);
       }
+      // A `start` getter that throws has not run `start()`: it is a crash of this
+      // attempt (`operation_crashed`, reported), not a failed hook (`error`).
+      let didReadStartHook = false;
       try {
         if (settlement) {
           settlement.rawStartPending = true;
         }
-        startPromise = adoptPromise(component.start());
+        const startHook: unknown = Reflect.get(component, 'start');
+        didReadStartHook = true;
+        startPromise = adoptPromise(
+          applyIntrinsic(
+            startHook as () => void | Promise<void>,
+            component,
+            [],
+          ),
+        );
         if (settlement) {
           const markRawStartSettled = (): void => {
             settlement.rawStartPending = false;
@@ -6948,7 +6959,7 @@ export class LifecycleManager
         if (settlement) {
           settlement.rawStartPending = false;
         }
-        didStartHookFail = true;
+        didStartHookFail = didReadStartHook;
         throw error;
       } finally {
         if (settlement) {
@@ -7833,10 +7844,17 @@ export class LifecycleManager
     // stop's, and must not be answered as a failed graceful phase and escalated.
     let didStopResolve = false;
 
+    // Read apart from the call, after the claim: a `stop` getter that throws has not
+    // run `stop()`, so it reaches the stop net as a crash (`operation_crashed`,
+    // reported) rather than a failed graceful phase (`error`).
+    const stopHook: unknown = Reflect.get(component, 'stop');
+
     try {
       // Race against graceful timeout
       // Adopted, for the reason `startComponentAttempt()` adopts `start()`'s.
-      const stopPromise = adoptPromise(component.stop());
+      const stopPromise = adoptPromise(
+        applyIntrinsic(stopHook as () => unknown, component, []),
+      );
 
       const delayMS = optionalValidatedTimerDelayMS(timeoutMS);
       if (delayMS !== undefined) {
@@ -8804,7 +8822,8 @@ export class LifecycleManager
         const timeoutError = this.componentErrors.get(name) ?? null;
         // A forced start that reported an unexpected stop before its deadline ended as
         // that stop, not as a timeout. Read before cleanup's own stop clears it.
-        const didStopUnexpectedly = this.componentUnexpectedStopHadError.has(name);
+        const didStopUnexpectedly =
+          this.componentUnexpectedStopHadError.has(name);
 
         // A forced start still owes cleanup if the old stalled stop finished first.
         // The instance and startup token must still belong to this attempt.

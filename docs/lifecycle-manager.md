@@ -2837,7 +2837,7 @@ if (result.success && result.status) {
 
 #### Promises Never Reject
 
-Every async method answers with a result object, including when something goes wrong that the manager did not plan for - a bug in the manager, or a component that breaks its contract with a getter (`getName()`, `getDependencies()`, `isOptional()`) that throws. The promise resolves with a failed result and the original error is reported on the global `'error'` channel (see [safe-handle-callback](./safe-handle-callback.md)):
+Every async method answers with a result object, including when something goes wrong that the manager did not plan for - a bug in the manager, or a component that breaks its contract with a getter (`getName()`, `getDependencies()`, `isOptional()`, or a `start` / `stop` accessor) that throws. The promise resolves with a failed result and the original error is reported on the global `'error'` channel (see [safe-handle-callback](./safe-handle-callback.md)):
 
 | Method                                                                   | Unexpected failure resolves with                                      |
 | ------------------------------------------------------------------------ | --------------------------------------------------------------------- |
