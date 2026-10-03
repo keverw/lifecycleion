@@ -5,6 +5,7 @@ import {
 import { ulid } from 'ulid';
 import readline from 'readline';
 import { resolveTimeoutMS } from './internal/timer-limits';
+import { observePromise, promiseResolveIntrinsic } from './internal/intrinsics';
 
 /**
  * The shutdown signal types that can trigger the shutdown callback
@@ -446,16 +447,18 @@ export class ProcessSignalManager {
       // If any listener registration fails, clean up any handlers that were already registered
       // This prevents partial registration and ensures consistent state. A cleanup failure
       // must not replace the registration error that got us here, but a listener it left
-      // on `process` must not go unreported either. Reported only once cleanup is done:
-      // a report dispatches synchronously, and a listener that attaches from it must not
-      // have its fresh listeners removed by the rest of this cleanup.
+      // on `process` must not go unreported either. Reported in order, after this
+      // failed attach has reached its caller: a listener that attaches from a report
+      // must not have this attach's error thrown over its own successful attach.
       const [firstFailure, ...laterFailures] = this.releaseListeners();
-      this.reportLaterCleanupFailures(laterFailures);
       if (firstFailure) {
-        reportCallbackError(
-          'ProcessSignalManager attach cleanup',
-          firstFailure.error,
-        );
+        this.reportCleanupFailuresLater([
+          ['ProcessSignalManager attach cleanup', firstFailure],
+          ...laterFailures.map(
+            (failure) =>
+              ['ProcessSignalManager listener cleanup', failure] as const,
+          ),
+        ]);
       }
       throw error;
     }
@@ -479,9 +482,15 @@ export class ProcessSignalManager {
     // that blocks re-attachment attempts
     this._isAttached = false;
 
-    // Reported only now: a listener that attaches from a synchronous report must find
-    // the manager detached, or its `attach()` is a no-op this detach then undoes.
-    this.reportLaterCleanupFailures(laterFailures);
+    // Reported after the first failure reaches the caller, so they follow it in order
+    // and a listener that attaches from a report does so after the caller has seen
+    // this detach finish.
+    this.reportCleanupFailuresLater(
+      laterFailures.map(
+        (failure) =>
+          ['ProcessSignalManager listener cleanup', failure] as const,
+      ),
+    );
 
     if (firstFailure) {
       throw firstFailure.error;
@@ -687,16 +696,23 @@ export class ProcessSignalManager {
     return failures;
   }
 
-  /** Report the cleanup failures after the first, which the caller surfaces itself. */
-  private reportLaterCleanupFailures(
-    failures: Array<{ error: unknown }>,
+  /**
+   * Report cleanup failures in order, in a microtask: after the throw that ends the
+   * current `attach()` / `detach()` has reached its caller.
+   */
+  private reportCleanupFailuresLater(
+    reports: ReadonlyArray<readonly [string, { error: unknown }]>,
   ): void {
-    for (const failure of failures) {
-      reportCallbackError(
-        'ProcessSignalManager listener cleanup',
-        failure.error,
-      );
+    if (reports.length === 0) {
+      return;
     }
+
+    // Captured intrinsics, not the replaceable `queueMicrotask` global.
+    void observePromise(promiseResolveIntrinsic(undefined), () => {
+      for (const [callbackName, failure] of reports) {
+        reportCallbackError(callbackName, failure.error);
+      }
+    });
   }
 
   /**

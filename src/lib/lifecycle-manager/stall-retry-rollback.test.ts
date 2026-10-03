@@ -303,7 +303,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
 
     expect(retry).toMatchObject({ success: false, code: 'unknown_error' });
     expect(contexts).toEqual([
-      { gracefulPhaseRan: false, gracefulTimedOut: true },
+      { gracefulPhaseRan: false, gracefulTimedOut: false },
     ]);
     expect(manager.getStalledComponents()[0]).toMatchObject({
       phase: 'force',
@@ -312,7 +312,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
     });
   });
 
-  test('a stalled retry announces the original graceful timeout in its force event', async () => {
+  test('a stalled retry force event describes only its own attempt', async () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new HangsThenForceThrows(logger, 'both'));
     await manager.startComponent('both');
@@ -325,7 +325,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
     await retryStalled(manager, 'both');
 
     expect(contexts).toEqual([
-      { gracefulPhaseRan: false, gracefulTimedOut: true },
+      { gracefulPhaseRan: false, gracefulTimedOut: false },
     ]);
     expect(manager.getStalledComponents()[0].reason).toBe('both');
   });
@@ -437,6 +437,40 @@ describe('LifecycleManager - stall retry and rollback', () => {
       phase: 'force',
       reason: 'both',
       startedAt: original.startedAt,
+    });
+  });
+
+  test('a crash between a graceful timeout and the force claim records the timeout', async () => {
+    const { logger, manager } = setup();
+    const component = new HangsThenForceThrows(logger, 'early');
+    await manager.registerComponent(component);
+    await manager.startComponent('early');
+    Object.defineProperty(component, 'onShutdownForceAborted', {
+      configurable: true,
+      get(): never {
+        throw new Error('abort hook read crashed');
+      },
+    });
+
+    const { release } = claimReports();
+    const beforeStop = Date.now();
+    try {
+      await manager.stopComponent('early');
+    } finally {
+      release();
+    }
+
+    const stall = manager.getStalledComponents()[0];
+    expect(stall).toMatchObject({ phase: 'graceful', reason: 'timeout' });
+    expect(stall.startedAt).toBeGreaterThanOrEqual(beforeStop);
+
+    // A retry that fails again still knows the graceful phase timed out.
+    Reflect.deleteProperty(component, 'onShutdownForceAborted');
+    await retryStalled(manager, 'early');
+    expect(manager.getStalledComponents()[0]).toMatchObject({
+      phase: 'force',
+      reason: 'both',
+      startedAt: stall.startedAt,
     });
   });
 

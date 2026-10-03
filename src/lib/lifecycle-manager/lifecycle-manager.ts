@@ -213,8 +213,8 @@ interface RestartStartSnapshot {
   readonly timeoutMS: number;
 }
 
-/** When the stop a force attempt continues began, and whether its graceful phase timed out. */
-interface ForceAttemptStop {
+/** When a stop began, and whether its graceful phase timed out. */
+interface StopAttempt {
   readonly startedAt: number;
   readonly gracefulTimedOut: boolean;
 }
@@ -325,13 +325,13 @@ export class LifecycleManager
   private runningComponents: Set<string> = new Set();
   private componentStates: Map<string, ComponentState> = new Map();
   private stalledComponents: Map<string, ComponentStallInfo> = new Map();
-  // What each stall record cannot say itself, kept by name beside it rather than on the
-  // record callers receive: whether its stop had already timed out gracefully - a force
-  // timeout reports `reason: 'timeout'` - so a retry that fails can still report
+  // What each stall record cannot say itself, kept beside the record object rather than
+  // on the record callers receive: whether its stop had already timed out gracefully - a
+  // force timeout reports `reason: 'timeout'` - so a retry that fails can still report
   // `'both'`, and whether the stop net recorded it after a crash. Written only by
-  // `markComponentStalled()` and removed with the record by `clearStallRecord()`.
-  private readonly stallDetails = new Map<
-    string,
+  // `markComponentStalled()`; keyed by the record, so it goes when the record does.
+  private readonly stallDetails = new WeakMap<
+    ComponentStallInfo,
     { readonly gracefulTimedOut: boolean; readonly crashed: boolean }
   >();
 
@@ -444,9 +444,9 @@ export class LifecycleManager
     {
       readonly claim: symbol;
       readonly previousState: ComponentState | undefined;
-      // The stop a force attempt continues, so the stop net can record a crash after
-      // the claim as the stall that attempt would have recorded.
-      readonly forceStop?: ForceAttemptStop;
+      // The stop this attempt runs, once known, so the stop net can record a crash
+      // as the stall that stop would have recorded.
+      readonly stop?: StopAttempt;
     }
   >();
   // Resolver for the first logger.exit() deferred during an already-running shutdown.
@@ -2207,7 +2207,7 @@ export class LifecycleManager
       this.pendingForceStopWaiters.delete(name);
       // A later registration of the same instance reports a broken list afresh.
       this.componentMetadata.clearReports(component);
-      this.clearStallRecord(name);
+      this.stalledComponents.delete(name);
       this.runningComponents.delete(name);
       this.componentClaims.delete(name);
       this.releaseStartSettlements(name);
@@ -5988,10 +5988,6 @@ export class LifecycleManager
       return await this.stopComponentInternal(name);
     }
 
-    this.logger
-      .entity(name)
-      .warn('Retrying stalled component shutdown (force phase)');
-
     // A retry continues the stop that stalled: it keeps when that stop began and
     // whether its graceful phase timed out, for its force event and any new stall.
     return await this.shutdownComponentForce(
@@ -6108,14 +6104,26 @@ export class LifecycleManager
     name: string,
     state: 'starting' | 'stopping' | 'force-stopping',
     claim: symbol,
-    forceStop?: ForceAttemptStop,
+    stop?: StopAttempt,
   ): void {
     this.componentClaims.set(name, {
       claim,
       previousState: this.componentStates.get(name),
-      ...(forceStop ? { forceStop } : {}),
+      ...(stop ? { stop } : {}),
     });
     this.componentStates.set(name, state);
+  }
+
+  /** Record the stop an attempt still holding `claim` runs, for the stop net. */
+  private recordClaimStop(
+    name: string,
+    claim: symbol,
+    stop: StopAttempt,
+  ): void {
+    const entry = this.componentClaims.get(name);
+    if (entry?.claim === claim) {
+      this.componentClaims.set(name, { ...entry, stop });
+    }
   }
 
   /** Whether `claim` is the attempt that last claimed `name`. */
@@ -7323,26 +7331,23 @@ export class LifecycleManager
           (state === 'stopping' || state === 'force-stopping') &&
           this.ownsClaim(name, claim)
         ) {
-          // A force-phase crash describes the stop that attempt continues - when it
-          // began and whether its graceful phase timed out - as a force failure does,
-          // whether it escalated from `stop()` or retried a stall.
-          const forceStop =
-            state === 'force-stopping'
-              ? this.componentClaims.get(name)?.forceStop
-              : undefined;
-          const didGracefulTimeOut = forceStop?.gracefulTimedOut === true;
-          const stallInfo: ComponentStallInfo = {
-            name,
-            phase: state === 'stopping' ? 'graceful' : 'force',
-            reason: didGracefulTimeOut ? 'both' : 'error',
-            startedAt: forceStop?.startedAt ?? startedAt,
-            stalledAt: Date.now(),
-            error: err,
+          // A crash describes the stop the attempt runs - when it began and whether
+          // its graceful phase timed out - as that stop's own failure would, whether it
+          // escalated from `stop()` or retried a stall.
+          const stop = this.componentClaims.get(name)?.stop ?? {
+            startedAt,
+            gracefulTimedOut: false,
           };
+          const stallInfo = this.stopStallInfo(
+            name,
+            state === 'stopping' ? 'graceful' : 'force',
+            stop,
+            err,
+          );
 
           this.markComponentStalled(name, stallInfo, {
             error: err,
-            gracefulTimedOut: didGracefulTimeOut,
+            gracefulTimedOut: stop.gracefulTimedOut,
             crashed: true,
           });
           // A force-stop waiter for this name is released. Signals stay attached, as they
@@ -7585,6 +7590,13 @@ export class LifecycleManager
     // ============================================================================
     // Phase 2: Force (graceful failed)
     // ============================================================================
+    const didGracefulTimeOut =
+      gracefulResult.code === 'component_shutdown_timeout';
+    // Before the force phase reads its hooks: a crash there still describes this stop.
+    this.recordClaimStop(name, claim, {
+      startedAt: shutdownStartedAt,
+      gracefulTimedOut: didGracefulTimeOut,
+    });
     this.logger
       .entity(name)
       .warn('Graceful shutdown failed, proceeding to force phase', {
@@ -7599,7 +7611,7 @@ export class LifecycleManager
       component,
       {
         gracefulPhaseRan: true,
-        gracefulTimedOut: gracefulResult.code === 'component_shutdown_timeout',
+        gracefulTimedOut: didGracefulTimeOut,
         gracefulError: gracefulResult.error,
         startedAt: shutdownStartedAt,
       },
@@ -7909,6 +7921,11 @@ export class LifecycleManager
         });
       return this.stalledStopResult(name, priorStall);
     }
+    if (priorStall) {
+      this.logger
+        .entity(name)
+        .warn('Retrying stalled component shutdown (force phase)');
+    }
 
     this.claimComponent(name, 'force-stopping', claim, {
       startedAt: context.startedAt,
@@ -7935,33 +7952,31 @@ export class LifecycleManager
     // Claim before calling this overridable hook, just as in the graceful phase.
     // Property-read failures above still leave the unexpected-stop handler intact.
     this.clearUnexpectedStopHandler(component, 'force stop');
-    this.logger.entity(name).info('Force shutdown started', {
-      params: {
-        gracefulPhaseRan: context.gracefulPhaseRan,
-        gracefulTimedOut: context.gracefulTimedOut,
-      },
-    });
+    // Describes this attempt: a stalled retry runs no graceful phase, so none timed out
+    // here, even when the stop it continues timed out gracefully.
+    const forceStartContext = {
+      gracefulPhaseRan: context.gracefulPhaseRan,
+      gracefulTimedOut: context.gracefulPhaseRan && context.gracefulTimedOut,
+    };
+    this.logger
+      .entity(name)
+      .info('Force shutdown started', { params: { ...forceStartContext } });
 
     this.lifecycleEvents.componentShutdownForce({
       name,
-      context: {
-        gracefulPhaseRan: context.gracefulPhaseRan,
-        gracefulTimedOut: context.gracefulTimedOut,
-      },
+      context: forceStartContext,
     });
 
     // If component doesn't implement onShutdownForce, mark as stalled immediately
     if (!hasForceHandler) {
-      const stallInfo: ComponentStallInfo = {
+      // The graceful phase failed when it ran. A force stop requested directly
+      // (`forceImmediate`) never ran it: this force phase is what had nothing to run.
+      const stallInfo = this.stopStallInfo(
         name,
-        // The graceful phase failed when it ran. A force stop requested directly
-        // (`forceImmediate`) never ran it: this force phase is what had nothing to run.
-        phase: context.gracefulPhaseRan ? 'graceful' : 'force',
-        reason: context.gracefulTimedOut ? 'timeout' : 'error',
-        startedAt: context.startedAt,
-        stalledAt: Date.now(),
-        error: context.gracefulError,
-      };
+        context.gracefulPhaseRan ? 'graceful' : 'force',
+        context,
+        context.gracefulError,
+      );
 
       this.markComponentStalled(name, stallInfo, {
         gracefulTimedOut: context.gracefulTimedOut,
@@ -8150,18 +8165,13 @@ export class LifecycleManager
 
       return this.withTransition<ComponentOperationResult>(() => {
         // Mark as stalled - force phase failed
-        const stallInfo: ComponentStallInfo = {
+        const stallInfo = this.stopStallInfo(
           name,
-          phase: 'force',
-          reason: isTimeout
-            ? 'timeout'
-            : context.gracefulTimedOut
-              ? 'both'
-              : 'error',
-          startedAt: context.startedAt,
-          stalledAt: Date.now(),
-          error: err,
-        };
+          'force',
+          context,
+          err,
+          isTimeout,
+        );
         this.markComponentStalled(name, stallInfo, {
           error: err,
           gracefulTimedOut: context.gracefulTimedOut,
@@ -8204,15 +8214,41 @@ export class LifecycleManager
     }
   }
 
-  /** Whether the stop that left `name` stalled had its graceful phase time out. */
-  private didStallGracefulTimeOut(name: string): boolean {
-    return this.stallDetails.get(name)?.gracefulTimedOut === true;
+  /**
+   * The stall record a stop leaves when `phase` fails. A graceful timeout is the reason
+   * while the graceful phase is what stalled, and `'both'` once a force phase failed
+   * after it; a force phase's own timeout is `'timeout'`.
+   */
+  private stopStallInfo(
+    name: string,
+    phase: 'graceful' | 'force',
+    stop: StopAttempt,
+    error: Error | undefined,
+    didForceTimeOut = false,
+  ): ComponentStallInfo {
+    return {
+      name,
+      phase,
+      reason: didForceTimeOut
+        ? 'timeout'
+        : stop.gracefulTimedOut
+          ? phase === 'force'
+            ? 'both'
+            : 'timeout'
+          : 'error',
+      startedAt: stop.startedAt,
+      stalledAt: Date.now(),
+      error,
+    };
   }
 
-  /** Remove a stall record together with the details kept beside it. */
-  private clearStallRecord(name: string): void {
-    this.stalledComponents.delete(name);
-    this.stallDetails.delete(name);
+  /** Whether the stop that left `name` stalled had its graceful phase time out. */
+  private didStallGracefulTimeOut(name: string): boolean {
+    const stallInfo = this.stalledComponents.get(name);
+    return (
+      stallInfo !== undefined &&
+      this.stallDetails.get(stallInfo)?.gracefulTimedOut === true
+    );
   }
 
   /**
@@ -8228,7 +8264,10 @@ export class LifecycleManager
     const error = stallInfo.error;
 
     // The stop net recorded this stall after a crash, and answered with its crash result.
-    if (this.stallDetails.get(name)?.crashed === true && error !== undefined) {
+    if (
+      this.stallDetails.get(stallInfo)?.crashed === true &&
+      error !== undefined
+    ) {
       return crashedComponentResult(
         name,
         error,
@@ -8899,7 +8938,7 @@ export class LifecycleManager
 
     return this.withTransition(() => {
       this.stalledComponents.set(name, stallInfo);
-      this.stallDetails.set(name, {
+      this.stallDetails.set(stallInfo, {
         gracefulTimedOut: options.gracefulTimedOut,
         crashed: options.crashed === true,
       });
@@ -8917,7 +8956,7 @@ export class LifecycleManager
   private markComponentRunning(name: string): void {
     this.componentStates.set(name, 'running');
     this.runningComponents.add(name);
-    this.clearStallRecord(name);
+    this.stalledComponents.delete(name);
     this.updateStartedFlag();
     const timestamps = this.componentTimestamps.get(name) ?? {
       startedAt: null,
@@ -8936,7 +8975,7 @@ export class LifecycleManager
     return this.withTransition(() => {
       this.componentStates.set(name, 'stopped');
       this.runningComponents.delete(name);
-      this.clearStallRecord(name);
+      this.stalledComponents.delete(name);
       // Clear the stall/timeout error so lastError reflects a clean stop.
       this.componentErrors.set(name, null);
       this.componentUnexpectedStopHadError.delete(name);
@@ -9077,7 +9116,7 @@ export class LifecycleManager
       // emit stopped or overwrite the newer state. It may have been the last stall
       // holding process signals attached, so the last-stop detach check still runs.
       if (stallInfo && currentState !== 'stalled') {
-        this.clearStallRecord(name);
+        this.stalledComponents.delete(name);
         this.updateStartedFlag();
         this.detachSignalsAfterLastStop();
         return false;

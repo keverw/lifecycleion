@@ -1783,7 +1783,7 @@ describe('ProcessSignalManager', () => {
       expect(counts()).toEqual(before);
     });
 
-    test('an attach from a detach cleanup report is not undone by that detach', () => {
+    test('an attach from a detach cleanup report is not undone by that detach', async () => {
       manager = new ProcessSignalManager({
         onShutdownRequested: shutdownCallback,
         onReloadRequested: reloadCallback,
@@ -1823,10 +1823,16 @@ describe('ProcessSignalManager', () => {
       globalThis.addEventListener('error', onGlobalError);
 
       try {
-        expect(() => manager.detach()).toThrow(failure);
+        try {
+          expect(() => manager.detach()).toThrow(failure);
+        } finally {
+          offSpy.mockRestore();
+        }
+        // Later failures are reported only after the first has reached the caller.
+        expect(wasAttachedDuringReport).toBeUndefined();
+        await Promise.resolve();
       } finally {
         globalThis.removeEventListener('error', onGlobalError);
-        offSpy.mockRestore();
       }
 
       // The report came after detach finished, so the listener's attach took effect
@@ -1839,7 +1845,7 @@ describe('ProcessSignalManager', () => {
       expect(counts()).toEqual(before);
     });
 
-    test('a cleanup failure during attach keeps the registration error', () => {
+    test('a cleanup failure during attach keeps the registration error', async () => {
       manager = new ProcessSignalManager({
         onShutdownRequested: shutdownCallback,
         onReloadRequested: reloadCallback,
@@ -1866,27 +1872,33 @@ describe('ProcessSignalManager', () => {
       globalThis.addEventListener('error', onGlobalError);
 
       try {
-        expect(() => manager.attach()).toThrow(registrationError);
+        try {
+          expect(() => manager.attach()).toThrow(registrationError);
+        } finally {
+          onSpy.mockRestore();
+          offSpy.mockRestore();
+        }
+        // Reported only after the failed attach has reached its caller.
+        expect(reports).toEqual([]);
+        await Promise.resolve();
       } finally {
         globalThis.removeEventListener('error', onGlobalError);
-        onSpy.mockRestore();
-        offSpy.mockRestore();
       }
 
       expect(manager.getStatus().isAttached).toBe(false);
       expect(process.listenerCount('SIGINT')).toBe(before);
-      // Every cleanup failure is reported rather than lost behind the rethrow, once
-      // cleanup has finished: the later ones first, then the first by attach.
+      // Every cleanup failure is reported rather than lost behind the rethrow, in the
+      // order the removals failed: the first by attach, then the later ones.
       expect(reports.length).toBeGreaterThan(1);
       for (const report of reports) {
         expect((report as Error).cause).toMatchObject({
           message: 'off failed',
         });
       }
-      expect((reports.at(-1) as Error).message).toContain(
+      expect((reports[0] as Error).message).toContain(
         'ProcessSignalManager attach cleanup',
       );
-      expect((reports[0] as Error).message).toContain(
+      expect((reports.at(-1) as Error).message).toContain(
         'ProcessSignalManager listener cleanup',
       );
     });
