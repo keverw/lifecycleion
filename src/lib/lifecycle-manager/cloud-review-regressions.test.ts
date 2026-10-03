@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import { Logger } from '../logger';
 import { LifecycleManager } from './lifecycle-manager';
 import { claimReports, deferred, Plain, setup } from './test-helpers';
@@ -256,6 +256,59 @@ test('a real signals-detached listener reattaches before the auto-detach log dec
       messages.some((line) => line.includes('Auto-detached process signals')),
     ).toBe(false);
   } finally {
+    manager.detachSignals();
+  }
+});
+
+test('a listener that reattaches from a detach cleanup report follows signals-detached', async () => {
+  const { manager } = setup();
+  manager.attachSignals();
+  const events: string[] = [];
+  manager.on('lifecycle-manager:signals-attached', () => {
+    events.push('attached');
+  });
+  manager.on('lifecycle-manager:signals-detached', () => {
+    events.push('detached');
+  });
+
+  // Two removals fail, so detach has a later failure to report after it throws.
+  const originalOff = process.off.bind(process);
+  const failure = new Error('off failed');
+  const failingSignals = new Set(['SIGINT', 'SIGTERM']);
+  const offSpy = spyOn(process, 'off').mockImplementation(((
+    event: string,
+    listener: (...args: unknown[]) => void,
+  ) => {
+    originalOff(event, listener);
+    if (failingSignals.delete(event)) {
+      throw failure;
+    }
+    return process;
+  }) as typeof process.off);
+
+  let didReattach = false;
+  const onGlobalError = (event: Event): void => {
+    event.preventDefault();
+    if (!didReattach) {
+      didReattach = true;
+      manager.attachSignals();
+    }
+  };
+  globalThis.addEventListener('error', onGlobalError);
+
+  try {
+    try {
+      expect(() => manager.detachSignals()).toThrow(failure);
+    } finally {
+      offSpy.mockRestore();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(didReattach).toBe(true);
+    expect(manager.getSignalStatus().isAttached).toBe(true);
+    expect(events).toEqual(['detached', 'attached']);
+  } finally {
+    globalThis.removeEventListener('error', onGlobalError);
     manager.detachSignals();
   }
 });

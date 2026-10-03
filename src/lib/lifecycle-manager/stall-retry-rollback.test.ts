@@ -243,6 +243,12 @@ describe('LifecycleManager - stall retry and rollback', () => {
     expect(stalls).toEqual([]);
     // Nothing is attempted, so no force start is announced that nothing would end.
     expect(forceStarts).toBe(0);
+    expect(logMessages(logger)).not.toContain(
+      'Retrying stalled component shutdown (force phase)',
+    );
+    expect(logMessages(logger)).toContain(
+      'Stalled component has no force handler to retry',
+    );
     expect(retry).toMatchObject({
       success: false,
       code: first.code,

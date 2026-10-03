@@ -1903,6 +1903,70 @@ describe('ProcessSignalManager', () => {
       );
     });
 
+    test('an attach from an attach cleanup report is not thrown over', async () => {
+      manager = new ProcessSignalManager({
+        onShutdownRequested: shutdownCallback,
+        onReloadRequested: reloadCallback,
+      });
+      const before = process.listenerCount('SIGINT');
+      const registrationError = new Error('on failed');
+      const originalOn = process.on.bind(process);
+      const onSpy = spyOn(process, 'on').mockImplementation(((
+        event: string,
+        listener: (...args: unknown[]) => void,
+      ) => {
+        if (event === 'SIGHUP') {
+          throw registrationError;
+        }
+        originalOn(event, listener);
+        return process;
+      }) as typeof process.on);
+      const originalOff = process.off.bind(process);
+      const offSpy = spyOn(process, 'off').mockImplementation(((
+        event: string,
+        listener: (...args: unknown[]) => void,
+      ) => {
+        originalOff(event, listener);
+        if (event === 'SIGINT') {
+          throw new Error('off failed');
+        }
+        return process;
+      }) as typeof process.off);
+
+      let reattachError: unknown;
+      const onGlobalError = (event: Event): void => {
+        event.preventDefault();
+        try {
+          manager.attach();
+        } catch (error) {
+          reattachError = error;
+        }
+      };
+      globalThis.addEventListener('error', onGlobalError);
+
+      try {
+        try {
+          expect(() => manager.attach()).toThrow(registrationError);
+        } finally {
+          onSpy.mockRestore();
+          offSpy.mockRestore();
+        }
+        expect(manager.isAttached).toBe(false);
+        expect(process.listenerCount('SIGINT')).toBe(before);
+        await Promise.resolve();
+      } finally {
+        globalThis.removeEventListener('error', onGlobalError);
+      }
+
+      // The failed attach had already thrown, so the listener's attach stands.
+      expect(reattachError).toBeUndefined();
+      expect(manager.isAttached).toBe(true);
+      expect(process.listenerCount('SIGINT')).toBe(before + 1);
+
+      manager.detach();
+      expect(process.listenerCount('SIGINT')).toBe(before);
+    });
+
     test('handles error in shutdown callback gracefully', () => {
       const errorCallback = mock(() => {
         throw new Error('Test error');
