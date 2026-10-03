@@ -24,6 +24,13 @@ import {
   isOperationTimeoutValidationError,
 } from './operation-policy';
 
+/** The public method each signal broadcast is named after when it reports a crash. */
+const SIGNAL_TRIGGER_OPERATIONS = {
+  reload: 'triggerReload',
+  info: 'triggerInfo',
+  debug: 'triggerDebug',
+} as const;
+
 export interface SignalBroadcastDescriptor {
   signal: 'reload' | 'info' | 'debug';
   // The handler as read off the component, unbound: it is called with the component
@@ -417,6 +424,15 @@ export async function runSignalBroadcast(
       }
     } catch (error) {
       const err = toError(error);
+
+      // Reported as every other getter that throws is; an invalid timeout is an
+      // expected refusal, not a crash.
+      if (!isOperationTimeoutValidationError(error)) {
+        reportCallbackError(
+          `lifecycle-manager ${SIGNAL_TRIGGER_OPERATIONS[descriptor.signal]}`,
+          error,
+        );
+      }
 
       context.logger.entity(name).error(descriptor.errorLog, {
         params: { error: err },

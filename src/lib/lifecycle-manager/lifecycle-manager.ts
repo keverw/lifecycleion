@@ -7358,8 +7358,9 @@ export class LifecycleManager
           this.resolvePendingForceStopWaiters(name);
           this.lifecycleEvents.componentStalled(name, stallInfo, {
             reason: stallInfo.reason,
-            // Paired with the reason as every other stall is: a graceful timeout the
-            // stop recorded before crashing stays a timeout; otherwise it was the crash.
+            // Paired with the reason as every other stall is: a crash still in the graceful
+            // phase after it timed out stays a timeout; otherwise - including a force-phase
+            // crash after a graceful timeout (`both`) - it was the crash.
             code:
               stallInfo.reason === 'timeout'
                 ? 'component_shutdown_timeout'

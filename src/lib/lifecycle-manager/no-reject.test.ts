@@ -1099,8 +1099,25 @@ describe('LifecycleManager - public methods never reject', () => {
       },
     });
 
-    const result = await manager.triggerReload();
+    // Reported on the global channel, as every other getter that throws is.
+    const reported: string[] = [];
+    const onGlobalError = (event: Event): void => {
+      event.preventDefault();
+      reported.push(String(((event as ErrorEvent).error as Error)?.message));
+    };
+    globalThis.addEventListener('error', onGlobalError);
 
+    let result;
+
+    try {
+      result = await manager.triggerReload();
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
+
+    expect(reported).toEqual([
+      'Error in a callback lifecycle-manager triggerReload',
+    ]);
     expect(wasReloaded).toBe(true);
     expect(result.results.find((entry) => entry.name === 'bad')?.code).toBe(
       'operation_crashed',
