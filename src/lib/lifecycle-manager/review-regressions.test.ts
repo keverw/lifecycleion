@@ -4991,9 +4991,7 @@ describe('LifecycleManager - round two review regressions', () => {
       entries
         .filter((entry) => entry.message.includes('were not attempted'))
         .map((entry) => entry.params),
-    ).toEqual([
-      { components: ['late'], reason: 'failed and rolled back' },
-    ]);
+    ).toEqual([{ components: ['late'], reason: 'failed and rolled back' }]);
     await logger.close();
   });
 
