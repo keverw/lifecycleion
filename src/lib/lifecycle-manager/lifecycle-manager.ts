@@ -2547,8 +2547,10 @@ export class LifecycleManager
     // The latch goes up before the attach, not after it: attaching emits
     // `lifecycle-manager:signals-attached` synchronously, and a listener that calls
     // `startAllComponents()` from there must find a startup already in progress rather
-    // than run a second one alongside this. Everything else this startup resets waits
-    // until the attach has succeeded, so a refusal only has the latch to release.
+    // than run a second one alongside this. Only the restart handoff below (and the
+    // auto-attach flag) moves before the attach; the shutdown state this startup resets waits until the attach has
+    // succeeded and no shutdown has begun, so a refusal releases the latch, which also
+    // reports the handed-off auto-starts as abandoned.
     this.isStarting = true;
     // The startup that actually takes the latch owns the current registry, even if
     // a listener started it before the original restart resumed. Transfer every
@@ -3217,10 +3219,10 @@ export class LifecycleManager
 
                 // Mark as failed state - unless stopping it again after a crash already
                 // left it stalled, which `stalledComponents` still says and the state
-                // must agree with. Nor over a component something else still owns: a
-                // start refused as `component_already_starting` because a late-startup
-                // cleanup is stopping it, say. Overwritten, its `stopping` guard was
-                // gone - a `stopComponent()` ran `stop()` again alongside the cleanup's.
+                // must agree with. Nor over a component something else now owns -
+                // running again, or with another start or stop in flight. Overwritten,
+                // its in-flight guard would be gone, and a second `stop()` could run
+                // alongside the one already underway.
                 const isOwnedElsewhere =
                   this.runningComponents.has(name) ||
                   this.isComponentInFlight(name);
