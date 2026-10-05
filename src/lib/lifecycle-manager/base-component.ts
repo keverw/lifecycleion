@@ -215,9 +215,22 @@ export abstract class BaseComponent {
    *
    * Can be sync or async - manager will await if Promise is returned.
    *
+   * `signal` is fresh for each start attempt. The manager aborts it when it stops
+   * waiting on this call while it is still pending - its `startupTimeoutMS` or a
+   * `startAllComponents()` deadline passed - with the `ComponentStartTimeoutError`
+   * the start's result carries as `signal.reason`, just before `onStartupAborted()`.
+   * It is never aborted because `start()` resolved or threw, nor by a stop or
+   * shutdown. Pass it to cancellable work (`fetch`, `listen`, a pool connect) or check
+   * `signal.aborted` between steps; settling promptly once it aborts releases the
+   * dependencies the manager keeps up for this start. It is scoped to this start, not
+   * to the run it begins. Declaring `start()` without the parameter is fine.
+   *
+   * An abort listener that throws is not reported to the manager: the runtime reports
+   * it as an uncaught exception, as for any `AbortSignal`. Catch inside listeners.
+   *
    * @throws Should throw an error if startup fails
    */
-  public abstract start(): Promise<void> | void;
+  public abstract start(signal: AbortSignal): Promise<void> | void;
 
   /**
    * Stop the component (graceful shutdown)
@@ -235,8 +248,15 @@ export abstract class BaseComponent {
   /**
    * Called when start() times out
    *
-   * Invoked when start() exceeds startupTimeoutMS before rollback begins.
-   * Use this to set flags, abort pending work, or cleanup resources.
+   * Invoked when start() exceeds startupTimeoutMS (or a startAllComponents() deadline
+   * abandons it) before rollback begins, right after the signal passed to start() is
+   * aborted. Prefer that signal for cancelling startup work; use this hook for
+   * instance-level cleanup the signal cannot reach. Not called for a start that a newer
+   * attempt has already superseded, whose signal is still aborted.
+   *
+   * Implementing it for a start() that times out on its own startupTimeoutMS makes
+   * cleaning up after a late success the component's job: the manager's automatic
+   * late-start stop runs only without this hook (bulk deadlines always run it).
    * Must be synchronous and fast - manager won't wait for it to complete.
    */
   public onStartupAborted?(): void;

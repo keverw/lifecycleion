@@ -27,6 +27,7 @@ bun run src/lib/lifecycle-manager/example/index.ts
 - No dependencies
 - Starts first
 - Simulates database connection
+- Checks the `AbortSignal` passed to `start()`, which aborts if its startup times out
 
 ### API Component
 

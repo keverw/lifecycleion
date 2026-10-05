@@ -53,6 +53,8 @@ import {
   awaitBoxedPromise,
   promiseConstructorIntrinsic,
   applyIntrinsic,
+  createOwnedAbortController,
+  type OwnedAbortController,
   promiseRejectIntrinsic,
   promiseResolveIntrinsic,
   promiseThenIntrinsic,
@@ -6942,6 +6944,29 @@ export class LifecycleManager
   }
 
   /**
+   * Abort the signal a start attempt handed to `start()`, from inside its deadline's
+   * timer, once the manager has stopped waiting on that `start()`.
+   *
+   * Abort listeners are the component's code, but they are the runtime's to call: an
+   * error one throws does not reach `abort()`'s caller. Node and Bun report it as an
+   * uncaught exception (browsers on the global `error` event) - fatal to a process that
+   * has no handler, as for any listener on any signal. Every caller has finished its
+   * bookkeeping before this runs. The `catch` only covers a runtime that let such an
+   * error escape: reported, so it cannot unwind the timer and skip the hook after it.
+   */
+  private abortStartSignal(
+    startAbort: OwnedAbortController,
+    reason: ComponentStartTimeoutError,
+    name: string,
+  ): void {
+    try {
+      startAbort.abort(reason);
+    } catch (error) {
+      reportCallbackError(`${name}.start abort signal listener`, error);
+    }
+  }
+
+  /**
    * Watch a component's promise that the manager already stopped waiting for - it timed
    * out - so its eventual rejection is logged rather than left unhandled.
    *
@@ -7802,6 +7827,10 @@ export class LifecycleManager
           dependencyGeneration,
         );
       }
+      // One controller per attempt, its signal handed to `start()`. Aborted only where
+      // the manager stops waiting on this attempt's still-pending `start()` - the timer
+      // below - never because `start()` settled, either way.
+      const startAbort = createOwnedAbortController();
       // Race against timeout
       // Adopted, not raced as it is: a native promise carrying its own no-op `then`
       // never settled the race, and its rejection went unhandled. See `adoptPromise()`.
@@ -7820,9 +7849,9 @@ export class LifecycleManager
         didReadStartHook = true;
         startPromise = adoptPromise(
           applyIntrinsic(
-            startHook as () => void | Promise<void>,
+            startHook as (signal: AbortSignal) => void | Promise<void>,
             component,
-            [],
+            [startAbort.signal],
           ),
         );
         if (settlement) {
@@ -7865,13 +7894,16 @@ export class LifecycleManager
               });
               reject(startupTimeoutError);
               // This attempt must settle, but its old deadline must not abort or
-              // announce a timeout for a newer run of the same component.
+              // announce a timeout for a newer run of the same component. Its own
+              // signal is still aborted: that is this attempt's alone, and nothing
+              // waits on this `start()` any more.
               if (isSuperseded()) {
                 this.observeFailureAfterTimeout(
                   startPromise,
                   name,
                   'Superseded start() failed after its deadline',
                 );
+                this.abortStartSignal(startAbort, startupTimeoutError, name);
                 return;
               }
               if (useBulkDeadline) {
@@ -7890,8 +7922,14 @@ export class LifecycleManager
                 // monitor call handles an already fulfilled start and must join cleanup.
                 settlement?.abandon();
               }
-              // Both the bulk deadline and late-cleanup announcement can run
-              // sinks that supersede this start. Recheck at the hook boundary too.
+              // The signal first, then the hook, so both cues describe one moment -
+              // and after the bookkeeping above, so abort listeners (the component's
+              // code) find the abandonment and any late cleanup already arranged.
+              // Aborted even when those sinks superseded the attempt: the signal is
+              // only this attempt's, unlike the instance's hook below.
+              this.abortStartSignal(startAbort, startupTimeoutError, name);
+              // The bulk deadline, the late-cleanup announcement, and abort listeners
+              // can all run code that supersedes this start. Recheck at the hook.
               if (!isSuperseded()) {
                 this.invokeAbortHook(
                   component,

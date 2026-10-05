@@ -16,6 +16,48 @@ export const objectPrototypeIntrinsic: object = Object.prototype;
 /** `Symbol.species`, read before application code can rebind the `Symbol` global. */
 export const speciesSymbolIntrinsic: typeof Symbol.species = Symbol.species;
 
+// Captured so an `abort()` or `signal` that application code replaces on the prototype
+// later cannot keep an owned controller from aborting, or hand out a different signal
+// than the one it aborts.
+const abortControllerIntrinsic = AbortController;
+// eslint-disable-next-line @typescript-eslint/unbound-method
+const abortMethodIntrinsic = AbortController.prototype.abort;
+// eslint-disable-next-line @typescript-eslint/unbound-method
+const abortControllerSignalGetterIntrinsic = Object.getOwnPropertyDescriptor(
+  AbortController.prototype,
+  'signal',
+)?.get;
+
+/** An `AbortController` whose signal and abort were read through captured intrinsics. */
+export interface OwnedAbortController {
+  readonly signal: AbortSignal;
+  /**
+   * Abort the signal with `reason`. Never throws for a listener's error: the runtime
+   * reports those itself (as an uncaught exception), not to the caller of `abort()`.
+   */
+  readonly abort: (reason: unknown) => void;
+}
+
+/** Create a controller from the `AbortController` captured at module initialization. */
+export function createOwnedAbortController(): OwnedAbortController {
+  const controller = new abortControllerIntrinsic();
+  const signal = (
+    abortControllerSignalGetterIntrinsic === undefined
+      ? controller.signal
+      : applyIntrinsic(abortControllerSignalGetterIntrinsic, controller, [])
+  ) as AbortSignal;
+  // This literal syntax sets the prototype without consulting a mutable helper.
+  const owned = {
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    __proto__: null,
+    signal,
+    abort: (reason: unknown): void => {
+      applyIntrinsic(abortMethodIntrinsic, controller, [reason]);
+    },
+  };
+  return owned;
+}
+
 // `instanceof` consults the right-hand side's live `Symbol.hasInstance`, which
 // application code can define on `Promise` after this module loads. The ordinary check
 // it overrides - a walk of the prototype chain - is captured from `Function.prototype`.

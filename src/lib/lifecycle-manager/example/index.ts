@@ -23,9 +23,12 @@ class DatabaseComponent extends BaseComponent {
     super(logger, { name: 'database' });
   }
 
-  public async start() {
+  // `signal` aborts if the manager gives up on this start (startupTimeoutMS passed).
+  // Real code would pass it to the driver's connect call; here it is checked between steps.
+  public async start(signal: AbortSignal) {
     this.logger.info('Connecting to database...');
     await sleep(500);
+    signal.throwIfAborted();
     this.connected = true;
     this.logger.success('Database connected');
   }

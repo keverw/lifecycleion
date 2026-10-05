@@ -12,6 +12,7 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
   - [3. Graceful Shutdown](#3-graceful-shutdown)
 - [Core Concepts](#core-concepts)
   - [Component Lifecycle States](#component-lifecycle-states)
+  - [Startup Abort Signal](#startup-abort-signal)
   - [Dependency Management](#dependency-management)
   - [Optional Components](#optional-components)
   - [Multi-Phase Shutdown](#multi-phase-shutdown)
@@ -131,7 +132,6 @@ import type { Logger } from 'lifecycleion/logger';
 
 class DatabaseComponent extends BaseComponent {
   private pool!: Pool;
-  private abortController = new AbortController();
 
   constructor(logger: Logger) {
     super(logger, {
@@ -139,20 +139,14 @@ class DatabaseComponent extends BaseComponent {
     });
   }
 
-  async start() {
+  // `signal` is aborted if the manager gives up on this start (it timed out)
+  async start(signal: AbortSignal) {
     this.logger.info('Connecting to database...');
 
-    this.pool = await createPool(config, {
-      signal: this.abortController.signal,
-    });
+    this.pool = await createPool(config, { signal });
 
     await this.pool.connect();
     this.logger.success('Database connected');
-  }
-
-  onStartupAborted() {
-    // Called if startup times out
-    this.abortController.abort();
   }
 
   async stop() {
@@ -290,9 +284,16 @@ components in this state so that `running + stopped + stalled = total`.
 
 When a component `start()` exceeds its `startupTimeoutMS`, the manager:
 
-1. Marks the component state as `starting-timed-out` (for observability)
-2. Treats the component as not running
-3. Calls `onStartupAborted()` if the component implements it
+1. Aborts the `AbortSignal` it passed to that `start()` call, with the
+   `ComponentStartTimeoutError` the start's result carries as `signal.reason`
+2. Calls `onStartupAborted()` if the component implements it, right after the abort
+3. Marks the component state as `starting-timed-out` (for observability)
+4. Treats the component as not running
+
+The signal is the primary cancellation cue: pass it to cancellable work, or check
+`signal.aborted` between steps, and let `start()` settle once it aborts. Each start
+attempt gets a fresh signal, so a retry is never handed an already-aborted one. See
+[Startup Abort Signal](#startup-abort-signal) for exactly when it is aborted.
 
 If `onStartupAborted()` is not implemented, the timeout still applies and the
 state enters `starting-timed-out`. If that delayed `start()` later completes
@@ -303,9 +304,8 @@ refused with `component_already_stopping` - the manager owns that teardown - and
 `startAllComponents()` is refused with `partial_state`.
 
 Any in-flight startup work may continue in the background, so components should
-either keep startup side effects idempotent or implement their own cancellation
-mechanism (e.g., track an abort flag, or stop/short-circuit once `stop()` is
-called).
+either keep startup side effects idempotent or honor the start signal (the manager
+cannot cancel work that ignores it).
 
 **Failed State Definition:**
 
@@ -383,6 +383,54 @@ If late startup retires the still-live stall first, successful cleanup preserves
 start result and `component:start-timeout` event report the timeout.
 
 **Automatic late resolution:** If `stop()` eventually completes after the graceful timeout (e.g., a server waiting on keep-alive connections), the manager automatically clears the stall and emits `component:stalled-resolved`. No manual retry is needed. The same applies to `onShutdownForce()`: if it eventually resolves after its own timeout, the stall is cleared automatically. If neither ever completes, the stall persists until you intervene.
+
+### Startup Abort Signal
+
+`start(signal)` receives a fresh `AbortSignal` for each start attempt. The manager
+aborts it exactly when it stops waiting on a `start()` call that is still pending:
+
+- the component's own `startupTimeoutMS` passes;
+- a `startAllComponents()` / `restartAllComponents()` deadline bounds the start and
+  passes first (a bulk deadline bounds an in-flight start through the same timer);
+- either of those passes for an attempt that a newer attempt has already superseded
+  (for example, the component reported an unexpected stop from inside `start()` and a
+  listener started it again). That old attempt's signal is still aborted, but
+  `onStartupAborted()` is not called, since it would reach the newer run.
+
+It is never aborted because `start()` resolved, rejected or threw. A shutdown pass
+does not abort it either - including one using `allowStopWithPendingStarts`, or one
+whose budget runs out while it waits on the start: the start attempt is still waiting
+on `start()`, and sends the component through the stop pipeline once it settles.
+`stopComponent()` and `unregisterComponent()` are refused while a start is pending
+(`component_not_running` / `component_starting`), so they never abandon one. A
+start that resolved but lost to a bulk deadline in the same moment is handed to
+late-start cleanup without an abort; there is no pending work left to cancel. With
+startup timeouts disabled (`0`) and no bulk deadline, the signal never aborts.
+
+`signal.reason` is the same `ComponentStartTimeoutError` instance the result reports
+as `error`. The abort happens after the manager has finished its own bookkeeping for
+the timeout (late-start cleanup is already arranged) and immediately before
+`onStartupAborted()`, so both describe the same moment and the signal is already
+`aborted` inside the hook. The result itself, with state `starting-timed-out`, is
+built after both.
+
+Abort listeners run synchronously inside the manager's timer, as the hook does: keep
+them fast. An error thrown by an abort listener (or `onabort`) does not reach the
+manager. As with any `AbortSignal`, the runtime reports it as an uncaught exception
+(`process` `'uncaughtException'` in Node and Bun, the global `error` event in
+browsers), which terminates a Node or Bun process that has no handler. The manager's
+timeout result, `onStartupAborted()` and late-start cleanup are unaffected, but catch
+inside listeners. The manager aborts through `AbortController` methods captured when
+the library loads, so a later replacement of `AbortController.prototype.abort` does
+not stop it.
+
+Late-start cleanup does not depend on the signal: a timed-out `start()` that resolves
+anyway is stopped automatically unless the component implements `onStartupAborted()`
+(bulk deadlines always clean up). A component that only uses the signal therefore
+keeps the manager's late cleanup. After an abort, prefer rejecting (for example with
+`signal.throwIfAborted()`) to resolving: a timed-out `start()` that resolves is a late
+success, which that cleanup stops again with `stop()`. Declaring `start()` without the parameter remains
+valid; such a component behaves as before.
 
 ### Dependency Management
 
@@ -500,7 +548,7 @@ remains `starting-timed-out`.
 For an explicit escape hatch, use `allowStopWithPendingStarts: true` on a shutdown
 call. That pass does not wait for unresolved `start()` calls, leaving its budget
 available to stop their dependencies. This can shut down resources those calls
-are still using; it does **not** cancel them. Cleanup already underway, stalled
+are still using; it does **not** cancel them or abort their start signals. Cleanup already underway, stalled
 components, and other stop failures retain their normal protection. If cleanup
 begins between dependency stops, the pass preserves its remaining dependencies.
 That protection lasts for the rest of this pass; after cleanup finishes, call
@@ -981,7 +1029,7 @@ multi-week wait.
 - `startAllComponents({ timeoutMS })` sets a time budget for starting components. Failure rollback uses its own shutdown timeouts
 - If exceeded: manager stops initiating new components and promptly returns a snapshot of partial results with `timedOut: true` and `code: 'startup_timeout'`. Unexpected stops reported by timeout logging, including further stops reported by reconciliation getters or logs, are drained first: a required stop returns `component_unexpected_stop` after rollback, while an optional stop is recorded in `failedOptionalComponents`. Shutdown begun by the final timeout warning or reconciliation callbacks returns `shutdown_in_progress`; shutdown owns teardown, so startup does not begin a competing rollback.
 - The remaining bulk budget also bounds the current component start, even when its own timeout is disabled. Previously started components remain running unless rollback had already begun for a separate failure.
-- A start still in flight receives `onStartupAborted()` when implemented. Restart and unregistration are allowed while the abandoned start remains pending. If it later resolves and still owns the component, automatic cleanup stops it. Recovery is blocked only while that cleanup runs. A stale completion cannot stop a retry or replacement.
+- A start still in flight has its start signal aborted and receives `onStartupAborted()` when implemented. Restart and unregistration are allowed while the abandoned start remains pending. If it later resolves and still owns the component, automatic cleanup stops it. Recovery is blocked only while that cleanup runs. A stale completion cannot stop a retry or replacement.
 - Once a required failure starts rollback, the startup timer is cleared. Startup waits for rollback and returns the original failure. Another bulk startup is blocked until rollback finishes.
 - Timeouts cannot preempt synchronous JavaScript that blocks the event loop.
 - Constructor option sets the default: `new LifecycleManager({ startupTimeoutMS: 60000 })`
@@ -2493,13 +2541,15 @@ interface ComponentOptions {
 ### Lifecycle Methods
 
 ```typescript
-// Required: Start the component
-abstract start(): Promise<void> | void;
+// Required: Start the component. `signal` is aborted if the manager stops waiting
+// on this start (a startup timeout or bulk deadline); see Startup Abort Signal.
+// Declaring start() without the parameter is fine.
+abstract start(signal: AbortSignal): Promise<void> | void;
 
 // Required: Stop the component
 abstract stop(): Promise<void> | void;
 
-// Optional: Called if start() times out
+// Optional: Called if start() times out, right after its signal is aborted
 onStartupAborted?(): void;
 
 // Optional: Called if graceful stop() times out
@@ -3200,23 +3250,15 @@ Implement cooperative cancellation:
 
 ```typescript
 class WorkerComponent extends BaseComponent {
-  private aborted = false;
-  private abortController = new AbortController();
-
-  async start() {
-    // Check abort flag during long operations
+  async start(signal: AbortSignal) {
+    // Check the signal between steps of long operations
     for (const task of tasks) {
-      if (this.aborted) throw new Error('Startup aborted');
+      signal.throwIfAborted();
       await processTask(task);
     }
 
-    // Use AbortController for APIs that support signals
-    await fetch(url, { signal: this.abortController.signal });
-  }
-
-  onStartupAborted() {
-    this.aborted = true;
-    this.abortController.abort();
+    // Pass it to APIs that support signals
+    await fetch(url, { signal });
   }
 
   async stop() {
@@ -3411,11 +3453,12 @@ class ServerComponent extends BaseComponent {
 }
 ```
 
-**Cooperative Cancellation during Startup:** If your component's startup logic consists of multiple sequential async steps or supports native cancellation (like `AbortSignal`), you can manage cooperative cancellation yourself. To do this, create an `AbortController` for each startup attempt, store it as an instance property on your component, pass its `signal` to your startup operations (like database connections or fetch requests), and call `this.abortController.abort()` at the very beginning of your `stop()` method (or in `onStartupAborted()`). Because an aborted signal stays aborted permanently, create a fresh controller before each retry or restart. Because `stop()` is protected by the `stopPromise` guard, this abort will only ever be triggered once for each stop attempt. If the underlying operations honor cancellation, awaiting the in-flight `startPromise` immediately after allows shutdown to proceed once they settle. Aborting the signal alone does not guarantee prompt completion. However, for standard single-step operations (like binding an HTTP server via `listen()`), awaiting the in-flight promise to settle and then immediately shutting it down remains the simplest and safest path.
+**Cooperative Cancellation during Startup:** The signal passed to `start(signal)` covers the manager giving up on a start (a timeout); pass it to your startup operations (like database connections or fetch requests). It is not aborted when `stop()` or a shutdown arrives while `start()` is still in flight. To also cancel startup from `stop()`, create your own `AbortController` for each startup attempt, store it as an instance property on your component, pass `AbortSignal.any([signal, this.abortController.signal])` to your startup operations, and call `this.abortController.abort()` at the very beginning of your `stop()` method. Because an aborted signal stays aborted permanently, create a fresh controller before each retry or restart. Because `stop()` is protected by the `stopPromise` guard, this abort will only ever be triggered once for each stop attempt. If the underlying operations honor cancellation, awaiting the in-flight `startPromise` immediately after allows shutdown to proceed once they settle. Aborting the signal alone does not guarantee prompt completion. However, for standard single-step operations (like binding an HTTP server via `listen()`), awaiting the in-flight promise to settle and then immediately shutting it down remains the simplest and safest path.
 
-If `onStartupAborted()` returns but `start()` stays pending, the manager keeps that
-component's dependencies protected. Prefer making `start()` resolve or reject after
-cancellation, once the component has stopped using those dependencies. If it never
+If the start signal aborts (or `onStartupAborted()` returns) but `start()` stays
+pending, the manager keeps that component's dependencies protected. Prefer making
+`start()` resolve or reject after cancellation, once the component has stopped using
+those dependencies. If it never
 settles, unregistering the component explicitly releases the manager's protection;
 it does not cancel the underlying work. Use that escape hatch only when your
 application can safely abandon the work.
@@ -4134,7 +4177,7 @@ The LifecycleManager does not forcibly terminate work when timeouts are exceeded
 
 When `start()` or `stop()` times out:
 
-- The manager calls `onStartupAborted()` or `onGracefulStopTimeout()` (if implemented)
+- For `start()`, the manager aborts the signal it passed to `start()`, then calls `onStartupAborted()` (if implemented); for `stop()`, it calls `onGracefulStopTimeout()` (if implemented)
 - The manager proceeds with next steps (rollback for startup, force phase for shutdown)
 - **Non-cooperative code continues running in the background** until completion or process exit
 - If `start()` times out and there is no `onStartupAborted()`, the manager will stop the component automatically if that delayed startup eventually completes. Bulk startup deadlines perform this late cleanup even when an abort hook is implemented. This includes a start that reported an unexpected stop before its deadline (answered `component_unexpected_stop`): if its `start()` still fulfills later, `stop()` runs and the component stays `stopped`, whether or not the start used `forceStalled`.
@@ -4142,8 +4185,8 @@ When `start()` or `stop()` times out:
 
 How to avoid surprises:
 
-1. Implement cooperative cancellation (AbortController, flags, or library timeouts).
-2. Wire cancellation into long-running work and close resources in `onStartupAborted()`/`onGracefulStopTimeout()`.
+1. Implement cooperative cancellation (the start signal, your own AbortController, flags, or library timeouts).
+2. Pass the start signal into long-running startup work, and close resources in `onStartupAborted()`/`onGracefulStopTimeout()`.
 3. Favor libraries that support AbortSignal or configurable timeouts.
 
 ### 2. Stalled Promises Can Retain Memory
