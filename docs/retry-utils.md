@@ -529,6 +529,20 @@ Subscribe using the `on` method or provide handlers in the constructor.
 
 > **Event ordering:** `attempt-handled` fires before the runner transitions to its terminal state and before `operation-ended`. If you need to react to the final `runnerState`, use the `operation-ended` event. During terminal outcome publication, re-entrant `cancel()` returns `not-running` because it cannot replace the committed outcome, even though an `attempt-handled` listener can still observe `runnerState: running` and `isRunning: true`; `run()`, `resume()` and `forceTry()` return `terminal_dispatch_in_progress`, and `reset()` waits for that outcome to settle. An `operation-started` listener can call `waitForCompletion()` for the operation being announced.
 
+To start more work from a terminal listener, wait for the outcome to settle first. Existing `run(true)` / `waitForCompletion()` callers still receive the original result. Guard the retry so a forced attempt that also ends `exhausted` does not trigger another one, without bound:
+
+```typescript
+let hasForced = false;
+
+runner.on(OPERATION_ENDED, async ({ runnerState }) => {
+  if (runnerState === 'exhausted' && !hasForced) {
+    hasForced = true;
+    await runner.waitForCompletion(); // Resolves once the outcome has settled.
+    await runner.forceTry();
+  }
+});
+```
+
 ```typescript
 const runner = new RetryRunner(policy, operation, {
   operationLabel: 'My Operation',

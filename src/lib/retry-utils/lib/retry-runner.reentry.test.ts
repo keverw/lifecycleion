@@ -7,7 +7,9 @@ import {
   type CancelResult,
   type ReportResult,
   type RunResult,
+  type RunResultNonSuccess,
 } from './retry-runner';
+import { RetryUtilsErrRunnerLockAcquisitionError } from './retry-utils-errors';
 
 const policy = { strategy: 'fixed' as const, maxRetryAttempts: 1, delayMS: 0 };
 
@@ -196,6 +198,81 @@ test('operation-ended listeners cannot replace an unresolved fatal operation', a
     status: 'attempt_success',
     data: 'after reset',
   });
+});
+
+test('an operation-ended listener can force a retry once the outcome has settled', async () => {
+  let attempts = 0;
+  let hasForced = false;
+  const runner = new RetryRunner(policy, (reportResult) => {
+    attempts++;
+    if (hasForced) {
+      reportResult('success', 'forced retry');
+    } else {
+      reportResult('error', new Error('attempt failed'));
+    }
+  });
+  let forced: Promise<RunResult<unknown>> | undefined;
+  runner.on(OPERATION_ENDED, ({ runnerState }: { runnerState: string }) => {
+    if (runnerState !== 'exhausted' || hasForced) {
+      return;
+    }
+    hasForced = true;
+    forced = (async () => {
+      await runner.waitForCompletion();
+      return await runner.forceTry({ shouldWaitForCompletion: true });
+    })();
+  });
+
+  // Waiters of the exhausted operation keep its own outcome.
+  expect(await runner.run(true)).toMatchObject({
+    status: 'attempts_exhausted',
+  });
+  expect(await forced).toMatchObject({
+    status: 'attempt_success',
+    data: 'forced retry',
+  });
+  // The first try, its one retry, then the forced retry.
+  expect(attempts).toBe(3);
+  expect(runner.runnerState).toBe('completed');
+});
+
+test('calls made while an operation call holds the lock return lock_error', async () => {
+  let invoked = 0;
+  const runner = new RetryRunner(policy, (reportResult) => {
+    invoked++;
+    reportResult('success', 'finished');
+  });
+  const nested: Array<Promise<RunResult<unknown>>> = [];
+  runner.on(OPERATION_STARTED, () => {
+    // Still inside run()'s synchronous dispatch, so its lock is held. Not a terminal
+    // dispatch, so this is lock contention rather than terminal_dispatch_in_progress.
+    nested.push(
+      runner.run(),
+      runner.resume(),
+      runner.forceTry({ shouldWaitForCompletion: true }),
+    );
+  });
+
+  expect(await runner.run(true)).toMatchObject({
+    status: 'attempt_success',
+    data: 'finished',
+  });
+
+  const results = await Promise.all(nested);
+  expect(results.map((result) => result.status)).toEqual([
+    'pre_operation_error',
+    'pre_operation_error',
+    'pre_operation_error',
+  ]);
+  for (const [index, method] of ['run', 'resume', 'forceTry'].entries()) {
+    const result = results[index] as RunResultNonSuccess;
+    expect(result.code).toBe('lock_error');
+    expect(result.error).toBeInstanceOf(
+      RetryUtilsErrRunnerLockAcquisitionError,
+    );
+    expect(result.error).toMatchObject({ invokedMethod: method });
+  }
+  expect(invoked).toBe(1);
 });
 
 test('synchronous abort acknowledgement leaves no cancellation grace timer', async () => {
