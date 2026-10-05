@@ -24,7 +24,6 @@ import {
   findAllCircularCycles,
 } from './internal/dependency-policy';
 import {
-  isOperationTimeoutValidationError,
   resolveOperationTimeoutMS,
   toOperationTimerDelayMS,
   settleOperation,
@@ -3699,8 +3698,15 @@ export class LifecycleManager
       return undefined;
     }
 
+    return this.restartRefusedDuringShutdown(refusedShutdownResult());
+  }
+
+  /** The refusal for a restart that met somebody else's shutdown, with its stop answer. */
+  private restartRefusedDuringShutdown(
+    shutdownResult: ShutdownResult,
+  ): RestartResult {
     const result: RestartResult = {
-      shutdownResult: refusedShutdownResult(),
+      shutdownResult,
       startupResult: refusedStartupResult(
         'shutdown_in_progress',
         LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
@@ -3879,15 +3885,7 @@ export class LifecycleManager
       // shutdown does, without starting anything on top of it.
       if (!stopPhase.accepted) {
         phases.shutdownResult = stopPhase.result;
-        this.logger.warn('Cannot restart all components during shutdown');
-        return {
-          shutdownResult: stopPhase.result,
-          startupResult: refusedStartupResult(
-            'shutdown_in_progress',
-            LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
-          ),
-          success: false,
-        };
+        return this.restartRefusedDuringShutdown(stopPhase.result);
       }
 
       const stayDownPassCountAtStopPhase = this.stayDownPassCount;
@@ -6799,12 +6797,12 @@ export class LifecycleManager
         );
       } catch (error) {
         if (
-          isOperationTimeoutValidationError(error) &&
+          settledFailureCode(error) === 'invalid_options' &&
           !this.ownsClaim(name, claim)
         ) {
           return crashedComponentResult(
             name,
-            error,
+            error as Error,
             `Start refused: ${describeError(error)}`,
             'invalid_options',
           );
@@ -7882,12 +7880,12 @@ export class LifecycleManager
         return await run(claim);
       } catch (error) {
         if (
-          isOperationTimeoutValidationError(error) &&
+          settledFailureCode(error) === 'invalid_options' &&
           !this.ownsClaim(name, claim)
         ) {
           return crashedComponentResult(
             name,
-            error,
+            error as Error,
             `Stop refused: ${describeError(error)}`,
             'invalid_options',
           );

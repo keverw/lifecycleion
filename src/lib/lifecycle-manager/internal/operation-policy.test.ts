@@ -5,7 +5,7 @@ import {
   crashedComponentResult,
   crashedShutdownResult,
   crashedStartupResult,
-  isOperationTimeoutValidationError,
+  isOperationOptionRefusal,
   resolveOperationTimeoutMS,
   settleOperation,
   settledFailureCode,
@@ -42,7 +42,7 @@ test('manager timeout refusals retain provenance across settlement and result fa
     );
     expect(result.code).toBe('invalid_options');
     expect(result.reason).toContain('start() refused:');
-    expect(isOperationTimeoutValidationError(result.error)).toBe(true);
+    expect(isOperationOptionRefusal(result.error)).toBe(true);
     expect(reports).toHaveLength(0);
     if (result.error === undefined) {
       throw new Error('Expected a timeout error');
@@ -83,7 +83,7 @@ test('raw shared timeout failures and caller errors remain reported operation cr
       );
       expect(result.code).toBe('operation_crashed');
       expect(result.reason).toContain('start() failed unexpectedly:');
-      expect(isOperationTimeoutValidationError(result.error)).toBe(false);
+      expect(isOperationOptionRefusal(result.error)).toBe(false);
       expect((reports.at(-1) as Error).cause).toBe(result.error);
     }
     expect(reports).toHaveLength(2);

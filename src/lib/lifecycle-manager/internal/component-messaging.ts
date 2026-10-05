@@ -21,7 +21,7 @@ import { toError } from '../../to-error';
 import { LIFECYCLE_MANAGER_LOG_MESSAGE_HANDLER_FAILED } from '../constants';
 import {
   resolveOperationTimeoutMS,
-  isOperationTimeoutValidationError,
+  isOperationOptionRefusal,
   invalidOperationOptionError,
 } from './operation-policy';
 
@@ -178,7 +178,7 @@ export async function sendMessageInternal(
       'sendMessageToComponent timeout',
     );
   } catch (error) {
-    if (!isOperationTimeoutValidationError(error)) {
+    if (!isOperationOptionRefusal(error)) {
       throw error;
     }
     return {

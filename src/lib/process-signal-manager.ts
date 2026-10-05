@@ -1012,9 +1012,7 @@ export class ProcessSignalManager {
         // Deferred, as the twin is: this runs inside a failing `attach()`, and a listener
         // that attaches from the report must not have that attach's error thrown over its
         // own, nor observe the shared state before the ownership repair above.
-        this.reportCleanupFailuresLater([
-          ['ProcessSignalManager stdin raw mode restore', { error }],
-        ]);
+        this.reportCleanupFailuresLater(rawModeRestoreReport({ error }));
       }
     }
   }

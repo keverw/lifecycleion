@@ -1861,9 +1861,9 @@ export class Logger extends EventEmitter {
       }
       // The decision `endsProcessOnExit` made above, re-checked live: listeners and sink
       // close ran since, and may have removed a stubbed `process.exit`. No exit happened,
-      // so say so and release the latch: a later `exit()` may try again once it is back.
+      // so say so. The latch stays set: this exit owned the logger's one `exit-process`,
+      // and exits refused by it while cleanup ran are not replayed by a later one.
       if (typeof globalThis.process?.exit !== 'function') {
-        this._hasScheduledProcessExit = false;
         reportToConsole(
           'Logger process exit skipped: process.exit is no longer callable',
         );

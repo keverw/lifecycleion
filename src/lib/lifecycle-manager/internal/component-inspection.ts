@@ -21,7 +21,7 @@ import {
 } from '../constants';
 import {
   toOperationTimerDelayMS,
-  isOperationTimeoutValidationError,
+  settledFailureCode,
 } from './operation-policy';
 
 /** The public method each signal broadcast is named after when it reports a crash. */
@@ -104,8 +104,9 @@ export async function checkComponentHealthOperation(
     }
   } catch (error) {
     const err = toError(error);
+    const code = settledFailureCode(error);
 
-    if (!isOperationTimeoutValidationError(error)) {
+    if (code !== 'invalid_options') {
       reportCallbackError('lifecycle-manager checkComponentHealth', error);
     }
     // Logged and announced as every other failed check is - `started` first, so a
@@ -121,17 +122,14 @@ export async function checkComponentHealthOperation(
     return {
       name,
       healthy: false,
-      message: isOperationTimeoutValidationError(error)
-        ? describeError(error)
-        : readFailureMessage,
+      message:
+        code === 'invalid_options' ? describeError(error) : readFailureMessage,
       checkedAt: startTime,
       durationMS: Date.now() - startTime,
       error: err,
       timedOut: false,
       // A getter that throws broke the component's contract: not a failed check.
-      code: isOperationTimeoutValidationError(error)
-        ? 'invalid_options'
-        : 'operation_crashed',
+      code,
     };
   }
 
@@ -420,10 +418,11 @@ export async function runSignalBroadcast(
       }
     } catch (error) {
       const err = toError(error);
+      const code = settledFailureCode(error);
 
       // Reported as every other getter that throws is; an invalid timeout is an
       // expected refusal, not a crash.
-      if (!isOperationTimeoutValidationError(error)) {
+      if (code !== 'invalid_options') {
         reportCallbackError(
           `lifecycle-manager ${SIGNAL_TRIGGER_OPERATIONS[descriptor.signal]}`,
           error,
@@ -439,9 +438,7 @@ export async function runSignalBroadcast(
         called: false,
         error: err,
         timedOut: false,
-        code: isOperationTimeoutValidationError(error)
-          ? 'invalid_options'
-          : 'operation_crashed',
+        code,
       });
       continue;
     }

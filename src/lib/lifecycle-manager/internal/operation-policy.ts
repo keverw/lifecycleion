@@ -13,17 +13,18 @@ import type {
   ComponentOperationResult,
 } from '../types';
 
-// The shared timer marker also covers validation performed by callers inside their
-// getters and hooks. Only errors thrown by this manager's own validator calls are
-// expected configuration refusals; caller failures retain the normal error channel.
-const lifecycleTimeoutValidationErrors = new WeakSet<Error>();
+// Errors from this manager's own option validation: its timeout validator calls and
+// {@link invalidOperationOptionError}. The shared timer marker also covers validation
+// performed by callers inside their getters and hooks; only this manager's own calls are
+// expected configuration refusals, and caller failures retain the normal error channel.
+const operationOptionRefusals = new WeakSet<Error>();
 
 function validateLifecycleDuration<T>(validate: () => T): T {
   try {
     return validate();
   } catch (error) {
     if (isTimeoutValidationError(error)) {
-      lifecycleTimeoutValidationErrors.add(error);
+      operationOptionRefusals.add(error);
     }
     throw error;
   }
@@ -36,14 +37,13 @@ function validateLifecycleDuration<T>(validate: () => T): T {
  */
 export function invalidOperationOptionError(message: string): TypeError {
   const error = new TypeError(message);
-  lifecycleTimeoutValidationErrors.add(error);
+  operationOptionRefusals.add(error);
   return error;
 }
 
-export function isOperationTimeoutValidationError(
-  error: unknown,
-): error is Error {
-  return lifecycleTimeoutValidationErrors.has(error as Error);
+/** Whether this manager's own option validation (timeouts included) refused `error`. */
+export function isOperationOptionRefusal(error: unknown): error is Error {
+  return operationOptionRefusals.has(error as Error);
 }
 
 export function resolveOperationTimeoutMS(
@@ -82,8 +82,8 @@ export function refusedShutdownResult(): ShutdownResult {
 
 /**
  * The safety net under every public async method: whatever `run` throws or rejects with
- * comes back as the failed result `toFailure` builds. Known timeout validation errors
- * are expected refusals; unexpected failures are reported on the global error channel.
+ * comes back as the failed result `toFailure` builds. Our own option refusals are
+ * expected; unexpected failures are reported on the global error channel.
  *
  * The public methods answer with result objects rather than rejections, so a caller can
  * start one without awaiting it - `const pending = manager.stopAllComponents()` - and read
@@ -136,7 +136,7 @@ export type SettledFailureCode = 'invalid_options' | 'operation_crashed';
  * rather than deriving it, so they cannot disagree with the report decision.
  */
 export function settledFailureCode(error: unknown): SettledFailureCode {
-  return isOperationTimeoutValidationError(error)
+  return isOperationOptionRefusal(error)
     ? 'invalid_options'
     : 'operation_crashed';
 }
@@ -186,7 +186,7 @@ export function crashedShutdownResult(
 export function crashedSignalBroadcastResult(
   signal: SignalBroadcastResult['signal'],
   error: Error,
-  code: SettledFailureCode = 'operation_crashed',
+  code: SettledFailureCode,
 ): SignalBroadcastResult {
   return {
     signal,
@@ -215,7 +215,7 @@ export function failedSignalCallbackResult(
 export function crashedHealthCheckResult(
   name: string,
   error: Error,
-  code: SettledFailureCode = 'operation_crashed',
+  code: SettledFailureCode,
 ): HealthCheckResult {
   return {
     name,

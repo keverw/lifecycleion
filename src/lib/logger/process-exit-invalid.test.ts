@@ -240,6 +240,53 @@ test('a repeat real exit does not report or call process.exit with a later code'
   }
 });
 
+test('an exit skipped because process.exit disappeared keeps later exits from re-emitting', async () => {
+  const actualExit = Object.getOwnPropertyDescriptor(process, 'exit');
+  const calls: number[] = [];
+  const stub = ((code?: number) => {
+    calls.push(code ?? 0);
+  }) as typeof process.exit;
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  process.exit = stub;
+  try {
+    const logger = new Logger({ sinks: [], callProcessExit: true });
+    const processed: number[] = [];
+    logger.on<{ eventType: string; code: number }>(
+      'logger',
+      ({ eventType, code }) => {
+        if (eventType === 'exit-process') {
+          processed.push(code);
+          // Removed after the exit was scheduled, so finish finds nothing to call.
+          (process as { exit?: unknown }).exit = undefined;
+        }
+      },
+    );
+
+    logger.exit(1);
+    await logger.close();
+    await Promise.resolve();
+
+    expect(output.mock.calls.flat().join('\n')).toContain(
+      'process.exit is no longer callable',
+    );
+
+    // Back again: a later exit still owns no second exit-process or process.exit().
+    process.exit = stub;
+    logger.exit(2);
+    await logger.close();
+    await Promise.resolve();
+
+    expect(processed).toEqual([1]);
+    expect(logger.exitCode).toBe(1);
+    expect(calls).toEqual([]);
+  } finally {
+    if (actualExit !== undefined) {
+      Object.defineProperty(process, 'exit', actualExit);
+    }
+    output.mockRestore();
+  }
+});
+
 test('an exit-process listener can close a logger whose sink hook requested the exit', async () => {
   const exit = spyOn(process, 'exit').mockImplementation(
     () => undefined as never,
