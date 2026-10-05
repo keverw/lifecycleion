@@ -56,4 +56,5 @@ export type RunnerErrorCode =
   | 'not_paused'
   | 'not_running'
   | 'retry_canceled'
+  | 'terminal_dispatch_in_progress'
   | 'unexpected_error';

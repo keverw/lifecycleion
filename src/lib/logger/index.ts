@@ -333,8 +333,7 @@ export class Logger extends EventEmitter {
     // value cannot strand a live process with a closed logger. Simulated exits
     // keep the requested code for inspection.
     const isInvalidExitCode =
-      this.callProcessExit &&
-      typeof globalThis.process?.exit === 'function' &&
+      this.endsProcessOnExit &&
       (!Number.isInteger(code) || code < 0 || code > 255);
     if (isInvalidExitCode) {
       if (!this._didReportInvalidExitCode) {
@@ -1857,26 +1856,22 @@ export class Logger extends EventEmitter {
     // dependency of the sink's return, and therefore runs once cleanup settles.
     const closing = this._closePromise ?? this.close();
     const finishExit = (): void => {
-      if (this.callProcessExit) {
-        if (
-          typeof globalThis.process !== 'undefined' &&
-          typeof globalThis.process.exit === 'function'
-        ) {
+      // The decision `endsProcessOnExit` made above, not a second copy of its test.
+      if (this._hasScheduledProcessExit) {
+        try {
+          globalThis.process.exit(exitCode);
+        } catch (error) {
+          reportToConsole(
+            `Logger process exit failed: ${describeError(error)}`,
+          );
+          // One bounded fallback. On Node, an exit listener may throw even
+          // for code 1; the second exit bypasses that listener.
           try {
-            globalThis.process.exit(exitCode);
-          } catch (error) {
+            globalThis.process.exit(1);
+          } catch (fallbackError) {
             reportToConsole(
-              `Logger process exit failed: ${describeError(error)}`,
+              `Logger fallback process exit failed: ${describeError(fallbackError)}`,
             );
-            // One bounded fallback. On Node, an exit listener may throw even
-            // for code 1; the second exit bypasses that listener.
-            try {
-              globalThis.process.exit(1);
-            } catch (fallbackError) {
-              reportToConsole(
-                `Logger fallback process exit failed: ${describeError(fallbackError)}`,
-              );
-            }
           }
         }
       }

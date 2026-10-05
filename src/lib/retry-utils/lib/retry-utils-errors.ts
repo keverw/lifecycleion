@@ -99,6 +99,15 @@ export class RetryUtilsErrRunnerLockAcquisitionError extends Error {
   }
 }
 
+export class RetryUtilsErrRunnerTerminalDispatchInProgress extends Error {
+  constructor(public invokedMethod: 'run' | 'resume' | 'forceTry') {
+    super(
+      'The current operation is publishing its terminal outcome. Wait for it to settle (waitForCompletion()) before starting more work.',
+    );
+    this.name = 'RetryUtilsErrRunnerTerminalDispatchInProgress';
+  }
+}
+
 export class RetryUtilsErrRunnerUnexpectedError extends Error {
   constructor(
     public invokedMethod: 'run' | 'resume' | 'forceTry',

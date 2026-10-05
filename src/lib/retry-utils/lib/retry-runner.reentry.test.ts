@@ -96,7 +96,7 @@ test('attempt-handled listeners cannot cancel or force an outcome already report
   expect(await cancellation).toBe('not-running');
   expect(await forced).toMatchObject({
     status: 'pre_operation_error',
-    code: 'lock_error',
+    code: 'terminal_dispatch_in_progress',
   });
   expect(await completion).toMatchObject({ status: 'attempt_success' });
   expect(stateDuringHandled).toBe('running');
@@ -131,7 +131,7 @@ test('a terminal attempt listener cannot replace the operation before its result
   });
   expect(await forced).toMatchObject({
     status: 'pre_operation_error',
-    code: 'lock_error',
+    code: 'terminal_dispatch_in_progress',
   });
   await resetting;
   expect(runner.runnerState).toBe('not-started');
@@ -187,7 +187,7 @@ test('operation-ended listeners cannot replace an unresolved fatal operation', a
   });
   expect(await forced).toMatchObject({
     status: 'pre_operation_error',
-    code: 'lock_error',
+    code: 'terminal_dispatch_in_progress',
   });
   await resetting;
   expect(runner.runnerState).toBe('not-started');

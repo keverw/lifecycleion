@@ -1,6 +1,6 @@
 import { isNullish } from '../internal/is-nullish';
 import { generateID } from '../id-helpers';
-import { resolveRequestTimeoutMS } from './consts';
+import { assertDurationMS } from '../internal/timer-limits';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import { setOwnHeader } from './utils';
 import type {
@@ -138,7 +138,11 @@ export class HTTPRequestBuilder<T = unknown> {
 
   public timeout(ms: number | null): this {
     this._assertNotSent('timeout');
-    resolveRequestTimeoutMS(ms);
+    // Validated only: nullish inherits the client's timeout at dispatch, where the
+    // value is resolved once.
+    if (!isNullish(ms)) {
+      assertDurationMS(ms, 'HTTP request timeout');
+    }
     this._timeout = ms;
     return this;
   }

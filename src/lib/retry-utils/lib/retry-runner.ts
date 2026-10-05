@@ -26,6 +26,7 @@ import {
   RetryUtilsErrRunnerNotPaused,
   RetryUtilsErrRunnerNotRunning,
   RetryUtilsErrRunnerRetryCanceled,
+  RetryUtilsErrRunnerTerminalDispatchInProgress,
   RetryUtilsErrRunnerUnexpectedError,
   RetryUtilsErrRunnerUnknownState,
 } from './retry-utils-errors';
@@ -604,7 +605,10 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     shouldWaitForCompletion: boolean,
   ): RunResult<T> | Promise<RunResult<T>> {
     // Simple lock check
-    if (this._isOperationLocked || this.terminalDispatchDepth > 0) {
+    if (this.terminalDispatchDepth > 0) {
+      return this.terminalDispatchRefusal('run');
+    }
+    if (this._isOperationLocked) {
       return {
         status: 'pre_operation_error',
         code: 'lock_error',
@@ -680,7 +684,10 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   private resumeOperation(
     shouldWaitForCompletion: boolean,
   ): RunResult<T> | Promise<RunResult<T>> {
-    if (this._isOperationLocked || this.terminalDispatchDepth > 0) {
+    if (this.terminalDispatchDepth > 0) {
+      return this.terminalDispatchRefusal('resume');
+    }
+    if (this._isOperationLocked) {
       return {
         status: 'pre_operation_error',
         code: 'lock_error',
@@ -745,7 +752,10 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     const shouldWaitForCompletion = options?.shouldWaitForCompletion ?? false;
     const shouldAbortRunning = options?.shouldAbortRunning ?? false;
 
-    if (this._isOperationLocked || this.terminalDispatchDepth > 0) {
+    if (this.terminalDispatchDepth > 0) {
+      return this.terminalDispatchRefusal('forceTry');
+    }
+    if (this._isOperationLocked) {
       return {
         status: 'pre_operation_error',
         code: 'lock_error',
@@ -1003,6 +1013,21 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       clearTimeout(this.currentState.cancellationTimeoutHandle);
       this.currentState.cancellationTimeoutHandle = null;
     }
+  }
+
+  /**
+   * A terminal listener cannot start new work before the committed outcome settles:
+   * a replacement would publish over the result existing waiters are about to receive.
+   * Not a lock failure - nothing is contended - so it has its own code.
+   */
+  private terminalDispatchRefusal(
+    methodName: 'run' | 'resume' | 'forceTry',
+  ): RunResult<T> {
+    return {
+      status: 'pre_operation_error',
+      code: 'terminal_dispatch_in_progress',
+      error: new RetryUtilsErrRunnerTerminalDispatchInProgress(methodName),
+    };
   }
 
   /** Keep terminal notifications and result publication in one reentry scope. */
