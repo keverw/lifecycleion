@@ -22,7 +22,7 @@ import {
 import { copyBoundedArray } from './bounded-array-copy';
 import {
   dispatchAnnouncedHook,
-  isComponentEnterable,
+  isComponentRunningMember,
   isHookEntryBlocked,
   readHookThenRecheck,
 } from './component-dispatch';
@@ -40,8 +40,12 @@ function readAvailability(
   const isCurrent = context.getComponent(componentName) === component;
   const state = context.componentStates.get(componentName);
   const isUnavailable = isHookEntryBlocked(context, componentName, state);
+  // The shared rule (see `isComponentEnterable()`), with the block just evaluated
+  // rather than evaluated again: each evaluation scans the manager's pending starts.
   const isRunning =
-    isCurrent && isComponentEnterable(context, componentName, state);
+    isCurrent &&
+    !isUnavailable &&
+    isComponentRunningMember(context, componentName, state);
   // The label does not depend on availability: a stall whose forced `start()` is still
   // pending is refused, but it is still `stalled` - as `checkComponentHealth()` and the
   // broadcast skip both call it. Gating this on availability made the same component
@@ -642,6 +646,15 @@ export function getValueInternal<T = unknown>(
   const { isRunning } = availability;
 
   if (handlerRead.status === 'read_failed') {
+    const err = toError(handlerRead.error);
+
+    // Logged as a message handler getter that throws is, besides the global report.
+    context.logger
+      .entity(componentName)
+      .error('getValue handler failed: {{error.message}}', {
+        params: { error: err, key, from },
+      });
+
     context.lifecycleEvents.componentValueReturned(componentName, key, from, {
       found: false,
       value: undefined,
@@ -660,7 +673,7 @@ export function getValueInternal<T = unknown>(
       handlerImplemented: false,
       requestedBy: from,
       code: 'operation_crashed',
-      error: toError(handlerRead.error),
+      error: err,
     };
   }
 

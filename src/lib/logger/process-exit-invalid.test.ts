@@ -1147,6 +1147,49 @@ test('isPendingExit holds for every pending exit, including a later simulated on
   expect(logger.exitCode).toBe(0);
 });
 
+test('pendingExitCode reads the code the pending exit settles on', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const seenByCallback: Array<[number, number | undefined]> = [];
+    const logger: Logger = new Logger({
+      sinks: [],
+      callProcessExit: false,
+      beforeExitCallback: async (code, isFirstExit) => {
+        seenByCallback.push([code, logger.pendingExitCode]);
+        if (!isFirstExit) {
+          return { action: 'wait' };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return { action: 'proceed' };
+      },
+    });
+    expect(logger.pendingExitCode).toBeUndefined();
+
+    logger.exit(0);
+    expect(logger.pendingExitCode).toBe(0);
+    // Overlapping requests settle on the last non-zero code; a later 0 does not
+    // downgrade it.
+    logger.exit(2);
+    expect(logger.pendingExitCode).toBe(2);
+    logger.exit(3);
+    logger.exit(0);
+    expect(logger.pendingExitCode).toBe(3);
+    // Each callback sees its own request's code, and the code the exit will use.
+    expect(seenByCallback).toEqual([
+      [0, 0],
+      [2, 2],
+      [3, 3],
+      [0, 3],
+    ]);
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(logger.exitCode).toBe(3);
+    expect(logger.pendingExitCode).toBeUndefined();
+  } finally {
+    output.mockRestore();
+  }
+});
+
 test('a code kept by a simulated request is normalized when the exit commits as real', async () => {
   const output = spyOn(console, 'error').mockImplementation(() => {});
   const actualExit = Object.getOwnPropertyDescriptor(process, 'exit');
@@ -1202,6 +1245,73 @@ test('replacement reports are bounded to one line per exit plus a settled-code s
     expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
       'Logger exit(1) replaces the pending exit code 0',
       'Logger exit code settled on 3 after 4 further replacements not reported',
+    ]);
+  } finally {
+    output.mockRestore();
+  }
+});
+
+test('a NaN exitCode on a log entry exits as a real exit(NaN) does', async () => {
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: true });
+    // Ignored before: no exit, no report, and `entry.exitCode` undefined, though a
+    // direct `exit(NaN)` fails with 1.
+    logger.error('fatal', { exitCode: NaN });
+    await logger.close();
+    await Promise.resolve();
+
+    expect(sink.logs[0]?.exitCode).toBe(1);
+    expect(logger.didExit).toBe(true);
+    expect(exit.mock.calls).toEqual([[1]]);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit code NaN is invalid; treating it as code 1',
+    ]);
+  } finally {
+    output.mockRestore();
+    exit.mockRestore();
+  }
+});
+
+test('a NaN exitCode on a log entry starts a simulated exit that keeps the code', async () => {
+  const sink = new ArraySink();
+  const logger = new Logger({ sinks: [sink], callProcessExit: false });
+  const processed = recordExitProcess(logger);
+  logger.error('fatal', { exitCode: NaN });
+  await logger.close();
+
+  expect(sink.logs[0]?.exitCode).toBeNaN();
+  expect(logger.didExit).toBe(true);
+  expect(processed).toEqual([NaN]);
+
+  // Once closed, the request still reaches `exit()` and starts the next exit.
+  logger.error('fatal after the first exit', { exitCode: NaN });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(processed).toEqual([NaN, NaN]);
+});
+
+test('a failure exit requested by a simulated exit-process listener is reported, not applied', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    const processed = recordExitProcess(logger);
+    logger.on<{ eventType: string }>('logger', ({ eventType }) => {
+      if (eventType === 'exit-process') {
+        logger.exit(1);
+      }
+    });
+    logger.exit(0);
+    await logger.close();
+
+    expect(processed).toEqual([0]);
+    expect(logger.exitCode).toBe(0);
+    // Dropped silently before, while the real exit reported the same request.
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit(1) ignored: an exit with code 0 is already processing',
     ]);
   } finally {
     output.mockRestore();

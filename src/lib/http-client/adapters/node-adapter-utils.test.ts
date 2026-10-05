@@ -1,8 +1,6 @@
 import { describe, expect, test } from 'bun:test';
-import {
-  materializeNodeRequestHeaders,
-  normalizeNodeRequestHeaders,
-} from './node-adapter-utils';
+import { normalizeNodeRequestHeaders } from './node-adapter-utils';
+import { materializeRequestHeaders } from '../internal/header-utils';
 
 describe('normalizeNodeRequestHeaders', () => {
   test('lowercases keys and coerces scalars to strings', () => {
@@ -40,28 +38,6 @@ describe('normalizeNodeRequestHeaders', () => {
   });
 });
 
-describe('materializeNodeRequestHeaders', () => {
-  test('joins repeated Cookie headers with RFC cookie delimiters', () => {
-    expect(
-      materializeNodeRequestHeaders({
-        cookie: ['session=abc123', 'theme=dark'],
-      }),
-    ).toEqual({
-      cookie: 'session=abc123; theme=dark',
-    });
-  });
-
-  test('joins non-cookie arrays with comma delimiters', () => {
-    expect(
-      materializeNodeRequestHeaders({
-        accept: ['application/json', 'text/plain'],
-      }),
-    ).toEqual({
-      accept: 'application/json, text/plain',
-    });
-  });
-});
-
 describe('__proto__ headers', () => {
   test('stay own keys through normalization and materialization', () => {
     const source = JSON.parse('{"__proto__": ["a", "b"]}') as Record<
@@ -69,7 +45,7 @@ describe('__proto__ headers', () => {
       string[]
     >;
     const normalized = normalizeNodeRequestHeaders(source);
-    const materialized = materializeNodeRequestHeaders(normalized);
+    const materialized = materializeRequestHeaders(normalized);
 
     expect(Object.getPrototypeOf(normalized)).toBe(Object.prototype);
     expect(

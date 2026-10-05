@@ -91,7 +91,9 @@ for (const phase of ['graceful', 'force', 'escalated-force'] as const) {
     expect(result.error).toBe(failure);
     expect(manager.getComponentStatus('a')?.state).toBe('stalled');
     // The deadline observer owns the actual hook rejection once installed.
-    // The foreground catch must still update state and return the error.
+    // The foreground catch must still update state and return the error. A rejection
+    // that beat the deferred deadline - in either phase - is labelled as the failure
+    // the result records, not as one after the deadline, which the result does not report.
     const reports = sink.logs.filter((entry) =>
       phase === 'graceful'
         ? entry.message.startsWith('Graceful shutdown threw error') ||
@@ -105,8 +107,8 @@ for (const phase of ['graceful', 'force', 'escalated-force'] as const) {
     expect(reports[0].type).toBe(phase === 'graceful' ? 'warn' : 'error');
     expect(reports[0].message).toBe(
       phase === 'graceful'
-        ? 'Component stop failed after deadline fired'
-        : 'Force shutdown failed after deadline fired',
+        ? 'Graceful shutdown threw error: cleanup rejected during abort'
+        : 'Force shutdown failed - stalled: cleanup rejected during abort',
     );
   });
 }

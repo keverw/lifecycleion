@@ -33,10 +33,8 @@ import {
 } from '../internal/multipart';
 import { writeRequestBodyChunked } from '../internal/request-body-writer';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
-import {
-  materializeNodeRequestHeaders,
-  normalizeNodeRequestHeaders,
-} from './node-adapter-utils';
+import { normalizeNodeRequestHeaders } from './node-adapter-utils';
+import { materializeRequestHeaders } from '../internal/header-utils';
 import { resolveDetectedRedirectURL } from '../utils';
 import { defineEntry } from '../../internal/define-entry';
 // Shared error normalization preserves Error instances and wraps other thrown values.
@@ -340,7 +338,7 @@ export class NodeAdapter implements HTTPAdapter {
 
     const options: http.RequestOptions = {
       method: request.method,
-      headers: materializeNodeRequestHeaders(request.headers),
+      headers: materializeRequestHeaders(request.headers),
       // Timeout is managed by the client via abort signal — the adapter does
       // not impose its own timeout so the client retains full control.
     };

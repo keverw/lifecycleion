@@ -189,23 +189,55 @@ test.each([
   },
 );
 
-test('stopping components still have their hooks read but are not warned', async () => {
-  const { context, add, events, componentStates } = fixture();
+test('components that will not be warned never have their hooks read', async () => {
+  const {
+    context,
+    add,
+    events,
+    componentStates,
+    pendingStarts,
+    cleanupPending,
+  } = fixture();
   let reads = 0;
-  for (const state of ['stopping', 'force-stopping'] as const) {
-    const component = add(state);
-    componentStates.set(state, state);
+  const names = [
+    'stopping',
+    'force-stopping',
+    'stopped',
+    'late-cleanup',
+    'pending-start',
+  ];
+  for (const name of names) {
+    const component = add(name);
     Object.defineProperty(component, 'onShutdownWarning', {
       get() {
         reads++;
-        return () => {
-          throw new Error('must not run');
-        };
+        throw new Error('getter must not run');
       },
     });
   }
-  await runShutdownWarningPhase(context, ['stopping', 'force-stopping'], 10);
-  expect(reads).toBe(2);
+  componentStates.set('stopping', 'stopping');
+  componentStates.set('force-stopping', 'force-stopping');
+  componentStates.set('stopped', 'stopped');
+  // Running, but owned by late-start cleanup or a still-running start().
+  cleanupPending.add('late-cleanup');
+  pendingStarts.add('pending-start');
+
+  const reports: unknown[] = [];
+  const onError = (event: ErrorEvent) => {
+    reports.push(event.error);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onError);
+  try {
+    await runShutdownWarningPhase(context, names, 10);
+  } finally {
+    globalThis.removeEventListener('error', onError);
+  }
+
+  // The getter is the component's code: running it for a component that is never
+  // warned reported its failure as a shutdown-warning error for nothing.
+  expect(reads).toBe(0);
+  expect(reports).toEqual([]);
   expect(events).toEqual([]);
 });
 

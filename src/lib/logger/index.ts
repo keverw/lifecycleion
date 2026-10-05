@@ -25,7 +25,6 @@ import {
 } from '../global-event-target';
 import { CurlyBrackets } from '../curly-brackets';
 import { MAX_RENDER_LENGTH } from '../internal/render-budget';
-import { isNumber } from '../is-number';
 import { adoptResult, UnreadableReturn } from '../internal/adopt-promise';
 import { describeError, isErrorValue, toError } from '../to-error';
 import { readMember, readUnknownMember } from '../internal/read-member';
@@ -331,6 +330,17 @@ export class Logger extends EventEmitter {
   }
 
   /**
+   * The code the pending exit will commit, while {@link isPendingExit} is true; otherwise
+   * `undefined`. Every request made for that exit settles it - the last non-zero code
+   * wins - so it can differ from the code of the request that started the exit, and from
+   * the `exitCode` a `beforeExitCallback` is called with. Normalized as `exit()`
+   * normalizes it (an invalid code reads `1` for a real exit).
+   */
+  public get pendingExitCode(): number | undefined {
+    return this._pendingExit?.code;
+  }
+
+  /**
    * Whether a proceeding `exit()` ends the process: `callProcessExit` is on and the
    * runtime has a `process.exit()` to call. False for a simulated exit, which closes the
    * logger and leaves the process running.
@@ -353,13 +363,6 @@ export class Logger extends EventEmitter {
    * Exit the process with the specified code
    */
   public exit(code: number): void {
-    // An `exit-process` listener of a simulated exit that exits again belongs to that
-    // exit. Running `beforeExit` for it would start another cycle whose emit reaches the
-    // same listener, without bound. Its code is not counted either: the exit has already
-    // published its code, as a real exit has by the time its listeners run.
-    if (this._isEmittingExitProcess && !this._hasScheduledProcessExit) {
-      return;
-    }
     // Keep real exits in the portable 0–255 range; larger codes can wrap to
     // success at the OS boundary. Decide before closing sinks so a bad caller
     // value cannot strand a live process with a closed logger. Simulated exits
@@ -379,6 +382,16 @@ export class Logger extends EventEmitter {
         );
       }
       code = 1;
+    }
+    // An `exit-process` listener of a simulated exit that exits again belongs to that
+    // exit. Running `beforeExit` for it would start another cycle whose emit reaches the
+    // same listener, without bound. Its code is not counted either: the exit has already
+    // published its code, as a real exit has by the time its listeners run. So it is
+    // treated as a real exit treats a request behind its commit: a failure ignored behind
+    // a committed 0 is reported rather than dropped without a trace.
+    if (this._isEmittingExitProcess && !this._hasScheduledProcessExit) {
+      this.reportIgnoredFailureExit(requestedCode, code);
+      return;
     }
     // An `exit-called` listener that exits again is absorbed too: its nested emit
     // reaches the same listener, so an unconditional one recursed until the stack
@@ -481,6 +494,11 @@ export class Logger extends EventEmitter {
    * reported on the standard global `'error'` channel.
    *
    * @param callback - Function to call before process exit (receives exitCode and isFirstExit).
+   *                   `exitCode` is this request's code (normalized as `exit()` normalizes
+   *                   it), not the code the exit will settle on: overlapping requests settle
+   *                   on the last non-zero one, so read `logger.pendingExitCode` for
+   *                   the code the exit will use (or the `exit-process` event once it
+   *                   commits).
    *                   Must return BeforeExitResult indicating whether to proceed with exit or wait.
    *                   Return `{ action: 'proceed' }` to continue with exit.
    *                   Return `{ action: 'wait' }` to prevent exit (e.g., shutdown already in progress).
@@ -494,9 +512,20 @@ export class Logger extends EventEmitter {
    * const lifecycle = new LifecycleManager({ logger });
    *
    * // Set callback after both are constructed
-   * logger.setBeforeExitCallback(async (exitCode, isFirstExit) => {
-   *   if (isFirstExit) {
+   * let isExitInProgress = false;
+   * logger.setBeforeExitCallback(async () => {
+   *   // A repeat while the first exit is still stopping components - a component that
+   *   // fails while stopping and logs `exitCode: 1` - must wait: 'proceed' would commit
+   *   // the exit there, closing the sinks and calling process.exit() mid-shutdown. Its
+   *   // code still counts toward the exit the first request proceeds with.
+   *   if (isExitInProgress) {
+   *     return { action: 'wait' };
+   *   }
+   *   isExitInProgress = true;
+   *   try {
    *     await lifecycle.stopAllComponents();
+   *   } finally {
+   *     isExitInProgress = false;
    *   }
    *   return { action: 'proceed' };
    * });
@@ -1133,7 +1162,7 @@ export class Logger extends EventEmitter {
     // member that matters is read, through the guard, since nothing else is used here.
     if (this._closed) {
       const closedExitCode = readUnknownMember(callerOptions, 'exitCode');
-      if (isNumber(closedExitCode)) {
+      if (isExitCodeRequest(closedExitCode)) {
         this.exit(closedExitCode);
       }
       return;
@@ -1430,7 +1459,7 @@ export class Logger extends EventEmitter {
       // requested value and reports the fix. A request, not an outcome: when other exits
       // overlap it, the process uses the code `exit()` settles on (see
       // `recordExitRequest`).
-      exitCode: isNumber(exitCode)
+      exitCode: isExitCodeRequest(exitCode)
         ? this.isInvalidExitCode(exitCode)
           ? 1
           : exitCode
@@ -1480,8 +1509,8 @@ export class Logger extends EventEmitter {
       timestamp,
     });
 
-    // Handle exit if requested (only if exitCode is a valid number)
-    if (isNumber(exitCode)) {
+    // Handle exit if requested (any number, `NaN` included; see `isExitCodeRequest`)
+    if (isExitCodeRequest(exitCode)) {
       this.exit(exitCode);
     }
   }
@@ -1586,6 +1615,14 @@ export class Logger extends EventEmitter {
    * One place, so a service or entity logger cannot drift from the logger that made it.
    */
   private renderErrorObject(prefix: string, error: unknown): string {
+    // A closed logger writes nothing - `handleLog` only honours the entry's `exitCode` -
+    // so the render would be thrown away. Skipped rather than run, since it is not free:
+    // it walks caller-owned values and can fail into a 'Render failed' console report for
+    // a line no sink will ever see. One place for both `errorObject`s, as `LoggerService`
+    // renders through this too.
+    if (this._closed) {
+      return '';
+    }
     return prepareErrorObjectLog(prefix, error, {
       // The logger's own masking and its failure handler, so an error rendered here masks
       // the way params do and a failure reaches diagnostics rather than the console.
@@ -2169,6 +2206,19 @@ export * from './types';
 export { REDACTION_FAILED_MARKER } from './utils/redaction';
 export * from './sinks';
 export type { LoggerService } from './logger-service';
+
+/**
+ * Whether a log entry's `exitCode` requests an exit: any number, `NaN` included.
+ *
+ * Not the shared `isNumber`, which rejects `NaN`: an entry logged with `exitCode: NaN`
+ * was ignored outright - no exit, no report, `entry.exitCode` undefined - while
+ * `exit(NaN)` fails with 1 (or, simulated, keeps `NaN` as a failure). A `NaN` is a broken
+ * code, not a request not to exit, so the entry takes the path a direct call takes.
+ * Non-numbers are still ignored, as documented.
+ */
+function isExitCodeRequest(value: unknown): value is number {
+  return typeof value === 'number';
+}
 
 /** Own the list by numeric membership; caller iterators do not select destinations. */
 function copySinkList(

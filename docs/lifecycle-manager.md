@@ -551,12 +551,12 @@ escape hatch when the application can handle that abandoned work safely.
 
 With `timeoutMS: 0`, the global shutdown deadline is disabled. Shutdown waits for
 ordinary in-flight starts and their automatic cleanup before stopping dependencies.
-If an unresolved start times out during that wait, shutdown returns
-`cleanup_incomplete`, releases its shutdown latch, and preserves the dependencies.
-A later shutdown can finish after the start settles; cleanup already underway is
-still joined. Finite shutdown budgets continue waiting within their remaining budget.
-The exception for starts already timed out and still unresolved remains: those
-return incomplete cleanup and may require another shutdown pass after they settle.
+If an unresolved start times out during that wait - with a finite budget or without
+one - shutdown stops waiting on it exactly as it would for a start that had already
+timed out when the pass began: it returns `cleanup_incomplete`, releases its shutdown
+latch, and preserves the dependencies, rather than spend the rest of its budget on a
+`start()` that may never settle. A later shutdown can finish after the start settles;
+cleanup already underway is still joined.
 
 A shutdown requested synchronously from `start()` also skips joining that requesting
 start and preserves its dependencies, so the hook can await the result. It first
@@ -1209,7 +1209,12 @@ without `startResult`; await the bulk startup or restart result to learn whether
 startup succeeded. This lets a component's `start()` await registration without
 waiting on its own startup batch. Follow-up batches share the original overall
 startup deadline, required-component rollback, and optional-component failure
-reporting. They do not get a fresh timeout budget. If startup exits before reaching a deferred
+reporting. They do not get a fresh timeout budget. A deferred auto-start is not an
+independent start: if a required one fails - its own `start()`, or a check such as
+`dependency_not_running` because its dependency was registered without `autoStart` -
+the whole startup rolls back with `required_component_failed`, including the components
+the original batch already started. Give the component `optional: true` (a component
+option) to have its failure reported in `failedOptionalComponents` instead. If startup exits before reaching a deferred
 component, a warning identifies that abandoned auto-start and the exit reason,
 including deferred components included in the initial order or left in an
 already-fixed follow-up batch. Unattempted components
@@ -1380,7 +1385,7 @@ checked again before invocation. A provider getter that starts teardown, removes
 or replaces its component cannot cause the captured provider to run; the
 `value-requested` event still receives its `value-returned` counterpart.
 
-Message, health, and value result code `stopped` means unavailable and not stalled. A stalled component answers `stalled` whenever it is refused, including while a `retryStalled` force retry has it in `force-stopping`. The label follows the stall, not availability, so messages, values, broadcasts, and health checks agree. `stopped` does not identify the exact lifecycle state. Use `getComponentStatus(name).state` to distinguish registered, starting, failed, and stopped components. `includeStopped` permits handlers on inactive components, but never during active startup, a timed-out startup, or teardown. A component whose timed-out start completed late and is being cleaned up is marked running only so it can be stopped: messages, values, health checks, and signal broadcasts treat it as unavailable (`stopped`, and no signal row), even with `includeStopped`.
+Message, health, and value result code `stopped` means unavailable and not stalled. A stalled component answers `stalled` whenever it is refused, including while a `retryStalled` force retry has it in `force-stopping`. The label follows the stall, not availability, so messages, values, broadcasts, and health checks agree. `stopped` does not identify the exact lifecycle state. Use `getComponentStatus(name).state` to distinguish registered, starting, failed, and stopped components. `includeStopped` permits handlers on inactive components, but never during active startup, a timed-out startup, or teardown. A component whose timed-out start completed late and is being cleaned up is marked running only so it can be stopped: messages, values, health checks, and signal broadcasts treat it as unavailable (`stopped`, and no signal row), even with `includeStopped`. Operations that select their own targets leave it out, as they leave out components that are not running: an unfiltered `broadcastMessage()` and `checkAllHealth()` have no row for it, so it does not turn the health report `degraded`. Asked about by name, it answers `stopped`.
 
 A handler or `healthCheck` property getter that stops or unregisters its own component answers with that refusal - `stopped` or `not_found` - rather than `no_handler`, a healthy result, or `operation_crashed`: the getter ran, but the component it was read from is no longer available.
 
@@ -1487,7 +1492,7 @@ if (result.sent) {
 
 Broadcast a message to multiple components.
 By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`, or `code: 'stalled'` for a stalled component (such as one in a `retryStalled` force retry). A target unregistered mid-broadcast also returns `stopped`, as does one replaced by another component under the same name mid-broadcast: the replacement is not sent the message.
-A non-empty `componentNames` array limits the targets; `null`, omitted, or empty arrays use all eligible components. Stopped/stalled explicit targets are reported but not sent unless explicitly included. Non-array filters - and an array whose `length` is not a whole number from 0 to 100,000 - refuse the whole broadcast before delivery and return `[]`, logging the `TypeError` as a warning, as an invalid broadcast `timeout` is, rather than reporting it on the global error channel.
+A non-empty `componentNames` array limits the targets; `null`, omitted, or empty arrays use all eligible components. Stopped/stalled explicit targets are reported but not sent unless explicitly included. Non-array filters - and an array whose `length` is not a whole number from 0 to 100,000 - refuse the whole broadcast before delivery and return `[]`, logging the `TypeError` as a warning, as an invalid broadcast `timeout` is, rather than reporting it on the global error channel. A component's `getDependencies()` list has the same kind of bound, 10,000 entries; see [Promises Never Reject](#promises-never-reject).
 
 An invalid shared timeout also refuses the whole broadcast before delivery, returning `[]` with a warning; no recipient row is ever `invalid_options`. The array alone cannot distinguish these refusals from no recipients; use the diagnostics for that distinction.
 
@@ -1554,7 +1559,7 @@ if (!health.healthy) {
 
 #### `checkAllHealth()`
 
-Check health of all running components.
+Check health of all running components. A running component that is stopping is still checked and answers `stopped`; one being cleaned up after a late-completed timed-out start is left out of the report (see [Component Messaging](#component-messaging)).
 
 ```typescript
 checkAllHealth(): Promise<HealthReport>
@@ -1797,7 +1802,7 @@ if (escalation.configured && escalation.isArmed) {
 
 #### Manual Signal Triggers
 
-Reload/info/debug broadcasts check that each component is still running immediately before invoking its handler. Components that begin teardown during an earlier callback are skipped, as are running components whose `start()` is still pending or whose late-start cleanup is pending. A synchronous signal-started event that makes its target unavailable produces a per-component `unavailable` result and a matching signal-failed event. Unavailable targets count toward the aggregate `error` or `partial_error` code. A handler timeout also emits signal-failed, while retaining the `timeout` result code; late settlement does not emit a second terminal event. An already-running signal handler is not cancelled by teardown. A timeout event carries an explanatory Error, while its result retains `error: null` and `timedOut: true`; the timeout is not a handler exception. Inspect `code` and `timedOut` as well as `error`.
+Reload/info/debug broadcasts check that each component is still running immediately before invoking its handler. Components that begin teardown during an earlier callback are skipped, as are running components whose `start()` is still pending or whose late-start cleanup is pending. A synchronous signal-started event that makes its target unavailable produces a per-component `unavailable` result and a matching signal-failed event. A handler or `signalTimeoutMS` read that fails - a getter that throws (`operation_crashed`) or an invalid timeout (`invalid_options`) - does not call the handler, but still emits signal-started then signal-failed, as a health check whose configuration read fails does, so a listener counting signals in flight stays paired. Unavailable targets count toward the aggregate `error` or `partial_error` code. A handler timeout also emits signal-failed, while retaining the `timeout` result code; late settlement does not emit a second terminal event. An already-running signal handler is not cancelled by teardown. A timeout event carries an explanatory Error, while its result retains `error: null` and `timedOut: true`; the timeout is not a handler exception. Inspect `code` and `timedOut` as well as `error`.
 
 ```typescript
 triggerReload(): Promise<SignalBroadcastResult>
@@ -1907,6 +1912,7 @@ const lifecycle = new LifecycleManager({
 - It also resets on a fresh `startAllComponents()`
 - A later `stopAllComponents()` attempt only continues the same escalation state when `countManualRetriesTowardEscalation` is `true`
 - Once the armed period expires, or shutdown/startup later succeeds, the next escalation state starts fresh
+- The request that finds the armed period already expired is the first of that fresh state: it starts it, as the first request of any shutdown does, rather than being dropped. This holds for a signal landing on a running shutdown too, so the next press counts toward `forceAfterCount`
 
 **Stalled shutdown behavior:**
 
@@ -2396,7 +2402,7 @@ interface DependencyValidationResult {
     missingDependency: string;
   }>;
   circularCycles: string[][];
-  unreadableDependencies: Array<{ componentName: string; error: Error }>; // getDependencies() threw or returned a non-array or non-string entry (a throwing isOptional() is read as required, not listed)
+  unreadableDependencies: Array<{ componentName: string; error: Error }>; // getDependencies() threw or returned a non-array, an array longer than 10,000, or a non-string entry (a throwing isOptional() is read as required, not listed)
   cycleCheckError?: Error; // Set only if cycle detection itself failed unexpectedly; valid is then false
   summary: {
     totalMissingDependencies: number; // Total number of missing dependencies across all components
@@ -2489,7 +2495,7 @@ onShutdownForceAborted?(): void;
 
 **Shutdown contract:** `stop()` should always eventually settle (resolve or reject) on every path. If you implement `onShutdownForce()`, it should also eventually settle. In many components, `onShutdownForce()` should not start a completely separate shutdown flow. Instead, it should help the in-flight `stop()` finish or await the same underlying stop work.
 
-**Important:** `onShutdownWarning()` is only fired during bulk shutdowns via `stopAllComponents()` or `restartAllComponents()`. Individual `stopComponent()` calls do NOT trigger the warning phase. There is no built-in "warning cleared" event, so if shutdown is canceled or stalls, reset any warning state on the next successful `start()` or via an app-specific signal.
+**Important:** `onShutdownWarning()` is only fired during bulk shutdowns via `stopAllComponents()` or `restartAllComponents()`. Individual `stopComponent()` calls do NOT trigger the warning phase. The `onShutdownWarning` property is read only for a component the phase will warn - running or stalled, and not owned by a start, a stop, or late-start cleanup - so a getter on it does not run, and its failure is not reported, for one that is skipped. There is no built-in "warning cleared" event, so if shutdown is canceled or stalls, reset any warning state on the next successful `start()` or via an app-specific signal.
 
 ### Signal Handlers
 
@@ -2618,6 +2624,8 @@ class ServerComponent extends BaseComponent {
 ```
 
 The `component:unexpected-stop` event gives callers a single place to decide what to do, such as restart, escalate, or shut everything down. `component:stopped` follows immediately afterward so generic "component is now stopped" listeners still work for this path. If you call `stopAllComponents()` in response, the already-stopped component is skipped naturally (it's no longer running), and the rest of the shutdown proceeds in normal dependency order. The error passed to `reportUnexpectedStop()` is stored as `lastError` on the component's status and remains visible after shutdown. For async listeners registered in `start()`, prefer `getUnexpectedStopReporter()` as shown above so callbacks from an older run become a no-op after restart. `reportUnexpectedStop()` remains useful for immediate or synchronous detection paths. Both return `true` if the manager accepted the signal for the current run, otherwise `false`.
+
+A stalled component started again with `startComponent(name, { forceStalled: true })` that reports an unexpected stop before that start completes goes back to `stalled`, not `stopped`: the stop that stalled is still unfinished, and its stall record stands. It emits `component:unexpected-stop` (with the state already `stalled`) but no `component:stopped`; the stall still ends with `component:stalled-resolved`, as any stall does. The start answers `component_unexpected_stop`.
 
 If a component reports an unexpected stop while `startAllComponents()` is still in progress, the startup attempt is reconciled before completion: a required component causes bulk startup to fail with `code: 'component_unexpected_stop'` and triggers rollback of any later-started components, while a stopped optional component is recorded in `failedOptionalComponents` and startup continues.
 
@@ -2765,7 +2773,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `component:stop-failed` - Component stop failed
 - `component:stalled` - Component failed to stop after graceful/force handling timed out or errored
 - `component:stalled-resolved` - A stall was cleared after its stop completed (late, or through a successful `retryStalled` force retry), or retired by a forced start: `reason: 'forced-start'` when the forced start itself brings the component up (or, with shutdown begun meanwhile, straight into cleanup), and `reason: 'late-start-cleanup'` when a timed-out forced start succeeds late and its cleanup retires the stall. Either reason means the old stop was superseded, not that it finished.
-- `component:unexpected-stop` - Component reported stopping on its own via `reportUnexpectedStop()`. Payload includes `name` and an optional `error`. This event fires before the follow-up `component:stopped` event so listeners can react to the abnormal cause separately from the generic stopped-state transition
+- `component:unexpected-stop` - Component reported stopping on its own via `reportUnexpectedStop()`. Payload includes `name` and an optional `error`. This event fires before the follow-up `component:stopped` event so listeners can react to the abnormal cause separately from the generic stopped-state transition. A forced start of a stalled component that reports one before it completes goes back to `stalled` and gets no `component:stopped` (see [Reporting Unexpected Stops](#reporting-unexpected-stops))
 
 **Signal Events:**
 
@@ -2789,7 +2797,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `component:debug-completed` - Component debug completed
 - `component:debug-failed` - Component debug failed
 
-Each `*-started` event precedes that component's final availability check, which follows the event's listeners even for a broadcast made from inside another listener. A listener that begins teardown synchronously prevents the handler from running; the component then reports `*-failed` and `code: 'unavailable'`.
+Each `*-started` event precedes that component's final availability check, which follows the event's listeners even for a broadcast made from inside another listener. A listener that begins teardown synchronously prevents the handler from running; the component then reports `*-failed` and `code: 'unavailable'`. Every `*-started` is followed by exactly one `*-completed` or `*-failed`, including for a component whose handler or `signalTimeoutMS` could not be read: its `*-started` and `*-failed` are emitted back to back, and the handler is not called.
 
 **Messaging Events:**
 
@@ -2908,7 +2916,7 @@ inspect their `error` for the named option. The array-only `broadcastMessage()` 
 has no aggregate error field, so its refusal is logged as a warning instead. The table
 above describes unexpected failures, including ordinary exceptions thrown by getters.
 
-Branch on `code` as usual; `operation_crashed` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around. Every call uses the same pair of codes. `error` means a method you wrote ran and failed: a component's `start()`, `stop()`, `onShutdownForce()`, `healthCheck()`, `onMessage()` or `getValue()` threw, rejected, or (for `healthCheck()`) returned a malformed result, or a custom `onReloadRequested` / `onInfoRequested` / `onDebugRequested` callback threw or rejected. That is an ordinary failure of that code, not of the manager. `operation_crashed` means something that should never throw did: the manager itself, or a property getter on a component - a handler such as `onMessage`, a timeout such as `healthCheckTimeoutMS`, or `getName()`. A `getDependencies()` that throws refuses its registration with `operation_crashed`, but once registered it fails only that component's own start, with `missing_dependency`.
+Branch on `code` as usual; `operation_crashed` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around. Every call uses the same pair of codes. `error` means a method you wrote ran and failed: a component's `start()`, `stop()`, `onShutdownForce()`, `healthCheck()`, `onMessage()` or `getValue()` threw, rejected, or (for `healthCheck()`) returned a malformed result, or a custom `onReloadRequested` / `onInfoRequested` / `onDebugRequested` callback threw or rejected. That is an ordinary failure of that code, not of the manager. `operation_crashed` means something that should never throw did: the manager itself, or a property getter on a component - a handler such as `onMessage`, a timeout such as `healthCheckTimeoutMS`, or `getName()`. A `getDependencies()` that throws refuses its registration with `operation_crashed`, but once registered it fails only that component's own start, with `missing_dependency`. An array whose `length` is not a whole number from 0 to 10,000 is treated the same way, before any entry is read - the dependency-list counterpart of `broadcastMessage()`'s 100,000-name `componentNames` bound - and `validateDependencies()` lists it under `unreadableDependencies`.
 
 A stop that crashes still records the component as stalled, so it can be retried or unregistered. Its result carries `status`, whose `stallInfo` describes that stall, and its `reason` says so when the graceful phase had already timed out first. Its `component:stalled` event uses `component_shutdown_timeout` when it crashed while still in the graceful phase after that phase timed out, and `operation_crashed` otherwise - including a crash in the force phase after a graceful timeout (`reason: 'both'`).
 
@@ -4108,7 +4116,7 @@ When `start()` or `stop()` times out:
 - The manager proceeds with next steps (rollback for startup, force phase for shutdown)
 - **Non-cooperative code continues running in the background** until completion or process exit
 - If `start()` times out and there is no `onStartupAborted()`, the manager will stop the component automatically if that delayed startup eventually completes. Bulk startup deadlines perform this late cleanup even when an abort hook is implemented. This includes a start that reported an unexpected stop before its deadline (answered `component_unexpected_stop`): if its `start()` still fulfills later, `stop()` runs and the component stays `stopped`, whether or not the start used `forceStalled`.
-- If shutdown begins while `start()` is in flight, a finite shutdown budget bounds the wait for startup and its automatic cleanup. When that budget expires, or the global shutdown deadline is disabled, unfinished work and its dependencies can remain for a later cleanup pass. A synchronous shutdown request from `start()` does not wait for that same start to finish.
+- If shutdown begins while `start()` is in flight, a finite shutdown budget bounds the wait for startup and its automatic cleanup. When that budget expires, or the start times out while still unresolved, unfinished work and its dependencies can remain for a later cleanup pass. A synchronous shutdown request from `start()` does not wait for that same start to finish.
 
 How to avoid surprises:
 

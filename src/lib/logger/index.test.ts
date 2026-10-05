@@ -1019,10 +1019,14 @@ describe('Logger', () => {
       expect(logger.didExit).toBe(false);
     });
 
-    test('should not exit when exitCode is NaN', () => {
+    test('should exit when exitCode is NaN, as exit(NaN) does', () => {
+      // A broken code, not a request not to exit. This logger is simulated, so the code
+      // is kept as a failure; a real exit uses 1 (see process-exit-invalid.test.ts).
       logger.error('Error with NaN', { exitCode: NaN });
 
-      expect(logger.didExit).toBe(false);
+      expect(logger.didExit).toBe(true);
+      expect(logger.exitCode).toBeNaN();
+      expect(arraySink.logs[0].exitCode).toBeNaN();
     });
 
     test('should include exitCode in LogEntry', () => {
@@ -3492,4 +3496,54 @@ test('default diagnostic messages omit caller-controlled key names', async () =>
   expect(diagnostics[0]?.message).toBe('Redaction failed');
   expect(diagnostics[0]?.path).toContain(secret);
   expect(sink.logs.every((log) => !log.message.includes(secret))).toBe(true);
+});
+
+test('errorObject on a closed logger does not render the error, but its exitCode still counts', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    let reads = 0;
+    // Every read counted and refused, so a render would both show up here and fail into
+    // a 'Render failed' report.
+    const hostileError = new Proxy(new Error('boom'), {
+      get() {
+        reads++;
+        throw new Error('read refused');
+      },
+      getOwnPropertyDescriptor() {
+        reads++;
+        throw new Error('read refused');
+      },
+      ownKeys() {
+        reads++;
+        throw new Error('read refused');
+      },
+    });
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const exitCodes: number[] = [];
+    logger.on<{ eventType: string; code: number }>(
+      'logger',
+      ({ eventType, code }) => {
+        if (eventType === 'exit-process') {
+          exitCodes.push(code);
+        }
+      },
+    );
+    const service = logger.service('svc').entity('one');
+    await logger.close();
+
+    logger.errorObject('closed', hostileError);
+    service.errorObject('closed', hostileError);
+    expect(reads).toBe(0);
+    expect(output).not.toHaveBeenCalled();
+    expect(sink.logs).toEqual([]);
+
+    logger.errorObject('closed', hostileError, { exitCode: 2 });
+    service.errorObject('closed', hostileError, { exitCode: 3 });
+    await sleep(0);
+    expect(reads).toBe(0);
+    expect(exitCodes).toEqual([2, 3]);
+  } finally {
+    output.mockRestore();
+  }
 });

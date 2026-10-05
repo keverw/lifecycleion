@@ -77,8 +77,8 @@ const LABELS: Record<FormatFailureKind, string> = {
   transform: 'Transform',
 };
 
-/** Use the same console label when a sink guards its own format handler. */
-export function formatFailureLabel(kind: FormatFailureKind): string {
+/** The console label for one failure kind. */
+function formatFailureLabel(kind: FormatFailureKind): string {
   return LABELS[kind];
 }
 

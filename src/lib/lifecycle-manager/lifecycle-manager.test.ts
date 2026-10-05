@@ -10231,6 +10231,69 @@ describe('LifecycleManager - Signal Integration', () => {
       }
     });
 
+    test('logs the code the pending exit will use beside the requested one', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      await lifecycle.registerComponent(
+        new TestComponent(logger, { name: 'comp1' }),
+      );
+      await lifecycle.startAllComponents();
+      lifecycle.enableLoggerExitHook();
+
+      // A failure folded into the exit before the hook runs: requested 0, exits 3.
+      let hasFolded = false;
+      logger.on('logger', (event) => {
+        if (
+          !hasFolded &&
+          (event as { eventType: string }).eventType === 'exit-called'
+        ) {
+          hasFolded = true;
+          logger.exit(3);
+        }
+      });
+
+      const output = spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        logger.exit(0);
+        await sleep(50);
+      } finally {
+        output.mockRestore();
+      }
+
+      const triggered = arraySink.logs.find((entry) =>
+        entry.message.startsWith('Logger exit triggered'),
+      );
+      expect(triggered?.params).toMatchObject({
+        exitCode: 0,
+        pendingExitCode: 3,
+      });
+      expect(logger.exitCode).toBe(3);
+    });
+
+    test('logs the pending exit code for an exit that waits on a running shutdown', async () => {
+      const lifecycle = new LifecycleManager({ logger });
+      const component = new TestComponent(logger, { name: 'comp1' });
+      let releaseStop!: () => void;
+      const stopGate = new Promise<void>((resolve) => {
+        releaseStop = resolve;
+      });
+      component.stop = (): Promise<void> => stopGate;
+      await lifecycle.registerComponent(component);
+      await lifecycle.startAllComponents();
+      lifecycle.enableLoggerExitHook();
+
+      const shutdown = lifecycle.stopAllComponents();
+      logger.exit(2);
+      releaseStop();
+      await shutdown;
+      await sleep(20);
+
+      const waiting = arraySink.logs.find((entry) =>
+        entry.message.startsWith('Logger exit called during shutdown'),
+      );
+      expect(waiting?.params).toEqual({ exitCode: 2, pendingExitCode: 2 });
+      expect(logger.exitCode).toBe(2);
+    });
+
     test('ignores an exit a sink makes from the exit log line, before the shutdown starts', async () => {
       let hasReentered = false;
       const sinkLogger = new Logger({

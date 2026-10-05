@@ -66,7 +66,7 @@ function healthRefusal(
   if (context.getComponent(name) !== component) {
     return 'not_found';
   }
-  if (isComponentEnterable(context, name)) {
+  if (isComponentEnterable(context, name, context.componentStates.get(name))) {
     return undefined;
   }
   return context.stalledComponents.has(name) ? 'stalled' : 'stopped';
@@ -361,10 +361,18 @@ export async function checkAllHealthOperation(
 ): Promise<HealthReport> {
   const startTime = Date.now();
 
-  // Get all running components
-  const runningComponents = context.components.filter((c) =>
-    context.isComponentRunning(context.nameOf(c)),
-  );
+  // Running members, selected as `broadcastMessage()` selects its recipients: a late
+  // start's cleanup marks its component running only to stop it, so it is not one the
+  // report is about. Checked, it answered `stopped` and flipped the aggregate to
+  // `degraded`. A running member that is mid-stop is still selected and answers
+  // `stopped`, as a broadcast reports it.
+  const runningComponents = context.components.filter((c) => {
+    const name = context.nameOf(c);
+    return (
+      context.isComponentRunning(name) &&
+      !context.isLateStartCleanupPending(name)
+    );
+  });
 
   // Check health of all running components in parallel
   const healthChecks = runningComponents.map((c) =>
@@ -414,7 +422,7 @@ export async function runSignalBroadcast(
 
     return (
       context.getComponent(name) === component &&
-      isComponentEnterable(context, name)
+      isComponentEnterable(context, name, context.componentStates.get(name))
     );
   };
   const targets = context.components.filter(canDispatch);
@@ -432,8 +440,8 @@ export async function runSignalBroadcast(
       canDispatch(component) ? undefined : ('unavailable' as const);
     // The handler, and its timeout when there is one, are the component's own
     // properties, so they are read here, per component: one that throws becomes that
-    // component's `operation_crashed` entry, before any `*-started` event for it, rather
-    // than ending the broadcast for every component after it.
+    // component's `operation_crashed` entry - an invalid timeout its `invalid_options`
+    // entry - rather than ending the broadcast for every component after it.
     let timeoutMS = 0;
     const handlerRead = readHookThenRecheck(
       () => {
@@ -471,9 +479,14 @@ export async function runSignalBroadcast(
     if (handlerRead.status === 'read_failed') {
       const err = toError(handlerRead.error);
 
+      // Logged and announced as a health check whose configuration read fails is -
+      // `started` first, so a listener counting signals in flight stays paired - and
+      // counted as a failure.
       context.logger.entity(name).error(descriptor.errorLog, {
         params: { error: err },
       });
+      descriptor.emitStarted(name);
+      descriptor.emitFailed(name, err);
 
       results.push({
         name,

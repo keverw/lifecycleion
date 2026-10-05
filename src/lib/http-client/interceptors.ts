@@ -45,50 +45,77 @@ export class RequestInterceptorManager {
     };
   }
 
-  public async run(
+  public run(
     request: InterceptedRequest,
     phase: InterceptorPhase,
     context: RequestInterceptorContext,
   ): Promise<InterceptedRequest | InterceptorCancel> {
-    let current = request;
+    return this.snapshot()(request, phase, context);
+  }
 
-    // Registration changes during an await apply to the next run.
-    for (const { fn, filter } of [...this.interceptors]) {
-      if (
-        !matchesFilter(
-          filter ?? {},
-          {
-            method: current.method,
-            requestURL: current.requestURL,
-            body: current.body,
-          },
-          phase.type,
-          'request',
-        )
-      ) {
-        continue;
-      }
+  /**
+   * Copy the current registrations into a chain that later `add()` and removal calls do
+   * not reach. A client takes its parent's snapshot and its own together when a dispatch
+   * begins, so a callback registered on either while the other's chain is awaiting
+   * applies to the next dispatch, not this one.
+   */
+  public snapshot(): InterceptorChain {
+    const interceptors = [...this.interceptors];
 
-      // Adopted, not awaited as it is: an interceptor is caller code, and one returning
-      // a native promise with its own `constructor` and a no-op `then` hung the
-      // request. See `adoptPromise()`.
-      const { value: result } = await awaitBoxedPromise(
-        adoptPromise(fn(current, phase, context)),
-      );
+    return (request, phase, context) =>
+      runInterceptors(interceptors, request, phase, context);
+  }
+}
 
-      // null is shorthand for { cancel: true } with no reason
-      if (result === null) {
-        return { cancel: true };
-      }
+export type InterceptorChain = (
+  request: InterceptedRequest,
+  phase: InterceptorPhase,
+  context: RequestInterceptorContext,
+) => Promise<InterceptedRequest | InterceptorCancel>;
 
-      // Interceptor signalled cancellation with optional reason
-      if (result && 'cancel' in result && result.cancel === true) {
-        return result;
-      }
+async function runInterceptors(
+  interceptors: readonly RegisteredInterceptor<RequestInterceptor>[],
+  request: InterceptedRequest,
+  phase: InterceptorPhase,
+  context: RequestInterceptorContext,
+): Promise<InterceptedRequest | InterceptorCancel> {
+  let current = request;
 
-      current = result as InterceptedRequest;
+  for (const { fn, filter } of interceptors) {
+    if (
+      !matchesFilter(
+        filter ?? {},
+        {
+          method: current.method,
+          requestURL: current.requestURL,
+          body: current.body,
+        },
+        phase.type,
+        'request',
+      )
+    ) {
+      continue;
     }
 
-    return current;
+    // Adopted, not awaited as it is: an interceptor is caller code, and one returning
+    // a native promise with its own `constructor` and a no-op `then` hung the
+    // request. See `adoptPromise()`.
+    const { value: result } = await awaitBoxedPromise(
+      adoptPromise(fn(current, phase, context)),
+    );
+
+    // null is shorthand for { cancel: true } with no reason
+    if (result === null) {
+      return { cancel: true };
+    }
+
+    // Interceptor signalled cancellation with optional reason
+    if (result && 'cancel' in result && result.cancel === true) {
+      return result;
+    }
+
+    current = result as InterceptedRequest;
   }
+
+  return current;
 }

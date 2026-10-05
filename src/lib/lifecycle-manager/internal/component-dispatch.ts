@@ -4,9 +4,11 @@ import { raceDeadline } from '../../internal/race-deadline';
 import { optionalValidatedTimerDelayMS } from '../../internal/timer-limits';
 import {
   applyIntrinsic,
+  observeRejection,
   promiseResolveIntrinsic,
 } from '../../internal/intrinsics';
 import { adoptPromise } from '../../internal/adopt-promise';
+import { reportCallbackError } from '../../safe-handle-callback';
 import type { ComponentState } from '../types';
 
 /**
@@ -51,19 +53,34 @@ export function isHookEntryBlocked(
 }
 
 /**
+ * Whether the component is running, by membership and by state: the half of
+ * {@link isComponentEnterable} that is not {@link isHookEntryBlocked}, for a caller that
+ * has already evaluated the block itself. `state` is the caller's own read, as there.
+ */
+export function isComponentRunningMember(
+  context: Pick<ComponentAccessContext, 'isComponentRunning'>,
+  name: string,
+  state: ComponentState | undefined,
+): boolean {
+  return context.isComponentRunning(name) && state === 'running';
+}
+
+/**
  * Whether the component is up and its hooks may be entered: running - by membership
  * and by state - and not blocked by {@link isHookEntryBlocked}. Registration identity
  * (the instance still registered under `name`) is each caller's own check.
+ *
+ * `state` is required, not defaulted: a caller whose own read found no state passes
+ * `undefined`, and that is the answer - a default would read the state again.
  */
 export function isComponentEnterable(
   context: HookEntryContext &
     Pick<ComponentAccessContext, 'isComponentRunning'>,
   name: string,
-  state: ComponentState | undefined = context.componentStates.get(name),
+  state: ComponentState | undefined,
 ): boolean {
   return (
-    context.isComponentRunning(name) &&
-    state === 'running' &&
+    isComponentRunningMember(context, name, state) &&
     !isHookEntryBlocked(context, name, state)
   );
 }
@@ -147,7 +164,9 @@ export interface HookDispatchRequest<TRefusal> {
  * The handler's result is adopted, not raced as it is (see `adoptPromise()`). A timeout
  * is logged and the still-running handler observed, so a late failure is reported rather
  * than floating. A synchronous throw, a rejection, and a failure to log the timeout are
- * all answered `threw`, as each operation answered them before this was shared.
+ * all answered `threw`, as each operation answered them before this was shared. A
+ * failure to observe the timed-out handler is the manager's own, not the handler's: it
+ * is reported on the global channel and the dispatch still answers `timed_out`.
  */
 export async function dispatchAnnouncedHook<TRefusal>(
   context: Pick<
@@ -184,12 +203,23 @@ export async function dispatchAnnouncedHook<TRefusal>(
       context.logger.entity(name).warn(request.timeoutLog, {
         params: request.timeoutLogParams,
       });
-      context.observeFailureAfterTimeout(
-        handlerPromise,
-        name,
-        request.lateFailureMessage,
-        request.lateFailureParams,
-      );
+      try {
+        context.observeFailureAfterTimeout(
+          handlerPromise,
+          name,
+          request.lateFailureMessage,
+          request.lateFailureParams,
+        );
+      } catch (error) {
+        // Not the handler's failure - it did time out - so not `threw`: the manager's,
+        // reported as its other failures are. The handler is still observed, silently,
+        // so a late rejection does not also go unhandled.
+        observeRejection(handlerPromise, () => undefined);
+        reportCallbackError(
+          `lifecycle-manager late failure observation for ${name}`,
+          error,
+        );
+      }
       return { status: 'timed_out' };
     }
 

@@ -642,6 +642,10 @@ export class BaseHTTPClient {
         const initialPhase: InterceptorPhase = { type: 'initial' };
         let interceptResult: InterceptedRequest | InterceptorCancel;
         let initialRequestCandidate: InterceptedRequest = finalRequest;
+        // Read once, where it is validated: the interceptor's request may carry a
+        // `requestURL` getter, and every later use - failure paths included - takes this
+        // value rather than reading it again.
+        let initialRequestURL = url;
 
         try {
           interceptResult = await this._runInterceptors(
@@ -658,7 +662,8 @@ export class BaseHTTPClient {
           if (!('cancel' in interceptResult)) {
             initialRequestCandidate = interceptResult;
             this._assertRequestIsSupported(interceptResult);
-            this._assertInterceptorResolvedURL(interceptResult.requestURL);
+            initialRequestURL = interceptResult.requestURL;
+            this._assertInterceptorResolvedURL(initialRequestURL);
           }
         } catch (error) {
           const response = this._buildResponse<T>({
@@ -668,7 +673,13 @@ export class BaseHTTPClient {
             wasTimeout: false,
             adapterType: this._adapter.getType(),
             initialURL: url,
-            requestURL: initialRequestCandidate.requestURL,
+            // The interceptor's request may be what failed - a `requestURL` getter
+            // that throws - so its URL is read best-effort, falling back to the
+            // request's own, rather than turning this into a `request_setup_error`.
+            requestURL: readBestEffort(
+              () => initialRequestCandidate.requestURL,
+              url,
+            ),
             redirectHistory: [],
             isNetworkErrorOverride: false,
           });
@@ -772,7 +783,7 @@ export class BaseHTTPClient {
         //     on each attempt of that hop, so this stays in sync with Set-Cookie from prior responses)
         //  5. Runs redirect-phase interceptors and observers
         //  6. Continues the loop with the updated request state
-        const credentialScope = { url: finalRequest.requestURL };
+        const credentialScope = { url: initialRequestURL };
         let currentInterceptedRequest: InterceptedRequest = finalRequest;
         let redirectHistory: string[] = [];
         let hopCount = 0;
@@ -796,7 +807,7 @@ export class BaseHTTPClient {
             requestID,
             options,
             callbacks: trackedCallbacks,
-            initialURL: finalRequest.requestURL,
+            initialURL: initialRequestURL,
             startAttemptNumber: lastAttemptNumber + 1,
             redirectHistory,
             hopContext: currentHopInfo
@@ -881,7 +892,7 @@ export class BaseHTTPClient {
               // finish. See docs/http-client.md.
               wasTimeout: false,
               adapterType: this._adapter.getType(),
-              initialURL: finalRequest.requestURL,
+              initialURL: initialRequestURL,
               requestURL: attemptResult.sentRequest.requestURL,
               redirectHistory,
               isNetworkErrorOverride: false,
@@ -913,7 +924,7 @@ export class BaseHTTPClient {
                 wasCancelled: false,
                 wasTimeout: false,
                 adapterType: this._adapter.getType(),
-                initialURL: finalRequest.requestURL,
+                initialURL: initialRequestURL,
                 requestURL: attemptResult.sentRequest.requestURL,
                 redirectHistory,
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
@@ -934,7 +945,7 @@ export class BaseHTTPClient {
                 wasCancelled: false,
                 wasTimeout: false,
                 adapterType: this._adapter.getType(),
-                initialURL: finalRequest.requestURL,
+                initialURL: initialRequestURL,
                 requestURL: attemptResult.sentRequest.requestURL,
                 redirectHistory,
                 // The one terminal branch that built from the hop's own response and
@@ -1008,7 +1019,7 @@ export class BaseHTTPClient {
                 wasCancelled: false,
                 wasTimeout: false,
                 adapterType: this._adapter.getType(),
-                initialURL: finalRequest.requestURL,
+                initialURL: initialRequestURL,
                 requestURL: attemptResult.sentRequest.requestURL,
                 redirectHistory,
               }),
@@ -1069,13 +1080,15 @@ export class BaseHTTPClient {
             // needs retrying.
             let redirectIntercept: InterceptedRequest | InterceptorCancel;
             let failedRedirectRequest: InterceptedRequest = redirectRequest;
+            // Read once inside the guarded block, as the initial phase does.
+            let redirectInterceptURL = redirectURL;
 
             try {
               redirectIntercept = await this._runInterceptors(
                 redirectRequest,
                 { type: 'redirect', ...hopInfo },
                 {
-                  initialURL: finalRequest.requestURL,
+                  initialURL: initialRequestURL,
                   redirectHistory: nextRedirectHistory,
                   requestID,
                   attemptNumber: lastAttemptNumber + 1,
@@ -1084,6 +1097,7 @@ export class BaseHTTPClient {
               if (!('cancel' in redirectIntercept)) {
                 failedRedirectRequest = redirectIntercept;
                 this._assertRequestIsSupported(redirectIntercept);
+                redirectInterceptURL = redirectIntercept.requestURL;
 
                 // Skipped when the `Location` arrived unusable and is still unusable: the
                 // assertion's message and its `interceptor_error` code both name an
@@ -1092,11 +1106,9 @@ export class BaseHTTPClient {
                 // URL into a bad one is still this assertion's, and still its own fault.
                 if (
                   !wasLocationUnsupported ||
-                  redirectIntercept.requestURL !== redirectURL
+                  redirectInterceptURL !== redirectURL
                 ) {
-                  this._assertInterceptorResolvedURL(
-                    redirectIntercept.requestURL,
-                  );
+                  this._assertInterceptorResolvedURL(redirectInterceptURL);
                 }
               }
             } catch (error) {
@@ -1111,8 +1123,12 @@ export class BaseHTTPClient {
                 wasCancelled: false,
                 wasTimeout: false,
                 adapterType: this._adapter.getType(),
-                initialURL: finalRequest.requestURL,
-                requestURL: failedRedirectRequest.requestURL,
+                initialURL: initialRequestURL,
+                // The interceptor's request may be what failed; see the initial phase.
+                requestURL: readBestEffort(
+                  () => failedRedirectRequest.requestURL,
+                  redirectURL,
+                ),
                 redirectHistory: nextRedirectHistory,
                 isNetworkErrorOverride: false,
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
@@ -1141,7 +1157,7 @@ export class BaseHTTPClient {
                 wasCancelled: true,
                 wasTimeout: false,
                 adapterType: this._adapter.getType(),
-                initialURL: finalRequest.requestURL,
+                initialURL: initialRequestURL,
                 requestURL: cancelledRequestURL,
                 redirectHistory: [...redirectHistory, cancelledRequestURL],
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
@@ -1154,7 +1170,7 @@ export class BaseHTTPClient {
             // as the server's doing: `request_setup_error`, not `interceptor_error`. See
             // `wasLocationUnsupported` above. Nothing has been dispatched - the adapter
             // never sees a `file:` or `data:` URL either way.
-            if (!this._isSupportedRequestURL(redirectIntercept.requestURL)) {
+            if (!this._isSupportedRequestURL(redirectInterceptURL)) {
               observerRequest = this._bestEffortAttemptRequestFromPending(
                 redirectIntercept,
                 timeout,
@@ -1166,8 +1182,8 @@ export class BaseHTTPClient {
                 wasCancelled: false,
                 wasTimeout: false,
                 adapterType: this._adapter.getType(),
-                initialURL: finalRequest.requestURL,
-                requestURL: redirectIntercept.requestURL,
+                initialURL: initialRequestURL,
+                requestURL: redirectInterceptURL,
                 redirectHistory: nextRedirectHistory,
                 isNetworkErrorOverride: false,
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
@@ -1175,7 +1191,7 @@ export class BaseHTTPClient {
 
               errorCode = 'request_setup_error';
               adapterCause = new Error(
-                `[HTTPClient] Redirect Location could not be resolved to an absolute http(s) URL: "${redirectIntercept.requestURL}".`,
+                `[HTTPClient] Redirect Location could not be resolved to an absolute http(s) URL: "${redirectInterceptURL}".`,
               );
 
               break;
@@ -1262,7 +1278,7 @@ export class BaseHTTPClient {
                   wasCancelled: wait === 'cancelled',
                   wasTimeout: wait === 'deadline',
                   adapterType: this._adapter.getType(),
-                  initialURL: finalRequest.requestURL,
+                  initialURL: initialRequestURL,
                   requestURL: redirectedRequestURL,
                   redirectHistory,
                   ...(uploadOutcome
@@ -1284,7 +1300,7 @@ export class BaseHTTPClient {
             wasCancelled,
             wasTimeout,
             adapterType: this._adapter.getType(),
-            initialURL: finalRequest.requestURL,
+            initialURL: initialRequestURL,
             requestURL: attemptResult.sentRequest.requestURL,
             redirectHistory,
             // From the attempt result when it threw - the shape that leaves
@@ -1769,6 +1785,7 @@ export class BaseHTTPClient {
           adapterCause?: Error;
           cancelReason?: string;
         },
+        knownBodies?: ObservedAttemptBodies | 'unbuildable',
       ) => {
         clearTimeout(timeoutID);
         emitAttemptEnd({ willRetry: false, status: 0 });
@@ -1782,6 +1799,7 @@ export class BaseHTTPClient {
             pendingRequest,
             timeout,
             requestID,
+            knownBodies,
           ),
           attemptCount: attemptNumber,
           wasCancelled: false,
@@ -1849,34 +1867,46 @@ export class BaseHTTPClient {
         attemptRequest = retryIntercept;
       }
 
-      // Only an origin change explicitly selects a new credential destination.
-      // Editing a redirected URL's path, query or fragment must not authorize the
-      // server-selected origin. Preserve this scope without changing observer URLs.
-      if (
-        !hopContext ||
-        (isRetry &&
-          this._isCrossOriginRedirect(
-            baseRequest.requestURL,
-            attemptRequest.requestURL,
-          ))
-      ) {
-        credentialScope.url = attemptRequest.requestURL;
-      }
-
       let sentRequest: AttemptRequest;
+      // What the snapshot of a failed setup may reuse: the bodies once built, or
+      // `unbuildable` while building them is what is under way.
+      let knownBodies: ObservedAttemptBodies | 'unbuildable' | undefined;
       try {
-        sentRequest = this._buildAttemptRequest(attemptRequest, {
-          requestID,
-          timeout,
-          attemptNumber,
-          cookieJar,
-        });
+        // Only an origin change explicitly selects a new credential destination.
+        // Editing a redirected URL's path, query or fragment must not authorize the
+        // server-selected origin. Preserve this scope without changing observer URLs.
+        // Inside this block because it reads an interceptor's request again: a getter
+        // that throws now ends the attempt it began, as a setup failure.
+        if (
+          !hopContext ||
+          (isRetry &&
+            this._isCrossOriginRedirect(
+              baseRequest.requestURL,
+              attemptRequest.requestURL,
+            ))
+        ) {
+          credentialScope.url = attemptRequest.requestURL;
+        }
+
+        knownBodies = 'unbuildable';
+        const observedBodies = buildObservedAttemptBodies(attemptRequest.body);
+        knownBodies = observedBodies;
+        sentRequest = this._buildAttemptRequest(
+          attemptRequest,
+          observedBodies,
+          { requestID, timeout, attemptNumber, cookieJar },
+        );
       } catch (error) {
-        // Serialization and cookie/header preparation precede adapter dispatch.
-        return endBeforeDispatch(attemptRequest, {
-          errorCode: 'request_setup_error',
-          adapterCause: normalizeError(error),
-        });
+        // Serialization and cookie/header preparation precede adapter dispatch. The
+        // snapshot reuses the bodies built here, or skips a build that already failed.
+        return endBeforeDispatch(
+          attemptRequest,
+          {
+            errorCode: 'request_setup_error',
+            adapterCause: normalizeError(error),
+          },
+          knownBodies,
+        );
       }
 
       // This attempt's own outcome takes over from here; see the declaration.
@@ -3095,27 +3125,29 @@ export class BaseHTTPClient {
   /**
    * Runs parent + own interceptor chains in order.
    * Returns the (possibly modified) request, or an InterceptorCancel signal.
+   *
+   * Both chains are snapshotted before either runs: a parent interceptor that registers
+   * one on the sub-client (or the reverse) affects the next dispatch, as documented,
+   * rather than this one. The observer runners below do the same.
    */
   private async _runInterceptors(
     request: InterceptedRequest,
     phase: InterceptorPhase,
     context: RequestInterceptorContext,
   ): Promise<InterceptedRequest | InterceptorCancel> {
+    const parentChain = this._parentClient?._requestInterceptors.snapshot();
+    const ownChain = this._requestInterceptors.snapshot();
     let current: InterceptedRequest | InterceptorCancel = request;
 
-    if (this._parentClient) {
-      current = await this._parentClient._requestInterceptors.run(
-        request,
-        phase,
-        context,
-      );
+    if (parentChain) {
+      current = await parentChain(request, phase, context);
 
       if ('cancel' in current) {
         return current;
       }
     }
 
-    return await this._requestInterceptors.run(current, phase, context);
+    return await ownChain(current, phase, context);
   }
 
   /**
@@ -3161,6 +3193,7 @@ export class BaseHTTPClient {
 
   private _buildAttemptRequest(
     request: InterceptedRequest,
+    observedBodies: ObservedAttemptBodies,
     params: {
       requestID: string;
       timeout: number;
@@ -3172,8 +3205,8 @@ export class BaseHTTPClient {
 
     // Build the finalized attempt snapshot before adapter-specific transport
     // materialization. Header names are normalized to lowercase here, and adapters
-    // may further materialize repeated header values at send time.
-    const observedBodies = buildObservedAttemptBodies(request.body);
+    // may further materialize repeated header values at send time. The bodies are
+    // built by the caller, so a setup failure's snapshot can reuse them.
     const { contentType } = observedBodies;
     const headers = this._withInternalRequestHeaders(
       request.headers,
@@ -3214,10 +3247,16 @@ export class BaseHTTPClient {
     };
   }
 
+  /**
+   * `knownBodies` is what the dispatch path already learned about this request's body:
+   * the bodies it built, or `'unbuildable'` when building them is what failed. Either way
+   * the snapshot does not build them again.
+   */
   private _bestEffortAttemptRequestFromPending(
     request: InterceptedRequest,
     timeout: number,
     requestID: string,
+    knownBodies?: ObservedAttemptBodies | 'unbuildable',
   ): AttemptRequest {
     // Best-effort snapshot for observers when a request fails before any adapter
     // attempt is dispatched (interceptor throw, pre-send cancel, setup error, etc.).
@@ -3253,20 +3292,33 @@ export class BaseHTTPClient {
       }
     }
 
+    // The remaining fields follow the same rule: each is read once, and one that cannot
+    // be read is left empty rather than failing the snapshot - a retry interceptor's
+    // request with a throwing `body` getter otherwise turned its `interceptor_error`
+    // into a `request_setup_error` and dropped the attempt it had already ended.
     let clonedBodies: Pick<AttemptRequest, 'body' | 'rawBody'>;
 
-    try {
-      clonedBodies = buildObservedAttemptBodies(request.body);
-    } catch {
-      clonedBodies = {
-        body: null,
-        rawBody: request.body,
-      };
+    if (knownBodies !== undefined && knownBodies !== 'unbuildable') {
+      clonedBodies = knownBodies;
+    } else {
+      const rawBody = readBestEffort(() => request.body, undefined);
+
+      // A body the dispatch path already failed to build is not validated and cloned a
+      // second time; it is reported as it came.
+      if (knownBodies === 'unbuildable') {
+        clonedBodies = { body: null, rawBody };
+      } else {
+        try {
+          clonedBodies = buildObservedAttemptBodies(rawBody);
+        } catch {
+          clonedBodies = { body: null, rawBody };
+        }
+      }
     }
 
     return {
-      requestURL: request.requestURL,
-      method: request.method,
+      requestURL: readBestEffort(() => request.requestURL, ''),
+      method: readBestEffort(() => request.method, '' as HTTPMethod),
       headers,
       body: clonedBodies.body,
       rawBody: clonedBodies.rawBody,
@@ -3280,11 +3332,14 @@ export class BaseHTTPClient {
     request: AttemptRequest,
     phase: ResponseObserverPhase,
   ): Promise<void> {
-    if (this._parentClient) {
-      await this._parentClient._responseObservers.run(response, request, phase);
+    const parentChain = this._parentClient?._responseObservers.snapshot();
+    const ownChain = this._responseObservers.snapshot();
+
+    if (parentChain) {
+      await parentChain(response, request, phase);
     }
 
-    await this._responseObservers.run(response, request, phase);
+    await ownChain(response, request, phase);
   }
 
   private async _runErrorObservers(
@@ -3292,11 +3347,14 @@ export class BaseHTTPClient {
     request: AttemptRequest,
     phase: ErrorObserverPhase,
   ): Promise<void> {
-    if (this._parentClient) {
-      await this._parentClient._errorObservers.run(error, request, phase);
+    const parentChain = this._parentClient?._errorObservers.snapshot();
+    const ownChain = this._errorObservers.snapshot();
+
+    if (parentChain) {
+      await parentChain(error, request, phase);
     }
 
-    await this._errorObservers.run(error, request, phase);
+    await ownChain(error, request, phase);
   }
 
   /**
@@ -3431,9 +3489,23 @@ export class HTTPClient extends BaseHTTPClient {
  */
 export type HTTPSubClient = Omit<HTTPClient, 'createSubClient'>;
 
-function buildObservedAttemptBodies(
-  rawBody: unknown,
-): Pick<AttemptRequest, 'body' | 'rawBody'> & { contentType: string | null } {
+type ObservedAttemptBodies = Pick<AttemptRequest, 'body' | 'rawBody'> & {
+  contentType: string | null;
+};
+
+/**
+ * Read one field of a caller-supplied request for a best-effort snapshot, answering
+ * `fallback` if the read throws.
+ */
+function readBestEffort<T>(read: () => T, fallback: T): T {
+  try {
+    return read();
+  } catch {
+    return fallback;
+  }
+}
+
+function buildObservedAttemptBodies(rawBody: unknown): ObservedAttemptBodies {
   // Validate before cloning so unsupported object-like values (URLSearchParams,
   // Blob, etc.) fail explicitly instead of being deep-cloned into `{}`.
   assertSupportedRequestBody(rawBody);

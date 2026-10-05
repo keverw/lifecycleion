@@ -48,16 +48,29 @@ export async function runShutdownWarningPhase(
     const component = context.getComponent(name);
     const state = context.componentStates.get(name);
 
+    // A global timeout releases the manager-wide latch while this component can still
+    // be stopping. Do not run its warning hook alongside stop()/onShutdownForce(),
+    // alongside a timed-out forced start() that left it `stalled`, nor on a late
+    // start's cleanup, which marks it `running` only to stop it: the shared rule (see
+    // `isHookEntryBlocked()`). Unlike the other hooks, a `stalled` component the pass
+    // retries is warned too, so this does not also require running membership.
+    // Decided before the hook is read: the read runs the component's code, which has no
+    // business running - nor its failure being reported - for a component never warned.
+    if (
+      component === undefined ||
+      (state !== 'running' && state !== 'stalled') ||
+      isHookEntryBlocked(context, name, state)
+    ) {
+      continue;
+    }
+
     // Contained per component: the read runs the component's code, and a getter that
     // threw here used to end the whole pass as `operation_crashed` with every component
     // still running. That component just gets no warning; its stop still runs.
     let warningHook: unknown;
 
     try {
-      warningHook =
-        component === undefined
-          ? undefined
-          : Reflect.get(component, 'onShutdownWarning');
+      warningHook = Reflect.get(component, 'onShutdownWarning');
     } catch (error) {
       reportCallbackError(
         `lifecycle-manager shutdown warning for ${name}`,
@@ -65,18 +78,8 @@ export async function runShutdownWarningPhase(
       );
     }
 
-    // A global timeout releases the manager-wide latch while this component can still
-    // be stopping. Do not run its warning hook alongside stop()/onShutdownForce(),
-    // alongside a timed-out forced start() that left it `stalled`, nor on a late
-    // start's cleanup, which marks it `running` only to stop it: the shared rule (see
-    // `isHookEntryBlocked()`). Unlike the other hooks, a `stalled` component the pass
-    // retries is warned too, so this does not also require running membership.
-    if (
-      component !== undefined &&
-      typeof warningHook === 'function' &&
-      (state === 'running' || state === 'stalled') &&
-      !isHookEntryBlocked(context, name, state)
-    ) {
+    // The getter may have begun teardown; the recheck before invocation skips it then.
+    if (typeof warningHook === 'function') {
       warningTargets.push({
         name,
         component,

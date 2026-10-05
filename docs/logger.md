@@ -287,7 +287,7 @@ logger.error('Non-fatal error'); // Process continues
 **Notes:**
 
 - The exit code is included in the `LogEntry` that sinks receive, so custom sinks can see when a log will trigger an exit
-- The `exitCode` must be a valid number. Non-numeric values are ignored and won't trigger exit
+- The `exitCode` must be a number. Non-numeric values (including numeric strings) are ignored and won't trigger exit. `NaN` is a number, so it is not ignored: the entry exits exactly as `logger.exit(NaN)` does - code 1 for a real exit (recorded as `entry.exitCode: 1`), or a simulated exit that keeps `NaN` as a failure code
 - When several exits overlap, the last non-zero code wins until the exit is committed; see [Exit Behavior](#exit-behavior)
 - An `exitCode` still counts after the logger has closed. That includes an exit that is committing, which closes the logger. The entry itself is not written, but the request reaches `exit()` exactly as a direct call would. So it can replace a pending code, be reported as ignored behind a committed real exit, or start the next simulated exit
 
@@ -1086,13 +1086,22 @@ const logger = new Logger();
 const lifecycle = new LifecycleManager({ logger });
 
 // Set custom callback after both are constructed
-logger.setBeforeExitCallback(async (exitCode, isFirstExit) => {
-  if (isFirstExit) {
+let isExitInProgress = false;
+logger.setBeforeExitCallback(async (exitCode) => {
+  // A repeat that arrives while the first exit is still shutting down waits for it.
+  if (isExitInProgress) {
+    return { action: 'wait' };
+  }
+
+  isExitInProgress = true;
+  try {
     // Custom logic before shutdown
     await saveState();
 
     // Graceful shutdown
     await lifecycle.stopAllComponents();
+  } finally {
+    isExitInProgress = false;
   }
 
   return { action: 'proceed' };
@@ -1104,10 +1113,13 @@ logger.setBeforeExitCallback(undefined);
 
 This approach avoids constructor ordering issues and allows components to reference each other without creating circular dependency problems.
 
+Repeats must answer `{ action: 'wait' }` while the first exit is still in progress. A component that fails while `stopAllComponents()` runs and logs `{ exitCode: 1 }` calls this callback again from inside that shutdown; answering `'proceed'` there commits the exit on the spot - closing the sinks and calling `process.exit(1)` with the shutdown half done. Waiting loses nothing: the logger has already recorded the repeat's code, so the first exit proceeds with the failure once the shutdown finishes (see [Exit Behavior](#exit-behavior)). This is what `enableLoggerExitHook()` does.
+
 **Notes:**
 
+- The callback's `exitCode` is the code of the request that called it (normalized as `exit()` normalizes it), not the code the exit will use. Overlapping requests settle on the last non-zero code while the exit is pending; read `logger.pendingExitCode` for the code the exit will actually use (or the `exit-process` event once it commits).
 - `isFirstExit` means the first exit request observed by the logger, not necessarily the first exit that has fully completed.
-- `isFirstExit` stays `false` for every exit after the first, even once that first exit has finished. With `callProcessExit: false` the process keeps running, so a callback gated on `isFirstExit` as above skips the shutdown on every later exit. `enableLoggerExitHook()` handles this by treating an exit as new whenever no earlier one is still in progress.
+- `isFirstExit` stays `false` for every exit after the first, even once that first exit has finished. With `callProcessExit: false` the process keeps running, so a callback gated on `isFirstExit` skips the shutdown on every later exit. The example above (like `enableLoggerExitHook()`) instead treats an exit as new whenever no earlier one is still in progress.
 - This method overwrites any existing `beforeExitCallback` (including one set in the Logger constructor).
 
 ## Built-In Sinks
@@ -1715,6 +1727,7 @@ logger.closed: boolean
 logger.didExit: boolean
 logger.exitCode: number // code of the last committed exit (0 before any)
 logger.isPendingExit: boolean // an exit is requested and not yet committed (every exit, simulated repeats included)
+logger.pendingExitCode: number | undefined // the code the pending exit will commit (last non-zero request wins); undefined when none is pending
 logger.hasExitedOrPending: boolean
 logger.endsProcessOnExit: boolean // callProcessExit is on and process.exit() exists
 
@@ -1886,13 +1899,13 @@ Invalid real exit codes produce one guarded `console.error` report per logger (`
 
 An exit's code is settled while it is pending - from its first `exit()` until the `exit-process` event fires: **the last non-zero request wins, and a request with code 0 never downgrades a pending failure.** Real and simulated exits (below) follow the same rule, so a test that runs a shutdown with `callProcessExit: false` sees the code production would exit with. A later `exit()` still emits `exit-called` and runs `beforeExitCallback`, and its code counts toward the pending one even when the callback answers `{ action: 'wait' }` for it, or when it comes from an `exit-called` listener (which is absorbed rather than emitting again). That is the usual shape under `enableLoggerExitHook()`: `SIGTERM` exits 0, a component fails while stopping and logs `exitCode: 1`, and the manager defers that request to the shutdown already under way. The process then exits 1, so a supervisor sees the failed shutdown instead of a clean one. A failure replaces a pending success or an earlier failure, since the latest failure is the most specific account of why the run ends. A success never replaces a failure: a second `exit(0)` - a repeated signal, a shutdown logging its own exit line - says the caller is done, not that the reported failure did not happen. A repeat of the pending code changes nothing. Whichever request is allowed to proceed first commits the pending code, not necessarily its own: `logger.exitCode`, the `exit-process` payload, and the `process.exit()` call all use it. A request of the same exit that proceeds after that has nothing left to publish. "Non-zero" is judged on the code each request stands for: the normalized code for a real exit, the requested code for a simulated one, so a simulated `exit(NaN)`, `exit(-1)` or `exit(300)` counts as a failure, as the real exit it stands in for would fail with 1. The first replacement of each exit is reported on guarded `console.error`, naming both codes (`Logger exit(1) replaces the pending exit code 0`); an invalid request also names the code it became (`Logger exit(300) replaces the pending exit code 0 with 1`). Later replacements of the same exit are counted rather than reported line by line, like the logger's other exit reports, and the commit reports the count once with the code they settled on (`Logger exit code settled on 3 after 4 further replacements not reported`).
 
-While an exit is pending, `logger.isPendingExit` is `true` - for every exit, including a simulated exit made after an earlier one completed. `logger.exitCode` changes only when an exit commits, so during that later exit it still reads the previous exit's code. A request ignored behind a committed real exit starts nothing and leaves `isPendingExit` `false`.
+While an exit is pending, `logger.isPendingExit` is `true` - for every exit, including a simulated exit made after an earlier one completed. `logger.exitCode` changes only when an exit commits, so during that later exit it still reads the previous exit's code. A request ignored behind a committed real exit starts nothing and leaves `isPendingExit` `false`. `logger.pendingExitCode` reads the code that pending exit will commit - the last non-zero code its requests settled on, normalized as `exit()` normalizes it - and is `undefined` whenever `isPendingExit` is `false`.
 
 An `exitCode` on a log entry counts even once the logger has closed - whether `close()` was called while the exit was pending or the exit's own commit closed it. The entry is not written, but its request reaches `exit()` as a direct call does, so it replaces a pending code, is reported as ignored behind a committed real exit (below), or starts the next simulated exit.
 
-Once a real exit's `exit-process` has fired, the code is final: it has been published, and `process.exit()` waits only for the sinks to close. A later `exit()` - one a sink makes from its own `close()`, or an `exit-process` listener makes - still emits `exit-called` and runs `beforeExitCallback`, but it cannot change the code or call `process.exit()` again. One case is reported rather than dropped silently, since it would otherwise let a run that asked to fail exit as a success: a non-zero request ignored after an exit with code 0 committed (`Logger exit(1) ignored: an exit with code 0 is already processing`). That report also goes to guarded `console.error`, once per logger. A simulated exit leaves the process running, so nothing is ignored once it has completed: an `exit()` made after its `exit-process` has fired starts the next exit, with a pending code of its own. (An `exit()` from that exit's own `exit-process` listener is still absorbed; see [Exit Event Phases](#exit-event-phases).)
+Once a real exit's `exit-process` has fired, the code is final: it has been published, and `process.exit()` waits only for the sinks to close. A later `exit()` - one a sink makes from its own `close()`, or an `exit-process` listener makes - still emits `exit-called` and runs `beforeExitCallback`, but it cannot change the code or call `process.exit()` again. One case is reported rather than dropped silently, since it would otherwise let a run that asked to fail exit as a success: a non-zero request ignored after an exit with code 0 committed (`Logger exit(1) ignored: an exit with code 0 is already processing`). That report also goes to guarded `console.error`, once per logger. A simulated exit leaves the process running, so nothing is ignored once it has completed: an `exit()` made after its `exit-process` has fired starts the next exit, with a pending code of its own. (An `exit()` from that exit's own `exit-process` listener is still absorbed; see [Exit Event Phases](#exit-event-phases). Its code is not applied, but a failure absorbed there behind a simulated exit with code 0 is reported with the same once-per-logger `ignored` line a real exit uses.)
 
-**Exit Code Validation:** `exit(code: number)` accepts numeric codes, not numeric strings. Non-numeric `exitCode` values on log entries are ignored.
+**Exit Code Validation:** `exit(code: number)` accepts numeric codes, not numeric strings. Non-numeric `exitCode` values on log entries are ignored; a `NaN` `exitCode` is a number and is passed to `exit()` like any other, so it fails with 1 for a real exit.
 Normalization applies only when `callProcessExit` is enabled and the runtime exposes a callable `process.exit`. Browser/worker runtimes without it retain the requested code and make no invalid-code report. That decision is made again when the exit commits. A code kept while `process.exit` was missing is normalized to 1 if the exit turns out real, so it never reaches `process.exit()`, and that is reported once (`Logger exit code 256 is invalid for a real exit; exiting with code 1`).
 For a real exit, codes must be integers in the portable range `0–255` on every platform, including Windows. This deliberately excludes Windows-specific exit codes above 255; they normalize to 1 too. Any other value is reported to the guarded console and replaced
 with 1 before `exit-called`, `beforeExitCallback`, and cleanup. This prevents codes such as 256 from wrapping to success (status 0) at the OS boundary. If `process.exit()` throws, the logger reports that failure
@@ -2201,7 +2214,7 @@ logger.error('Error event will be emitted');
 
 When the logger handles an exit, it emits two distinct events representing different lifecycle phases:
 
-- **`exit-called`**: Emitted when `logger.exit()` accepts a request, _before_ any registered `beforeExitCallback` hooks (like component shutdowns) run. It indicates the exit sequence has been initiated, and includes an `isFirstExit: boolean` flag to track redundant exit calls. Two nested requests are absorbed by the exit already in flight and emit nothing: an `exit()` from an `exit-called` listener, and, during a simulated exit, an `exit()` from an `exit-process` listener. Either would otherwise reach the same listener again without bound. An absorbed request from an `exit-called` listener still counts toward the pending exit code (see [Exit Behavior](#exit-behavior)); one from a simulated exit's `exit-process` listener does not, since that exit has already published its code.
+- **`exit-called`**: Emitted when `logger.exit()` accepts a request, _before_ any registered `beforeExitCallback` hooks (like component shutdowns) run. It indicates the exit sequence has been initiated, and includes an `isFirstExit: boolean` flag to track redundant exit calls. Two nested requests are absorbed by the exit already in flight and emit nothing: an `exit()` from an `exit-called` listener, and, during a simulated exit, an `exit()` from an `exit-process` listener. Either would otherwise reach the same listener again without bound. An absorbed request from an `exit-called` listener still counts toward the pending exit code (see [Exit Behavior](#exit-behavior)); one from a simulated exit's `exit-process` listener does not, since that exit has already published its code (a failure absorbed behind a published 0 is still reported, as for a real exit).
 - **`exit-process`**: Emitted **after** the exit's `beforeExitCallback` (if any) has settled without answering `{ action: 'wait' }` (a callback that throws or rejects proceeds too), as the logger moves into sink cleanup and optionally terminates the process (`callProcessExit: true`). If cleanup is already under way - `close()` was called first, or a sink's close hook requested the exit - the exit joins that cleanup rather than starting it. It carries the code the exit settled on - the pending code every request made for that exit settled on, not necessarily the code of the request that proceeded - and fires once per exit, even when several of its requests proceed. A real exit emits it at most once per logger: once one exit has scheduled `process.exit()`, later exits do not emit it again (see [Exit Behavior](#exit-behavior)). A simulated exit emits it once for each exit, since an `exit()` made after one has completed starts the next.
 
 ## Custom Sinks

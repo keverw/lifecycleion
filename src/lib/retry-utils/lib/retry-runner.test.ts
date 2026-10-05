@@ -99,6 +99,34 @@ describe('RetryRunner', () => {
     expect(runner.graceCancelPeriodMS).toBe(MAX_TIMER_MS);
   });
 
+  test('a NaN retry delay waits on a timer instead of retrying synchronously', async () => {
+    let invoked = 0;
+    const runner = new RetryRunner(policy, (reportResult: ReportResult) => {
+      invoked++;
+      if (invoked === 1) {
+        reportResult('error', new Error('boom'));
+      } else {
+        reportResult('success', 'done');
+      }
+    });
+    // Unreachable through RetryPolicy itself, so the backstop is reached by stubbing it.
+    const internals = runner as unknown as {
+      policy: { shouldRetry: (...args: unknown[]) => unknown };
+    };
+    const original = internals.policy.shouldRetry.bind(internals.policy);
+    internals.policy.shouldRetry = (...args: unknown[]) => {
+      original(...args);
+      return { shouldRetry: true, delayMS: NaN };
+    };
+
+    const completion = runner.run(true);
+    expect(invoked).toBe(1);
+    expect(runner.isRetryPending).toBe(true);
+    expect(Number.isFinite(runner.retryTimeRemaining)).toBe(true);
+    expect(await completion).toMatchObject({ status: 'attempt_success' });
+    expect(invoked).toBe(2);
+  });
+
   describe('run', () => {
     test('should run successfully on first attempt', async () => {
       const operation = (reportResult: ReportResult): void => {

@@ -6,7 +6,10 @@ import type {
   RetryQueryResult,
 } from './types';
 import { clamp, finiteClamp } from '../../clamp';
-import { resolveTimeoutMS } from '../../internal/timer-limits';
+import {
+  assertNumberOption,
+  resolveTimeoutMS,
+} from '../../internal/timer-limits';
 import { calculateExponentialDelay, getMostCommonError } from './utils';
 
 interface CurrentState {
@@ -150,7 +153,9 @@ export class RetryPolicy {
    * @param {RetryPolicyOptions} policy The retry policy options, including strategy, maximum retry attempts,
    * and other parameters specific to the fixed or exponential strategy.
    *
-   * Throws an error if an invalid retry strategy is provided.
+   * Throws an error if an invalid retry strategy is provided, a `TypeError` for a `NaN` or
+   * non-number duration, `maxRetryAttempts` or `factor`, and a `RangeError` for a negative
+   * duration.
    */
 
   constructor(policy: RetryPolicyOptions) {
@@ -163,10 +168,13 @@ export class RetryPolicy {
     // Duration inputs are validated before clamping. Zero keeps this policy's existing
     // 1ms minimum, while Infinity selects the timer ceiling.
     //
-    // Strict duration validation does not apply to the count, multiplier, or jitter
-    // fraction. They retain their existing normalization: maxRetryAttempts accepts
-    // Infinity and defaults NaN, factor defaults NaN and accepts Infinity, and
-    // dispersion uses finiteClamp's fallback for non-finite values.
+    // The count and the multiplier share the duration rule's first half: a `NaN` or a
+    // non-number throws (`assertNumberOption`) rather than being replaced. A stored `NaN`
+    // count made `retryCount >= maxRetryAttempts` false forever - unlimited retries - and
+    // `Number.isNaN` does not coerce, so `'abc'` or `{}` used to reach it unchecked. Past
+    // that check both are clamped to `[1, Infinity]`: `Infinity` stays legal for each, and
+    // `maxRetryAttempts: 0` still allows one retry. Dispersion keeps finiteClamp's
+    // fallback for non-finite values.
     //
     // Duration ceilings use `MAX_TIMER_MS`, not `Number.MAX_SAFE_INTEGER`. `setTimeout`
     // holds its delay in a signed 32-bit int and coerces larger values to 1 ms. A value
@@ -174,12 +182,11 @@ export class RetryPolicy {
     // ceiling it would retry every millisecond instead of waiting about 34 days. Since
     // the exponential delay is clamped to `maxTimeoutMS` on the way out, bounding the
     // three durations here bounds every delay this policy can produce.
-    const attempts = (value: number): number =>
-      Math.floor(
-        Number.isNaN(value)
-          ? DEFAULT_MAX_RETRY_ATTEMPTS
-          : clamp(value, 1, Infinity),
-      );
+    const attempts = (requested: number | undefined): number => {
+      const value = requested ?? DEFAULT_MAX_RETRY_ATTEMPTS;
+      assertNumberOption(value, 'Retry maxRetryAttempts');
+      return Math.floor(clamp(value, 1, Infinity));
+    };
     const duration = (
       requested: number | null | undefined,
       fallback: number,
@@ -193,9 +200,7 @@ export class RetryPolicy {
       const { maxRetryAttempts, delayMS } = policy;
       this.policy = {
         strategy: 'fixed',
-        maxRetryAttempts: attempts(
-          maxRetryAttempts ?? DEFAULT_MAX_RETRY_ATTEMPTS,
-        ),
+        maxRetryAttempts: attempts(maxRetryAttempts),
         delayMS: duration(delayMS, DEFAULT_MIN_TIMEOUT_MS, 'Retry delayMS'),
       };
     } else if (strategy === 'exponential') {
@@ -221,18 +226,17 @@ export class RetryPolicy {
       const finalMin = Math.min(minTimeoutMS, maxTimeoutMS);
       const finalMax = Math.max(minTimeoutMS, maxTimeoutMS);
 
+      // `factor` is not a duration either, but it multiplies into one, so a `NaN` here
+      // reaches the same place a `NaN` timeout did. `Infinity` stays legal: the delay it
+      // produces is capped at `maxTimeoutMS` before jitter, which is what the caller
+      // asking for it means - jump straight to the ceiling.
+      const resolvedFactor = factor ?? DEFAULT_FACTOR;
+      assertNumberOption(resolvedFactor, 'Retry factor');
+
       this.policy = {
         strategy: 'exponential',
-        maxRetryAttempts: attempts(
-          maxRetryAttempts ?? DEFAULT_MAX_RETRY_ATTEMPTS,
-        ),
-        // `factor` is not a duration either, but it multiplies into one, so a `NaN` here
-        // reaches the same place a `NaN` timeout did. `Infinity` stays legal: the delay it
-        // produces is capped at `maxTimeoutMS` before jitter, which is what the caller
-        // asking for it means - jump straight to the ceiling.
-        factor: Number.isNaN(factor ?? DEFAULT_FACTOR)
-          ? DEFAULT_FACTOR
-          : clamp(factor ?? DEFAULT_FACTOR, 1, Infinity),
+        maxRetryAttempts: attempts(maxRetryAttempts),
+        factor: clamp(resolvedFactor, 1, Infinity),
         minTimeoutMS: finalMin,
         maxTimeoutMS: finalMax,
         dispersion: finiteClamp(

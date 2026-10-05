@@ -48,7 +48,9 @@ The stateful helpers have deliberately smaller scopes:
   accessor.
 - Whether a hook may be entered at all is one rule in `component-dispatch.ts`:
   `isHookEntryBlocked()` (a start, stop, pending raw start or late-start cleanup owns
-  the component) and `isComponentEnterable()` (running and not blocked). Messaging,
+  the component) and `isComponentEnterable()` (running and not blocked).
+  `isComponentRunningMember()` is the running half alone, for a caller that already
+  holds its `isHookEntryBlocked()` answer and must not evaluate it twice. Messaging,
   value access, health checks, signals and shutdown warnings all apply it; each keeps
   its own refusal codes, and a site that deliberately differs (broadcast selection,
   warnings to retried stalls) says why where it does.

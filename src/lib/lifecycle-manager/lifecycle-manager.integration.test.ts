@@ -358,8 +358,13 @@ describe('LifecycleManager Integration Tests', () => {
         stopPromise,
       ]);
 
-      // The same shutdown pass waits for startup cleanup and stops dependencies.
-      expect(stopResult.success).toBe(true);
+      // The slow start times out while the pass waits on it, so the pass stops waiting
+      // rather than spend its budget on it and reports its late cleanup as pending.
+      expect(stopResult.code).toBe('cleanup_incomplete');
+
+      // Once the late start settles and its cleanup runs, another pass finishes.
+      await sleep(100);
+      expect((await lifecycle.stopAllComponents()).success).toBe(true);
       expect(lifecycle.getRunningComponentNames()).toEqual([]);
     });
 

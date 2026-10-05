@@ -9,6 +9,7 @@ import {
 } from '../../internal/intrinsics';
 import Router from 'find-my-way';
 import { guardProgressCallback } from '../internal/progress';
+import { materializeRequestHeaders } from '../internal/header-utils';
 import qs from 'qs';
 import { sleep } from '../../sleep';
 import { adoptPromise } from '../../internal/adopt-promise';
@@ -269,7 +270,7 @@ export class MockAdapter implements HTTPAdapter {
     );
 
     const { requestURL, method, headers, body } = request;
-    const materializedHeaders = materializeMockRequestHeaders(headers);
+    const materializedHeaders = materializeRequestHeaders(headers);
 
     // --- 1. Pre-flight abort check ---
     // Throw immediately if the signal was already cancelled before we even start.
@@ -656,26 +657,6 @@ function parseCookieHeader(
   }
 
   return cookies;
-}
-
-function materializeMockRequestHeaders(
-  headers: Record<string, string | string[]>,
-): Record<string, string> {
-  const result: Record<string, string> = {};
-
-  for (const [key, value] of Object.entries(headers)) {
-    defineEntry(
-      result,
-      key,
-      Array.isArray(value)
-        ? key.toLowerCase() === 'cookie'
-          ? value.join('; ')
-          : value.join(', ')
-        : value,
-    );
-  }
-
-  return result;
 }
 
 function cookiesToSetCookieHeaders(

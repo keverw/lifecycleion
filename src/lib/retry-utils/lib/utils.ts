@@ -60,9 +60,10 @@ export function calculateExponentialDelay({
   // as "retry now" - the busy-retry this whole guard exists to prevent.
   //
   // The bounds are tried in turn rather than trusting either: `RetryPolicy` refuses a
-  // non-finite timeout now, but this function is exported and takes its bounds from the
-  // caller, so a fallback of `maxTimeoutMS` alone would hand back the very `Infinity` or
-  // `NaN` it was called to rule out. `DEFAULT_FALLBACK_DELAY_MS` is the answer when a
+  // `NaN` timeout and clamps `Infinity` to the timer ceiling, so its bounds are always
+  // finite, but this function is exported and takes its bounds from the caller, so a
+  // fallback of `maxTimeoutMS` alone would hand back the very `Infinity` or `NaN` it was
+  // called to rule out. `DEFAULT_FALLBACK_DELAY_MS` is the answer when a
   // caller supplies no finite bound at all: an ordinary wait, which is the safe direction
   // to fail for something whose only job is to not retry immediately.
   for (const candidate of [clamped, maxTimeoutMS, minTimeoutMS]) {

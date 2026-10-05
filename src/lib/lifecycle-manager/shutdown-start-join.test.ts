@@ -36,7 +36,7 @@ for (const timeoutMS of [0, 1000]) {
         }
         expect(order).toEqual([]);
         expect(manager.getComponentStatus('database')?.state).toBe('running');
-        if (hasLateTimeout && timeoutMS === 0) {
+        if (hasLateTimeout) {
           expect((await shutdown).code).toBe('cleanup_incomplete');
           expect(manager.getComponentStatus('database')?.state).toBe('running');
         }
@@ -45,10 +45,9 @@ for (const timeoutMS of [0, 1000]) {
         expect(order).toEqual(['worker']);
         expect(manager.getComponentStatus('database')?.state).toBe('running');
         stop.resolve();
-        const result =
-          hasLateTimeout && timeoutMS === 0
-            ? await manager.stopAllComponents({ timeoutMS: 0 })
-            : await shutdown;
+        const result = hasLateTimeout
+          ? await manager.stopAllComponents({ timeoutMS: 0 })
+          : await shutdown;
         expect(result.success).toBe(true);
         expect(order).toEqual(['worker', 'database']);
         expect(manager.getRunningComponentNames()).toEqual([]);

@@ -208,11 +208,10 @@ describe('RetryPolicy - durations that are not finite', () => {
     }
   });
 
-  test('a NaN dispersion or factor does not reach the delay', () => {
+  test('a NaN dispersion does not reach the delay', () => {
     const policy = new RetryPolicy({
       strategy: 'exponential',
       dispersion: NaN,
-      factor: NaN,
     });
 
     policy.shouldDoFirstTry();
@@ -220,6 +219,24 @@ describe('RetryPolicy - durations that are not finite', () => {
     expect(Number.isFinite(policy.shouldRetry(new Error('boom')).delayMS)).toBe(
       true,
     );
+  });
+
+  test('a NaN or non-number factor throws at construction', () => {
+    // Not coerced: `Number.isNaN('abc')` is false, so a string used to slip past the old
+    // NaN check, survive `clamp` as `NaN`, and make every computed delay `NaN`.
+    for (const value of [NaN, 'abc', {}, '2']) {
+      expect(
+        () =>
+          new RetryPolicy({
+            strategy: 'exponential',
+            factor: value as number,
+          }),
+      ).toThrow(TypeError);
+    }
+
+    expect(
+      new RetryPolicy({ strategy: 'exponential', factor: Infinity }).policyInfo,
+    ).toMatchObject({ factor: Infinity });
   });
 
   test('maxRetryAttempts: Infinity is still allowed', () => {
@@ -233,13 +250,27 @@ describe('RetryPolicy - durations that are not finite', () => {
     expect(policy.policyInfo.maxRetryAttempts).toBe(Infinity);
   });
 
-  test('maxRetryAttempts: NaN falls back to the default', () => {
-    const policy = new RetryPolicy({
-      strategy: 'exponential',
-      maxRetryAttempts: NaN,
-    });
+  test('a NaN or non-number maxRetryAttempts throws at construction', () => {
+    // A stored `NaN` made `retryCount >= maxRetryAttempts` false forever: unlimited
+    // retries from what was meant to be a bounded policy. `'abc'` and `{}` reached it
+    // because `Number.isNaN` does not coerce.
+    for (const strategy of ['fixed', 'exponential'] as const) {
+      for (const value of [NaN, 'abc', {}, '3']) {
+        expect(
+          () =>
+            new RetryPolicy({
+              strategy,
+              maxRetryAttempts: value as number,
+            }),
+        ).toThrow(TypeError);
+      }
+    }
+  });
 
-    expect(Number.isNaN(policy.policyInfo.maxRetryAttempts)).toBe(false);
+  test('maxRetryAttempts: 0 is clamped to one retry', () => {
+    const policy = new RetryPolicy({ strategy: 'fixed', maxRetryAttempts: 0 });
+
+    expect(policy.maxRetryAttempts).toBe(1);
   });
 });
 

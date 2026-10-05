@@ -41,39 +41,67 @@ export class ResponseObserverManager {
     };
   }
 
-  public async run(
+  public run(
     response: HTTPResponse,
     request: AttemptRequest,
     phase: ResponseObserverPhase,
   ): Promise<void> {
-    // Registration changes during an await apply to the next run.
-    for (const { fn, filter } of [...this.observers]) {
-      if (
-        !matchesFilter(
-          filter ?? {},
-          {
-            status: response.status,
-            method: request.method,
-            requestURL: request.requestURL,
-            body: response.body,
-            contentType: response.contentType,
-            contentTypeHeader: scalarHeader(response.headers, 'content-type'),
-          },
-          phase.type,
-          'response',
-        )
-      ) {
-        continue;
-      }
+    return this.snapshot()(response, request, phase);
+  }
 
-      await safeHandleCallbackAndWait(
-        'ResponseObserver',
-        fn,
-        response,
-        request,
-        phase,
-      );
+  /**
+   * Copy the current registrations into a chain that later `add()` and removal calls do
+   * not reach. See `RequestInterceptorManager.snapshot()`.
+   */
+  public snapshot(): ResponseObserverChain {
+    const observers = [...this.observers];
+
+    return (response, request, phase) =>
+      runResponseObservers(observers, response, request, phase);
+  }
+}
+
+export type ResponseObserverChain = (
+  response: HTTPResponse,
+  request: AttemptRequest,
+  phase: ResponseObserverPhase,
+) => Promise<void>;
+
+async function runResponseObservers(
+  observers: ReadonlyArray<{
+    fn: ResponseObserver;
+    filter?: ResponseObserverFilter;
+  }>,
+  response: HTTPResponse,
+  request: AttemptRequest,
+  phase: ResponseObserverPhase,
+): Promise<void> {
+  for (const { fn, filter } of observers) {
+    if (
+      !matchesFilter(
+        filter ?? {},
+        {
+          status: response.status,
+          method: request.method,
+          requestURL: request.requestURL,
+          body: response.body,
+          contentType: response.contentType,
+          contentTypeHeader: scalarHeader(response.headers, 'content-type'),
+        },
+        phase.type,
+        'response',
+      )
+    ) {
+      continue;
     }
+
+    await safeHandleCallbackAndWait(
+      'ResponseObserver',
+      fn,
+      response,
+      request,
+      phase,
+    );
   }
 }
 
@@ -102,34 +130,56 @@ export class ErrorObserverManager {
     };
   }
 
-  public async run(
+  public run(
     error: HTTPClientError,
     request: AttemptRequest,
     phase: ErrorObserverPhase,
   ): Promise<void> {
-    // Registration changes during an await apply to the next run.
-    for (const { fn, filter } of [...this.observers]) {
-      if (
-        !matchesFilter(
-          filter ?? {},
-          {
-            method: request.method,
-            requestURL: request.requestURL,
-          },
-          phase.type,
-          'error',
-        )
-      ) {
-        continue;
-      }
+    return this.snapshot()(error, request, phase);
+  }
 
-      await safeHandleCallbackAndWait(
-        'ErrorObserver',
-        fn,
-        error,
-        request,
-        phase,
-      );
+  /**
+   * Copy the current registrations into a chain that later `add()` and removal calls do
+   * not reach. See `RequestInterceptorManager.snapshot()`.
+   */
+  public snapshot(): ErrorObserverChain {
+    const observers = [...this.observers];
+
+    return (error, request, phase) =>
+      runErrorObservers(observers, error, request, phase);
+  }
+}
+
+export type ErrorObserverChain = (
+  error: HTTPClientError,
+  request: AttemptRequest,
+  phase: ErrorObserverPhase,
+) => Promise<void>;
+
+async function runErrorObservers(
+  observers: ReadonlyArray<{
+    fn: ErrorObserver;
+    filter?: ErrorObserverFilter;
+  }>,
+  error: HTTPClientError,
+  request: AttemptRequest,
+  phase: ErrorObserverPhase,
+): Promise<void> {
+  for (const { fn, filter } of observers) {
+    if (
+      !matchesFilter(
+        filter ?? {},
+        {
+          method: request.method,
+          requestURL: request.requestURL,
+        },
+        phase.type,
+        'error',
+      )
+    ) {
+      continue;
     }
+
+    await safeHandleCallbackAndWait('ErrorObserver', fn, error, request, phase);
   }
 }

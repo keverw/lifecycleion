@@ -775,7 +775,7 @@ export class LifecycleManager
    * Check if a component is registered
    */
   public hasComponent(name: string): boolean {
-    return this.components.some((c) => this.nameOf(c) === name);
+    return this.isNameRegistered(name);
   }
 
   /**
@@ -851,36 +851,17 @@ export class LifecycleManager
    * Get detailed status for a specific component
    */
   public getComponentStatus(name: string): ComponentStatus | undefined {
-    const component = this.getComponent(name);
-    if (!component) {
-      return undefined;
-    }
-
-    const state = this.componentStates.get(name) || 'registered';
-    const timestamps = this.componentTimestamps.get(name) || {
-      startedAt: null,
-      stoppedAt: null,
-    };
-    const lastError = this.componentErrors.get(name) || null;
-    const stallInfo = this.stalledComponents.get(name) || null;
-
-    return {
-      name,
-      state,
-      startedAt: timestamps.startedAt,
-      stoppedAt: timestamps.stoppedAt,
-      lastError,
-      stallInfo,
-    };
+    return this.isNameRegistered(name) ? this.statusOf(name) : undefined;
   }
 
   /**
    * Get statuses for all components
    */
   public getAllComponentStatuses(): ComponentStatus[] {
-    return this.components
-      .map((component) => this.getComponentStatus(this.nameOf(component)))
-      .filter((status): status is ComponentStatus => status !== undefined);
+    // One walk: each entry is already in hand, so it is not looked up by name again.
+    return this.components.map((component) =>
+      this.statusOf(this.nameOf(component)),
+    );
   }
 
   /**
@@ -1653,7 +1634,7 @@ export class LifecycleManager
         this.noteShutdownRequestDuringActivePass();
 
         this.logger.debug(LIFECYCLE_MANAGER_LOG_LOGGER_EXIT_DURING_SHUTDOWN, {
-          params: { exitCode },
+          params: { exitCode, pendingExitCode: this.readPendingExitCode() },
         });
 
         // Only the leading exit gets here, and it holds `isHandlingLoggerExit` until this
@@ -1673,7 +1654,11 @@ export class LifecycleManager
         }
 
         this.logger.info('Logger exit triggered, stopping components...', {
-          params: { exitCode, timeoutMS: this.shutdownOptions.timeoutMS },
+          params: {
+            exitCode,
+            pendingExitCode: this.readPendingExitCode(),
+            timeoutMS: this.shutdownOptions.timeoutMS,
+          },
         });
 
         // Stop all components with the manager's `shutdownOptions` defaults
@@ -3884,6 +3869,9 @@ export class LifecycleManager
     // application is still running. Hold both the value and its registration:
     // shutdown hooks can mutate the property or replace an instance before startup.
     const restartSnapshots = new Map<string, RestartStartSnapshot>();
+    // Read once: no caller code runs between here and the loop, and the stop pass reads
+    // the same set as it begins.
+    const currentStarts = this.currentStartSettlements();
     for (const component of [...this.components]) {
       const name = this.nameOf(component);
       const generation = this.registrationReads.currentGeneration(component);
@@ -3898,7 +3886,7 @@ export class LifecycleManager
           `${name}.startupTimeoutMS`,
         ),
       });
-      this.validateRestartStopBudgets(name, component);
+      this.validateRestartStopBudgets(name, component, currentStarts);
     }
 
     return { startupOptions, shutdownTimeoutMS, restartSnapshots };
@@ -3913,18 +3901,27 @@ export class LifecycleManager
    * snapshotted: each stop still reads its own when it runs, as any stop does.
    *
    * Only for what that stop phase will call: `stop()` of a running component, and the
-   * force handler of a running or stalled one (`retryStalled` is on for restart).
+   * force handler of a running or stalled one (`retryStalled` is on for restart). A
+   * start still in flight counts as running: the stop phase joins it and sends the
+   * component through the stop pipeline once `start()` settles. One that already timed
+   * out does not - the pass reports it as `cleanup_incomplete` instead of stopping it.
    */
   private validateRestartStopBudgets(
     name: string,
     component: BaseComponent,
+    currentStarts: ReadonlyMap<string, StartSettlement>,
   ): void {
-    const isRunning = this.runningComponents.has(name);
-    if (!isRunning && !this.stalledComponents.has(name)) {
+    const settlement = currentStarts.get(name);
+    const isStartInFlight =
+      (this.componentStates.get(name) === 'starting' ||
+        settlement !== undefined) &&
+      !this.isUnresolvedTimedOutStart(settlement);
+    const willStop = this.runningComponents.has(name) || isStartInFlight;
+    if (!willStop && !this.stalledComponents.has(name)) {
       return;
     }
 
-    if (isRunning) {
+    if (willStop) {
       toOperationTimerDelayMS(
         this.readRestartInput(() => component.shutdownGracefulTimeoutMS),
         `${name}.shutdownGracefulTimeoutMS`,
@@ -5827,6 +5824,16 @@ export class LifecycleManager
     let stopCandidateNames: readonly string[] | null = null;
     // Components still starting when the pass began; see where it is filled in.
     let startingAtPassStart: readonly string[] = [];
+    // For each of those not also running as the pass began: its stop attempt and its
+    // last `startedAt` at that moment. A start that fails on its own puts back the state
+    // it replaced - `stopped`, for a component started again after a stop - and that is
+    // not a stop by this pass. Only a start that came up during the pass changes its
+    // `startedAt`, and only a stop issues a new stop attempt; one of the two must have
+    // moved for the pass to count it as stopped.
+    const startOnlyBaselines = new Map<
+      string,
+      { stopAttemptToken: string | undefined; startedAt: number | null }
+    >();
     // Components a concurrent stop still owns, or whose dependencies must stay up. Out
     // here only so the sweep below can settle them from either path; the `catch` never
     // reads it.
@@ -5843,14 +5850,21 @@ export class LifecycleManager
     // a candidate the manager already has as `stopped` - one that stopped itself through
     // `reportUnexpectedStop()` during the warning phase, say - is reconciled in here.
     // Without this the `catch` would under-report a pass that threw before reaching such
-    // a component.
+    // a component. A start that failed on its own back to `stopped` is not one of them
+    // (see `startOnlyBaselines`).
     const collectStoppedComponents = (
       excludedNames?: Set<string>,
     ): string[] => {
       for (const name of stopCandidateNames ?? []) {
+        const baseline = startOnlyBaselines.get(name);
         if (
           excludedNames?.has(name) ||
-          this.componentStates.get(name) !== 'stopped'
+          this.componentStates.get(name) !== 'stopped' ||
+          (baseline !== undefined &&
+            baseline.stopAttemptToken ===
+              this.componentStopAttemptTokens.get(name) &&
+            baseline.startedAt ===
+              (this.componentTimestamps.get(name)?.startedAt ?? null))
         ) {
           continue;
         }
@@ -5949,6 +5963,14 @@ export class LifecycleManager
         ...startingAtPassStart,
       ]);
       stopCandidateNames = [...runningComponentsToStop, ...startingAtPassStart];
+      for (const name of startingAtPassStart) {
+        if (!runningComponentsToStop.includes(name)) {
+          startOnlyBaselines.set(name, {
+            stopAttemptToken: this.componentStopAttemptTokens.get(name),
+            startedAt: this.componentTimestamps.get(name)?.startedAt ?? null,
+          });
+        }
+      }
 
       if (!shouldRetryStalled) {
         for (const name of stalledComponentNames) {
@@ -5987,6 +6009,13 @@ export class LifecycleManager
       // then it may still be running on them.
       const concurrentOwners = new Set<string>();
       const concurrentlyProtectedSkips = new Set<string>();
+      const isStartStillInProgress = (name: string): boolean =>
+        isStartUnfinished(currentStarts.get(name)) ||
+        this.isComponentInFlight(name);
+      // An owner holds its dependencies until it settles: not running, and neither its
+      // stop nor its start still in progress.
+      const hasSettled = (owner: string): boolean =>
+        !this.runningComponents.has(owner) && !isStartStillInProgress(owner);
       // Walked fresh on every check, not cached for the loop: dependency getters are live
       // caller code, and a stop or a logger sink between two checks can change what an
       // owner - or anything down its chain - depends on (see
@@ -6010,12 +6039,7 @@ export class LifecycleManager
         };
         for (const owners of [concurrentOwners, concurrentlyProtectedSkips]) {
           for (const owner of owners) {
-            if (
-              (this.runningComponents.has(owner) ||
-                this.isComponentInFlight(owner) ||
-                isStartUnfinished(currentStarts.get(owner))) &&
-              reaches(owner)
-            ) {
+            if (!hasSettled(owner) && reaches(owner)) {
               return true;
             }
           }
@@ -6040,7 +6064,9 @@ export class LifecycleManager
 
       // Preserve a configuration refusal on the aggregate result as well as the log.
       // It leaves the component running; it is not a fabricated stall or a crash.
-      let invalidOptionsError: Error | undefined;
+      // Keyed by the refused component, first refusal kept: the result names one only
+      // while that component is still left behind when the pass ends.
+      const invalidOptionsRefusals = new Map<string, Error | undefined>();
       // Components a `haltOnStall` break left behind without trying to stop them. Still
       // running at the end, they are reported apart from the stops that actually failed:
       // naming them under "Failed to stop" said their `stop()` had run and failed.
@@ -6049,10 +6075,6 @@ export class LifecycleManager
       // available for a component still up after a failed stop never is: still running
       // at the end, it is reported under "Not attempted" too, not as a failed stop.
       const attemptedStopNames = new Set<string>();
-
-      const isStartStillInProgress = (name: string): boolean =>
-        isStartUnfinished(currentStarts.get(name)) ||
-        this.isComponentInFlight(name);
 
       const canReleaseStartupDependencies = (name: string): boolean => {
         const state = this.componentStates.get(name);
@@ -6127,8 +6149,11 @@ export class LifecycleManager
               return;
             }
           }
-          // Zero disables the shutdown deadline, but a startup timeout can still
-          // abandon an unresolved start. Finite budgets keep joining recovery.
+          // A startup timeout can abandon an unresolved start while this join waits on
+          // it - with or without a shutdown deadline. One abandoned mid-join is then
+          // treated as one already abandoned when the pass began: the pass stops
+          // waiting rather than spend the rest of its budget on a raw `start()` that
+          // may never settle.
           for (const settlement of startsToJoin) {
             // Do not spend another shutdown budget on an already abandoned
             // start. Recovery already underway at this join is still awaited.
@@ -6141,10 +6166,7 @@ export class LifecycleManager
               !requestingStarts.has(settlement) &&
               !(timedOutStarts.has(settlement) && settlement.rawStartPending)
             ) {
-              if (
-                effectiveTimeout === 0 &&
-                (!settlement.recovery || settlement.isAwaitingLateStart)
-              ) {
+              if (!settlement.recovery || settlement.isAwaitingLateStart) {
                 await racePromises([settlement.promise, settlement.abandoned]);
                 // Abandonment does not release cleanup already underway. The raw
                 // start may have settled while the timeout notification was delivered.
@@ -6182,6 +6204,21 @@ export class LifecycleManager
           ...runningComponentsToStop.filter((name) => !needsStartJoin(name)),
           ...runningComponentsToStop.filter(needsStartJoin),
         ];
+        // Whether `name` must stay up for now: a dependency of startup work, or of a
+        // concurrent owner still in progress. Recorded as still in progress if so.
+        const isSkippedForProtection = (name: string): boolean => {
+          protectActiveStartupDependencies();
+          if (protectedDependencies.has(name)) {
+            stoppingComponents.add(name);
+            return true;
+          }
+          if (isProtectedByConcurrentOwner(name)) {
+            stoppingComponents.add(name);
+            concurrentlyProtectedSkips.add(name);
+            return true;
+          }
+          return false;
+        };
         // Returns true when the pass must stop here: its deadline passed, or a failure
         // halted it under `haltOnStall`.
         const runStopLoop = async (
@@ -6212,28 +6249,14 @@ export class LifecycleManager
             // An earlier dependency stop can let raw startup settle and begin its
             // automatic cleanup. The override no longer permits releasing that
             // cleanup's remaining dependencies, even though the initial join did.
-            protectActiveStartupDependencies();
-            if (protectedDependencies.has(name)) {
-              stoppingComponents.add(name);
-              continue;
-            }
-            if (isProtectedByConcurrentOwner(name)) {
-              stoppingComponents.add(name);
-              concurrentlyProtectedSkips.add(name);
+            if (isSkippedForProtection(name)) {
               continue;
             }
 
             this.logger.entity(name).info('Stopping component');
 
             // Logger sinks are caller code and can start cleanup synchronously.
-            protectActiveStartupDependencies();
-            if (protectedDependencies.has(name)) {
-              stoppingComponents.add(name);
-              continue;
-            }
-            if (isProtectedByConcurrentOwner(name)) {
-              stoppingComponents.add(name);
-              concurrentlyProtectedSkips.add(name);
+            if (isSkippedForProtection(name)) {
               continue;
             }
 
@@ -6280,9 +6303,9 @@ export class LifecycleManager
 
             if (
               result.code === 'invalid_options' &&
-              invalidOptionsError === undefined
+              !invalidOptionsRefusals.has(name)
             ) {
-              invalidOptionsError = result.error;
+              invalidOptionsRefusals.set(name, result.error);
             }
 
             if (result.success) {
@@ -6341,10 +6364,6 @@ export class LifecycleManager
         // The loop does not wait for a concurrent stop. One that has settled by the end
         // of the loop no longer needs the dependencies skipped on its account: go back
         // to them once, in the same order, rather than leave them running.
-        const hasSettled = (owner: string): boolean =>
-          !this.runningComponents.has(owner) &&
-          !this.isComponentInFlight(owner) &&
-          !isStartUnfinished(currentStarts.get(owner));
         if (
           !(await runStopLoop(stopOrder)) &&
           !hasTimedOut &&
@@ -6414,37 +6433,12 @@ export class LifecycleManager
 
         return inProgressOwnerDependencies.has(name);
       };
-      // Startup protection is retained for the loop, which comes back to a skip only for
-      // a settled concurrent owner.
-      // Settle it fresh: once no unfinished start needs a skipped dependency that has
-      // since stopped, it is not in progress. One still running was deliberately left up
-      // and never stopped by this pass, so it stays in progress (`cleanup_incomplete`)
-      // rather than becoming a failed stop.
-      let unfinishedStartDependencies: Set<string> | undefined;
-      const isNeededByUnfinishedStart = (name: string): boolean => {
-        if (unfinishedStartDependencies === undefined) {
-          unfinishedStartDependencies = new Set<string>();
-          for (const start of startingAtPassStart) {
-            if (
-              isStartStillInProgress(start) ||
-              this.stalledComponents.has(start)
-            ) {
-              protectDependencies(start, unfinishedStartDependencies);
-            }
-          }
-        }
-
-        return unfinishedStartDependencies.has(name);
-      };
+      // A dependency kept up for an unfinished start is settled by the same rules, read
+      // fresh: one that has since stopped is not in progress, whatever still needs it.
+      // One still running was deliberately left up and never stopped by this pass, so it
+      // stays in progress (`cleanup_incomplete`) rather than becoming a failed stop.
       for (const name of Array.from(stoppingComponents)) {
         if (
-          (protectedDependencies.has(name) &&
-            !this.runningComponents.has(name) &&
-            !concurrentOwners.has(name) &&
-            !concurrentlyProtectedSkips.has(name) &&
-            !isStartStillInProgress(name) &&
-            !isNeededByUnfinishedStart(name) &&
-            !isNeededByInProgressOwner(name)) ||
           (finalStalledNames.has(name) && !isStartStillInProgress(name)) ||
           ((concurrentOwners.has(name) ||
             concurrentlyProtectedSkips.has(name)) &&
@@ -6530,18 +6524,31 @@ export class LifecycleManager
           : []),
       ];
 
+      // A refused stop only names the pass when it left something behind: its own
+      // component still running, or still in progress. One whose component went down by
+      // another path is not a failure, so neither its code nor its `error` describes
+      // what kept this pass short of its goal - a stall elsewhere, say.
+      let hasRelevantRefusal = false;
+      let invalidOptionsError: Error | undefined;
+      for (const [name, error] of invalidOptionsRefusals) {
+        if (this.runningComponents.has(name) || stoppingComponents.has(name)) {
+          hasRelevantRefusal = true;
+          invalidOptionsError = error;
+          break;
+        }
+      }
+
       // The result code, in priority order. A timeout outranks everything and reports
       // only the budget. Pending cleanup outranks a refused stop: a caller waiting for
       // `cleanup_incomplete` must still see it, and the refusal stays on `error`. A
-      // refused stop only names the pass when it left something behind - one whose
-      // component went down by another path is not a failure. Every failure part means
-      // `!isSuccess`, so `partial_state` is never reached with a refusal recorded.
+      // refusal left behind always means `!isSuccess`, so `partial_state` is never
+      // reached with one.
       let code: ShutdownResult['code'];
       if (hasTimedOut) {
         code = 'shutdown_timeout';
       } else if (stoppingComponents.size > 0) {
         code = 'cleanup_incomplete';
-      } else if (!isSuccess && invalidOptionsError !== undefined) {
+      } else if (hasRelevantRefusal) {
         code = 'invalid_options';
       } else if (failureReasonParts.length > 0) {
         code = 'partial_state';
@@ -6731,6 +6738,21 @@ export class LifecycleManager
     if (resolve !== null) {
       this.pendingLoggerExitResolve = null;
       resolve(result);
+    }
+  }
+
+  /**
+   * The code the logger's pending exit will commit, for the exit hook's log lines: the
+   * `exitCode` the hook is called with is only that request's, and overlapping requests
+   * settle on the last non-zero one. `undefined` when no exit is pending, or when the
+   * logger cannot say - a logger copy without the getter, or one that throws.
+   */
+  private readPendingExitCode(): number | undefined {
+    try {
+      const code: unknown = this.rootLogger.pendingExitCode;
+      return typeof code === 'number' ? code : undefined;
+    } catch {
+      return undefined;
     }
   }
 
@@ -6965,6 +6987,26 @@ export class LifecycleManager
   /** Whether a component is registered under `name`, without calling any public method. */
   private isNameRegistered(name: string): boolean {
     return this.components.some((component) => this.nameOf(component) === name);
+  }
+
+  /** The status of the component registered under `name`; the caller has checked it is. */
+  private statusOf(name: string): ComponentStatus {
+    const state = this.componentStates.get(name) || 'registered';
+    const timestamps = this.componentTimestamps.get(name) || {
+      startedAt: null,
+      stoppedAt: null,
+    };
+    const lastError = this.componentErrors.get(name) || null;
+    const stallInfo = this.stalledComponents.get(name) || null;
+
+    return {
+      name,
+      state,
+      startedAt: timestamps.startedAt,
+      stoppedAt: timestamps.stoppedAt,
+      lastError,
+      stallInfo,
+    };
   }
 
   /**
@@ -7882,12 +7924,8 @@ export class LifecycleManager
       // before the manager has promoted it to running. If that happened, do
       // not fall through into the normal success path and resurrect it. Still this
       // attempt's: the check above returned otherwise, and no caller code ran since.
-      if (
-        this.componentStates.get(name) === 'stopped' &&
-        !this.runningComponents.has(name)
-      ) {
+      if (this.hasStoppedUnexpectedlyDuringStart(name)) {
         this.clearUnexpectedStopHandler(component, 'start');
-        this.restoreStallAfterUnexpectedStop(name);
         const error =
           this.componentErrors.get(name) ??
           new Error(`Component "${name}" stopped unexpectedly during startup`);
@@ -8115,15 +8153,10 @@ export class LifecycleManager
       const unexpectedStopError = this.componentErrors.get(name);
       if (
         this.componentStartAttemptTokens.get(name) === startAttemptToken &&
-        this.componentStates.get(name) === 'stopped' &&
-        !this.runningComponents.has(name) &&
+        this.hasStoppedUnexpectedlyDuringStart(name) &&
         (isStartupTimeout ||
           this.componentUnexpectedStopHadError.get(name) === true)
       ) {
-        // A timed-out attempt too: late cleanup runs only if `start()` later fulfills
-        // (and not at all with an abort hook outside a bulk deadline), and it accepts a
-        // forced start's `stalled` state as its own.
-        this.restoreStallAfterUnexpectedStop(name);
         return {
           success: false,
           componentName: name,
@@ -8692,6 +8725,10 @@ export class LifecycleManager
     // Only this attempt's deadline is a timeout. A hook may reject with the same
     // exported error class and component name for an unrelated reason.
     let gracefulTimeoutError: ComponentStopTimeoutError | undefined;
+    // Set once that rejection has been delivered to the race - a macrotask after the
+    // deadline fired (see `rejectAfterTimeoutHook()`), as in the force phase. A stop
+    // rejection before then still settles the race as a graceful failure.
+    let didDeadlineReject = false;
     const outcomeObserver = this.createStopPhaseObserver(name);
 
     let timeoutHandle: NodeJS.Timeout | undefined;
@@ -8737,6 +8774,15 @@ export class LifecycleManager
                 stopPromise,
                 'Component stop failed after deadline fired',
                 {
+                  // Labelled as the result records it: a rejection that beat the
+                  // deferred deadline is the graceful phase's own failure (`error`),
+                  // not one after a timeout.
+                  getReport: () => ({
+                    message: didDeadlineReject
+                      ? 'Component stop failed after deadline fired'
+                      : 'Graceful shutdown threw error: {{error.message}}',
+                    level: 'warn',
+                  }),
                   onResolved: () => {
                     preparation.lateResolution = stopAttemptToken;
                     this.handleLateStopResolution(
@@ -8747,10 +8793,10 @@ export class LifecycleManager
                   },
                 },
               );
-              timeoutHandle = this.rejectAfterTimeoutHook(
-                reject,
-                gracefulTimeoutError,
-              );
+              timeoutHandle = this.rejectAfterTimeoutHook((timeoutError) => {
+                didDeadlineReject = true;
+                reject(timeoutError);
+              }, gracefulTimeoutError);
             }, delayMS);
           },
         );
@@ -9039,6 +9085,10 @@ export class LifecycleManager
     // This attempt's own timeout rejection, so the `catch` can tell it apart from
     // anything `onShutdownForce()` rejects with.
     let forceTimeoutError: Error | undefined;
+    // Set once that rejection has been delivered to the race - a macrotask after the
+    // deadline fired (see `rejectAfterTimeoutHook()`). A hook rejection before then still
+    // settles the race as the hook's own failure, and is reported as one.
+    let didDeadlineReject = false;
     // Set once the force race has settled without a failure: a throw after that is the
     // bookkeeping's, not the hook's, as in the graceful phase.
     let didForceResolve = false;
@@ -9092,7 +9142,12 @@ export class LifecycleManager
                     (forceOutcome === 'pending' && isSuperseded())
                       ? { message: abandonedForceMessage, level: 'warn' }
                       : {
-                          message: 'Force shutdown failed after deadline fired',
+                          // Labelled as the result records it: a rejection that beat
+                          // the deferred deadline is the stall's own failure, not one
+                          // after a timeout.
+                          message: didDeadlineReject
+                            ? 'Force shutdown failed after deadline fired'
+                            : 'Force shutdown failed - stalled: {{error.message}}',
                           level: 'error',
                         },
                   onResolved: () =>
@@ -9103,10 +9158,10 @@ export class LifecycleManager
                     ),
                 },
               );
-              timeoutHandle = this.rejectAfterTimeoutHook(
-                reject,
-                forceTimeoutError,
-              );
+              timeoutHandle = this.rejectAfterTimeoutHook((timeoutError) => {
+                didDeadlineReject = true;
+                reject(timeoutError);
+              }, forceTimeoutError);
             }, delayMS);
           },
         );
@@ -9864,10 +9919,10 @@ export class LifecycleManager
         }
       }
     })();
+    // `component` and `token` are already this attempt's: both callers run after the
+    // attempt recorded them on its settlement.
     if (settlement) {
       settlement.recovery = recovery;
-      settlement.component = component;
-      settlement.token = startAttemptToken;
     }
     // This task floats after the timeout; contain failures in the reporting path.
     observeRejection(recovery, () => {});
@@ -10343,18 +10398,20 @@ export class LifecycleManager
   }
 
   /**
-   * A forced start's unexpected stop ends only the new run: the stop that stalled is still
-   * unfinished. Put `stalled` back, as a failed forced start does, so the stalled refusal,
-   * `retryStalled` and signal detach keep agreeing with the stall record.
+   * Whether the start attempt that owns `name` ended in an unexpected stop reported
+   * while `start()` was still in flight: `stopped`, or `stalled` for a forced start whose
+   * old stop is still unfinished (see {@link handleComponentUnexpectedStop}). Asked only
+   * by an attempt that has already checked it is not superseded, so the state is its own.
    */
-  private restoreStallAfterUnexpectedStop(name: string): void {
-    if (
-      this.stalledComponents.has(name) &&
-      this.componentStates.get(name) === 'stopped' &&
-      !this.runningComponents.has(name)
-    ) {
-      this.componentStates.set(name, 'stalled');
+  private hasStoppedUnexpectedlyDuringStart(name: string): boolean {
+    if (this.runningComponents.has(name)) {
+      return false;
     }
+    const state = this.componentStates.get(name);
+    return (
+      state === 'stopped' ||
+      (state === 'stalled' && this.stalledComponents.has(name))
+    );
   }
 
   private handleComponentUnexpectedStop(
@@ -10398,8 +10455,14 @@ export class LifecycleManager
 
       this.componentUnexpectedStopHadError.set(name, didReportError);
 
+      // A forced start's unexpected stop ends only the new run: the stop that stalled is
+      // still unfinished, so the component is `stalled` again, as a failed forced start
+      // leaves it - and the stalled refusal, `retryStalled` and signal detach keep agreeing
+      // with the stall record. Set here, not once `start()` settles: in between, the
+      // component was reported stopped while its stall stood.
+      const isStillStalled = this.stalledComponents.has(name);
       this.runningComponents.delete(name);
-      this.componentStates.set(name, 'stopped');
+      this.componentStates.set(name, isStillStalled ? 'stalled' : 'stopped');
       this.componentErrors.set(name, failure);
       if (this.isStarting) {
         this.unexpectedStopsDuringStartup.set(name, failure);
@@ -10429,12 +10492,16 @@ export class LifecycleManager
 
       // Model this the same as other terminal transitions: emit the abnormal-cause
       // event first, then the canonical stopped-state event that generic listeners
-      // can rely on regardless of why the component stopped.
+      // can rely on regardless of why the component stopped. A component back to
+      // `stalled` is not stopped, so it gets only the cause: its stall still ends with
+      // `component:stalled-resolved`, as any stall does.
       this.lifecycleEvents.componentUnexpectedStop(name, failure ?? undefined);
-      this.lifecycleEvents.componentStopped(
-        name,
-        this.getComponentStatus(name),
-      );
+      if (!isStillStalled) {
+        this.lifecycleEvents.componentStopped(
+          name,
+          this.getComponentStatus(name),
+        );
+      }
       return true;
     });
   }
@@ -10788,6 +10855,14 @@ export class LifecycleManager
       // begins, so it seeds the cycle - the same as a signal that starts a pass - rather
       // than counting as press one. A pass that has a live cycle keeps it, and this
       // signal counts against it.
+      //
+      // A window armed under this pass that has already lapsed is expired first, so the
+      // cycle it held is stale by the time this signal asks: expiring it only once the
+      // signal was being counted cleared the cycle and dropped the press - neither counted
+      // nor seeding the next cycle.
+      if (this.repeatedShutdownRequestPolicy !== undefined) {
+        this.normalizeRepeatedShutdownRequestStateArmedStatus();
+      }
       const isFirstRequestOfCycle =
         this.repeatedShutdownRequestPolicy !== undefined &&
         this.repeatedShutdownRequestState.firstRequestAt === null;
@@ -10817,8 +10892,9 @@ export class LifecycleManager
 
       // No window to consume: `acceptShutdownPass()` spends it on the request that starts
       // the pass. A window armed by this very pass - from a listener on its completed
-      // event, before the latch comes down - that has already expired is cleared by
-      // this call. Either way the request is answered here: falling through would emit
+      // event, before the latch comes down - that lapsed only after the check above, while
+      // the emit's listeners ran, is cleared by this call, and this request seeds the next
+      // cycle there. Either way the request is answered here: falling through would emit
       // `signal:shutdown` a second time and reseed escalation under a running pass.
       this.handleRepeatedShutdownRequest(method, null);
     });
@@ -11043,7 +11119,8 @@ export class LifecycleManager
    * that is about to start a pass consumes the window *before* calling this - the whole
    * point being that the user code below finds none - and there would otherwise be
    * nothing left here to tell an armed request apart from a fresh one. A window found
-   * already lapsed is expired and the request is not counted.
+   * already lapsed is expired and the request is not counted; on a running pass it seeds
+   * the next cycle instead.
    */
   private handleRepeatedShutdownRequest(
     method: ShutdownMethod,
@@ -11083,6 +11160,15 @@ export class LifecycleManager
     if (consumedArmedUntil === null && state.remainsArmedUntil !== null) {
       if (now >= state.remainsArmedUntil) {
         this.expireRepeatedShutdownRequestState();
+        // The cycle is gone, but this request was still made. On a running pass it is
+        // the first press after a stale cycle, which seeds the next one - unless the
+        // expiry's sinks already began it with a request of their own.
+        if (
+          this.isShuttingDown &&
+          this.repeatedShutdownRequestState.firstRequestAt === null
+        ) {
+          this.seedRepeatedShutdownRequestState(method);
+        }
         return;
       }
 

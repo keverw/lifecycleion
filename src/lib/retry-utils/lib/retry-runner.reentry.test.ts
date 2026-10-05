@@ -76,6 +76,49 @@ test('a forced operation publishes its completion promise before the start event
   expect(invoked).toBe(0);
 });
 
+test.each(['cancel', 'reset'] as const)(
+  'non-waiting starts still report running when an operation-started listener calls %s()',
+  async (stop) => {
+    let invoked = 0;
+    const runner = new RetryRunner(policy, () => {
+      invoked++;
+    });
+    runner.overrideGraceCancelPeriodMS(0);
+    let isStopping = false;
+    const stops: Array<Promise<unknown>> = [];
+    runner.on(OPERATION_STARTED, () => {
+      if (isStopping) {
+        stops.push(stop === 'cancel' ? runner.cancel() : runner.reset());
+      }
+    });
+
+    isStopping = true;
+    expect(await runner.run()).toEqual({ status: 'running' });
+    await Promise.all(stops);
+    expect(invoked).toBe(0);
+
+    isStopping = false;
+    expect(await runner.forceTry()).toEqual({
+      status: 'running',
+      reattached: false,
+    });
+    expect(invoked).toBe(1);
+    await runner.cancel();
+
+    isStopping = true;
+    if (stop === 'cancel') {
+      expect(await runner.resume()).toEqual({ status: 'running' });
+      await Promise.all(stops);
+    }
+    expect(await runner.forceTry()).toEqual({
+      status: 'running',
+      reattached: false,
+    });
+    await Promise.all(stops);
+    expect(invoked).toBe(1);
+  },
+);
+
 test('attempt-handled listeners cannot cancel or force an outcome already reported', async () => {
   const runner = new RetryRunner(policy, (reportResult) => {
     reportResult('success', 'finished');

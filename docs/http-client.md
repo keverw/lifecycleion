@@ -439,7 +439,10 @@ interface HTTPClientError {
 
 Interceptor and response/error observer dispatches snapshot their registrations.
 Adding or removing a callback during a dispatch affects the next dispatch; removing
-an earlier callback cannot skip a later one in the current snapshot.
+an earlier callback cannot skip a later one in the current snapshot. A sub-client's
+dispatch snapshots its parent's registrations and its own together when it begins,
+so a parent callback that registers one on the sub-client does not run it in the
+same dispatch.
 
 Interceptors run **before** an adapter attempt and can mutate the outgoing request (headers, URL, body) or cancel it entirely. They are the right place for auth token injection, URL rewriting, or pre-flight validation.
 

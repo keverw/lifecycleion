@@ -381,7 +381,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
    *
    * Overrides the default grace period of 1000ms
    * Invalid values throw. Infinity and oversized values use the runtime timer ceiling.
-   * Use 0 for immediate force-cancel.
+   * Use 0 to force-cancel on the next timer turn: a zero-length timer is still armed, so an
+   * attempt that acknowledges the abort before it fires (synchronously or in a microtask)
+   * still settles the cancellation as `'canceled'` rather than `'forced'`.
    */
 
   public overrideGraceCancelPeriodMS(value: number): void {
@@ -659,6 +661,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
    * A forced restart keeps an unresolved completion promise for the callers already
    * waiting on it. Continuing an operation (forcing a replacement while it is running or
    * stopping) also keeps its start time and announces no second `operation-started`.
+   *
+   * A non-waiting call reports the dispatch, not the outcome, so it returns the
+   * running-shaped result even when the listener has already stopped the operation: its
+   * caller reads `canceled` from `waitForCompletion()` like any other outcome, and
+   * `forceTry()` always carries `reattached`.
    */
   private startOperation(
     operationType: OperationStartedType,
@@ -668,6 +675,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     const wasForced = operationType === 'force';
     const operationResolver = this.beginOperation(wasForced);
     this.currentState.runnerState = 'running';
+    let wasStoppedByListener = false;
 
     if (!isContinuingOperation) {
       // Start timing
@@ -675,12 +683,12 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       this.currentState.finalTimeTakenMS = null;
 
       this.emit(OPERATION_STARTED, { operationType });
-      if (this.currentState.runnerState !== 'running') {
-        return operationResolver.promise;
-      }
+      wasStoppedByListener = this.currentState.runnerState !== 'running';
     }
 
-    void this.attemptOperation(wasForced);
+    if (!wasStoppedByListener) {
+      void this.attemptOperation(wasForced);
+    }
 
     if (shouldWaitForCompletion) {
       return operationResolver.promise;
@@ -1260,14 +1268,20 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         };
       } else {
         if (shouldRetryQuery.shouldRetry) {
-          if (shouldRetryQuery.delayMS > 0) {
-            // Bounded again here, not only in `RetryPolicy`. The delay can also arrive
-            // from a caller-built policy object or an exported delay calculator given its
-            // own bounds, and a `setTimeout` past `MAX_TIMER_MS` fires on the next tick -
-            // so an unbounded number reaching this line turns "wait a month" into a busy
-            // retry loop. The same clamped value is recorded, so the remaining-time
-            // bookkeeping describes the timer that actually exists.
-            const delayMS = clampTimerDelayMS(shouldRetryQuery.delayMS);
+          // Written as `!(delayMS <= 0)` so a `NaN` takes the timer path: the synchronous
+          // branch below re-enters `attemptOperation` on this stack, and a delay that is
+          // not a number must never be read as "retry now".
+          if (!(shouldRetryQuery.delayMS <= 0)) {
+            // Bounded again here, not only in `RetryPolicy`. `this.policy` is always a
+            // `RetryPolicy` this runner built, whose delays are already finite and capped,
+            // so this is a backstop: a `setTimeout` past `MAX_TIMER_MS` fires on the next
+            // tick, turning "wait a month" into a busy retry loop. `clampTimerDelayMS` does
+            // not repair `NaN`, so that case takes `RetryPolicy`'s 1ms minimum. The same
+            // value is recorded, so the remaining-time bookkeeping describes the timer
+            // that actually exists.
+            const delayMS = Number.isNaN(shouldRetryQuery.delayMS)
+              ? 1
+              : clampTimerDelayMS(shouldRetryQuery.delayMS);
 
             this.currentState.retryTimeoutStartTime = Date.now();
             this.currentState.retryTimeoutDelayMS = delayMS;

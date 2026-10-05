@@ -76,7 +76,7 @@ Retries a fixed number of times with a fixed delay between attempts.
 ```typescript
 {
   strategy: 'fixed';
-  maxRetryAttempts?: number; // Max retries allowed (excludes initial attempt). Default: 10, Min: 1, floored to integer
+  maxRetryAttempts?: number; // Max retries allowed (excludes initial attempt). Default: 10, Min: 1 (0 still allows one retry), floored to integer; NaN or non-number throws
   delayMS?: number | null; // Delay between retries. Default (omitted or null): 1000ms. 0 becomes 1ms; Infinity uses the timer ceiling; negative, NaN or non-number throws
 }
 ```
@@ -88,8 +88,8 @@ Uses exponential backoff with jitter to calculate delays between retry attempts.
 ```typescript
 {
   strategy: 'exponential';
-  maxRetryAttempts?: number; // Max retries allowed (excludes initial attempt). Default: 10, Min: 1, floored to integer
-  factor?: number; // Multiplier for exponential growth. Default: 1.5, Min: 1
+  maxRetryAttempts?: number; // Max retries allowed (excludes initial attempt). Default: 10, Min: 1 (0 still allows one retry), floored to integer; NaN or non-number throws
+  factor?: number; // Multiplier for exponential growth. Default: 1.5, Min: 1; NaN or non-number throws
   minTimeoutMS?: number | null; // Shortest delay between retries. Default (omitted or null): 1000ms. 0 becomes 1ms; Infinity uses the timer ceiling; negative, NaN or non-number throws
   maxTimeoutMS?: number | null; // Longest delay between retries. Default (omitted or null): 30000ms. 0 becomes 1ms; Infinity uses the timer ceiling; negative, NaN or non-number throws
   dispersion?: number; // Randomness added to delays (0 to 1 inclusive, e.g. 0.1 = 10%). Default: 0.1
@@ -109,12 +109,13 @@ finalDelay = clamp(delay + randomOffset, minTimeoutMS, maxTimeoutMS);
 > non-number `delayMS`, `minTimeoutMS`, or `maxTimeoutMS` values throw `TypeError` at
 > construction, and negative ones throw `RangeError` - they are not clamped. Zero keeps the
 > existing 1 ms minimum; positive `Infinity` selects the timer ceiling.
-> This strict rule applies to the three duration fields only. The count,
-> multiplier, and jitter fraction retain their earlier normalization:
-> `maxRetryAttempts` accepts `Infinity` and defaults `NaN`; `factor` accepts
-> `Infinity` and defaults `NaN`; non-finite `dispersion` uses its default.
-> `maxRetryAttempts` is additionally floored to an integer after clamping. If
-> `maxTimeoutMS < minTimeoutMS`, the values are swapped.
+> `maxRetryAttempts` and `factor` also throw `TypeError` for an explicit `NaN` or
+> non-number value (no coercion: `'3'` throws too); omitted or `undefined` uses the
+> default. Past that check each is clamped to a minimum of `1` and accepts `Infinity`, so
+> `maxRetryAttempts: 0` (or a negative count) still allows one retry - there is no
+> "no retries" value; skip the retry utilities for that. `maxRetryAttempts` is
+> additionally floored to an integer after clamping. Non-finite `dispersion` uses its
+> default. If `maxTimeoutMS < minTimeoutMS`, the values are swapped.
 
 > **Delays are capped at 2,147,483,647 ms (about 24.8 days).** `delayMS`, `minTimeoutMS` and `maxTimeoutMS` are each bounded there, and so is every delay computed from them. `setTimeout` keeps its delay in a signed 32-bit integer and reads anything larger as `1` ms, so an uncapped `delayMS: 3e9` would read as "wait 34 days" and retry roughly every millisecond instead. `maxRetryAttempts` is not a duration and `Infinity` remains a supported value there.
 
@@ -335,7 +336,7 @@ Starts the operation with retries. Defaults to `shouldWaitForCompletion = false`
 
 Returns `Promise<RunResult<T>>`:
 
-- If `shouldWaitForCompletion` is `false` (default): resolves immediately with `{ status: 'running' }`.
+- If `shouldWaitForCompletion` is `false` (default): resolves immediately with `{ status: 'running' }`. This reports that the operation was started, not how it ends: an `operation-started` listener that calls `cancel()` or `reset()` still leaves this result `{ status: 'running' }`, and `waitForCompletion()` reports `{ status: 'canceled' }`. The same holds for `resume()` and `forceTry()` (which still includes `reattached: false`).
 - If `shouldWaitForCompletion` is `true`: resolves when the operation finishes with one of:
   - `{ status: 'attempt_success', data?: T }` - succeeded
   - `{ status: 'attempts_exhausted', error? }` - all retries failed (`error` is from the final attempt)

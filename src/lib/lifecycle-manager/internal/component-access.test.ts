@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import { Logger } from '../../logger';
 import { BaseComponent } from '../base-component';
 import { LifecycleManagerEvents } from '../events';
@@ -10,6 +10,8 @@ import {
   sendMessageInternal,
 } from './component-messaging';
 import { isOperationOptionRefusal } from './operation-policy';
+import { isComponentEnterable } from './component-dispatch';
+import { claimReports } from '../test-helpers';
 import {
   checkAllHealthOperation,
   checkComponentHealthOperation,
@@ -755,4 +757,155 @@ test('a target becoming unavailable in the started listener is refused the same 
     'component:health-check-started',
     'component:health-check-failed',
   ]);
+});
+
+test('checkAllHealth leaves out a component under late-start cleanup, as broadcast selection does', async () => {
+  const state = fixture();
+  let calls = 0;
+  for (const name of ['healthy', 'late']) {
+    Object.defineProperty(state.add(name), 'healthCheck', {
+      value: () => {
+        calls++;
+        return true;
+      },
+    });
+  }
+  // Marked running only so that it can be stopped: not a running member the report is
+  // about, so it must not answer `stopped` and flip the aggregate to degraded.
+  state.cleanupPending.add('late');
+
+  const report = await checkAllHealthOperation(state.context);
+
+  expect(report.components.map(({ name }) => name)).toEqual(['healthy']);
+  expect(report).toMatchObject({ healthy: true, code: 'ok' });
+  expect(calls).toBe(1);
+  expect(state.events).toEqual([
+    'component:health-check-started',
+    'component:health-check-completed',
+  ]);
+});
+
+test('message availability evaluates the hook-entry block once per read', async () => {
+  const { context, add } = fixture();
+  add('target');
+  let blockReads = 0;
+  const counted: ComponentAccessContext = {
+    ...context,
+    isRawStartPending: () => {
+      blockReads++;
+      return false;
+    },
+  };
+
+  // No handler: the initial availability read and the recheck after the handler read.
+  const result = await sendMessageInternal(counted, 'target', 'hi', null);
+
+  expect(result.code).toBe('no_handler');
+  expect(blockReads).toBe(2);
+});
+
+test('isComponentEnterable answers from an explicitly passed undefined state', () => {
+  const { context, add, componentStates } = fixture();
+  add('target');
+  let stateReads = 0;
+  const originalGet = componentStates.get.bind(componentStates);
+  spyOn(componentStates, 'get').mockImplementation((name) => {
+    stateReads++;
+    return originalGet(name);
+  });
+
+  // The caller's own read found no state: that is the answer, not a cue to read again.
+  expect(isComponentEnterable(context, 'target', undefined)).toBe(false);
+  expect(stateReads).toBe(0);
+  expect(isComponentEnterable(context, 'target', 'running')).toBe(true);
+});
+
+test.each([
+  [
+    'an invalid signalTimeoutMS',
+    (component: BaseComponent) => {
+      Object.defineProperty(component, 'signalTimeoutMS', { value: NaN });
+      return () => {};
+    },
+    'invalid_options',
+  ],
+  [
+    'a throwing handler getter',
+    () => {
+      throw new Error('getter exploded');
+    },
+    'operation_crashed',
+  ],
+] as const)(
+  'a signal whose configuration read fails emits paired started/failed events (%s)',
+  async (_label, pick, code) => {
+    const { context, add } = fixture();
+    add('target');
+    const events: string[] = [];
+    let failedWith: Error | undefined;
+    const { reports, release } = claimReports();
+    let result;
+    try {
+      result = await runSignalBroadcast(context, {
+        signal: 'reload',
+        pickHandler: pick,
+        startupLog: 'starting',
+        timeoutLog: 'timeout',
+        errorLog: 'failed',
+        emitStarted: (name) => {
+          events.push(`started:${name}`);
+        },
+        emitCompleted: (name) => {
+          events.push(`completed:${name}`);
+        },
+        emitFailed: (name, error) => {
+          events.push(`failed:${name}`);
+          failedWith = error;
+        },
+      });
+    } finally {
+      release();
+    }
+
+    expect(result.results).toEqual([
+      {
+        name: 'target',
+        called: false,
+        error: expect.any(Error),
+        timedOut: false,
+        code,
+      },
+    ]);
+    // As a health check whose configuration read fails: `started` first, so a listener
+    // counting signals in flight stays paired.
+    expect(events).toEqual(['started:target', 'failed:target']);
+    expect(failedWith).toBe(result.results[0]?.error ?? undefined);
+    expect(reports).toHaveLength(code === 'operation_crashed' ? 1 : 0);
+  },
+);
+
+test('a getValue getter that throws is logged, as a message handler getter is', () => {
+  const { context, add } = fixture();
+  const error = new Error('getter exploded');
+  Object.defineProperty(add('provider'), 'getValue', {
+    get() {
+      throw error;
+    },
+  });
+  spyOn(context.logger, 'entity').mockReturnValue(context.logger);
+  const logged = spyOn(context.logger, 'error').mockImplementation(() => {});
+  const { reports, release } = claimReports();
+  let result;
+  try {
+    result = getValueInternal(context, 'provider', 'key', 'caller');
+  } finally {
+    release();
+  }
+
+  expect(result).toMatchObject({ code: 'operation_crashed', error });
+  expect(reports).toHaveLength(1);
+  expect(logged).toHaveBeenCalledWith(
+    'getValue handler failed: {{error.message}}',
+    { params: { error, key: 'key', from: 'caller' } },
+  );
 });

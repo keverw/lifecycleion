@@ -289,16 +289,20 @@ test('a signal reseeding a cleared cycle mid-pass is not logged as a restart', a
 
   const shutdown = manager.stopAllComponents();
   // The pass's cycle is cleared under it: a lapsed armed window, expired by the first
-  // signal. The next one finds no cycle on an ordinary pass and seeds one.
+  // signal. That signal then finds no cycle on an ordinary pass and seeds one, and the
+  // next counts against it.
   (
     manager as unknown as {
       repeatedShutdownRequestState: { remainsArmedUntil: number };
     }
   ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
   sendSignal(manager, 'SIGINT');
-  expect(manager.getShutdownEscalationStatus().firstMethod).toBeNull();
+  expect(manager.getShutdownEscalationStatus().firstMethod).toBe('SIGINT');
   sendSignal(manager, 'SIGTERM');
-  expect(manager.getShutdownEscalationStatus().firstMethod).toBe('SIGTERM');
+  expect(manager.getShutdownEscalationStatus()).toMatchObject({
+    firstMethod: 'SIGINT',
+    requestCount: 1,
+  });
   stop.resolve();
   await shutdown;
 

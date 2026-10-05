@@ -5536,6 +5536,71 @@ describe('HTTPClient — sub-clients', () => {
     expect(order).toEqual(['root', 'sub']);
   });
 
+  test('a sub-client callback registered by a parent callback mid-dispatch waits for the next dispatch', async () => {
+    let isFailing = false;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: () =>
+        isFailing
+          ? Promise.reject(new Error('transport down'))
+          : Promise.resolve({ status: 200, headers: {}, body: null }),
+    };
+    const root = new HTTPClient({ adapter });
+    const sub = root.createSubClient();
+    const calls: string[] = [];
+    const registered = new Set<string>();
+
+    // Each parent callback yields before registering on the sub-client, so a
+    // sub-client list copied only once the parent chain finished would include it.
+    root.addRequestInterceptor(async (request) => {
+      if (!registered.has('interceptor')) {
+        registered.add('interceptor');
+        await Promise.resolve();
+        sub.addRequestInterceptor((subRequest) => {
+          calls.push('interceptor');
+          return subRequest;
+        });
+      }
+      return request;
+    });
+    root.addResponseObserver(async () => {
+      if (!registered.has('response')) {
+        registered.add('response');
+        await Promise.resolve();
+        sub.addResponseObserver(() => {
+          calls.push('response');
+        });
+      }
+    });
+    root.addErrorObserver(async () => {
+      if (!registered.has('error')) {
+        registered.add('error');
+        await Promise.resolve();
+        sub.addErrorObserver(() => {
+          calls.push('error');
+        });
+      }
+    });
+
+    await sub.get('https://example.com/').send();
+    expect(calls).toEqual([]);
+
+    isFailing = true;
+    await sub.get('https://example.com/').send();
+    // The interceptor applies from this dispatch on; the error observer was
+    // registered by this dispatch's own parent error observer.
+    expect(calls).toEqual(['interceptor']);
+
+    calls.length = 0;
+    await sub.get('https://example.com/').send();
+    expect(calls).toEqual(['interceptor', 'error']);
+
+    calls.length = 0;
+    isFailing = false;
+    await sub.get('https://example.com/').send();
+    expect(calls).toEqual(['interceptor', 'response']);
+  });
+
   test('sub-client does not expose createSubClient()', () => {
     const root = makeClient();
     const sub = root.createSubClient();
