@@ -4,6 +4,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ArraySink, Logger } from './index';
 
+// The codes `exit-process` publishes, so a test can check they agree with
+// `logger.exitCode` and the `process.exit()` call.
+function recordExitProcess(logger: Logger): number[] {
+  const processed: number[] = [];
+  logger.on<{ eventType: string; code: number }>(
+    'logger',
+    ({ eventType, code }) => {
+      if (eventType === 'exit-process') {
+        processed.push(code);
+      }
+    },
+  );
+  return processed;
+}
+
 test.each([1.5, 1e20, -1, 256, 2 ** 40])(
   'invalid real exit code %s is normalized before notifications',
   async (requestedCode) => {
@@ -204,7 +219,16 @@ test.each([false, true])(
       logger.exit(300);
       logger.exit(301);
       expect(codes).toEqual(hasEarlierValidExit ? [0, 1, 1] : [1, 1]);
-      expect(output).toHaveBeenCalledTimes(1);
+      // The normalized code replaces a pending success, and says what it became; the
+      // repeat of the pending 1 changes nothing and is not reported.
+      expect(output.mock.calls.map((call) => String(call[0]))).toEqual(
+        hasEarlierValidExit
+          ? [
+              'Logger exit code 300 is invalid; treating it as code 1',
+              'Logger exit(300) replaces the pending exit code 0 with 1',
+            ]
+          : ['Logger exit code 300 is invalid; treating it as code 1'],
+      );
     } finally {
       output.mockRestore();
     }
@@ -431,25 +455,34 @@ test('a simulated exit with beforeExit ignores an exit requested by its own exit
 });
 
 test('an exit-called listener that exits again does not recurse', async () => {
-  const logger = new Logger({ sinks: [], callProcessExit: false });
-  const called: number[] = [];
-  logger.on<{ eventType: string; code: number }>(
-    'logger',
-    ({ eventType, code }) => {
-      if (eventType === 'exit-called') {
-        called.push(code);
-        // Unconditional: each nested exit emitted exit-called again until the stack
-        // overflowed.
-        logger.exit(2);
-      }
-    },
-  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    const called: number[] = [];
+    logger.on<{ eventType: string; code: number }>(
+      'logger',
+      ({ eventType, code }) => {
+        if (eventType === 'exit-called') {
+          called.push(code);
+          // Unconditional: each nested exit emitted exit-called again until the stack
+          // overflowed.
+          logger.exit(2);
+        }
+      },
+    );
 
-  logger.exit(1);
-  await logger.close();
+    logger.exit(1);
+    await logger.close();
 
-  expect(called).toEqual([1]);
-  expect(logger.exitCode).toBe(1);
+    // Absorbed, but its failure code still replaces the pending one.
+    expect(called).toEqual([1]);
+    expect(logger.exitCode).toBe(2);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit(2) replaces the pending exit code 1',
+    ]);
+  } finally {
+    output.mockRestore();
+  }
 });
 
 test('a failure exit ignored behind a scheduled success exit is reported once', async () => {
@@ -465,11 +498,12 @@ test('a failure exit ignored behind a scheduled success exit is reported once', 
     await logger.close();
     await Promise.resolve();
 
-    // The first exit owns the code; the failure request is not lost silently.
+    // The first exit committed its code before the failures arrived, so they cannot
+    // replace it; the failure is not lost silently either.
     expect(exit.mock.calls).toEqual([[0]]);
     expect(output).toHaveBeenCalledTimes(1);
     expect(String(output.mock.calls[0]?.[0])).toContain(
-      'Logger exit(1) ignored: an exit with code 0 is already in progress',
+      'Logger exit(1) ignored: an exit with code 0 is already processing',
     );
   } finally {
     output.mockRestore();
@@ -477,7 +511,7 @@ test('a failure exit ignored behind a scheduled success exit is reported once', 
   }
 });
 
-test('a failure exit whose beforeExit loses the race to a success exit is reported', async () => {
+test('a success exit that proceeds first does not downgrade a pending failure', async () => {
   const exit = spyOn(process, 'exit').mockImplementation(
     () => undefined as never,
   );
@@ -493,41 +527,53 @@ test('a failure exit whose beforeExit loses the race to a success exit is report
         return { action: 'proceed' };
       },
     });
-    // Neither is scheduled when the other is requested, so only processExit sees it.
+    const processed = recordExitProcess(logger);
+    // Neither has proceeded when the other is requested. The success proceeds first,
+    // but commits the pending failure rather than its own code.
     logger.exit(1);
     logger.exit(0);
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    expect(exit.mock.calls).toEqual([[0]]);
-    expect(output.mock.calls.flat().join('\n')).toContain(
-      'Logger exit(1) ignored',
-    );
+    expect(processed).toEqual([1]);
+    expect(logger.exitCode).toBe(1);
+    expect(exit.mock.calls).toEqual([[1]]);
+    expect(output).not.toHaveBeenCalled();
   } finally {
     output.mockRestore();
     exit.mockRestore();
   }
 });
 
-test('an exit-called listener that requests a failure during a success exit is reported', async () => {
+test('an exit-called listener that requests a failure replaces a pending success', async () => {
   const exit = spyOn(process, 'exit').mockImplementation(
     () => undefined as never,
   );
   const output = spyOn(console, 'error').mockImplementation(() => {});
   try {
     const logger = new Logger({ sinks: [], callProcessExit: true });
-    logger.on<{ eventType: string }>('logger', ({ eventType }) => {
-      if (eventType === 'exit-called') {
-        logger.exit(1);
-      }
-    });
+    const called: number[] = [];
+    logger.on<{ eventType: string; code: number }>(
+      'logger',
+      ({ eventType, code }) => {
+        if (eventType === 'exit-called') {
+          called.push(code);
+          logger.exit(1);
+        }
+      },
+    );
+    const processed = recordExitProcess(logger);
     logger.exit(0);
     await logger.close();
     await Promise.resolve();
 
-    expect(exit.mock.calls).toEqual([[0]]);
-    expect(output.mock.calls.flat().join('\n')).toContain(
-      'Logger exit(1) ignored',
-    );
+    // Absorbed by the exit in flight - no second exit-called - but its code counts.
+    expect(called).toEqual([0]);
+    expect(processed).toEqual([1]);
+    expect(logger.exitCode).toBe(1);
+    expect(exit.mock.calls).toEqual([[1]]);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit(1) replaces the pending exit code 0',
+    ]);
   } finally {
     output.mockRestore();
     exit.mockRestore();
@@ -616,11 +662,10 @@ test('an exit-called listener during a repeat exit is judged against the schedul
   }
 });
 
-test('a failure exit beforeExit waits out behind a pending success exit is reported', async () => {
+test('a failure exit beforeExit waits out behind a pending success exit replaces its code', async () => {
   // SIGTERM's `exit(0)` is still stopping components when one fails and logs
-  // `exitCode: 1`; `LifecycleManager` answers 'wait' for it. Nothing had scheduled when
-  // the failure arrived, so the check in `exit()` never saw an owner, and the process
-  // exited 0 with nothing on stderr.
+  // `exitCode: 1`; `LifecycleManager` answers 'wait' for it. Under first-wins the
+  // process exited 0, so a failed shutdown read as a clean one.
   const exit = spyOn(process, 'exit').mockImplementation(
     () => undefined as never,
   );
@@ -640,54 +685,23 @@ test('a failure exit beforeExit waits out behind a pending success exit is repor
         return { action: 'proceed' };
       },
     });
+    const processed = recordExitProcess(logger);
     logger.exit(0);
     await new Promise((resolve) => setTimeout(resolve, 30));
 
-    // The owning exit keeps its code, as documented, but the failure is not silent.
-    expect(exit.mock.calls).toEqual([[0]]);
-    expect(output).toHaveBeenCalledTimes(1);
-    expect(String(output.mock.calls[0]?.[0])).toContain(
-      'Logger exit(1) ignored: an exit with code 0 is already in progress',
-    );
+    expect(processed).toEqual([1]);
+    expect(logger.exitCode).toBe(1);
+    expect(exit.mock.calls).toEqual([[1]]);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit(1) replaces the pending exit code 0',
+    ]);
   } finally {
     output.mockRestore();
     exit.mockRestore();
   }
 });
 
-test('a failure exit beforeExit waits out after a success exit scheduled is reported', async () => {
-  const exit = spyOn(process, 'exit').mockImplementation(
-    () => undefined as never,
-  );
-  const output = spyOn(console, 'error').mockImplementation(() => {});
-  try {
-    const logger = new Logger({
-      sinks: [],
-      callProcessExit: true,
-      beforeExitCallback: async (code) => {
-        if (code === 0) {
-          return { action: 'proceed' };
-        }
-        // Answers only once the success exit has scheduled.
-        await new Promise((resolve) => setTimeout(resolve, 5));
-        return { action: 'wait' };
-      },
-    });
-    logger.exit(0);
-    logger.exit(1);
-    await new Promise((resolve) => setTimeout(resolve, 20));
-
-    expect(exit.mock.calls).toEqual([[0]]);
-    expect(output.mock.calls.flat().join('\n')).toContain(
-      'Logger exit(1) ignored',
-    );
-  } finally {
-    output.mockRestore();
-    exit.mockRestore();
-  }
-});
-
-test('a success exit beforeExit waits out is not reported, nor is a waited failure that owns the process', async () => {
+test('an invalid exit during a pending success exit replaces it with 1', async () => {
   const exit = spyOn(process, 'exit').mockImplementation(
     () => undefined as never,
   );
@@ -704,24 +718,144 @@ test('a success exit beforeExit waits out is not reported, nor is a waited failu
         return { action: 'proceed' };
       },
     });
-    logger.exit(2);
+    const processed = recordExitProcess(logger);
     logger.exit(0);
-    logger.exit(1);
+    logger.exit(300);
     await new Promise((resolve) => setTimeout(resolve, 20));
 
-    // The process fails either way, so nothing a supervisor reads was dropped.
-    expect(exit.mock.calls).toEqual([[2]]);
-    expect(output).not.toHaveBeenCalled();
+    expect(processed).toEqual([1]);
+    expect(logger.exitCode).toBe(1);
+    expect(exit.mock.calls).toEqual([[1]]);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit code 300 is invalid; treating it as code 1',
+      'Logger exit(300) replaces the pending exit code 0 with 1',
+    ]);
   } finally {
     output.mockRestore();
     exit.mockRestore();
   }
 });
 
-test('a simulated exit does not carry a waited failure into a later exit', async () => {
+test('a failure exit requested after exit-process fired is ignored and reported', async () => {
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    let releaseClose = (): void => {};
+    const closeGate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    const logger = new Logger({
+      // Held open, so `process.exit()` is still to come when the failure arrives.
+      sinks: [{ write: () => {}, close: () => closeGate }],
+      callProcessExit: true,
+      beforeExitCallback: async (_code, isFirstExit) => {
+        if (!isFirstExit) {
+          return { action: 'wait' };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return { action: 'proceed' };
+      },
+    });
+    const processed = recordExitProcess(logger);
+    logger.exit(0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(processed).toEqual([0]);
+    expect(exit).not.toHaveBeenCalled();
+
+    // The code is final once published: the failure cannot change it.
+    logger.exit(1);
+    releaseClose();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(processed).toEqual([0]);
+    expect(logger.exitCode).toBe(0);
+    expect(exit.mock.calls).toEqual([[0]]);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit(1) ignored: an exit with code 0 is already processing',
+    ]);
+  } finally {
+    output.mockRestore();
+    exit.mockRestore();
+  }
+});
+
+test('a failure exit requested by an exit-process listener is not applied', async () => {
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({ sinks: [], callProcessExit: true });
+    const processed = recordExitProcess(logger);
+    logger.on<{ eventType: string }>('logger', ({ eventType }) => {
+      if (eventType === 'exit-process') {
+        logger.exit(1);
+      }
+    });
+    logger.exit(0);
+    await logger.close();
+    await Promise.resolve();
+
+    expect(processed).toEqual([0]);
+    expect(logger.exitCode).toBe(0);
+    expect(exit.mock.calls).toEqual([[0]]);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit(1) ignored: an exit with code 0 is already processing',
+    ]);
+  } finally {
+    output.mockRestore();
+    exit.mockRestore();
+  }
+});
+
+test('the last failure exit replaces an earlier one, and a success does not downgrade it', async () => {
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({
+      sinks: [],
+      callProcessExit: true,
+      beforeExitCallback: async (_code, isFirstExit) => {
+        if (!isFirstExit) {
+          return { action: 'wait' };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return { action: 'proceed' };
+      },
+    });
+    const processed = recordExitProcess(logger);
+    logger.exit(2);
+    logger.exit(0);
+    logger.exit(1);
+    logger.exit(1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(processed).toEqual([1]);
+    expect(logger.exitCode).toBe(1);
+    expect(exit.mock.calls).toEqual([[1]]);
+    // The success and the repeat of the pending code change nothing, so only the
+    // replacement is reported.
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit(1) replaces the pending exit code 2',
+    ]);
+  } finally {
+    output.mockRestore();
+    exit.mockRestore();
+  }
+});
+
+test('a pending failure applies to an exit that turns out simulated, and not to the next exit', async () => {
   const output = spyOn(console, 'error').mockImplementation(() => {});
   const actualExit = Object.getOwnPropertyDescriptor(process, 'exit');
   try {
+    const calls: number[] = [];
+    const stub = ((code?: number) => {
+      calls.push(code ?? 0);
+    }) as typeof process.exit;
     let shouldWait = true;
     const logger = new Logger({
       sinks: [],
@@ -729,29 +863,170 @@ test('a simulated exit does not carry a waited failure into a later exit', async
       beforeExitCallback: () =>
         shouldWait ? { action: 'wait' } : { action: 'proceed' },
     });
-    // Simulated: no callable process.exit, so the waited failure must not linger.
-    (process as { exit?: unknown }).exit = undefined;
+    const processed = recordExitProcess(logger);
+    // A real failure request, left pending.
+    process.exit = stub;
     logger.exit(1);
     await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Simulated from here: no callable process.exit. The success does not downgrade the
+    // pending failure, and the exit that proceeds commits it.
+    (process as { exit?: unknown }).exit = undefined;
     shouldWait = false;
     logger.exit(0);
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(logger.exitCode).toBe(0);
+    expect(processed).toEqual([1]);
+    expect(logger.exitCode).toBe(1);
 
-    const calls: number[] = [];
-    process.exit = ((code?: number) => {
-      calls.push(code ?? 0);
-    }) as typeof process.exit;
+    // The commit used the pending code up: the next exit starts from its own.
+    process.exit = stub;
     logger.exit(0);
     await logger.close();
     await new Promise((resolve) => setTimeout(resolve, 0));
 
+    expect(processed).toEqual([1, 0]);
+    expect(logger.exitCode).toBe(0);
     expect(calls).toEqual([0]);
     expect(output).not.toHaveBeenCalled();
   } finally {
     if (actualExit !== undefined) {
       Object.defineProperty(process, 'exit', actualExit);
     }
+    output.mockRestore();
+  }
+});
+
+// A simulated logger whose first exit runs a short shutdown and proceeds, answering
+// 'wait' for every exit requested while it runs - the shape `LifecycleManager` gives it.
+function simulatedShutdownLogger(
+  duringShutdown: (logger: Logger) => void = () => {},
+): Logger {
+  const logger: Logger = new Logger({
+    sinks: [],
+    callProcessExit: false,
+    beforeExitCallback: async (_code, isFirstExit) => {
+      if (!isFirstExit) {
+        return { action: 'wait' };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      duringShutdown(logger);
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      return { action: 'proceed' };
+    },
+  });
+  return logger;
+}
+
+test('a simulated failure exit beforeExit waits out behind a pending success exit replaces its code', async () => {
+  // The SIGTERM shape under `callProcessExit: false`: it exited 0 while the real exit
+  // exited 1, so a test of the shutdown passed where production failed.
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = simulatedShutdownLogger((shuttingDown) => {
+      shuttingDown.error('component failed to stop', { exitCode: 1 });
+    });
+    const processed = recordExitProcess(logger);
+    logger.exit(0);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(processed).toEqual([1]);
+    expect(logger.didExit).toBe(true);
+    expect(logger.exitCode).toBe(1);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit(1) replaces the pending exit code 0',
+    ]);
+  } finally {
+    output.mockRestore();
+  }
+});
+
+test.each<[string, number[], number, string[]]>([
+  [
+    'a later failure replaces an earlier one',
+    [2, 1],
+    1,
+    ['Logger exit(1) replaces the pending exit code 2'],
+  ],
+  ['a success does not downgrade a failure', [1, 0], 1, []],
+  [
+    // Not normalized when simulated, and not 0, so a failure; a repeat is no change.
+    'NaN counts as a failure',
+    [0, NaN, 0, NaN],
+    NaN,
+    ['Logger exit(NaN) replaces the pending exit code 0'],
+  ],
+  [
+    'a code a real exit would normalize is kept as requested',
+    [0, 300],
+    300,
+    ['Logger exit(300) replaces the pending exit code 0'],
+  ],
+])(
+  'overlapping simulated exits: %s',
+  async (_name, requests, settledCode, lines) => {
+    const output = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const logger = simulatedShutdownLogger();
+      const processed = recordExitProcess(logger);
+      for (const code of requests) {
+        logger.exit(code);
+      }
+      await new Promise((resolve) => setTimeout(resolve, 30));
+
+      expect(processed).toEqual([settledCode]);
+      expect(logger.exitCode).toEqual(settledCode);
+      expect(output.mock.calls.map((call) => String(call[0]))).toEqual(lines);
+    } finally {
+      output.mockRestore();
+    }
+  },
+);
+
+test('overlapping simulated exits that both proceed publish the settled code once', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({
+      sinks: [],
+      callProcessExit: false,
+      beforeExitCallback: async (code) => {
+        if (code !== 0) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        return { action: 'proceed' };
+      },
+    });
+    const processed = recordExitProcess(logger);
+    // As with a real exit, the success proceeds first and commits the pending failure;
+    // the failure, proceeding later, was already folded into it.
+    logger.exit(1);
+    logger.exit(0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(processed).toEqual([1]);
+    expect(logger.exitCode).toBe(1);
+    expect(output).not.toHaveBeenCalled();
+  } finally {
+    output.mockRestore();
+  }
+});
+
+test('a simulated exit requested after an earlier one completed starts fresh', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    const processed = recordExitProcess(logger);
+    logger.exit(0);
+    // Each later exit publishes its own code: the process is still running, so the
+    // failure is not ignored behind the earlier success, and the success after it does
+    // not inherit it.
+    logger.exit(1);
+    logger.exit(0);
+    await logger.close();
+
+    expect(processed).toEqual([0, 1, 0]);
+    expect(logger.exitCode).toBe(0);
+    expect(output).not.toHaveBeenCalled();
+  } finally {
     output.mockRestore();
   }
 });
@@ -772,7 +1047,7 @@ test('an invalid exit absorbed by a scheduled exit does not claim to exit with 1
     // Said "exiting with code 1" while the process went on to exit 0.
     expect(lines).toEqual([
       'Logger exit code 300 is invalid; treating it as code 1',
-      'Logger exit(300) ignored: an exit with code 0 is already in progress',
+      'Logger exit(300) ignored: an exit with code 0 is already processing',
     ]);
     expect(exit.mock.calls).toEqual([[0]]);
   } finally {

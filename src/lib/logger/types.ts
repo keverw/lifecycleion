@@ -107,10 +107,13 @@ export interface LogEntry {
   error?: unknown; // Original error object from errorObject() calls
   /**
    * Exit code this log requested, normalized as `exit()` normalizes it: an invalid code
-   * for a real exit reads 1. This is the request, not the outcome. If another exit already
-   * owns the process, or the request is absorbed (an `exit-called` listener's exit, or one
-   * `beforeExitCallback` answers `{ action: 'wait' }` for), the process exits with the
-   * owning exit's code; read `logger.exitCode` or the `exit-process` event for that.
+   * for a real exit reads 1. This is the request, not the outcome. Overlapping exits,
+   * real or simulated, settle on one code while an exit is pending: the last non-zero
+   * request wins, a request with code 0 never downgrades a pending failure, and nothing
+   * changes the code once `exit-process` has fired. That holds for an absorbed request
+   * too (an `exit-called` listener's exit, or one `beforeExitCallback` answers
+   * `{ action: 'wait' }` for). Read `logger.exitCode` or the `exit-process` event for the
+   * code the exit uses.
    */
   exitCode?: number;
   tags?: string[]; // Optional tags for categorizing/filtering logs (e.g., ['auth', 'security'])
@@ -167,7 +170,9 @@ export interface BeforeExitResult {
   /**
    * Whether to proceed with the exit
    * - 'proceed': Continue with process exit
-   * - 'wait': Shutdown is already in progress, wait for it to complete
+   * - 'wait': Shutdown is already in progress, wait for it to complete. The request's
+   *   code still counts: a non-zero code replaces the pending exit's code until that
+   *   exit publishes `exit-process`.
    */
   action: 'proceed' | 'wait';
 }

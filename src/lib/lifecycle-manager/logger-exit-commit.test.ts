@@ -56,6 +56,37 @@ async function withStubbedExit(
   }
 }
 
+// A component whose stop fails and says so the documented way: a log line carrying an
+// exit code.
+class FailsOnStop extends Plain {
+  constructor(
+    logger: Logger,
+    name: string,
+    private readonly beforeFailing: Promise<void> = Promise.resolve(),
+  ) {
+    super(logger, name);
+  }
+
+  public override async stop(): Promise<void> {
+    await this.beforeFailing;
+    this.logger.error('Could not flush pending writes', { exitCode: 1 });
+  }
+}
+
+function recordExitProcess(logger: Logger): number[] {
+  const processed: number[] = [];
+  logger.on<{ eventType: string; code: number }>(
+    'logger',
+    ({ eventType, code }) => {
+      if (eventType === 'exit-process') {
+        processed.push(code);
+      }
+    },
+  );
+
+  return processed;
+}
+
 function realExitManager(sink: LogSink): {
   logger: Logger;
   manager: LifecycleManager;
@@ -235,6 +266,76 @@ describe('LifecycleManager - logger exit commits the process to ending', () => {
     }
   });
 
+  test('a component failing while a success exit stops it makes the process exit non-zero', async () => {
+    // The manager answers 'wait' for the failure's exit, since the success exit is
+    // already stopping components; the logger keeps its code for the pending exit.
+    const output = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await withStubbedExit(async (exits, release, sink) => {
+        const { logger, manager } = realExitManager(sink);
+        const processed = recordExitProcess(logger);
+        await manager.registerComponent(new FailsOnStop(logger, 'a'));
+        await manager.startAllComponents();
+
+        logger.exit(0);
+        await waitFor(() => logger.didExit);
+        release();
+        await waitFor(() => exits.length > 0);
+
+        expect(manager.isComponentRunning('a')).toBe(false);
+        expect(processed).toEqual([1]);
+        expect(logger.exitCode).toBe(1);
+        expect(exits).toEqual([1]);
+      });
+      expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+        'Logger exit(1) replaces the pending exit code 0',
+      ]);
+    } finally {
+      output.mockRestore();
+    }
+  });
+
+  test('a component failing during a SIGTERM shutdown a success exit waits for makes the process exit non-zero', async () => {
+    const stopGate = deferred();
+    const output = spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      await withStubbedExit(async (exits, release, sink) => {
+        // Released inside the stubbed scope: the exit proceeds only once this pass ends.
+        try {
+          const { logger, manager } = realExitManager(sink);
+          const processed = recordExitProcess(logger);
+          await manager.registerComponent(
+            new FailsOnStop(logger, 'a', stopGate.promise),
+          );
+          await manager.startAllComponents();
+
+          // SIGTERM starts the shutdown; the application's handler exits 0 behind it.
+          sendSignal(manager, 'SIGTERM');
+          logger.exit(0);
+          await sleep(5);
+          expect(logger.didExit).toBe(false);
+
+          stopGate.resolve();
+          await waitFor(() => logger.didExit);
+          release();
+          await waitFor(() => exits.length > 0);
+
+          expect(processed).toEqual([1]);
+          expect(logger.exitCode).toBe(1);
+          expect(exits).toEqual([1]);
+        } finally {
+          stopGate.resolve();
+        }
+      });
+      expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+        'Logger exit(1) replaces the pending exit code 0',
+      ]);
+    } finally {
+      output.mockRestore();
+    }
+  });
+
   test('a sink exiting from the forced exit line does not recurse', async () => {
     const stopGate = deferred();
     let isArmed = false;
@@ -280,6 +381,94 @@ describe('LifecycleManager - logger exit commits the process to ending', () => {
       isArmed = false;
       stopGate.resolve();
       await sleep(10);
+    }
+  });
+
+  test('a component failing during a SIGTERM shutdown gives a simulated exit the same non-zero code', async () => {
+    // How a test checks shutdown: `callProcessExit: false`. It exited 0 here while the
+    // real exit exited 1, so the test passed where production failed.
+    const stopGate = deferred();
+    const output = spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const logger = new Logger({
+        sinks: [new ArraySink()],
+        callProcessExit: false,
+      });
+      const manager = new LifecycleManager({
+        logger,
+        enableLoggerExitHook: true,
+        shutdownWarningTimeoutMS: -1,
+      });
+      const processed = recordExitProcess(logger);
+      await manager.registerComponent(
+        new FailsOnStop(logger, 'a', stopGate.promise),
+      );
+      await manager.startAllComponents();
+
+      sendSignal(manager, 'SIGTERM');
+      logger.exit(0);
+      await sleep(5);
+      expect(logger.didExit).toBe(false);
+
+      stopGate.resolve();
+      await waitFor(() => logger.didExit);
+
+      expect(processed).toEqual([1]);
+      expect(logger.exitCode).toBe(1);
+      expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+        'Logger exit(1) replaces the pending exit code 0',
+      ]);
+    } finally {
+      stopGate.resolve();
+      output.mockRestore();
+    }
+  });
+
+  test('a simulated exit after an earlier one completed settles its own code', async () => {
+    const output = spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const logger = new Logger({
+        sinks: [new ArraySink()],
+        callProcessExit: false,
+      });
+      const manager = new LifecycleManager({
+        logger,
+        enableLoggerExitHook: true,
+        shutdownWarningTimeoutMS: -1,
+      });
+      const processed = recordExitProcess(logger);
+      let shouldFail = true;
+      const a = new Plain(logger, 'a');
+      a.stop = (): Promise<void> => {
+        if (shouldFail) {
+          logger.error('Could not flush pending writes', { exitCode: 1 });
+        }
+        return Promise.resolve();
+      };
+      await manager.registerComponent(a);
+      await manager.startAllComponents();
+
+      logger.exit(0);
+      await waitFor(() => processed.length === 1);
+      expect(logger.exitCode).toBe(1);
+
+      // The process kept running, so the next exit stops the components again and
+      // starts from its own code rather than the failure the last one settled on.
+      shouldFail = false;
+      await manager.startAllComponents();
+      logger.exit(0);
+      await waitFor(() => processed.length === 2);
+
+      expect(manager.isComponentRunning('a')).toBe(false);
+      expect(processed).toEqual([1, 0]);
+      expect(logger.exitCode).toBe(0);
+      expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+        'Logger exit(1) replaces the pending exit code 0',
+      ]);
+    } finally {
+      output.mockRestore();
     }
   });
 

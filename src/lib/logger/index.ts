@@ -257,12 +257,14 @@ export class Logger extends EventEmitter {
   private _exitRequested = false;
   private _didReportInvalidExitCode = false;
   private _didReportIgnoredFailureExit = false;
-  // The first failure exit `beforeExit` answered 'wait' for before any exit scheduled.
-  // Reported by the exit that schedules, should it own the process under code 0.
-  private _waitedFailureExit:
-    { requestedCode: number; code: number } | undefined;
-  // The code of the exit whose `exit-called` listeners are running; undefined otherwise.
-  private _exitCalledCode: number | undefined;
+  // The exit in hand until one of its requests proceeds and `processExit` commits its
+  // code. Its first request creates it, and every request made before the commit
+  // settles `code` (see `recordExitRequest`). Undefined while no exit is pending. A
+  // request keeps a reference to the exit it joined, so one that proceeds after that
+  // exit committed can tell it has nothing left to publish.
+  private _pendingExit: { code: number } | undefined;
+  // Whether an exit's `exit-called` listeners are running.
+  private _isEmittingExitCalled = false;
   private _hasScheduledProcessExit = false;
   private _isEmittingExitProcess = false;
   private _isPendingExit = false;
@@ -330,7 +332,8 @@ export class Logger extends EventEmitter {
   public exit(code: number): void {
     // An `exit-process` listener of a simulated exit that exits again belongs to that
     // exit. Running `beforeExit` for it would start another cycle whose emit reaches the
-    // same listener, without bound.
+    // same listener, without bound. Its code is not counted either: the exit has already
+    // published its code, as a real exit has by the time its listeners run.
     if (this._isEmittingExitProcess && !this._hasScheduledProcessExit) {
       return;
     }
@@ -339,10 +342,11 @@ export class Logger extends EventEmitter {
     // value cannot strand a live process with a closed logger. Simulated exits
     // keep the requested code for inspection.
     //
-    // The report describes the request, not the process's outcome: another exit may
-    // already own the process, in which case this one is ignored (and says so below)
-    // rather than exiting with 1. Normalized before any early return, so every path
-    // below - an absorbed request included - judges the code the request stands for.
+    // The report describes the request, not the process's outcome: a real exit may
+    // already have committed its code, in which case this one is ignored (and says so
+    // below) rather than exiting with 1. Normalized before any early return, so every
+    // path below - an absorbed request included - judges the code the request stands
+    // for.
     const requestedCode = code;
     if (this.isInvalidExitCode(code)) {
       if (!this._didReportInvalidExitCode) {
@@ -355,24 +359,17 @@ export class Logger extends EventEmitter {
     }
     // An `exit-called` listener that exits again is absorbed too: its nested emit
     // reaches the same listener, so an unconditional one recursed until the stack
-    // overflowed. The outer exit is already in flight under its own code and owns this
-    // request - unless an earlier real exit already scheduled, whose code is the one the
-    // process uses.
-    if (this._exitCalledCode !== undefined) {
-      this.reportIgnoredFailureExit(
-        requestedCode,
-        code,
-        this._hasScheduledProcessExit ? this._exitCode : this._exitCalledCode,
-      );
+    // overflowed. The outer exit is already in flight and carries this request: its
+    // code still counts toward the pending one, but it runs no listeners or
+    // `beforeExit` of its own.
+    if (this._isEmittingExitCalled) {
+      this.recordExitRequest(requestedCode, code);
       return;
     }
     const isFirstExit = !this._exitRequested;
-    // Once a real exit is scheduled it owns the process's code, and a later exit is not
-    // replayed (see `processExit`). Silently dropping a failure code there would let the
-    // process report success for a run that asked to fail.
-    if (this._hasScheduledProcessExit) {
-      this.reportIgnoredFailureExit(requestedCode, code, this._exitCode);
-    }
+    // Recorded before `exit-called` and `beforeExit` run, so a request either of them
+    // makes - and one `beforeExit` answers 'wait' for - is judged against this one.
+    const pendingExit = this.recordExitRequest(requestedCode, code);
 
     this._exitRequested = true;
 
@@ -385,11 +382,11 @@ export class Logger extends EventEmitter {
     const beforeExit = this.withoutActiveSinkClose(() => {
       // Only the emit is guarded, not `beforeExit`: that callback is told `isFirstExit`
       // and decides repeats itself (`LifecycleManager` relies on seeing them).
-      this._exitCalledCode = code;
+      this._isEmittingExitCalled = true;
       try {
         this.emit('logger', { eventType: 'exit-called', code, isFirstExit });
       } finally {
-        this._exitCalledCode = undefined;
+        this._isEmittingExitCalled = false;
       }
 
       return this.beforeExitCallback
@@ -410,23 +407,15 @@ export class Logger extends EventEmitter {
           // Shutdown is already in progress, don't proceed with exit
           // The ongoing shutdown will handle the exit when it completes
           //
-          // That shutdown exits under its own code, so this request is dropped. The check
-          // at the top of `exit()` only sees an exit that has already scheduled, and the
-          // ordinary case has not: SIGTERM's `exit(0)` is still stopping components when
-          // one fails and logs `exitCode: 1`, `LifecycleManager` answers 'wait', and the
-          // process exited 0 with nothing on stderr. Report it now if an exit owns the
-          // process, otherwise leave it for the exit that schedules to report.
-          if (this._hasScheduledProcessExit) {
-            this.reportIgnoredFailureExit(requestedCode, code, this._exitCode);
-          } else if (code !== 0 && this._waitedFailureExit === undefined) {
-            this._waitedFailureExit = { requestedCode, code };
-          }
+          // Its code needs nothing more: it was recorded when this request was made, so
+          // a failure arriving while that shutdown runs (SIGTERM's `exit(0)` stopping
+          // components when one fails and logs `exitCode: 1`) is the code it exits with.
           return;
         }
 
         // Proceed with exit (either callback returned 'proceed' or failed)
         hasStartedProcessExit = true;
-        this.processExit(code);
+        this.processExit(pendingExit);
       });
       observeRejection(continuation, (error: unknown) => {
         // A malformed callback result may throw while reading action; still proceed.
@@ -447,7 +436,7 @@ export class Logger extends EventEmitter {
         // fall-through rung.
         reportCallbackError('beforeExit result', error);
         try {
-          this.processExit(code);
+          this.processExit(pendingExit);
         } catch (exitError) {
           reportToConsole(
             `Logger process exit failed: ${describeError(exitError)}`,
@@ -455,7 +444,7 @@ export class Logger extends EventEmitter {
         }
       });
     } else {
-      this.processExit(code);
+      this.processExit(pendingExit);
     }
   }
 
@@ -1408,8 +1397,9 @@ export class Logger extends EventEmitter {
       error: options?.error,
       // The code this entry's exit request stands for, normalized as `exit()` normalizes
       // it, so a sink never records `300` for a request that means 1. `exit()` gets the
-      // requested value and reports the fix. A request, not an outcome: when another
-      // exit already owns the process, that exit's code is the one the process uses.
+      // requested value and reports the fix. A request, not an outcome: when other exits
+      // overlap it, the process uses the code `exit()` settles on (see
+      // `recordExitRequest`).
       exitCode: isNumber(exitCode)
         ? this.isInvalidExitCode(exitCode)
           ? 1
@@ -1918,26 +1908,83 @@ export class Logger extends EventEmitter {
   }
 
   /**
-   * Report an exit request dropped because an exit under code 0 owns the process. Only
-   * that pairing is reported: any other dropped code changes nothing a supervisor reads
-   * (the process still fails, or both requests succeed), and repeat exits are ordinary -
-   * a second signal, a shutdown that logs its own exit line. Once per logger, like the
-   * invalid-code report, so a loop of failing exits cannot flood the console the logger
-   * falls back to while it closes its sinks.
+   * Fold an exit request into the code its exit will use, and return the pending exit
+   * it joined - undefined if a real exit has already committed its code.
+   *
+   * Until an exit commits its code in `processExit`, the last non-zero request wins.
+   * Requests overlap during a shutdown: SIGTERM's `exit(0)` is still stopping components
+   * when one fails and logs `exitCode: 1`, and `LifecycleManager` answers 'wait' for it.
+   * Keeping the first code there exited 0, so a supervisor read a failed shutdown as a
+   * clean one. The latest failure is the most specific account of why the run ends.
+   *
+   * A success never downgrades a pending failure: a later `exit(0)` - a second signal, a
+   * shutdown logging its own exit line - says the caller is done, not that the failure
+   * already reported did not happen.
+   *
+   * Simulated exits follow the same rule, so a test that runs a shutdown with
+   * `callProcessExit: false` sees the code production would exit with. They differ only
+   * after the commit, since a simulated exit leaves the process running: a real exit's
+   * code is final once `exit-process` has fired - published, with `process.exit()` only
+   * waiting for the sinks to close - so a later request is ignored, and a failure
+   * ignored behind a success is reported (see `reportIgnoredFailureExit`). A request
+   * made after a simulated exit committed starts the next exit instead.
+   *
+   * "Non-zero" is judged on the code the request stands for in its mode: normalized for
+   * a real exit (`exit(300)` is a failure with code 1), as requested for a simulated one.
+   * So a simulated `exit(NaN)` - like `-1` or `1.5` - is a failure: it replaces a pending
+   * code and a later `exit(0)` does not downgrade it, as the real exit it stands in for
+   * would fail with 1. Only `0` (or `-0`) is a success.
+   *
+   * @param requested The code as the caller wrote it, which is what a report names.
+   * @param code The code that request stands for in its mode.
+   */
+  private recordExitRequest(
+    requested: number,
+    code: number,
+  ): { code: number } | undefined {
+    if (this._hasScheduledProcessExit) {
+      this.reportIgnoredFailureExit(requested, code);
+      return undefined;
+    }
+    const pendingExit = this._pendingExit;
+    if (pendingExit === undefined) {
+      this._pendingExit = { code };
+      return this._pendingExit;
+    }
+    const pendingCode = pendingExit.code;
+    // `Object.is`, so a repeated simulated `exit(NaN)` is a repeat, not a replacement.
+    if (code === 0 || Object.is(code, pendingCode)) {
+      return pendingExit;
+    }
+    pendingExit.code = code;
+    // Each replacement is reported, so the code the exit settles on is never a surprise.
+    // Bounded by the requests made before the code commits; a repeat of the pending code
+    // changes nothing and is not reported. Names the normalized code when it differs
+    // from the request, as `exit(300)` does.
+    reportToConsole(
+      `Logger exit(${String(requested)}) replaces the pending exit code ${String(pendingCode)}${
+        Object.is(requested, code) ? '' : ` with ${String(code)}`
+      }`,
+    );
+    return pendingExit;
+  }
+
+  /**
+   * Report a failure exit request ignored because a real exit with code 0 has already
+   * committed its code. Only that pairing is reported: any other ignored code changes
+   * nothing a supervisor reads (the process still fails, or both requests succeed), and
+   * repeat exits are ordinary - a sink exiting from its own `close()`, a shutdown that
+   * logs its own exit line. Once per logger, like the invalid-code report, so a loop of
+   * failing exits cannot flood the console the logger falls back to while it closes its
+   * sinks.
    *
    * @param requested The code as the caller wrote it, which is what the line names.
    * @param code The code that request stands for once normalized, which is what decides
    *             whether it asked to fail: `exit(300)` is a failure, `exit(0)` is not.
-   * @param owningCode The code of the exit that owns the process.
    */
-  private reportIgnoredFailureExit(
-    requested: number,
-    code: number,
-    owningCode: number,
-  ): void {
+  private reportIgnoredFailureExit(requested: number, code: number): void {
     if (
-      !this.endsProcessOnExit ||
-      owningCode !== 0 ||
+      this._exitCode !== 0 ||
       code === 0 ||
       this._didReportIgnoredFailureExit
     ) {
@@ -1945,7 +1992,7 @@ export class Logger extends EventEmitter {
     }
     this._didReportIgnoredFailureExit = true;
     reportToConsole(
-      `Logger exit(${String(requested)}) ignored: an exit with code 0 is already in progress`,
+      `Logger exit(${String(requested)}) ignored: an exit with code 0 is already processing`,
     );
   }
 
@@ -1970,39 +2017,34 @@ export class Logger extends EventEmitter {
   /**
    * Process the exit
    */
-  private processExit(exitCode: number): void {
-    // The first real exit already owns the process's exit code. A later one would only
-    // report a code the process never exits with and call process.exit() again.
+  private processExit(pendingExit: { code: number } | undefined): void {
+    // A real exit has already committed the process's exit code. A later one would only
+    // publish a code the process never exits with and call process.exit() again. Not
+    // reported here: `exit()` recorded this request when it was made - against the
+    // pending code, or as ignored if the commit came first.
     if (this._hasScheduledProcessExit) {
-      // Also reached by an exit whose `beforeExit` was still running when another one
-      // scheduled first, so `exit()` had nothing to compare against yet. The code is
-      // already normalized here, which is the one the request stood for.
-      this.reportIgnoredFailureExit(exitCode, exitCode, this._exitCode);
       return;
     }
-    // A simulated exit schedules nothing, so an `exit-process` listener that exits again
-    // would re-enter here and emit again, without bound. The outer exit owns this one.
-    if (this._isEmittingExitProcess) {
+    // Another request of this exit proceeded first and committed the code this one was
+    // folded into, so it has nothing left to publish - for a simulated exit too, which
+    // would otherwise emit `exit-process` again with a code the exit already settled
+    // past. That also covers a request proceeding while `exit-process` listeners run:
+    // the exit was committed before they were called. (`pendingExit` is undefined only
+    // when the real exit above had committed.)
+    if (pendingExit === undefined || pendingExit !== this._pendingExit) {
       return;
     }
+    // The pending code applies to whichever request proceeds, in the mode it proceeds in:
+    // it settled on every request made for this exit, so a pending real failure still
+    // counts when the exit turns out simulated (`process.exit` removed since the
+    // request). No special case is needed to keep it out of a later exit: it is cleared
+    // here, and a request made after this commit starts a new pending exit.
+    this._pendingExit = undefined;
     this._hasScheduledProcessExit = this.endsProcessOnExit;
+    const exitCode = pendingExit.code;
     this._didExit = true;
     this._exitCode = exitCode;
     this._isPendingExit = false;
-
-    // A failure exit `beforeExit` waited out while this one was still pending: this exit
-    // is the shutdown it waited for, and it now owns the process. Taken either way, so a
-    // simulated exit - which leaves the process running and may exit again - does not
-    // carry it into an unrelated later exit.
-    const waitedFailureExit = this._waitedFailureExit;
-    this._waitedFailureExit = undefined;
-    if (waitedFailureExit !== undefined) {
-      this.reportIgnoredFailureExit(
-        waitedFailureExit.requestedCode,
-        waitedFailureExit.code,
-        exitCode,
-      );
-    }
 
     // Nor are these listeners; see `withoutActiveSinkClose`.
     this.withoutActiveSinkClose(() => {

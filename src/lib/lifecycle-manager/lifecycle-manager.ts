@@ -1577,10 +1577,11 @@ export class LifecycleManager
   public enableLoggerExitHook(): void {
     this.rootLogger.setBeforeExitCallback(async (exitCode: number) => {
       // An exit that ends the process has already proceeded, or a forced one is logging
-      // that it is about to: that exit owns the exit code, and the logger is closing its
-      // sinks on the way to `process.exit()`. A later exit - one a sink makes from its own
-      // `close()` or from the forced exit's log line - must not run a second shutdown,
-      // proceed under its own code, or re-enter here from a log line without bound.
+      // that it is about to, and the logger is on its way to `process.exit()`. A later
+      // exit - one a sink makes from its own `close()` or from the forced exit's log line
+      // - must not run a second shutdown, proceed on its own, or re-enter here from a log
+      // line without bound. Its code is the logger's to settle: a failure still replaces
+      // the pending code until the logger publishes it in `exit-process`.
       if (this.isProcessExitCommitted || this.isProceedingForcedExit) {
         return { action: 'wait' as const };
       }
@@ -1616,11 +1617,15 @@ export class LifecycleManager
       // even once that first exit has long finished, and each later exit must still
       // stop the components and keep a restart down.
       //
-      // A repeat that arrives while a leading exit is still in hand is ignored, so it
-      // cannot override the leading exit's code or exit ahead of it. That holds before
+      // A repeat that arrives while a leading exit is still in hand waits, so it cannot
+      // exit ahead of the leading exit or start a second shutdown. That holds before
       // the leading exit's shutdown has started too: a sink behind its "stopping
       // components" log line that calls `logger.exit()` synchronously would otherwise
       // be told to proceed, and exit with every component still running.
+      //
+      // Waiting does not drop the repeat's code. The logger recorded it when the repeat
+      // was made, and a failure replaces the pending code: a component that fails while
+      // stopping and logs `exitCode: 1` turns a SIGTERM's `exit(0)` into a non-zero exit.
       //
       // Not logged: this runs synchronously inside the repeat's `logger.exit()`, so a
       // sink that exits from the lines it writes would re-enter here from the log line

@@ -10210,17 +10210,25 @@ describe('LifecycleManager - Signal Integration', () => {
         shutdownCount++;
       });
 
-      // First exit
-      logger.exit(0);
+      const output = spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        // First exit
+        logger.exit(0);
 
-      // Second exit while the first is still being handled (should be ignored by
-      // lifecycle manager)
-      logger.exit(1);
-      await sleep(50);
+        // Second exit while the first is still being handled: the lifecycle manager
+        // makes it wait, but the logger settles its failure code on the first exit.
+        logger.exit(1);
+        await sleep(50);
 
-      // Should only trigger shutdown once
-      expect(shutdownCount).toBe(1);
-      expect(logger.exitCode).toBe(0);
+        // Should only trigger shutdown once
+        expect(shutdownCount).toBe(1);
+        expect(logger.exitCode).toBe(1);
+        expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+          'Logger exit(1) replaces the pending exit code 0',
+        ]);
+      } finally {
+        output.mockRestore();
+      }
     });
 
     test('ignores an exit a sink makes from the exit log line, before the shutdown starts', async () => {
@@ -10256,12 +10264,22 @@ describe('LifecycleManager - Signal Integration', () => {
         }
       });
 
-      sinkLogger.exit(0);
-      await sleep(50);
+      const output = spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        sinkLogger.exit(0);
+        await sleep(50);
 
-      expect(hasReentered).toBe(true);
-      expect(runningAtExit).toBe(0);
-      expect(sinkLogger.exitCode).toBe(0);
+        // The sink's exit waits rather than proceeding with components still running,
+        // but its failure code still settles on the exit it waited for.
+        expect(hasReentered).toBe(true);
+        expect(runningAtExit).toBe(0);
+        expect(sinkLogger.exitCode).toBe(1);
+        expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+          'Logger exit(1) replaces the pending exit code 0',
+        ]);
+      } finally {
+        output.mockRestore();
+      }
     });
 
     test('should stop components again on an exit after a finished simulated exit', async () => {
@@ -10377,16 +10395,26 @@ describe('LifecycleManager - Signal Integration', () => {
 
       await sleep(5);
 
-      logger.exit(7);
-      logger.exit(8);
+      const output = spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        // The first exit is the one deferred; the second waits, but the last failure
+        // code is the one the deferred exit settles on.
+        logger.exit(7);
+        logger.exit(8);
 
-      await stopPromise;
-      await sleep(5);
+        await stopPromise;
+        await sleep(5);
 
-      expect(lifecycle.getRunningComponentCount()).toBe(0);
-      expect(logger.didExit).toBe(true);
-      expect(logger.exitCode).toBe(7);
-      expect(logger.isPendingExit).toBe(false);
+        expect(lifecycle.getRunningComponentCount()).toBe(0);
+        expect(logger.didExit).toBe(true);
+        expect(logger.exitCode).toBe(8);
+        expect(logger.isPendingExit).toBe(false);
+        expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+          'Logger exit(8) replaces the pending exit code 7',
+        ]);
+      } finally {
+        output.mockRestore();
+      }
     });
 
     test('releases a logger exit when a manual shutdown times out on a never-settling stop', async () => {
