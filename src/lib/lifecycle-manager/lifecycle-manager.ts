@@ -302,6 +302,14 @@ interface ShutdownPass {
    * `answerShutdownSignalDuringPass()`.
    */
   readonly isRestartStopPhase: boolean;
+
+  /**
+   * Every component marked running while this pass is active. A start in flight as the
+   * pass began counts as stopped by it only if it came up here or a stop ran on it; read
+   * from this record rather than inferred from `startedAt`, which a frozen or coarse
+   * clock leaves unchanged across runs.
+   */
+  readonly cameUp: Set<string>;
 }
 
 /**
@@ -5757,6 +5765,7 @@ export class LifecycleManager
       const pass: ShutdownPass = {
         shutdownRequested: false,
         isRestartStopPhase: !isRequestToStayDown,
+        cameUp: new Set(),
       };
 
       if (isRequestToStayDown) {
@@ -5824,16 +5833,12 @@ export class LifecycleManager
     let stopCandidateNames: readonly string[] | null = null;
     // Components still starting when the pass began; see where it is filled in.
     let startingAtPassStart: readonly string[] = [];
-    // For each of those not also running as the pass began: its stop attempt and its
-    // last `startedAt` at that moment. A start that fails on its own puts back the state
-    // it replaced - `stopped`, for a component started again after a stop - and that is
-    // not a stop by this pass. Only a start that came up during the pass changes its
-    // `startedAt`, and only a stop issues a new stop attempt; one of the two must have
-    // moved for the pass to count it as stopped.
-    const startOnlyBaselines = new Map<
-      string,
-      { stopAttemptToken: string | undefined; startedAt: number | null }
-    >();
+    // For each of those not also running as the pass began: its stop attempt at that
+    // moment. A start that fails on its own puts back the state it replaced - `stopped`,
+    // for a component started again after a stop - and that is not a stop by this pass.
+    // The pass counts it as stopped only if it came up during the pass (`pass.cameUp`)
+    // or a stop issued it a new stop attempt.
+    const startOnlyBaselines = new Map<string, string | undefined>();
     // Components a concurrent stop still owns, or whose dependencies must stay up. Out
     // here only so the sweep below can settle them from either path; the `catch` never
     // reads it.
@@ -5856,15 +5861,13 @@ export class LifecycleManager
       excludedNames?: Set<string>,
     ): string[] => {
       for (const name of stopCandidateNames ?? []) {
-        const baseline = startOnlyBaselines.get(name);
         if (
           excludedNames?.has(name) ||
           this.componentStates.get(name) !== 'stopped' ||
-          (baseline !== undefined &&
-            baseline.stopAttemptToken ===
-              this.componentStopAttemptTokens.get(name) &&
-            baseline.startedAt ===
-              (this.componentTimestamps.get(name)?.startedAt ?? null))
+          (startOnlyBaselines.has(name) &&
+            !pass.cameUp.has(name) &&
+            startOnlyBaselines.get(name) ===
+              this.componentStopAttemptTokens.get(name))
         ) {
           continue;
         }
@@ -5965,10 +5968,10 @@ export class LifecycleManager
       stopCandidateNames = [...runningComponentsToStop, ...startingAtPassStart];
       for (const name of startingAtPassStart) {
         if (!runningComponentsToStop.includes(name)) {
-          startOnlyBaselines.set(name, {
-            stopAttemptToken: this.componentStopAttemptTokens.get(name),
-            startedAt: this.componentTimestamps.get(name)?.startedAt ?? null,
-          });
+          startOnlyBaselines.set(
+            name,
+            this.componentStopAttemptTokens.get(name),
+          );
         }
       }
 
@@ -10177,6 +10180,7 @@ export class LifecycleManager
     this.stalledComponents.delete(name);
     this.updateStartedFlag();
     this.stampTimestamp(name, 'startedAt');
+    this.activeShutdownPass?.cameUp.add(name);
   }
 
   /** Record now as `field`, keeping the other timestamp from the component's last run. */

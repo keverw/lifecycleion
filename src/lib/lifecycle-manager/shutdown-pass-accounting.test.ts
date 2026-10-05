@@ -1,4 +1,4 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
 import type { Logger } from '../logger';
 import { BaseComponent } from './base-component';
 import { deferred, Plain, setup } from './test-helpers';
@@ -121,4 +121,58 @@ test('a start that comes up during a shutdown pass and is stopped by it is repor
   expect((await starting).code).toBe('shutdown_in_progress');
   expect(result.success).toBe(true);
   expect(result.stoppedComponents).toEqual(['c']);
+});
+
+test('a start that comes up during a shutdown pass and then stops itself is reported as stopped, on a frozen clock', async () => {
+  // Counting it must not depend on `Date.now()` moving: a frozen clock (fake timers, a
+  // mocked `Date.now()`) gives the new run the same `startedAt` as the last one.
+  const now = spyOn(Date, 'now').mockReturnValue(1_700_000_000_000);
+  try {
+    const { logger, manager } = setup();
+    const gate = deferred();
+    let startCalls = 0;
+
+    class Component extends BaseComponent {
+      constructor() {
+        super(logger, { name: 'c' });
+      }
+
+      public async start(): Promise<void> {
+        startCalls++;
+        if (startCalls === 2) {
+          await gate.promise;
+        }
+      }
+
+      public async stop(): Promise<void> {}
+
+      public dies(): void {
+        this.reportUnexpectedStop(new Error('died'));
+      }
+    }
+
+    const component = new Component();
+    await manager.registerComponent(component);
+    await manager.startComponent('c');
+    await manager.stopComponent('c');
+
+    // It goes down by itself the moment it is running, before the start path can
+    // send it through a stop of its own: no stop attempt marks it.
+    manager.on('component:started', ({ name }: { name: string }) => {
+      if (name === 'c') {
+        component.dies();
+      }
+    });
+
+    const starting = manager.startComponent('c');
+    const shutdown = manager.stopAllComponents();
+    gate.resolve();
+    const result = await shutdown;
+    await starting;
+
+    expect(manager.getComponentStatus('c')?.state).toBe('stopped');
+    expect(result.stoppedComponents).toEqual(['c']);
+  } finally {
+    now.mockRestore();
+  }
 });
