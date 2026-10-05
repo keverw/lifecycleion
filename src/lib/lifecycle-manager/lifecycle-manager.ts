@@ -4056,6 +4056,11 @@ export class LifecycleManager
           // Restart cannot safely bring up replacements while old starts remain.
           // Keep their dependencies protected even if shutdown hooks opt out.
           allowStopWithPendingStarts: false,
+          // One rule for abandoned starts, whatever `shutdownOptions` says: one known
+          // before the stop phase is refused up front, and one abandoned during it
+          // ends the phase `cleanup_incomplete`. Waiting would only trade that for a
+          // `shutdown_timeout` after stopping more components, startup skipped either way.
+          waitForAbandonedStarts: false,
         },
         // Not a request to stay down: see `acceptShutdownPass()`.
         false,

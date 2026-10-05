@@ -144,3 +144,29 @@ test('allowStopWithPendingStarts takes precedence over waitForAbandonedStarts', 
     await manager.stopAllComponents();
   }
 });
+
+test('restartAllComponents does not wait for abandoned starts even when shutdownOptions does', async () => {
+  const { logger, manager } = setup({
+    shutdownOptions: { waitForAbandonedStarts: true },
+  });
+  const { order, start, register } = twoComponents(logger, manager);
+  await register();
+  const starting = manager.startComponent('worker');
+  try {
+    // Still in flight as the restart begins, so its preflight lets it through; it
+    // times out while the stop phase waits on it.
+    const restart = await manager.restartAllComponents({
+      shutdownTimeoutMS: 500,
+    });
+    expect((await starting).code).toBe('component_startup_timeout');
+    expect(restart.shutdownResult.code).toBe('cleanup_incomplete');
+    expect(restart.startupResult.code).toBe('partial_state');
+    expect(order).toEqual([]);
+    expect(manager.getComponentStatus('database')?.state).toBe('running');
+  } finally {
+    start.resolve();
+    await starting;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await manager.stopAllComponents();
+  }
+});

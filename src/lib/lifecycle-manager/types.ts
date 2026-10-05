@@ -426,6 +426,7 @@ export interface StopAllOptions {
    * `timeoutMS: 0` it lasts until `start()` settles. Once it does, its late cleanup
    * stops it and the pass goes on to its dependencies. allowStopWithPendingStarts takes
    * precedence: with it enabled, starts are not waited for at all.
+   * restartAllComponents always disables this, including when configured globally.
    */
   waitForAbandonedStarts?: boolean;
 }

@@ -567,6 +567,10 @@ wait is still bounded by `timeoutMS` (`shutdown_timeout` when it runs out); with
 leave as little running as possible, such as a process that exits right after it, and
 a slow start may still finish within the budget. `allowStopWithPendingStarts` takes
 precedence: with it enabled, starts are not waited for at all.
+`restartAllComponents()` always keeps it disabled, as it does `allowStopWithPendingStarts`:
+a restart refuses up front for a start that already timed out, and one that times out
+during its stop phase ends that phase `cleanup_incomplete`. Waiting would only trade
+that for `shutdown_timeout` after stopping more components, with startup skipped either way.
 
 ```typescript
 const result = await lifecycle.stopAllComponents({
