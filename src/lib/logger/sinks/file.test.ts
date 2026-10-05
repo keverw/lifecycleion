@@ -1645,6 +1645,31 @@ describe('FileSink - bounded queue', () => {
     },
   );
 
+  test.each(['maxQueueSize', 'maxRetries', 'maxSizeMB'] as const)(
+    'NaN or non-number %s rejects before initialization, naming its option',
+    (option) => {
+      const initialize = spyOn(
+        FileSink.prototype as unknown as { initialize(): Promise<void> },
+        'initialize',
+      ).mockResolvedValue();
+      try {
+        for (const requested of [Number.NaN, '12', {}]) {
+          expect(
+            () =>
+              new FileSink({
+                logDir: tmpDir.path,
+                basename: 'count-option',
+                [option]: requested as number,
+              }),
+          ).toThrow(`FileSink ${option} must be a number other than NaN`);
+        }
+        expect(initialize).not.toHaveBeenCalled();
+      } finally {
+        initialize.mockRestore();
+      }
+    },
+  );
+
   test('nullish, zero, finite and infinite close budgets keep their meanings', async () => {
     const initialize = spyOn(
       FileSink.prototype as unknown as { initialize(): Promise<void> },
@@ -3508,7 +3533,7 @@ describe('FileSink - entries written during close', () => {
     expect(content).toContain(message);
   });
 
-  test('refuses a negative or unreadable maxSizeMB the same way', async () => {
+  test('takes the default for a negative maxSizeMB and refuses NaN', async () => {
     const logDir = `${tmpDir.path}/negative-max-size`;
 
     const sink = new FileSink({
@@ -3530,25 +3555,17 @@ describe('FileSink - entries written during close', () => {
 
     expect((await fsPromises.readdir(logDir)).length).toBe(1);
 
-    const nanDir = `${tmpDir.path}/nan-max-size`;
-    const nanSink = new FileSink({
-      logDir: nanDir,
-      basename: 'nan',
-      maxSizeMB: Number.NaN,
-      jsonFormat: false,
-    });
-
-    nanSink.write({
-      timestamp: Date.now(),
-      type: 'info',
-      serviceName: 'TestService',
-      template: 'NaN threshold',
-      message: 'NaN threshold',
-    });
-
-    await nanSink.close();
-
-    expect((await fsPromises.readdir(nanDir)).length).toBe(1);
+    // NaN names no threshold at all - a config parse mistake - so it is refused at
+    // construction like `closeTimeoutMS`, rather than quietly taking the default.
+    expect(
+      () =>
+        new FileSink({
+          logDir: `${tmpDir.path}/nan-max-size`,
+          basename: 'nan',
+          maxSizeMB: Number.NaN,
+          jsonFormat: false,
+        }),
+    ).toThrow('FileSink maxSizeMB must be a number other than NaN');
   });
 });
 

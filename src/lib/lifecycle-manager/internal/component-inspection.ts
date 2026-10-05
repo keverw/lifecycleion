@@ -10,7 +10,11 @@ import type {
   SignalBroadcastResult,
   ComponentSignalResult,
 } from '../types';
-import { applyIntrinsic, allPromises } from '../../internal/intrinsics';
+import {
+  applyIntrinsic,
+  allPromises,
+  promiseResolveIntrinsic,
+} from '../../internal/intrinsics';
 import { adoptPromise } from '../../internal/adopt-promise';
 import { isObjectLike } from '../../internal/is-object-like';
 import { toError, describeError } from '../../to-error';
@@ -149,6 +153,11 @@ export async function checkComponentHealthOperation(
   }
 
   context.lifecycleEvents.componentHealthCheckStarted(name);
+  // One microtask, so the recheck below follows the started listeners even for a check
+  // made from inside another manager event listener, where `health-check-started` is
+  // only queued behind the event being delivered. That drain is synchronous and has
+  // finished by the time this resumes; see `sendMessageInternal()`.
+  await promiseResolveIntrinsic(undefined);
 
   // Handler/configuration getters and started listeners may unregister this
   // instance or begin teardown. Keep the announced check paired without entering
@@ -455,7 +464,10 @@ export async function runSignalBroadcast(
     }
 
     descriptor.emitStarted(name);
-    // Event listeners can synchronously begin teardown too.
+    // Event listeners can synchronously begin teardown too. One microtask first, so a
+    // broadcast made from inside another manager event listener - where `*-started` is
+    // only queued - still rechecks after those listeners; see `sendMessageInternal()`.
+    await promiseResolveIntrinsic(undefined);
     if (!canDispatch(component)) {
       const error = new Error(
         `Component "${name}" became unavailable before ${descriptor.signal} dispatch`,

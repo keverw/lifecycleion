@@ -11,7 +11,7 @@ import {
   resolveAbsoluteURLForRuntime,
   stripCrossOriginURLCredentials,
   stripURLCredentials,
-  setOwnHeader,
+  defineOwnEntry,
 } from '../utils';
 
 /**
@@ -437,7 +437,7 @@ function parseXHRResponseHeaders(
     } else {
       // Defined, not assigned, as every other adapter does: a `__proto__` header
       // would otherwise hit the prototype setter and vanish.
-      setOwnHeader(result, key, value);
+      defineOwnEntry(result, key, value);
     }
   }
 

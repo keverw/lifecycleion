@@ -211,10 +211,10 @@ test('restart refuses without starting when its stop phase is refused mid-accept
   expect(result.shutdownResult.code).toBe('already_in_progress');
   expect(result.startupResult.code).toBe('shutdown_in_progress');
   expect(result.startupSkippedByShutdownRequest).toBeUndefined();
-  expect(messages).toContain('Cannot restart all components during shutdown');
-  expect(messages).not.toContain(
-    'Cannot start all components: shutdown in progress',
-  );
+  // One refusal for the one request: the restart's, not also its stop phase's.
+  expect(messages.filter((message) => message.startsWith('Cannot '))).toEqual([
+    'Cannot restart all components during shutdown',
+  ]);
   expect(messages).not.toContain('Restart completed');
   await shutdown;
 });

@@ -2,7 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { Logger } from './index';
+import { ArraySink, Logger } from './index';
 
 test.each([1.5, 1e20, -1, 256, 2 ** 40])(
   'invalid real exit code %s is normalized before notifications',
@@ -428,4 +428,190 @@ test('a simulated exit with beforeExit ignores an exit requested by its own exit
   expect(codes).toEqual([1]);
   expect(beforeExitCalls).toBe(1);
   expect(logger.exitCode).toBe(1);
+});
+
+test('an exit-called listener that exits again does not recurse', async () => {
+  const logger = new Logger({ sinks: [], callProcessExit: false });
+  const called: number[] = [];
+  logger.on<{ eventType: string; code: number }>(
+    'logger',
+    ({ eventType, code }) => {
+      if (eventType === 'exit-called') {
+        called.push(code);
+        // Unconditional: each nested exit emitted exit-called again until the stack
+        // overflowed.
+        logger.exit(2);
+      }
+    },
+  );
+
+  logger.exit(1);
+  await logger.close();
+
+  expect(called).toEqual([1]);
+  expect(logger.exitCode).toBe(1);
+});
+
+test('a failure exit ignored behind a scheduled success exit is reported once', async () => {
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({ sinks: [], callProcessExit: true });
+    logger.exit(0);
+    logger.exit(1);
+    logger.exit(3);
+    await logger.close();
+    await Promise.resolve();
+
+    // The first exit owns the code; the failure request is not lost silently.
+    expect(exit.mock.calls).toEqual([[0]]);
+    expect(output).toHaveBeenCalledTimes(1);
+    expect(String(output.mock.calls[0]?.[0])).toContain(
+      'Logger exit(1) ignored: an exit with code 0 is already in progress',
+    );
+  } finally {
+    output.mockRestore();
+    exit.mockRestore();
+  }
+});
+
+test('a failure exit whose beforeExit loses the race to a success exit is reported', async () => {
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({
+      sinks: [],
+      callProcessExit: true,
+      beforeExitCallback: async (code) => {
+        if (code !== 0) {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+        }
+        return { action: 'proceed' };
+      },
+    });
+    // Neither is scheduled when the other is requested, so only processExit sees it.
+    logger.exit(1);
+    logger.exit(0);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(exit.mock.calls).toEqual([[0]]);
+    expect(output.mock.calls.flat().join('\n')).toContain(
+      'Logger exit(1) ignored',
+    );
+  } finally {
+    output.mockRestore();
+    exit.mockRestore();
+  }
+});
+
+test('an exit-called listener that requests a failure during a success exit is reported', async () => {
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({ sinks: [], callProcessExit: true });
+    logger.on<{ eventType: string }>('logger', ({ eventType }) => {
+      if (eventType === 'exit-called') {
+        logger.exit(1);
+      }
+    });
+    logger.exit(0);
+    await logger.close();
+    await Promise.resolve();
+
+    expect(exit.mock.calls).toEqual([[0]]);
+    expect(output.mock.calls.flat().join('\n')).toContain(
+      'Logger exit(1) ignored',
+    );
+  } finally {
+    output.mockRestore();
+    exit.mockRestore();
+  }
+});
+
+test('a later success or repeated failure exit is not reported', async () => {
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({ sinks: [], callProcessExit: true });
+    logger.exit(2);
+    logger.exit(0);
+    logger.exit(1);
+    await logger.close();
+    await Promise.resolve();
+
+    expect(exit.mock.calls).toEqual([[2]]);
+    expect(output).not.toHaveBeenCalled();
+  } finally {
+    output.mockRestore();
+    exit.mockRestore();
+  }
+});
+
+test('a log entry records the exit code a real exit will use', async () => {
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: true });
+    logger.error('fatal', { exitCode: 300 });
+    await logger.close();
+    await Promise.resolve();
+
+    // Recorded 300 before, while the process exited 1.
+    expect(sink.logs[0]?.exitCode).toBe(1);
+    expect(exit.mock.calls).toEqual([[1]]);
+    expect(output.mock.calls.flat().join('\n')).toContain(
+      'exit code 300 is invalid',
+    );
+  } finally {
+    output.mockRestore();
+    exit.mockRestore();
+  }
+});
+
+test('a simulated exit entry keeps the requested exit code', async () => {
+  const sink = new ArraySink();
+  const logger = new Logger({ sinks: [sink], callProcessExit: false });
+  logger.error('fatal', { exitCode: 300 });
+  await logger.close();
+
+  expect(sink.logs[0]?.exitCode).toBe(300);
+  expect(logger.exitCode).toBe(300);
+});
+
+test('an exit-called listener during a repeat exit is judged against the scheduled code', async () => {
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({ sinks: [], callProcessExit: true });
+    logger.exit(1);
+    // The repeat's own code is 0, but the process exits 1: the nested failure request
+    // changes nothing, so it is not reported as ignored behind a success.
+    logger.on<{ eventType: string }>('logger', ({ eventType }) => {
+      if (eventType === 'exit-called') {
+        logger.exit(5);
+      }
+    });
+    logger.exit(0);
+    await logger.close();
+    await Promise.resolve();
+
+    expect(exit.mock.calls).toEqual([[1]]);
+    expect(output).not.toHaveBeenCalled();
+  } finally {
+    output.mockRestore();
+    exit.mockRestore();
+  }
 });

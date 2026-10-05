@@ -165,9 +165,10 @@ function invokeCallbackSafely(
   onError: ((error: unknown) => void) | undefined,
   thisArg: unknown,
 ): void {
-  // `typeof`, not `isFunction()`: its `instanceof Function` fallback reads the value's
-  // prototype, which throws for a revoked proxy - outside every guard here. Anything
-  // callable is `typeof 'function'` anyway.
+  // `typeof`, not `isFunction()`: its `instanceof Function` fallback also accepts an
+  // object that merely inherits from `Function.prototype` without being callable, which
+  // would reach the call below and throw there instead of being reported as not a
+  // function. Anything callable is `typeof 'function'` anyway.
   if (typeof callback !== 'function') {
     reportToOnError(
       callbackName,

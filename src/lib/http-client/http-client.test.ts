@@ -4034,6 +4034,20 @@ describe('HTTPClient — timeout resolution', () => {
     }
   });
 
+  test('invalid per-request options throw from the method helper, before send()', () => {
+    const client = makeClient();
+    // Fail-fast at the call site: not a deferred request_setup_error.
+    expect(() => client.get('/api/users/1', { timeout: Number.NaN })).toThrow(
+      TypeError,
+    );
+    expect(() =>
+      client.get('/api/users/1', {
+        retryPolicy: { strategy: 'fixed', delayMS: Number.NaN },
+      }),
+    ).toThrow(TypeError);
+    expect(client.listRequests().count).toBe(0);
+  });
+
   test('null request options and builder resets inherit the client timeout', async () => {
     const client = makeClient({ timeout: 4_321 });
     const seen: Array<number | undefined> = [];

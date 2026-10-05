@@ -48,6 +48,8 @@ test.each(['bigint', 'circular', 'toJSON'] as const)(
       expect(sends).toBe(0);
       expect(starts).toEqual([1]);
       expect(request.attemptCount).toBe(1);
+      // Attempt setup fails after the attempt began, so its start time is recorded.
+      expect(request.startedAt).not.toBeNull();
       const attemptTimerIndex = timer.mock.calls.findIndex(
         (call) => call[1] === timeoutMS,
       );
@@ -245,5 +247,42 @@ test('unstringifiable interceptor header stays a contained request_setup_error',
   // Only the unconvertible entry is dropped from the best-effort snapshot.
   expect(observed).toHaveLength(1);
   expect(observed[0]['x-trace']).toBe('abc');
+  expect(observed[0]).not.toHaveProperty('bad');
+});
+
+test('best-effort snapshot reads interceptor headers from a single object', async () => {
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
+  };
+  const client = new HTTPClient({ adapter });
+  let reads = 0;
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    // Each read yields a new object stamped with its read number, so entries taken
+    // from different reads would disagree.
+    get headers() {
+      reads++;
+      return {
+        first: String(reads),
+        second: String(reads),
+        bad: {
+          toString() {
+            throw new Error('header conversion failed');
+          },
+        } as unknown as string,
+      };
+    },
+  }));
+  const observed: Array<Record<string, string | string[]>> = [];
+  client.addErrorObserver((_error, attemptRequest) => {
+    observed.push(attemptRequest.headers);
+  });
+  const request = client.get('https://example.com/');
+  await request.send();
+  expect(request.error?.code).toBe('request_setup_error');
+  expect(observed).toHaveLength(1);
+  expect(observed[0].first).toBeDefined();
+  expect(observed[0].second).toBe(observed[0].first);
   expect(observed[0]).not.toHaveProperty('bad');
 });

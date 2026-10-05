@@ -10,6 +10,7 @@ import type {
   ShutdownResult,
   SignalBroadcastResult,
   HealthCheckResult,
+  HealthReport,
   ComponentOperationResult,
 } from '../types';
 
@@ -91,9 +92,12 @@ export function refusedShutdownResult(): ShutdownResult {
  * with nothing attached it is an unhandled rejection, fatal under Node's default
  * `--unhandled-rejections=throw`. Only errors branded by our own validation (timeouts, and
  * {@link invalidOperationOptionError}) become `invalid_options`, without a callback-error
- * report. Ordinary TypeError/RangeError
- * values from caller getters remain unexpected failures: recognizing every error of
- * those types would hide actual bugs behind a configuration refusal.
+ * report. Inline failure paths inside an operation apply the same split: a branded
+ * refusal met before the operation claimed anything is `invalid_options`, unreported;
+ * once it has acted, any failure is reported and answered `operation_crashed`. Ordinary
+ * TypeError/RangeError values from caller getters remain unexpected failures:
+ * recognizing every error of those types would hide actual bugs behind a configuration
+ * refusal.
  *
  * `toFailure` runs on the failure path with nothing left above it, so it must build its
  * result fields from manager-owned data, without unguarded caller reads. Guarded
@@ -180,6 +184,25 @@ export function crashedShutdownResult(
 }
 
 /**
+ * The aggregate code for an operation that takes no caller options - `trigger*()` and
+ * `checkAllHealth()` - settling a failure. Each component's own timeout is classified
+ * inside the loop, as that component's entry, so an option refusal reaching the
+ * operation's safety net would be the manager breaking its own invariant: a crash. Its
+ * result type has no `invalid_options`, and the report {@link settleOperation} skipped
+ * for an expected refusal is made here, as it is for every other crash.
+ */
+function optionlessFailureCode(
+  operation: string,
+  error: Error,
+  code: SettledFailureCode,
+): 'operation_crashed' {
+  if (code === 'invalid_options') {
+    reportCallbackError(`lifecycle-manager ${operation}`, error);
+  }
+  return 'operation_crashed';
+}
+
+/**
  * The `SignalBroadcastResult` for a `trigger*()` call that crashed as a whole, so there
  * are no per-component results to report.
  */
@@ -192,7 +215,26 @@ export function crashedSignalBroadcastResult(
     signal,
     results: [],
     timedOut: false,
-    code,
+    code: optionlessFailureCode(`${signal} broadcast`, error, code),
+    error,
+  };
+}
+
+/**
+ * The `HealthReport` for a `checkAllHealth()` call that crashed as a whole. Each
+ * component's check is settled on its own, so there are no entries to report.
+ */
+export function crashedHealthReport(
+  error: Error,
+  code: SettledFailureCode,
+): HealthReport {
+  return {
+    healthy: false,
+    components: [],
+    checkedAt: Date.now(),
+    durationMS: 0,
+    timedOut: false,
+    code: optionlessFailureCode('checkAllHealth', error, code),
     error,
   };
 }

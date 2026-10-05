@@ -623,3 +623,83 @@ test.each([false, true])(
     }
   },
 );
+
+test('an unexpected close failure is not an unhandled rejection for a fire-and-forget close', async () => {
+  const logger = new Logger({ sinks: [], callProcessExit: false });
+  const failure = new Error('unexpected cleanup failure');
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandled);
+  const fault = spyOn(
+    logger,
+    'unregisterReportErrorListener',
+  ).mockImplementationOnce(() => {
+    throw failure;
+  });
+  try {
+    // `void` is an ordinary way to close; the shared completion used to be left
+    // unobserved, so this rejection escaped as unhandled and could end the process.
+    void logger.close();
+    await sleep(10);
+    expect(unhandled).toEqual([]);
+    // A caller that awaits still sees the failure.
+    expect(await logger.close().catch((error: unknown) => error)).toBe(failure);
+  } finally {
+    fault.mockRestore();
+    process.off('unhandledRejection', onUnhandled);
+  }
+});
+
+test('close consults no iterator hooks while starting sink cleanup', async () => {
+  const closed: string[] = [];
+  const sink = (name: string): LogSink => ({
+    write: () => {},
+    close: () => {
+      closed.push(name);
+    },
+  });
+  const shared = sink('shared');
+  const logger = new Logger({
+    sinks: [sink('log'), shared],
+    diagnosticSinks: [shared, sink('diagnostic')],
+    callProcessExit: false,
+  });
+  const diagnostics: LoggerDiagnostic[] = [];
+  logger.on<LoggerDiagnostic>('diagnostic', (event) => {
+    diagnostics.push(event);
+  });
+  const arrayIterator = Object.getOwnPropertyDescriptor(
+    Array.prototype,
+    Symbol.iterator,
+  ) as PropertyDescriptor;
+  const setIterator = Object.getOwnPropertyDescriptor(
+    Set.prototype,
+    Symbol.iterator,
+  ) as PropertyDescriptor;
+  const refuse = (): never => {
+    throw new Error('iterator hook consulted');
+  };
+  let closing: Promise<void>;
+  // Patched only across the synchronous part of close(), which collects, dedupes and
+  // invokes every sink hook; the runner itself needs the real iterators afterwards.
+  Object.defineProperty(Array.prototype, Symbol.iterator, {
+    ...arrayIterator,
+    value: refuse,
+  });
+  Object.defineProperty(Set.prototype, Symbol.iterator, {
+    ...setIterator,
+    value: refuse,
+  });
+  try {
+    closing = logger.close();
+  } finally {
+    Object.defineProperty(Array.prototype, Symbol.iterator, arrayIterator);
+    Object.defineProperty(Set.prototype, Symbol.iterator, setIterator);
+  }
+  await closing;
+  await sleep(0);
+  expect(closed).toEqual(['log', 'shared', 'diagnostic']);
+  expect(diagnostics).toEqual([]);
+});

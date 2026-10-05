@@ -1399,6 +1399,14 @@ other non-number values with `TypeError` before starting initialization.
 Zero retains the existing close behavior, including each sink’s final-flush minimum;
 Infinity and oversized values clamp to 2,147,483,647ms.
 
+The count options follow the same rule for values that are not numbers: `maxQueueSize`,
+`maxRetries`, and FileSink `maxSizeMB` use their defaults when omitted or `null`, and
+constructors reject NaN or any other non-number with a `TypeError` naming the option,
+before starting initialization. Their numeric meanings are unchanged: a negative
+`maxQueueSize` (or `Infinity`) is unlimited and `0` takes the default; `maxRetries` of
+zero or less means no retries and `Infinity` takes the default; a `maxSizeMB` of zero or
+less takes the default and `Infinity` never rotates on size.
+
 #### Flush Pending Writes
 
 Wait for all pending writes to complete and get statistics:
@@ -1862,10 +1870,12 @@ When a log includes an `exitCode`, the logger will:
 The cleanup deadline starts when sink cleanup begins; it does not bound an awaited
 `beforeExitCallback` or override its explicit `{ action: 'wait' }` decision.
 
-Invalid real exit codes produce one diagnostic per logger, on the first invalid request even if earlier requests used valid codes. Further invalid-code diagnostics are suppressed; each request still uses the normalized code.
+Invalid real exit codes produce one guarded `console.error` report per logger, on the first invalid request even if earlier requests used valid codes. Further invalid-code reports are suppressed; each request still uses the normalized code, and a log entry that requested the exit records the normalized code in `entry.exitCode`. The report is not a `LoggerDiagnostic`: it is made synchronously as the exit begins, and the sinks a diagnostic would reach are about to be closed, so it would land on the console anyway.
+
+The first real exit to proceed owns the process's exit code. A later `exit()` still emits `exit-called` and runs `beforeExitCallback`, but it cannot change the code or call `process.exit()` again. One case is reported rather than dropped silently: a non-zero request ignored while an exit with code 0 is in progress, which would otherwise let a run that asked to fail exit as a success. That report also goes to guarded `console.error`, once per logger. A repeat with the same code, a success after a failure, or a different failure code is not reported, since the process's outcome is unchanged.
 
 **Exit Code Validation:** `exit(code: number)` accepts numeric codes, not numeric strings. Non-numeric `exitCode` values on log entries are ignored.
-Normalization applies only when `callProcessExit` is enabled and the runtime exposes a callable `process.exit`. Browser/worker runtimes without it retain the requested code and emit no fallback diagnostic.
+Normalization applies only when `callProcessExit` is enabled and the runtime exposes a callable `process.exit`. Browser/worker runtimes without it retain the requested code and make no invalid-code report.
 For a real exit, codes must be integers in the portable range `0–255` on every platform, including Windows. This deliberately excludes Windows-specific exit codes above 255; they normalize to 1 too. Any other value is reported to the guarded console and replaced
 with 1 before `exit-called`, `beforeExitCallback`, and cleanup. This prevents codes such as 256 from wrapping to success (status 0) at the OS boundary. If `process.exit()` throws, the logger reports that failure
 and makes one fallback call with code 1, including when 1 was requested originally.
@@ -2173,8 +2183,8 @@ logger.error('Error event will be emitted');
 
 When the logger handles an exit, it emits two distinct events representing different lifecycle phases:
 
-- **`exit-called`**: Emitted **immediately** when `logger.exit()` is called, _before_ any registered `beforeExitCallback` hooks (like component shutdowns) run. It indicates the exit sequence has been initiated, and includes an `isFirstExit: boolean` flag to track redundant exit calls.
-- **`exit-process`**: Emitted **after** all registered exit callbacks have settled and finished their work, just before the logger starts closing its sinks and optionally terminates the process (`callProcessExit: true`). It indicates the logger has finished pre-exit callback work and is proceeding into final sink cleanup.
+- **`exit-called`**: Emitted when `logger.exit()` accepts a request, _before_ any registered `beforeExitCallback` hooks (like component shutdowns) run. It indicates the exit sequence has been initiated, and includes an `isFirstExit: boolean` flag to track redundant exit calls. Two nested requests are absorbed by the exit already in flight and emit nothing: an `exit()` from an `exit-called` listener, and, during a simulated exit, an `exit()` from an `exit-process` listener. Either would otherwise reach the same listener again without bound.
+- **`exit-process`**: Emitted **after** the exit's `beforeExitCallback` (if any) has settled without answering `{ action: 'wait' }` (a callback that throws or rejects proceeds too), as the logger moves into sink cleanup and optionally terminates the process (`callProcessExit: true`). If cleanup is already under way - `close()` was called first, or a sink's close hook requested the exit - the exit joins that cleanup rather than starting it. A real exit emits it at most once per logger: once one exit has scheduled `process.exit()`, later exits do not emit it again (see [Exit Behavior](#exit-behavior)). A simulated exit emits it for each exit that proceeds.
 
 ## Custom Sinks
 

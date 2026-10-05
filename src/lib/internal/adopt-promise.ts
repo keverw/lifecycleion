@@ -23,6 +23,11 @@ function inheritsFromPromise(value: unknown): boolean {
   }
 }
 
+// Captured like the promise intrinsics: a later patch to hasOwnProperty that answered
+// `false` would send a native promise's own no-op `then` down the trusting path.
+// eslint-disable-next-line @typescript-eslint/unbound-method
+const hasOwnPropertyIntrinsic = Object.prototype.hasOwnProperty;
+
 /**
  * Whether `value` carries `then` as an own property - the shape of a native promise
  * someone attached a replacement `then` to. A class's `then` lives on its prototype and
@@ -31,7 +36,7 @@ function inheritsFromPromise(value: unknown): boolean {
  */
 function hasOwnThen(value: object): boolean {
   try {
-    return Object.prototype.hasOwnProperty.call(value, 'then');
+    return applyIntrinsic(hasOwnPropertyIntrinsic, value, ['then']);
   } catch {
     return true;
   }

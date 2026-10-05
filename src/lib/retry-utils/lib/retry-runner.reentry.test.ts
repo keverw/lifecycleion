@@ -871,3 +871,85 @@ test.each([false, true])(
     }
   },
 );
+
+test('canForceTry reads false wherever forceTry() would refuse with terminal_dispatch_in_progress', async () => {
+  let report: ReportResult | undefined;
+  const runner = new RetryRunner(policy, (reportResult) => {
+    report = reportResult;
+  });
+  const seen: Array<{ event: string; canForceTry: boolean; code?: string }> =
+    [];
+  const record = async (event: string): Promise<void> => {
+    const canForceTry = runner.canForceTry;
+    const result = (await runner.forceTry()) as RunResultNonSuccess;
+    seen.push({ event, canForceTry, code: result.code });
+  };
+  const running = runner.run(true);
+  runner.on(ATTEMPT_HANDLED, () => void record('attempt-handled'));
+  runner.on(OPERATION_ENDED, () => void record('operation-ended'));
+  // Reported outside run()'s lock, so only the terminal dispatch is in play.
+  report?.('fatal', new Error('done'));
+  expect(await running).toMatchObject({ status: 'attempt_fatal' });
+  await Promise.resolve();
+  expect(seen).toEqual([
+    {
+      event: 'attempt-handled',
+      canForceTry: false,
+      code: 'terminal_dispatch_in_progress',
+    },
+    {
+      event: 'operation-ended',
+      canForceTry: false,
+      code: 'terminal_dispatch_in_progress',
+    },
+  ]);
+  // Once published, a fatal-error runner can be forced again.
+  expect(runner.canForceTry).toBe(true);
+});
+
+test('canForceTry reads false while another call holds the operation lock', async () => {
+  const runner = new RetryRunner(policy, () => {});
+  let canForceTryDuringStart: boolean | undefined;
+  let forcedDuringStart: RunResult<unknown> | undefined;
+  runner.on(OPERATION_STARTED, () => {
+    canForceTryDuringStart = runner.canForceTry;
+    void runner.forceTry().then((result) => {
+      forcedDuringStart = result;
+    });
+  });
+  await runner.run();
+  await Promise.resolve();
+  expect(canForceTryDuringStart).toBe(false);
+  expect(forcedDuringStart).toMatchObject({ code: 'lock_error' });
+  expect(runner.canForceTry).toBe(true);
+  runner.overrideGraceCancelPeriodMS(0);
+  await runner.cancel();
+});
+
+test('a non-callable hook inheriting from Function.prototype is not registered', async () => {
+  const fake = Object.create(Function.prototype) as () => void;
+  const reports: unknown[] = [];
+  const onGlobalError = (event: Event): void => {
+    reports.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onGlobalError);
+  try {
+    const runner = new RetryRunner(
+      policy,
+      (reportResult) => {
+        reportResult('success', 'done');
+      },
+      {
+        onOperationStarted: fake,
+        onOperationEnded: fake,
+        onAttemptStarted: fake,
+        onAttemptHandled: fake,
+      },
+    );
+    expect(await runner.run(true)).toMatchObject({ status: 'attempt_success' });
+    expect(reports).toEqual([]);
+  } finally {
+    globalThis.removeEventListener('error', onGlobalError);
+  }
+});

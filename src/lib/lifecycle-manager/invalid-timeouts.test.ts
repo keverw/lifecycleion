@@ -608,6 +608,51 @@ test('invalid broadcast timeout reports its refusal through the configured logge
   ]);
 });
 
+test('non-array broadcast componentNames is refused through the configured logger', async () => {
+  const warnings: string[] = [];
+  const reportingLogger = new Logger({
+    callProcessExit: false,
+    sinks: [
+      {
+        write(entry) {
+          if (entry.type === 'warn') {
+            warnings.push(entry.message);
+          }
+        },
+      },
+    ],
+  });
+  const manager = new LifecycleManager({ logger: reportingLogger });
+  const component = new Component(reportingLogger, { name: 'target' });
+  await manager.registerComponent(component);
+  await manager.startComponent('target');
+  const broadcasts: string[] = [];
+  manager.on('component:broadcast-started', () => {
+    broadcasts.push('started');
+  });
+  try {
+    // An array-like and a bare name are both refused, not read as filters - and not
+    // treated as "no filter", which would message every running component.
+    for (const componentNames of ['target', { length: 1, 0: 'target' }]) {
+      expect(
+        await withoutGlobalReports(() =>
+          manager.broadcastMessage('hello', {
+            componentNames: componentNames as unknown as string[],
+          }),
+        ),
+      ).toEqual([]);
+    }
+    expect(warnings).toEqual([
+      'Broadcast refused: broadcastMessage componentNames must be an array',
+      'Broadcast refused: broadcastMessage componentNames must be an array',
+    ]);
+    expect(component.messages).toBe(0);
+    expect(broadcasts).toEqual([]);
+  } finally {
+    await manager.stopAllComponents();
+  }
+});
+
 test('active bulk startup refuses without reading unused timeout options', async () => {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => {

@@ -256,6 +256,9 @@ export class Logger extends EventEmitter {
   private _exitCode: number = 0;
   private _exitRequested = false;
   private _didReportInvalidExitCode = false;
+  private _didReportIgnoredFailureExit = false;
+  // The code of the exit whose `exit-called` listeners are running; undefined otherwise.
+  private _exitCalledCode: number | undefined;
   private _hasScheduledProcessExit = false;
   private _isEmittingExitProcess = false;
   private _isPendingExit = false;
@@ -327,21 +330,36 @@ export class Logger extends EventEmitter {
     if (this._isEmittingExitProcess && !this._hasScheduledProcessExit) {
       return;
     }
+    // Likewise an `exit-called` listener that exits again: its nested emit reaches the
+    // same listener, so an unconditional one recursed until the stack overflowed. The
+    // outer exit is already in flight under its own code and owns this request - unless
+    // an earlier real exit already scheduled, whose code is the one the process uses.
+    if (this._exitCalledCode !== undefined) {
+      this.reportIgnoredFailureExit(
+        code,
+        this._hasScheduledProcessExit ? this._exitCode : this._exitCalledCode,
+      );
+      return;
+    }
     const isFirstExit = !this._exitRequested;
     // Keep real exits in the portable 0–255 range; larger codes can wrap to
     // success at the OS boundary. Decide before closing sinks so a bad caller
     // value cannot strand a live process with a closed logger. Simulated exits
     // keep the requested code for inspection.
-    const isInvalidExitCode =
-      this.endsProcessOnExit &&
-      (!Number.isInteger(code) || code < 0 || code > 255);
+    const isInvalidExitCode = this.isInvalidExitCode(code);
+    if (isInvalidExitCode && !this._didReportInvalidExitCode) {
+      this._didReportInvalidExitCode = true;
+      reportToConsole(
+        `Logger exit code ${String(code)} is invalid; exiting with code 1`,
+      );
+    }
+    // Once a real exit is scheduled it owns the process's code, and a later exit is not
+    // replayed (see `processExit`). Silently dropping a failure code there would let the
+    // process report success for a run that asked to fail.
+    if (this._hasScheduledProcessExit) {
+      this.reportIgnoredFailureExit(code, this._exitCode);
+    }
     if (isInvalidExitCode) {
-      if (!this._didReportInvalidExitCode) {
-        this._didReportInvalidExitCode = true;
-        reportToConsole(
-          `Logger exit code ${String(code)} is invalid; exiting with code 1`,
-        );
-      }
       code = 1;
     }
 
@@ -360,7 +378,14 @@ export class Logger extends EventEmitter {
       | ReturnType<typeof safeHandleCallbackAndWait<BeforeExitResult>>
       | undefined;
     try {
-      this.emit('logger', { eventType: 'exit-called', code, isFirstExit });
+      // Only the emit is guarded, not `beforeExit`: that callback is told `isFirstExit`
+      // and decides repeats itself (`LifecycleManager` relies on seeing them).
+      this._exitCalledCode = code;
+      try {
+        this.emit('logger', { eventType: 'exit-called', code, isFirstExit });
+      } finally {
+        this._exitCalledCode = undefined;
+      }
 
       if (this.beforeExitCallback) {
         beforeExit = safeHandleCallbackAndWait<BeforeExitResult>(
@@ -1007,6 +1032,10 @@ export class Logger extends EventEmitter {
         rejectClose = reject;
       },
     );
+    // Marked handled, as the re-entry rejection above is: `void logger.close()` is an
+    // ordinary call, and an unexpected internal cleanup failure must not become an
+    // unhandled rejection that kills the process. Awaiting callers still see it.
+    observeRejection(this._closePromise, () => {});
     void observePromise(this.closeOwnedSinks(), resolveClose, rejectClose);
     return this._closePromise;
   }
@@ -1362,7 +1391,13 @@ export class Logger extends EventEmitter {
       // this field could honestly name.
       redactedKeys: didRequestRedaction ? inertKeys : undefined,
       error: options?.error,
-      exitCode: isNumber(exitCode) ? exitCode : undefined,
+      // The code the exit below will actually use, so a sink never records `300` for a
+      // process that exits 1. `exit()` gets the requested value and reports the fix.
+      exitCode: isNumber(exitCode)
+        ? this.isInvalidExitCode(exitCode)
+          ? 1
+          : exitCode
+        : undefined,
       tags: tags !== null && tags.length > 0 ? tags : undefined,
     };
 
@@ -1540,16 +1575,29 @@ export class Logger extends EventEmitter {
       // Capture owned lists, which add/remove replaces rather than mutates.
       // This preserves identities and positions across re-entrant close hooks.
       // A later malformed return must still name the destination we actually closed.
+      //
+      // Index loops throughout, like `handleLog` and `copySinkList`: spread, `Set`, and
+      // `map` consult replaceable iterator hooks, and this is the shutdown path that
+      // must reach completion whatever the application has patched.
       const logSinks = this.sinks;
       const diagnosticSinks = this.diagnosticSinks;
-      const sinksToClose = [...new Set([...logSinks, ...diagnosticSinks])];
-      const labelFor = (sink: LogSink): string => {
-        const logIndex = logSinks.indexOf(sink);
-        return logIndex >= 0
-          ? `Log sink #${logIndex + 1}`
-          : `Diagnostic sink #${diagnosticSinks.indexOf(sink) + 1}`;
+      // Each sink closes once, labelled by its first position in the configured lists
+      // (log sinks first), not by the merged close order.
+      const sinksToClose: LogSink[] = [];
+      const labels: string[] = [];
+      const collect = (sinks: LogSink[], kind: string): void => {
+        // eslint-disable-next-line unicorn/no-for-loop
+        for (let index = 0; index < sinks.length; index++) {
+          const sink = sinks[index];
+          if (!sinksToClose.includes(sink)) {
+            sinksToClose.push(sink);
+            labels.push(`${kind} sink #${index + 1}`);
+          }
+        }
       };
-      const pendingSinks = new Set(sinksToClose);
+      collect(logSinks, 'Log');
+      collect(diagnosticSinks, 'Diagnostic');
+      const isPending = new Array<boolean>(sinksToClose.length).fill(true);
       let didReachDeadline = false;
       let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
       // One budget for the whole close, started before invoking any sink. Zero still
@@ -1559,74 +1607,89 @@ export class Logger extends EventEmitter {
       // Unlike raceDeadline(pending, ...), this timer must be armed before creating
       // pending work, since constructing closeOperations synchronously invokes hooks.
       const deadline = new promiseConstructorIntrinsic<
-        PromiseResultBox<LogSink[]>
+        PromiseResultBox<number[]>
       >((resolve) => {
         timeoutHandle = setTimeout(() => {
           didReachDeadline = true;
-          resolve(boxPromiseValue([...pendingSinks]));
+          const expired: number[] = [];
+          // eslint-disable-next-line unicorn/no-for-loop
+          for (let index = 0; index < isPending.length; index++) {
+            if (isPending[index]) {
+              expired.push(index);
+            }
+          }
+          resolve(boxPromiseValue(expired));
         }, this.closeTimeoutMS);
       });
 
-      try {
-        const closeOperations = sinksToClose.map(async (sink) => {
+      const closeSink = async (index: number): Promise<void> => {
+        const sink = sinksToClose[index];
+        try {
+          let result: unknown;
+          let pending: ReturnType<typeof adoptResult>;
           try {
-            let result: unknown;
-            let pending: ReturnType<typeof adoptResult>;
-            try {
-              this._activeSinkClose = sink;
-              // Read once, preserving the receiver, and contain property-access failures
-              // separately from classifying the return of a successful close call.
-              // The captured apply restores the original receiver.
-              // eslint-disable-next-line @typescript-eslint/unbound-method
-              const close = sink.close;
-              if (close) {
-                result = applyIntrinsic(close, sink, []);
-              }
-              // Return inspection also runs caller code, including then/constructor
-              // getters. Keep it guarded so these cannot join their own completion.
-              pending = adoptResult(result);
-            } catch (error) {
-              this.handleSinkError(error, 'close', sink);
-              return;
-            } finally {
-              this._activeSinkClose = undefined;
+            this._activeSinkClose = sink;
+            // Read once, preserving the receiver, and contain property-access failures
+            // separately from classifying the return of a successful close call.
+            // The captured apply restores the original receiver.
+            // eslint-disable-next-line @typescript-eslint/unbound-method
+            const close = sink.close;
+            if (close) {
+              result = applyIntrinsic(close, sink, []);
             }
-            if (pending instanceof UnreadableReturn) {
-              // Use the configured lists, not the merged/deduplicated close order.
-              this.handleSinkError(
-                pending,
-                'close',
-                sink,
-                `${labelFor(sink)} close`,
-              );
-              return;
-            }
-            try {
-              await awaitBoxedPromise(
-                pending ?? promiseResolveIntrinsic(undefined),
-              );
-            } catch (error) {
-              // A deadline reports uncertainty, not the eventual cause. Preserve a
-              // later failure on the terminal channel without re-entering closed sinks
-              // or emitting a second timeout diagnostic.
-              if (this._reportedCloseReentryErrors.has(error as object)) {
-                // Detection already reported this exact failure. A sink may forward
-                // it after the deadline just as it may return it immediately; neither
-                // path should duplicate the diagnostic for the same re-entry.
-                return;
-              }
-              if (didReachDeadline) {
-                reportToConsole(
-                  `${labelFor(sink)} close failed after its deadline: ${describeError(error)}`,
-                );
-              } else {
-                this.handleSinkError(error, 'close', sink);
-              }
-            }
+            // Return inspection also runs caller code, including then/constructor
+            // getters. Keep it guarded so these cannot join their own completion.
+            pending = adoptResult(result);
+          } catch (error) {
+            this.handleSinkError(error, 'close', sink);
+            return;
           } finally {
-            pendingSinks.delete(sink);
+            this._activeSinkClose = undefined;
           }
-        });
+          if (pending instanceof UnreadableReturn) {
+            // Use the configured lists, not the merged/deduplicated close order.
+            this.handleSinkError(
+              pending,
+              'close',
+              sink,
+              `${labels[index]} close`,
+            );
+            return;
+          }
+          try {
+            await awaitBoxedPromise(
+              pending ?? promiseResolveIntrinsic(undefined),
+            );
+          } catch (error) {
+            // A deadline reports uncertainty, not the eventual cause. Preserve a
+            // later failure on the terminal channel without re-entering closed sinks
+            // or emitting a second timeout diagnostic.
+            if (this._reportedCloseReentryErrors.has(error as object)) {
+              // Detection already reported this exact failure. A sink may forward
+              // it after the deadline just as it may return it immediately; neither
+              // path should duplicate the diagnostic for the same re-entry.
+              return;
+            }
+            if (didReachDeadline) {
+              reportToConsole(
+                `${labels[index]} close failed after its deadline: ${describeError(error)}`,
+              );
+            } else {
+              this.handleSinkError(error, 'close', sink);
+            }
+          }
+        } finally {
+          isPending[index] = false;
+        }
+      };
+
+      try {
+        // Started in order, each running synchronously up to its first await, exactly
+        // as `map` invoked them.
+        const closeOperations: Promise<void>[] = [];
+        for (let index = 0; index < sinksToClose.length; index++) {
+          closeOperations.push(closeSink(index));
+        }
 
         // Both helpers observe owned native promises through the captured method;
         // native combinators would consult the inputs' replaceable then properties.
@@ -1635,16 +1698,17 @@ export class Logger extends EventEmitter {
           () => undefined,
         );
         const { value: expired } = await racePromises([completed, deadline]);
-        const expiredSinks = expired?.value;
-        if (expiredSinks !== undefined) {
-          for (const sink of expiredSinks) {
-            const label = labelFor(sink);
+        const expiredIndexes = expired?.value;
+        if (expiredIndexes !== undefined) {
+          // eslint-disable-next-line unicorn/no-for-loop
+          for (let position = 0; position < expiredIndexes.length; position++) {
+            const index = expiredIndexes[position];
             this.handleSinkError(
               new Error(
-                `${label} close timed out after ${String(this.closeTimeoutMS)}ms; sink cleanup/flush is unconfirmed`,
+                `${labels[index]} close timed out after ${String(this.closeTimeoutMS)}ms; sink cleanup/flush is unconfirmed`,
               ),
               'close',
-              sink,
+              sinksToClose[index],
             );
           }
         }
@@ -1820,12 +1884,52 @@ export class Logger extends EventEmitter {
   }
 
   /**
+   * Whether a real exit must replace `code` with 1. Kept in the portable 0–255 range:
+   * larger codes can wrap to success at the OS boundary. Simulated exits keep any code.
+   */
+  private isInvalidExitCode(code: number): boolean {
+    return (
+      this.endsProcessOnExit &&
+      (!Number.isInteger(code) || code < 0 || code > 255)
+    );
+  }
+
+  /**
+   * Report an exit request dropped because an exit under code 0 already owns the
+   * process. Only that pairing is reported: any other dropped code changes nothing a
+   * supervisor reads (the process still fails, or both requests succeed), and repeat
+   * exits are ordinary - a second signal, a shutdown that logs its own exit line. Once
+   * per logger, like the invalid-code report, so a loop of failing exits cannot flood
+   * the console the logger falls back to while it closes its sinks.
+   */
+  private reportIgnoredFailureExit(
+    requested: number,
+    owningCode: number,
+  ): void {
+    if (
+      !this.endsProcessOnExit ||
+      owningCode !== 0 ||
+      requested === 0 ||
+      this._didReportIgnoredFailureExit
+    ) {
+      return;
+    }
+    this._didReportIgnoredFailureExit = true;
+    reportToConsole(
+      `Logger exit(${String(requested)}) ignored: an exit with code 0 is already in progress`,
+    );
+  }
+
+  /**
    * Process the exit
    */
   private processExit(exitCode: number): void {
     // The first real exit already owns the process's exit code. A later one would only
     // report a code the process never exits with and call process.exit() again.
     if (this._hasScheduledProcessExit) {
+      // Also reached by an exit whose `beforeExit` was still running when another one
+      // scheduled first, so `exit()` had nothing to compare against yet.
+      this.reportIgnoredFailureExit(exitCode, this._exitCode);
       return;
     }
     // A simulated exit schedules nothing, so an `exit-process` listener that exits again

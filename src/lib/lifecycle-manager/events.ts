@@ -183,7 +183,12 @@ export interface LifecycleManagerEventMap {
   'component:shutdown-warning-completed': { name: string };
   'component:shutdown-warning-skipped': {
     name: string;
-    reason: 'component_changed' | 'component_not_available';
+    // `component_not_found`: unregistered. `component_changed`: another instance now
+    // holds the name. `component_not_available`: same instance, no longer in the
+    // state it was selected in.
+    reason:
+      'component_not_found' | 'component_changed' | 'component_not_available';
+    // The name's current state; absent when nothing is registered under it.
     state?: ComponentState;
   };
   'lifecycle-manager:shutdown-warning-completed': { timeoutMS: number };
@@ -218,8 +223,14 @@ export interface LifecycleManagerEventMap {
     name: string;
     stallInfo: ComponentStallInfo;
     stalledDurationMS: number;
-    /** Set when late forced-start cleanup supersedes the old stop. */
-    reason?: 'late-start-cleanup';
+    /**
+     * Set when a forced start supersedes the old stop rather than that stop finishing:
+     * `'forced-start'` when the forced start itself marks the component running (it
+     * succeeded, or it is being stopped at once because shutdown began meanwhile), and
+     * `'late-start-cleanup'` when a timed-out forced start succeeds late and its cleanup
+     * retires the stall.
+     */
+    reason?: 'late-start-cleanup' | 'forced-start';
   };
   'component:unexpected-stop': { name: string; error?: Error };
   'component:shutdown-force-completed': { name: string };
@@ -520,7 +531,12 @@ export class LifecycleManagerEvents {
     reason: LifecycleManagerEventMap['component:shutdown-warning-skipped']['reason'],
     state?: ComponentState,
   ): void {
-    this.emit('component:shutdown-warning-skipped', { name, reason, state });
+    // Omitted, not present as `undefined`, when there is no state: the docs promise the
+    // key only when there is one, and `'state' in payload` should agree with them.
+    this.emit(
+      'component:shutdown-warning-skipped',
+      state === undefined ? { name, reason } : { name, reason, state },
+    );
   }
 
   public componentShutdownWarningCompleted(name: string): void {
@@ -593,7 +609,7 @@ export class LifecycleManagerEvents {
     name: string,
     stallInfo: ComponentStallInfo,
     stalledDurationMS: number,
-    reason?: 'late-start-cleanup',
+    reason?: LifecycleManagerEventMap['component:stalled-resolved']['reason'],
   ): void {
     this.emit('component:stalled-resolved', {
       name,

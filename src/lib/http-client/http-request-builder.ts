@@ -1,8 +1,8 @@
 import { isNullish } from '../internal/is-nullish';
 import { generateID } from '../id-helpers';
-import { assertDurationMS } from '../internal/timer-limits';
+import { validateRequestTimeoutMS } from './consts';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
-import { setOwnHeader } from './utils';
+import { defineOwnEntry } from './utils';
 import type {
   HTTPMethod,
   HTTPResponse,
@@ -101,7 +101,7 @@ export class HTTPRequestBuilder<T = unknown> {
     // prototype (an array value) or vanish (a string). A nullish argument stays a
     // no-op, as `Object.assign` treated it.
     for (const [key, value] of Object.entries(headers ?? {})) {
-      setOwnHeader(this._headers, key, value);
+      defineOwnEntry(this._headers, key, value);
     }
     return this;
   }
@@ -140,9 +140,7 @@ export class HTTPRequestBuilder<T = unknown> {
     this._assertNotSent('timeout');
     // Validated only: nullish inherits the client's timeout at dispatch, where the
     // value is resolved once.
-    if (!isNullish(ms)) {
-      assertDurationMS(ms, 'HTTP request timeout');
-    }
+    validateRequestTimeoutMS(ms);
     this._timeout = ms;
     return this;
   }

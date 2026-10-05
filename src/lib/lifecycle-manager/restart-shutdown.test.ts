@@ -5,6 +5,7 @@ import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
 import type { RestartResult, ShutdownResult } from './types';
 import { sleep } from '../sleep';
+import { deferred } from './test-helpers';
 
 function setup(shutdownTimeoutMS?: number) {
   const logger = new Logger({
@@ -31,14 +32,6 @@ function shutdownCompleted(manager: LifecycleManager): Promise<void> {
       resolve();
     });
   });
-}
-
-function deferred(): { promise: Promise<void>; resolve: () => void } {
-  let resolve!: () => void;
-  const promise = new Promise<void>((settle) => {
-    resolve = settle;
-  });
-  return { promise, resolve };
 }
 
 // Sends a signal down the same private entry point the OS handlers use.

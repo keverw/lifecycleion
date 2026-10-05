@@ -71,6 +71,20 @@ export const DEFAULT_TIMEOUT_MS = 30_000;
 export { MAX_TIMER_MS } from '../internal/timer-limits';
 
 /**
+ * Reject a request timeout that {@link resolveRequestTimeoutMS} would refuse, without
+ * resolving it. Builders validate when the value is set but keep nullish as-is, so it
+ * still inherits the client value at dispatch. One check keeps both sites agreeing on
+ * what is invalid and on the error's label.
+ */
+export function validateRequestTimeoutMS(
+  requested: unknown,
+): asserts requested is number | null | undefined {
+  if (!isNullish(requested)) {
+    assertDurationMS(requested, 'HTTP request timeout');
+  }
+}
+
+/**
  * The per-attempt timeout a request will actually run under.
  *
  * `HTTPClientConfig.timeout` and `HTTPRequestOptions.timeout` both document `<= 0` as
@@ -90,10 +104,10 @@ export function resolveRequestTimeoutMS(
   requested: unknown,
   defaultMS: number = DEFAULT_TIMEOUT_MS,
 ): number {
+  validateRequestTimeoutMS(requested);
   if (isNullish(requested)) {
     return defaultMS;
   }
-  assertDurationMS(requested, 'HTTP request timeout');
 
   if (requested <= 0 || requested === Number.POSITIVE_INFINITY) {
     return 0;

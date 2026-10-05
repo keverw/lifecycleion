@@ -598,8 +598,13 @@ Detach signal handlers and stop listening for process signals and keyboard event
 - Calling multiple times is safe (idempotent)
 
 If restoring terminal mode fails, `detach()` still returns normally and reports the
-failure on the global `'error'` channel. The shared state remains marked so a future
-manager attachment can adopt ownership and retry restoration when it detaches.
+failure on the global `'error'` channel before it returns, so a caller that exits right
+after `detach()` does not lose it. The shared state remains marked so a future manager
+attachment can adopt ownership and retry restoration when it detaches.
+
+If removing a signal listener fails, `detach()` still removes the rest and restores the
+terminal, then throws the first removal failure; any further failures are reported on the
+`'error'` channel in a microtask, after that throw has reached the caller.
 
 ### Trigger Methods
 

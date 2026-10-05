@@ -11,12 +11,17 @@ import type {
   GetValueOptions,
   ValueResult,
 } from '../types';
-import { applyIntrinsic, observeRejection } from '../../internal/intrinsics';
+import {
+  applyIntrinsic,
+  observeRejection,
+  promiseResolveIntrinsic,
+} from '../../internal/intrinsics';
 import {
   adoptPromise,
   adoptResult,
   UnreadableReturn,
 } from '../../internal/adopt-promise';
+import { isObjectLike } from '../../internal/is-object-like';
 import { toError } from '../../to-error';
 import { LIFECYCLE_MANAGER_LOG_MESSAGE_HANDLER_FAILED } from '../constants';
 import {
@@ -44,8 +49,11 @@ function readAvailability(
     context.isRawStartPending(componentName);
   const isRunning =
     isCurrent && !isUnavailable && context.isComponentRunning(componentName);
-  const isStalled =
-    !isUnavailable && context.stalledComponents.has(componentName);
+  // The label does not depend on availability: a stall whose forced `start()` is still
+  // pending is refused, but it is still `stalled` - as `checkComponentHealth()` and the
+  // broadcast skip both call it. Gating this on availability made the same component
+  // answer `stopped` here and `stalled` there, flipping with `includeStalled`.
+  const isStalled = context.stalledComponents.has(componentName);
   const refusalCode =
     isCurrent &&
     !isUnavailable &&
@@ -200,6 +208,13 @@ export async function sendMessageInternal(
     payload,
   });
 
+  // One microtask before the recheck, so it follows the sent listeners however this
+  // send was reached. A send made from inside another manager event listener only
+  // queues `message-sent` behind the notification being delivered; that drain is
+  // synchronous, so it has run every queued listener by the time this resumes. Without
+  // the wait a listener could not prevent a nested dispatch, as the event docs promise.
+  await promiseResolveIntrinsic(undefined);
+
   // The handler/options getters and sent listeners are caller code. Recheck the
   // same instance immediately before dispatch; even non-running overrides never
   // permit entering a handler while startup or teardown owns the component.
@@ -333,6 +348,30 @@ export async function sendMessageInternal(
 }
 
 /**
+ * The broadcast's `componentNames` filter, copied once by index - as
+ * `tryReadDependencies()` copies a dependency list - into a set the filter consults. The
+ * array is the caller's: a subclass or proxy runs its own code for `length` and
+ * `includes`, and the filter would have asked it once per registered component. A read
+ * that throws still fails the broadcast, before it has announced itself.
+ */
+function copyTargetNames(names: unknown): Set<unknown> | undefined {
+  if (names === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(names)) {
+    throw invalidOperationOptionError(
+      'broadcastMessage componentNames must be an array',
+    );
+  }
+  const copy = new Set<unknown>();
+  const length = Number(Reflect.get(names, 'length'));
+  for (let index = 0; index < length; index++) {
+    copy.add(Reflect.get(names, index));
+  }
+  return copy;
+}
+
+/**
  * Internal broadcast with explicit 'from' parameter
  *
  * @param payload - Message payload
@@ -355,18 +394,13 @@ export async function broadcastMessageInternal(
 
   // Read once: a getter behind it would otherwise run - and could answer differently -
   // on each read.
-  const names = options?.componentNames ?? undefined;
-  if (names !== undefined && !Array.isArray(names)) {
-    throw invalidOperationOptionError(
-      'broadcastMessage componentNames must be an array',
-    );
-  }
-  const hasExplicitTargets = names !== undefined && names.length > 0;
+  const targetNames = copyTargetNames(options?.componentNames ?? undefined);
+  const hasExplicitTargets = targetNames !== undefined && targetNames.size > 0;
 
   // Filter by names if specified
   if (hasExplicitTargets) {
     targetComponents = targetComponents.filter((c) =>
-      names.includes(context.nameOf(c)),
+      targetNames.has(context.nameOf(c)),
     );
   }
 
@@ -448,9 +482,15 @@ export async function broadcastMessageInternal(
         error: messageResult.error,
         timedOut: messageResult.timedOut,
         // A target unregistered mid-broadcast is no longer running; `error` would claim
-        // its handler ran and failed.
+        // its handler ran and failed. Each send is handed the shared timeout already
+        // validated above, so a per-recipient option refusal would be the manager
+        // breaking its own invariant - a crash, not the caller's options.
         code:
-          messageResult.code === 'not_found' ? 'stopped' : messageResult.code,
+          messageResult.code === 'not_found'
+            ? 'stopped'
+            : messageResult.code === 'invalid_options'
+              ? 'operation_crashed'
+              : messageResult.code,
       });
     }
   } catch (error) {
@@ -667,11 +707,18 @@ export function getValueInternal<T = unknown>(
       );
     }
 
-    const componentResult = rawResult as ReturnType<
-      NonNullable<BaseComponent['getValue']>
-    >;
-    const wasFound = componentResult.found;
-    const value = componentResult.value;
+    // Validated as `healthCheck()` results are: `found` is read once and must be a
+    // boolean. Testing it for truthiness turned `{ found: 'no' }` into `code: 'found'`
+    // - a malformed answer reported as a value. Thrown here, so it is answered as the
+    // handler's own failure (`code: 'error'`), like a handler that threw.
+    if (!isObjectLike(rawResult)) {
+      throw new TypeError('getValue() did not return a ComponentValueResult');
+    }
+    const wasFound: unknown = Reflect.get(rawResult, 'found');
+    if (typeof wasFound !== 'boolean') {
+      throw new TypeError('getValue() result.found must be a boolean');
+    }
+    const value: unknown = Reflect.get(rawResult, 'value');
 
     context.lifecycleEvents.componentValueReturned(componentName, key, from, {
       found: wasFound,

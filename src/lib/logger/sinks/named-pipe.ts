@@ -609,8 +609,14 @@ export class NamedPipeSink implements LogSink {
     this.jsonFormat = options.jsonFormat ?? false;
     this.onError = options.onError;
     this.formatter = options.formatter;
-    this.maxQueueSize = resolveMaxQueueSize(options.maxQueueSize);
-    this.maxRetries = resolveMaxRetries(options.maxRetries);
+    this.maxQueueSize = resolveMaxQueueSize(
+      options.maxQueueSize,
+      'NamedPipeSink maxQueueSize',
+    );
+    this.maxRetries = resolveMaxRetries(
+      options.maxRetries,
+      'NamedPipeSink maxRetries',
+    );
     this.minLevel = options.minLevel ?? LogLevel.INFO;
 
     this.initPromise = this.initializePipe();

@@ -1,3 +1,5 @@
+import { isNullish } from '../../../internal/is-nullish';
+
 /**
  * What a queueing sink does when it cannot write, in one place.
  *
@@ -57,19 +59,44 @@ export { MAX_TIMER_MS } from '../../../internal/timer-limits';
 export { resolveTimeoutMS } from '../../../internal/timer-limits';
 
 /**
+ * Refuse a count option that names no number at all.
+ *
+ * `NaN` and non-numbers used to take the default silently, while `closeTimeoutMS` in the
+ * same options object threw for them - two validation rules in one config. A `NaN` here
+ * is a parse or arithmetic mistake upstream (`Number(env.MAX_QUEUE)` on an unset
+ * variable), and quietly substituting a default hides it, so these fail at construction
+ * like the timeout does. Numeric sentinels (`-1`, `0`, `Infinity`) keep their documented
+ * meanings; only values that are not numbers at all are refused.
+ */
+export function assertCountOption(
+  requested: unknown,
+  label: string,
+): asserts requested is number {
+  if (typeof requested !== 'number' || Number.isNaN(requested)) {
+    throw new TypeError(`${label} must be a number other than NaN`);
+  }
+}
+
+/**
  * The cap a sink should enforce, or `undefined` for unlimited.
  *
  * @param requested What the caller asked for: a positive count, {@link UNLIMITED_QUEUE}
- *                  (or any negative number) for no cap, or `undefined` to take the
- *                  default. `0` takes the default too - a sink that queues nothing at all
+ *                  (or any negative number) for no cap, or `undefined`/`null` to take the
+ *                  default. `NaN` or a non-number throws `TypeError` - see
+ *                  {@link assertCountOption}. `0` takes the default too - a sink that queues nothing at all
  *                  cannot write anything before it is initialized, so honouring it would
  *                  read as "drop everything" and is far more likely to be a mistake than
  *                  an intention.
  */
-export function resolveMaxQueueSize(requested?: number): number | undefined {
-  if (typeof requested !== 'number' || Number.isNaN(requested)) {
+export function resolveMaxQueueSize(
+  requested?: number | null,
+  label = 'maxQueueSize',
+): number | undefined {
+  if (isNullish(requested)) {
     return DEFAULT_MAX_QUEUE_SIZE;
   }
+
+  assertCountOption(requested, label);
 
   if (requested < 0) {
     return undefined;
@@ -95,14 +122,19 @@ export function resolveMaxQueueSize(requested?: number): number | undefined {
  * How many attempts a failed write gets, never fewer than the one it already had.
  *
  * A negative or zero value resolves to none rather than being honoured literally: the
- * entry is still written once, it simply is not retried. A value that names no usable
- * count at all - `NaN`, `Infinity`, a non-number - takes {@link DEFAULT_MAX_RETRIES}
- * instead, since it says nothing about what the caller wanted.
+ * entry is still written once, it simply is not retried. `Infinity` takes
+ * {@link DEFAULT_MAX_RETRIES} (see below); `NaN` or a non-number throws `TypeError` - see
+ * {@link assertCountOption}.
  */
-export function resolveMaxRetries(requested?: number): number {
-  if (typeof requested !== 'number' || Number.isNaN(requested)) {
+export function resolveMaxRetries(
+  requested?: number | null,
+  label = 'maxRetries',
+): number {
+  if (isNullish(requested)) {
     return DEFAULT_MAX_RETRIES;
   }
+
+  assertCountOption(requested, label);
 
   if (requested <= 0) {
     return 0;

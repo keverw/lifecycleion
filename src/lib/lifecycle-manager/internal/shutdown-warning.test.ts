@@ -37,7 +37,7 @@ function fixture() {
     componentStates.set(name, 'running');
     return component;
   };
-  return { context, add, events, componentStates, pendingStarts };
+  return { context, add, events, components, componentStates, pendingStarts };
 }
 
 test('a stalled component whose start() is still running gets no warning', async () => {
@@ -291,5 +291,31 @@ test('throwing hook getters report their component and allow remaining warnings'
     events.filter(({ name }) => name === 'component:shutdown-warning'),
   ).toEqual([
     { name: 'component:shutdown-warning', payload: { name: 'healthy' } },
+  ]);
+});
+
+test('an unregistered target is skipped as not found without a state key; a replaced one as changed', async () => {
+  const { context, add, events, components, componentStates } = fixture();
+  let calls = 0;
+  const hook = (): void => {
+    calls++;
+  };
+  add('gone', hook);
+  add('swapped', hook);
+  const phase = runShutdownWarningPhase(context, ['gone', 'swapped'], 100);
+  // Both are selected and announced; the recheck runs a microtask later.
+  components.delete('gone');
+  componentStates.delete('gone');
+  add('swapped', hook);
+  await phase;
+
+  expect(calls).toBe(0);
+  const skipped = events
+    .filter(({ name }) => name === 'component:shutdown-warning-skipped')
+    .map(({ payload }) => payload);
+  // Strict: `state` is omitted, not present as `undefined`, for an unregistered name.
+  expect(skipped).toStrictEqual([
+    { name: 'gone', reason: 'component_not_found' },
+    { name: 'swapped', reason: 'component_changed', state: 'running' },
   ]);
 });

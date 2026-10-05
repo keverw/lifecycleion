@@ -1229,6 +1229,32 @@ describe('NamedPipeSink', () => {
     },
   );
 
+  test.each(['maxQueueSize', 'maxRetries'] as const)(
+    'NaN or non-number %s rejects before initialization, naming its option',
+    (option) => {
+      const initialize = spyOn(
+        NamedPipeSink.prototype as unknown as {
+          initializePipe(): Promise<void>;
+        },
+        'initializePipe',
+      ).mockResolvedValue();
+      try {
+        for (const requested of [Number.NaN, '12', {}]) {
+          expect(
+            () =>
+              new NamedPipeSink({
+                pipePath: `${tmpDir.path}/count-option.pipe`,
+                [option]: requested as number,
+              }),
+          ).toThrow(`NamedPipeSink ${option} must be a number other than NaN`);
+        }
+        expect(initialize).not.toHaveBeenCalled();
+      } finally {
+        initialize.mockRestore();
+      }
+    },
+  );
+
   test('nullish, zero, finite and infinite close budgets keep their meanings', async () => {
     const initialize = spyOn(
       NamedPipeSink.prototype as unknown as { initializePipe(): Promise<void> },

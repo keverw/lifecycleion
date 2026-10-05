@@ -584,6 +584,9 @@ describe('MockAdapter via HTTPClient', () => {
       expect(calls).toBe(1);
       expect(request.attemptCount).toBe(1);
       expect(response.isFailed).toBe(true);
+      // A configuration error, not a transport failure.
+      expect(response.status).toBe(0);
+      expect(response.isNetworkError).toBe(false);
       expect(request.error?.code).toBe('adapter_error');
       expect(request.error?.isRetriesExhausted).toBe(false);
       expect(request.error?.cause).toBeInstanceOf(
@@ -705,12 +708,18 @@ describe('MockAdapter via HTTPClient', () => {
       });
       const response = await request.send();
       expect(response.isFailed).toBe(true);
+      expect(response.isNetworkError).toBe(false);
       expect(calls).toBe(1);
       expect(request.error?.code).toBe('adapter_error');
       expect(request.error?.isRetriesExhausted).toBe(false);
       expect(request.error?.cause).toBeInstanceOf(
         defaultDelay === -1 ? RangeError : TypeError,
       );
+      // The route set no delay; the live default is what was invalid.
+      expect(request.error?.cause?.message).toContain(
+        'MockAdapter defaultDelay',
+      );
+      expect(request.error?.cause?.message).not.toContain('response delay');
     },
   );
 

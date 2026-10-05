@@ -308,10 +308,11 @@ function getBrowserResolutionBase(): string | undefined {
 }
 
 /**
- * Store one header as an own key. Defined, not assigned: a `__proto__` header would
- * otherwise set the record's prototype (an array value) or vanish (a string).
+ * Store one entry - a header, cookie, or form field - as an own key of a record built
+ * from caller-controlled names. Defined, not assigned: a `__proto__` key would
+ * otherwise set the record's prototype (an object value) or vanish (a string).
  */
-export function setOwnHeader<V>(
+export function defineOwnEntry<V>(
   record: Record<string, V>,
   key: string,
   value: V,
@@ -333,7 +334,7 @@ export function normalizeHeaders(
   const result: Record<string, string> = {};
 
   for (const [key, value] of Object.entries(headers)) {
-    setOwnHeader(result, key.toLowerCase(), value);
+    defineOwnEntry(result, key.toLowerCase(), value);
   }
 
   return result;
@@ -354,7 +355,7 @@ export function mergeHeaders(
     }
 
     for (const [key, value] of Object.entries(headers)) {
-      setOwnHeader(
+      defineOwnEntry(
         result,
         key.toLowerCase(),
         normalizeMergedHeaderValue(value),
@@ -390,7 +391,7 @@ export function mergeObservedHeaders(
     }
 
     for (const [key, value] of Object.entries(headers)) {
-      setOwnHeader(
+      defineOwnEntry(
         result,
         key.toLowerCase(),
         Array.isArray(value)
@@ -539,7 +540,7 @@ export function extractFetchHeaders(
     const lower = key.toLowerCase();
 
     if (lower !== 'set-cookie') {
-      setOwnHeader(result, lower, value);
+      defineOwnEntry(result, lower, value);
     }
   }
 
@@ -600,7 +601,7 @@ export function normalizeAdapterResponseHeaders(
         result[lower] = [...existingLines, ...chunk];
       }
     } else {
-      setOwnHeader(
+      defineOwnEntry(
         result,
         lower,
         Array.isArray(value) ? (value[0] ?? '') : value,

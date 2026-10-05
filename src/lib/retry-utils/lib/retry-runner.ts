@@ -5,7 +5,6 @@ import { generateID } from '../../id-helpers';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { isString } from '../../strings';
 import { isPlainObject } from '../../is-plain-object';
-import { isFunction } from '../../is-function';
 import { RetryPolicy } from './retry-policy';
 import { clampTimerDelayMS, toTimerDelayMS } from '../../internal/timer-limits';
 import type {
@@ -242,7 +241,18 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     }
   }
 
+  /**
+   * Whether `forceTry()` would be accepted now. Refused, whatever the state, while the
+   * current operation publishes its terminal outcome (`terminal_dispatch_in_progress`,
+   * e.g. from an `attempt-handled` listener for a terminal report or an `operation-ended`
+   * listener) or while another `run()` / `resume()` / `forceTry()` call holds the lock
+   * (`lock_error`) - reading `true` there sent callers into a refusal it promised away.
+   */
   public get canForceTry(): boolean {
+    if (this.terminalDispatchDepth > 0 || this._isOperationLocked) {
+      return false;
+    }
+
     return (
       this.currentState.runnerState === 'running' ||
       this.currentState.runnerState === 'exhausted' ||
@@ -341,7 +351,12 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       }
 
       // subscribe the event handlers
-      if (isFunction(options.onOperationStarted)) {
+      //
+      // `typeof`, not `isFunction()`: its `instanceof Function` fallback accepts a
+      // non-callable object inheriting from `Function.prototype`, which was registered
+      // here and then reported as "not a function" on every emit. Anything that is not
+      // callable is ignored, as every other non-function value always has been.
+      if (typeof options.onOperationStarted === 'function') {
         // operation started
         this.on(
           OPERATION_STARTED,
@@ -350,7 +365,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       }
 
       // operation ended
-      if (isFunction(options.onOperationEnded)) {
+      if (typeof options.onOperationEnded === 'function') {
         this.on(
           OPERATION_ENDED,
           options.onOperationEnded as (data: unknown) => void,
@@ -358,7 +373,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       }
 
       // attempt started
-      if (isFunction(options.onAttemptStarted)) {
+      if (typeof options.onAttemptStarted === 'function') {
         this.on(
           ATTEMPT_STARTED,
           options.onAttemptStarted as (data: unknown) => void,
@@ -366,7 +381,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       }
 
       // attempt handled
-      if (isFunction(options.onAttemptHandled)) {
+      if (typeof options.onAttemptHandled === 'function') {
         this.on(
           ATTEMPT_HANDLED,
           options.onAttemptHandled as (data: unknown) => void,

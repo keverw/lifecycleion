@@ -188,39 +188,51 @@ describe('LifecycleManager - logger exit commits the process to ending', () => {
   });
 
   test('an exit a sink makes from close() after the commit is ignored', async () => {
-    await withStubbedExit(async (exits, release, gated) => {
-      const exitingOnClose: LogSink = {
-        write: (): void => {},
-        close: (): void => {
-          logger.exit(5);
-        },
-      };
-      const logger = new Logger({
-        sinks: [new ArraySink(), gated, exitingOnClose],
-        callProcessExit: true,
-      });
-      const manager = new LifecycleManager({
-        logger,
-        enableLoggerExitHook: true,
-        shutdownWarningTimeoutMS: -1,
-      });
-      let passes = 0;
-      manager.on('lifecycle-manager:shutdown-initiated', () => {
-        passes++;
-      });
-      await manager.registerComponent(new Plain(logger, 'a'));
-      await manager.startAllComponents();
+    // The logger reports the ignored failure exit on the console once; asserted below
+    // rather than left in the test output.
+    const output = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      await withStubbedExit(async (exits, release, gated) => {
+        const exitingOnClose: LogSink = {
+          write: (): void => {},
+          close: (): void => {
+            logger.exit(5);
+          },
+        };
+        const logger = new Logger({
+          sinks: [new ArraySink(), gated, exitingOnClose],
+          callProcessExit: true,
+        });
+        const manager = new LifecycleManager({
+          logger,
+          enableLoggerExitHook: true,
+          shutdownWarningTimeoutMS: -1,
+        });
+        let passes = 0;
+        manager.on('lifecycle-manager:shutdown-initiated', () => {
+          passes++;
+        });
+        await manager.registerComponent(new Plain(logger, 'a'));
+        await manager.startAllComponents();
 
-      logger.exit(0);
-      await waitFor(() => logger.didExit);
-      release();
-      await waitFor(() => exits.length > 0);
-      await sleep(20);
+        logger.exit(0);
+        await waitFor(() => logger.didExit);
+        release();
+        await waitFor(() => exits.length > 0);
+        await sleep(20);
 
-      // No second shutdown pass, and the first exit's code is the one used.
-      expect(passes).toBe(1);
-      expect(exits).toEqual([0]);
-    });
+        // No second shutdown pass, and the first exit's code is the one used.
+        expect(passes).toBe(1);
+        expect(exits).toEqual([0]);
+      });
+      expect(
+        output.mock.calls
+          .map((call) => String(call[0]))
+          .filter((line) => line.includes('Logger exit(5) ignored')),
+      ).toHaveLength(1);
+    } finally {
+      output.mockRestore();
+    }
   });
 
   test('a sink exiting from the forced exit line does not recurse', async () => {

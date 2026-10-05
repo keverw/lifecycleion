@@ -3,6 +3,7 @@ import {
   DEFAULT_TIMEOUT_MS,
   MAX_TIMER_MS,
   resolveRequestTimeoutMS,
+  validateRequestTimeoutMS,
 } from './consts';
 
 test.each([undefined, null])(
@@ -18,6 +19,17 @@ test.each([NaN, '100', {}, true])(
   'invalid explicit HTTP timeout %s remains a type error',
   (value) => {
     expect(() => resolveRequestTimeoutMS(value)).toThrow(TypeError);
+    // The builder's set-time check and dispatch-time resolution share one rule.
+    expect(() => validateRequestTimeoutMS(value)).toThrow(
+      'HTTP request timeout must be a number other than NaN',
+    );
+  },
+);
+
+test.each([undefined, null, 0, -1, Infinity, 12.5])(
+  'validateRequestTimeoutMS accepts %s without resolving it',
+  (value) => {
+    expect(() => validateRequestTimeoutMS(value)).not.toThrow();
   },
 );
 

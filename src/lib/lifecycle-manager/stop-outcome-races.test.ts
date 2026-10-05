@@ -192,7 +192,7 @@ test('synchronous force failure answers as a returned rejection when graceful re
   ]);
 });
 
-test('a failure after force shutdown resolved is a crash, not an abandoned force failure', async () => {
+test('a failure after force shutdown marked the component stopped is reported, and the stop still succeeds', async () => {
   const { logger, manager } = setup();
   const sink = logger.getSinks()[0] as ArraySink;
   const graceful = deferred();
@@ -227,8 +227,11 @@ test('a failure after force shutdown resolved is a crash, not an abandoned force
     release();
   }
 
-  expect(result.success).toBe(false);
-  expect(result.code).toBe('operation_crashed');
+  // As in the graceful phase: the component did stop, so only the status read failed.
+  // Not an abandoned force failure either.
+  expect(result.success).toBe(true);
+  expect(result.code).toBeUndefined();
+  expect(manager.getComponentStatus('a')?.state).toBe('stopped');
   expect(
     reports.some((report) => (report as Error).cause === bookkeepingFailure),
   ).toBe(true);

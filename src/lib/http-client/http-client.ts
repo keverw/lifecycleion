@@ -28,7 +28,7 @@ import {
   mergeObservedHeaders,
   mergeHeaders,
   normalizeMergedHeaderValue,
-  setOwnHeader,
+  defineOwnEntry,
   normalizeAdapterResponseHeaders,
   parseContentType,
   resolveAbsoluteURL,
@@ -1273,7 +1273,8 @@ export class BaseHTTPClient {
             // which the branches above reach with `adapterResponse: null` and so
             // cannot read for themselves.
             ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
-            ...(attemptResult.errorCode === 'request_setup_error' ||
+            ...(attemptResult.isNetworkErrorOverride === false ||
+            attemptResult.errorCode === 'request_setup_error' ||
             attemptResult.errorCode === 'interceptor_error' ||
             attemptResult.errorCode === 'stream_setup_error' ||
             attemptResult.errorCode === 'redirect_disabled'
@@ -1537,6 +1538,11 @@ export class BaseHTTPClient {
     isRetriesExhausted: boolean;
     errorCode?: HTTPClientError['code'];
     adapterCause?: Error;
+    /**
+     * Set for a non-retryable adapter failure. It shares `adapter_error` with transport
+     * failures, so the code alone cannot say the request never failed on the network.
+     */
+    isNetworkErrorOverride?: boolean;
     cancelReason?: string;
     /**
      * Tears down the attempt that produced `adapterResponse`, as a per-attempt timeout
@@ -2564,6 +2570,11 @@ export class BaseHTTPClient {
             wasCancelled: false,
             wasTimeout: didTimeoutThisAttempt,
             isRetriesExhausted: false,
+            // A flagged adapter failure is a local configuration error (for example
+            // MockAdapter's invalid delay), not a transport failure.
+            ...(isNonRetryableAdapterFailure
+              ? { isNetworkErrorOverride: false }
+              : {}),
             errorCode: isNonRetryableAdapterFailure
               ? 'adapter_error'
               : isStreamFactoryError
@@ -3196,25 +3207,28 @@ export class BaseHTTPClient {
     // intentionally — they are applied at dispatch time, and since no attempt ever
     // went out, including them would be misleading. Unsupported body types are caught
     // and swallowed here; the real error is reported via request_setup_error instead.
-    // Headers are merged one at a time for the same reason: this runs inside failure
-    // handlers and must not replace their result, so a value whose string conversion
-    // throws (or a getter that does) drops only that entry, keeping the rest for
-    // diagnosis.
+    // Headers are merged one at a time for the same reason, rather than through
+    // `mergeHeaders`, which fails as a whole: this runs inside failure handlers and
+    // must not replace their result, so a value whose string conversion throws (or a
+    // getter that does) drops only that entry, keeping the rest for diagnosis. The
+    // header object is read once, so every entry comes from the same object.
     const headers: Record<string, string | string[]> = {};
+    let sourceHeaders: Record<string, string | string[]> = {};
     let headerNames: string[] = [];
 
     try {
-      headerNames = Object.keys(request.headers ?? {});
+      sourceHeaders = request.headers ?? {};
+      headerNames = Object.keys(sourceHeaders);
     } catch {
       // An unreadable header object leaves the snapshot without headers.
     }
 
     for (const name of headerNames) {
       try {
-        setOwnHeader(
+        defineOwnEntry(
           headers,
           name.toLowerCase(),
-          normalizeMergedHeaderValue(request.headers[name]),
+          normalizeMergedHeaderValue(sourceHeaders[name]),
         );
       } catch {
         // Skip only this entry.
@@ -3515,12 +3529,12 @@ function snapshotHeaderRecord(
 
     for (const [name, headerValue] of Object.entries(value)) {
       if (typeof headerValue === 'string') {
-        setOwnHeader(snapshot, name, headerValue);
+        defineOwnEntry(snapshot, name, headerValue);
       } else if (
         Array.isArray(headerValue) &&
         headerValue.every((item) => typeof item === 'string')
       ) {
-        setOwnHeader(snapshot, name, [...headerValue]);
+        defineOwnEntry(snapshot, name, [...headerValue]);
       } else {
         return undefined;
       }

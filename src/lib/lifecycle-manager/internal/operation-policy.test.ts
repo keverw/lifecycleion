@@ -3,8 +3,11 @@ import { toTimerDelayMS as sharedTimerDelay } from '../../internal/timer-limits'
 import { claimReports } from '../test-helpers';
 import {
   crashedComponentResult,
+  crashedHealthReport,
   crashedShutdownResult,
+  crashedSignalBroadcastResult,
   crashedStartupResult,
+  invalidOperationOptionError,
   isOperationOptionRefusal,
   resolveOperationTimeoutMS,
   settleOperation,
@@ -88,6 +91,37 @@ test('raw shared timeout failures and caller errors remain reported operation cr
     }
     expect(reports).toHaveLength(2);
     expect((reports[1] as Error).cause).toBe(callerError);
+  } finally {
+    release();
+  }
+});
+
+test('aggregate results of operations without caller options never answer invalid_options', () => {
+  const { reports, release } = claimReports();
+  try {
+    // Neither `trigger*()` nor `checkAllHealth()` takes options, so a branded refusal
+    // reaching their net is the manager's own bug: a reported crash, not a refusal.
+    const refusal = invalidOperationOptionError('impossible option');
+    const signal = crashedSignalBroadcastResult(
+      'reload',
+      refusal,
+      'invalid_options',
+    );
+    const health = crashedHealthReport(refusal, 'invalid_options');
+    expect(signal.code).toBe('operation_crashed');
+    expect(signal.error).toBe(refusal);
+    expect(health.code).toBe('operation_crashed');
+    expect(health.error).toBe(refusal);
+    expect(reports).toHaveLength(2);
+    expect((reports[0] as Error).message).toContain('reload broadcast');
+    expect((reports[1] as Error).message).toContain('checkAllHealth');
+
+    // An ordinary crash was already reported by `settleOperation()`; not again here.
+    const crash = new Error('crash');
+    expect(crashedHealthReport(crash, 'operation_crashed').code).toBe(
+      'operation_crashed',
+    );
+    expect(reports).toHaveLength(2);
   } finally {
     release();
   }

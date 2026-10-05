@@ -37,7 +37,7 @@ import {
   materializeNodeRequestHeaders,
   normalizeNodeRequestHeaders,
 } from './node-adapter-utils';
-import { resolveDetectedRedirectURL, setOwnHeader } from '../utils';
+import { resolveDetectedRedirectURL, defineOwnEntry } from '../utils';
 // Shared error normalization preserves Error instances and wraps other thrown values.
 // Non-Error values receive a "Non-error value thrown: <description>" message, with the
 // original value retained on cause for consumers of the normalized error.
@@ -1687,6 +1687,20 @@ export class NodeAdapter implements HTTPAdapter {
         });
       };
 
+      // Both body shapes finish the same way. Finalization can throw even after every
+      // body write succeeded, so the one-shot upload outcome stays pending until it can
+      // include that failure.
+      const runBodyWrite = (write: () => Promise<void>): void => {
+        beginBodyWrite();
+
+        const writeTask = (async (): Promise<void> => {
+          await write();
+          req.end();
+          endBodyWrite();
+        })();
+        observeTaskFailure(writeTask, onBodyWriteFailure);
+      };
+
       // Write request body
       if (request.body instanceof FormData) {
         // FormData → multipart/form-data with exact Content-Length so upload
@@ -1694,10 +1708,8 @@ export class NodeAdapter implements HTTPAdapter {
         const boundary = generateMultipartBoundary();
         const form = request.body;
 
-        beginBodyWrite();
-
-        const writeTask = (async (): Promise<void> => {
-          await serializeMultipartFormData(
+        runBodyWrite(() =>
+          serializeMultipartFormData(
             form,
             req,
             boundary,
@@ -1705,13 +1717,8 @@ export class NodeAdapter implements HTTPAdapter {
             (isWaiting) => {
               sourceWaitSince = isWaiting ? Date.now() : undefined;
             },
-          );
-          // Finalization can throw even after every body write succeeded. Keep the
-          // one-shot upload outcome pending until it can include that failure.
-          req.end();
-          endBodyWrite();
-        })();
-        observeTaskFailure(writeTask, onBodyWriteFailure);
+          ),
+        );
       } else if (
         typeof request.body === 'string' ||
         request.body instanceof Uint8Array
@@ -1725,16 +1732,9 @@ export class NodeAdapter implements HTTPAdapter {
 
         req.setHeader('Content-Length', bytes.length.toString());
 
-        beginBodyWrite();
-
-        const writeTask = (async (): Promise<void> => {
-          await writeRequestBodyChunked(bytes, req, reportUploadProgress);
-          // Finalization can throw even after every body write succeeded. Keep the
-          // one-shot upload outcome pending until it can include that failure.
-          req.end();
-          endBodyWrite();
-        })();
-        observeTaskFailure(writeTask, onBodyWriteFailure);
+        runBodyWrite(() =>
+          writeRequestBodyChunked(bytes, req, reportUploadProgress),
+        );
       } else {
         // No body — fire 100% upload immediately and end the request
         reportUploadProgress({ loaded: 0, total: 0, progress: 1 });
@@ -2627,7 +2627,7 @@ function normalizeResponseHeaders(
       continue;
     }
     // Keys are already lowercase from Node's http parser
-    setOwnHeader(result, key, Array.isArray(value) ? value : String(value));
+    defineOwnEntry(result, key, Array.isArray(value) ? value : String(value));
   }
 
   return result;

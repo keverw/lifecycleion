@@ -25,8 +25,8 @@ test.each([false, true])(
     manager.on('component:stopped', () => {
       events.push('stopped');
     });
-    manager.on('component:stalled-resolved', () => {
-      events.push('stalled-resolved');
+    manager.on('component:stalled-resolved', (data: { reason?: string }) => {
+      events.push(`stalled-resolved:${data.reason ?? 'none'}`);
     });
     component.start = () => start.promise;
     const starting = manager.startComponent('a', { forceStalled: true });
@@ -41,14 +41,20 @@ test.each([false, true])(
       if (hasShutdownBegun) {
         expect(result.code).toBe('shutdown_in_progress');
       }
-      expect(events).toEqual([hasShutdownBegun ? 'stopped' : 'started']);
+      // Either way the forced start retires the old stall and announces it first; the
+      // old stop finishing afterwards owns nothing and announces nothing.
+      const expectedEvents = [
+        'stalled-resolved:forced-start',
+        hasShutdownBegun ? 'stopped' : 'started',
+      ];
+      expect(events).toEqual(expectedEvents);
       expect(manager.getComponentStatus('a')?.state).toBe(
         hasShutdownBegun ? 'stopped' : 'running',
       );
       expect(manager.getComponentStatus('a')?.stallInfo).toBeNull();
       oldStop.resolve();
       await new Promise<void>((resolve) => setImmediate(resolve));
-      expect(events).toEqual([hasShutdownBegun ? 'stopped' : 'started']);
+      expect(events).toEqual(expectedEvents);
     } finally {
       start.resolve();
       oldStop.resolve();

@@ -2,7 +2,7 @@ import { describeError, toError } from '../to-error';
 import { adoptResult, UnreadableReturn } from './adopt-promise';
 import { reportToConsole } from './report-to-console';
 import { reportToHost } from './report-to-host';
-import { observePromise } from './intrinsics';
+import { observePromise, observeRejection } from './intrinsics';
 
 /**
  * A caller's handler for one kind of failure, and the reporter that feeds it.
@@ -130,10 +130,17 @@ export function reportThroughHandler(
       return;
     }
     if (pending !== undefined) {
-      void observePromise(pending, settle, (handlerError: unknown) => {
-        reportToConsole(withHandlerFailure('rejected', handlerError));
-        settle();
-      });
+      // Observed to the end, as every other floating reaction here is: the reactions are
+      // built not to throw, but if one ever did, the derived promise would otherwise
+      // reject unhandled. `settle` is idempotent, so it doubles as that last observer
+      // and still lowers the caller's guard if the rejection report failed before it.
+      observeRejection(
+        observePromise(pending, settle, (handlerError: unknown) => {
+          reportToConsole(withHandlerFailure('rejected', handlerError));
+          settle();
+        }),
+        settle,
+      );
       return;
     }
 

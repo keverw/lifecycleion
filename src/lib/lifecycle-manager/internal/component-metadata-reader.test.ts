@@ -33,7 +33,7 @@ function collectReports(run: (reports: Error[]) => void): void {
   }
 }
 
-test('every dependency read runs guarded copying, while failure reports retain the first context', () => {
+test('every dependency read runs guarded copying, while failure reports retain the first context and name once', () => {
   collectReports((reports) => {
     const calls: string[] = [];
     const invalid = Object.create(null);
@@ -73,7 +73,7 @@ test('every dependency read runs guarded copying, while failure reports retain t
       '0',
       '1',
       '2',
-      'name',
+      // Already reported: the name is looked up only for the report actually made.
     ]);
     expect(reports).toHaveLength(1);
     expect(reports[0].message).toContain(

@@ -119,6 +119,25 @@ test('includeStalled does not enter a stalled component whose start() is still r
   expect(message.sent).toBe(false);
   expect(value.found).toBe(false);
   expect(calls).toBe(0);
+  // Refused, but still labelled `stalled` - as health and the broadcast skip label it -
+  // whether or not the caller opted into stalled components.
+  expect(message.code).toBe('stalled');
+  expect(value.code).toBe('stalled');
+  for (const allowStalled of [false, true]) {
+    const [row] = await broadcastMessageInternal(context, 'hi', null, {
+      componentNames: ['forced'],
+      includeStalled: allowStalled,
+    });
+    expect(row.code).toBe('stalled');
+    expect(
+      (
+        await sendMessageInternal(context, 'forced', 'hi', null, {
+          includeStalled: allowStalled,
+        })
+      ).code,
+    ).toBe('stalled');
+  }
+  expect(calls).toBe(0);
 
   pendingStarts.delete('forced');
   const allowed = await sendMessageInternal(context, 'forced', 'hi', null, {
@@ -316,4 +335,75 @@ test('signal inspection rechecks availability after the started callback', async
   expect(handlerReads).toBe(1);
   expect(timeoutReads).toBe(1);
   expect(calls).toBe(0);
+});
+
+test.each([
+  ['a non-boolean found', { found: 'no', value: 1 }],
+  ['a missing found', { value: 1 }],
+  ['a non-object result', 'found'],
+])('value access refuses %s as a handler error', (_label, answer) => {
+  const { context, add } = fixture();
+  const component = add('provider');
+  Object.defineProperty(component, 'getValue', { value: () => answer });
+  const result = getValueInternal(context, 'provider', 'key', null);
+  expect(result).toMatchObject({
+    found: false,
+    value: undefined,
+    handlerImplemented: true,
+    code: 'error',
+  });
+  expect(result.error).toBeInstanceOf(TypeError);
+});
+
+test('value access reads found and value once each', () => {
+  const { context, add } = fixture();
+  const component = add('provider');
+  const reads: string[] = [];
+  Object.defineProperty(component, 'getValue', {
+    value: () => ({
+      get found() {
+        reads.push('found');
+        return true;
+      },
+      get value() {
+        reads.push('value');
+        return 7;
+      },
+    }),
+  });
+  expect(getValueInternal(context, 'provider', 'key', null)).toMatchObject({
+    found: true,
+    value: 7,
+    code: 'found',
+  });
+  expect(reads).toEqual(['found', 'value']);
+});
+
+test('broadcast copies its componentNames once without calling the array methods', async () => {
+  const { context, add } = fixture();
+  for (const name of ['first', 'second', 'third']) {
+    Object.defineProperty(add(name), 'onMessage', { value: () => name });
+  }
+  class HostileNames extends Array<string> {
+    public override includes(): boolean {
+      throw new Error('includes must not be called');
+    }
+  }
+  const names = HostileNames.from(['third', 'first']) as HostileNames;
+  const reads: PropertyKey[] = [];
+  const proxy = new Proxy(names, {
+    get(target, property, receiver) {
+      reads.push(property);
+      return Reflect.get(target, property, receiver) as unknown;
+    },
+  });
+  const results = await broadcastMessageInternal(context, 'hi', null, {
+    componentNames: proxy,
+  });
+  // Registration order, filtered by the copied names.
+  expect(results.map(({ name, data }) => ({ name, data }))).toEqual([
+    { name: 'first', data: 'first' },
+    { name: 'third', data: 'third' },
+  ]);
+  expect(reads).toEqual(['length', '0', '1']);
 });

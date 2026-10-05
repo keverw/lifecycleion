@@ -1,4 +1,4 @@
-import { setOwnHeader } from '../utils';
+import { defineOwnEntry } from '../utils';
 
 export function normalizeNodeRequestHeaders(
   headers: Record<string, string | string[] | number | undefined>,
@@ -10,7 +10,7 @@ export function normalizeNodeRequestHeaders(
       continue;
     }
 
-    setOwnHeader(
+    defineOwnEntry(
       result,
       key.toLowerCase(),
       Array.isArray(value) ? value.map((item) => String(item)) : String(value),
@@ -27,11 +27,11 @@ export function materializeNodeRequestHeaders(
 
   for (const [key, value] of Object.entries(headers)) {
     if (!Array.isArray(value)) {
-      setOwnHeader(result, key, value);
+      defineOwnEntry(result, key, value);
       continue;
     }
 
-    setOwnHeader(
+    defineOwnEntry(
       result,
       key,
       key.toLowerCase() === 'cookie'

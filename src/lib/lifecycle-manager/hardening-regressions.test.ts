@@ -4,14 +4,8 @@ import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
 import { sleep } from '../sleep';
+import { deferred } from './test-helpers';
 
-function deferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>((r) => {
-    resolve = r;
-  });
-  return { promise, resolve };
-}
 function setup() {
   const logger = new Logger({
     sinks: [new ArraySink()],

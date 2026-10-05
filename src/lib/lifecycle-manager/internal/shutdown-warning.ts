@@ -111,11 +111,15 @@ export async function runShutdownWarningPhase(
         const current = context.getComponent(name);
         const state = context.componentStates.get(name);
         if (current !== component || state !== selectedState) {
+          // Unregistered and replaced are told apart: `component_changed` for a target
+          // that was simply removed sent listeners looking for a replacement.
           context.lifecycleEvents.componentShutdownWarningSkipped(
             name,
-            current !== component
-              ? 'component_changed'
-              : 'component_not_available',
+            current === undefined
+              ? 'component_not_found'
+              : current !== component
+                ? 'component_changed'
+                : 'component_not_available',
             state,
           );
           return 'skipped' as const;

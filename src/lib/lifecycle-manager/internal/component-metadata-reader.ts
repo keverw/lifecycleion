@@ -126,15 +126,19 @@ export class ComponentMetadataReader {
     context: string,
     failure: unknown,
     // For a registration candidate, not recorded yet: named by what registration read.
-    name: string = this.nameOf(component),
+    name?: string,
   ): void {
     if (this.reportedDependencyReadFailures.has(component)) {
       return;
     }
 
+    // Looked up only for the report actually made - not as a parameter default, which
+    // ran on every failing read of an already-reported list. Before the mark, so a
+    // lookup that throws leaves the one report still to be made.
+    const label = name ?? this.nameOf(component);
     this.reportedDependencyReadFailures.add(component);
     reportCallbackError(
-      `lifecycle-manager ${context} dependencies of ${name}`,
+      `lifecycle-manager ${context} dependencies of ${label}`,
       failure,
     );
   }

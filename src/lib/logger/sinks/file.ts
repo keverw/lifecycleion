@@ -1,4 +1,5 @@
 import { raceDeadline } from '../../internal/race-deadline';
+import { isNullish } from '../../internal/is-nullish';
 import fs, { promises as fsPromises } from 'fs';
 import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
@@ -6,6 +7,7 @@ import { reportThroughHandler } from '../../internal/failure-reporter';
 import { renderJSONLine } from './internal/render-json-line';
 import { renderTextLine } from './internal/render-text-line';
 import {
+  assertCountOption,
   DEFAULT_CLOSE_TIMEOUT_MS,
   resolveMaxQueueSize,
   resolveMaxRetries,
@@ -77,14 +79,16 @@ const ROTATION_RETRY_MAX_MS = 30_000;
  * only time out - and every pass reserves a fresh collision-free archive name, so it
  * fills the log directory as fast as the disk will take files.
  *
- * `Infinity` is left alone: it is the honest spelling of "never rotate on size". Anything
- * unusable - zero, negative, `NaN`, a non-number from untyped config - takes the default
- * rather than being honoured literally, the same answer the queue options give.
+ * `Infinity` is left alone: it is the honest spelling of "never rotate on size". Zero or
+ * negative takes the default rather than being honoured literally. `NaN` or a non-number
+ * from untyped config throws, the same answer the queue options and `closeTimeoutMS` give.
  */
-function resolveMaxSizeMB(requested?: number): number {
-  if (typeof requested !== 'number' || Number.isNaN(requested)) {
+function resolveMaxSizeMB(requested?: number | null): number {
+  if (isNullish(requested)) {
     return DEFAULT_MAX_SIZE_MB;
   }
+
+  assertCountOption(requested, 'FileSink maxSizeMB');
 
   return requested > 0 ? requested : DEFAULT_MAX_SIZE_MB;
 }
@@ -360,10 +364,16 @@ export class FileSink implements LogSink {
     this.basename = resolveBasename(options.basename);
     this.maxSizeMB = resolveMaxSizeMB(options.maxSizeMB);
     this.jsonFormat = options.jsonFormat ?? false;
-    this.maxRetries = resolveMaxRetries(options.maxRetries);
+    this.maxRetries = resolveMaxRetries(
+      options.maxRetries,
+      'FileSink maxRetries',
+    );
     this.minLevel = options.minLevel ?? LogLevel.INFO;
     this.onError = options.onError;
-    this.maxQueueSize = resolveMaxQueueSize(options.maxQueueSize);
+    this.maxQueueSize = resolveMaxQueueSize(
+      options.maxQueueSize,
+      'FileSink maxQueueSize',
+    );
 
     // Initialize asynchronously
     this.initPromise = this.initialize();

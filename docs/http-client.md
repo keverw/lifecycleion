@@ -169,6 +169,15 @@ run. Invalid retry durations throw there, and later mutations to the supplied ob
 not change the policy. Each request starts with a fresh retry budget; `null` on the
 builder disables retries inherited from the client.
 
+**Invalid timeouts and retry policies throw synchronously.** A `timeout` that is `NaN` or
+not a number (a `TypeError`), or an invalid `retryPolicy`, throws from the call that
+supplies it: `new HTTPClient()`, `createSubClient()`,
+`client.get(path, { timeout, retryPolicy })` and the other method helpers, `.timeout()`, and
+`.retryPolicy()`. It never reaches `send()`, so it does not resolve as a
+`request_setup_error` and no `'error'` observer sees it. A malformed setting is a
+programming mistake that no retry or response handling can repair, so it fails where it
+was written.
+
 ## Making Requests
 
 ### HTTP Methods
@@ -1769,7 +1778,7 @@ builder.error; // HTTPClientError | null
 builder.attemptCount; // Attempts begun, including one a retry interceptor or request setup ended before dispatch (null before send)
 builder.nextRetryDelayMS; // Scheduled delay for next retry (ms), or null
 builder.nextRetryAt; // Epoch ms for next retry, or null
-builder.startedAt; // Epoch ms when first attempt dispatched (null before send, and null when no adapter attempt was dispatched - e.g. pre-send cancel(), pre-aborted AbortSignal, request setup error, or interceptor cancel/error)
+builder.startedAt; // Epoch ms when the first attempt began (null before send, and null when the request ended before its first attempt began - e.g. pre-send cancel(), pre-aborted AbortSignal, request setup error raised before the first attempt such as an unresolvable URL, or request interceptor cancel/error). A setup failure inside an attempt (body serialization, or a cookie jar that throws while building the Cookie header) happens after the attempt began, so startedAt is set and attemptCount counts it
 builder.elapsedMS; // Wall-clock ms including retry waits; freezes on completion (null when startedAt is null)
 ```
 

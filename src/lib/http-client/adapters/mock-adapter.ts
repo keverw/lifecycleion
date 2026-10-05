@@ -20,7 +20,7 @@ import {
   normalizeAdapterResponseHeaders,
   parseContentType,
   resolveDetectedRedirectURL,
-  setOwnHeader,
+  defineOwnEntry,
 } from '../utils';
 import type {
   HTTPAdapter,
@@ -396,12 +396,18 @@ export class MockAdapter implements HTTPAdapter {
     // adapter default. When a signal is present, the sleep is abort-aware and
     // throws AbortError immediately instead of waiting out the full duration.
     const requestedDelay = mockResponse.delay;
+    // Name the setting that was actually used, so a bad live `defaultDelay` update
+    // is not blamed on a route that never set a delay.
+    const isDefaultDelay =
+      requestedDelay === undefined || requestedDelay === null;
     let delay: number;
     try {
       delay = resolveTimeoutMS(
-        requestedDelay ?? this.config.defaultDelay,
+        isDefaultDelay ? this.config.defaultDelay : requestedDelay,
         0,
-        'MockAdapter response delay',
+        isDefaultDelay
+          ? 'MockAdapter defaultDelay'
+          : 'MockAdapter response delay',
       );
     } catch (error) {
       // The route has already run. Retrying a bad delay would repeat its side effects
@@ -645,7 +651,7 @@ function parseCookieHeader(
 
     if (name) {
       // Defined, not assigned: a `__proto__` cookie would otherwise vanish.
-      setOwnHeader(cookies, name, value);
+      defineOwnEntry(cookies, name, value);
     }
   }
 
@@ -658,7 +664,7 @@ function materializeMockRequestHeaders(
   const result: Record<string, string> = {};
 
   for (const [key, value] of Object.entries(headers)) {
-    setOwnHeader(
+    defineOwnEntry(
       result,
       key,
       Array.isArray(value)
@@ -734,9 +740,9 @@ function extractFormData(fd: FormData): MockFormData {
     // Defined, not assigned: a `__proto__` field would otherwise vanish, and a
     // `__proto__` file would become the record's prototype.
     if (typeof value === 'string') {
-      setOwnHeader(fields, key, value);
+      defineOwnEntry(fields, key, value);
     } else {
-      setOwnHeader(files, key, value);
+      defineOwnEntry(files, key, value);
     }
   }
 

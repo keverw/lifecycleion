@@ -356,7 +356,17 @@ describe('ArraySink - redactedParams snapshot', () => {
       },
     });
 
-    sink.write(entryWith({ hostile, other: 'kept' }));
+    // No `onFormatError`, so the failure falls through to the console rung.
+    const captured = muteConsoleError();
+
+    try {
+      sink.write(entryWith({ hostile, other: 'kept' }));
+    } finally {
+      restoreConsoleError();
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('getter blew up');
 
     const stored = sink.logs[0].redactedParams as Record<string, unknown>;
 
@@ -382,7 +392,16 @@ describe('ArraySink - redactedParams snapshot', () => {
       },
     );
 
-    sink.write(entryWith({ a: unenumerable, b: unenumerable }));
+    const captured = muteConsoleError();
+
+    try {
+      sink.write(entryWith({ a: unenumerable, b: unenumerable }));
+    } finally {
+      restoreConsoleError();
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('ownKeys refused');
 
     const stored = sink.logs[0].redactedParams as Record<string, unknown>;
 
@@ -612,7 +631,13 @@ describe('ArraySink - a self-logging onFormatError cannot recurse', () => {
 
     self.sink = sink;
 
-    sink.write(entry('first'));
+    const captured = muteConsoleError();
+
+    try {
+      sink.write(entry('first'));
+    } finally {
+      restoreConsoleError();
+    }
 
     expect(maxDepth).toBe(1);
     expect(calls).toBe(1);
@@ -623,6 +648,8 @@ describe('ArraySink - a self-logging onFormatError cannot recurse', () => {
       'the sink failed',
       'first',
     ]);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('transformer refused');
   });
 
   test('through a param the snapshot cannot copy', () => {
@@ -654,9 +681,17 @@ describe('ArraySink - a self-logging onFormatError cannot recurse', () => {
 
     self.sink = sink;
 
-    sink.write({ ...entry('first'), redactedParams: { user: hostile } });
+    const captured = muteConsoleError();
+
+    try {
+      sink.write({ ...entry('first'), redactedParams: { user: hostile } });
+    } finally {
+      restoreConsoleError();
+    }
 
     expect(calls).toBe(1);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('accessor refused');
     expect(sink.logs).toHaveLength(2);
     // Both entries were snapshotted with the marker; neither was lost.
     expect(JSON.stringify(sink.logs[0]?.redactedParams)).toContain(
@@ -691,10 +726,18 @@ describe('ArraySink - a self-logging onFormatError cannot recurse', () => {
 
     self.sink = sink;
 
-    sink.write(entry('first'));
+    const captured = muteConsoleError();
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    try {
+      sink.write(entry('first'));
 
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      restoreConsoleError();
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('transformer refused');
     expect(calls).toBe(1);
     expect(sink.logs.map((log) => log.message)).toEqual([
       'first',
@@ -703,10 +746,17 @@ describe('ArraySink - a self-logging onFormatError cannot recurse', () => {
 
     // The guard came down when the handler settled, not before and not never: a later
     // failure that is not nested inside a report is reported on its own account.
-    sink.write(entry('second'));
+    const capturedLater = muteConsoleError();
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    try {
+      sink.write(entry('second'));
 
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      restoreConsoleError();
+    }
+
+    expect(capturedLater).toHaveLength(1);
     expect(calls).toBe(2);
     expect(sink.logs).toHaveLength(4);
   });
@@ -727,10 +777,20 @@ describe('ArraySink - a self-logging onFormatError cannot recurse', () => {
       },
     });
 
-    sink.write(entry('first'));
-    sink.write(entry('second'));
+    const captured = muteConsoleError();
+
+    try {
+      sink.write(entry('first'));
+      sink.write(entry('second'));
+    } finally {
+      restoreConsoleError();
+    }
 
     expect(calls).toBe(2);
+    expect(captured).toHaveLength(2);
+    expect(captured[0]).toContain(
+      'the failure handler also threw: handler refused',
+    );
     expect(sink.logs).toHaveLength(2);
   });
 });

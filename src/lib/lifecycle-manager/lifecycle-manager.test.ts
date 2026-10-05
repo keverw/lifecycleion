@@ -4664,10 +4664,13 @@ describe('LifecycleManager - Bulk Operations', () => {
 
       await sleep(500);
 
+      // The old stop finishing ends its stall, and says so, but owns no state: the
+      // forced start keeps `starting`, and nothing reports the component stopped.
       expect(lifecycle.getComponentStatus('restartable')?.state).toBe(
         'starting',
       );
-      expect(stalledResolvedEvents).toHaveLength(0);
+      expect(stalledResolvedEvents).toHaveLength(1);
+      expect(stalledResolvedEvents[0].reason).toBeUndefined();
       expect(stoppedEvents).toHaveLength(0);
 
       const startResult = await startPromise;
@@ -4679,7 +4682,8 @@ describe('LifecycleManager - Bulk Operations', () => {
         'running',
       );
       expect(lifecycle.getStalledComponentCount()).toBe(0);
-      expect(stalledResolvedEvents).toHaveLength(0);
+      // The stall was already gone, so the forced start retires nothing more.
+      expect(stalledResolvedEvents).toHaveLength(1);
       expect(stoppedEvents).toHaveLength(0);
     }, 4000);
 

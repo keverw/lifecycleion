@@ -225,8 +225,9 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
   const dispatchEvent = readGlobal('dispatchEvent');
   const errorEventConstructor = readGlobal('ErrorEvent');
 
-  // `typeof`, not `isFunction()`: its `instanceof Function` fallback reads the value's
-  // prototype, which throws for a revoked proxy.
+  // `typeof`, not `isFunction()`: its `instanceof Function` fallback also accepts a
+  // non-callable object that inherits from `Function.prototype`, which would pass here
+  // as available when nothing can actually be called.
   if (
     typeof dispatchEvent !== 'function' ||
     typeof errorEventConstructor !== 'function'

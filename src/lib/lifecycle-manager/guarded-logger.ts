@@ -117,6 +117,13 @@ export function createGuardedLoggerService(
   // Capped at `MAX_CACHED_ENTITY_CHILDREN`. Dropped whenever the resolved `entity`
   // changes, and a call that failed - and fell back to this parent - is never cached, so
   // each failure is still reported when it happens.
+  //
+  // A cached child is shared, so an assignment through it (`entity('db').warn = fn`)
+  // outlives the call that made it, and it keeps the parts the service held when it was
+  // built. Deliberately not guarded against: this guard is the manager's private logger,
+  // over a service the manager made itself and never hands out, and the manager only
+  // ever logs through its children - it never assigns to them or swaps the service's
+  // private parts. Only the built-in `entity` is memoized; a custom one is called fresh.
   let entityCache: {
     method: unknown;
     call: (entityName: string) => LoggerService;

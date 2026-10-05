@@ -105,7 +105,7 @@ export interface LogEntry {
   redactedParams?: Record<string, unknown>; // Present when redaction is configured: { userID: 456, password: '***' }
   redactedKeys?: string[]; // List of keys that were redacted (e.g., ['password', 'user.apiKey'])
   error?: unknown; // Original error object from errorObject() calls
-  exitCode?: number; // Exit code if this log triggers a process exit
+  exitCode?: number; // Exit code if this log triggers a process exit: the code the exit uses, so an invalid real code reads 1
   tags?: string[]; // Optional tags for categorizing/filtering logs (e.g., ['auth', 'security'])
 }
 

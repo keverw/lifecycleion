@@ -314,6 +314,30 @@ for (const entry of ['adoptPromise', 'adoptResult'] as const) {
     expect(await pending).toBe(42);
   });
 
+  test(`${entry} keeps the own-then check after a later hasOwnProperty patch`, async () => {
+    // An own constructor makes Promise.resolve wrap the promise and call its own then.
+    const source: object = Promise.reject(new Error('real rejection'));
+    Object.defineProperty(source, 'constructor', { value: Object });
+    Object.defineProperty(source, 'then', { value: () => undefined });
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const originalHasOwn = Object.prototype.hasOwnProperty;
+    let pending!: Promise<unknown>;
+    try {
+      // A patch that hides the own no-op then would leave adoption hanging.
+      Object.prototype.hasOwnProperty = () => false;
+      pending =
+        entry === 'adoptPromise'
+          ? adoptPromise(source)
+          : (adoptResult(source) as Promise<unknown>);
+    } finally {
+      Object.prototype.hasOwnProperty = originalHasOwn;
+    }
+    const hung = new Promise<string>((resolve) => {
+      setTimeout(() => resolve('hung'), 200);
+    });
+    expect(await Promise.race([settle(pending), hung])).toBe('real rejection');
+  });
+
   test(`${entry} keeps Promise.resolve after a later static patch`, async () => {
     const source = Promise.resolve(42);
     // eslint-disable-next-line @typescript-eslint/unbound-method
