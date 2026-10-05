@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { claimReports, Plain, setup } from './test-helpers';
+import { claimReports, deferred, Plain, setup } from './test-helpers';
 
 test('continuing after invalid component timeout keeps its dependencies running', async () => {
   const { logger, manager } = setup();
@@ -110,5 +110,77 @@ test('continuing after a throwing stop getter protects the still-running compone
     expect(stops).toEqual(['independent', 'refused', 'dependency']);
   } finally {
     release();
+  }
+});
+
+test('pending startup cleanup outranks an invalid stop timeout in the pass result', async () => {
+  const { logger, manager } = setup();
+  const database = new Plain(logger, 'database');
+  const api = new Plain(logger, 'api', ['database']);
+  const refused = new Plain(logger, 'refused');
+  const gate = deferred();
+  api.start = () => gate.promise;
+  Object.defineProperty(api, 'startupTimeoutMS', { value: 5 });
+  for (const component of [database, api, refused]) {
+    await manager.registerComponent(component);
+  }
+  await manager.startComponent('database');
+  await manager.startComponent('refused');
+  await manager.startComponent('api');
+  Object.defineProperty(refused, 'shutdownGracefulTimeoutMS', {
+    configurable: true,
+    value: NaN,
+  });
+
+  const { reports, release } = claimReports();
+  try {
+    const result = await manager.stopAllComponents({ haltOnStall: false });
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('cleanup_incomplete');
+    // The refusal is still on the result, unreported as a crash.
+    expect(result.error?.message).toContain(
+      'refused.shutdownGracefulTimeoutMS',
+    );
+    expect(result.reason).toContain('refused.shutdownGracefulTimeoutMS');
+    expect(manager.getComponentStatus('database')?.state).toBe('running');
+    expect(reports).toEqual([]);
+  } finally {
+    release();
+    gate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    Object.defineProperty(refused, 'shutdownGracefulTimeoutMS', {
+      value: 1000,
+    });
+    await manager.stopAllComponents();
+    await logger.close();
+  }
+});
+
+test('restart abandoned for an invalid stop timeout does not call it a crash', async () => {
+  const { logger, manager } = setup();
+  const refused = new Plain(logger, 'refused');
+  await manager.registerComponent(refused);
+  expect((await manager.startAllComponents()).success).toBe(true);
+  Object.defineProperty(refused, 'shutdownGracefulTimeoutMS', {
+    configurable: true,
+    value: NaN,
+  });
+
+  const { reports, release } = claimReports();
+  try {
+    const result = await manager.restartAllComponents();
+    expect(result.success).toBe(false);
+    expect(result.shutdownResult.code).toBe('invalid_options');
+    expect(result.startupResult.code).toBe('invalid_options');
+    expect(result.startupResult.reason).toContain('refused invalid options');
+    expect(result.startupResult.reason).not.toContain('unexpectedly');
+    expect(reports).toEqual([]);
+  } finally {
+    release();
+    Object.defineProperty(refused, 'shutdownGracefulTimeoutMS', {
+      value: 1000,
+    });
+    await manager.stopAllComponents();
+    await logger.close();
   }
 });

@@ -155,10 +155,11 @@ export class ComponentLifecycle implements ComponentLifecycleRef {
     return this.internalCallbacks.stopAllComponentsInternal(options);
   }
 
+  /** Requested as this component, for the reason {@link stopAllComponents} gives. */
   public restartAllComponents(
     options?: RestartAllOptions,
   ): Promise<RestartResult> {
-    return this.manager.restartAllComponents(options);
+    return this.internalCallbacks.restartAllComponentsInternal(options);
   }
 
   public startComponent(

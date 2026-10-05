@@ -20,7 +20,7 @@ test.each([new Set(['a']), 'a', {}])(
     manager.on('component:broadcast-started', () => {
       started++;
     });
-    const { release } = claimReports();
+    const { reports, release } = claimReports();
     try {
       const result = await manager.broadcastMessage('x', {
         componentNames,
@@ -28,6 +28,8 @@ test.each([new Set(['a']), 'a', {}])(
       expect(result).toEqual([]);
       expect(calls).toEqual([]);
       expect(started).toBe(0);
+      // A configuration refusal, not a crash: no global callback-error report.
+      expect(reports).toHaveLength(0);
     } finally {
       release();
       await manager.stopAllComponents();

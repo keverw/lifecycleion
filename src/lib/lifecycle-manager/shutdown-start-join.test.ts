@@ -306,6 +306,49 @@ for (const timeoutMS of [undefined, 100, 0]) {
   });
 }
 
+for (const shutdownTimeoutMS of [undefined, 0]) {
+  test(`a start that yields can await its own restart through its lifecycle handle (${shutdownTimeoutMS ?? 'default'})`, async () => {
+    const { logger, manager } = setup();
+    const database = new Plain(logger, 'database');
+    const worker = new Plain(logger, 'worker', ['database']);
+    // With every deadline disabled, joining this start would wait forever.
+    Object.defineProperty(worker, 'startupTimeoutMS', { value: 0 });
+    let restartResult:
+      Awaited<ReturnType<typeof manager.restartAllComponents>> | undefined;
+    let databaseStateAtReturn: string | undefined;
+    let elapsedMS = 0;
+    let isFirstStart = true;
+    worker.start = async () => {
+      if (!isFirstStart) {
+        return;
+      }
+      isFirstStart = false;
+      await Promise.resolve();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const { lifecycle } = worker as unknown as {
+        lifecycle: ComponentLifecycleRef;
+      };
+      const startedAt = performance.now();
+      restartResult = await lifecycle.restartAllComponents({
+        shutdownTimeoutMS,
+      });
+      elapsedMS = performance.now() - startedAt;
+      databaseStateAtReturn = manager.getComponentStatus('database')?.state;
+    };
+    await manager.registerComponent(database);
+    await manager.registerComponent(worker);
+    await manager.startComponent('database');
+    await manager.startComponent('worker');
+    // Not joined: the restart answers without waiting on the start awaiting it.
+    expect(elapsedMS).toBeLessThan(1000);
+    expect(restartResult?.success).toBe(false);
+    expect(restartResult?.shutdownResult.timedOut).toBeUndefined();
+    expect(restartResult?.shutdownResult.code).not.toBe('shutdown_timeout');
+    expect(databaseStateAtReturn).toBe('running');
+    await manager.stopAllComponents();
+  });
+}
+
 test('shutdown requested after a start hook yields is bounded by its deadline', async () => {
   const { logger, manager } = setup();
   const database = new Plain(logger, 'database');

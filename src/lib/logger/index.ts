@@ -1856,27 +1856,31 @@ export class Logger extends EventEmitter {
     // dependency of the sink's return, and therefore runs once cleanup settles.
     const closing = this._closePromise ?? this.close();
     const finishExit = (): void => {
+      if (!this._hasScheduledProcessExit) {
+        return;
+      }
       // The decision `endsProcessOnExit` made above, re-checked live: listeners and sink
-      // close ran since, and may have removed a stubbed `process.exit`.
-      if (
-        this._hasScheduledProcessExit &&
-        typeof globalThis.process?.exit === 'function'
-      ) {
+      // close ran since, and may have removed a stubbed `process.exit`. No exit happened,
+      // so say so and release the latch: a later `exit()` may try again once it is back.
+      if (typeof globalThis.process?.exit !== 'function') {
+        this._hasScheduledProcessExit = false;
+        reportToConsole(
+          'Logger process exit skipped: process.exit is no longer callable',
+        );
+        return;
+      }
+      try {
+        globalThis.process.exit(exitCode);
+      } catch (error) {
+        reportToConsole(`Logger process exit failed: ${describeError(error)}`);
+        // One bounded fallback. On Node, an exit listener may throw even
+        // for code 1; the second exit bypasses that listener.
         try {
-          globalThis.process.exit(exitCode);
-        } catch (error) {
+          globalThis.process.exit(1);
+        } catch (fallbackError) {
           reportToConsole(
-            `Logger process exit failed: ${describeError(error)}`,
+            `Logger fallback process exit failed: ${describeError(fallbackError)}`,
           );
-          // One bounded fallback. On Node, an exit listener may throw even
-          // for code 1; the second exit bypasses that listener.
-          try {
-            globalThis.process.exit(1);
-          } catch (fallbackError) {
-            reportToConsole(
-              `Logger fallback process exit failed: ${describeError(fallbackError)}`,
-            );
-          }
         }
       }
     };

@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { Plain, setup, deferred, claimReports } from './test-helpers';
+import { Plain, setup, deferred, claimReports, Stalls } from './test-helpers';
 
 class GatedStop extends Plain {
   public readonly entered = deferred();
@@ -171,4 +171,50 @@ test('restart refusal during shutdown warns without taking ownership of the pass
     component.release.resolve();
     expect((await shutdown).success).toBe(true);
   }
+});
+
+test('restart refuses without starting when its stop phase is refused mid-acceptance', async () => {
+  const { logger, manager } = setup({
+    repeatedShutdownRequestPolicy: {
+      forceAfterCount: 3,
+      withinMS: 1000,
+      armedAfterFailureMS: 60_000,
+      onForceShutdown: () => {},
+    },
+  });
+  await manager.registerComponent(new Stalls(logger, 'a'));
+  await manager.startAllComponents();
+  // A failed stop arms escalation; its expiry, found lapsed by the restart's own stop
+  // phase acceptance, logs through the sink below after every earlier restart check.
+  await manager.stopAllComponents();
+  (
+    manager as unknown as {
+      repeatedShutdownRequestState: { remainsArmedUntil: number };
+    }
+  ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+  const messages: string[] = [];
+  let shutdown: ReturnType<typeof manager.stopAllComponents> | undefined;
+  logger.addSink({
+    write(entry) {
+      messages.push(entry.message);
+      if (
+        entry.template ===
+        'Repeated shutdown escalation window expired, clearing previous shutdown state'
+      ) {
+        shutdown = manager.stopAllComponents();
+      }
+    },
+  });
+  const result = await manager.restartAllComponents();
+  expect(shutdown).toBeDefined();
+  expect(result.success).toBe(false);
+  expect(result.shutdownResult.code).toBe('already_in_progress');
+  expect(result.startupResult.code).toBe('shutdown_in_progress');
+  expect(result.startupSkippedByShutdownRequest).toBeUndefined();
+  expect(messages).toContain('Cannot restart all components during shutdown');
+  expect(messages).not.toContain(
+    'Cannot start all components: shutdown in progress',
+  );
+  expect(messages).not.toContain('Restart completed');
+  await shutdown;
 });

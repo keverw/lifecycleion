@@ -51,6 +51,7 @@ describe('ComponentLifecycle Proxy Wrapper', () => {
       broadcastMessageInternal: mock(() => Promise.resolve({} as any)),
       getValueInternal: mock(() => ({}) as any),
       stopAllComponentsInternal: mock(() => Promise.resolve({} as any)),
+      restartAllComponentsInternal: mock(() => Promise.resolve({} as any)),
     };
 
     const proxy = new ComponentLifecycle(
@@ -143,7 +144,10 @@ describe('ComponentLifecycle Proxy Wrapper', () => {
 
     const restartOpts = { shutdownTimeoutMS: 300 };
     await proxy.restartAllComponents(restartOpts);
-    expect(mockManager.restartAllComponents).toHaveBeenCalledWith(restartOpts);
+    expect(mockCallbacks.restartAllComponentsInternal).toHaveBeenCalledWith(
+      restartOpts,
+    );
+    expect(mockManager.restartAllComponents).not.toHaveBeenCalled();
 
     const startCompOpts = { allowNonRunningDependencies: true };
     await proxy.startComponent('comp1', startCompOpts);
@@ -202,6 +206,7 @@ describe('ComponentLifecycle Proxy Wrapper', () => {
       broadcastMessageInternal: mock(() => Promise.resolve({} as any)),
       getValueInternal: mock(() => ({}) as any),
       stopAllComponentsInternal: mock(() => Promise.resolve({} as any)),
+      restartAllComponentsInternal: mock(() => Promise.resolve({} as any)),
     };
 
     const proxy = new ComponentLifecycle(

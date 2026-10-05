@@ -552,9 +552,10 @@ A shutdown requested synchronously from `start()` also skips joining that reques
 start and preserves its dependencies, so the hook can await the result. It first
 yields one timer turn so an immediately rejected start can settle and release its
 dependencies before the pass decides what to protect.
-A request made through the component's own handle, `this.lifecycle.stopAllComponents()`,
-is treated the same way even after the hook has already yielded (for example, after an
-earlier `await`), so `start()` can await it at any point.
+A request made through the component's own handle, `this.lifecycle.stopAllComponents()`
+or `this.lifecycle.restartAllComponents()`, is treated the same way even after the hook
+has already yielded (for example, after an earlier `await`), so `start()` can await it at
+any point.
 A request made through the manager itself after the hook has yielded cannot be
 identified as re-entry across all supported runtimes. Awaiting that shutdown can
 consume its finite budget, or wait indefinitely when both startup and shutdown
@@ -1456,7 +1457,7 @@ if (result.sent) {
 
 Broadcast a message to multiple components.
 By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`, as does a target unregistered mid-broadcast.
-A non-empty `componentNames` array limits the targets; `null`, omitted, or empty arrays use all eligible components. Stopped/stalled explicit targets are reported but not sent unless explicitly included. Non-array filters refuse the whole broadcast before delivery, return `[]`, and report a `TypeError` through the global error channel.
+A non-empty `componentNames` array limits the targets; `null`, omitted, or empty arrays use all eligible components. Stopped/stalled explicit targets are reported but not sent unless explicitly included. Non-array filters refuse the whole broadcast before delivery and return `[]`, logging the `TypeError` as a warning, as an invalid broadcast `timeout` is, rather than reporting it on the global error channel.
 
 An invalid shared timeout also refuses the whole broadcast before delivery, returning `[]` with a warning rather than per-recipient `invalid_options` rows. The array alone cannot distinguish these refusals from no recipients; use the diagnostics for that distinction. The `invalid_options` result-code member remains in the public type for compatibility.
 
@@ -2870,11 +2871,11 @@ Every async method answers with a result object, including when something goes w
 | `triggerReload()`, `triggerInfo()`, `triggerDebug()`                     | `code: 'operation_crashed'` with `error`                              |
 | `broadcastMessage()`                                                     | an empty array                                                        |
 
-Invalid timeout values are expected refusals (`invalid_options`) and do not use the
-global callback-error channel; inspect their `error` for the named option. The array-only
-`broadcastMessage()` result has no aggregate error field, so its refusal is logged as
-a warning instead. The table above describes unexpected failures, including ordinary
-exceptions thrown by getters.
+Invalid timeout values, and a non-array `broadcastMessage()` `componentNames`, are
+expected refusals (`invalid_options`) and do not use the global callback-error channel;
+inspect their `error` for the named option. The array-only `broadcastMessage()` result
+has no aggregate error field, so its refusal is logged as a warning instead. The table
+above describes unexpected failures, including ordinary exceptions thrown by getters.
 
 Branch on `code` as usual; `operation_crashed` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around. Every call uses the same pair of codes. `error` means a method you wrote ran and failed: a component's `start()`, `stop()`, `onShutdownForce()`, `healthCheck()`, `onMessage()` or `getValue()` threw, rejected, or (for `healthCheck()`) returned a malformed result, or a custom `onReloadRequested` / `onInfoRequested` / `onDebugRequested` callback threw or rejected. That is an ordinary failure of that code, not of the manager. `operation_crashed` means something that should never throw did: the manager itself, or a property getter on a component - a handler such as `onMessage`, a timeout such as `healthCheckTimeoutMS`, or `getName()`. A `getDependencies()` that throws refuses its registration with `operation_crashed`, but once registered it fails only that component's own start, with `missing_dependency`.
 

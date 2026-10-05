@@ -29,6 +29,17 @@ function validateLifecycleDuration<T>(validate: () => T): T {
   }
 }
 
+/**
+ * A `TypeError` for a malformed caller option this manager validates itself. Branded as
+ * the timeout refusals are, so settlement answers `invalid_options` without a
+ * callback-error report rather than calling the manager's own refusal a crash.
+ */
+export function invalidOperationOptionError(message: string): TypeError {
+  const error = new TypeError(message);
+  lifecycleTimeoutValidationErrors.add(error);
+  return error;
+}
+
 export function isOperationTimeoutValidationError(
   error: unknown,
 ): error is Error {
@@ -78,8 +89,9 @@ export function refusedShutdownResult(): ShutdownResult {
  * start one without awaiting it - `const pending = manager.stopAllComponents()` - and read
  * the outcome whenever it likes, or drop it with `void`. A rejection would break that:
  * with nothing attached it is an unhandled rejection, fatal under Node's default
- * `--unhandled-rejections=throw`. Only errors branded by our timeout validator become
- * `invalid_options`, without a callback-error report. Ordinary TypeError/RangeError
+ * `--unhandled-rejections=throw`. Only errors branded by our own validation (timeouts, and
+ * {@link invalidOperationOptionError}) become `invalid_options`, without a callback-error
+ * report. Ordinary TypeError/RangeError
  * values from caller getters remain unexpected failures: recognizing every error of
  * those types would hide actual bugs behind a configuration refusal.
  *
@@ -98,9 +110,9 @@ export async function settleOperation<T>(
   } catch (error) {
     // Classified once, here, beside the decision not to report: a builder that chose
     // its own code could label an unreported refusal as a crash.
-    if (isOperationTimeoutValidationError(error)) {
+    if (settledFailureCode(error) === 'invalid_options') {
       return toFailure(
-        error,
+        error as Error,
         `${operation}() refused: ${describeError(error)}`,
         'invalid_options',
       );
@@ -119,6 +131,17 @@ export async function settleOperation<T>(
 export type SettledFailureCode = 'invalid_options' | 'operation_crashed';
 
 /**
+ * The one classification {@link settleOperation} and every failure builder's caller
+ * share: a refusal from our own option validation, or a crash. Builders take the code
+ * rather than deriving it, so they cannot disagree with the report decision.
+ */
+export function settledFailureCode(error: unknown): SettledFailureCode {
+  return isOperationTimeoutValidationError(error)
+    ? 'invalid_options'
+    : 'operation_crashed';
+}
+
+/**
  * The `StartupResult` for a startup that failed unexpectedly - crashed, or skipped
  * because the shutdown it followed did - carrying the error. A bulk startup's own crash
  * spreads it and adds what it had started.
@@ -126,16 +149,11 @@ export type SettledFailureCode = 'invalid_options' | 'operation_crashed';
 export function crashedStartupResult(
   error: Error | undefined,
   reason: string,
+  code: SettledFailureCode,
   durationMS = 0,
 ): StartupResult {
   return {
-    ...refusedStartupResult(
-      isOperationTimeoutValidationError(error)
-        ? 'invalid_options'
-        : 'operation_crashed',
-      reason,
-      durationMS,
-    ),
+    ...refusedStartupResult(code, reason, durationMS),
     error,
   };
 }
@@ -148,6 +166,7 @@ export function crashedStartupResult(
 export function crashedShutdownResult(
   error: Error,
   reason: string,
+  code: SettledFailureCode,
 ): ShutdownResult {
   return {
     success: false,
@@ -155,9 +174,7 @@ export function crashedShutdownResult(
     stalledComponents: [],
     durationMS: 0,
     reason,
-    code: isOperationTimeoutValidationError(error)
-      ? 'invalid_options'
-      : 'operation_crashed',
+    code,
     error,
   };
 }
@@ -220,14 +237,13 @@ export function crashedComponentResult(
   name: string,
   error: Error,
   reason: string,
+  code: SettledFailureCode,
 ): ComponentOperationResult {
   return {
     success: false,
     componentName: name,
     reason,
-    code: isOperationTimeoutValidationError(error)
-      ? 'invalid_options'
-      : 'operation_crashed',
+    code,
     error,
   };
 }

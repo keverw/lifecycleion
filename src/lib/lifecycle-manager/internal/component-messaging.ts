@@ -22,6 +22,7 @@ import { LIFECYCLE_MANAGER_LOG_MESSAGE_HANDLER_FAILED } from '../constants';
 import {
   resolveOperationTimeoutMS,
   isOperationTimeoutValidationError,
+  invalidOperationOptionError,
 } from './operation-policy';
 
 function readAvailability(
@@ -356,7 +357,9 @@ export async function broadcastMessageInternal(
   // on each read.
   const names = options?.componentNames ?? undefined;
   if (names !== undefined && !Array.isArray(names)) {
-    throw new TypeError('broadcastMessage componentNames must be an array');
+    throw invalidOperationOptionError(
+      'broadcastMessage componentNames must be an array',
+    );
   }
   const hasExplicitTargets = names !== undefined && names.length > 0;
 

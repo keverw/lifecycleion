@@ -8,6 +8,7 @@ import {
   isOperationTimeoutValidationError,
   resolveOperationTimeoutMS,
   settleOperation,
+  settledFailureCode,
   toOperationTimerDelayMS,
 } from './operation-policy';
 
@@ -33,9 +34,11 @@ test('manager timeout refusals retain provenance across settlement and result fa
       'start',
       () => {
         toOperationTimerDelayMS(NaN, 'test timeout');
-        return Promise.resolve(crashedStartupResult(undefined, 'unreachable'));
+        return Promise.resolve(
+          crashedStartupResult(undefined, 'unreachable', 'operation_crashed'),
+        );
       },
-      (error, reason) => crashedStartupResult(error, reason),
+      (error, reason, code) => crashedStartupResult(error, reason, code),
     );
     expect(result.code).toBe('invalid_options');
     expect(result.reason).toContain('start() refused:');
@@ -44,11 +47,14 @@ test('manager timeout refusals retain provenance across settlement and result fa
     if (result.error === undefined) {
       throw new Error('Expected a timeout error');
     }
-    expect(crashedShutdownResult(result.error, 'failure').code).toBe(
+    // Builders carry the code they are handed; the shared classifier supplies it.
+    const code = settledFailureCode(result.error);
+    expect(code).toBe('invalid_options');
+    expect(crashedShutdownResult(result.error, 'failure', code).code).toBe(
       'invalid_options',
     );
     expect(
-      crashedComponentResult('example', result.error, 'failure').code,
+      crashedComponentResult('example', result.error, 'failure', code).code,
     ).toBe('invalid_options');
   } finally {
     release();
@@ -62,14 +68,18 @@ test('raw shared timeout failures and caller errors remain reported operation cr
     for (const run of [
       () => {
         sharedTimerDelay(NaN, 'caller timeout');
-        return Promise.resolve(crashedStartupResult(undefined, 'unreachable'));
+        return Promise.resolve(
+          crashedStartupResult(undefined, 'unreachable', 'operation_crashed'),
+        );
       },
       () => {
         return Promise.reject(callerError);
       },
     ]) {
-      const result = await settleOperation('start', run, (error, reason) =>
-        crashedStartupResult(error, reason),
+      const result = await settleOperation(
+        'start',
+        run,
+        (error, reason, code) => crashedStartupResult(error, reason, code),
       );
       expect(result.code).toBe('operation_crashed');
       expect(result.reason).toContain('start() failed unexpectedly:');

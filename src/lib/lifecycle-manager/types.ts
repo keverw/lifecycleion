@@ -878,6 +878,10 @@ export interface LifecycleInternalCallbacks {
   stopAllComponentsInternal: (
     options?: StopAllOptions,
   ) => Promise<ShutdownResult>;
+  /** `restartAllComponents()` requested by this component, from its own handle. */
+  restartAllComponentsInternal: (
+    options?: RestartAllOptions,
+  ) => Promise<RestartResult>;
 }
 
 /**

@@ -35,6 +35,7 @@ import {
   failedSignalCallbackResult,
   crashedHealthCheckResult,
   type SettledFailureCode,
+  settledFailureCode,
   crashedComponentResult,
   refusedStartupResult,
 } from './internal/operation-policy';
@@ -1188,7 +1189,7 @@ export class LifecycleManager
     return this.settleOperation(
       'startAllComponents',
       () => this.startAllComponentsOperation(options),
-      (error, reason) => this.crashedStartupResult(error, reason),
+      (error, reason, code) => this.crashedStartupResult(error, reason, code),
     );
   }
 
@@ -1228,7 +1229,7 @@ export class LifecycleManager
     return this.settleOperation(
       'stopAllComponents',
       () => this.stopAllComponentsOperation(options),
-      (error, reason) => crashedShutdownResult(error, reason),
+      (error, reason, code) => crashedShutdownResult(error, reason, code),
     );
   }
 
@@ -1260,10 +1261,10 @@ export class LifecycleManager
     return this.settleOperation(
       'restartAllComponents',
       () => this.restartAllComponentsOperation(options, phases),
-      (error, reason) => ({
+      (error, reason, code) => ({
         shutdownResult:
-          phases.shutdownResult ?? crashedShutdownResult(error, reason),
-        startupResult: this.crashedStartupResult(error, reason),
+          phases.shutdownResult ?? crashedShutdownResult(error, reason, code),
+        startupResult: this.crashedStartupResult(error, reason, code),
         success: false,
       }),
     );
@@ -1283,7 +1284,8 @@ export class LifecycleManager
     return this.settleOperation(
       'startComponent',
       () => this.startComponentInternal(name, options),
-      (error, reason) => crashedComponentResult(name, error, reason),
+      (error, reason, code) =>
+        crashedComponentResult(name, error, reason, code),
     );
   }
 
@@ -1297,7 +1299,8 @@ export class LifecycleManager
     return this.settleOperation(
       'stopComponent',
       () => this.stopComponentOperation(name, options),
-      (error, reason) => crashedComponentResult(name, error, reason),
+      (error, reason, code) =>
+        crashedComponentResult(name, error, reason, code),
     );
   }
 
@@ -1311,7 +1314,8 @@ export class LifecycleManager
     return this.settleOperation(
       'restartComponent',
       () => this.restartComponentOperation(name, options),
-      (error, reason) => crashedComponentResult(name, error, reason),
+      (error, reason, code) =>
+        crashedComponentResult(name, error, reason, code),
     );
   }
 
@@ -1926,7 +1930,7 @@ export class LifecycleManager
     return this.settleOperation(
       'sendMessageToComponent',
       () => this.sendMessageInternal(componentName, payload, from, options),
-      (error) => ({
+      (error, _reason, code) => ({
         sent: false,
         componentFound: this.isNameRegistered(componentName),
         componentRunning: this.runningComponents.has(componentName),
@@ -1934,9 +1938,7 @@ export class LifecycleManager
         data: undefined,
         error,
         timedOut: false,
-        code: isOperationTimeoutValidationError(error)
-          ? 'invalid_options'
-          : 'operation_crashed',
+        code,
       }),
     );
   }
@@ -1956,12 +1958,12 @@ export class LifecycleManager
     return this.settleOperation(
       'broadcastMessage',
       () => this.broadcastMessageInternal(payload, from, options),
-      (error) => {
+      (error, _reason, code) => {
         // The array contract has no aggregate error field. Keep its refusal shape,
         // but make an invalid budget visible through the configured logger instead
         // of silently looking like an empty recipient list. This is not a callback
         // crash and must not enter the global callback-error channel.
-        if (isOperationTimeoutValidationError(error)) {
+        if (code === 'invalid_options') {
           this.logger.warn('Broadcast refused: {{error.message}}', {
             params: { error },
           });
@@ -1999,21 +2001,23 @@ export class LifecycleManager
         options?: GetValueOptions,
       ) => this.getValueSettled<T>(compName, key, from, options),
       stopAllComponentsInternal: (options?: StopAllOptions) =>
-        this.stopAllComponentsRequestedBy(component, options),
+        this.requestedBy(component, () => this.stopAllComponents(options)),
+      restartAllComponentsInternal: (options?: RestartAllOptions) =>
+        this.requestedBy(component, () => this.restartAllComponents(options)),
     };
   }
 
   /**
-   * `stopAllComponents()` requested through a component's own `lifecycle` handle. Its
+   * A bulk stop or restart requested through a component's own `lifecycle` handle. Its
    * unfinished start is the requester, exactly as a synchronous request from inside
    * `start()` is: the pass does not join a start that may be awaiting it. Unlike the
    * synchronous check, this still holds once the hook has yielded, which no
    * runtime-neutral check of the caller can recognise.
    */
-  private stopAllComponentsRequestedBy(
+  private requestedBy<T>(
     component: BaseComponent,
-    options?: StopAllOptions,
-  ): Promise<ShutdownResult> {
+    request: () => Promise<T>,
+  ): Promise<T> {
     const requesting: StartSettlement[] = [];
     for (const settlement of this.startSettlements.values()) {
       if (
@@ -2027,7 +2031,7 @@ export class LifecycleManager
     }
     try {
       // The pass captures its requesters synchronously, before its first await.
-      return this.stopAllComponents(options);
+      return request();
     } finally {
       for (const settlement of requesting) {
         this.invokingStarts.delete(settlement);
@@ -3592,6 +3596,7 @@ export class LifecycleManager
           ...this.crashedStartupResult(
             crashError,
             `startAllComponents() failed unexpectedly: ${describeError(crashError)}`,
+            settledFailureCode(crashError),
             Date.now() - startTime,
           ),
           ...(isDependencyCycle
@@ -3869,14 +3874,24 @@ export class LifecycleManager
         pendingAutoStarts,
       );
 
-      const stayDownPassCountAtStopPhase = this.stayDownPassCount;
+      // A refused stop phase is somebody else's pass - one a sink or callback began
+      // while this one was being set up. Refuse as a restart arriving during that
+      // shutdown does, without starting anything on top of it.
+      if (!stopPhase.accepted) {
+        phases.shutdownResult = stopPhase.result;
+        this.logger.warn('Cannot restart all components during shutdown');
+        return {
+          shutdownResult: stopPhase.result,
+          startupResult: refusedStartupResult(
+            'shutdown_in_progress',
+            LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
+          ),
+          success: false,
+        };
+      }
 
-      // A refused stop phase is somebody else's pass: this restart has nothing of its own
-      // for a request to cancel, so it behaves exactly as it did before cancellation
-      // existed.
-      const shutdownResult = stopPhase.accepted
-        ? await stopPhase.promise
-        : stopPhase.result;
+      const stayDownPassCountAtStopPhase = this.stayDownPassCount;
+      const shutdownResult = await stopPhase.promise;
 
       phases.shutdownResult = shutdownResult;
 
@@ -3896,9 +3911,8 @@ export class LifecycleManager
       // what attributes those; the count only covers passes accepted in the gap, when no
       // pass is running for a request to land on.
       const wasCanceledByShutdownRequest =
-        stopPhase.accepted &&
-        (stopPhase.pass.shutdownRequested ||
-          this.stayDownPassCount !== stayDownPassCountAtStopPhase);
+        stopPhase.pass.shutdownRequested ||
+        this.stayDownPassCount !== stayDownPassCountAtStopPhase;
 
       // Phase 2: Start all components - unless something asked us to stay down while
       // phase 1 ran. Checked ahead of a stalled/failed stop phase: the request is the
@@ -3947,15 +3961,22 @@ export class LifecycleManager
         shutdownResult.code === 'operation_crashed' ||
         shutdownResult.code === 'invalid_options'
       ) {
-        this.logger.warn('Restart abandoned: the shutdown phase failed', {
-          params: { reason: shutdownResult.reason },
-        });
+        const wasRefused = shutdownResult.code === 'invalid_options';
+        this.logger.warn(
+          wasRefused
+            ? 'Restart abandoned: the shutdown phase refused invalid options'
+            : 'Restart abandoned: the shutdown phase failed',
+          { params: { reason: shutdownResult.reason } },
+        );
 
         return {
           shutdownResult,
           startupResult: this.crashedStartupResult(
             shutdownResult.error,
-            'Startup skipped: the restart shutdown phase failed unexpectedly',
+            wasRefused
+              ? 'Startup skipped: the restart shutdown phase refused invalid options'
+              : 'Startup skipped: the restart shutdown phase failed unexpectedly',
+            shutdownResult.code,
           ),
           success: false,
         };
@@ -3977,7 +3998,7 @@ export class LifecycleManager
         'startAllComponents',
         () =>
           this.startAllComponentsOperation(startupOptions, restartSnapshots),
-        (error, reason) => this.crashedStartupResult(error, reason),
+        (error, reason, code) => this.crashedStartupResult(error, reason, code),
       );
 
       const isSuccess = shutdownResult.success && startupResult.success;
@@ -4310,7 +4331,8 @@ export class LifecycleManager
     const stopResult = await this.settleOperation(
       'stopComponent',
       () => this.stopComponentOperation(name, stopOptions, stopContext),
-      (error, reason) => crashedComponentResult(name, error, reason),
+      (error, reason, code) =>
+        crashedComponentResult(name, error, reason, code),
     );
 
     if (!stopResult.success) {
@@ -4374,7 +4396,8 @@ export class LifecycleManager
           undefined,
           startSnapshot,
         ),
-      (error, reason) => crashedComponentResult(name, error, reason),
+      (error, reason, code) =>
+        crashedComponentResult(name, error, reason, code),
     );
 
     if (!startResult.success) {
@@ -6184,21 +6207,28 @@ export class LifecycleManager
               code: 'shutdown_timeout' as const,
               reason: `Shutdown timeout exceeded (${effectiveTimeout}ms)`,
             }
-          : !isSuccess && invalidOptionsError !== undefined
+          : // Pending cleanup outranks a refused stop: a caller waiting for
+            // `cleanup_incomplete` must still see it. The refusal stays on `error`.
+            stoppingComponents.size > 0 ||
+              (!isSuccess && invalidOptionsError !== undefined)
             ? {
-                code: 'invalid_options' as const,
-                error: invalidOptionsError,
+                code:
+                  stoppingComponents.size > 0
+                    ? ('cleanup_incomplete' as const)
+                    : ('invalid_options' as const),
+                ...(invalidOptionsError !== undefined
+                  ? { error: invalidOptionsError }
+                  : {}),
                 reason: [
                   ...failureReasonParts,
-                  describeError(invalidOptionsError),
+                  ...(invalidOptionsError !== undefined
+                    ? [describeError(invalidOptionsError)]
+                    : []),
                 ].join('; '),
               }
             : failureReasonParts.length > 0
               ? {
-                  code:
-                    stoppingComponents.size > 0
-                      ? ('cleanup_incomplete' as const)
-                      : ('partial_state' as const),
+                  code: 'partial_state' as const,
                   reason: failureReasonParts.join('; '),
                 }
               : {}),
@@ -6776,6 +6806,7 @@ export class LifecycleManager
             name,
             error,
             `Start refused: ${describeError(error)}`,
+            'invalid_options',
           );
         }
 
@@ -6801,6 +6832,7 @@ export class LifecycleManager
                 ? 'component stopped again'
                 : `stopping it again also failed: ${stopResult.reason ?? 'unknown reason'}`
             }`,
+            settledFailureCode(error),
           );
         }
 
@@ -6828,6 +6860,7 @@ export class LifecycleManager
           name,
           toError(error),
           `Start failed unexpectedly: ${describeError(error)}`,
+          settledFailureCode(error),
         );
       }
     } finally {
@@ -7856,6 +7889,7 @@ export class LifecycleManager
             name,
             error,
             `Stop refused: ${describeError(error)}`,
+            'invalid_options',
           );
         }
 
@@ -8848,10 +8882,9 @@ export class LifecycleManager
       stall?.gracefulTimedOut === true
         ? `Stop failed unexpectedly after its graceful phase timed out: ${describeError(error)}`
         : `Stop failed unexpectedly: ${describeError(error)}`,
+      // A crash that left a stall is a crash, even for a timeout validation error.
+      stall !== undefined ? 'operation_crashed' : settledFailureCode(error),
     );
-    if (stall !== undefined) {
-      result.code = 'operation_crashed';
-    }
 
     try {
       const status = this.getComponentStatus(name);
@@ -10484,9 +10517,10 @@ export class LifecycleManager
   private crashedStartupResult(
     error: Error | undefined,
     reason: string,
+    code: SettledFailureCode,
     durationMS = 0,
   ): StartupResult {
-    return crashedStartupResult(error, reason, durationMS);
+    return crashedStartupResult(error, reason, code, durationMS);
   }
 
   /** The shutdown latch: set exactly while a shutdown pass is running. */

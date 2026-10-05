@@ -683,10 +683,10 @@ export class ProcessSignalManager {
    */
   private releaseListeners(): {
     failures: Array<{ error: unknown }>;
-    rawModeRestoreFailure: { error: unknown } | undefined;
+    rawModeRestoreFailure: RawModeFailure | undefined;
   } {
     const failures: Array<{ error: unknown }> = [];
-    let rawModeRestoreFailure: { error: unknown } | undefined;
+    let rawModeRestoreFailure: RawModeFailure | undefined;
     const attempt = (step: () => void): void => {
       try {
         step();
@@ -990,26 +990,11 @@ export class ProcessSignalManager {
 
     if (shouldRestoreRawMode) {
       try {
-        if (process.stdin.isTTY && process.stdin.isRaw) {
-          process.stdin.setRawMode(false);
-        }
-
-        // As in restoreStdin: an attach from inside setRawMode(false) may have adopted
-        // the raw mode it was turning off. Turn it back on for that instance instead.
-        if (
-          shared.attachedInstances.size > 0 &&
-          shared.rawModeOwner !== null &&
-          shared.rawModeOwner !== this.instanceID &&
-          shared.rawModeEnabledByManager
-        ) {
-          if (process.stdin.isTTY && !process.stdin.isRaw) {
-            process.stdin.setRawMode(true);
-          }
-        } else {
-          // Clear ownership after successful operation
-          // (either raw mode was disabled, or it was already off and doesn't need disabling)
-          shared.rawModeOwner = null;
-          shared.rawModeEnabledByManager = false;
+        const reEnableFailure = releaseRawMode(shared, this.instanceID);
+        if (reEnableFailure) {
+          this.reportCleanupFailuresLater(
+            rawModeRestoreReport(reEnableFailure),
+          );
         }
       } catch (error) {
         // Ensure there's a non-null owner so future detaches can retry.
@@ -1045,11 +1030,11 @@ export class ProcessSignalManager {
    * were the recorded raw mode owner.
    */
   /** Returns a raw-mode restore failure for the caller to report with its others. */
-  private restoreStdin(): { error: unknown } | undefined {
+  private restoreStdin(): RawModeFailure | undefined {
     const shared = getSharedState();
     const didResume = this.didResumeStdin;
     this.didResumeStdin = false;
-    let rawModeRestoreFailure: { error: unknown } | undefined;
+    let rawModeRestoreFailure: RawModeFailure | undefined;
 
     // Remove handler if it exists
     if (this.keypressHandler) {
@@ -1101,23 +1086,7 @@ export class ProcessSignalManager {
       shared.rawModeEnabledByManager
     ) {
       try {
-        if (process.stdin.isTTY && process.stdin.isRaw) {
-          process.stdin.setRawMode(false);
-        }
-        // An attach from inside setRawMode(false) may have adopted the raw mode it was
-        // turning off. Turn it back on for that instance instead of clearing its claim.
-        if (
-          shared.attachedInstances.size > 0 &&
-          shared.rawModeOwner !== this.instanceID &&
-          shared.rawModeEnabledByManager
-        ) {
-          if (process.stdin.isTTY && !process.stdin.isRaw) {
-            process.stdin.setRawMode(true);
-          }
-        } else {
-          shared.rawModeOwner = null;
-          shared.rawModeEnabledByManager = false;
-        }
+        rawModeRestoreFailure = releaseRawMode(shared, this.instanceID);
       } catch (error) {
         // The owner stays set so a future detach can retry - but this is reported
         // rather than left to the exit. "Restored on process exit anyway" is true of a
@@ -1152,11 +1121,62 @@ export class ProcessSignalManager {
   }
 }
 
+/**
+ * Turn raw mode off for the last attached instance that owned it. An attach from inside
+ * `setRawMode(false)` may have adopted the raw mode being turned off; turn it back on
+ * for that instance rather than clearing its claim. A disable failure throws, leaving
+ * ownership for the caller to repair; a re-enable failure is returned, so it is reported
+ * as what it is rather than as a failed restore.
+ */
+function releaseRawMode(
+  shared: ProcessSignalManagerSharedState,
+  instanceID: string,
+): RawModeFailure | undefined {
+  if (process.stdin.isTTY && process.stdin.isRaw) {
+    process.stdin.setRawMode(false);
+  }
+
+  if (
+    shared.attachedInstances.size > 0 &&
+    shared.rawModeOwner !== null &&
+    shared.rawModeOwner !== instanceID &&
+    shared.rawModeEnabledByManager
+  ) {
+    try {
+      if (process.stdin.isTTY && !process.stdin.isRaw) {
+        process.stdin.setRawMode(true);
+      }
+    } catch (error) {
+      return { error, isReEnable: true };
+    }
+    return undefined;
+  }
+
+  // Raw mode was disabled, or was already off and needed no disabling.
+  shared.rawModeOwner = null;
+  shared.rawModeEnabledByManager = false;
+  return undefined;
+}
+
+/** A raw-mode failure to report, and whether it was the re-enable for an adopter. */
+interface RawModeFailure {
+  error: unknown;
+  isReEnable?: boolean;
+}
+
 /** The report for a raw-mode restore failure, if there was one. */
 function rawModeRestoreReport(
-  failure: { error: unknown } | undefined,
+  failure: RawModeFailure | undefined,
 ): Array<readonly [string, { error: unknown }]> {
-  return failure
-    ? [['ProcessSignalManager stdin raw mode restore', failure]]
-    : [];
+  if (!failure) {
+    return [];
+  }
+  return [
+    [
+      failure.isReEnable
+        ? 'ProcessSignalManager stdin raw mode re-enable'
+        : 'ProcessSignalManager stdin raw mode restore',
+      failure,
+    ],
+  ];
 }
