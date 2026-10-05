@@ -91,15 +91,18 @@ export function refusedShutdownResult(): ShutdownResult {
 export async function settleOperation<T>(
   operation: string,
   run: () => Promise<T>,
-  toFailure: (error: Error, reason: string) => T,
+  toFailure: (error: Error, reason: string, code: SettledFailureCode) => T,
 ): Promise<T> {
   try {
     return await run();
   } catch (error) {
+    // Classified once, here, beside the decision not to report: a builder that chose
+    // its own code could label an unreported refusal as a crash.
     if (isOperationTimeoutValidationError(error)) {
       return toFailure(
         error,
         `${operation}() refused: ${describeError(error)}`,
+        'invalid_options',
       );
     }
     reportCallbackError(`lifecycle-manager ${operation}`, error);
@@ -107,9 +110,13 @@ export async function settleOperation<T>(
     return toFailure(
       toError(error),
       `${operation}() failed unexpectedly: ${describeError(error)}`,
+      'operation_crashed',
     );
   }
 }
+
+/** The code {@link settleOperation} hands its failure builder. */
+export type SettledFailureCode = 'invalid_options' | 'operation_crashed';
 
 /**
  * The `StartupResult` for a startup that failed unexpectedly - crashed, or skipped
@@ -162,12 +169,13 @@ export function crashedShutdownResult(
 export function crashedSignalBroadcastResult(
   signal: SignalBroadcastResult['signal'],
   error: Error,
+  code: SettledFailureCode = 'operation_crashed',
 ): SignalBroadcastResult {
   return {
     signal,
     results: [],
     timedOut: false,
-    code: 'operation_crashed',
+    code,
     error,
   };
 }
@@ -190,6 +198,7 @@ export function failedSignalCallbackResult(
 export function crashedHealthCheckResult(
   name: string,
   error: Error,
+  code: SettledFailureCode = 'operation_crashed',
 ): HealthCheckResult {
   return {
     name,
@@ -198,7 +207,7 @@ export function crashedHealthCheckResult(
     durationMS: 0,
     error,
     timedOut: false,
-    code: 'operation_crashed',
+    code,
   };
 }
 

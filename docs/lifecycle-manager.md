@@ -1560,8 +1560,14 @@ interface HealthReport {
   checkedAt: number;
   durationMS: number;
   timedOut: boolean;
-  code: 'ok' | 'degraded' | 'timeout' | 'error' | 'operation_crashed';
-  error?: Error; // Set when the check itself failed unexpectedly (operation_crashed)
+  code:
+    | 'ok'
+    | 'degraded'
+    | 'timeout'
+    | 'error'
+    | 'invalid_options'
+    | 'operation_crashed';
+  error?: Error; // Set when the check itself failed unexpectedly (operation_crashed) or an invalid timeout was refused (invalid_options)
 }
 ```
 
@@ -2977,6 +2983,7 @@ type UnregisterFailureCode =
   | 'component_stopping' // A stop is in flight; wait for it to settle
   | 'stop_failed'
   | 'bulk_operation_in_progress'
+  | 'invalid_options' // An invalid timeout refused before the operation ran
   | 'operation_crashed';
 
 // Startup order failure codes

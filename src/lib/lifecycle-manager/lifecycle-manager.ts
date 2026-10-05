@@ -34,6 +34,7 @@ import {
   crashedSignalBroadcastResult,
   failedSignalCallbackResult,
   crashedHealthCheckResult,
+  type SettledFailureCode,
   crashedComponentResult,
   refusedStartupResult,
 } from './internal/operation-policy';
@@ -721,11 +722,11 @@ export class LifecycleManager
     return this.settleOperation(
       'unregisterComponent',
       () => this.unregisterComponentOperation(name, options, progress),
-      (error, reason) => ({
+      (error, reason, code) => ({
         success: false,
         componentName: name,
         reason,
-        code: 'operation_crashed',
+        code,
         error,
         wasStopped: progress.wasStopped,
         wasRegistered: progress.wasRegistered,
@@ -1351,19 +1352,22 @@ export class LifecycleManager
             this.settleOperation(
               'reload signal',
               () => this.handleReloadRequest('signal'),
-              (error) => crashedSignalBroadcastResult('reload', error),
+              (error, _reason, code) =>
+                crashedSignalBroadcastResult('reload', error, code),
             ),
           onInfoRequested: () =>
             this.settleOperation(
               'info signal',
               () => this.handleInfoRequest('signal'),
-              (error) => crashedSignalBroadcastResult('info', error),
+              (error, _reason, code) =>
+                crashedSignalBroadcastResult('info', error, code),
             ),
           onDebugRequested: () =>
             this.settleOperation(
               'debug signal',
               () => this.handleDebugRequest('signal'),
-              (error) => crashedSignalBroadcastResult('debug', error),
+              (error, _reason, code) =>
+                crashedSignalBroadcastResult('debug', error, code),
             ),
         });
       }
@@ -1642,7 +1646,8 @@ export class LifecycleManager
     return this.settleOperation(
       'triggerReload',
       () => this.handleReloadRequest(),
-      (error) => crashedSignalBroadcastResult('reload', error),
+      (error, _reason, code) =>
+        crashedSignalBroadcastResult('reload', error, code),
     );
   }
 
@@ -1654,7 +1659,8 @@ export class LifecycleManager
     return this.settleOperation(
       'triggerInfo',
       () => this.handleInfoRequest(),
-      (error) => crashedSignalBroadcastResult('info', error),
+      (error, _reason, code) =>
+        crashedSignalBroadcastResult('info', error, code),
     );
   }
 
@@ -1666,7 +1672,8 @@ export class LifecycleManager
     return this.settleOperation(
       'triggerDebug',
       () => this.handleDebugRequest(),
-      (error) => crashedSignalBroadcastResult('debug', error),
+      (error, _reason, code) =>
+        crashedSignalBroadcastResult('debug', error, code),
     );
   }
 
@@ -1727,7 +1734,7 @@ export class LifecycleManager
     return this.settleOperation(
       'checkComponentHealth',
       () => this.checkComponentHealthOperation(name),
-      (error) => crashedHealthCheckResult(name, error),
+      (error, _reason, code) => crashedHealthCheckResult(name, error, code),
     );
   }
 
@@ -1743,13 +1750,13 @@ export class LifecycleManager
     return this.settleOperation(
       'checkAllHealth',
       () => this.checkAllHealthOperation(),
-      (error) => ({
+      (error, _reason, code) => ({
         healthy: false,
         components: [],
         checkedAt: Date.now(),
         durationMS: 0,
         timedOut: false,
-        code: 'operation_crashed',
+        code,
         error,
       }),
     );
@@ -3701,14 +3708,27 @@ export class LifecycleManager
     return result;
   }
 
+  /**
+   * One caller read during restart preparation, followed by the active-shutdown
+   * check it requires: the read can start a shutdown, which must stop preparation
+   * before validation or the next getter runs.
+   */
+  private readRestartInput<V>(
+    read: () => V,
+  ): { value: V } | { refusal: RestartResult } {
+    const value = read();
+    const refusal = this.refuseRestartDuringActiveShutdown();
+    return refusal ? { refusal } : { value };
+  }
+
   private async restartAllComponentsOperation(
     options: RestartAllOptions | undefined,
     phases: { shutdownResult?: ShutdownResult },
   ): Promise<RestartResult> {
     // A restart arriving during somebody else's shutdown has no stop pass to own.
     // Refuse it before reading options or component getters, without recording a
-    // request to stay down against the running pass. Keep the checks after individual
-    // caller reads explicit below: each is a re-entry boundary, and a shutdown begun
+    // request to stay down against the running pass. Every caller read below goes
+    // through `readRestartInput()`: each is a re-entry boundary, and a shutdown begun
     // there must prevent both validation and the next getter from running.
     const alreadyShuttingDown = this.refuseRestartDuringActiveShutdown();
     if (alreadyShuttingDown) {
@@ -3719,38 +3739,42 @@ export class LifecycleManager
     // invalid startup budget only after shutdown would leave a healthy application
     // down for a configuration typo. The snapshot also prevents a caller getter or
     // mutation during stop from swapping the value after validation.
-    const requestedStartupOptions = options?.startupOptions;
-    const afterStartupOptionsRead = this.refuseRestartDuringActiveShutdown();
-    if (afterStartupOptionsRead) {
-      return afterStartupOptionsRead;
+    const startupOptionsRead = this.readRestartInput(
+      () => options?.startupOptions,
+    );
+    if ('refusal' in startupOptionsRead) {
+      return startupOptionsRead.refusal;
     }
-    const requestedStartupTimeoutMS = requestedStartupOptions?.timeoutMS;
-    const afterStartupTimeoutRead = this.refuseRestartDuringActiveShutdown();
-    if (afterStartupTimeoutRead) {
-      return afterStartupTimeoutRead;
+    const requestedStartupOptions = startupOptionsRead.value;
+    const startupTimeoutRead = this.readRestartInput(
+      () => requestedStartupOptions?.timeoutMS,
+    );
+    if ('refusal' in startupTimeoutRead) {
+      return startupTimeoutRead.refusal;
     }
     const startupTimeoutMS = resolveOperationTimeoutMS(
-      requestedStartupTimeoutMS,
+      startupTimeoutRead.value,
       this.startupTimeoutMS,
       'restartAllComponents startupOptions.timeoutMS',
     );
-    const shouldIgnoreStalledComponents =
-      requestedStartupOptions?.ignoreStalledComponents === true;
-    const afterIgnoreStalledRead = this.refuseRestartDuringActiveShutdown();
-    if (afterIgnoreStalledRead) {
-      return afterIgnoreStalledRead;
+    const ignoreStalledRead = this.readRestartInput(
+      () => requestedStartupOptions?.ignoreStalledComponents === true,
+    );
+    if ('refusal' in ignoreStalledRead) {
+      return ignoreStalledRead.refusal;
     }
     const startupOptions: StartupOptions = {
       timeoutMS: startupTimeoutMS,
-      ignoreStalledComponents: shouldIgnoreStalledComponents,
+      ignoreStalledComponents: ignoreStalledRead.value,
     };
-    const requestedShutdownTimeoutMS = options?.shutdownTimeoutMS;
-    const afterShutdownTimeoutRead = this.refuseRestartDuringActiveShutdown();
-    if (afterShutdownTimeoutRead) {
-      return afterShutdownTimeoutRead;
+    const shutdownTimeoutRead = this.readRestartInput(
+      () => options?.shutdownTimeoutMS,
+    );
+    if ('refusal' in shutdownTimeoutRead) {
+      return shutdownTimeoutRead.refusal;
     }
     const shutdownTimeoutMS = resolveOperationTimeoutMS(
-      requestedShutdownTimeoutMS,
+      shutdownTimeoutRead.value,
       this.shutdownOptions.timeoutMS,
       'restartAllComponents shutdownTimeoutMS',
     );
@@ -3762,17 +3786,17 @@ export class LifecycleManager
     for (const component of [...this.components]) {
       const name = this.nameOf(component);
       const generation = this.registrationReads.currentGeneration(component);
-      const requestedComponentTimeoutMS = component.startupTimeoutMS;
-      const afterComponentTimeoutRead =
-        this.refuseRestartDuringActiveShutdown();
-      if (afterComponentTimeoutRead) {
-        return afterComponentTimeoutRead;
+      const componentTimeoutRead = this.readRestartInput(
+        () => component.startupTimeoutMS,
+      );
+      if ('refusal' in componentTimeoutRead) {
+        return componentTimeoutRead.refusal;
       }
       restartSnapshots.set(name, {
         component,
         generation,
         timeoutMS: toOperationTimerDelayMS(
-          requestedComponentTimeoutMS,
+          componentTimeoutRead.value,
           `${name}.startupTimeoutMS`,
         ),
       });
@@ -10452,7 +10476,7 @@ export class LifecycleManager
   private settleOperation<T>(
     operation: string,
     run: () => Promise<T>,
-    toFailure: (error: Error, reason: string) => T,
+    toFailure: (error: Error, reason: string, code: SettledFailureCode) => T,
   ): Promise<T> {
     return settleOperation(operation, run, toFailure);
   }
@@ -10921,7 +10945,8 @@ export class LifecycleManager
           this.settleOperation(
             `${descriptor.signal} broadcast`,
             descriptor.broadcast,
-            (error) => crashedSignalBroadcastResult(descriptor.signal, error),
+            (error, _reason, code) =>
+              crashedSignalBroadcastResult(descriptor.signal, error, code),
           ),
       );
 

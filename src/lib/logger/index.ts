@@ -1856,8 +1856,12 @@ export class Logger extends EventEmitter {
     // dependency of the sink's return, and therefore runs once cleanup settles.
     const closing = this._closePromise ?? this.close();
     const finishExit = (): void => {
-      // The decision `endsProcessOnExit` made above, not a second copy of its test.
-      if (this._hasScheduledProcessExit) {
+      // The decision `endsProcessOnExit` made above, re-checked live: listeners and sink
+      // close ran since, and may have removed a stubbed `process.exit`.
+      if (
+        this._hasScheduledProcessExit &&
+        typeof globalThis.process?.exit === 'function'
+      ) {
         try {
           globalThis.process.exit(exitCode);
         } catch (error) {

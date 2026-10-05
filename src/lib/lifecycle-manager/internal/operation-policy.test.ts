@@ -35,7 +35,7 @@ test('manager timeout refusals retain provenance across settlement and result fa
         toOperationTimerDelayMS(NaN, 'test timeout');
         return Promise.resolve(crashedStartupResult(undefined, 'unreachable'));
       },
-      crashedStartupResult,
+      (error, reason) => crashedStartupResult(error, reason),
     );
     expect(result.code).toBe('invalid_options');
     expect(result.reason).toContain('start() refused:');
@@ -68,7 +68,9 @@ test('raw shared timeout failures and caller errors remain reported operation cr
         return Promise.reject(callerError);
       },
     ]) {
-      const result = await settleOperation('start', run, crashedStartupResult);
+      const result = await settleOperation('start', run, (error, reason) =>
+        crashedStartupResult(error, reason),
+      );
       expect(result.code).toBe('operation_crashed');
       expect(result.reason).toContain('start() failed unexpectedly:');
       expect(isOperationTimeoutValidationError(result.error)).toBe(false);

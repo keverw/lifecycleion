@@ -254,6 +254,7 @@ export type UnregisterFailureCode =
   | 'component_stopping'
   | 'stop_failed'
   | 'bulk_operation_in_progress'
+  | 'invalid_options'
   | 'operation_crashed';
 
 /**
@@ -635,9 +636,15 @@ export interface HealthReport {
   timedOut: boolean;
 
   /** Machine-readable outcome code */
-  code: 'ok' | 'degraded' | 'timeout' | 'error' | 'operation_crashed';
+  code:
+    | 'ok'
+    | 'degraded'
+    | 'timeout'
+    | 'error'
+    | 'invalid_options'
+    | 'operation_crashed';
 
-  /** The thrown value, when the check itself failed unexpectedly (`code: 'operation_crashed'`) */
+  /** The thrown value, when the check itself failed unexpectedly (`code: 'operation_crashed'`) or an invalid timeout was refused (`code: 'invalid_options'`) */
   error?: Error;
 }
 
@@ -661,12 +668,14 @@ export interface SignalBroadcastResult {
     | 'timeout'
     | 'partial_error'
     | 'error'
+    | 'invalid_options'
     | 'operation_crashed';
 
   /**
    * The thrown value, when the broadcast itself failed rather than a component's handler:
    * a custom `on*Requested` callback that threw or rejected (`code: 'error'`), or an
-   * unexpected failure of the call (`code: 'operation_crashed'`). Per-component failures
+   * unexpected failure of the call (`code: 'operation_crashed'`), or an invalid timeout refused
+   * before the broadcast (`code: 'invalid_options'`). Per-component failures
    * are on `results`.
    */
   error?: Error;
