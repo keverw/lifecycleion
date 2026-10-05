@@ -1357,12 +1357,12 @@ checked again before invocation. A provider getter that starts teardown, removes
 or replaces its component cannot cause the captured provider to run; the
 `value-requested` event still receives its `value-returned` counterpart.
 
-Message, health, and value result code `stopped` means unavailable and not stalled. It does not identify the exact lifecycle state. Use `getComponentStatus(name).state` to distinguish registered, starting, failed, and stopped components. `includeStopped` permits handlers on inactive components, but never during active startup, a timed-out startup, or teardown.
+Message, health, and value result code `stopped` means unavailable and not stalled. A stalled component answers `stalled` whenever it is refused, including while a `retryStalled` force retry has it in `force-stopping`. The label follows the stall, not availability, so messages, values, broadcasts, and health checks agree. `stopped` does not identify the exact lifecycle state. Use `getComponentStatus(name).state` to distinguish registered, starting, failed, and stopped components. `includeStopped` permits handlers on inactive components, but never during active startup, a timed-out startup, or teardown.
 
 #### `sendMessageToComponent(componentName, payload, options?)`
 
 Send a message to a specific component.
-By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`. Missing targets return `not_found`.
+By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`, or `code: 'stalled'` for a stalled component (such as one in a `retryStalled` force retry). Missing targets return `not_found`.
 
 ```typescript
 sendMessageToComponent<T = unknown>(
@@ -1461,7 +1461,7 @@ if (result.sent) {
 #### `broadcastMessage(payload, options?)`
 
 Broadcast a message to multiple components.
-By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`, as does a target unregistered mid-broadcast.
+By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`, or `code: 'stalled'` for a stalled component (such as one in a `retryStalled` force retry). A target unregistered mid-broadcast also returns `stopped`.
 A non-empty `componentNames` array limits the targets; `null`, omitted, or empty arrays use all eligible components. Stopped/stalled explicit targets are reported but not sent unless explicitly included. Non-array filters refuse the whole broadcast before delivery and return `[]`, logging the `TypeError` as a warning, as an invalid broadcast `timeout` is, rather than reporting it on the global error channel.
 
 An invalid shared timeout also refuses the whole broadcast before delivery, returning `[]` with a warning; no recipient row is ever `invalid_options`. The array alone cannot distinguish these refusals from no recipients; use the diagnostics for that distinction.
@@ -1577,7 +1577,7 @@ interface HealthReport {
 
 ### Value Sharing
 
-Components can share values with each other. **By default, only running components can provide values.** Use the `includeStopped` or `includeStalled` options to retrieve values from components in other states. Value requests remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout.
+Components can share values with each other. **By default, only running components can provide values.** Use the `includeStopped` or `includeStalled` options to retrieve values from components in other states. Value requests remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Refused requests return `code: 'stopped'`, or `code: 'stalled'` for a stalled component.
 
 ```typescript
 class ConfigComponent extends BaseComponent {
