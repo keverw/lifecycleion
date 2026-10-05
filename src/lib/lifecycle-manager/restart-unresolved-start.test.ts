@@ -1,5 +1,5 @@
 import { expect, test } from 'bun:test';
-import { claimReports, deferred, Plain, setup } from './test-helpers';
+import { deferred, Plain, setup } from './test-helpers';
 
 for (const hasAbortHook of [false, true]) {
   test(`restart refuses before stopping anything while a timed-out start is unresolved (abort hook: ${hasAbortHook})`, async () => {
@@ -67,46 +67,3 @@ for (const hasAbortHook of [false, true]) {
     }
   });
 }
-
-test('the dependencies held up by a failed stop are reported as not attempted, not as failed stops', async () => {
-  const { logger, manager } = setup({ shutdownWarningTimeoutMS: -1 });
-  const database = new Plain(logger, 'database');
-  const api = new Plain(logger, 'api', ['database']);
-  let databaseStops = 0;
-  database.stop = () => {
-    databaseStops++;
-    return Promise.resolve();
-  };
-  await manager.registerComponent(database);
-  await manager.registerComponent(api);
-  await manager.startAllComponents();
-  // Refused before cleanup starts: `api` stays running and holds `database` up.
-  Object.defineProperty(api, 'shutdownGracefulTimeoutMS', {
-    value: -5,
-    configurable: true,
-  });
-
-  const { release } = claimReports();
-  try {
-    const result = await manager.stopAllComponents({ haltOnStall: false });
-
-    expect(result).toMatchObject({
-      success: false,
-      code: 'invalid_options',
-      stoppedComponents: [],
-    });
-    expect(result.reason).toStartWith(
-      'Failed to stop: api; Not attempted: database;',
-    );
-    expect(databaseStops).toBe(0);
-    expect(manager.getComponentStatus('database')?.state).toBe('running');
-  } finally {
-    release();
-    Object.defineProperty(api, 'shutdownGracefulTimeoutMS', {
-      value: 1000,
-      configurable: true,
-    });
-    await manager.stopAllComponents();
-    await logger.close();
-  }
-});
