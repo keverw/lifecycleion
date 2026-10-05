@@ -184,6 +184,7 @@ interface ShutdownPassOptions {
   readonly retryStalled: boolean;
   readonly haltOnStall: boolean;
   readonly allowStopWithPendingStarts: boolean;
+  readonly waitForAbandonedStarts: boolean;
 }
 
 /** A start and any automatic cleanup it still owns. */
@@ -603,11 +604,13 @@ export class LifecycleManager
       retryStalled: shouldRetryStalled,
       haltOnStall: shouldHaltOnStall,
       allowStopWithPendingStarts,
+      waitForAbandonedStarts: shouldWaitForAbandonedStarts,
     } = options.shutdownOptions ?? {};
     this.shutdownOptions = {
       retryStalled: shouldRetryStalled ?? true,
       haltOnStall: shouldHaltOnStall ?? true,
       allowStopWithPendingStarts: allowStopWithPendingStarts === true,
+      waitForAbandonedStarts: shouldWaitForAbandonedStarts === true,
       timeoutMS: resolveTimeoutMS(
         shutdownTimeoutMS,
         30000,
@@ -5680,6 +5683,9 @@ export class LifecycleManager
         allowStopWithPendingStarts:
           (options?.allowStopWithPendingStarts ??
             this.shutdownOptions.allowStopWithPendingStarts) === true,
+        waitForAbandonedStarts:
+          (options?.waitForAbandonedStarts ??
+            this.shutdownOptions.waitForAbandonedStarts) === true,
       };
 
       this.normalizeRepeatedShutdownRequestStateArmedStatus();
@@ -5807,6 +5813,7 @@ export class LifecycleManager
       retryStalled: shouldRetryStalled,
       haltOnStall: shouldHaltOnStall,
       allowStopWithPendingStarts,
+      waitForAbandonedStarts: shouldWaitForAbandonedStarts,
     } = options;
 
     let hasTimedOut = false;
@@ -5960,6 +5967,13 @@ export class LifecycleManager
           this.isUnresolvedTimedOutStart(settlement),
         ),
       );
+      // Already abandoned as the pass began and still unresolved: not waited for, and
+      // its dependencies kept out of the warning phase - unless the caller opted into
+      // waiting for abandoned starts.
+      const isSkippedTimedOutStart = (settlement: StartSettlement): boolean =>
+        !shouldWaitForAbandonedStarts &&
+        timedOutStarts.has(settlement) &&
+        settlement.rawStartPending;
 
       stallCandidateNames = new Set([
         ...runningComponentsToStop,
@@ -6125,8 +6139,7 @@ export class LifecycleManager
           if (
             !canReleaseStartupDependencies(name) &&
             settlement &&
-            timedOutStarts.has(settlement) &&
-            settlement.rawStartPending
+            isSkippedTimedOutStart(settlement)
           ) {
             protectDependencies(name, warningExcluded);
           }
@@ -6156,7 +6169,8 @@ export class LifecycleManager
           // it - with or without a shutdown deadline. One abandoned mid-join is then
           // treated as one already abandoned when the pass began: the pass stops
           // waiting rather than spend the rest of its budget on a raw `start()` that
-          // may never settle.
+          // may never settle. `waitForAbandonedStarts` opts back into waiting for
+          // both, within the budget.
           for (const settlement of startsToJoin) {
             // Do not spend another shutdown budget on an already abandoned
             // start. Recovery already underway at this join is still awaited.
@@ -6167,9 +6181,14 @@ export class LifecycleManager
               // cleanup beginning after it is protected until a later shutdown pass.
               !canReleaseStartupDependencies(settlement.name) &&
               !requestingStarts.has(settlement) &&
-              !(timedOutStarts.has(settlement) && settlement.rawStartPending)
+              !isSkippedTimedOutStart(settlement)
             ) {
-              if (!settlement.recovery || settlement.isAwaitingLateStart) {
+              if (shouldWaitForAbandonedStarts) {
+                await settlement.promise;
+              } else if (
+                !settlement.recovery ||
+                settlement.isAwaitingLateStart
+              ) {
                 await racePromises([settlement.promise, settlement.abandoned]);
                 // Abandonment does not release cleanup already underway. The raw
                 // start may have settled while the timeout notification was delivered.

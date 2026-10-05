@@ -558,6 +558,23 @@ latch, and preserves the dependencies, rather than spend the rest of its budget 
 `start()` that may never settle. A later shutdown can finish after the start settles;
 cleanup already underway is still joined.
 
+To wait for such a start instead, pass `waitForAbandonedStarts: true` (default:
+`false`; it can also be set in `shutdownOptions`). The pass then waits for a start that
+timed out before it began or while it ran, the same way in both cases, until its
+`start()` settles and its late cleanup stops it, and then stops its dependencies. The
+wait is still bounded by `timeoutMS` (`shutdown_timeout` when it runs out); with
+`timeoutMS: 0` it lasts until `start()` settles. Use it when one shutdown call should
+leave as little running as possible, such as a process that exits right after it, and
+a slow start may still finish within the budget. `allowStopWithPendingStarts` takes
+precedence: with it enabled, starts are not waited for at all.
+
+```typescript
+const result = await lifecycle.stopAllComponents({
+  timeoutMS: 10000,
+  waitForAbandonedStarts: true,
+});
+```
+
 A shutdown requested synchronously from `start()` also skips joining that requesting
 start and preserves its dependencies, so the hook can await the result. It first
 yields one timer turn so an immediately rejected start can settle and release its
@@ -1041,6 +1058,7 @@ interface StopAllOptions {
   retryStalled?: boolean; // Retry components that were previously stalled (default: true)
   haltOnStall?: boolean; // Stop processing after a stop failure or refusal (default: true)
   allowStopWithPendingStarts?: boolean; // Release pending starts' dependency protection (default: false)
+  waitForAbandonedStarts?: boolean; // Wait, within timeoutMS, for starts already past startupTimeoutMS (default: false)
 }
 ```
 

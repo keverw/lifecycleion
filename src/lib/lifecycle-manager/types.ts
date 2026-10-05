@@ -418,6 +418,16 @@ export interface StopAllOptions {
    * restartAllComponents always disables this override, including when configured globally.
    */
   allowStopWithPendingStarts?: boolean;
+  /**
+   * Wait for a start whose `startupTimeoutMS` has passed while its `start()` is still
+   * unresolved, instead of answering `cleanup_incomplete` at once (default: false).
+   * Applies whether it timed out before the pass began or while the pass waited on it.
+   * The wait is bounded by `timeoutMS` (`shutdown_timeout` when it runs out); with
+   * `timeoutMS: 0` it lasts until `start()` settles. Once it does, its late cleanup
+   * stops it and the pass goes on to its dependencies. allowStopWithPendingStarts takes
+   * precedence: with it enabled, starts are not waited for at all.
+   */
+  waitForAbandonedStarts?: boolean;
 }
 
 /**
