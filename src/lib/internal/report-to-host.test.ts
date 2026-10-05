@@ -265,3 +265,93 @@ test('a throwing message accessor still reaches error listeners without reportEr
     globalThis.reportError = originalReportError;
   }
 });
+
+/** Isolate host-hook overrides and restore both globals even when a check fails. */
+function withHostMethodOverride(
+  method: 'dispatchEvent' | 'reportError',
+  handler: (this: unknown, value: unknown) => unknown,
+  run: () => void,
+): void {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, method);
+  const eventDescriptor = Object.getOwnPropertyDescriptor(
+    globalThis,
+    'ErrorEvent',
+  );
+  try {
+    Object.defineProperty(globalThis, method, {
+      configurable: true,
+      writable: true,
+      value: handler,
+    });
+    if (method === 'reportError') {
+      // Keep dispatch unavailable so the host's reportError rung is exercised.
+      Object.defineProperty(globalThis, 'ErrorEvent', {
+        configurable: true,
+        writable: true,
+        value: undefined,
+      });
+    }
+    run();
+  } finally {
+    if (descriptor) {
+      Object.defineProperty(globalThis, method, descriptor);
+    } else {
+      Reflect.deleteProperty(globalThis, method);
+    }
+    if (eventDescriptor) {
+      Object.defineProperty(globalThis, 'ErrorEvent', eventDescriptor);
+    } else {
+      Reflect.deleteProperty(globalThis, 'ErrorEvent');
+    }
+  }
+}
+
+for (const method of ['dispatchEvent', 'reportError'] as const) {
+  test(`host ${method} ignores an own call override`, async () => {
+    const { reportToHost } = await importReportToHostCopy(`own-call-${method}`);
+    const error = new Error('original failure');
+    const received: unknown[] = [];
+    const handler = function (this: unknown, value: unknown): boolean {
+      expect(this).toBe(globalThis);
+      received.push(value);
+      return false;
+    };
+    Object.defineProperty(handler, 'call', { value: () => false });
+    withHostMethodOverride(method, handler, () => {
+      reportToHost(error);
+      expect(received).toHaveLength(1);
+      if (method === 'dispatchEvent') {
+        expect((received[0] as ErrorEvent).error).toBe(error);
+      }
+    });
+  });
+}
+
+for (const method of ['dispatchEvent', 'reportError'] as const) {
+  test(`host ${method} uses the captured apply after a global patch`, async () => {
+    const { reportToHost } = await importReportToHostCopy(
+      `captured-apply-${method}`,
+    );
+    const originalApply = Reflect.apply;
+    let calls = 0;
+    let hasGlobalReceiver = false;
+    withHostMethodOverride(
+      method,
+      function (this: unknown) {
+        calls++;
+        hasGlobalReceiver = this === globalThis;
+        return false;
+      },
+      () => {
+        try {
+          Reflect.apply = () => false;
+          reportToHost(new Error('original failure'));
+        } finally {
+          Reflect.apply = originalApply;
+        }
+      },
+    );
+    expect(calls).toBe(1);
+    expect(hasGlobalReceiver).toBe(true);
+  });
+}

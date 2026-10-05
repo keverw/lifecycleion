@@ -1,3 +1,11 @@
+import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
+import {
+  awaitBoxedPromise,
+  promiseResolveIntrinsic,
+  observePromise,
+  observeRejection,
+  promiseConstructorIntrinsic as NativePromise,
+} from '../../internal/intrinsics';
 import * as http from 'node:http';
 import { guardProgressCallback } from '../internal/progress';
 import * as https from 'node:https';
@@ -29,11 +37,12 @@ import {
   materializeNodeRequestHeaders,
   normalizeNodeRequestHeaders,
 } from './node-adapter-utils';
-import { resolveDetectedRedirectURL } from '../utils';
+import { resolveDetectedRedirectURL, setOwnHeader } from '../utils';
 // Shared error normalization preserves Error instances and wraps other thrown values.
 // Non-Error values receive a "Non-error value thrown: <description>" message, with the
 // original value retained on cause for consumers of the normalized error.
 import { toError as normalizeError, describeError } from '../../to-error';
+import { reportCallbackError } from '../../safe-handle-callback';
 import { reportToHost } from '../../internal/report-to-host';
 import { readUnknownMember as readObjectMember } from '../../internal/read-member';
 
@@ -548,7 +557,7 @@ export class NodeAdapter implements HTTPAdapter {
       return error;
     };
 
-    return new Promise<AdapterResponse>((resolve, reject) => {
+    const operation = new NativePromise<AdapterResponse>((resolve, reject) => {
       let activeResponseStream:
         | {
             status: number;
@@ -796,7 +805,7 @@ export class NodeAdapter implements HTTPAdapter {
           return;
         }
 
-        upload.outcome = new Promise<Error | undefined>((settle) => {
+        upload.outcome = new NativePromise<Error | undefined>((settle) => {
           upload.settle = settle;
         });
       };
@@ -897,6 +906,34 @@ export class NodeAdapter implements HTTPAdapter {
        */
       const failRequest = (error: Error): void => {
         reject(settleRequestBodyForThrow(error));
+      };
+
+      const observeTaskFailure = (
+        task: Promise<void>,
+        onFailure: (error: unknown) => void,
+      ): void => {
+        observeRejection(task, (error: unknown) => {
+          try {
+            onFailure(error);
+          } catch (error_) {
+            const failure = normalizeError(error_);
+            // Recovery also reads caller-owned values. Reject before cleanup or
+            // reporting can throw; the outer rejection path settles the upload.
+            reject(failure);
+            try {
+              destroyRequestQuietly(req);
+            } catch {
+              // A patched request can even refuse its destroyed-state read.
+            }
+            reportCallbackError(
+              'NodeAdapter task failure handler',
+              new AggregateError(
+                [error, failure],
+                'Task failed and its recovery handler also failed',
+              ),
+            );
+          }
+        });
       };
 
       // Every bodied request has its outcome from here on, whichever branch below writes
@@ -1060,7 +1097,7 @@ export class NodeAdapter implements HTTPAdapter {
           destroyRequestQuietly(req);
         });
 
-        void (async () => {
+        const responseTask = (async () => {
           const status = res.statusCode ?? 0;
           const headers = normalizeResponseHeaders(res.headers);
 
@@ -1142,7 +1179,7 @@ export class NodeAdapter implements HTTPAdapter {
               res.once('error', setupFailed);
               res.once('aborted', setupClosed);
               res.once('close', setupClosed);
-              writable = await request.streamResponse(
+              const returned = request.streamResponse(
                 {
                   status: 200,
                   headers,
@@ -1152,6 +1189,20 @@ export class NodeAdapter implements HTTPAdapter {
                 },
                 { signal: streamAbort.signal },
               );
+              const pending = adoptResult(returned);
+              if (pending instanceof UnreadableReturn) {
+                throw pending;
+              }
+              if (pending !== undefined) {
+                writable = (await awaitBoxedPromise(pending)).value as
+                  WritableLike | null | StreamResponseCancel;
+              } else {
+                // Preserve the one-turn sync-factory handoff without adopting its
+                // writable again or adding extra microtasks before stream listeners.
+                await promiseResolveIntrinsic(undefined);
+                writable = returned as
+                  WritableLike | null | StreamResponseCancel;
+              }
             } catch (error) {
               isStreamFactoryPending = false;
               failStreamSetupOnSocketError = undefined;
@@ -1376,7 +1427,8 @@ export class NodeAdapter implements HTTPAdapter {
               ),
             });
           });
-        })().catch((error: unknown) => {
+        })();
+        observeTaskFailure(responseTask, (error: unknown) => {
           failRequest(normalizeError(error));
         });
       });
@@ -1589,72 +1641,77 @@ export class NodeAdapter implements HTTPAdapter {
         });
       }
 
+      const onBodyWriteFailure = (error: unknown): void => {
+        endBodyWrite(error);
+
+        // The abort path first, the same priority `req.on('error')` gives it: a
+        // caller tearing its own request down - or a per-attempt timeout doing it -
+        // parks the writer's rejection here too, and against an endpoint that answers
+        // early (a `413`, a redirect, an early `2xx`) `didReceiveResponse` is already
+        // true, so every cancelled upload put a spurious transport failure on the
+        // host's global `'error'` channel for a teardown that was asked for. The
+        // outcome is settled above either way; `failRequest` is first-call-wins, so
+        // the abort listener's own answer stands where it got there first.
+        if (request.signal?.aborted) {
+          destroyRequestQuietly(req);
+
+          const abortErr = new Error('Request aborted');
+
+          abortErr.name = 'AbortError';
+          failRequest(abortErr);
+
+          return;
+        }
+
+        // See `didReceiveResponse`: the server has already answered, so the
+        // write failing is how that answer arrived, not a transport failure
+        // to report over it. The response path resolves with the real status.
+        // Said rather than dropped, and the leftovers cleaned up: see
+        // `reportWriteErrorAfterResponse`.
+        if (didReceiveResponse) {
+          reportWriteErrorAfterResponse(error);
+
+          return;
+        }
+
+        destroyRequestQuietly(req);
+        settleResponse({
+          // No isRetryable veto: that would stop retrying an idempotent
+          // PUT or DELETE. Delivery is unproven rather than disproven, so
+          // nothing is claimed and the client's method rule decides.
+          status: 0,
+          isTransportError: true,
+          headers: {},
+          body: null,
+          errorCause: normalizeError(error),
+        });
+      };
+
       // Write request body
       if (request.body instanceof FormData) {
         // FormData → multipart/form-data with exact Content-Length so upload
         // progress is length-computable (not chunked-transfer guesswork).
         const boundary = generateMultipartBoundary();
+        const form = request.body;
 
         beginBodyWrite();
 
-        serializeMultipartFormData(
-          request.body,
-          req,
-          boundary,
-          reportUploadProgress,
-          (isWaiting) => {
-            sourceWaitSince = isWaiting ? Date.now() : undefined;
-          },
-        )
-          .then(() => {
-            endBodyWrite();
-            req.end();
-          })
-          .catch((error: unknown) => {
-            endBodyWrite(error);
-
-            // The abort path first, the same priority `req.on('error')` gives it: a
-            // caller tearing its own request down - or a per-attempt timeout doing it -
-            // parks the writer's rejection here too, and against an endpoint that answers
-            // early (a `413`, a redirect, an early `2xx`) `didReceiveResponse` is already
-            // true, so every cancelled upload put a spurious transport failure on the
-            // host's global `'error'` channel for a teardown that was asked for. The
-            // outcome is settled above either way; `failRequest` is first-call-wins, so
-            // the abort listener's own answer stands where it got there first.
-            if (request.signal?.aborted) {
-              destroyRequestQuietly(req);
-
-              const abortErr = new Error('Request aborted');
-
-              abortErr.name = 'AbortError';
-              failRequest(abortErr);
-
-              return;
-            }
-
-            // See `didReceiveResponse`: the server has already answered, so the
-            // write failing is how that answer arrived, not a transport failure
-            // to report over it. The response path resolves with the real status.
-            // Said rather than dropped, and the leftovers cleaned up: see
-            // `reportWriteErrorAfterResponse`.
-            if (didReceiveResponse) {
-              reportWriteErrorAfterResponse(error);
-
-              return;
-            }
-
-            destroyRequestQuietly(req);
-            settleResponse({
-              // No isRetryable veto: that would stop retrying an idempotent
-              // PUT or DELETE. Delivery is unproven rather than disproven, so
-              // nothing is claimed and the client's method rule decides.
-              status: 0,
-              isTransportError: true,
-              headers: {},
-              body: null,
-              errorCause: normalizeError(error),
-            });
-          });
+        const writeTask = (async (): Promise<void> => {
+          await serializeMultipartFormData(
+            form,
+            req,
+            boundary,
+            reportUploadProgress,
+            (isWaiting) => {
+              sourceWaitSince = isWaiting ? Date.now() : undefined;
+            },
+          );
+          // Finalization can throw even after every body write succeeded. Keep the
+          // one-shot upload outcome pending until it can include that failure.
+          req.end();
+          endBodyWrite();
+        })();
+        observeTaskFailure(writeTask, onBodyWriteFailure);
       } else if (
         typeof request.body === 'string' ||
         request.body instanceof Uint8Array
@@ -1670,62 +1727,21 @@ export class NodeAdapter implements HTTPAdapter {
 
         beginBodyWrite();
 
-        writeRequestBodyChunked(bytes, req, reportUploadProgress)
-          .then(() => {
-            endBodyWrite();
-            req.end();
-          })
-          .catch((error: unknown) => {
-            endBodyWrite(error);
-
-            // The abort path first, the same priority `req.on('error')` gives it: a
-            // caller tearing its own request down - or a per-attempt timeout doing it -
-            // parks the writer's rejection here too, and against an endpoint that answers
-            // early (a `413`, a redirect, an early `2xx`) `didReceiveResponse` is already
-            // true, so every cancelled upload put a spurious transport failure on the
-            // host's global `'error'` channel for a teardown that was asked for. The
-            // outcome is settled above either way; `failRequest` is first-call-wins, so
-            // the abort listener's own answer stands where it got there first.
-            if (request.signal?.aborted) {
-              destroyRequestQuietly(req);
-
-              const abortErr = new Error('Request aborted');
-
-              abortErr.name = 'AbortError';
-              failRequest(abortErr);
-
-              return;
-            }
-
-            // See `didReceiveResponse`: the server has already answered, so the
-            // write failing is how that answer arrived, not a transport failure
-            // to report over it. The response path resolves with the real status.
-            // Said rather than dropped, and the leftovers cleaned up: see
-            // `reportWriteErrorAfterResponse`.
-            if (didReceiveResponse) {
-              reportWriteErrorAfterResponse(error);
-
-              return;
-            }
-
-            destroyRequestQuietly(req);
-            settleResponse({
-              // No isRetryable veto: that would stop retrying an idempotent
-              // PUT or DELETE. Delivery is unproven rather than disproven, so
-              // nothing is claimed and the client's method rule decides.
-              status: 0,
-              isTransportError: true,
-              headers: {},
-              body: null,
-              errorCause: normalizeError(error),
-            });
-          });
+        const writeTask = (async (): Promise<void> => {
+          await writeRequestBodyChunked(bytes, req, reportUploadProgress);
+          // Finalization can throw even after every body write succeeded. Keep the
+          // one-shot upload outcome pending until it can include that failure.
+          req.end();
+          endBodyWrite();
+        })();
+        observeTaskFailure(writeTask, onBodyWriteFailure);
       } else {
         // No body — fire 100% upload immediately and end the request
         reportUploadProgress({ loaded: 0, total: 0, progress: 1 });
         req.end();
       }
-    }).catch((error: unknown) => {
+    });
+    return await observePromise(operation, undefined, (error: unknown) => {
       // The one rejection path the executor's own handlers cannot see: a `Promise`
       // executor rejects on a synchronous throw too, and `httpModule.request`,
       // `Buffer.from` and `req.setHeader` can all raise one after the outcome promise has
@@ -1831,7 +1847,7 @@ async function streamResponseBody(
   totalBytes: number,
   onProgress?: (e: AdapterProgressEvent) => void,
 ): Promise<StreamResponseBodyResult> {
-  return new Promise((resolve) => {
+  return await new NativePromise((resolve) => {
     let loadedBytes = 0;
 
     // Deduplication guard — same as buffered download: when Content-Length is
@@ -2611,7 +2627,7 @@ function normalizeResponseHeaders(
       continue;
     }
     // Keys are already lowercase from Node's http parser
-    result[key] = Array.isArray(value) ? value : String(value);
+    setOwnHeader(result, key, Array.isArray(value) ? value : String(value));
   }
 
   return result;

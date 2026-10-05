@@ -1,4 +1,6 @@
+import { awaitBoxedPromise } from '../internal/intrinsics';
 import { matchesFilter } from './utils';
+import { adoptPromise } from '../internal/adopt-promise';
 import type {
   RequestInterceptorFilter,
   RequestInterceptor,
@@ -50,7 +52,8 @@ export class RequestInterceptorManager {
   ): Promise<InterceptedRequest | InterceptorCancel> {
     let current = request;
 
-    for (const { fn, filter } of this.interceptors) {
+    // Registration changes during an await apply to the next run.
+    for (const { fn, filter } of [...this.interceptors]) {
       if (
         !matchesFilter(
           filter ?? {},
@@ -66,7 +69,12 @@ export class RequestInterceptorManager {
         continue;
       }
 
-      const result = await fn(current, phase, context);
+      // Adopted, not awaited as it is: an interceptor is caller code, and one returning
+      // a native promise with its own `constructor` and a no-op `then` hung the
+      // request. See `adoptPromise()`.
+      const { value: result } = await awaitBoxedPromise(
+        adoptPromise(fn(current, phase, context)),
+      );
 
       // null is shorthand for { cancel: true } with no reason
       if (result === null) {

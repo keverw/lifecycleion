@@ -57,6 +57,60 @@ describe('FileSink', () => {
     await tmpDir.cleanup();
   });
 
+  test('flush and close settle after global Promise and its methods are replaced', async () => {
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'patched-promises',
+      jsonFormat: false,
+    });
+    expect((await sink.flush()).success).toBe(true);
+    const originalPromise = Promise;
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const originalThen = Promise.prototype.then;
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const originalRace = Promise.race;
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const originalResolve = Promise.resolve;
+    let flushed: Awaited<ReturnType<typeof sink.flush>> | undefined;
+    let didClose = false;
+    try {
+      originalPromise.prototype.then = function () {
+        return new originalPromise(() => {});
+      };
+      originalPromise.race = function () {
+        return new originalPromise(() => {});
+      };
+      originalPromise.resolve = (() =>
+        new originalPromise(() => {})) as typeof Promise.resolve;
+      globalThis.Promise = (() => {
+        throw new Error('live Promise constructor used');
+      }) as unknown as PromiseConstructor;
+      const flush = sink.flush(40);
+      void Reflect.apply(originalThen, flush, [
+        (value: Awaited<typeof flush>) => {
+          flushed = value;
+        },
+        () => {},
+      ]);
+      await new originalPromise((resolve) => setTimeout(resolve, 80));
+      expect(flushed?.success).toBe(true);
+      const close = sink.close();
+      void Reflect.apply(originalThen, close, [
+        () => {
+          didClose = true;
+        },
+        () => {},
+      ]);
+      await new originalPromise((resolve) => setTimeout(resolve, 80));
+      expect(didClose).toBe(true);
+    } finally {
+      globalThis.Promise = originalPromise;
+      originalPromise.prototype.then = originalThen;
+      originalPromise.race = originalRace;
+      originalPromise.resolve = originalResolve;
+    }
+  });
+
   test('should create log directory if it does not exist', async () => {
     const nonExistentDir = `${tmpDir.path}/does-not-exist`;
 
@@ -818,7 +872,7 @@ describe('FileSink', () => {
         throw new Error('transient write failure');
       }
 
-      return realWriteEntry(entry);
+      return await realWriteEntry(entry);
     };
 
     sink.write(entryFor('first'));
@@ -1540,62 +1594,157 @@ describe('FileSink - bounded queue', () => {
     await sink.close();
   });
 
-  test('an unusable closeTimeoutMS takes the default and Infinity is bounded', async () => {
-    // `NaN` - `Number(process.env.UNSET)` - made every `elapsed > closeTimeoutMS` check
-    // false, so the drain loop inside `close()` could never time out and a stalled
-    // destination hung shutdown for good. `Infinity` did the reverse: `setTimeout` reads
-    // it as `1`, so the init wait gave up at once. Both are resolved, the way the queue
-    // options are, and the same way in `NamedPipeSink`.
-    const read = (sink: FileSink): number =>
-      (sink as unknown as { closeTimeoutMS: number }).closeTimeoutMS;
-
-    const nan = new FileSink({
-      logDir: tmpDir.path,
-      basename: 'nan-timeout',
-      closeTimeoutMS: Number.NaN,
-    });
-    const negative = new FileSink({
-      logDir: tmpDir.path,
-      basename: 'negative-timeout',
-      closeTimeoutMS: -5,
-    });
-    const infinite = new FileSink({
-      logDir: tmpDir.path,
-      basename: 'infinite-timeout',
-      closeTimeoutMS: Number.POSITIVE_INFINITY,
-    });
-
-    expect(read(nan)).toBe(30_000);
-    expect(read(negative)).toBe(30_000);
-    expect(read(infinite)).toBe(2_147_483_647);
-
-    await Promise.all([nan.close(), negative.close(), infinite.close()]);
+  test('invalid closeTimeoutMS rejects before initialization', () => {
+    const initialize = spyOn(
+      FileSink.prototype as unknown as { initialize(): Promise<void> },
+      'initialize',
+    ).mockResolvedValue();
+    const timer = spyOn(globalThis, 'setTimeout');
+    try {
+      for (const requested of [
+        Number.NaN,
+        -1,
+        -Infinity,
+        '12',
+        false,
+        {},
+        Symbol('timeout'),
+      ]) {
+        expect(
+          () =>
+            new FileSink({
+              logDir: tmpDir.path,
+              basename: 'timeout-option',
+              closeTimeoutMS: requested as number,
+            }),
+        ).toThrow(
+          typeof requested === 'number' && requested < 0
+            ? RangeError
+            : TypeError,
+        );
+      }
+      expect(initialize).not.toHaveBeenCalled();
+      expect(timer).not.toHaveBeenCalled();
+    } finally {
+      initialize.mockRestore();
+      timer.mockRestore();
+    }
   });
 
-  test('flush(NaN) still times out rather than waiting forever', async () => {
-    // The same comparison inside `flush()`: `Date.now() - startTime > NaN` is never true.
-    // Resolved to the default, the deadline is real again - shown here with a stalled
-    // stream and a queue that can never drain, where the call must come back at all.
+  test.each([NaN, -1])(
+    'invalid file close budget %s identifies its option',
+    (closeTimeoutMS) => {
+      expect(
+        () =>
+          new FileSink({
+            logDir: tmpDir.path,
+            basename: 'invalid-budget',
+            closeTimeoutMS,
+          }),
+      ).toThrow('FileSink closeTimeoutMS');
+    },
+  );
+
+  test('nullish, zero, finite and infinite close budgets keep their meanings', async () => {
+    const initialize = spyOn(
+      FileSink.prototype as unknown as { initialize(): Promise<void> },
+      'initialize',
+    ).mockResolvedValue();
+    try {
+      for (const [requested, expected] of [
+        [undefined, 30_000],
+        [null, 30_000],
+        [0, 0],
+        [12, 12],
+        [Infinity, 2_147_483_647],
+        [3e9, 2_147_483_647],
+      ] as const) {
+        const sink = new FileSink({
+          logDir: tmpDir.path,
+          basename: 'timeout-option',
+          closeTimeoutMS: requested,
+        });
+        expect(
+          (sink as unknown as { closeTimeoutMS: number }).closeTimeoutMS,
+        ).toBe(expected);
+        await sink.close();
+      }
+    } finally {
+      initialize.mockRestore();
+    }
+  });
+
+  test('flush preserves nullish, zero, finite and infinite budgets', async () => {
+    const sink = new FileSink({ logDir: tmpDir.path, basename: 'flush-valid' });
+    await sink.flush();
+    const state = sink as unknown as {
+      flushWindow(timeoutMS: number, startTime: number): Promise<unknown>;
+    };
+    const flushWindow = spyOn(state, 'flushWindow').mockResolvedValue({
+      success: true,
+      entriesWritten: 0,
+      entriesFailed: 0,
+      timedOut: false,
+    });
+    try {
+      for (const [requested, expected] of [
+        [undefined, 30_000],
+        [null, 30_000],
+        [0, 0],
+        [12, 12],
+        [Infinity, 2_147_483_647],
+        [3e9, 2_147_483_647],
+      ] as const) {
+        await sink.flush(requested);
+        expect(flushWindow.mock.calls.at(-1)?.[0]).toBe(expected);
+      }
+    } finally {
+      flushWindow.mockRestore();
+      await sink.close();
+    }
+  });
+
+  test('invalid flush budgets reject without queuing work or advancing the flush window', async () => {
     const sink = new FileSink({
       logDir: tmpDir.path,
-      basename: 'flush-nan',
-      closeTimeoutMS: 150,
+      basename: 'flush-invalid',
     });
-
     await sink.flush();
-
-    const privateSink = sink as unknown as {
-      flush: (timeoutMS?: number) => Promise<{ timedOut: boolean }>;
+    const state = sink as unknown as {
+      pendingFlush: Promise<void>;
+      flushWindow(timeoutMS: number, startTime: number): Promise<unknown>;
     };
-
-    // A flush with nothing queued returns at once whatever the timeout, so the value has
-    // to be resolved for the deadline to mean anything; `0` proves the resolution is in
-    // the path, since an unresolved `NaN` and a `0` behave identically on an empty queue.
-    const result = await privateSink.flush(Number.NaN);
-
-    expect(result.timedOut).toBe(false);
-
-    await sink.close();
+    const pendingBefore = state.pendingFlush;
+    const flushWindow = spyOn(state, 'flushWindow');
+    const timer = spyOn(globalThis, 'setTimeout');
+    try {
+      for (const requested of [
+        Number.NaN,
+        -1,
+        -Infinity,
+        '12',
+        false,
+        {},
+        Symbol('timeout'),
+      ]) {
+        const error: unknown = await sink
+          .flush(requested as number)
+          .catch((error: unknown) => error);
+        expect(error).toBeInstanceOf(
+          typeof requested === 'number' && requested < 0
+            ? RangeError
+            : TypeError,
+        );
+        expect((error as Error).message).toContain('FileSink flush timeoutMS');
+      }
+      expect(state.pendingFlush).toBe(pendingBefore);
+      expect(flushWindow).not.toHaveBeenCalled();
+      expect(timer).not.toHaveBeenCalled();
+    } finally {
+      flushWindow.mockRestore();
+      timer.mockRestore();
+      await sink.close();
+    }
   });
 
   test('getHealth() reports unhealthy for the whole of a close', async () => {

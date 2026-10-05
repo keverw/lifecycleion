@@ -61,3 +61,23 @@ describe('materializeNodeRequestHeaders', () => {
     });
   });
 });
+
+describe('__proto__ headers', () => {
+  test('stay own keys through normalization and materialization', () => {
+    const source = JSON.parse('{"__proto__": ["a", "b"]}') as Record<
+      string,
+      string[]
+    >;
+    const normalized = normalizeNodeRequestHeaders(source);
+    const materialized = materializeNodeRequestHeaders(normalized);
+
+    expect(Object.getPrototypeOf(normalized)).toBe(Object.prototype);
+    expect(
+      Object.getOwnPropertyDescriptor(normalized, '__proto__')?.value,
+    ).toEqual(['a', 'b']);
+    expect(Object.getPrototypeOf(materialized)).toBe(Object.prototype);
+    expect(
+      Object.getOwnPropertyDescriptor(materialized, '__proto__')?.value,
+    ).toBe('a, b');
+  });
+});

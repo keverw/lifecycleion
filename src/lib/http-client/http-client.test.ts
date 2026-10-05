@@ -38,6 +38,8 @@ import type {
   RequestInterceptorContext,
   SubClientConfig,
 } from './types';
+import { hostileRejections } from '../internal/hostile-promise-test-utils';
+import { sleep } from '../sleep';
 
 let server: TestServer;
 const originalFetch = globalThis.fetch;
@@ -527,6 +529,87 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(response.body).toEqual({ ok: true });
     expect(await response.requestBodySettled).toBeInstanceOf(Error);
   });
+
+  test.each(hostileRejections)(
+    'fails, not hangs, on an adapter send rejecting with %s',
+    async (_label, make) => {
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (): Promise<AdapterResponse> =>
+          make(new Error('adapter rejected')),
+      };
+
+      const outcome = await Promise.race([
+        new HTTPClient({ adapter, baseURL: 'http://example.test' })
+          .get('/x')
+          .send(),
+        sleep(200).then(() => 'hung' as const),
+      ]);
+
+      expect(outcome).not.toBe('hung');
+      expect((outcome as { isFailed: boolean }).isFailed).toBe(true);
+    },
+  );
+
+  test.each(hostileRejections)(
+    'fails, not hangs, on a request interceptor rejecting with %s',
+    async (_label, make) => {
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (): Promise<AdapterResponse> =>
+          Promise.resolve({
+            status: 200,
+            headers: {},
+            body: new Uint8Array(),
+          }),
+      };
+      const client = new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+      });
+      client.addRequestInterceptor(() =>
+        make(new Error('interceptor rejected')),
+      );
+
+      const outcome = await Promise.race([
+        client.get('/x').send(),
+        sleep(200).then(() => 'hung' as const),
+      ]);
+
+      expect(outcome).not.toBe('hung');
+      expect((outcome as { isFailed: boolean }).isFailed).toBe(true);
+    },
+  );
+
+  test.each(hostileRejections)(
+    'adopts a `requestBodySettled` rejected promise with %s',
+    async (_label, make) => {
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+          Promise.resolve({
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+            body: new TextEncoder().encode('{"ok":true}'),
+            requestBodySettled: make(new Error('upload blew up')),
+          }),
+      };
+
+      const response = await new HTTPClient({
+        adapter,
+        baseURL: 'http://example.test',
+      })
+        .post('/upload')
+        .send<{ ok: boolean }>();
+      const settled = await Promise.race([
+        response.requestBodySettled,
+        sleep(200).then(() => 'hung' as const),
+      ]);
+
+      expect(settled).toBeInstanceOf(Error);
+      expect((settled as Error).message).toContain('upload blew up');
+    },
+  );
 
   test('adopts a rejecting `requestBodySettled` from an adapter that resolves', async () => {
     // `HTTPAdapter` is a public extension point, and the resolve path handed the adapter's
@@ -3910,11 +3993,11 @@ describe('HTTPClient — timeout resolution', () => {
   // that arms the per-attempt timer *and* the `<= 0` check that disables the
   // upload-settle wait: no timer on the attempt, and a wait that re-armed a `NaN` timer
   // every millisecond and could never expire. `Infinity` fired the attempt timer after
-  // 1 ms, since the timer coerces anything past 2^31 - 1 to 1. `NaN` now takes the
-  // default and `Infinity` disables the timer, on the config and the per-request override.
+  // 1 ms, since the timer coerces anything past 2^31 - 1 to 1. Nullish values take the
+  // default, NaN is rejected, and Infinity disables the timer on config and overrides.
   const observed = async (
-    config: { timeout?: number },
-    perRequest?: number,
+    config: { timeout?: number | null },
+    perRequest?: number | null,
   ): Promise<number | undefined> => {
     const client = makeClient(config);
     let seen: number | undefined;
@@ -3934,9 +4017,32 @@ describe('HTTPClient — timeout resolution', () => {
     return seen;
   };
 
-  test('NaN takes the default, on the config and per request', async () => {
-    expect(await observed({ timeout: Number.NaN })).toBe(DEFAULT_TIMEOUT_MS);
-    expect(await observed({ timeout: 4_321 }, Number.NaN)).toBe(4_321);
+  test('nullish values take the default; invalid explicit values fail', async () => {
+    expect(await observed({})).toBe(DEFAULT_TIMEOUT_MS);
+    expect(await observed({ timeout: null })).toBe(DEFAULT_TIMEOUT_MS);
+    expect(await observed({ timeout: 4_321 }, null)).toBe(4_321);
+    expect(await observed({ timeout: 0 }, null)).toBe(0);
+    for (const value of [Number.NaN, '100' as unknown as number]) {
+      const configError = await observed({ timeout: value }).catch(
+        (error: unknown) => error,
+      );
+      const requestError = await observed({ timeout: 4_321 }, value).catch(
+        (error: unknown) => error,
+      );
+      expect(configError).toBeInstanceOf(TypeError);
+      expect(requestError).toBeInstanceOf(TypeError);
+    }
+  });
+
+  test('null request options and builder resets inherit the client timeout', async () => {
+    const client = makeClient({ timeout: 4_321 });
+    const seen: Array<number | undefined> = [];
+    client.addResponseObserver((_response, request) => {
+      seen.push(request.timeout);
+    });
+    await client.get('/api/users/1', { timeout: null }).send();
+    await client.get('/api/users/1').timeout(1).timeout(null).send();
+    expect(seen).toEqual([4_321, 4_321]);
   });
 
   test('Infinity means no timeout, the same as 0', async () => {
@@ -3954,12 +4060,9 @@ describe('HTTPClient — timeout resolution', () => {
     expect(await observed({ timeout: 4_321 }, 0)).toBe(0);
   });
 
-  test('a NaN timeout no longer leaves a never-settling upload wait spinning', async () => {
-    // The redirect variant of the settle-wait test above, under the misconfiguration.
-    // `NaN` is the per-request value here, over a 100ms client default, so the number the
-    // wait runs under is the one `NaN` resolved to: taken literally it re-armed a `NaN`
-    // timer every millisecond and never failed, and this test would hang at its own
-    // deadline rather than fail at 100ms.
+  test('a NaN timeout is rejected before an upload wait starts', () => {
+    // A per-request NaN must fail at the builder boundary, before the adapter
+    // dispatches or starts an upload-settle wait.
     let hop = 0;
 
     const adapter: HTTPAdapter = {
@@ -3986,21 +4089,19 @@ describe('HTTPClient — timeout resolution', () => {
 
     try {
       const startedAt = Date.now();
-      const response = await new HTTPClient({
+      const request = new HTTPClient({
         adapter,
         baseURL: 'http://example.test',
         followRedirects: true,
         timeout: 100,
       })
         .post('/upload')
-        .json({ a: 1 })
-        .timeout(Number.NaN)
-        .send();
+        .json({ a: 1 });
 
       expect(Date.now() - startedAt).toBeLessThan(2000);
-      expect(hop).toBe(1);
-      expect(response.isTimeout).toBe(true);
-      expect(reports).toHaveLength(1);
+      expect(() => request.timeout(Number.NaN)).toThrow(TypeError);
+      expect(hop).toBe(0);
+      expect(reports).toHaveLength(0);
     } finally {
       globalThis.removeEventListener('error', onGlobalError);
     }
@@ -8845,3 +8946,33 @@ test.each([false, true])(
     }
   },
 );
+
+test('requestBodySettled uses one then read and observes the captured settlement', async () => {
+  let reads = 0;
+  const failure = new Error('upload failed');
+  const settled = {
+    get then() {
+      if (++reads > 1) {
+        return undefined;
+      }
+      return (resolve: (value: Error) => void): void => {
+        resolve(failure);
+      };
+    },
+  } as unknown as Promise<Error | undefined>;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () =>
+      Promise.resolve({
+        status: 200,
+        headers: {},
+        body: null,
+        requestBodySettled: settled,
+      }),
+  };
+  const client = new HTTPClient({ adapter });
+  const response = await client.get('https://example.com').send();
+  expect(response.status).toBe(200);
+  expect(await response.requestBodySettled).toBe(failure);
+  expect(reads).toBe(1);
+});

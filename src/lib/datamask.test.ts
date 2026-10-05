@@ -165,6 +165,31 @@ describe('maskDomain', () => {
   test('keeps empty labels empty', () => {
     expect(maskDomain('a..b', '*', 50)).toBe('a..b');
   });
+
+  test('keeps the TLD of a fully qualified name readable', () => {
+    expect(maskDomain('example.com.')).toBe('e****le.com.');
+    expect(maskDomain('example.com.')).toBe(`${maskDomain('example.com')}.`);
+    expect(maskDomain('mail.example.co.uk.', '*', 50)).toBe(
+      'm**l.ex***le.*o.uk.',
+    );
+  });
+
+  test('masks a single fully qualified label as a value without a dot', () => {
+    expect(maskDomain('localhost.', '*', 50)).toBe('lo****ost.');
+  });
+
+  test('keeps the TLD readable past a run of trailing dots', () => {
+    expect(maskDomain('example.com..')).toBe(`${maskDomain('example.com')}..`);
+    expect(maskDomain('mail.example.co.uk...', '*', 50)).toBe(
+      'm**l.ex***le.*o.uk...',
+    );
+  });
+
+  test('masks a single label before a run of trailing dots as a value without a dot', () => {
+    expect(maskDomain('localhost..', '*', 50)).toBe('lo****ost..');
+    expect(maskDomain('com.')).toBe(`${maskDomain('com')}.`);
+    expect(maskDomain('..', '*', 50)).toBe('..');
+  });
 });
 
 describe('maskEmail', () => {

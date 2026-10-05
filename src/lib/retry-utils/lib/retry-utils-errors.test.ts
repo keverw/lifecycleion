@@ -6,6 +6,7 @@ import {
   RetryUtilsErrRunnerAttemptsExhausted,
   RetryUtilsErrRunnerCancelPending,
   RetryUtilsErrRunnerForceTryRetryInProgress,
+  RetryUtilsErrRunnerForceTrySuperseded,
   RetryUtilsErrRunnerLastRetryFatallyFailed,
   RetryUtilsErrRunnerLockAcquisitionError,
   RetryUtilsErrRunnerNotPaused,
@@ -28,6 +29,7 @@ describe('retry-utils errors', () => {
       new RetryUtilsErrRunnerAlreadyCompleted('run'),
       new RetryUtilsErrRunnerAlreadyRunning('run'),
       new RetryUtilsErrRunnerForceTryRetryInProgress('forceTry'),
+      new RetryUtilsErrRunnerForceTrySuperseded(),
       new RetryUtilsErrRunnerNotPaused('resume'),
       new RetryUtilsErrRunnerCancelPending('run'),
       new RetryUtilsErrRunnerRetryCanceled('run'),
@@ -72,3 +74,12 @@ describe('retry-utils errors', () => {
     expect(unknownState.runnerState).toBe('weird');
   });
 });
+
+test.each([undefined, 'forceTry'] as const)(
+  'superseded force error identifies the method and recovery (%s)',
+  (method) => {
+    const error = new RetryUtilsErrRunnerForceTrySuperseded(method);
+    expect(error.invokedMethod).toBe('forceTry');
+    expect(error.message).toContain('Await');
+  },
+);

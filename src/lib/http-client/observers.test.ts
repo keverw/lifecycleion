@@ -63,6 +63,36 @@ function makeError(overrides: Partial<HTTPClientError> = {}): HTTPClientError {
   };
 }
 
+test.each(['response', 'error'] as const)(
+  '%s observer changes during an awaited callback apply to the next run',
+  async (kind) => {
+    const responseManager = new ResponseObserverManager();
+    const errorManager = new ErrorObserverManager();
+    const mgr = kind === 'response' ? responseManager : errorManager;
+    const run = () =>
+      kind === 'response'
+        ? responseManager.run(makeResponse(), makeRequest(), { type: 'final' })
+        : errorManager.run(makeError(), makeRequest(), { type: 'final' });
+    const calls: number[] = [];
+    const remove = mgr.add(async () => {
+      calls.push(1);
+      await Promise.resolve();
+      remove();
+      mgr.add(() => {
+        calls.push(3);
+      });
+    });
+    mgr.add(() => {
+      calls.push(2);
+    });
+    await run();
+    expect(calls).toEqual([1, 2]);
+    calls.length = 0;
+    await run();
+    expect(calls).toEqual([2, 3]);
+  },
+);
+
 describe('ResponseObserverManager', () => {
   test('calls observers in order', async () => {
     const mgr = new ResponseObserverManager();

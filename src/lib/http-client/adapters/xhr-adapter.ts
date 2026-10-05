@@ -1,3 +1,4 @@
+import { promiseConstructorIntrinsic } from '../../internal/intrinsics';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 import { guardProgressCallback } from '../internal/progress';
 import type {
@@ -10,6 +11,7 @@ import {
   resolveAbsoluteURLForRuntime,
   stripCrossOriginURLCredentials,
   stripURLCredentials,
+  setOwnHeader,
 } from '../utils';
 
 /**
@@ -50,7 +52,7 @@ export class XHRAdapter implements HTTPAdapter {
       request.initialURL,
     );
 
-    return new Promise((resolve, reject) => {
+    return new promiseConstructorIntrinsic((resolve, reject) => {
       const xhr = new XMLHttpRequest();
 
       // responseType 'arraybuffer' gives us a raw ArrayBuffer on load,
@@ -433,7 +435,9 @@ function parseXHRResponseHeaders(
         result['set-cookie'] = [existing, value];
       }
     } else {
-      result[key] = value;
+      // Defined, not assigned, as every other adapter does: a `__proto__` header
+      // would otherwise hit the prototype setter and vanish.
+      setOwnHeader(result, key, value);
     }
   }
 

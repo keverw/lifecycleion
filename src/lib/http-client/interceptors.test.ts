@@ -30,6 +30,30 @@ function makeContext(
 }
 
 describe('RequestInterceptorManager', () => {
+  test('changes during an awaited callback apply to the next run', async () => {
+    const mgr = new RequestInterceptorManager();
+    const calls: number[] = [];
+    const remove = mgr.add(async (request) => {
+      calls.push(1);
+      await Promise.resolve();
+      remove();
+      mgr.add((next) => {
+        calls.push(3);
+        return next;
+      });
+      return request;
+    });
+    mgr.add((request) => {
+      calls.push(2);
+      return request;
+    });
+    await mgr.run(makeRequest(), { type: 'initial' }, makeContext());
+    expect(calls).toEqual([1, 2]);
+    calls.length = 0;
+    await mgr.run(makeRequest(), { type: 'initial' }, makeContext());
+    expect(calls).toEqual([2, 3]);
+  });
+
   test('runs interceptors in order', async () => {
     const mgr = new RequestInterceptorManager();
     const order: number[] = [];

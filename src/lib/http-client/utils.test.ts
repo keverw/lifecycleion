@@ -313,6 +313,39 @@ describe('mergeHeaders', () => {
     });
   });
 
+  test('response header records keep a __proto__ header as an own key', () => {
+    const fetchHeaders = extractFetchHeaders(
+      new Headers([
+        ['__proto__', 'a'],
+        ['x-ok', '1'],
+      ]),
+    );
+    expect(
+      Object.getOwnPropertyDescriptor(fetchHeaders, '__proto__')?.value,
+    ).toBe('a');
+
+    const normalized = normalizeAdapterResponseHeaders(
+      JSON.parse('{"__proto__": ["a", "b"]}') as Record<string, string[]>,
+    );
+    expect(Object.getPrototypeOf(normalized)).toBe(Object.prototype);
+    expect(
+      Object.getOwnPropertyDescriptor(normalized, '__proto__')?.value,
+    ).toBe('a');
+  });
+
+  test('keeps a __proto__ header as an own key', () => {
+    const source = JSON.parse(
+      '{"__proto__": ["a", "b"], "x-ok": "1"}',
+    ) as Record<string, string | string[]>;
+    const merged = mergeHeaders(source);
+
+    expect(Object.getPrototypeOf(merged)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(merged, '__proto__')?.value).toEqual(
+      ['a', 'b'],
+    );
+    expect(merged['x-ok']).toBe('1');
+  });
+
   test('skips undefined sets', () => {
     expect(mergeHeaders({ 'content-type': 'text/plain' }, undefined)).toEqual({
       'content-type': 'text/plain',

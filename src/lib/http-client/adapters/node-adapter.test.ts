@@ -1,3 +1,4 @@
+import { hostileRejections } from '../../internal/hostile-promise-test-utils';
 import { describe, expect, test, beforeAll, afterAll, spyOn } from 'bun:test';
 import { execSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -3308,7 +3309,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     // Concurrent requests sharing one writable attach one absorber between them, not one
     // each: a dozen failures inside a single turn would otherwise trip Node's listener
     // warning before any removal ran.
-    await Promise.all(Array.from({ length: 12 }, async () => runOnce()));
+    await Promise.all(Array.from({ length: 12 }, async () => await runOnce()));
     expect(emitter.listenerCount('error')).toBe(1);
 
     // Released a turn after the error was delivered, not a turn after it was attached.
@@ -3573,6 +3574,44 @@ describe('NodeAdapter.send() — unit branches without server', () => {
 
     expect(errorListeners).toBe(5);
   });
+
+  test.each(hostileRejections)(
+    'stream factory adopts %s',
+    async (_label, make) => {
+      const req = new MockClientRequest();
+      const res = new MockIncomingMessage(200, {
+        'content-type': 'application/octet-stream',
+      });
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        (_options, callback) => {
+          queueMicrotask(() =>
+            (
+              callback as ((response: http.IncomingMessage) => void) | undefined
+            )?.(res as unknown as http.IncomingMessage),
+          );
+          return req as unknown as http.ClientRequest;
+        },
+      );
+      const failure = new Error('hostile factory failure');
+      try {
+        const error = await new NodeAdapter()
+          .send({
+            requestURL: 'http://example.test/data',
+            method: 'GET',
+            headers: {},
+            signal: AbortSignal.timeout(100),
+            streamResponse: () => make(failure),
+          })
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+        expect(error).toBe(failure);
+      } finally {
+        requestSpy.mockRestore();
+      }
+    },
+  );
 
   test('async streamResponse factory rejection rejects the promise', async () => {
     const req = new MockClientRequest();
@@ -6010,7 +6049,7 @@ describe('NodeAdapter — crl option (enforcement)', () => {
   });
 
   const get = async (config: NodeAdapterConfig, server: TlsTestServer) =>
-    new HTTPClient({
+    await new HTTPClient({
       adapter: new NodeAdapter(config),
       baseURL: server.url,
     })
@@ -7053,4 +7092,54 @@ describe('NodeAdapter — abort listeners are released when the request settles'
 
 test('rejects malformed initial CRLs before any request or retry', () => {
   expect(() => new NodeAdapter({ crl: 'garbage' })).toThrow();
+});
+
+describe('NodeAdapter upload finalization', () => {
+  test.each(['string', 'bytes', 'multipart'] as const)(
+    '%s upload reports req.end failure after accepting all body bytes',
+    async (kind) => {
+      const failure = new Error('request end failed');
+      const chunks: Buffer[] = [];
+      const req = new MockClientRequest((data, callback) => {
+        chunks.push(Buffer.from(data));
+        callback?.(null);
+        return true;
+      });
+      const endSpy = spyOn(req, 'end').mockImplementation(() => {
+        // All writes succeeded. Finalizing the request is still part of the upload,
+        // so its failure must win over a premature successful body settlement.
+        expect(Buffer.concat(chunks).toString()).toContain('payload');
+        throw failure;
+      });
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        () => req as unknown as http.ClientRequest,
+      );
+      const form = new FormData();
+      form.append('field', 'payload');
+      const body =
+        kind === 'multipart'
+          ? form
+          : kind === 'bytes'
+            ? new TextEncoder().encode('payload')
+            : 'payload';
+      try {
+        const response = await new NodeAdapter().send({
+          requestURL: 'http://example.test/upload',
+          method: 'POST',
+          headers: {},
+          body,
+        });
+        expect(endSpy).toHaveBeenCalledTimes(1);
+        expect(response.status).toBe(0);
+        expect(response.isTransportError).toBe(true);
+        expect(response.errorCause).toBe(failure);
+        expect(response.requestBodySettled).toBeDefined();
+        expect(await response.requestBodySettled).toBe(failure);
+        expect(req.destroyed).toBe(true);
+      } finally {
+        requestSpy.mockRestore();
+        endSpy.mockRestore();
+      }
+    },
+  );
 });

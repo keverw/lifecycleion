@@ -7,8 +7,10 @@
  * defaults, including treating null optional settings as omitted. What changed is the unit: `datamask` indexed a string by UTF-16 code unit,
  * so an emoji-heavy value came back cut through a surrogate pair - a lone `\uD83D` at
  * the seam, `isWellFormed()` false - and the same broken text went wherever the mask
- * did. These count in code points, so a cut never lands inside a character. A value with
- * no astral characters masks exactly as it did before.
+ * did. These count in characters (see below), so a cut never lands inside one. A value
+ * whose every code unit is a character of its own - no astral characters, combining
+ * marks, joiners or `\r\n` pairs - masks exactly as it did before; one with a multi-unit
+ * cluster such as `e` + combining accent counts it once, so its mask is shorter.
  *
  * A character is a grapheme cluster where the runtime has `Intl.Segmenter` - so a
  * family emoji, a flag, a skin-tone variant or `e` + combining accent is one character,
@@ -102,7 +104,9 @@ export function maskString(
  * Mask a hostname label by label, keeping the dots and the last label whole.
  *
  * Every label but the last is masked with {@link maskString} at `percent`; the last one -
- * the TLD, ordinarily - is left readable. A value with no dot is masked as one string.
+ * the TLD, ordinarily - is left readable, and trailing dots - a fully qualified name's, or a
+ * run of them - do not change which label that is. A value with no dot is masked as one
+ * string.
  *
  * @example
  * ```typescript
@@ -120,11 +124,20 @@ export function maskDomain(
   }
 
   const labels = value.split('.');
-  const last = labels.length - 1;
+  // A fully qualified name's trailing dot leaves an empty label after the TLD - more
+  // than one, for a run of dots; the TLD is still the last label that is not empty.
+  let last = labels.length - 1;
+
+  while (last > 0 && labels[last] === '') {
+    last--;
+  }
+
+  // A single label before the dots is masked like a value without a dot.
+  const readable = last > 0 ? last : -1;
 
   return labels
     .map((label, index) =>
-      index === last ? label : maskString(label, maskChar, percent),
+      index === readable ? label : maskString(label, maskChar, percent),
     )
     .join('.');
 }

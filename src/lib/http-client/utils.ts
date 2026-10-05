@@ -308,6 +308,23 @@ function getBrowserResolutionBase(): string | undefined {
 }
 
 /**
+ * Store one header as an own key. Defined, not assigned: a `__proto__` header would
+ * otherwise set the record's prototype (an array value) or vanish (a string).
+ */
+export function setOwnHeader<V>(
+  record: Record<string, V>,
+  key: string,
+  value: V,
+): void {
+  Object.defineProperty(record, key, {
+    value,
+    enumerable: true,
+    configurable: true,
+    writable: true,
+  });
+}
+
+/**
  * Normalizes header keys to lowercase.
  */
 export function normalizeHeaders(
@@ -316,7 +333,7 @@ export function normalizeHeaders(
   const result: Record<string, string> = {};
 
   for (const [key, value] of Object.entries(headers)) {
-    result[key.toLowerCase()] = value;
+    setOwnHeader(result, key.toLowerCase(), value);
   }
 
   return result;
@@ -337,13 +354,24 @@ export function mergeHeaders(
     }
 
     for (const [key, value] of Object.entries(headers)) {
-      result[key.toLowerCase()] = Array.isArray(value)
-        ? normalizeMergedHeaderArray(value)
-        : String(value);
+      setOwnHeader(
+        result,
+        key.toLowerCase(),
+        normalizeMergedHeaderValue(value),
+      );
     }
   }
 
   return result;
+}
+
+/** One header value as {@link mergeHeaders} stores it. Throws if conversion does. */
+export function normalizeMergedHeaderValue(
+  value: string | string[],
+): string | string[] {
+  return Array.isArray(value)
+    ? normalizeMergedHeaderArray(value)
+    : String(value);
 }
 
 function normalizeMergedHeaderArray(value: string[]): string | string[] {
@@ -362,9 +390,13 @@ export function mergeObservedHeaders(
     }
 
     for (const [key, value] of Object.entries(headers)) {
-      result[key.toLowerCase()] = Array.isArray(value)
-        ? value.map((item) => String(item))
-        : String(value);
+      setOwnHeader(
+        result,
+        key.toLowerCase(),
+        Array.isArray(value)
+          ? value.map((item) => String(item))
+          : String(value),
+      );
     }
   }
 
@@ -507,7 +539,7 @@ export function extractFetchHeaders(
     const lower = key.toLowerCase();
 
     if (lower !== 'set-cookie') {
-      result[lower] = value;
+      setOwnHeader(result, lower, value);
     }
   }
 
@@ -568,7 +600,11 @@ export function normalizeAdapterResponseHeaders(
         result[lower] = [...existingLines, ...chunk];
       }
     } else {
-      result[lower] = Array.isArray(value) ? (value[0] ?? '') : value;
+      setOwnHeader(
+        result,
+        lower,
+        Array.isArray(value) ? (value[0] ?? '') : value,
+      );
     }
   }
 

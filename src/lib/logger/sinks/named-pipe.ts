@@ -1,3 +1,4 @@
+import { raceDeadline } from '../../internal/race-deadline';
 import * as fs from 'fs';
 import { promises as fsPromises } from 'fs';
 import * as os from 'os';
@@ -11,6 +12,12 @@ import { renderJSONLine } from './internal/render-json-line';
 import { renderTextLine } from './internal/render-text-line';
 import { reportThroughHandler } from '../../internal/failure-reporter';
 import { readUnknownMember } from '../../internal/read-member';
+import { sleep } from '../../sleep';
+import {
+  observePromise,
+  observeRejection,
+  promiseConstructorIntrinsic,
+} from '../../internal/intrinsics';
 import {
   DEFAULT_CLOSE_TIMEOUT_MS,
   resolveMaxQueueSize,
@@ -49,7 +56,12 @@ export interface NamedPipeSinkOptions {
    */
   minLevel?: LogLevel;
   jsonFormat?: boolean;
-  closeTimeoutMS?: number;
+  /**
+   * Close budget in ms (default: 30000). Null or undefined uses the default.
+   * NaN/other non-numbers throw TypeError; negatives throw RangeError.
+   * Zero retains the final-flush minimum; Infinity is timer-capped.
+   */
+  closeTimeoutMS?: number | null;
   /**
    * Notified when this sink cannot do its job, in the shape every sink reports.
    *
@@ -587,14 +599,16 @@ export class NamedPipeSink implements LogSink {
   private closeTimeoutMS: number;
 
   constructor(options: NamedPipeSinkOptions) {
+    this.closeTimeoutMS = resolveTimeoutMS(
+      options.closeTimeoutMS,
+      DEFAULT_CLOSE_TIMEOUT_MS,
+      'NamedPipeSink closeTimeoutMS',
+    );
+
     this.pipePath = options.pipePath;
     this.jsonFormat = options.jsonFormat ?? false;
     this.onError = options.onError;
     this.formatter = options.formatter;
-    this.closeTimeoutMS = resolveTimeoutMS(
-      options.closeTimeoutMS,
-      DEFAULT_CLOSE_TIMEOUT_MS,
-    );
     this.maxQueueSize = resolveMaxQueueSize(options.maxQueueSize);
     this.maxRetries = resolveMaxRetries(options.maxRetries);
     this.minLevel = options.minLevel ?? LogLevel.INFO;
@@ -907,33 +921,15 @@ export class NamedPipeSink implements LogSink {
     const startTime = Date.now();
 
     // Wait for initialization with timeout
-    let timeoutHandle: NodeJS.Timeout | undefined;
-    const timeoutSentinel = { timedOut: true } as const;
-
+    // Losing initialization remains observed after the deadline.
     try {
-      const timeoutPromise = new Promise<typeof timeoutSentinel>((resolve) => {
-        timeoutHandle = setTimeout(
-          () => resolve(timeoutSentinel),
-          this.closeTimeoutMS,
-        );
-      });
-
-      const result = await Promise.race([
-        this.initPromise.then(() => undefined),
-        timeoutPromise,
-      ]);
-
-      // Check if timeout fired
-      if (result === timeoutSentinel) {
-        // Timeout fired - prevent unhandled rejection if initPromise fails later
-        Promise.resolve(this.initPromise).catch(() => {
-          // Intentionally ignore errors after timeout
-        });
-      }
-    } finally {
-      if (timeoutHandle) {
-        clearTimeout(timeoutHandle);
-      }
+      await raceDeadline(
+        this.initPromise,
+        this.closeTimeoutMS,
+        () => undefined,
+      );
+    } catch {
+      // `openPipe` reports its own failures; a close does not get to raise one.
     }
 
     // Drain what the pipe can still take before giving up on it, the way
@@ -997,7 +993,7 @@ export class NamedPipeSink implements LogSink {
 
       // Spaced out, so a reader that never comes back costs a handful of immediate
       // syscalls across the window rather than a spin.
-      await new Promise((resolve) => setTimeout(resolve, CLOSE_REOPEN_POLL_MS));
+      await sleep(CLOSE_REOPEN_POLL_MS);
     }
 
     // A substituted pending stream or an in-progress probe counts as work to wait for,
@@ -1020,7 +1016,7 @@ export class NamedPipeSink implements LogSink {
       // the queue may have been left parked by a failed write rather than by backpressure.
       this.processQueue();
 
-      await new Promise((resolve) => setTimeout(resolve, 10));
+      await sleep(10);
     }
 
     this.closed = true;
@@ -1070,7 +1066,7 @@ export class NamedPipeSink implements LogSink {
         this.closeTimeoutMS - (Date.now() - startTime),
       );
 
-      return new Promise<void>((resolve) => {
+      return await new promiseConstructorIntrinsic<void>((resolve) => {
         // Bounded, by `remainingCloseMS` above. Until this existed the close itself had no
         // timeout at all - `closeTimeoutMS` covered only the wait for *initialization*. `end()` flushes before it calls back,
         // and a FIFO with no reader cannot flush - so on the sink's most ordinary failure
@@ -1257,28 +1253,18 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
-    let timeoutHandle: NodeJS.Timeout | undefined;
-
     try {
       const attempt = this.initializePipe();
 
       // Held so a failure after the race is not an unhandled rejection, the way `close()`
       // holds the init promise it may stop waiting on.
-      this.initPromise = attempt.catch(() => {
+      this.initPromise = observePromise(attempt, undefined, () => {
         // Reported by `openPipe` itself; nothing further to do here.
       });
 
-      const timeoutPromise = new Promise<void>((resolve) => {
-        timeoutHandle = setTimeout(resolve, remainingMS);
-      });
-
-      await Promise.race([this.initPromise, timeoutPromise]);
+      await raceDeadline(this.initPromise, remainingMS, () => undefined);
     } catch {
       // `openPipe` reports its own failures; a close does not get to raise one.
-    } finally {
-      if (timeoutHandle) {
-        clearTimeout(timeoutHandle);
-      }
     }
   }
 
@@ -1330,7 +1316,7 @@ export class NamedPipeSink implements LogSink {
 
       probe = undefined;
 
-      await new Promise<void>((resolve) => {
+      await new promiseConstructorIntrinsic<void>((resolve) => {
         fs.close(descriptor, () => resolve());
       });
     };
@@ -1786,27 +1772,29 @@ export class NamedPipeSink implements LogSink {
    *          reading the pipe. Reusing it means there is no second pathname open.
    */
   private async openWriteProbe(): Promise<number | null> {
-    return await new Promise<number | null>((resolve, reject) => {
-      fs.open(
-        this.pipePath,
-        fs.constants.O_WRONLY | fs.constants.O_NONBLOCK,
-        (error, descriptor) => {
-          if (error === null) {
-            resolve(descriptor);
+    return await new promiseConstructorIntrinsic<number | null>(
+      (resolve, reject) => {
+        fs.open(
+          this.pipePath,
+          fs.constants.O_WRONLY | fs.constants.O_NONBLOCK,
+          (error, descriptor) => {
+            if (error === null) {
+              resolve(descriptor);
 
-            return;
-          }
+              return;
+            }
 
-          if (readUnknownMember(error, 'code') === NO_READER_ERRNO) {
-            resolve(null);
+            if (readUnknownMember(error, 'code') === NO_READER_ERRNO) {
+              resolve(null);
 
-            return;
-          }
+              return;
+            }
 
-          reject(error);
-        },
-      );
-    });
+            reject(error);
+          },
+        );
+      },
+    );
   }
 
   /**
@@ -2279,14 +2267,19 @@ export class NamedPipeSink implements LogSink {
     this.lastReopenAttempt = now;
     this._isReconnecting = true;
 
-    this.initPromise = this.initializePipe().finally(() => {
-      this._isReconnecting = false;
-    });
+    const attempt = this.initializePipe();
+    this.initPromise = (async (): Promise<void> => {
+      try {
+        await attempt;
+      } finally {
+        this._isReconnecting = false;
+      }
+    })();
 
     // `initializePipe` reports its own failures through `handleError` and never rejects,
     // but this chain is not awaited by anyone, so a throw from the `finally` above would
     // be an unhandled rejection raised out of an ordinary `logger.info()`.
-    void this.initPromise.catch(() => {
+    observeRejection(this.initPromise, () => {
       // Nothing left to report with.
     });
   }
@@ -2708,7 +2701,7 @@ export class NamedPipeSink implements LogSink {
               disposition: options?.disposition ?? 'no_entry',
             }),
       () => `NamedPipeSink error (${kind}): ${describeError(failure)}`,
-      options?.onReported,
+      { onSettled: options?.onReported, handlerName: 'NamedPipeSink onError' },
     );
   }
 
