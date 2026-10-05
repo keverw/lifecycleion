@@ -172,7 +172,11 @@ test('restart abandoned for an invalid stop timeout does not call it a crash', a
     expect(result.success).toBe(false);
     expect(result.shutdownResult.code).toBe('invalid_options');
     expect(result.startupResult.code).toBe('invalid_options');
-    expect(result.startupResult.reason).toContain('refused invalid options');
+    // Refused by the restart's preflight, before its stop phase stopped anything.
+    expect(result.startupResult.reason).toContain(
+      'restartAllComponents() refused',
+    );
+    expect(manager.isComponentRunning('refused')).toBe(true);
     expect(result.startupResult.reason).not.toContain('unexpectedly');
     expect(reports).toEqual([]);
   } finally {

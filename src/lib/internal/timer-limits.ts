@@ -25,12 +25,6 @@ export function isTimeoutValidationError(error: unknown): error is Error {
   return timeoutValidationErrors.has(error as Error);
 }
 
-function invalidTimeoutType(label: string): TypeError {
-  const error = new TypeError(`${label} must be a number other than NaN`);
-  timeoutValidationErrors.add(error);
-  return error;
-}
-
 function invalidTimeoutRange(label: string): RangeError {
   const error = new RangeError(`${label} must be non-negative`);
   timeoutValidationErrors.add(error);
@@ -38,17 +32,37 @@ function invalidTimeoutRange(label: string): RangeError {
 }
 
 /**
+ * Refuse a numeric option that names no number at all: NaN or a non-number.
+ *
+ * The rule every numeric option shares, durations and counts alike. A `NaN` is a parse or
+ * arithmetic mistake upstream (`Number(env.MAX_QUEUE)` on an unset variable), not a
+ * request for a default, so it fails where it was configured rather than being quietly
+ * replaced. Numeric sentinels (`-1`, `0`, `Infinity`) are each caller's to interpret;
+ * this deliberately does not erase those distinctions.
+ */
+export function assertNumberOption(
+  requested: unknown,
+  label: string,
+): asserts requested is number {
+  if (typeof requested !== 'number' || Number.isNaN(requested)) {
+    throw new TypeError(`${label} must be a number other than NaN`);
+  }
+}
+
+/**
  * Validate the numeric part of a duration before interpreting API-specific sentinels.
- * NaN and non-numbers are configuration mistakes, not requests for a default or an
- * unlimited wait. Callers decide whether negative values or Infinity have a meaning;
- * this helper deliberately does not erase those distinctions.
+ * {@link assertNumberOption}, with the rejection tagged so {@link isTimeoutValidationError}
+ * can tell it apart from an unrelated `TypeError` thrown by application code.
  */
 export function assertDurationMS(
   requested: unknown,
   label = 'Timeout',
 ): asserts requested is number {
-  if (typeof requested !== 'number' || Number.isNaN(requested)) {
-    throw invalidTimeoutType(label);
+  try {
+    assertNumberOption(requested, label);
+  } catch (error) {
+    timeoutValidationErrors.add(error as Error);
+    throw error;
   }
 }
 

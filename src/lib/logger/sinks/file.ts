@@ -7,7 +7,7 @@ import { reportThroughHandler } from '../../internal/failure-reporter';
 import { renderJSONLine } from './internal/render-json-line';
 import { renderTextLine } from './internal/render-text-line';
 import {
-  assertCountOption,
+  assertNumberOption,
   DEFAULT_CLOSE_TIMEOUT_MS,
   resolveMaxQueueSize,
   resolveMaxRetries,
@@ -49,7 +49,7 @@ export type {
 const MIN_CLOSE_FLUSH_MS = 100;
 
 const FAILURE_REPORT_OPTIONS = {
-  handlerName: 'FileSink failure handler',
+  handlerName: 'FileSink onError',
 } as const;
 
 /**
@@ -88,7 +88,7 @@ function resolveMaxSizeMB(requested?: number | null): number {
     return DEFAULT_MAX_SIZE_MB;
   }
 
-  assertCountOption(requested, 'FileSink maxSizeMB');
+  assertNumberOption(requested, 'FileSink maxSizeMB');
 
   return requested > 0 ? requested : DEFAULT_MAX_SIZE_MB;
 }

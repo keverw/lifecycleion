@@ -464,3 +464,90 @@ for (const base of [Array, Map] as const) {
     expect(constructed).toBe(0);
   });
 }
+
+for (const entry of ['adoptPromise', 'adoptResult'] as const) {
+  test(`${entry} rejects a foreign promise whose own no-op then hides a throwing species`, async () => {
+    const { runInNewContext } = await import('node:vm');
+    const promise = runInNewContext(
+      'Promise.reject(new Error("foreign rejection"))',
+    ) as object;
+    // Keep the broken baseline safe for the test runner.
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    void Reflect.apply(Promise.prototype.then, promise, [undefined, () => {}]);
+    let isOwnThenCalled = false;
+    Object.defineProperty(promise, 'then', {
+      value: (): void => {
+        isOwnThenCalled = true;
+      },
+    });
+    // The `constructor` read succeeds; only the species read throws - and not this
+    // realm's TypeError, which the slot check alone could have thrown.
+    Object.defineProperty(promise, 'constructor', {
+      value: {
+        get [Symbol.species](): never {
+          throw new Error('species failure');
+        },
+      },
+    });
+
+    const pending =
+      entry === 'adoptPromise'
+        ? adoptPromise(promise)
+        : (adoptResult(promise) as Promise<unknown>);
+    const hung = new Promise<string>((resolve) => {
+      setTimeout(() => resolve('hung'), 200);
+    });
+    expect(await Promise.race([settle(pending), hung])).toBe('species failure');
+    expect(isOwnThenCalled).toBe(false);
+  });
+
+  test(`${entry} adopts a thenable after Promise gains a Symbol.hasInstance that claims it`, async () => {
+    // A class prototype keeps the thenable off the plain-object shortcut, so it
+    // reaches the classification a redefined `instanceof` would mislead.
+    const thenable = new (class Deferred {
+      public then = (resolve: (value: string) => void): void => {
+        resolve('adopted');
+      };
+    })();
+    let pending!: Promise<unknown>;
+    try {
+      Object.defineProperty(Promise, Symbol.hasInstance, {
+        configurable: true,
+        value: () => true,
+      });
+      pending =
+        entry === 'adoptPromise'
+          ? adoptPromise<unknown>(thenable)
+          : (adoptResult(thenable) as Promise<unknown>);
+    } finally {
+      delete (Promise as unknown as Record<symbol, unknown>)[
+        Symbol.hasInstance
+      ];
+    }
+    expect(await settle(pending)).toBe('resolved');
+    expect(await pending).toBe('adopted');
+  });
+
+  test(`${entry} keeps the prototype check after a later Reflect.getPrototypeOf patch`, async () => {
+    // An own constructor makes Promise.resolve wrap the promise and call its own then.
+    const source: object = Promise.reject(new Error('real rejection'));
+    Object.defineProperty(source, 'constructor', { value: Object });
+    Object.defineProperty(source, 'then', { value: () => undefined });
+    const originalGetPrototypeOf = Reflect.getPrototypeOf;
+    let pending!: Promise<unknown>;
+    try {
+      // A patch that dresses the promise as a plain object would skip the intrinsic.
+      Reflect.getPrototypeOf = () => Object.prototype;
+      pending =
+        entry === 'adoptPromise'
+          ? adoptPromise(source)
+          : (adoptResult(source) as Promise<unknown>);
+    } finally {
+      Reflect.getPrototypeOf = originalGetPrototypeOf;
+    }
+    const hung = new Promise<string>((resolve) => {
+      setTimeout(() => resolve('hung'), 200);
+    });
+    expect(await Promise.race([settle(pending), hung])).toBe('real rejection');
+  });
+}

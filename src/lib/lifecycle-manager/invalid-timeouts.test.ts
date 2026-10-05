@@ -543,6 +543,51 @@ for (const field of [
     expect(component.starts).toBe(2);
     await manager.stopAllComponents();
   });
+
+  test(`restart refuses ${field} on a later-stopped component before stopping any`, async () => {
+    const manager = new LifecycleManager({ logger });
+    class Forceful extends Component {
+      public forceCalls = 0;
+      public onShutdownForce(): void {
+        this.forceCalls++;
+      }
+    }
+    // `dependent` stops first, so the invalid budget on `base` is only met after a
+    // stop phase has already taken `dependent` down.
+    const base = new Forceful(logger, { name: 'base' });
+    const dependent = new Forceful(logger, {
+      name: 'dependent',
+      dependencies: ['base'],
+    });
+    await manager.registerComponent(base);
+    await manager.registerComponent(dependent);
+    await manager.startAllComponents();
+    let timeout = NaN;
+    Object.defineProperty(base, field, {
+      get() {
+        return timeout;
+      },
+    });
+
+    const invalid = await withoutGlobalReports(() =>
+      manager.restartAllComponents(),
+    );
+    expect(invalid.success).toBe(false);
+    expect(invalid.shutdownResult.code).toBe('invalid_options');
+    expect(invalid.shutdownResult.error?.message).toContain(field);
+    expect(invalid.startupResult.code).toBe('invalid_options');
+    expect(dependent.stops).toBe(0);
+    expect(base.stops).toBe(0);
+    expect(manager.getComponentStatus('dependent')?.state).toBe('running');
+    expect(manager.getComponentStatus('base')?.state).toBe('running');
+
+    timeout = field === 'shutdownGracefulTimeoutMS' ? 1000 : 500;
+    const recovered = await manager.restartAllComponents();
+    expect(recovered.success).toBe(true);
+    expect(dependent.starts).toBe(2);
+    expect(base.starts).toBe(2);
+    await manager.stopAllComponents();
+  });
 }
 
 test.each([NaN, -1])(

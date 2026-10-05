@@ -1,6 +1,38 @@
 /** Preserve invocation semantics if application code later replaces Reflect.apply. */
 export const applyIntrinsic: typeof Reflect.apply = Reflect.apply;
 
+// The reflection the promise classification reads, captured for the same reason: a
+// replaced Reflect method could misreport a value's prototype or `constructor` and send
+// a native promise's own no-op `then` down the trusting path.
+/** `Reflect.get` as it was at module initialization. */
+export const getIntrinsic: typeof Reflect.get = Reflect.get;
+/** `Reflect.getPrototypeOf` as it was at module initialization. */
+export const getPrototypeOfIntrinsic: typeof Reflect.getPrototypeOf =
+  Reflect.getPrototypeOf;
+/** `Reflect.construct` as it was at module initialization. */
+export const constructIntrinsic: typeof Reflect.construct = Reflect.construct;
+/** `Object.prototype`, read before application code can rebind the `Object` global. */
+export const objectPrototypeIntrinsic: object = Object.prototype;
+/** `Symbol.species`, read before application code can rebind the `Symbol` global. */
+export const speciesSymbolIntrinsic: typeof Symbol.species = Symbol.species;
+
+// `instanceof` consults the right-hand side's live `Symbol.hasInstance`, which
+// application code can define on `Promise` after this module loads. The ordinary check
+// it overrides - a walk of the prototype chain - is captured from `Function.prototype`.
+const ordinaryHasInstanceIntrinsic = Function.prototype[Symbol.hasInstance];
+
+/**
+ * `value instanceof constructor` as the ordinary prototype-chain walk answers it, never
+ * a `Symbol.hasInstance` defined on `constructor` later. Throws as `instanceof` does,
+ * for a proxy whose `getPrototypeOf` trap throws.
+ */
+export function ordinaryInstanceOf(
+  value: unknown,
+  constructor: object,
+): boolean {
+  return applyIntrinsic(ordinaryHasInstanceIntrinsic, constructor, [value]);
+}
+
 // Async functions use the realm's intrinsic Promise even when application setup has
 // replaced the global binding before this module loads. Capture that same constructor
 // and prototype so our observers accept the native promises returned by async functions.

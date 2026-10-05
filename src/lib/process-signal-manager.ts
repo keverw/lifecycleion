@@ -470,8 +470,15 @@ export class ProcessSignalManager {
           (failure) =>
             ['ProcessSignalManager listener cleanup', failure] as const,
         ),
-        ...rawModeRestoreReport(rawModeRestoreFailure),
       ]);
+      // Except a raw-mode restore failure - the terminal left in raw mode - which is
+      // reported now, before the throw, as `detach()` reports it when it returns. A
+      // caller that exits from its catch - `try { attach() } catch { process.exit(1) }`
+      // - never drains the microtask, and a leaked listener dies with the process where
+      // a raw terminal outlives it, so this is the one report that cannot wait. The
+      // cost: a listener that attaches from this report still has this attach's error
+      // thrown after it, though `isAttached` then reads `true`.
+      reportCleanupFailures(rawModeRestoreReport(rawModeRestoreFailure));
       throw error;
     }
   }
@@ -699,7 +706,8 @@ export class ProcessSignalManager {
    * detached status. Returns every failure in order, reporting none: the caller
    * surfaces the first and reports the rest once its own state is final. A raw-mode
    * restore failure comes back separately: it is reported, never thrown, as `detach()`
-   * has always returned normally over it, and it follows the rest, as the last step.
+   * has always returned normally over it. `detach()` reports it after the rest, as its
+   * last step; a failed `attach()` reports it before its throw, ahead of the rest.
    */
   private releaseListeners(): {
     failures: Array<{ error: unknown }>;

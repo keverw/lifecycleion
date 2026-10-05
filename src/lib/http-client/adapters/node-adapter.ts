@@ -1191,7 +1191,10 @@ export class NodeAdapter implements HTTPAdapter {
               );
               const pending = adoptResult(returned);
               if (pending instanceof UnreadableReturn) {
-                throw pending;
+                // Match await's rejection reason, as RetryRunner does: the factory's
+                // own error, not the wrapper describing it, becomes the setup failure
+                // the caller sees on `error.cause`.
+                throw pending.cause;
               }
               if (pending !== undefined) {
                 writable = (await awaitBoxedPromise(pending)).value as

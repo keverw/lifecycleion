@@ -16,6 +16,7 @@ import { CookieJar } from './cookie-jar';
 import { startTestServer, type TestServer } from './test-helpers/test-server';
 import { scalarHeader } from './utils';
 import {
+  DEFAULT_MAX_REDIRECTS,
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_REQUEST_ID_HEADER,
   DEFAULT_TIMEOUT_MS,
@@ -1483,6 +1484,54 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(() => new HTTPClient({ adapter, followRedirects: true })).toThrow(
       /redirect handling is not supported with XHR adapter/i,
     );
+  });
+
+  test('validates and keeps one read of each constructor config field', () => {
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).document = {};
+    (globalThis as Record<string, unknown>).XMLHttpRequest = class {};
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'xhr',
+      send: (_request: AdapterRequest): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 200,
+          headers: {},
+          body: null,
+        }),
+    };
+    const reads = { followRedirects: 0, maxRedirects: 0, baseURL: 0 };
+    // Each getter answers differently once it has been read: a client that reads a
+    // field again after validating it keeps a value the validation never saw - here,
+    // redirect following on XHR, which construction exists to refuse.
+    const config = {
+      adapter,
+      get followRedirects(): boolean {
+        return ++reads.followRedirects > 1;
+      },
+      get maxRedirects(): number | undefined {
+        return ++reads.maxRedirects > 1 ? 0 : undefined;
+      },
+      get baseURL(): string {
+        return ++reads.baseURL > 1 ? 'not a url' : 'https://example.com';
+      },
+    };
+
+    const client = new HTTPClient(config);
+    const kept = (
+      client as unknown as {
+        _config: {
+          followRedirects: boolean;
+          maxRedirects: number;
+          baseURL?: string;
+        };
+      }
+    )._config;
+
+    expect(reads).toEqual({ followRedirects: 1, maxRedirects: 1, baseURL: 1 });
+    expect(kept.followRedirects).toBe(false);
+    expect(kept.maxRedirects).toBe(DEFAULT_MAX_REDIRECTS);
+    expect(kept.baseURL).toBe('https://example.com');
   });
 
   test('allows browser XHR adapter when followRedirects is false', () => {

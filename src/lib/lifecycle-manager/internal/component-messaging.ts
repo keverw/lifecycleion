@@ -1,7 +1,5 @@
 import type { ComponentAccessContext } from './component-access-context';
 import type { BaseComponent } from '../base-component';
-import { raceDeadline } from '../../internal/race-deadline';
-import { optionalValidatedTimerDelayMS } from '../../internal/timer-limits';
 import { reportCallbackError } from '../../safe-handle-callback';
 import type {
   SendMessageOptions,
@@ -11,16 +9,8 @@ import type {
   GetValueOptions,
   ValueResult,
 } from '../types';
-import {
-  applyIntrinsic,
-  observeRejection,
-  promiseResolveIntrinsic,
-} from '../../internal/intrinsics';
-import {
-  adoptPromise,
-  adoptResult,
-  UnreadableReturn,
-} from '../../internal/adopt-promise';
+import { applyIntrinsic, observeRejection } from '../../internal/intrinsics';
+import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { isObjectLike } from '../../internal/is-object-like';
 import { toError } from '../../to-error';
 import { LIFECYCLE_MANAGER_LOG_MESSAGE_HANDLER_FAILED } from '../constants';
@@ -29,6 +19,11 @@ import {
   isOperationOptionRefusal,
   invalidOperationOptionError,
 } from './operation-policy';
+import { copyBoundedArray } from './bounded-array-copy';
+import {
+  dispatchAnnouncedHook,
+  readHookThenRecheck,
+} from './component-dispatch';
 
 function readAvailability(
   context: ComponentAccessContext,
@@ -38,7 +33,8 @@ function readAvailability(
   allowStalled: boolean,
 ) {
   // Neither override permits entering a provider during startup or teardown - a
-  // forced start that timed out is back to `stalled` while its `start()` still runs.
+  // forced start that timed out is back to `stalled` while its `start()` still runs,
+  // and a late start's cleanup marks its component `running` only to stop it.
   const isCurrent = context.getComponent(componentName) === component;
   const state = context.componentStates.get(componentName);
   const isUnavailable =
@@ -46,7 +42,8 @@ function readAvailability(
     state === 'starting-timed-out' ||
     state === 'stopping' ||
     state === 'force-stopping' ||
-    context.isRawStartPending(componentName);
+    context.isRawStartPending(componentName) ||
+    context.isLateStartCleanupPending(componentName);
   const isRunning =
     isCurrent && !isUnavailable && context.isComponentRunning(componentName);
   // The label does not depend on availability: a stall whose forced `start()` is still
@@ -99,38 +96,59 @@ export async function sendMessageInternal(
 
   const allowStopped = options?.includeStopped === true;
   const allowStalled = options?.includeStalled === true;
-  const initialAvailability = readAvailability(
+  // The latest availability read, so each answer below reports what the last recheck
+  // found rather than what was true before caller code ran.
+  let availability = readAvailability(
     context,
     componentName,
     component,
     allowStopped,
     allowStalled,
   );
-  const { isRunning } = initialAvailability;
-  if (initialAvailability.refusalCode !== undefined) {
-    return {
-      sent: false,
-      componentFound: initialAvailability.isCurrent,
-      componentRunning: false,
-      handlerImplemented: false,
-      data: undefined,
-      error: null,
-      timedOut: false,
-      code: initialAvailability.refusalCode,
-    };
+  const recheck = () => {
+    availability = readAvailability(
+      context,
+      componentName,
+      component,
+      allowStopped,
+      allowStalled,
+    );
+    return availability.refusalCode;
+  };
+  // Nothing is announced before dispatch, so a refusal up to then has no event to pair.
+  const refuseBeforeAnnouncement = (
+    code: NonNullable<ReturnType<typeof readAvailability>['refusalCode']>,
+  ): MessageResult => ({
+    sent: false,
+    componentFound: availability.isCurrent,
+    componentRunning: false,
+    handlerImplemented: false,
+    data: undefined,
+    error: null,
+    timedOut: false,
+    code,
+  });
+  if (availability.refusalCode !== undefined) {
+    return refuseBeforeAnnouncement(availability.refusalCode);
   }
 
   // Read once, guarded, and that value is what gets called - as `getValueInternal()`
   // reads its handler. Unguarded, a getter that threw escaped to the generic safety
   // net, and one that answered differently the second time failed as a handler error.
-  let messageHandler: unknown;
+  const handlerRead = readHookThenRecheck(
+    () => Reflect.get(component, 'onMessage') as unknown,
+    (error) => {
+      reportCallbackError('lifecycle-manager sendMessageToComponent', error);
+    },
+    recheck,
+  );
+  if (handlerRead.status === 'refused') {
+    return refuseBeforeAnnouncement(handlerRead.refusal);
+  }
 
-  try {
-    messageHandler = Reflect.get(component, 'onMessage');
-  } catch (error) {
-    const err = toError(error);
+  if (handlerRead.status === 'read_failed') {
+    const err = toError(handlerRead.error);
 
-    reportCallbackError('lifecycle-manager sendMessageToComponent', error);
     // Logged and announced as a failure, but without `message-sent`: nothing was sent -
     // the result says `sent: false` - and the event must not say otherwise. This is the
     // one `message-failed` with no `message-sent` before it; see its event docs.
@@ -143,7 +161,7 @@ export async function sendMessageInternal(
       timedOut: false,
       code: 'operation_crashed',
       componentFound: true,
-      componentRunning: isRunning,
+      componentRunning: availability.isRunning,
       handlerImplemented: false,
       data: undefined,
     });
@@ -151,7 +169,7 @@ export async function sendMessageInternal(
     return {
       sent: false,
       componentFound: true,
-      componentRunning: isRunning,
+      componentRunning: availability.isRunning,
       handlerImplemented: false,
       data: undefined,
       error: err,
@@ -160,6 +178,8 @@ export async function sendMessageInternal(
     };
   }
 
+  const messageHandler = handlerRead.value;
+
   // Availability and handler refusals take precedence over an unused timeout.
   // Unlike broadcast's one shared dispatch budget, there is no operation to time
   // here until this particular recipient is available and implements the handler.
@@ -167,7 +187,7 @@ export async function sendMessageInternal(
     return {
       sent: false,
       componentFound: true,
-      componentRunning: isRunning,
+      componentRunning: availability.isRunning,
       handlerImplemented: false,
       data: undefined,
       error: null,
@@ -192,7 +212,7 @@ export async function sendMessageInternal(
     return {
       sent: false,
       componentFound: true,
-      componentRunning: isRunning,
+      componentRunning: availability.isRunning,
       handlerImplemented: true,
       data: undefined,
       error,
@@ -201,47 +221,45 @@ export async function sendMessageInternal(
     };
   }
 
-  // Send message
-  context.lifecycleEvents.componentMessageSent({
-    componentName,
-    from,
-    payload,
+  // The handler/options getters and sent listeners are caller code. The dispatch
+  // rechecks the same instance immediately before calling it; even non-running
+  // overrides never permit entering a handler while startup or teardown owns it.
+  const dispatch = await dispatchAnnouncedHook(context, {
+    name: componentName,
+    component,
+    handler: messageHandler,
+    args: [payload, from],
+    timeoutMS,
+    announce: () => {
+      context.lifecycleEvents.componentMessageSent({
+        componentName,
+        from,
+        payload,
+      });
+    },
+    recheck,
+    timeoutLog: 'Message handler timed out',
+    timeoutLogParams: { from, timeoutMS },
+    lateFailureMessage: 'Message handler failed after it had already timed out',
+    lateFailureParams: { from },
   });
 
-  // One microtask before the recheck, so it follows the sent listeners however this
-  // send was reached. A send made from inside another manager event listener only
-  // queues `message-sent` behind the notification being delivered; that drain is
-  // synchronous, so it has run every queued listener by the time this resumes. Without
-  // the wait a listener could not prevent a nested dispatch, as the event docs promise.
-  await promiseResolveIntrinsic(undefined);
-
-  // The handler/options getters and sent listeners are caller code. Recheck the
-  // same instance immediately before dispatch; even non-running overrides never
-  // permit entering a handler while startup or teardown owns the component.
-  const dispatchAvailability = readAvailability(
-    context,
-    componentName,
-    component,
-    allowStopped,
-    allowStalled,
-  );
-  const { isCurrent, isRunning: isDispatchRunning } = dispatchAvailability;
-  if (dispatchAvailability.refusalCode !== undefined) {
-    const code = dispatchAvailability.refusalCode;
+  if (dispatch.status === 'refused') {
+    const code = dispatch.refusal;
     const error = new Error(
       `Component "${componentName}" became unavailable before message dispatch`,
     );
     context.lifecycleEvents.componentMessageFailed(componentName, from, error, {
       timedOut: false,
       code,
-      componentFound: isCurrent,
+      componentFound: availability.isCurrent,
       componentRunning: false,
       handlerImplemented: true,
       data: undefined,
     });
     return {
       sent: false,
-      componentFound: isCurrent,
+      componentFound: availability.isCurrent,
       componentRunning: false,
       handlerImplemented: true,
       data: undefined,
@@ -251,73 +269,38 @@ export async function sendMessageInternal(
     };
   }
 
-  const timeoutResult = { timedOut: true } as const;
+  const isDispatchRunning = availability.isRunning;
 
-  try {
-    // A synchronous throw lands in the `catch` below, answered as a rejection is.
-    const result: unknown = applyIntrinsic(messageHandler, component, [
-      payload,
+  if (dispatch.status === 'timed_out') {
+    // Paired with `message-sent`, as a handler that threw or rejected is: the event
+    // carries `timedOut` for exactly this, but nothing emitted it.
+    context.lifecycleEvents.componentMessageFailed(
+      componentName,
       from,
-    ]);
-
-    // Adopted, not raced as it is: see `adoptPromise()`.
-    const handlerPromise = adoptPromise(result);
-
-    const { value: outcome } = await raceDeadline(
-      handlerPromise,
-      optionalValidatedTimerDelayMS(timeoutMS),
-      () => timeoutResult,
-    );
-
-    if (outcome === timeoutResult) {
-      context.logger.entity(componentName).warn('Message handler timed out', {
-        params: { from, timeoutMS },
-      });
-      context.observeFailureAfterTimeout(
-        handlerPromise,
-        componentName,
-        'Message handler failed after it had already timed out',
-        { from },
-      );
-      // Paired with `message-sent`, as a handler that threw or rejected is: the event
-      // carries `timedOut` for exactly this, but nothing emitted it.
-      context.lifecycleEvents.componentMessageFailed(
-        componentName,
-        from,
-        new Error(`Message handler timed out after ${String(timeoutMS)}ms`),
-        {
-          timedOut: true,
-          code: 'timeout',
-          componentFound: true,
-          componentRunning: isDispatchRunning,
-          handlerImplemented: true,
-          data: undefined,
-        },
-      );
-      return {
-        sent: true,
+      new Error(`Message handler timed out after ${String(timeoutMS)}ms`),
+      {
+        timedOut: true,
+        code: 'timeout',
         componentFound: true,
         componentRunning: isDispatchRunning,
         handlerImplemented: true,
         data: undefined,
-        error: null,
-        timedOut: true,
-        code: 'timeout',
-      };
-    }
-
+      },
+    );
     return {
       sent: true,
       componentFound: true,
       componentRunning: isDispatchRunning,
       handlerImplemented: true,
-      data: outcome,
+      data: undefined,
       error: null,
-      timedOut: false,
-      code: 'sent',
+      timedOut: true,
+      code: 'timeout',
     };
-  } catch (error) {
-    const err = toError(error);
+  }
+
+  if (dispatch.status === 'threw') {
+    const err = toError(dispatch.error);
 
     context.logger
       .entity(componentName)
@@ -345,14 +328,34 @@ export async function sendMessageInternal(
       code: 'error',
     };
   }
+
+  return {
+    sent: true,
+    componentFound: true,
+    componentRunning: isDispatchRunning,
+    handlerImplemented: true,
+    data: dispatch.value,
+    error: null,
+    timedOut: false,
+    code: 'sent',
+  };
 }
 
 /**
- * The broadcast's `componentNames` filter, copied once by index - as
- * `tryReadDependencies()` copies a dependency list - into a set the filter consults. The
- * array is the caller's: a subclass or proxy runs its own code for `length` and
- * `includes`, and the filter would have asked it once per registered component. A read
- * that throws still fails the broadcast, before it has announced itself.
+ * The most `componentNames` a broadcast filter is read for. Far above any registry this
+ * manager is meant to hold - and duplicates or unknown names only cost a set entry each -
+ * yet small enough that copying a list this long cannot stall the event loop.
+ */
+const MAX_BROADCAST_TARGET_NAMES = 100_000;
+
+/**
+ * The broadcast's `componentNames` filter, copied once by index - with the same bounded
+ * copy `tryReadDependencies()` makes of a dependency list - into a set the filter
+ * consults. The array is the caller's: a subclass or proxy runs its own code for
+ * `length` and `includes`, and the filter would have asked it once per registered
+ * component. A non-array, or a `length` that is not a plausible list size (a proxy can
+ * claim `Infinity`), refuses the whole broadcast as an invalid option before it has
+ * announced itself; a read that throws fails it at the same point.
  */
 function copyTargetNames(names: unknown): Set<unknown> | undefined {
   if (names === undefined) {
@@ -363,10 +366,17 @@ function copyTargetNames(names: unknown): Set<unknown> | undefined {
       'broadcastMessage componentNames must be an array',
     );
   }
+  const entries = copyBoundedArray(
+    names,
+    MAX_BROADCAST_TARGET_NAMES,
+    (length) =>
+      invalidOperationOptionError(
+        `broadcastMessage componentNames has an implausible length: ${String(length)} (at most ${String(MAX_BROADCAST_TARGET_NAMES)})`,
+      ),
+  );
   const copy = new Set<unknown>();
-  const length = Number(Reflect.get(names, 'length'));
-  for (let index = 0; index < length; index++) {
-    copy.add(Reflect.get(names, index));
+  for (const name of entries) {
+    copy.add(name);
   }
   return copy;
 }
@@ -423,7 +433,11 @@ export async function broadcastMessageInternal(
   // non-running state the caller opted into. Finer refusals - startup, teardown - are
   // `sendMessageInternal()`'s.
   const skipCodeFor = (name: string): 'stalled' | 'stopped' | undefined => {
-    if (context.isComponentRunning(name)) {
+    // A late start's cleanup marks its component running only to stop it.
+    if (
+      context.isComponentRunning(name) &&
+      !context.isLateStartCleanupPending(name)
+    ) {
       return undefined;
     }
     const isStalled = context.stalledComponents.has(name);
@@ -451,7 +465,15 @@ export async function broadcastMessageInternal(
     for (const component of targetComponents) {
       // The recorded name, so no component's own `getName()` runs mid-broadcast.
       const name = context.nameOf(component);
-      const skipCode = skipCodeFor(name);
+      // Targets were selected as instances, but each send resolves its recipient by
+      // name. An earlier recipient's handler can unregister this one and register a
+      // replacement under the same name - with `includeStopped`, even one that never
+      // started - which was never selected. The selected target is gone: reported as a
+      // target unregistered mid-broadcast is, and the replacement is not sent to.
+      const skipCode =
+        context.getComponent(name) === component
+          ? skipCodeFor(name)
+          : ('stopped' as const);
 
       if (skipCode !== undefined) {
         results.push({
@@ -575,16 +597,15 @@ export function getValueInternal<T = unknown>(
     );
     return result;
   };
-  const initialRefusal = refuseUnavailable(
-    readAvailability(
-      context,
-      componentName,
-      component,
-      allowStopped,
-      allowStalled,
-    ),
-    false,
+  // The latest availability read; see `sendMessageInternal()`.
+  let availability = readAvailability(
+    context,
+    componentName,
+    component,
+    allowStopped,
+    allowStalled,
   );
+  const initialRefusal = refuseUnavailable(availability, false);
   if (initialRefusal) {
     return initialRefusal;
   }
@@ -594,27 +615,34 @@ export function getValueInternal<T = unknown>(
   // `value-returned` pair. A throwing read is answered with `code: 'operation_crashed'`
   // if still available - a getter that throws broke the component's contract, unlike a
   // handler that throws - and reported even if the getter removed the component or
-  // began teardown.
-  let getValueHandler: unknown;
+  // began teardown. Either way the provider getter is caller code: a captured provider
+  // is never invoked after it removed/replaced the registration or handed the
+  // component to teardown.
+  const handlerRead = readHookThenRecheck(
+    () => Reflect.get(component, 'getValue') as unknown,
+    (error) => {
+      reportCallbackError('lifecycle-manager getValue', error);
+    },
+    () => {
+      availability = readAvailability(
+        context,
+        componentName,
+        component,
+        allowStopped,
+        allowStalled,
+      );
+      return availability.refusalCode === undefined ? undefined : availability;
+    },
+  );
+  if (handlerRead.status === 'refused') {
+    return refuseUnavailable(
+      handlerRead.refusal,
+      typeof handlerRead.value === 'function',
+    ) as ValueResult<T>;
+  }
+  const { isRunning } = availability;
 
-  try {
-    getValueHandler = Reflect.get(component, 'getValue');
-  } catch (error) {
-    const err = toError(error);
-
-    reportCallbackError('lifecycle-manager getValue', error);
-    const availability = readAvailability(
-      context,
-      componentName,
-      component,
-      allowStopped,
-      allowStalled,
-    );
-    const refusal = refuseUnavailable(availability, false);
-    if (refusal) {
-      return refusal;
-    }
-    const { isRunning } = availability;
+  if (handlerRead.status === 'read_failed') {
     context.lifecycleEvents.componentValueReturned(componentName, key, from, {
       found: false,
       value: undefined,
@@ -633,28 +661,11 @@ export function getValueInternal<T = unknown>(
       handlerImplemented: false,
       requestedBy: from,
       code: 'operation_crashed',
-      error: err,
+      error: toError(handlerRead.error),
     };
   }
 
-  // The provider getter is caller code. Never invoke a captured provider after
-  // it removed/replaced the registration or handed the component to teardown.
-  const availability = readAvailability(
-    context,
-    componentName,
-    component,
-    allowStopped,
-    allowStalled,
-  );
-  const dispatchRefusal = refuseUnavailable(
-    availability,
-    typeof getValueHandler === 'function',
-  );
-  if (dispatchRefusal) {
-    return dispatchRefusal;
-  }
-
-  const { isRunning } = availability;
+  const getValueHandler = handlerRead.value;
 
   // Check if handler implemented
   if (typeof getValueHandler !== 'function') {

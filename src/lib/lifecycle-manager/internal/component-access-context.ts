@@ -25,6 +25,11 @@ export interface ComponentAccessContext {
   readonly getComponent: (name: string) => BaseComponent | undefined;
   /** Whether a `start()` of the component is still running, whatever its state says. */
   readonly isRawStartPending: (name: string) => boolean;
+  /**
+   * Whether a timed-out start that completed late is being cleaned up: the component is
+   * marked running only so the normal stop path can stop it, and must not be entered.
+   */
+  readonly isLateStartCleanupPending: (name: string) => boolean;
   readonly sendMessageSettled: (
     componentName: string,
     payload: unknown,

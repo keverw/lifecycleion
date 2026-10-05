@@ -1,5 +1,6 @@
 import type { BaseComponent } from '../base-component';
 import { DependencyCycleError } from '../errors';
+import { copyBoundedArray } from './bounded-array-copy';
 
 /**
  * The most dependencies one component's `getDependencies()` is read for. See
@@ -25,30 +26,20 @@ export function tryReadDependencies(component: BaseComponent): DependencyRead {
     const dependencies: unknown = component.getDependencies();
 
     if (Array.isArray(dependencies)) {
-      const copy: string[] = [];
-      const length = Number(Reflect.get(dependencies, 'length'));
-
-      // Bounded before the loop: a proxy passes `Array.isArray` and can report any
-      // `length` - `Infinity` would block the event loop in the copy below, with no
-      // timeout to rescue it. Far more dependencies than any component declares is a
-      // broken list, not one to read.
-      if (
-        !Number.isInteger(length) ||
-        length < 0 ||
-        length > MAX_DECLARED_DEPENDENCIES
-      ) {
-        return {
-          error: new TypeError(
+      // Bounded before any entry is read - see `copyBoundedArray()`. Far more
+      // dependencies than any component declares is a broken list, not one to read.
+      const entries = copyBoundedArray(
+        dependencies,
+        MAX_DECLARED_DEPENDENCIES,
+        (length) =>
+          new TypeError(
             `getDependencies() returned an implausible length: ${String(length)}`,
           ),
-        };
-      }
-
+      );
+      const copy: string[] = [];
       let invalidEntry: TypeError | undefined;
 
-      for (let index = 0; index < length; index++) {
-        const dependency: unknown = Reflect.get(dependencies, index);
-
+      for (const dependency of entries) {
         if (typeof dependency === 'string') {
           copy.push(dependency);
         } else {
@@ -168,6 +159,65 @@ export function getStartupOrder<T>(
 }
 
 /**
+ * Walk the graph depth-first, calling `onBackEdge` with the current path and the
+ * index where a cycle closes. Returning `true` from `onBackEdge` stops the walk.
+ *
+ * Iterative rather than recursive: a dependency chain is as deep as the registry
+ * is long, and a recursive walk exhausts the call stack around 50k components, which
+ * made validation throw instead of answering. An explicit frame stack visits nodes and
+ * neighbors in exactly the order the recursion did, so the cycles found are unchanged.
+ */
+function walkForCycles(
+  adjacency: Map<string, Set<string>>,
+  onBackEdge: (path: string[], cycleStart: number, neighbor: string) => boolean,
+): void {
+  const visited = new Set<string>();
+  const inStack = new Set<string>();
+  const path: string[] = [];
+  const frames: Array<{ node: string; neighbors: Iterator<string> }> = [];
+
+  const enter = (node: string): void => {
+    visited.add(node);
+    inStack.add(node);
+    path.push(node);
+    frames.push({
+      node,
+      neighbors: (adjacency.get(node) ?? new Set<string>()).values(),
+    });
+  };
+
+  for (const root of adjacency.keys()) {
+    if (visited.has(root)) {
+      continue;
+    }
+
+    enter(root);
+
+    while (frames.length > 0) {
+      const frame = frames[frames.length - 1];
+      const next = frame.neighbors.next();
+
+      if (next.done) {
+        inStack.delete(frame.node);
+        path.pop();
+        frames.pop();
+        continue;
+      }
+
+      const neighbor = next.value;
+      if (!visited.has(neighbor)) {
+        enter(neighbor);
+      } else if (
+        inStack.has(neighbor) &&
+        onBackEdge(path, path.indexOf(neighbor), neighbor)
+      ) {
+        return;
+      }
+    }
+  }
+}
+
+/**
  * Find a single dependency cycle (for error reporting during registration)
  * Returns the first cycle found, or empty array if no cycle exists
  *
@@ -178,56 +228,27 @@ export function getStartupOrder<T>(
 export function findDependencyCycle(
   adjacency: Map<string, Set<string>>,
 ): string[] {
-  const visited = new Set<string>();
-  const inStack = new Set<string>();
-  const path: string[] = [];
+  let cycle: string[] = [];
 
-  const visit = (node: string): string[] | null => {
-    visited.add(node);
-    inStack.add(node);
-    path.push(node);
+  walkForCycles(adjacency, (path, cycleStart, neighbor) => {
+    cycle = cycleStart >= 0 ? path.slice(cycleStart) : [neighbor];
+    return true;
+  });
 
-    for (const neighbor of adjacency.get(node) ?? []) {
-      if (!visited.has(neighbor)) {
-        const result = visit(neighbor);
-        if (result) {
-          return result;
-        }
-      } else if (inStack.has(neighbor)) {
-        const cycleStart = path.indexOf(neighbor);
-        return cycleStart >= 0 ? path.slice(cycleStart) : [neighbor];
-      }
-    }
-
-    inStack.delete(node);
-    path.pop();
-    return null;
-  };
-
-  for (const node of adjacency.keys()) {
-    if (visited.has(node)) {
-      continue;
-    }
-    const result = visit(node);
-    if (result) {
-      return result;
-    }
-  }
-
-  return [];
+  return cycle;
 }
 
 /**
  * Find circular dependency cycles using Depth-First Search (DFS) with cycle detection.
  *
- * Algorithm: DFS with visited set and recursion stack tracking
+ * Algorithm: DFS with visited set and path-stack tracking
  * - Uses 'visited' set to ensure each node is processed exactly once (prevents infinite loops)
- * - Uses 'inStack' set to track the current DFS recursion path
+ * - Uses 'inStack' set to track the current DFS path
  * - When a node in the current path is encountered again, a cycle is detected
  * - Extracts the cycle from the path and continues searching for more cycles
  *
  * Time Complexity: O(V + E) where V = components, E = dependency edges
- * Space Complexity: O(V) for visited/inStack sets and recursion stack
+ * Space Complexity: O(V) for visited/inStack sets and the explicit frame stack
  *
  * Performance note: This method finds a representative set of cycles while ensuring
  * each node is visited once (prevents infinite loops). For hot paths that only need
@@ -239,39 +260,13 @@ export function findAllCircularCycles(
   adjacency: Map<string, Set<string>>,
 ): string[][] {
   const cycles: string[][] = [];
-  const visited = new Set<string>();
-  const inStack = new Set<string>();
-  const path: string[] = [];
 
-  const visit = (node: string): void => {
-    visited.add(node);
-    inStack.add(node);
-    path.push(node);
-
-    for (const neighbor of adjacency.get(node) ?? []) {
-      if (!visited.has(neighbor)) {
-        // Continue DFS to unvisited neighbor
-        visit(neighbor);
-      } else if (inStack.has(neighbor)) {
-        // Found a cycle - extract it from the path
-        const cycleStart = path.indexOf(neighbor);
-        if (cycleStart >= 0) {
-          const cycle = path.slice(cycleStart);
-          cycles.push(cycle);
-        }
-      }
+  walkForCycles(adjacency, (path, cycleStart) => {
+    if (cycleStart >= 0) {
+      cycles.push(path.slice(cycleStart));
     }
-
-    inStack.delete(node);
-    path.pop();
-  };
-
-  // Visit all nodes to find all cycles (including disconnected components)
-  for (const node of adjacency.keys()) {
-    if (!visited.has(node)) {
-      visit(node);
-    }
-  }
+    return false;
+  });
 
   return cycles;
 }

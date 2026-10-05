@@ -62,6 +62,10 @@ export function createStopPhaseObserver(
         return;
       }
       isObserved = true;
+      // Which branch the terminal observer below hears from. Both reactions can throw,
+      // and a failure to report the hook's rejection is not a failed late resolution:
+      // one label for both sent readers looking for a reconciliation that never ran.
+      let terminalLabel = 'Late stop resolution failed';
       // Already-adopted hook promises only. One chain owns both late success
       // reconciliation and rejection reporting, even when force is abandoned.
       const observed = observePromise(
@@ -70,16 +74,29 @@ export function createStopPhaseObserver(
           options?.onResolved?.();
         },
         (error: unknown) => {
-          const selected = options?.getReport?.();
+          terminalLabel = 'Late stop failure could not be reported';
+          // A selector that throws must not swallow the hook's own failure: that is
+          // still reported, with the details given up front, before the selector's.
+          let selected:
+            { message: string; level: 'warn' | 'error' } | undefined;
+          let selectionFailure: { error: unknown } | undefined;
+          try {
+            selected = options?.getReport?.();
+          } catch (selectionError) {
+            selectionFailure = { error: selectionError };
+          }
           report(
             error,
             selected?.message ?? message,
             selected?.level ?? options?.level,
           );
+          if (selectionFailure !== undefined) {
+            throw selectionFailure.error;
+          }
         },
       );
       observeRejection(observed, (error: unknown) => {
-        report(error, 'Late stop resolution failed');
+        report(error, terminalLabel);
       });
     },
   };

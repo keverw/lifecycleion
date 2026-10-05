@@ -1,6 +1,12 @@
 import {
   promiseConstructorIntrinsic,
   applyIntrinsic,
+  constructIntrinsic,
+  getIntrinsic,
+  getPrototypeOfIntrinsic,
+  objectPrototypeIntrinsic,
+  ordinaryInstanceOf,
+  speciesSymbolIntrinsic,
   queueMicrotaskIntrinsic,
   promiseResolveIntrinsic,
   promiseRejectIntrinsic,
@@ -12,12 +18,14 @@ import { reportToConsole } from './report-to-console';
 
 /**
  * Whether `value` has `Promise.prototype` on its prototype chain - the shape of a native
- * promise from this realm, or a subclass's. `instanceof` walks the chain without reading
- * any property of `value`; a proxy's `getPrototypeOf` trap that throws answers `false`.
+ * promise from this realm, or a subclass's. The ordinary `instanceof` walk reads no
+ * property of `value`; a proxy's `getPrototypeOf` trap that throws answers `false`. It
+ * is the captured walk, not `instanceof` itself, so a `Symbol.hasInstance` defined on
+ * `Promise` later cannot claim a plain thenable is a promise and have it refused.
  */
 function inheritsFromPromise(value: unknown): boolean {
   try {
-    return value instanceof promiseConstructorIntrinsic;
+    return ordinaryInstanceOf(value, promiseConstructorIntrinsic);
   } catch {
     return false;
   }
@@ -52,7 +60,7 @@ function hasOwnThen(value: object): boolean {
  */
 function hasObjectPrototype(value: object): boolean {
   try {
-    return Reflect.getPrototypeOf(value) === Object.prototype;
+    return getPrototypeOfIntrinsic(value) === objectPrototypeIntrinsic;
   } catch {
     return false;
   }
@@ -67,23 +75,10 @@ function isThisRealmTypeError(error: unknown): boolean {
   try {
     return (
       isObjectLike(error) &&
-      Reflect.getPrototypeOf(error) === typeErrorPrototype
+      getPrototypeOfIntrinsic(error) === typeErrorPrototype
     );
   } catch {
     return false;
-  }
-}
-
-/**
- * Whether reading `constructor` throws - the read the intrinsic `then` makes once its
- * internal-slot check accepts a native promise of any realm.
- */
-function hasThrowingConstructor(value: object): boolean {
-  try {
-    Reflect.get(value, 'constructor', value);
-    return false;
-  } catch {
-    return true;
   }
 }
 
@@ -111,7 +106,7 @@ function hasUnusableSpecies(value: object): boolean {
   }
   let constructor: unknown;
   try {
-    constructor = Reflect.get(value, 'constructor', value);
+    constructor = getIntrinsic(value, 'constructor', value);
   } catch {
     return false;
   }
@@ -122,16 +117,16 @@ function hasUnusableSpecies(value: object): boolean {
     return true;
   }
   try {
-    const species: unknown = Reflect.get(
+    const species: unknown = getIntrinsic(
       constructor,
-      Symbol.species,
+      speciesSymbolIntrinsic,
       constructor,
     );
     if (species === undefined || species === null) {
       return false;
     }
     let isCapable = false;
-    Reflect.construct(species as new (...args: unknown[]) => unknown, [
+    constructIntrinsic(species as new (...args: unknown[]) => unknown, [
       (resolve: unknown, reject: unknown): void => {
         isCapable =
           typeof resolve === 'function' && typeof reject === 'function';
@@ -216,8 +211,9 @@ function hasUnusableSpecies(value: object): boolean {
  * and this never writes to the value it is handed. Such a promise's failure is still
  * reported - as an unhandled rejection rather than through the caller. A native promise
  * from another realm - an iframe, a `vm` context - fares the same: the intrinsic accepts
- * it, since its check is the internal slot, not the prototype, and a broken `constructor`
- * throws there and again in `Promise.resolve()`, which rejects the result.
+ * it, since its check is the internal slot, not the prototype, and what its broken
+ * `constructor` or species throws there - or again in `Promise.resolve()` - rejects the
+ * result.
  */
 export function adoptPromise<T>(
   value: T | PromiseLike<T>,
@@ -230,9 +226,9 @@ export function adoptPromise<T>(
  * the internal promise slot, so this also observes foreign-realm promises that fail
  * instanceof and have a throwing or non-callable own then. Ordinary plain thenables
  * skip the probe. A failed probe on a local promise is an adoption failure (for
- * example a broken constructor/species), as is a foreign-realm promise whose
- * `constructor` read throws; on other objects, normal thenable handling remains the
- * fallback. Do not skip class or null prototypes: real native promises
+ * example a broken constructor/species), as is any failure other than this realm's
+ * `TypeError` - only a value that passed the slot check gets far enough to throw one;
+ * on other objects, normal thenable handling remains the fallback. Do not skip class or null prototypes: real native promises
  * can acquire either through setPrototypeOf, and foreign promises fail instanceof.
  * The intrinsic slot probe is necessary to keep their own then from hiding failures.
  * This one boundary is shared by both adoption entry points.
@@ -249,15 +245,15 @@ function adoptOwnPromise<T>(value: T): Promise<Awaited<T>> | undefined {
         didAdopt = true;
       } catch (error) {
         // A foreign-realm promise fails `inheritsFromPromise`. The slot check rejects a
-        // non-promise with this realm's `TypeError` before reading `constructor`, so any
-        // other failure plus a throwing `constructor` read is a broken native promise,
-        // whose own `then` must not be trusted to settle it. A broken species fails with
-        // that same `TypeError`, so it is told apart by the species path itself.
+        // non-promise with this realm's `TypeError` and nothing else, before reading
+        // `constructor`, so any other failure - from a `constructor` getter, a species
+        // getter or a species constructor - comes from a native promise of some realm,
+        // whose own `then` must not be trusted to settle it. A broken species can fail
+        // with that same `TypeError`, so it is told apart by the species path itself.
         if (
           inheritsFromPromise(value) ||
-          (isThisRealmTypeError(error)
-            ? hasUnusableSpecies(value)
-            : hasThrowingConstructor(value))
+          !isThisRealmTypeError(error) ||
+          hasUnusableSpecies(value)
         ) {
           didAdopt = true;
           // Preserve the original rejection value, as adoption does.
@@ -352,7 +348,7 @@ export function adoptResult(
   }
   let then: unknown;
   try {
-    then = Reflect.get(result, 'then', result);
+    then = getIntrinsic(result, 'then', result);
   } catch (error) {
     return new UnreadableReturn(error);
   }

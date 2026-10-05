@@ -903,6 +903,10 @@ console.log(logger.getSinks().length); // 0
   throw `TypeError` during construction. Infinity and oversized values clamp to the maximum supported timer delay
   (2,147,483,647ms). The deadline timer keeps the event loop alive until cleanup
   finishes or the timeout is reported; it is not a background, unreferenced timer.
+  The budget starts once every sink's close hook has been invoked, after their
+  synchronous parts return, so synchronous work in one hook is not charged against a
+  later sink's asynchronous cleanup. No timer can interrupt synchronous work, so that
+  time is outside the budget either way.
 - At the deadline, each unfinished sink produces a normal sink-close diagnostic
   identifying that sink and stating that cleanup/flush is unconfirmed. No writes are
   replayed, and the logger does not claim a definite number of lost entries. `close()`
@@ -912,9 +916,13 @@ console.log(logger.getSinks().length); // 0
   At process exit, any still-unflushed data may be lost. Timers cannot interrupt
   synchronous code that blocks the event loop.
 - Sink authors should make `close()` flush and release only the sink's own resources;
-  leave `logger.close()` and `logger.exit()` to the logger's owner. Awaiting the owning
-  logger's `close()` after yielding creates a self-dependency and can delay shutdown
-  for the entire `closeTimeoutMS` budget.
+  leave `logger.close()` and `logger.exit()` to the logger's owner. **Do not await the
+  owning logger's `close()` from a sink's `close()` after it yields.** That `close()`
+  waits for this sink, so the two wait on each other: shutdown stalls for the entire
+  `closeTimeoutMS` budget (60 seconds by default), and the deadline then reports the
+  sink's cleanup as timed out. Only the synchronous part of a hook can be recognized as
+  re-entry (below); after an `await` the logger cannot tell the hook's call from any
+  other caller's without async context tracking, which browsers do not provide.
 - Calling `logger.close()` from a sink close getter, hook, synchronous return-value
   getter, or a callback they invoke returns a rejected promise and reports one sink-close
   diagnostic through the normal failure channel. Returning or awaiting that rejection
@@ -1734,7 +1742,7 @@ interface LoggerOptions {
   sinks?: LogSink[]; // Output destinations
   diagnosticSinks?: LogSink[]; // Optional destinations for logger-internal failures
   redactFunction?: (keyName, value: string) => RedactFunctionResult; // Custom redaction (default: masks with asterisks using datamask)
-  closeTimeoutMS?: number | null; // Overall sink cleanup budget (default: 60000ms; null uses default; 0 is immediate)
+  closeTimeoutMS?: number | null; // Overall sink cleanup budget (default: 60000ms; null uses default; 0 is immediate; negative throws RangeError, NaN/non-number throws TypeError)
   callProcessExit?: boolean; // Actually call process.exit() (default: true, disable for tests/browser)
   beforeExitCallback?: (
     code,
@@ -1870,9 +1878,9 @@ When a log includes an `exitCode`, the logger will:
 The cleanup deadline starts when sink cleanup begins; it does not bound an awaited
 `beforeExitCallback` or override its explicit `{ action: 'wait' }` decision.
 
-Invalid real exit codes produce one guarded `console.error` report per logger, on the first invalid request even if earlier requests used valid codes. Further invalid-code reports are suppressed; each request still uses the normalized code, and a log entry that requested the exit records the normalized code in `entry.exitCode`. The report is not a `LoggerDiagnostic`: it is made synchronously as the exit begins, and the sinks a diagnostic would reach are about to be closed, so it would land on the console anyway.
+Invalid real exit codes produce one guarded `console.error` report per logger (`Logger exit code 300 is invalid; treating it as code 1`), on the first invalid request even if earlier requests used valid codes. Further invalid-code reports are suppressed; each request still uses the normalized code, and a log entry that requested the exit records the normalized code in `entry.exitCode`. The report describes the request, not the process's outcome: if another exit already owns the process, the normalized request is ignored like any other (see below). Likewise `entry.exitCode` is the code the entry _requested_; read `logger.exitCode` or the `exit-process` event for the code the process actually uses. The report is not a `LoggerDiagnostic`: it is made synchronously as the exit begins, and the sinks a diagnostic would reach are about to be closed, so it would land on the console anyway.
 
-The first real exit to proceed owns the process's exit code. A later `exit()` still emits `exit-called` and runs `beforeExitCallback`, but it cannot change the code or call `process.exit()` again. One case is reported rather than dropped silently: a non-zero request ignored while an exit with code 0 is in progress, which would otherwise let a run that asked to fail exit as a success. That report also goes to guarded `console.error`, once per logger. A repeat with the same code, a success after a failure, or a different failure code is not reported, since the process's outcome is unchanged.
+The first real exit to proceed owns the process's exit code. A later `exit()` still emits `exit-called` and runs `beforeExitCallback`, but it cannot change the code or call `process.exit()` again. One case is reported rather than dropped silently: a non-zero request ignored while an exit with code 0 is in progress, which would otherwise let a run that asked to fail exit as a success (`Logger exit(1) ignored: an exit with code 0 is already in progress`). That covers a request made after the code-0 exit has proceeded, one made from an `exit-called` listener, and one `beforeExitCallback` answers `{ action: 'wait' }` for while the code-0 exit is still running its own callback - the usual shape under `enableLoggerExitHook()`, where `SIGTERM` exits 0, a component fails while stopping and logs `exitCode: 1`, and the manager defers that request to the shutdown already under way. The failure request does not change the code: the exit already under way still exits 0, and the report is how the failure is surfaced. That report also goes to guarded `console.error`, once per logger. A repeat with the same code, a success after a failure, or a different failure code is not reported, since the process's outcome is unchanged.
 
 **Exit Code Validation:** `exit(code: number)` accepts numeric codes, not numeric strings. Non-numeric `exitCode` values on log entries are ignored.
 Normalization applies only when `callProcessExit` is enabled and the runtime exposes a callable `process.exit`. Browser/worker runtimes without it retain the requested code and make no invalid-code report.
@@ -2252,7 +2260,7 @@ interface LogEntry {
   redactedParams?: Record<string, unknown>; // Present when redaction is configured: { userID: 456, password: '***' }
   redactedKeys?: string[]; // List of keys that were redacted: ['password', 'user.apiKey']
   error?: unknown; // Original error object from errorObject() calls
-  exitCode?: number; // Exit code if this log triggers a process exit
+  exitCode?: number; // Exit code this log requested (an invalid real code reads 1); the process may use another exit's code - see Exit Behavior
   tags?: string[]; // Optional tags for categorizing/filtering logs: ['auth', 'security']
 }
 ```

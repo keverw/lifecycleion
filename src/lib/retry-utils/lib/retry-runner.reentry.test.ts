@@ -690,6 +690,83 @@ for (const outcome of ['skip', 'error', 'fatal', 'exhausted'] as const) {
   });
 }
 
+for (const outcome of ['fatal', 'exhausted'] as const) {
+  for (const site of ['abort', 'attempt-handled', 'operation-ended'] as const) {
+    test.each([false, true])(
+      `cancel from ${site} after an abort ${outcome} report keeps forceTry from restarting (wait: %s)`,
+      async (shouldWaitForCompletion) => {
+        const reports: ReportResult[] = [];
+        const retryStarted = Promise.withResolvers<void>();
+        let cancellation: Promise<CancelResult> | undefined;
+        let isForcing = false;
+        const runner = new RetryRunner(
+          { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 5 },
+          (report, signal) => {
+            reports.push(report);
+            if (reports.length === 2) {
+              retryStarted.resolve();
+            }
+            signal.addEventListener(
+              'abort',
+              () => {
+                const failure = new Error('abort outcome');
+                if (outcome === 'fatal') {
+                  report('fatal', failure);
+                } else {
+                  report('error', failure);
+                }
+                if (site === 'abort') {
+                  cancellation = runner.cancel();
+                }
+              },
+              { once: true },
+            );
+          },
+        );
+        runner.on(ATTEMPT_HANDLED, () => {
+          // Inside the terminal publication, while it still reads 'running'.
+          if (site === 'attempt-handled' && isForcing) {
+            cancellation = runner.cancel();
+          }
+        });
+        runner.on(OPERATION_ENDED, () => {
+          if (site === 'operation-ended' && isForcing) {
+            cancellation = runner.cancel();
+          }
+        });
+        const original = runner.run(true);
+        if (outcome === 'exhausted') {
+          reports[0]('error', new Error('initial failure'));
+          await retryStarted.promise;
+        }
+        const beforeForce = reports.length;
+        isForcing = true;
+        const forced = await runner.forceTry({
+          shouldAbortRunning: true,
+          shouldWaitForCompletion,
+        });
+        const terminal =
+          outcome === 'fatal'
+            ? { status: 'attempt_fatal' }
+            : { status: 'attempts_exhausted' };
+        expect(await cancellation).toBe('not-running');
+        // The newer cancel wins, as reset() already did: no replacement starts.
+        expect(reports).toHaveLength(beforeForce);
+        expect(forced).toMatchObject(
+          shouldWaitForCompletion
+            ? terminal
+            : { status: 'pre_operation_error', code: 'force_try_superseded' },
+        );
+        expect(await original).toMatchObject(terminal);
+        expect(runner.runnerState).toBe(
+          outcome === 'fatal' ? 'fatal-error' : 'exhausted',
+        );
+        expect(runner.isAttemptRunning).toBe(false);
+      },
+    );
+  }
+}
+
 for (const request of ['cancel', 'reset'] as const) {
   test.each([false, true])(
     `abort success followed by ${request} preserves precedence (wait: %s)`,
@@ -925,6 +1002,99 @@ test('canForceTry reads false while another call holds the operation lock', asyn
   runner.overrideGraceCancelPeriodMS(0);
   await runner.cancel();
 });
+
+test.each([false, true])(
+  'forceTry from a retry-scheduling attempt-handled listener (reported synchronously: %s)',
+  async (isSynchronous) => {
+    const reports: ReportResult[] = [];
+    const runner = new RetryRunner(
+      { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 1000 },
+      (report) => {
+        reports.push(report);
+        if (isSynchronous && reports.length === 1) {
+          report('error', new Error('first attempt failed'));
+        }
+      },
+    );
+    let seen:
+      | {
+          canForceTry: boolean;
+          forced: Promise<RunResult<unknown>>;
+          attempts: number;
+          isRetryPending: boolean;
+        }
+      | undefined;
+    runner.once(ATTEMPT_HANDLED, () => {
+      const canForceTry = runner.canForceTry;
+      const forced = runner.forceTry();
+      // Read before returning: an accepted force starts the attempt synchronously.
+      seen = {
+        canForceTry,
+        forced,
+        attempts: reports.length,
+        isRetryPending: runner.isRetryPending,
+      };
+    });
+    try {
+      await runner.run();
+      if (!isSynchronous) {
+        reports[0]('error', new Error('first attempt failed'));
+      }
+      // A synchronous report happens inside run()'s own dispatch, which still holds
+      // the lock: the force is refused and the retry stays on its timer. Reported
+      // outside that dispatch, the force starts the next attempt at once.
+      expect(seen).toBeDefined();
+      expect({ ...seen, forced: await seen?.forced }).toEqual(
+        isSynchronous
+          ? {
+              canForceTry: false,
+              forced: expect.objectContaining({
+                status: 'pre_operation_error',
+                code: 'lock_error',
+              }) as RunResult<unknown>,
+              attempts: 1,
+              isRetryPending: true,
+            }
+          : {
+              canForceTry: true,
+              forced: { status: 'running', reattached: false },
+              attempts: 2,
+              isRetryPending: false,
+            },
+      );
+    } finally {
+      runner.overrideGraceCancelPeriodMS(0);
+      await runner.cancel();
+    }
+  },
+);
+
+test.each([false, true])(
+  'default forceTry while stopping attaches and lets cancellation finish (wait: %s)',
+  async (shouldWaitForCompletion) => {
+    const reports: ReportResult[] = [];
+    const runner = new RetryRunner(policy, (report) => {
+      reports.push(report);
+    });
+    const original = runner.run(true);
+    const cancellation = runner.cancel();
+    expect(runner.runnerState).toBe('stopping');
+    // Accepted, though it starts nothing: it attaches to the in-flight attempt.
+    expect(runner.canForceTry).toBe(true);
+    const forced = runner.forceTry({ shouldWaitForCompletion });
+    expect(runner.runnerState).toBe('stopping');
+    reports[0]('skip', 'aborted');
+    expect(await cancellation).toBe('canceled');
+    expect(await forced).toEqual(
+      shouldWaitForCompletion
+        ? { status: 'canceled' }
+        : { status: 'running', reattached: true },
+    );
+    expect(await original).toEqual({ status: 'canceled' });
+    expect(reports).toHaveLength(1);
+    expect(runner.runnerState).toBe('stopped');
+  },
+);
 
 test('a non-callable hook inheriting from Function.prototype is not registered', async () => {
   const fake = Object.create(Function.prototype) as () => void;

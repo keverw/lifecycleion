@@ -1,0 +1,148 @@
+import type { BaseComponent } from '../base-component';
+import type { ComponentAccessContext } from './component-access-context';
+import { raceDeadline } from '../../internal/race-deadline';
+import { optionalValidatedTimerDelayMS } from '../../internal/timer-limits';
+import {
+  applyIntrinsic,
+  promiseResolveIntrinsic,
+} from '../../internal/intrinsics';
+import { adoptPromise } from '../../internal/adopt-promise';
+
+/**
+ * The two steps every component hook dispatch - message, value, health check, signal -
+ * shares. Each operation keeps its own events, result shapes and refusal labels; only
+ * the order of reads, rechecks and the deadline lives here, so it cannot drift between
+ * them. The availability rule itself is the caller's: `recheck` answers a refusal, or
+ * `undefined` while the component may still be entered.
+ */
+
+/** What {@link readHookThenRecheck} found. */
+export type HookRead<TValue, TRefusal> =
+  /** `value` is what the read returned, or `undefined` when it threw. */
+  | { status: 'refused'; refusal: TRefusal; value: TValue | undefined }
+  | { status: 'read_failed'; error: unknown }
+  | { status: 'read'; value: TValue };
+
+/**
+ * Read a component's hook - and whatever configuration goes with it - once, guarded,
+ * then recheck availability before answering anything.
+ *
+ * The read runs the component's code, which can stop, unregister or replace the
+ * component. Answering from the read alone told a caller `no_handler` (health: healthy)
+ * for a component that was already stopped, or `operation_crashed` for one that was no
+ * longer registered. So availability wins over both: a read failure is still reported
+ * through `reportReadFailure` - it broke the component's contract whatever happened
+ * next - but the answer is the refusal when there is one.
+ */
+export function readHookThenRecheck<TValue, TRefusal>(
+  read: () => TValue,
+  reportReadFailure: (error: unknown) => void,
+  recheck: () => TRefusal | undefined,
+): HookRead<TValue, TRefusal> {
+  let value: TValue | undefined;
+  let failure: { error: unknown } | undefined;
+
+  try {
+    value = read();
+  } catch (error) {
+    failure = { error };
+    reportReadFailure(error);
+  }
+
+  const refusal = recheck();
+  if (refusal !== undefined) {
+    return { status: 'refused', refusal, value };
+  }
+  return failure !== undefined
+    ? { status: 'read_failed', error: failure.error }
+    : { status: 'read', value: value as TValue };
+}
+
+/** What {@link dispatchAnnouncedHook} did. */
+export type HookDispatch<TRefusal> =
+  | { status: 'refused'; refusal: TRefusal }
+  | { status: 'settled'; value: unknown }
+  | { status: 'timed_out' }
+  | { status: 'threw'; error: unknown };
+
+export interface HookDispatchRequest<TRefusal> {
+  name: string;
+  component: BaseComponent;
+  /** The handler as read once by the caller; called with `component` as receiver. */
+  handler: Parameters<typeof applyIntrinsic>[0];
+  args: readonly unknown[];
+  timeoutMS: number;
+  /** Emits the operation's `*-started` / `message-sent` event. */
+  announce: () => void;
+  recheck: () => TRefusal | undefined;
+  timeoutLog: string;
+  timeoutLogParams: Record<string, unknown>;
+  lateFailureMessage: string;
+  lateFailureParams?: Record<string, unknown>;
+}
+
+/**
+ * Announce a dispatch, recheck availability after its listeners, then call the handler
+ * under its deadline.
+ *
+ * One microtask separates the announcement from the recheck, so the recheck follows the
+ * announcement's listeners however the dispatch was reached. A dispatch made from inside
+ * another manager event listener only queues its announcement behind the notification
+ * being delivered; that drain is synchronous, so it has run every queued listener by the
+ * time this resumes. Without the wait a listener could not prevent a nested dispatch, as
+ * the event docs promise.
+ *
+ * The handler's result is adopted, not raced as it is (see `adoptPromise()`). A timeout
+ * is logged and the still-running handler observed, so a late failure is reported rather
+ * than floating. A synchronous throw, a rejection, and a failure to log the timeout are
+ * all answered `threw`, as each operation answered them before this was shared.
+ */
+export async function dispatchAnnouncedHook<TRefusal>(
+  context: Pick<
+    ComponentAccessContext,
+    'logger' | 'observeFailureAfterTimeout'
+  >,
+  request: HookDispatchRequest<TRefusal>,
+): Promise<HookDispatch<TRefusal>> {
+  const { name } = request;
+
+  request.announce();
+  await promiseResolveIntrinsic(undefined);
+
+  const refusal = request.recheck();
+  if (refusal !== undefined) {
+    return { status: 'refused', refusal };
+  }
+
+  const timeoutResult = { timedOut: true } as const;
+
+  try {
+    const handlerPromise = adoptPromise<unknown>(
+      applyIntrinsic(request.handler, request.component, request.args),
+    );
+    // Zero means no timer, as for startup and signals: racing `setTimeout(..., 0)` made
+    // the outcome depend on whether a handler settled before its first asynchronous turn.
+    const { value } = await raceDeadline(
+      handlerPromise,
+      optionalValidatedTimerDelayMS(request.timeoutMS),
+      () => timeoutResult,
+    );
+
+    if (value === timeoutResult) {
+      context.logger.entity(name).warn(request.timeoutLog, {
+        params: request.timeoutLogParams,
+      });
+      context.observeFailureAfterTimeout(
+        handlerPromise,
+        name,
+        request.lateFailureMessage,
+        request.lateFailureParams,
+      );
+      return { status: 'timed_out' };
+    }
+
+    return { status: 'settled', value };
+  } catch (error) {
+    return { status: 'threw', error };
+  }
+}

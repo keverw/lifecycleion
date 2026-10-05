@@ -38,7 +38,7 @@ maskString(''); // ''
 
 ### maskDomain
 
-Masks every label of a hostname but the last, keeping the dots. Default `percent` is `60`. A value with no dot is masked as one string. Trailing dots - a fully qualified name's, or a run of them - do not change which label is the last, so `example.com.` keeps `com` readable; a single label followed only by dots is masked like a value with no dot.
+Masks every label of a hostname but the last, keeping the dots. Default `percent` is `60`. A value with no dot is masked as one string. Trailing dots - a fully qualified name's, or a run of them - do not change which label is the last, so `example.com.` keeps `com` readable. Leading dots are skipped the same way, so a single label with only dots around it - `localhost.`, `.internal`, `..secret` - is masked like a value with no dot.
 
 ```typescript
 maskDomain('example.com', '*', 50); // 'ex***le.com'

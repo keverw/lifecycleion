@@ -105,7 +105,14 @@ export interface LogEntry {
   redactedParams?: Record<string, unknown>; // Present when redaction is configured: { userID: 456, password: '***' }
   redactedKeys?: string[]; // List of keys that were redacted (e.g., ['password', 'user.apiKey'])
   error?: unknown; // Original error object from errorObject() calls
-  exitCode?: number; // Exit code if this log triggers a process exit: the code the exit uses, so an invalid real code reads 1
+  /**
+   * Exit code this log requested, normalized as `exit()` normalizes it: an invalid code
+   * for a real exit reads 1. This is the request, not the outcome. If another exit already
+   * owns the process, or the request is absorbed (an `exit-called` listener's exit, or one
+   * `beforeExitCallback` answers `{ action: 'wait' }` for), the process exits with the
+   * owning exit's code; read `logger.exitCode` or the `exit-process` event for that.
+   */
+  exitCode?: number;
   tags?: string[]; // Optional tags for categorizing/filtering logs (e.g., ['auth', 'security'])
 }
 

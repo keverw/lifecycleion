@@ -176,7 +176,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   // Ownership therefore needs an identity independent of that shared promise.
   private operationToken = Symbol();
   // A newer stop request made by an abort listener takes precedence over the
-  // force request that invoked it, even if cancellation settles synchronously.
+  // force request that invoked it, even if cancellation settles synchronously
+  // or the listener's own report already ended the operation.
   private stopRequestToken = Symbol();
   // Mutable runtime state for the current operation.
   private currentState: RetryRunnerCurrentState = this.getEmptyCurrentState();
@@ -247,6 +248,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
    * e.g. from an `attempt-handled` listener for a terminal report or an `operation-ended`
    * listener) or while another `run()` / `resume()` / `forceTry()` call holds the lock
    * (`lock_error`) - reading `true` there sent callers into a refusal it promised away.
+   *
+   * Accepted is not "starts an attempt": with an attempt in flight - including while
+   * `'stopping'` - the default `forceTry()` attaches to it (`reattached: true`) and a
+   * pending cancellation still ends `'stopped'`. It reads no options, so it cannot
+   * foresee `shouldAbortRunning: true` refusing with `force_try_in_progress`.
    */
   public get canForceTry(): boolean {
     if (this.terminalDispatchDepth > 0 || this._isOperationLocked) {
@@ -435,6 +441,16 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   }
 
   public async cancel(): Promise<CancelResult> {
+    // Stop intent is recorded whatever this call then returns, as reset() records it.
+    // An abort listener that reports fatal (or exhausts the budget) and then cancels has
+    // already ended the operation, so there is nothing left to cancel and this returns
+    // 'not-running' - but the forceTry({ shouldAbortRunning: true }) that dispatched the
+    // abort must still not start a replacement its caller just asked to stop. A committed
+    // success is the one exception: forceTry() can never revive a completed operation,
+    // and it reports that more precisely as already_completed.
+    if (!this.policy.wasSuccessful) {
+      this.stopRequestToken = Symbol();
+    }
     // The attempt has already chosen a terminal result, even though its handled
     // event still presents the pre-terminal state to listeners.
     if (
@@ -448,7 +464,6 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       this.currentState.runnerState === 'running' ||
       this.currentState.runnerState === 'stopping'
     ) {
-      this.stopRequestToken = Symbol();
       const cancellationPromiseProtectedResolver =
         new PromiseProtectedResolver<CancelResult>();
 
@@ -614,20 +629,24 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     return this.currentOperationResolver;
   }
 
-  // Keep the lock around synchronous dispatch, not the caller's wait for completion.
-  // The public async wrapper awaits only after this method's finally released it.
-  private runOperation(
-    shouldWaitForCompletion: boolean,
+  /**
+   * The one admission path for run(), resume() and forceTry(). A terminal publication
+   * refuses first, then the lock. The lock covers synchronous dispatch only, never the
+   * caller's wait for completion: `dispatch` returns that promise without awaiting it,
+   * so the public async wrappers await only after this finally released the lock.
+   */
+  private dispatchUnderLock(
+    methodName: 'run' | 'resume' | 'forceTry',
+    dispatch: () => RunResult<T> | Promise<RunResult<T>>,
   ): RunResult<T> | Promise<RunResult<T>> {
-    // Simple lock check
     if (this.terminalDispatchDepth > 0) {
-      return this.terminalDispatchRefusal('run');
+      return this.terminalDispatchRefusal(methodName);
     }
     if (this._isOperationLocked) {
       return {
         status: 'pre_operation_error',
         code: 'lock_error',
-        error: new RetryUtilsErrRunnerLockAcquisitionError('run'),
+        error: new RetryUtilsErrRunnerLockAcquisitionError(methodName),
       };
     }
 
@@ -635,6 +654,67 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     this._isOperationLocked = true;
 
     try {
+      return dispatch();
+    } catch (error) {
+      // handle error unexpected when starting the operation
+      return {
+        status: 'pre_operation_error',
+        code: 'unexpected_error',
+        error: new RetryUtilsErrRunnerUnexpectedError(
+          methodName,
+          error as Error,
+        ),
+      };
+    } finally {
+      // Always release the lock.
+      this._isOperationLocked = false;
+    }
+  }
+
+  /**
+   * Start the first attempt of an operation, under the caller's lock. The re-entrancy
+   * recheck lives here once: an `operation-started` listener is the only caller code
+   * between claiming the operation and its first attempt, and it may cancel or reset it.
+   *
+   * A forced restart keeps an unresolved completion promise for the callers already
+   * waiting on it. Continuing an operation (forcing a replacement while it is running or
+   * stopping) also keeps its start time and announces no second `operation-started`.
+   */
+  private startOperation(
+    operationType: OperationStartedType,
+    shouldWaitForCompletion: boolean,
+    isContinuingOperation = false,
+  ): RunResult<T> | Promise<RunResult<T>> {
+    const wasForced = operationType === 'force';
+    const operationResolver = this.beginOperation(wasForced);
+    this.currentState.runnerState = 'running';
+
+    if (!isContinuingOperation) {
+      // Start timing
+      this.currentState.operationStartTime = Date.now();
+      this.currentState.finalTimeTakenMS = null;
+
+      this.emit(OPERATION_STARTED, { operationType });
+      if (this.currentState.runnerState !== 'running') {
+        return operationResolver.promise;
+      }
+    }
+
+    void this.attemptOperation(wasForced);
+
+    if (shouldWaitForCompletion) {
+      return operationResolver.promise;
+    } else if (wasForced) {
+      return { status: 'running', reattached: false };
+    } else {
+      return { status: 'running' };
+    }
+  }
+
+  private runOperation(
+    shouldWaitForCompletion: boolean,
+  ): RunResult<T> | Promise<RunResult<T>> {
+    return this.dispatchUnderLock('run', () => {
       // check if in a disallowed state for this operation
       const checkDisallowedStates = this.checkForDisallowedPerOperationStates(
         'run',
@@ -651,26 +731,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       if (checkDisallowedStates) {
         return checkDisallowedStates;
       } else if (this.policy.shouldDoFirstTry()) {
-        const operationResolver = this.beginOperation();
-        this.currentState.runnerState = 'running';
-
-        // Start timing
-        this.currentState.operationStartTime = Date.now();
-        this.currentState.finalTimeTakenMS = null;
-
-        this.emit(OPERATION_STARTED, { operationType: 'initial' });
-        if (this.currentState.runnerState !== 'running') {
-          return operationResolver.promise;
-        }
-
-        // Start the initial operation
-        void this.attemptOperation(false);
-
-        if (shouldWaitForCompletion) {
-          return operationResolver.promise;
-        } else {
-          return { status: 'running' };
-        }
+        return this.startOperation('initial', shouldWaitForCompletion);
       } else {
         return {
           status: 'pre_operation_error',
@@ -683,36 +744,13 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           ),
         };
       }
-    } catch (error) {
-      // handle error unexpected when starting the operation
-      return {
-        status: 'pre_operation_error',
-        code: 'unexpected_error',
-        error: new RetryUtilsErrRunnerUnexpectedError('run', error as Error),
-      };
-    } finally {
-      // Always release the lock.
-      this._isOperationLocked = false;
-    }
+    });
   }
 
   private resumeOperation(
     shouldWaitForCompletion: boolean,
   ): RunResult<T> | Promise<RunResult<T>> {
-    if (this.terminalDispatchDepth > 0) {
-      return this.terminalDispatchRefusal('resume');
-    }
-    if (this._isOperationLocked) {
-      return {
-        status: 'pre_operation_error',
-        code: 'lock_error',
-        error: new RetryUtilsErrRunnerLockAcquisitionError('resume'),
-      };
-    }
-
-    this._isOperationLocked = true;
-
-    try {
+    return this.dispatchUnderLock('resume', () => {
       // check if in a disallowed state for this operation
       const checkDisallowedStates = this.checkForDisallowedPerOperationStates(
         'resume',
@@ -721,44 +759,17 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
       if (checkDisallowedStates) {
         return checkDisallowedStates;
+      } else if (this.currentState.runnerState !== 'stopped') {
+        return {
+          status: 'pre_operation_error',
+          code: 'not_paused',
+          error: new RetryUtilsErrRunnerNotPaused('resume'),
+        };
       } else {
-        if (this.currentState.runnerState !== 'stopped') {
-          return {
-            status: 'pre_operation_error',
-            code: 'not_paused',
-            error: new RetryUtilsErrRunnerNotPaused('resume'),
-          };
-        }
-
         // Resume from the paused/stopped state.
-        const operationResolver = this.beginOperation();
-        this.currentState.runnerState = 'running';
-        this.currentState.operationStartTime = Date.now();
-        this.currentState.finalTimeTakenMS = null;
-
-        this.emit(OPERATION_STARTED, { operationType: 'resume' });
-        if (this.currentState.runnerState !== 'running') {
-          return operationResolver.promise;
-        }
-
-        // Restart the initial operation
-        void this.attemptOperation(false);
-
-        if (shouldWaitForCompletion) {
-          return operationResolver.promise;
-        } else {
-          return { status: 'running' };
-        }
+        return this.startOperation('resume', shouldWaitForCompletion);
       }
-    } catch (error) {
-      return {
-        status: 'pre_operation_error',
-        code: 'unexpected_error',
-        error: new RetryUtilsErrRunnerUnexpectedError('resume', error as Error),
-      };
-    } finally {
-      this._isOperationLocked = false;
-    }
+    });
   }
 
   private forceTryOperation(
@@ -767,20 +778,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     const shouldWaitForCompletion = options?.shouldWaitForCompletion ?? false;
     const shouldAbortRunning = options?.shouldAbortRunning ?? false;
 
-    if (this.terminalDispatchDepth > 0) {
-      return this.terminalDispatchRefusal('forceTry');
-    }
-    if (this._isOperationLocked) {
-      return {
-        status: 'pre_operation_error',
-        code: 'lock_error',
-        error: new RetryUtilsErrRunnerLockAcquisitionError('forceTry'),
-      };
-    }
-
-    this._isOperationLocked = true;
-
-    try {
+    return this.dispatchUnderLock('forceTry', () => {
       const refusal = this.checkForDisallowedPerOperationStates('forceTry', [
         'completed',
       ]);
@@ -789,7 +787,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       }
 
       // If an attempt is already running and we don't want to abort it,
-      // just attach to the current operation.
+      // just attach to the current operation. This includes 'stopping': the
+      // pending cancellation is left to finish, so a waiting caller receives
+      // its 'canceled' result.
       if (this.isAttemptRunning && !shouldAbortRunning) {
         if (shouldWaitForCompletion) {
           return this.currentOperationResolver.promise;
@@ -857,59 +857,35 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         } else {
           return { status: 'running', reattached: false };
         }
-      } else {
-        // Case 2: No pending retry, start a brand-new forced attempt.
-        // The abort above has already dispatched caller code. This new identity
-        // makes resets from that old attempt leave the accepted restart alone.
-        const isContinuingOperation =
-          this.currentState.runnerState === 'running' ||
-          this.currentState.runnerState === 'stopping';
-        const operationResolver = this.beginOperation(true);
-        if (this.currentState.runnerState === 'not-started') {
-          // Treat as a first try so the policy tracks the initial attempt.
-          this.policy.shouldDoFirstTry();
-        } else if (
-          this.currentState.runnerState === 'stopping' ||
-          this.currentState.runnerState === 'stopped'
-        ) {
-          // Transition from stopped/stopping to running.
-          this.cleanupTimers();
-          this.confirmCancellation('running', {
-            status: null,
-          });
-        }
-
-        this.currentState.runnerState = 'running';
-        if (!isContinuingOperation) {
-          this.currentState.operationStartTime = Date.now();
-          this.currentState.finalTimeTakenMS = null;
-          this.emit(OPERATION_STARTED, { operationType: 'force' });
-          // The start listener is the only caller code since the state was set.
-          if (this.currentState.runnerState !== 'running') {
-            return operationResolver.promise;
-          }
-        }
-
-        void this.attemptOperation(true);
-
-        if (shouldWaitForCompletion) {
-          return operationResolver.promise;
-        } else {
-          return { status: 'running', reattached: false };
-        }
       }
-    } catch (error) {
-      return {
-        status: 'pre_operation_error',
-        code: 'unexpected_error',
-        error: new RetryUtilsErrRunnerUnexpectedError(
-          'forceTry',
-          error as Error,
-        ),
-      };
-    } finally {
-      this._isOperationLocked = false;
-    }
+
+      // Case 2: No pending retry, start a brand-new forced attempt. startOperation()
+      // gives it a new identity, since the abort above has already dispatched caller
+      // code: resets from that old attempt must leave the accepted restart alone.
+      const isContinuingOperation =
+        this.currentState.runnerState === 'running' ||
+        this.currentState.runnerState === 'stopping';
+      if (this.currentState.runnerState === 'not-started') {
+        // Treat as a first try so the policy tracks the initial attempt.
+        this.policy.shouldDoFirstTry();
+      } else if (
+        this.currentState.runnerState === 'stopping' ||
+        this.currentState.runnerState === 'stopped'
+      ) {
+        // Transition from stopped/stopping to running. Pending cancel() callers
+        // resolve 'superseded'; nothing here runs caller code synchronously.
+        this.cleanupTimers();
+        this.confirmCancellation('running', {
+          status: null,
+        });
+      }
+
+      return this.startOperation(
+        'force',
+        shouldWaitForCompletion,
+        isContinuingOperation,
+      );
+    });
   }
 
   /**

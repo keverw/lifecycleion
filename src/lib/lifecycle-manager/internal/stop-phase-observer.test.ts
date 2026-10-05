@@ -90,7 +90,7 @@ test('intrinsic observation ignores promise methods and reconciles successful wo
   expect(reports).toEqual([]);
 });
 
-test('late reconciliation and report-selection failures reach the terminal warning', async () => {
+test('late reconciliation and report-selection failures reach the terminal warning under their own labels', async () => {
   const reconciliationError = new Error('reconciliation failed');
   const selectionError = new Error('report selection failed');
   const resolved = setup();
@@ -117,10 +117,17 @@ test('late reconciliation and report-selection failures reach the terminal warni
       level: 'warn',
     },
   ]);
+  // The hook's own failure is still reported, under the fallback details, and the
+  // selection failure is labelled as a reporting failure, not a resolution failure.
   expect(rejected.reports).toEqual([
     {
+      error: expect.objectContaining({ message: 'hook failure' }),
+      message: 'unused',
+      level: 'warn',
+    },
+    {
       error: selectionError,
-      message: 'Late stop resolution failed',
+      message: 'Late stop failure could not be reported',
       level: 'warn',
     },
   ]);
@@ -144,7 +151,7 @@ test('terminal reporting contains a reporter that throws again', async () => {
     { error: hookError, message: 'hook failure', level: 'warn' },
     {
       error: reportError,
-      message: 'Late stop resolution failed',
+      message: 'Late stop failure could not be reported',
       level: 'warn',
     },
   ]);

@@ -298,9 +298,9 @@ If `onStartupAborted()` is not implemented, the timeout still applies and the
 state enters `starting-timed-out`. If that delayed `start()` later completes
 successfully, the manager automatically calls `stop()` to clean it up and then
 returns the state to `starting-timed-out` for observability. Until that cleanup
-settles, `stopComponent()` on the component is refused with
-`component_already_stopping`, and `startAllComponents()` is refused with
-`partial_state`.
+settles, `stopComponent()` and `startComponent()` on the component are both
+refused with `component_already_stopping` - the manager owns that teardown - and
+`startAllComponents()` is refused with `partial_state`.
 
 Any in-flight startup work may continue in the background, so components should
 either keep startup side effects idempotent or implement their own cancellation
@@ -885,8 +885,10 @@ operation. The pending component is not counted as successfully started. Preflig
 snapshots are taken after their log callbacks and exclude teardown. Even the
 all-running shortcut returns `partial_state` if those callbacks change availability.
 Startup interrupted by shutdown also excludes components already in teardown from
-its `startedComponents` snapshot. Rollback failure reports retain running-set
-membership to identify resources cleanup could not release, including stalled work.
+its `startedComponents` snapshot. Rollback failure reports likewise list the
+components still up after the rollback - the ones it could not stop - and exclude any
+still in teardown; a component the rollback left stalled is reported by the stalled
+APIs (`getStalledComponentNames()`), not as started.
 An independent operation includes late cleanup owned by an earlier timed-out start;
 a subsequent bulk pass encountering it returns `partial_state` without taking over
 that cleanup or rolling back components it may still depend on. If cleanup is already
@@ -1040,7 +1042,7 @@ interface StopAllOptions {
 **Option Details:**
 
 - `retryStalled`: If `true`, attempts to stop components that are currently in the `stalled` state from previous shutdown attempts. If `false`, skips components already marked as stalled. **Note:** retry goes directly to the force phase (`onShutdownForce`), not the graceful phase. `stop()` is not called again. The assumption is that graceful already had its chance, and the retry is an escalation. A retry keeps the original stall's start time: a component without `onShutdownForce` attempts nothing new, so it stays stalled under its original record and answers with that stop's result without emitting `component:shutdown-force` or `component:stalled`. A retry that runs `onShutdownForce` emits `component:shutdown-force` describing only that attempt (`gracefulPhaseRan: false`, `gracefulTimedOut: false`). If it succeeds it emits `component:stalled-resolved`; if it fails again it records a fresh force-phase stall: `reason: 'timeout'` when `onShutdownForce` times out again, otherwise `'both'` when the original graceful phase timed out and `'error'` when it did not.
-- `haltOnStall`: If `true`, stops processing remaining components after a stop failure or refusal, including invalid configuration. If `false`, continues independent cleanup. Either way, a component another operation is already stopping or starting does not halt the pass: its dependencies are skipped while that work is in flight, and the pass goes back to them once if it has settled by the end of the loop. The pass does not wait for that work. Dependencies of any component still running after a failed stop remain protected, including when a getter throws before cleanup starts. The aggregate result stays unsuccessful; validation refusals retain `invalid_options`.
+- `haltOnStall`: If `true`, stops processing remaining components after a stop failure or refusal, including invalid configuration. If `false`, continues independent cleanup. Either way, a component another operation is already stopping or starting does not halt the pass: its dependencies are skipped while that work is in flight, and the pass goes back to them once if it has settled by the end of the loop. The pass does not wait for that work. Dependencies of any component still running after a failed stop remain protected, including when a getter throws before cleanup starts. The aggregate result stays unsuccessful; validation refusals retain `invalid_options`. Its `reason` names components a `haltOnStall` break never reached under `Not attempted:`, apart from the ones whose stop actually failed (`Failed to stop:`).
 
 **Timeout Behavior:**
 
@@ -1166,9 +1168,20 @@ interface RestartResult {
 **Important:** `restartAllComponents` hardcodes `retryStalled: true` and `haltOnStall: true` for the shutdown phase to ensure clean restart. Only `shutdownTimeoutMS` can be customized.
 
 Restart checks existing components' startup timeout settings before stopping them.
-It saves those settings for registrations that remain unchanged. If the registry
-changes during this initial check, restart logs a warning and refuses both phases
-with `partial_state`, before stopping anything.
+It saves those settings for registrations that remain unchanged. It also checks the
+stop budgets its stop phase will use - `shutdownGracefulTimeoutMS` of each running
+component, and `shutdownForceTimeoutMS` of each running or stalled component that
+implements `onShutdownForce()` - so an invalid one refuses the restart with
+`invalid_options` before any component is stopped, rather than halting the stop phase
+partway with some components already down. If the registry changes during this
+initial check, restart logs a warning and refuses both phases with `partial_state`,
+before stopping anything.
+
+Restart skips its startup phase, logs a warning, and answers `partial_state` for
+`startupResult` when the stop phase timed out, left cleanup incomplete, or ended with
+components still running - a `haltOnStall` break, or a stop that failed and left its
+component up. Starting on top of those would only be refused, and would report the
+components the stop phase never restarted as started.
 
 **Components included in startup.** The startup phase builds an initial dependency-ordered
 list before calling components' `start()` methods. After each batch, it checks for
@@ -1201,7 +1214,10 @@ stop from either notification still emits its normal stopped event and changes s
 but does not reopen startup rollback. The startup result remains successful and its
 `startedComponents` snapshot excludes components no longer running after the callbacks.
 The completion event describes the completed pass; use component events/status for
-subsequent availability changes.
+subsequent availability changes. A shutdown begun from either notification is the
+exception: `getSystemState()` already answers `shutting-down`, so the result reports
+`code: 'shutdown_in_progress'` (reason `Shutdown triggered as startup completed`)
+rather than success, while the `lifecycle-manager:started` event stands.
 That completion boundary comes after failure reconciliation. Registrations made
 while a failed pass is being reconciled cannot escape its rollback by starting
 independently. If reconciliation succeeds, its deferred registrations run in
@@ -1357,7 +1373,9 @@ checked again before invocation. A provider getter that starts teardown, removes
 or replaces its component cannot cause the captured provider to run; the
 `value-requested` event still receives its `value-returned` counterpart.
 
-Message, health, and value result code `stopped` means unavailable and not stalled. A stalled component answers `stalled` whenever it is refused, including while a `retryStalled` force retry has it in `force-stopping`. The label follows the stall, not availability, so messages, values, broadcasts, and health checks agree. `stopped` does not identify the exact lifecycle state. Use `getComponentStatus(name).state` to distinguish registered, starting, failed, and stopped components. `includeStopped` permits handlers on inactive components, but never during active startup, a timed-out startup, or teardown.
+Message, health, and value result code `stopped` means unavailable and not stalled. A stalled component answers `stalled` whenever it is refused, including while a `retryStalled` force retry has it in `force-stopping`. The label follows the stall, not availability, so messages, values, broadcasts, and health checks agree. `stopped` does not identify the exact lifecycle state. Use `getComponentStatus(name).state` to distinguish registered, starting, failed, and stopped components. `includeStopped` permits handlers on inactive components, but never during active startup, a timed-out startup, or teardown. A component whose timed-out start completed late and is being cleaned up is marked running only so it can be stopped: messages, values, health checks, and signal broadcasts treat it as unavailable (`stopped`, and no signal row), even with `includeStopped`.
+
+A handler or `healthCheck` property getter that stops or unregisters its own component answers with that refusal - `stopped` or `not_found` - rather than `no_handler`, a healthy result, or `operation_crashed`: the getter ran, but the component it was read from is no longer available.
 
 #### `sendMessageToComponent(componentName, payload, options?)`
 
@@ -1461,8 +1479,8 @@ if (result.sent) {
 #### `broadcastMessage(payload, options?)`
 
 Broadcast a message to multiple components.
-By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`, or `code: 'stalled'` for a stalled component (such as one in a `retryStalled` force retry). A target unregistered mid-broadcast also returns `stopped`.
-A non-empty `componentNames` array limits the targets; `null`, omitted, or empty arrays use all eligible components. Stopped/stalled explicit targets are reported but not sent unless explicitly included. Non-array filters refuse the whole broadcast before delivery and return `[]`, logging the `TypeError` as a warning, as an invalid broadcast `timeout` is, rather than reporting it on the global error channel.
+By default, only running components receive messages, so use `includeStopped`/`includeStalled` to override. During bulk shutdown, components still running can receive messages until their own teardown begins. Messages remain blocked during `starting`, `starting-timed-out`, `stopping`, and `force-stopping`, even with these overrides or after the bulk shutdown timeout. Messages refused during teardown return `code: 'stopped'` and `error: null`, or `code: 'stalled'` for a stalled component (such as one in a `retryStalled` force retry). A target unregistered mid-broadcast also returns `stopped`, as does one replaced by another component under the same name mid-broadcast: the replacement is not sent the message.
+A non-empty `componentNames` array limits the targets; `null`, omitted, or empty arrays use all eligible components. Stopped/stalled explicit targets are reported but not sent unless explicitly included. Non-array filters - and an array whose `length` is not a whole number from 0 to 100,000 - refuse the whole broadcast before delivery and return `[]`, logging the `TypeError` as a warning, as an invalid broadcast `timeout` is, rather than reporting it on the global error channel.
 
 An invalid shared timeout also refuses the whole broadcast before delivery, returning `[]` with a warning; no recipient row is ever `invalid_options`. The array alone cannot distinguish these refusals from no recipients; use the diagnostics for that distinction.
 
@@ -2372,6 +2390,7 @@ interface DependencyValidationResult {
   }>;
   circularCycles: string[][];
   unreadableDependencies: Array<{ componentName: string; error: Error }>; // getDependencies() threw or returned a non-array or non-string entry (a throwing isOptional() is read as required, not listed)
+  cycleCheckError?: Error; // Set only if cycle detection itself failed unexpectedly; valid is then false
   summary: {
     totalMissingDependencies: number; // Total number of missing dependencies across all components
     requiredMissingDependencies: number; // Missing dependencies on required components (blocks startup)
@@ -2729,10 +2748,10 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 **Component Lifecycle:**
 
 - `component:starting` - Component start initiated
-- `component:started` - Component started successfully
+- `component:started` - Component started successfully. Also emitted for a `start()` that finishes after a shutdown began, immediately followed by that component's stop (its `startComponent()` result is still `shutdown_in_progress`)
 - `component:start-failed` - Component start failed
 - `component:shutdown-warning` - Component selected for a shutdown warning
-- `component:shutdown-warning-completed` - The invoked warning hook completed
+- `component:shutdown-warning-completed` - The invoked warning hook completed. Not emitted for a component already reported by `component:shutdown-warning-timeout`: a hook that settles after the warning phase timed out does not also report completion
 - `component:shutdown-warning-skipped` - A selected warning hook was not invoked because its registration or state changed; includes `name`, `reason` (`component_not_found`, `component_changed`, or `component_not_available`), and the name's current `state` when one is registered
 - `component:stopping` - Component stop initiated
 - `component:stopped` - Component is now stopped. Emitted after normal manager-driven stop flows, after late stall resolution, and after `reportUnexpectedStop()` transitions a running component into the stopped state
@@ -2876,7 +2895,7 @@ Every async method answers with a result object, including when something goes w
 | `triggerReload()`, `triggerInfo()`, `triggerDebug()`                     | `code: 'operation_crashed'` with `error`                              |
 | `broadcastMessage()`                                                     | an empty array                                                        |
 
-Invalid timeout values, and a non-array `broadcastMessage()` `componentNames`, are
+Invalid timeout values, and a non-array (or invalid-length) `broadcastMessage()` `componentNames`, are
 expected refusals (`invalid_options`) and do not use the global callback-error channel;
 inspect their `error` for the named option. The array-only `broadcastMessage()` result
 has no aggregate error field, so its refusal is logged as a warning instead. The table

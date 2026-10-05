@@ -615,3 +615,168 @@ test('an exit-called listener during a repeat exit is judged against the schedul
     exit.mockRestore();
   }
 });
+
+test('a failure exit beforeExit waits out behind a pending success exit is reported', async () => {
+  // SIGTERM's `exit(0)` is still stopping components when one fails and logs
+  // `exitCode: 1`; `LifecycleManager` answers 'wait' for it. Nothing had scheduled when
+  // the failure arrived, so the check in `exit()` never saw an owner, and the process
+  // exited 0 with nothing on stderr.
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({
+      sinks: [],
+      callProcessExit: true,
+      beforeExitCallback: async (_code, isFirstExit) => {
+        if (!isFirstExit) {
+          return { action: 'wait' };
+        }
+        // The leading exit's shutdown, during which a component fails.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        logger.error('component failed to stop', { exitCode: 1 });
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return { action: 'proceed' };
+      },
+    });
+    logger.exit(0);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    // The owning exit keeps its code, as documented, but the failure is not silent.
+    expect(exit.mock.calls).toEqual([[0]]);
+    expect(output).toHaveBeenCalledTimes(1);
+    expect(String(output.mock.calls[0]?.[0])).toContain(
+      'Logger exit(1) ignored: an exit with code 0 is already in progress',
+    );
+  } finally {
+    output.mockRestore();
+    exit.mockRestore();
+  }
+});
+
+test('a failure exit beforeExit waits out after a success exit scheduled is reported', async () => {
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({
+      sinks: [],
+      callProcessExit: true,
+      beforeExitCallback: async (code) => {
+        if (code === 0) {
+          return { action: 'proceed' };
+        }
+        // Answers only once the success exit has scheduled.
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return { action: 'wait' };
+      },
+    });
+    logger.exit(0);
+    logger.exit(1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(exit.mock.calls).toEqual([[0]]);
+    expect(output.mock.calls.flat().join('\n')).toContain(
+      'Logger exit(1) ignored',
+    );
+  } finally {
+    output.mockRestore();
+    exit.mockRestore();
+  }
+});
+
+test('a success exit beforeExit waits out is not reported, nor is a waited failure that owns the process', async () => {
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({
+      sinks: [],
+      callProcessExit: true,
+      beforeExitCallback: async (_code, isFirstExit) => {
+        if (!isFirstExit) {
+          return { action: 'wait' };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        return { action: 'proceed' };
+      },
+    });
+    logger.exit(2);
+    logger.exit(0);
+    logger.exit(1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    // The process fails either way, so nothing a supervisor reads was dropped.
+    expect(exit.mock.calls).toEqual([[2]]);
+    expect(output).not.toHaveBeenCalled();
+  } finally {
+    output.mockRestore();
+    exit.mockRestore();
+  }
+});
+
+test('a simulated exit does not carry a waited failure into a later exit', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  const actualExit = Object.getOwnPropertyDescriptor(process, 'exit');
+  try {
+    let shouldWait = true;
+    const logger = new Logger({
+      sinks: [],
+      callProcessExit: true,
+      beforeExitCallback: () =>
+        shouldWait ? { action: 'wait' } : { action: 'proceed' },
+    });
+    // Simulated: no callable process.exit, so the waited failure must not linger.
+    (process as { exit?: unknown }).exit = undefined;
+    logger.exit(1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    shouldWait = false;
+    logger.exit(0);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(logger.exitCode).toBe(0);
+
+    const calls: number[] = [];
+    process.exit = ((code?: number) => {
+      calls.push(code ?? 0);
+    }) as typeof process.exit;
+    logger.exit(0);
+    await logger.close();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(calls).toEqual([0]);
+    expect(output).not.toHaveBeenCalled();
+  } finally {
+    if (actualExit !== undefined) {
+      Object.defineProperty(process, 'exit', actualExit);
+    }
+    output.mockRestore();
+  }
+});
+
+test('an invalid exit absorbed by a scheduled exit does not claim to exit with 1', async () => {
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = new Logger({ sinks: [], callProcessExit: true });
+    logger.exit(0);
+    logger.exit(300);
+    await logger.close();
+    await Promise.resolve();
+
+    const lines = output.mock.calls.map((call) => String(call[0]));
+    // Said "exiting with code 1" while the process went on to exit 0.
+    expect(lines).toEqual([
+      'Logger exit code 300 is invalid; treating it as code 1',
+      'Logger exit(300) ignored: an exit with code 0 is already in progress',
+    ]);
+    expect(exit.mock.calls).toEqual([[0]]);
+  } finally {
+    output.mockRestore();
+    exit.mockRestore();
+  }
+});

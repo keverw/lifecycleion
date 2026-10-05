@@ -257,6 +257,10 @@ export class Logger extends EventEmitter {
   private _exitRequested = false;
   private _didReportInvalidExitCode = false;
   private _didReportIgnoredFailureExit = false;
+  // The first failure exit `beforeExit` answered 'wait' for before any exit scheduled.
+  // Reported by the exit that schedules, should it own the process under code 0.
+  private _waitedFailureExit:
+    { requestedCode: number; code: number } | undefined;
   // The code of the exit whose `exit-called` listeners are running; undefined otherwise.
   private _exitCalledCode: number | undefined;
   private _hasScheduledProcessExit = false;
@@ -330,37 +334,44 @@ export class Logger extends EventEmitter {
     if (this._isEmittingExitProcess && !this._hasScheduledProcessExit) {
       return;
     }
-    // Likewise an `exit-called` listener that exits again: its nested emit reaches the
-    // same listener, so an unconditional one recursed until the stack overflowed. The
-    // outer exit is already in flight under its own code and owns this request - unless
-    // an earlier real exit already scheduled, whose code is the one the process uses.
+    // Keep real exits in the portable 0–255 range; larger codes can wrap to
+    // success at the OS boundary. Decide before closing sinks so a bad caller
+    // value cannot strand a live process with a closed logger. Simulated exits
+    // keep the requested code for inspection.
+    //
+    // The report describes the request, not the process's outcome: another exit may
+    // already own the process, in which case this one is ignored (and says so below)
+    // rather than exiting with 1. Normalized before any early return, so every path
+    // below - an absorbed request included - judges the code the request stands for.
+    const requestedCode = code;
+    if (this.isInvalidExitCode(code)) {
+      if (!this._didReportInvalidExitCode) {
+        this._didReportInvalidExitCode = true;
+        reportToConsole(
+          `Logger exit code ${String(code)} is invalid; treating it as code 1`,
+        );
+      }
+      code = 1;
+    }
+    // An `exit-called` listener that exits again is absorbed too: its nested emit
+    // reaches the same listener, so an unconditional one recursed until the stack
+    // overflowed. The outer exit is already in flight under its own code and owns this
+    // request - unless an earlier real exit already scheduled, whose code is the one the
+    // process uses.
     if (this._exitCalledCode !== undefined) {
       this.reportIgnoredFailureExit(
+        requestedCode,
         code,
         this._hasScheduledProcessExit ? this._exitCode : this._exitCalledCode,
       );
       return;
     }
     const isFirstExit = !this._exitRequested;
-    // Keep real exits in the portable 0–255 range; larger codes can wrap to
-    // success at the OS boundary. Decide before closing sinks so a bad caller
-    // value cannot strand a live process with a closed logger. Simulated exits
-    // keep the requested code for inspection.
-    const isInvalidExitCode = this.isInvalidExitCode(code);
-    if (isInvalidExitCode && !this._didReportInvalidExitCode) {
-      this._didReportInvalidExitCode = true;
-      reportToConsole(
-        `Logger exit code ${String(code)} is invalid; exiting with code 1`,
-      );
-    }
     // Once a real exit is scheduled it owns the process's code, and a later exit is not
     // replayed (see `processExit`). Silently dropping a failure code there would let the
     // process report success for a run that asked to fail.
     if (this._hasScheduledProcessExit) {
-      this.reportIgnoredFailureExit(code, this._exitCode);
-    }
-    if (isInvalidExitCode) {
-      code = 1;
+      this.reportIgnoredFailureExit(requestedCode, code, this._exitCode);
     }
 
     this._exitRequested = true;
@@ -369,15 +380,9 @@ export class Logger extends EventEmitter {
       this._isPendingExit = true;
     }
 
-    // A sink close hook that calls exit() runs these listeners and the synchronous part
-    // of `beforeExit` from inside its own close. Neither is that hook, so their close()
-    // joins the shared completion rather than being refused as the hook's re-entry.
-    const activeSinkClose = this._activeSinkClose;
-    this._activeSinkClose = undefined;
-    let beforeExit:
-      | ReturnType<typeof safeHandleCallbackAndWait<BeforeExitResult>>
-      | undefined;
-    try {
+    // Neither these listeners nor `beforeExit` is the sink close hook that may have
+    // called this; see `withoutActiveSinkClose`.
+    const beforeExit = this.withoutActiveSinkClose(() => {
       // Only the emit is guarded, not `beforeExit`: that callback is told `isFirstExit`
       // and decides repeats itself (`LifecycleManager` relies on seeing them).
       this._exitCalledCode = code;
@@ -387,17 +392,15 @@ export class Logger extends EventEmitter {
         this._exitCalledCode = undefined;
       }
 
-      if (this.beforeExitCallback) {
-        beforeExit = safeHandleCallbackAndWait<BeforeExitResult>(
-          'beforeExit',
-          this.beforeExitCallback,
-          code,
-          isFirstExit,
-        );
-      }
-    } finally {
-      this._activeSinkClose = activeSinkClose;
-    }
+      return this.beforeExitCallback
+        ? safeHandleCallbackAndWait<BeforeExitResult>(
+            'beforeExit',
+            this.beforeExitCallback,
+            code,
+            isFirstExit,
+          )
+        : undefined;
+    });
 
     if (beforeExit) {
       let hasStartedProcessExit = false;
@@ -406,6 +409,18 @@ export class Logger extends EventEmitter {
         if (result.success && result.value?.action === 'wait') {
           // Shutdown is already in progress, don't proceed with exit
           // The ongoing shutdown will handle the exit when it completes
+          //
+          // That shutdown exits under its own code, so this request is dropped. The check
+          // at the top of `exit()` only sees an exit that has already scheduled, and the
+          // ordinary case has not: SIGTERM's `exit(0)` is still stopping components when
+          // one fails and logs `exitCode: 1`, `LifecycleManager` answers 'wait', and the
+          // process exited 0 with nothing on stderr. Report it now if an exit owns the
+          // process, otherwise leave it for the exit that schedules to report.
+          if (this._hasScheduledProcessExit) {
+            this.reportIgnoredFailureExit(requestedCode, code, this._exitCode);
+          } else if (code !== 0 && this._waitedFailureExit === undefined) {
+            this._waitedFailureExit = { requestedCode, code };
+          }
           return;
         }
 
@@ -1391,8 +1406,10 @@ export class Logger extends EventEmitter {
       // this field could honestly name.
       redactedKeys: didRequestRedaction ? inertKeys : undefined,
       error: options?.error,
-      // The code the exit below will actually use, so a sink never records `300` for a
-      // process that exits 1. `exit()` gets the requested value and reports the fix.
+      // The code this entry's exit request stands for, normalized as `exit()` normalizes
+      // it, so a sink never records `300` for a request that means 1. `exit()` gets the
+      // requested value and reports the fix. A request, not an outcome: when another
+      // exit already owns the process, that exit's code is the one the process uses.
       exitCode: isNumber(exitCode)
         ? this.isInvalidExitCode(exitCode)
           ? 1
@@ -1600,28 +1617,6 @@ export class Logger extends EventEmitter {
       const isPending = new Array<boolean>(sinksToClose.length).fill(true);
       let didReachDeadline = false;
       let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-      // One budget for the whole close, started before invoking any sink. Zero still
-      // lets this turn's promise reactions run before the timer's next task. Keep
-      // this timer referenced: explicit cleanup must reach completion or report its
-      // deadline even if a pending sink promise is the only other work remaining.
-      // Unlike raceDeadline(pending, ...), this timer must be armed before creating
-      // pending work, since constructing closeOperations synchronously invokes hooks.
-      const deadline = new promiseConstructorIntrinsic<
-        PromiseResultBox<number[]>
-      >((resolve) => {
-        timeoutHandle = setTimeout(() => {
-          didReachDeadline = true;
-          const expired: number[] = [];
-          // eslint-disable-next-line unicorn/no-for-loop
-          for (let index = 0; index < isPending.length; index++) {
-            if (isPending[index]) {
-              expired.push(index);
-            }
-          }
-          resolve(boxPromiseValue(expired));
-        }, this.closeTimeoutMS);
-      });
-
       const closeSink = async (index: number): Promise<void> => {
         const sink = sinksToClose[index];
         try {
@@ -1690,6 +1685,34 @@ export class Logger extends EventEmitter {
         for (let index = 0; index < sinksToClose.length; index++) {
           closeOperations.push(closeSink(index));
         }
+
+        // One budget for the whole close, started once every hook has been invoked
+        // rather than before the first. The hooks run one after another, synchronously
+        // up to their first await, and a timer cannot fire while they do: armed before
+        // them, synchronous time spent in an earlier hook was charged to every later
+        // sink, so a slow first hook could leave a later sink's asynchronous cleanup no
+        // time at all and report it as timed out though it was given none. Synchronous
+        // work is unbounded by any timer either way, so this costs the bound nothing.
+        //
+        // Zero still lets this turn's promise reactions run before the timer's next
+        // task. Keep this timer referenced: explicit cleanup must reach completion or
+        // report its deadline even if a pending sink promise is the only other work
+        // remaining.
+        const deadline = new promiseConstructorIntrinsic<
+          PromiseResultBox<number[]>
+        >((resolve) => {
+          timeoutHandle = setTimeout(() => {
+            didReachDeadline = true;
+            const expired: number[] = [];
+            // eslint-disable-next-line unicorn/no-for-loop
+            for (let index = 0; index < isPending.length; index++) {
+              if (isPending[index]) {
+                expired.push(index);
+              }
+            }
+            resolve(boxPromiseValue(expired));
+          }, this.closeTimeoutMS);
+        });
 
         // Both helpers observe owned native promises through the captured method;
         // native combinators would consult the inputs' replaceable then properties.
@@ -1895,21 +1918,27 @@ export class Logger extends EventEmitter {
   }
 
   /**
-   * Report an exit request dropped because an exit under code 0 already owns the
-   * process. Only that pairing is reported: any other dropped code changes nothing a
-   * supervisor reads (the process still fails, or both requests succeed), and repeat
-   * exits are ordinary - a second signal, a shutdown that logs its own exit line. Once
-   * per logger, like the invalid-code report, so a loop of failing exits cannot flood
-   * the console the logger falls back to while it closes its sinks.
+   * Report an exit request dropped because an exit under code 0 owns the process. Only
+   * that pairing is reported: any other dropped code changes nothing a supervisor reads
+   * (the process still fails, or both requests succeed), and repeat exits are ordinary -
+   * a second signal, a shutdown that logs its own exit line. Once per logger, like the
+   * invalid-code report, so a loop of failing exits cannot flood the console the logger
+   * falls back to while it closes its sinks.
+   *
+   * @param requested The code as the caller wrote it, which is what the line names.
+   * @param code The code that request stands for once normalized, which is what decides
+   *             whether it asked to fail: `exit(300)` is a failure, `exit(0)` is not.
+   * @param owningCode The code of the exit that owns the process.
    */
   private reportIgnoredFailureExit(
     requested: number,
+    code: number,
     owningCode: number,
   ): void {
     if (
       !this.endsProcessOnExit ||
       owningCode !== 0 ||
-      requested === 0 ||
+      code === 0 ||
       this._didReportIgnoredFailureExit
     ) {
       return;
@@ -1921,6 +1950,24 @@ export class Logger extends EventEmitter {
   }
 
   /**
+   * Run `run` with no sink close marked active, restoring the mark afterwards.
+   *
+   * A sink close hook that calls `exit()` runs `exit-called` and `exit-process`
+   * listeners and the synchronous part of `beforeExit` from inside its own close. None of
+   * those is that hook, so a `close()` they make joins the shared completion rather than
+   * being refused as the hook's own re-entry.
+   */
+  private withoutActiveSinkClose<T>(run: () => T): T {
+    const activeSinkClose = this._activeSinkClose;
+    this._activeSinkClose = undefined;
+    try {
+      return run();
+    } finally {
+      this._activeSinkClose = activeSinkClose;
+    }
+  }
+
+  /**
    * Process the exit
    */
   private processExit(exitCode: number): void {
@@ -1928,8 +1975,9 @@ export class Logger extends EventEmitter {
     // report a code the process never exits with and call process.exit() again.
     if (this._hasScheduledProcessExit) {
       // Also reached by an exit whose `beforeExit` was still running when another one
-      // scheduled first, so `exit()` had nothing to compare against yet.
-      this.reportIgnoredFailureExit(exitCode, this._exitCode);
+      // scheduled first, so `exit()` had nothing to compare against yet. The code is
+      // already normalized here, which is the one the request stood for.
+      this.reportIgnoredFailureExit(exitCode, exitCode, this._exitCode);
       return;
     }
     // A simulated exit schedules nothing, so an `exit-process` listener that exits again
@@ -1942,18 +1990,29 @@ export class Logger extends EventEmitter {
     this._exitCode = exitCode;
     this._isPendingExit = false;
 
-    // A sink close hook that calls exit() emits this from inside its own close. The
-    // listeners are not that hook, so their close() joins the shared completion rather
-    // than being refused as the hook's own re-entry.
-    const activeSinkClose = this._activeSinkClose;
-    this._activeSinkClose = undefined;
-    this._isEmittingExitProcess = true;
-    try {
-      this.emit('logger', { eventType: 'exit-process', code: exitCode });
-    } finally {
-      this._isEmittingExitProcess = false;
-      this._activeSinkClose = activeSinkClose;
+    // A failure exit `beforeExit` waited out while this one was still pending: this exit
+    // is the shutdown it waited for, and it now owns the process. Taken either way, so a
+    // simulated exit - which leaves the process running and may exit again - does not
+    // carry it into an unrelated later exit.
+    const waitedFailureExit = this._waitedFailureExit;
+    this._waitedFailureExit = undefined;
+    if (waitedFailureExit !== undefined) {
+      this.reportIgnoredFailureExit(
+        waitedFailureExit.requestedCode,
+        waitedFailureExit.code,
+        exitCode,
+      );
     }
+
+    // Nor are these listeners; see `withoutActiveSinkClose`.
+    this.withoutActiveSinkClose(() => {
+      this._isEmittingExitProcess = true;
+      try {
+        this.emit('logger', { eventType: 'exit-process', code: exitCode });
+      } finally {
+        this._isEmittingExitProcess = false;
+      }
+    });
 
     // An exit request made by a sink hook must join the already-published cleanup,
     // not call the public self-await guard. Its exit continuation does not become a

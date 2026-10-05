@@ -539,7 +539,7 @@ describe('LifecycleManager - review regressions', () => {
     }
 
     expect(result.success).toBe(false);
-    expect(result.reason).toBe('Stalled: api; Failed to stop: db');
+    expect(result.reason).toBe('Stalled: api; Not attempted: db');
   });
 
   test('a restart whose stop phase timed out does not report a startup that never ran', async () => {

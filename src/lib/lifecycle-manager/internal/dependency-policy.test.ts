@@ -118,3 +118,18 @@ test('a thrown dependency getter preserves the original failure', () => {
   });
   expect(tryReadDependencies(component)).toEqual({ error: failure });
 });
+
+test('cycle search handles a chain deeper than the call stack', () => {
+  const depth = 200_000;
+  const graph = new Map<string, Set<string>>();
+  for (let index = 0; index < depth; index++) {
+    graph.set(`c${index}`, new Set(index + 1 < depth ? [`c${index + 1}`] : []));
+  }
+
+  expect(findAllCircularCycles(graph)).toEqual([]);
+  expect(findDependencyCycle(graph)).toEqual([]);
+
+  graph.get(`c${depth - 1}`)?.add('c0');
+  expect(findDependencyCycle(graph)).toHaveLength(depth);
+  expect(findAllCircularCycles(graph)).toHaveLength(1);
+});

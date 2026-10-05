@@ -190,9 +190,29 @@ describe('maskDomain', () => {
     expect(maskDomain('com.')).toBe(`${maskDomain('com')}.`);
     expect(maskDomain('..', '*', 50)).toBe('..');
   });
+
+  test('masks a single label after a run of leading dots as a value without a dot', () => {
+    expect(maskDomain('.internal')).toBe(`.${maskDomain('internal')}`);
+    expect(maskDomain('..secret')).toBe(`..${maskDomain('secret')}`);
+    expect(maskDomain('.localhost.', '*', 50)).toBe('.lo****ost.');
+  });
+
+  test('keeps the TLD readable past a run of leading dots', () => {
+    expect(maskDomain('.example.com')).toBe(`.${maskDomain('example.com')}`);
+    expect(maskDomain('..mail.example.co.uk', '*', 50)).toBe(
+      '..m**l.ex***le.*o.uk',
+    );
+  });
 });
 
 describe('maskEmail', () => {
+  test('masks a single-label domain behind a leading dot', () => {
+    expect(maskEmail('bob@.corp')).toBe(
+      `${maskString('bob', '*', 50)}@.${maskDomain('corp')}`,
+    );
+    expect(maskEmail('bob@.corp')).not.toContain('corp');
+  });
+
   test('matches the datamask package on its own README examples', () => {
     expect(maskEmail('test@example.com')).toBe('t**t@e****le.com');
     expect(maskEmail('test@example.com', '#', 45, 80)).toBe('t#st@e#####e.com');

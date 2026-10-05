@@ -319,3 +319,44 @@ test('an unregistered target is skipped as not found without a state key; a repl
     { name: 'swapped', reason: 'component_changed', state: 'running' },
   ]);
 });
+
+test('a warning hook that resolves after the phase timed out does not also report completion', async () => {
+  const { context, add, events } = fixture();
+  spyOn(context.logger, 'warn').mockImplementation(() => {});
+  spyOn(context.logger, 'entity').mockReturnValue(context.logger);
+  let resolve!: () => void;
+  add('complete', () => Promise.resolve());
+  add(
+    'pending',
+    () =>
+      new Promise<void>((done) => {
+        resolve = done;
+      }),
+  );
+  await runShutdownWarningPhase(context, ['complete', 'pending'], 10);
+  resolve();
+  await flushWarnings();
+  // Each component has exactly one outcome: `complete` completed, `pending` timed out.
+  expect(
+    events
+      .filter(({ name }) =>
+        [
+          'component:shutdown-warning-completed',
+          'component:shutdown-warning-timeout',
+        ].includes(name),
+      )
+      .map(({ name, payload }) => ({ name, payload })),
+  ).toEqual([
+    {
+      name: 'component:shutdown-warning-completed',
+      payload: { name: 'complete' },
+    },
+    {
+      name: 'component:shutdown-warning-timeout',
+      payload: { name: 'pending', timeoutMS: 10 },
+    },
+  ]);
+  expect(events.at(-1)?.name).toBe(
+    'lifecycle-manager:shutdown-warning-timeout',
+  );
+});

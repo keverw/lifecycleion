@@ -136,33 +136,52 @@ export class BaseHTTPClient {
     config: HTTPClientConfig = {},
     internal: InternalClientState = {},
   ) {
+    // Read every documented field exactly once, then validate and keep that snapshot.
+    // A getter can answer differently on each read, so validating one read and storing
+    // another let a value the checks never saw through - e.g. followRedirects: true on
+    // the XHR adapter. Keep this list exhaustive as options grow.
+    const snapshot = {
+      adapter: config.adapter,
+      baseURL: config.baseURL,
+      defaultHeaders: config.defaultHeaders,
+      timeout: config.timeout,
+      cookieJar: config.cookieJar,
+      retryPolicy: config.retryPolicy,
+      retryNonIdempotentMethods: config.retryNonIdempotentMethods,
+      includeRequestID: config.includeRequestID,
+      includeAttemptHeader: config.includeAttemptHeader,
+      userAgent: config.userAgent,
+      followRedirects: config.followRedirects,
+      maxRedirects: config.maxRedirects,
+    } satisfies Record<keyof HTTPClientConfig, unknown>;
+
     this._clientID = generateID('ulid');
-    this._adapter = config.adapter ?? new FetchAdapter();
+    this._adapter = snapshot.adapter ?? new FetchAdapter();
     this._isBrowserRuntime = isBrowserEnvironment();
     assertSupportedAdapterRuntimeAndConfig(
-      config,
+      snapshot,
       this._adapter.getType(),
       this._isBrowserRuntime,
     );
     this._tracker = internal.tracker ?? new RequestTracker();
     this._parentClient = internal.parentClient ?? null;
-    const configuredRetryPolicy = config.retryPolicy;
+    const configuredRetryPolicy = snapshot.retryPolicy;
 
     this._config = {
       adapter: this._adapter,
-      baseURL: config.baseURL,
-      defaultHeaders: config.defaultHeaders ?? {},
-      timeout: resolveRequestTimeoutMS(config.timeout),
-      cookieJar: config.cookieJar,
+      baseURL: snapshot.baseURL,
+      defaultHeaders: snapshot.defaultHeaders ?? {},
+      timeout: resolveRequestTimeoutMS(snapshot.timeout),
+      cookieJar: snapshot.cookieJar,
       retryPolicy: isNullish(configuredRetryPolicy)
         ? undefined
         : snapshotRetryPolicyOptions(configuredRetryPolicy),
-      retryNonIdempotentMethods: config.retryNonIdempotentMethods ?? false,
-      includeRequestID: config.includeRequestID ?? false,
-      includeAttemptHeader: config.includeAttemptHeader ?? false,
-      userAgent: config.userAgent,
-      followRedirects: config.followRedirects ?? false,
-      maxRedirects: config.maxRedirects ?? DEFAULT_MAX_REDIRECTS,
+      retryNonIdempotentMethods: snapshot.retryNonIdempotentMethods ?? false,
+      includeRequestID: snapshot.includeRequestID ?? false,
+      includeAttemptHeader: snapshot.includeAttemptHeader ?? false,
+      userAgent: snapshot.userAgent,
+      followRedirects: snapshot.followRedirects ?? false,
+      maxRedirects: snapshot.maxRedirects ?? DEFAULT_MAX_REDIRECTS,
     };
 
     this._requestInterceptors = new RequestInterceptorManager();

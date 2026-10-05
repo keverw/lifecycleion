@@ -88,6 +88,12 @@ export async function runShutdownWarningPhase(
   context.logger.info('Shutdown warning phase');
   context.lifecycleEvents.lifecycleManagerShutdownWarning(timeoutMS);
 
+  // Components already announced as timed out. Their hooks keep running, but each
+  // component gets one outcome: a hook that resolves after its timeout was announced
+  // does not follow `component:shutdown-warning-timeout` (and the phase's own timeout)
+  // with a `completed` that contradicts them.
+  const timedOutNames = new Set<string>();
+
   // Both delivery modes share the invocation boundary. Returning an explicit
   // outcome lets the timed mode track rejections without starting a second
   // reporting chain; the detached mode can safely ignore the settled promise.
@@ -127,7 +133,9 @@ export async function runShutdownWarningPhase(
         await awaitBoxedPromise(
           adoptPromise(applyIntrinsic(hook, component, [])),
         );
-        context.lifecycleEvents.componentShutdownWarningCompleted(name);
+        if (!timedOutNames.has(name)) {
+          context.lifecycleEvents.componentShutdownWarningCompleted(name);
+        }
         return 'resolved' as const;
       } catch (error) {
         try {
@@ -184,6 +192,7 @@ export async function runShutdownWarningPhase(
     );
 
     for (const { name } of pendingComponents) {
+      timedOutNames.add(name);
       context.logger.entity(name).warn('Shutdown warning phase timed out', {
         params: { timeoutMS },
       });

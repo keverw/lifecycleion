@@ -118,7 +118,7 @@ describe('LifecycleManager - BaseComponent', () => {
     startup.resolve();
     await stopped.promise;
     expect((await requireDefined(restart, 'restart refusal')).code).toBe(
-      'component_already_starting',
+      'component_already_stopping',
     );
     expect((await requireDefined(unregister, 'unregister refusal')).code).toBe(
       'bulk_operation_in_progress',
@@ -4810,8 +4810,10 @@ describe('LifecycleManager - Bulk Operations', () => {
       expect(startResult.code).toBe('error');
       expect(stopResult.success).toBe(false);
       expect(lifecycle.getStalledComponentCount()).toBe(0);
+      // The stalled stop finished while the forced start ran, so the component is
+      // stopped - not `registered`, which would say it had never run.
       expect(lifecycle.getComponentStatus('failing-restart')?.state).toBe(
-        'registered',
+        'stopped',
       );
     }, 4000);
 

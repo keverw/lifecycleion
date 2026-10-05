@@ -11,6 +11,8 @@ details, not exports of the package's lifecycle-manager entry.
 | `component-messaging.ts`      | Message delivery, message broadcasts, and synchronous value access.                                     |
 | `component-inspection.ts`     | Individual and aggregate health checks, plus reload/info/debug broadcasts.                              |
 | `component-access-context.ts` | The readonly live view and dispatch callbacks used by those operations.                                 |
+| `component-dispatch.ts`       | The shared hook read-then-recheck and announce-recheck-invoke-under-deadline steps of those operations. |
+| `bounded-array-copy.ts`       | The bounded by-index copy of caller arrays (dependency lists, broadcast `componentNames`).              |
 | `dependency-policy.ts`        | Bounded dependency reads, stable dependency ordering, and cycle discovery.                              |
 | `operation-policy.ts`         | Lifecycle-specific timeout error provenance, async failure containment, and common result construction. |
 | `registration-policy.ts`      | Registration progress reports and placement predicates.                                                 |
@@ -39,7 +41,11 @@ The stateful helpers have deliberately smaller scopes:
   must not bypass those checks or freeze an overridable method.
 - Hook receivers, property-read order, notifications, and failure channels are part
   of the behavior. Keep these in their existing order when moving code. In particular,
-  signal dispatch rechecks availability after its started event.
+  every hook dispatch rechecks availability after reading its hook and again after its
+  started event; `component-dispatch.ts` holds both steps so they cannot drift apart.
+- Availability includes a late start's cleanup, which marks its component running only
+  to stop it. The manager exposes it through the `isLateStartCleanupPending`
+  accessor.
 - Dependency ordering snapshots names before acquiring dependency lists. The manager
   supplies candidate and generation-aware reads; the graph helper does not own a
   second dependency cache or registration registry.

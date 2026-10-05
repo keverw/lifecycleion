@@ -594,6 +594,57 @@ describe('NodeAdapter streamResponse factory failures', () => {
     }
   });
 
+  test('a factory return whose then cannot be read fails with the original error', async () => {
+    // Matches what `await` rejects with (and RetryRunner's handling of the same return):
+    // the getter's own error, not the internal wrapper describing it, so the caller can
+    // still identify the failure it raised.
+    const net = await import('node:net');
+
+    const server = net.createServer((socket) => {
+      socket.on('data', () => {
+        socket.end(
+          'HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 4\r\n\r\nbody',
+        );
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+    const failure = new Error('cannot read factory then');
+    let factoryCalls = 0;
+
+    try {
+      const client = new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL: `http://127.0.0.1:${port}`,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+      });
+
+      const builder = client.get('/unreadable-then').streamResponse(() => {
+        factoryCalls++;
+        return {
+          get then(): never {
+            throw failure;
+          },
+        } as unknown as Promise<null>;
+      });
+
+      const res = await builder.send();
+
+      expect(res.isFailed).toBe(true);
+      expect(builder.error?.code).toBe('stream_setup_error');
+      expect(builder.error?.cause).toBe(failure);
+      expect(factoryCalls).toBe(1);
+    } finally {
+      await new Promise<void>((done) => {
+        server.close(() => done());
+      });
+    }
+  });
+
   test('streamResponse on other adapters becomes request_setup_error', async () => {
     const adapter: HTTPAdapter = {
       getType: () => 'mock',

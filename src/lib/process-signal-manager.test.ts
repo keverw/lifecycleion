@@ -1945,10 +1945,11 @@ describe('ProcessSignalManager', () => {
       }
     });
 
-    test('a failed attach whose rollback re-enable fails reports it once, as a re-enable', async () => {
+    test('a failed attach whose rollback re-enable fails reports it once, as a re-enable', () => {
       // The same re-enable, reached from a failed attach's rollback. `attach()`'s catch
       // does not retry it - ownership went to the instance that attached - so the
-      // rollback's failure is the one reported, after the attach error reached its caller.
+      // rollback's failure is the one reported, before the attach error is thrown, as
+      // every raw-mode failure from a failed attach is.
       let replacement: ProcessSignalManager | undefined;
       const tty = mockRawTTY(
         () => {
@@ -1986,8 +1987,6 @@ describe('ProcessSignalManager', () => {
           onShutdownRequested: shutdownCallback,
         });
         expect(() => manager.attach()).toThrow('resume failed');
-        expect(reports).toEqual([]);
-        await Promise.resolve();
 
         expect(reports.map((report) => report.message)).toEqual([
           'Error in a callback ProcessSignalManager stdin raw mode re-enable',
@@ -2055,10 +2054,74 @@ describe('ProcessSignalManager', () => {
       }
     });
 
-    test('a failed attach whose raw-mode rollback also fails reports after the shared state is repaired', async () => {
+    test('a failed attach reports its raw-mode restore failure before throwing and its listener cleanup failures after', async () => {
+      // A caller that exits from its catch never drains a microtask, so the broken
+      // terminal is reported before the throw. Leaked listeners die with the process,
+      // so those reports still wait until the attach error has reached its caller.
+      const tty = mockRawTTY(() => {
+        throw new Error('tty refused');
+      });
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const mockedResume = process.stdin.resume;
+      // Fail the attach's own resume, after it enabled raw mode.
+      (process.stdin as any).resume = mock(() => {
+        if ((process.stdin as any).isRaw === true) {
+          throw new Error('resume failed');
+        }
+
+        return mockedResume.call(process.stdin);
+      });
+      const originalOff = process.off.bind(process);
+      const offSpy = spyOn(process, 'off').mockImplementation(((
+        event: string,
+        listener: (...args: unknown[]) => void,
+      ) => {
+        originalOff(event, listener);
+        throw new Error(`off ${event} failed`);
+      }) as typeof process.off);
+      const { reports, stop } = captureReports();
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        let reportsAtThrow: string[] = [];
+        try {
+          manager.attach();
+        } catch (error) {
+          reportsAtThrow = reports.map((report) => report.message);
+          expect((error as Error).message).toBe('resume failed');
+        }
+        offSpy.mockRestore();
+
+        expect(reportsAtThrow).toEqual([
+          'Error in a callback ProcessSignalManager stdin raw mode restore',
+        ]);
+        expect((reports[0]?.cause as Error).message).toBe('tty refused');
+
+        await Promise.resolve();
+
+        const later = reports.slice(1).map((report) => report.message);
+        expect(later.length).toBeGreaterThan(1);
+        expect(later[0]).toContain('ProcessSignalManager attach cleanup');
+        for (const name of later.slice(1)) {
+          expect(name).toContain('ProcessSignalManager listener cleanup');
+        }
+        expect(manager.isAttached).toBe(false);
+      } finally {
+        offSpy.mockRestore();
+        stop();
+        resetShared();
+        tty.restore();
+      }
+    });
+
+    test('a failed attach whose raw-mode rollback also fails reports before throwing, after the shared state is repaired', () => {
       // `setRawMode(true)` can throw after actually enabling raw mode, and the rollback's
-      // own `setRawMode(false)` can fail too. The report is deferred until the failed
-      // attach has reached its caller, and a listener that reads the shared state from
+      // own `setRawMode(false)` can fail too. The report is dispatched before the failed
+      // attach throws - a caller that exits from its catch must not lose the one report
+      // that its terminal is broken - and a listener that reads the shared state from
       // there must see it already repaired - an owner on record and the manager flag set
       // - rather than the half-way shape where nothing is attached and nothing can be
       // adopted.
@@ -2117,10 +2180,17 @@ describe('ProcessSignalManager', () => {
           onShutdownRequested: shutdownCallback,
         });
 
-        expect(() => failing.attach()).toThrow('enable threw late');
+        // `process.exit()` from the catch does not drain microtasks, so the report
+        // must already be out by the time the throw arrives.
+        let reportsAtThrow = -1;
+        try {
+          failing.attach();
+        } catch (error) {
+          reportsAtThrow = seenDuringReport.length;
+          expect((error as Error).message).toBe('enable threw late');
+        }
+        expect(reportsAtThrow).toBe(1);
         expect(failing.isAttached).toBe(false);
-        expect(seenDuringReport).toHaveLength(0);
-        await Promise.resolve();
 
         // One report, not two: the rollback inside `listenForKeyPresses` tries the
         // restore and fails, and `attach`'s own catch runs `restoreStdin`, which retries

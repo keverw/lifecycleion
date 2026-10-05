@@ -42,10 +42,13 @@ test.each([false, true])(
         expect(result.code).toBe('shutdown_in_progress');
       }
       // Either way the forced start retires the old stall and announces it first; the
-      // old stop finishing afterwards owns nothing and announces nothing.
+      // old stop finishing afterwards owns nothing and announces nothing. A start that
+      // finished after the shutdown began is announced as started, then stopped - an
+      // ordinary start followed by a stop, as the signal-attach rollback reports one.
       const expectedEvents = [
         'stalled-resolved:forced-start',
-        hasShutdownBegun ? 'stopped' : 'started',
+        'started',
+        ...(hasShutdownBegun ? ['stopped'] : []),
       ];
       expect(events).toEqual(expectedEvents);
       expect(manager.getComponentStatus('a')?.state).toBe(

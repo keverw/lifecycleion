@@ -1,7 +1,5 @@
 import type { ComponentAccessContext } from './component-access-context';
 import type { BaseComponent } from '../base-component';
-import { raceDeadline } from '../../internal/race-deadline';
-import { optionalValidatedTimerDelayMS } from '../../internal/timer-limits';
 import { reportCallbackError } from '../../safe-handle-callback';
 import type {
   HealthCheckResult,
@@ -10,12 +8,7 @@ import type {
   SignalBroadcastResult,
   ComponentSignalResult,
 } from '../types';
-import {
-  applyIntrinsic,
-  allPromises,
-  promiseResolveIntrinsic,
-} from '../../internal/intrinsics';
-import { adoptPromise } from '../../internal/adopt-promise';
+import { allPromises } from '../../internal/intrinsics';
 import { isObjectLike } from '../../internal/is-object-like';
 import { toError, describeError } from '../../to-error';
 import {
@@ -27,6 +20,10 @@ import {
   toOperationTimerDelayMS,
   settledFailureCode,
 } from './operation-policy';
+import {
+  dispatchAnnouncedHook,
+  readHookThenRecheck,
+} from './component-dispatch';
 
 /** The public method each signal broadcast is named after when it reports a crash. */
 const SIGNAL_TRIGGER_OPERATIONS = {
@@ -47,6 +44,39 @@ export interface SignalBroadcastDescriptor {
   emitCompleted: (name: string) => void;
   emitFailed: (name: string, error: Error) => void;
 }
+
+type HealthRefusalCode = 'not_found' | 'stalled' | 'stopped';
+
+/** What a health check that timed out is reported as having answered. */
+const HEALTH_CHECK_TIMEOUT_RESULT: ComponentHealthResult = Object.freeze({
+  healthy: false,
+  message: 'Health check timed out',
+});
+
+/**
+ * Why a health hook must not be entered now, or `undefined` if it may be. Teardown may
+ * outlive the bulk shutdown latch, so neither stop phase may still be using the
+ * component; a late start's cleanup marks its component running only to stop it.
+ */
+function healthRefusal(
+  context: ComponentAccessContext,
+  name: string,
+  component: BaseComponent,
+): HealthRefusalCode | undefined {
+  if (context.getComponent(name) !== component) {
+    return 'not_found';
+  }
+  if (context.isComponentUp(name) && !context.isLateStartCleanupPending(name)) {
+    return undefined;
+  }
+  return context.stalledComponents.has(name) ? 'stalled' : 'stopped';
+}
+
+const HEALTH_REFUSAL_MESSAGES: Record<HealthRefusalCode, string> = {
+  not_found: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND,
+  stalled: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
+  stopped: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_RUNNING,
+};
 
 export async function checkComponentHealthOperation(
   context: ComponentAccessContext,
@@ -70,49 +100,61 @@ export async function checkComponentHealthOperation(
     };
   }
 
-  // Teardown may outlive the bulk shutdown latch. Do not enter a health hook
-  // while either stop phase is still using the component.
-  if (!context.isComponentUp(name)) {
-    const isStalled = context.stalledComponents.has(name);
-    return {
-      name,
-      healthy: false,
-      message: isStalled
-        ? LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED
-        : LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_RUNNING,
-      checkedAt: startTime,
-      durationMS: Date.now() - startTime,
-      error: null,
-      timedOut: false,
-      code: isStalled ? 'stalled' : 'stopped',
-    };
+  const refused = (code: HealthRefusalCode): HealthCheckResult => ({
+    name,
+    healthy: false,
+    message: HEALTH_REFUSAL_MESSAGES[code],
+    checkedAt: startTime,
+    durationMS: Date.now() - startTime,
+    error: null,
+    timedOut: false,
+    code,
+  });
+  const recheck = () => healthRefusal(context, name, component);
+
+  const initialRefusal = recheck();
+  if (initialRefusal !== undefined) {
+    return refused(initialRefusal);
   }
 
   // Read once, guarded, and that value is what gets called - as `onMessage` and
-  // `getValue` are read.
-  let healthCheckHandler: unknown;
+  // `getValue` are read - then availability rechecked: the getters can stop or
+  // unregister the component, which then answers its refusal, not `no_handler`
+  // (counted healthy) or a crash.
   let timeoutMS = 0;
   let readFailureMessage = 'Health check could not be read';
+  const handlerRead = readHookThenRecheck(
+    () => {
+      const handler: unknown = Reflect.get(component, 'healthCheck');
+      // Configuration getters are caller code too. Capture the timeout before
+      // announcing the check, and distinguish its failure from the handler itself.
+      // A component without a health handler does not need timeout configuration.
+      if (typeof handler === 'function') {
+        readFailureMessage = 'Health check timeout could not be read';
+        timeoutMS = toOperationTimerDelayMS(
+          component.healthCheckTimeoutMS,
+          `${name}.healthCheckTimeoutMS`,
+        );
+      }
+      return handler;
+    },
+    (error) => {
+      if (settledFailureCode(error) !== 'invalid_options') {
+        reportCallbackError('lifecycle-manager checkComponentHealth', error);
+      }
+    },
+    recheck,
+  );
 
-  try {
-    healthCheckHandler = Reflect.get(component, 'healthCheck');
-    // Configuration getters are caller code too. Capture the timeout before
-    // announcing the check, and distinguish its failure from the handler itself.
-    // A component without a health handler does not need timeout configuration.
-    if (typeof healthCheckHandler === 'function') {
-      readFailureMessage = 'Health check timeout could not be read';
-      timeoutMS = toOperationTimerDelayMS(
-        component.healthCheckTimeoutMS,
-        `${name}.healthCheckTimeoutMS`,
-      );
-    }
-  } catch (error) {
+  if (handlerRead.status === 'refused') {
+    return refused(handlerRead.refusal);
+  }
+
+  if (handlerRead.status === 'read_failed') {
+    const { error } = handlerRead;
     const err = toError(error);
     const code = settledFailureCode(error);
 
-    if (code !== 'invalid_options') {
-      reportCallbackError('lifecycle-manager checkComponentHealth', error);
-    }
     // Logged and announced as every other failed check is - `started` first, so a
     // listener counting checks in flight stays paired - and counted as a failure.
     context.logger
@@ -137,6 +179,8 @@ export async function checkComponentHealthOperation(
     };
   }
 
+  const healthCheckHandler = handlerRead.value;
+
   // Check if component implements healthCheck
   if (typeof healthCheckHandler !== 'function') {
     // No health check implemented - assume healthy
@@ -152,73 +196,71 @@ export async function checkComponentHealthOperation(
     };
   }
 
-  context.lifecycleEvents.componentHealthCheckStarted(name);
-  // One microtask, so the recheck below follows the started listeners even for a check
-  // made from inside another manager event listener, where `health-check-started` is
-  // only queued behind the event being delivered. That drain is synchronous and has
-  // finished by the time this resumes; see `sendMessageInternal()`.
-  await promiseResolveIntrinsic(undefined);
+  const failed = (error: unknown): HealthCheckResult => {
+    const durationMS = Date.now() - startTime;
+    const err = toError(error);
+
+    context.logger
+      .entity(name)
+      .error('Health check failed: {{error.message}}', {
+        params: { error: err },
+      });
+
+    context.lifecycleEvents.componentHealthCheckFailed(name, err);
+
+    return {
+      name,
+      healthy: false,
+      message: 'Health check threw error',
+      checkedAt: startTime,
+      durationMS,
+      error: err,
+      timedOut: false,
+      code: 'error',
+    };
+  };
 
   // Handler/configuration getters and started listeners may unregister this
   // instance or begin teardown. Keep the announced check paired without entering
   // a hook whose component is no longer available.
-  const isCurrent = context.getComponent(name) === component;
-  if (!isCurrent || !context.isComponentUp(name)) {
-    const isStalled = isCurrent && context.stalledComponents.has(name);
-    const message = !isCurrent
-      ? LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND
-      : isStalled
-        ? LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED
-        : LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_RUNNING;
+  const dispatch = await dispatchAnnouncedHook(context, {
+    name,
+    component,
+    handler: healthCheckHandler,
+    args: [],
+    timeoutMS,
+    announce: () => {
+      context.lifecycleEvents.componentHealthCheckStarted(name);
+    },
+    recheck,
+    timeoutLog: 'Health check timed out',
+    timeoutLogParams: { timeoutMS },
+    lateFailureMessage: 'Health check failed after it had already timed out',
+  });
+
+  if (dispatch.status === 'refused') {
+    const result = refused(dispatch.refusal);
     context.lifecycleEvents.componentHealthCheckFailed(
       name,
-      new Error(message),
+      new Error(result.message),
     );
-    return {
-      name,
-      healthy: false,
-      message,
-      checkedAt: startTime,
-      durationMS: Date.now() - startTime,
-      error: null,
-      timedOut: false,
-      code: !isCurrent ? 'not_found' : isStalled ? 'stalled' : 'stopped',
-    };
+    return result;
+  }
+
+  if (dispatch.status === 'threw') {
+    return failed(dispatch.error);
   }
 
   try {
-    const timeoutResult: ComponentHealthResult = {
-      healthy: false,
-      message: 'Health check timed out',
-    };
-
-    // Adopted, not raced as it is: see `adoptPromise()`.
-    const healthCheckPromise = adoptPromise(
-      applyIntrinsic(healthCheckHandler, component, []) as ReturnType<
-        NonNullable<BaseComponent['healthCheck']>
-      >,
-    );
-    // Match startup and signal timeout semantics: zero means no timer. Racing against
-    // `setTimeout(..., 0)` made the outcome depend on whether an otherwise healthy
-    // check happened to settle before or after its first asynchronous turn.
-    const { value: result } = await raceDeadline(
-      healthCheckPromise,
-      optionalValidatedTimerDelayMS(timeoutMS),
-      () => timeoutResult,
-    );
-
     // Normalize boolean to ComponentHealthResult
-    const isTimedOut = result === timeoutResult;
-    if (isTimedOut) {
-      context.logger.entity(name).warn('Health check timed out', {
-        params: { timeoutMS },
-      });
-      context.observeFailureAfterTimeout(
-        healthCheckPromise,
-        name,
-        'Health check failed after it had already timed out',
-      );
-    }
+    const isTimedOut = dispatch.status === 'timed_out';
+    // Typed as the hook promises; `isObjectLike()` and the type checks below are what
+    // actually validate it.
+    const result = isTimedOut
+      ? HEALTH_CHECK_TIMEOUT_RESULT
+      : (dispatch.value as Awaited<
+          ReturnType<NonNullable<BaseComponent['healthCheck']>>
+        >);
     // A malformed return is a contract failure, not a throw from the handler.
     // Read healthy once before validating its type: accepting truthy non-booleans
     // would let checkAllHealth report a malformed component as healthy. The other
@@ -310,27 +352,7 @@ export async function checkComponentHealthOperation(
       code: isTimedOut ? 'timeout' : 'ok',
     };
   } catch (error) {
-    const durationMS = Date.now() - startTime;
-    const err = toError(error);
-
-    context.logger
-      .entity(name)
-      .error('Health check failed: {{error.message}}', {
-        params: { error: err },
-      });
-
-    context.lifecycleEvents.componentHealthCheckFailed(name, err);
-
-    return {
-      name,
-      healthy: false,
-      message: 'Health check threw error',
-      checkedAt: startTime,
-      durationMS,
-      error: err,
-      timedOut: false,
-      code: 'error',
-    };
+    return failed(error);
   }
 }
 
@@ -393,7 +415,9 @@ export async function runSignalBroadcast(
     return (
       context.getComponent(name) === component &&
       context.componentStates.get(name) === 'running' &&
-      context.runningComponents.has(name)
+      context.runningComponents.has(name) &&
+      // A late start's cleanup marks its component running only to stop it.
+      !context.isLateStartCleanupPending(name)
     );
   };
   const targets = context.components.filter(canDispatch);
@@ -407,36 +431,48 @@ export async function runSignalBroadcast(
     if (!canDispatch(component)) {
       continue;
     }
+    const recheck = () =>
+      canDispatch(component) ? undefined : ('unavailable' as const);
     // The handler, and its timeout when there is one, are the component's own
     // properties, so they are read here, per component: one that throws becomes that
     // component's `operation_crashed` entry, before any `*-started` event for it, rather
     // than ending the broadcast for every component after it.
-    let handler: unknown;
     let timeoutMS = 0;
+    const handlerRead = readHookThenRecheck(
+      () => {
+        const handler = descriptor.pickHandler(component);
 
-    try {
-      handler = descriptor.pickHandler(component);
+        // Only when there is a handler to time: a component without one answers
+        // `no_handler`, whatever its timeout getter would have done.
+        if (typeof handler === 'function') {
+          timeoutMS = toOperationTimerDelayMS(
+            component.signalTimeoutMS,
+            `${name}.signalTimeoutMS`,
+          );
+        }
+        return handler;
+      },
+      (error) => {
+        // Reported as every other getter that throws is; an invalid timeout is an
+        // expected refusal, not a crash.
+        if (settledFailureCode(error) !== 'invalid_options') {
+          reportCallbackError(
+            `lifecycle-manager ${SIGNAL_TRIGGER_OPERATIONS[descriptor.signal]}`,
+            error,
+          );
+        }
+      },
+      recheck,
+    );
 
-      // Only when there is a handler to time: a component without one answers
-      // `no_handler`, whatever its timeout getter would have done.
-      if (typeof handler === 'function') {
-        timeoutMS = toOperationTimerDelayMS(
-          component.signalTimeoutMS,
-          `${name}.signalTimeoutMS`,
-        );
-      }
-    } catch (error) {
-      const err = toError(error);
-      const code = settledFailureCode(error);
+    // The read itself took the component down: skipped, as a component that began
+    // teardown during an earlier component's callback is.
+    if (handlerRead.status === 'refused') {
+      continue;
+    }
 
-      // Reported as every other getter that throws is; an invalid timeout is an
-      // expected refusal, not a crash.
-      if (code !== 'invalid_options') {
-        reportCallbackError(
-          `lifecycle-manager ${SIGNAL_TRIGGER_OPERATIONS[descriptor.signal]}`,
-          error,
-        );
-      }
+    if (handlerRead.status === 'read_failed') {
+      const err = toError(handlerRead.error);
 
       context.logger.entity(name).error(descriptor.errorLog, {
         params: { error: err },
@@ -447,10 +483,12 @@ export async function runSignalBroadcast(
         called: false,
         error: err,
         timedOut: false,
-        code,
+        code: settledFailureCode(handlerRead.error),
       });
       continue;
     }
+
+    const handler = handlerRead.value;
 
     if (typeof handler !== 'function') {
       results.push({
@@ -463,12 +501,26 @@ export async function runSignalBroadcast(
       continue;
     }
 
-    descriptor.emitStarted(name);
-    // Event listeners can synchronously begin teardown too. One microtask first, so a
-    // broadcast made from inside another manager event listener - where `*-started` is
-    // only queued - still rechecks after those listeners; see `sendMessageInternal()`.
-    await promiseResolveIntrinsic(undefined);
-    if (!canDispatch(component)) {
+    // Event listeners can synchronously begin teardown too; the dispatch rechecks after
+    // the started event's listeners, even for a broadcast made from inside another
+    // manager event listener, where `*-started` is only queued.
+    const dispatch = await dispatchAnnouncedHook(context, {
+      name,
+      component,
+      handler,
+      args: [],
+      timeoutMS,
+      announce: () => {
+        descriptor.emitStarted(name);
+      },
+      recheck,
+      timeoutLog: descriptor.timeoutLog,
+      timeoutLogParams: { timeoutMS },
+      lateFailureMessage:
+        'Lifecycle handler failed after it had already timed out',
+    });
+
+    if (dispatch.status === 'refused') {
       const error = new Error(
         `Component "${name}" became unavailable before ${descriptor.signal} dispatch`,
       );
@@ -480,56 +532,22 @@ export async function runSignalBroadcast(
         timedOut: false,
         code: 'unavailable',
       });
-      continue;
-    }
-
-    const timeoutResult = { timedOut: true } as const;
-
-    try {
-      const handlerResult: unknown = applyIntrinsic(handler, component, []);
-      // Adopted, not raced as it is: see `adoptPromise()`.
-      const handlerPromise = adoptPromise(handlerResult);
-
-      const { value: outcome } = await raceDeadline(
-        handlerPromise,
-        optionalValidatedTimerDelayMS(timeoutMS),
-        () => timeoutResult,
+    } else if (dispatch.status === 'timed_out') {
+      descriptor.emitFailed(
+        name,
+        new Error(
+          `${descriptor.signal} handler timed out after ${timeoutMS}ms`,
+        ),
       );
-
-      if (outcome === timeoutResult) {
-        context.logger.entity(name).warn(descriptor.timeoutLog, {
-          params: { timeoutMS },
-        });
-        context.observeFailureAfterTimeout(
-          handlerPromise,
-          name,
-          'Lifecycle handler failed after it had already timed out',
-        );
-        descriptor.emitFailed(
-          name,
-          new Error(
-            `${descriptor.signal} handler timed out after ${timeoutMS}ms`,
-          ),
-        );
-        results.push({
-          name,
-          called: true,
-          error: null,
-          timedOut: true,
-          code: 'timeout',
-        });
-      } else {
-        descriptor.emitCompleted(name);
-        results.push({
-          name,
-          called: true,
-          error: null,
-          timedOut: false,
-          code: 'called',
-        });
-      }
-    } catch (error) {
-      const err = toError(error);
+      results.push({
+        name,
+        called: true,
+        error: null,
+        timedOut: true,
+        code: 'timeout',
+      });
+    } else if (dispatch.status === 'threw') {
+      const err = toError(dispatch.error);
 
       context.logger.entity(name).error(descriptor.errorLog, {
         params: { error: err },
@@ -543,6 +561,15 @@ export async function runSignalBroadcast(
         error: err,
         timedOut: false,
         code: 'error',
+      });
+    } else {
+      descriptor.emitCompleted(name);
+      results.push({
+        name,
+        called: true,
+        error: null,
+        timedOut: false,
+        code: 'called',
       });
     }
   }

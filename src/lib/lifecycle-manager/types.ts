@@ -1149,6 +1149,14 @@ export interface DependencyValidationResult {
     error: Error;
   }>;
 
+  /**
+   * Set only when cycle detection itself failed unexpectedly (the walk is iterative,
+   * so chain depth alone cannot cause this). The graph could not be confirmed acyclic, so `valid`
+   * is false, and `circularCycles` is empty because nothing was found, not because
+   * nothing is there. Reported on the global error channel as well.
+   */
+  cycleCheckError?: Error;
+
   /** Summary counts for quick overview */
   summary: {
     /** Total number of missing dependencies */

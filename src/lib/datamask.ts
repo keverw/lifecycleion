@@ -106,7 +106,7 @@ export function maskString(
  * Every label but the last is masked with {@link maskString} at `percent`; the last one -
  * the TLD, ordinarily - is left readable, and trailing dots - a fully qualified name's, or a
  * run of them - do not change which label that is. A value with no dot is masked as one
- * string.
+ * string, and so is a single label with only dots around it, leading or trailing.
  *
  * @example
  * ```typescript
@@ -132,8 +132,16 @@ export function maskDomain(
     last--;
   }
 
-  // A single label before the dots is masked like a value without a dot.
-  const readable = last > 0 ? last : -1;
+  // Leading dots leave empty labels in front the same way. Without skipping them,
+  // '.internal' would count its one real label as a TLD and leave it readable.
+  let first = 0;
+
+  while (first < last && labels[first] === '') {
+    first++;
+  }
+
+  // A single label among the dots is masked like a value without a dot.
+  const readable = last > first ? last : -1;
 
   return labels
     .map((label, index) =>

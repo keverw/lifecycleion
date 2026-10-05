@@ -719,3 +719,75 @@ test('close consults no iterator hooks while starting sink cleanup', async () =>
   expect(closed).toEqual(['log', 'shared', 'diagnostic']);
   expect(diagnostics).toEqual([]);
 });
+
+test('synchronous time in one close hook is not charged to a later sink', async () => {
+  // The hooks run one after another, and the deadline used to be armed before the first.
+  // A hook that blocked past the budget left the next sink no time at all, so its
+  // ordinary asynchronous close was reported as timed out though it was never given any.
+  const diagnostics: LoggerDiagnostic[] = [];
+  let didLaterSinkFinish = false;
+  const slowSink: LogSink = {
+    write: () => {},
+    close: () => {
+      const until = Date.now() + 60;
+      while (Date.now() < until) {
+        // Synchronous cleanup: a final flush with writeFileSync, say.
+      }
+    },
+  };
+  const laterSink: LogSink = {
+    write: () => {},
+    close: async () => {
+      await sleep(10);
+      didLaterSinkFinish = true;
+    },
+  };
+  const logger = new Logger({
+    callProcessExit: false,
+    closeTimeoutMS: 40,
+    sinks: [slowSink, laterSink],
+  });
+  logger.on<LoggerDiagnostic>('diagnostic', (diagnostic) => {
+    diagnostics.push(diagnostic);
+  });
+
+  await logger.close();
+  await sleep(0);
+
+  expect(didLaterSinkFinish).toBe(true);
+  expect(diagnostics).toEqual([]);
+});
+
+test('the close budget still bounds a sink that never settles after a slow hook', async () => {
+  const diagnostics: LoggerDiagnostic[] = [];
+  const stuckSink: LogSink = {
+    write: () => {},
+    close: () => new Promise<void>(() => {}),
+  };
+  const logger = new Logger({
+    callProcessExit: false,
+    closeTimeoutMS: 20,
+    sinks: [
+      {
+        write: () => {},
+        close: () => {
+          const until = Date.now() + 30;
+          while (Date.now() < until) {
+            // Blocks past the whole budget before the stuck sink is reached.
+          }
+        },
+      },
+      stuckSink,
+    ],
+  });
+  logger.on<LoggerDiagnostic>('diagnostic', (diagnostic) => {
+    diagnostics.push(diagnostic);
+  });
+
+  await logger.close();
+  await sleep(0);
+
+  expect(diagnostics).toHaveLength(1);
+  expect(diagnostics[0].sink).toBe(stuckSink);
+  expect(diagnostics[0].message).toContain('Log sink #2 close timed out');
+});

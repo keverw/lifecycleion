@@ -588,6 +588,13 @@ Attach signal handlers and start listening for process signals and keyboard even
 - Starts listening for Ctrl+C, Escape, R, I, and D key presses
 - Calling multiple times is safe (idempotent)
 
+If registration fails partway, `attach()` removes what it registered, restores the
+terminal, and throws the registration error. If restoring terminal mode fails during that
+cleanup, the failure is reported on the global `'error'` channel before the throw, so a
+caller that exits from its `catch` does not lose it. Any failure to remove a listener it
+had registered is reported on that channel in a microtask, after the throw has reached the
+caller.
+
 ### `detach(): void`
 
 Detach signal handlers and stop listening for process signals and keyboard events.

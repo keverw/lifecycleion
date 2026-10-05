@@ -1358,6 +1358,61 @@ describe('FileSink', () => {
     }
   });
 
+  test('an onError result whose then cannot be read names the option', async () => {
+    // Named after the option the caller set, as NamedPipeSink's `onError` and ArraySink's
+    // `onFormatError` are, rather than a description of it.
+    const captured = muteConsoleError();
+
+    try {
+      const sink = new FileSink({
+        logDir: tmpDir.path,
+        basename: 'callback-unreadable-then',
+        maxSizeMB: 1,
+        maxRetries: 0,
+        onError: () => {
+          const result = {};
+          Object.defineProperty(result, 'then', {
+            get: (): never => {
+              throw new Error('then getter exploded');
+            },
+          });
+
+          return result as unknown as void;
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const privateSink = sink as any;
+
+      privateSink.destroyStream();
+      privateSink.setupLogFile = mock(() => {
+        throw new Error('Failed to setup log file');
+      });
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'will fail',
+        message: 'will fail',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      const reports = captured.filter((line) =>
+        line.includes('returned a value whose then could not be read'),
+      );
+
+      expect(reports.length).toBeGreaterThan(0);
+      expect(reports[0]).toContain('Failure handler (FileSink onError)');
+      expect(reports[0]).toContain('Failed to setup log file');
+
+      await sink.close();
+    } finally {
+      restoreConsoleError();
+    }
+  });
+
   test('a throwing onError callback falls through to the console and does not stop the retry', async () => {
     // Swallowed, this lost both failures at once: the write error the callback was told
     // about and the callback's own throw, so a sink that could not write anything

@@ -9,6 +9,7 @@ import {
   getValueInternal,
   sendMessageInternal,
 } from './component-messaging';
+import { isOperationOptionRefusal } from './operation-policy';
 import {
   checkAllHealthOperation,
   checkComponentHealthOperation,
@@ -28,6 +29,7 @@ function fixture() {
   const events: string[] = [];
   const stalledComponents = new Map<string, ComponentStallInfo>();
   const pendingStarts = new Set<string>();
+  const cleanupPending = new Set<string>();
   const context: ComponentAccessContext = {
     get components() {
       return state.components;
@@ -47,6 +49,7 @@ function fixture() {
     getComponent: (name) =>
       state.components.find((component) => component.getName() === name),
     isRawStartPending: (name) => pendingStarts.has(name),
+    isLateStartCleanupPending: (name) => cleanupPending.has(name),
     sendMessageSettled: (name, payload, from, options) =>
       sendMessageInternal(context, name, payload, from, options),
     checkComponentHealth: (name) =>
@@ -73,6 +76,7 @@ function fixture() {
     runningComponents,
     stalledComponents,
     pendingStarts,
+    cleanupPending,
   };
 }
 
@@ -174,53 +178,76 @@ test('message dispatch reads its handler once and preserves its receiver and asy
   expect(events).toEqual(['component:message-sent']);
 });
 
-test('broadcast dispatch resolves later recipients through the live registry', async () => {
-  const { context, state, add } = fixture();
-  const first = add('first');
-  const oldSecond = add('second');
-  const replacement = add('replacement');
-  // The replacement takes the same registered identity, without changing the
-  // broadcast's original target snapshot.
-  const recordedNames = new Map<BaseComponent, string>([
-    [first, 'first'],
-    [oldSecond, 'second'],
-    [replacement, 'second'],
-  ]);
-  state.components = [first, oldSecond];
-  const liveContext: ComponentAccessContext = {
-    ...context,
-    get components() {
-      return state.components;
-    },
-    nameOf: (component) => recordedNames.get(component) ?? '',
-    // Both lookup paths use the registration's recorded identity in the manager.
-    getComponent: (name) =>
-      state.components.find(
-        (component) => recordedNames.get(component) === name,
-      ),
-    sendMessageSettled: (name, payload, from, options) =>
-      sendMessageInternal(liveContext, name, payload, from, options),
-  };
-  Object.defineProperty(first, 'onMessage', {
-    value: () => {
-      state.components = [first, replacement];
-      return Promise.resolve('first-result');
-    },
-  });
-  Object.defineProperty(oldSecond, 'onMessage', {
-    value: () => {
-      throw new Error('The removed recipient must not be called');
-    },
-  });
-  Object.defineProperty(replacement, 'onMessage', {
-    value: () => Promise.resolve('replacement-result'),
-  });
-  const results = await broadcastMessageInternal(liveContext, 'hello', null);
-  expect(results.map(({ name, data }) => ({ name, data }))).toEqual([
-    { name: 'first', data: 'first-result' },
-    { name: 'second', data: 'replacement-result' },
-  ]);
-});
+test.each([false, true])(
+  'broadcast does not deliver to a replacement registered under a selected name mid-broadcast (includeStopped: %p)',
+  async (shouldIncludeStopped) => {
+    const { context, state, add, componentStates, runningComponents } =
+      fixture();
+    const first = add('first');
+    const oldSecond = add('second');
+    const replacement = add('replacement');
+    // The replacement takes the same registered identity, without changing the
+    // broadcast's original target snapshot.
+    const recordedNames = new Map<BaseComponent, string>([
+      [first, 'first'],
+      [oldSecond, 'second'],
+      [replacement, 'second'],
+    ]);
+    state.components = [first, oldSecond];
+    const liveContext: ComponentAccessContext = {
+      ...context,
+      get components() {
+        return state.components;
+      },
+      nameOf: (component) => recordedNames.get(component) ?? '',
+      // Both lookup paths use the registration's recorded identity in the manager.
+      getComponent: (name) =>
+        state.components.find(
+          (component) => recordedNames.get(component) === name,
+        ),
+      sendMessageSettled: (name, payload, from, options) =>
+        sendMessageInternal(liveContext, name, payload, from, options),
+    };
+    let replacementCalls = 0;
+    Object.defineProperty(first, 'onMessage', {
+      value: () => {
+        state.components = [first, replacement];
+        // A freshly registered replacement is not running yet; `includeStopped`
+        // would otherwise admit it under the selected target's name.
+        componentStates.set('second', 'registered');
+        runningComponents.delete('second');
+        return Promise.resolve('first-result');
+      },
+    });
+    Object.defineProperty(oldSecond, 'onMessage', {
+      value: () => {
+        throw new Error('The removed recipient must not be called');
+      },
+    });
+    Object.defineProperty(replacement, 'onMessage', {
+      value: () => {
+        replacementCalls++;
+        return Promise.resolve('replacement-result');
+      },
+    });
+    const results = await broadcastMessageInternal(liveContext, 'hello', null, {
+      includeStopped: shouldIncludeStopped,
+    });
+    expect(
+      results.map((row) => ({
+        name: row.name,
+        sent: row.sent,
+        data: row.data,
+        code: row.code,
+      })),
+    ).toEqual([
+      { name: 'first', sent: true, data: 'first-result', code: 'sent' },
+      // The selected instance was unregistered mid-broadcast.
+      { name: 'second', sent: false, data: undefined, code: 'stopped' },
+    ]);
+    expect(replacementCalls).toBe(0);
+  },
+);
 
 test('value access reads a provider once and retains its receiver', () => {
   const { context, add, events } = fixture();
@@ -406,4 +433,280 @@ test('broadcast copies its componentNames once without calling the array methods
     { name: 'third', data: 'third' },
   ]);
   expect(reads).toEqual(['length', '0', '1']);
+});
+
+/** Run `operation`, collecting what it reports on the global error channel. */
+async function captureReports<T>(
+  operation: () => T | Promise<T>,
+): Promise<{ result: T; reports: Error[] }> {
+  const reports: Error[] = [];
+  const onError = (event: ErrorEvent) => {
+    reports.push(event.error as Error);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onError);
+  try {
+    return { result: await operation(), reports };
+  } finally {
+    globalThis.removeEventListener('error', onError);
+  }
+}
+
+/** Takes `name` out of service the way a stop that settled would. */
+function stopIn(fixtureState: ReturnType<typeof fixture>, name: string): void {
+  fixtureState.componentStates.set(name, 'stopped');
+  fixtureState.runningComponents.delete(name);
+}
+
+test('a message handler getter that stops its component is answered as stopped, not no_handler', async () => {
+  const state = fixture();
+  const component = state.add('recipient');
+  Object.defineProperty(component, 'onMessage', {
+    get() {
+      stopIn(state, 'recipient');
+      return undefined;
+    },
+  });
+  const result = await sendMessageInternal(
+    state.context,
+    'recipient',
+    'hi',
+    null,
+  );
+  expect(result).toMatchObject({
+    sent: false,
+    componentFound: true,
+    componentRunning: false,
+    handlerImplemented: false,
+    code: 'stopped',
+  });
+  expect(state.events).toEqual([]);
+});
+
+test('a message handler getter that unregisters and throws is answered as not_found, but still reported', async () => {
+  const state = fixture();
+  const component = state.add('recipient');
+  const error = new Error('getter failure');
+  Object.defineProperty(component, 'onMessage', {
+    get() {
+      state.state.components = [];
+      throw error;
+    },
+  });
+  const { result, reports } = await captureReports(() =>
+    sendMessageInternal(state.context, 'recipient', 'hi', null),
+  );
+  expect(result).toMatchObject({
+    sent: false,
+    componentFound: false,
+    componentRunning: false,
+    code: 'not_found',
+    error: null,
+  });
+  // Nothing was announced, so nothing is left unpaired.
+  expect(state.events).toEqual([]);
+  expect(reports.map((report) => report.cause)).toEqual([error]);
+});
+
+test('a health check getter that stops its component is not counted healthy', async () => {
+  const state = fixture();
+  const component = state.add('checked');
+  Object.defineProperty(component, 'healthCheck', {
+    get() {
+      stopIn(state, 'checked');
+      return undefined;
+    },
+  });
+  const report = await checkAllHealthOperation(state.context);
+  expect(report.healthy).toBe(false);
+  expect(report.components).toEqual([
+    expect.objectContaining({
+      name: 'checked',
+      healthy: false,
+      code: 'stopped',
+      error: null,
+    }),
+  ]);
+  expect(state.events).toEqual([]);
+});
+
+test('a health check getter that unregisters and throws is answered as not_found, but still reported', async () => {
+  const state = fixture();
+  const component = state.add('checked');
+  const error = new Error('getter failure');
+  Object.defineProperty(component, 'healthCheck', {
+    get() {
+      state.state.components = [];
+      throw error;
+    },
+  });
+  const { result, reports } = await captureReports(() =>
+    checkComponentHealthOperation(state.context, 'checked'),
+  );
+  expect(result).toMatchObject({
+    healthy: false,
+    code: 'not_found',
+    error: null,
+  });
+  expect(state.events).toEqual([]);
+  expect(reports.map((report) => report.cause)).toEqual([error]);
+});
+
+test('a signal handler read that stops its component skips it without a started event', async () => {
+  const state = fixture();
+  const component = state.add('signal-target');
+  let calls = 0;
+  const started: string[] = [];
+  const result = await runSignalBroadcast(state.context, {
+    signal: 'reload',
+    pickHandler: (target) => {
+      expect(target).toBe(component);
+      stopIn(state, 'signal-target');
+      return () => {
+        calls++;
+      };
+    },
+    startupLog: 'starting',
+    timeoutLog: 'timeout',
+    errorLog: 'failed',
+    emitStarted: (name) => {
+      started.push(name);
+    },
+    emitCompleted: () => {},
+    emitFailed: () => {},
+  });
+  // Skipped as a target that went down during an earlier callback is.
+  expect(result.results).toEqual([]);
+  expect(started).toEqual([]);
+  expect(calls).toBe(0);
+});
+
+test.each([Infinity, 5e7, -1, 1.5, Number.NaN])(
+  'broadcast refuses componentNames with an implausible length (%p) before reading entries',
+  async (length) => {
+    const { context, add, events } = fixture();
+    let calls = 0;
+    Object.defineProperty(add('first'), 'onMessage', {
+      value: () => {
+        calls++;
+      },
+    });
+    const entryReads: PropertyKey[] = [];
+    const names = new Proxy(['first'], {
+      get(target, property, receiver) {
+        if (property === 'length') {
+          return length;
+        }
+        entryReads.push(property);
+        return Reflect.get(target, property, receiver) as unknown;
+      },
+    });
+    let refusal: unknown;
+    try {
+      await broadcastMessageInternal(context, 'hi', null, {
+        componentNames: names,
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    // The same branded refusal a non-array filter gets: `[]` and a warning upstream.
+    expect(refusal).toBeInstanceOf(TypeError);
+    expect(isOperationOptionRefusal(refusal)).toBe(true);
+    expect((refusal as Error).message).toContain('componentNames');
+    expect(entryReads).toEqual([]);
+    expect(calls).toBe(0);
+    expect(events).toEqual([]);
+  },
+);
+
+test('a component under late-start cleanup is refused by every access operation', async () => {
+  const state = fixture();
+  const component = state.add('late');
+  let calls = 0;
+  for (const hook of ['onMessage', 'getValue', 'healthCheck']) {
+    Object.defineProperty(component, hook, {
+      value: () => {
+        calls++;
+        return hook === 'getValue' ? { found: true, value: 1 } : true;
+      },
+    });
+  }
+  // Late-start cleanup marks the component running only so that it can be stopped.
+  state.cleanupPending.add('late');
+
+  for (const shouldIncludeStopped of [false, true]) {
+    const options = { includeStopped: shouldIncludeStopped };
+    expect(
+      await sendMessageInternal(state.context, 'late', 'hi', null, options),
+    ).toMatchObject({ sent: false, componentFound: true, code: 'stopped' });
+    expect(
+      getValueInternal(state.context, 'late', 'key', null, options),
+    ).toMatchObject({ found: false, componentFound: true, code: 'stopped' });
+    const [row] = await broadcastMessageInternal(state.context, 'hi', null, {
+      ...options,
+      componentNames: ['late'],
+    });
+    expect(row).toMatchObject({ name: 'late', sent: false, code: 'stopped' });
+  }
+  // Not an eligible recipient of an unfiltered broadcast.
+  expect(await broadcastMessageInternal(state.context, 'hi', null)).toEqual([]);
+  expect(
+    await checkComponentHealthOperation(state.context, 'late'),
+  ).toMatchObject({ healthy: false, code: 'stopped' });
+  const signals = await runSignalBroadcast(state.context, {
+    signal: 'reload',
+    pickHandler: () => () => {
+      calls++;
+    },
+    startupLog: 'starting',
+    timeoutLog: 'timeout',
+    errorLog: 'failed',
+    emitStarted: () => {},
+    emitCompleted: () => {},
+    emitFailed: () => {},
+  });
+  expect(signals.results).toEqual([]);
+  expect(calls).toBe(0);
+
+  // Once cleanup ends the same registration is reachable again.
+  state.cleanupPending.delete('late');
+  expect(
+    (await sendMessageInternal(state.context, 'late', 'hi', null)).code,
+  ).toBe('sent');
+  expect(calls).toBe(1);
+});
+
+test('a target becoming unavailable in the started listener is refused the same way by message, health and signal dispatch', async () => {
+  const state = fixture();
+  const component = state.add('target');
+  let calls = 0;
+  for (const hook of ['onMessage', 'healthCheck']) {
+    Object.defineProperty(component, hook, {
+      value: () => {
+        calls++;
+        return true;
+      },
+    });
+  }
+  const context: ComponentAccessContext = {
+    ...state.context,
+    lifecycleEvents: new LifecycleManagerEvents((name) => {
+      state.events.push(name);
+      if (name.endsWith('-started') || name === 'component:message-sent') {
+        state.cleanupPending.add('target');
+      }
+    }),
+  };
+  const message = await sendMessageInternal(context, 'target', 'hi', null);
+  expect(message).toMatchObject({ sent: false, code: 'stopped' });
+  state.cleanupPending.delete('target');
+  const health = await checkComponentHealthOperation(context, 'target');
+  expect(health).toMatchObject({ healthy: false, code: 'stopped' });
+  expect(calls).toBe(0);
+  expect(state.events).toEqual([
+    'component:message-sent',
+    'component:message-failed',
+    'component:health-check-started',
+    'component:health-check-failed',
+  ]);
 });
