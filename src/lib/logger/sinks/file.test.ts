@@ -562,15 +562,26 @@ describe('FileSink', () => {
 
     await fsPromises.writeFile(blocked, 'in the way');
 
-    const sink = new FileSink({
-      logDir: `${blocked}/logs`,
-      basename: 'lazy-test',
-      maxSizeMB: 1,
-      jsonFormat: false,
-    });
+    // No `onError`, so the failed setup falls through to the console rung.
+    const captured = muteConsoleError();
+    let sink: FileSink;
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    try {
+      sink = new FileSink({
+        logDir: `${blocked}/logs`,
+        basename: 'lazy-test',
+        maxSizeMB: 1,
+        jsonFormat: false,
+      });
 
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } finally {
+      restoreConsoleError();
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('Failed to setup log file');
+    expect(captured[0]).toContain('ENOTDIR');
     expect(sink.getHealth().isInitialized).toBe(false);
 
     // The obstruction goes away, exactly as a volume that mounts late would.
@@ -618,16 +629,27 @@ describe('FileSink', () => {
       throw new Error('Failed to setup log file');
     });
 
-    sink.write({
-      timestamp: Date.now(),
-      type: 'info',
-      serviceName: 'FlushCountTest',
-      template: 'never lands',
-      message: 'never lands',
-    });
+    // No `onError`, so the line lost to exhausted retries is reported on the console.
+    const captured = muteConsoleError();
+    let result: Awaited<ReturnType<FileSink['flush']>>;
 
-    const result = await sink.flush();
+    try {
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        serviceName: 'FlushCountTest',
+        template: 'never lands',
+        message: 'never lands',
+      });
 
+      result = await sink.flush();
+    } finally {
+      restoreConsoleError();
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('FileSink error writing to');
+    expect(captured[0]).toContain('Failed to setup log file');
     expect(result.entriesFailed).toBe(1);
     expect(result.success).toBe(false);
     expect(sink.getHealth().droppedEntries).toBe(1);
@@ -662,16 +684,25 @@ describe('FileSink', () => {
     // Get access to private properties for testing (using type assertion to access private fields)
     const privateSink = sink as any;
 
-    // Simulate an error on the stream
-    if (privateSink.logFileStream) {
-      privateSink.logFileStream.emit(
-        'error',
-        new Error('Simulated stream error'),
-      );
+    // Simulate an error on the stream. No `onError`, so it is reported on the console.
+    const captured = muteConsoleError();
+
+    try {
+      if (privateSink.logFileStream) {
+        privateSink.logFileStream.emit(
+          'error',
+          new Error('Simulated stream error'),
+        );
+      }
+
+      // Give time for error to be processed
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } finally {
+      restoreConsoleError();
     }
 
-    // Give time for error to be processed
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('error-test');
 
     // The stream should have been destroyed
     expect(privateSink.logFileStream).toBeUndefined();
@@ -980,11 +1011,21 @@ describe('FileSink', () => {
       message: 'Should not be written',
     };
 
-    // Writing after close should not throw, but should be ignored
-    sink.write(entry);
+    // Writing after close should not throw, but should be ignored - and, with no
+    // `onError`, reported once on the console.
+    const captured = muteConsoleError();
 
-    // Wait a bit
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    try {
+      sink.write(entry);
+
+      // Wait a bit
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } finally {
+      restoreConsoleError();
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('Entry logged after close() began');
 
     const currentDate = new Date().toISOString().slice(0, 10);
     const logFilePath = `${tmpDir.path}/closed-test-${currentDate}.log`;
@@ -1175,7 +1216,7 @@ describe('FileSink', () => {
     await sink.close();
   });
 
-  test('should get current minLevel', () => {
+  test('should get current minLevel', async () => {
     const sink = new FileSink({
       logDir: tmpDir.path,
       basename: 'get-level',
@@ -1188,9 +1229,12 @@ describe('FileSink', () => {
 
     sink.setMinLevel(LogLevel.DEBUG);
     expect(sink.getMinLevel()).toBe(LogLevel.DEBUG);
+
+    // Closed so its setup does not outlive the temp dir and fail on the console later.
+    await sink.close();
   });
 
-  test('should default to INFO level', () => {
+  test('should default to INFO level', async () => {
     const sink = new FileSink({
       logDir: tmpDir.path,
       basename: 'default-level',
@@ -1199,6 +1243,9 @@ describe('FileSink', () => {
     });
 
     expect(sink.getMinLevel()).toBe(LogLevel.INFO);
+
+    // Closed so its setup does not outlive the temp dir and fail on the console later.
+    await sink.close();
   });
 
   test('does not re-render a queued entry whose first render failed', async () => {
@@ -1404,10 +1451,20 @@ describe('FileSink - bounded queue', () => {
       maxQueueSize: 5,
     });
 
-    // Written before initialization completes, so they queue rather than drain.
-    for (let index = 0; index < 50; index++) {
-      sink.write(makeEntry(`entry-${index}`));
+    // Written before initialization completes, so they queue rather than drain. No
+    // `onError`, so the first drop is reported on the console, and only the first.
+    const captured = muteConsoleError();
+
+    try {
+      for (let index = 0; index < 50; index++) {
+        sink.write(makeEntry(`entry-${index}`));
+      }
+    } finally {
+      restoreConsoleError();
     }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('maxQueueSize=5');
 
     const health = sink.getHealth();
 
@@ -2233,33 +2290,45 @@ describe('FileSink - async self-logging onError', () => {
       maxQueueSize: 1,
     });
 
-    // Two lines into a one-slot queue before the file is open, so nothing drains between
-    // them: the older is evicted.
-    sink.write(makeEntry('first'));
-    sink.write(makeEntry('second'));
+    // No `onError`: each of the three losses is reported once on the console.
+    const captured = muteConsoleError();
 
-    await sink.flush();
+    try {
+      // Two lines into a one-slot queue before the file is open, so nothing drains
+      // between them: the older is evicted.
+      sink.write(makeEntry('first'));
+      sink.write(makeEntry('second'));
 
-    expect(sink.getHealth().droppedByKind.queue_full).toBe(1);
-    // Destination health recovers independently of historical loss counters.
-    expect(sink.getHealth().isHealthy).toBe(true);
+      await sink.flush();
 
-    sink.write({
-      timestamp: Date.now(),
-      type: 'info',
-      template: 'unrenderable',
-      message: UNRENDERABLE_MESSAGE,
-    });
+      expect(sink.getHealth().droppedByKind.queue_full).toBe(1);
+      // Destination health recovers independently of historical loss counters.
+      expect(sink.getHealth().isHealthy).toBe(true);
 
-    await sink.flush();
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'unrenderable',
+        message: UNRENDERABLE_MESSAGE,
+      });
 
-    expect(sink.getHealth().droppedByKind.format).toBe(1);
+      await sink.flush();
 
-    const closing = sink.close();
+      expect(sink.getHealth().droppedByKind.format).toBe(1);
 
-    sink.write(makeEntry('after close'));
+      const closing = sink.close();
 
-    await closing;
+      sink.write(makeEntry('after close'));
+
+      await closing;
+    } finally {
+      restoreConsoleError();
+    }
+
+    expect(captured).toHaveLength(3);
+    expect(captured[0]).toContain('maxQueueSize=1');
+    expect(captured[1]).toContain('Failed to format log entry');
+    expect(captured[2]).toContain('Entry logged after close() began');
 
     const health = sink.getHealth();
     const byKind = health.droppedByKind;

@@ -11,6 +11,10 @@ import type { SinkFailure, SinkFailureKind } from './internal/sink-failure';
 import { LogLevel } from '../types';
 import type { LogEntry } from '../types';
 import { TmpDir } from '../../tmp-dir';
+import {
+  muteConsoleError,
+  restoreConsoleError,
+} from '../../internal/console-test-utils';
 
 /**
  * A message the JSON envelope cannot serialize: `JSON.stringify` calls `toJSON` and it
@@ -909,9 +913,19 @@ describe('NamedPipeSink', () => {
       message: 'Should not be written',
     };
 
-    sink.write(entry);
+    // No `onError`, so the refused entry is reported once on the console.
+    const captured = muteConsoleError();
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    try {
+      sink.write(entry);
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } finally {
+      restoreConsoleError();
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('Entry logged after close() began');
 
     const allData = reader.data.join('');
     expect(allData).not.toContain('Should not be written');
@@ -1407,9 +1421,21 @@ describe('NamedPipeSink', () => {
       message: 'Test message',
     };
 
-    sink.write(entry);
+    // No `onError`, so the fallback is reported on the console.
+    const captured = muteConsoleError();
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    try {
+      sink.write(entry);
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } finally {
+      restoreConsoleError();
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain(
+      'NamedPipeSink formatter failed; the default format was used',
+    );
 
     // Should fall back to default formatting
     const allData = reader.data.join('');
@@ -3227,15 +3253,27 @@ describe('NamedPipeSink', () => {
       expect(await waitForOpenPipe(sink)).toBe(true);
       // Defensive state: a live writer coexists with the cap's worth of stale opens.
       internals.abandonedOpens = 2;
-      const status = await sink.reconnect();
+
+      // No `onError`, so giving up at the cap is reported on the console.
+      const captured = muteConsoleError();
+      let status: Awaited<ReturnType<NamedPipeSink['reconnect']>>;
+
+      try {
+        status = await sink.reconnect();
+        sink.write({
+          timestamp: Date.now(),
+          type: 'info',
+          template: 'held',
+          message: 'held',
+        });
+      } finally {
+        restoreConsoleError();
+      }
+
+      expect(captured).toHaveLength(1);
+      expect(captured[0]).toContain('Gave up reopening named pipe');
       expect(status.success).toBe(false);
       expect(sink.getHealth().isInitialized).toBe(false);
-      sink.write({
-        timestamp: Date.now(),
-        type: 'info',
-        template: 'held',
-        message: 'held',
-      });
       expect(sink.getHealth().queueSize).toBe(1);
 
       internals.abandonedOpens = 0;
@@ -4442,23 +4480,39 @@ describe('NamedPipeSink', () => {
       maxQueueSize: 1,
     });
 
-    sink.write({
-      timestamp: Date.now(),
-      type: 'info',
-      template: 'unrenderable',
-      message: UNRENDERABLE_MESSAGE,
-    });
-    sink.write(makeEntry('first'));
-    sink.write(makeEntry('second'));
+    // No `onError`: each loss is reported once on the console.
+    const captured = muteConsoleError();
 
-    expect(sink.getHealth().droppedByKind.format).toBe(1);
-    expect(sink.getHealth().droppedByKind.queue_full).toBe(1);
+    try {
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'unrenderable',
+        message: UNRENDERABLE_MESSAGE,
+      });
+      sink.write(makeEntry('first'));
+      sink.write(makeEntry('second'));
 
-    const closing = sink.close();
+      expect(sink.getHealth().droppedByKind.format).toBe(1);
+      expect(sink.getHealth().droppedByKind.queue_full).toBe(1);
 
-    sink.write(makeEntry('after close'));
+      const closing = sink.close();
 
-    await closing;
+      sink.write(makeEntry('after close'));
+
+      await closing;
+    } finally {
+      restoreConsoleError();
+    }
+
+    expect(captured).toHaveLength(4);
+    expect(captured[0]).toContain('Failed to format a log entry');
+    expect(captured[1]).toContain('maxQueueSize=1');
+
+    const closeReports = captured.slice(2).join('\n');
+
+    expect(closeReports).toContain('Entry logged after close() began');
+    expect(closeReports).toContain('Closed with 1 entry still queued');
 
     const health = sink.getHealth();
     const byKind = health.droppedByKind;
@@ -4914,9 +4968,19 @@ describe('NamedPipeSink', () => {
 
     const startedAt = Date.now();
 
-    await sink.close();
+    // No `onError`, so the abandoned entry is reported on the console.
+    const captured = muteConsoleError();
+
+    try {
+      await sink.close();
+    } finally {
+      restoreConsoleError();
+    }
 
     const elapsed = Date.now() - startedAt;
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('Closed with 1 entry still queued');
 
     // Comfortably inside `closeTimeoutMS`, which is what the grace window exists to stay
     // clear of; the upper bound is loose so a slow machine does not make this flake.

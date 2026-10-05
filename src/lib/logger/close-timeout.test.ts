@@ -2,6 +2,10 @@ import { expect, spyOn, test } from 'bun:test';
 import { Logger } from './index';
 import type { LoggerDiagnostic, LogSink } from './types';
 import { sleep } from '../sleep';
+import {
+  muteConsoleError,
+  restoreConsoleError,
+} from '../internal/console-test-utils';
 
 for (const mode of ['thenable', 'promise subclass', 'async hook'] as const) {
   test(`close deadline breaks a ${mode} self-dependency`, async () => {
@@ -112,8 +116,20 @@ test('deadline reports only unfinished unique sinks and contains their late reje
   expect(slowCalls).toBe(1);
   expect(fastCalls).toBe(1);
   expect(diagnosticWrites).toBe(0);
-  pending.reject(new Error('late failure after deadline'));
-  await sleep(0);
+
+  // The late rejection is contained: no second diagnostic, only the terminal console rung.
+  const captured = muteConsoleError();
+
+  try {
+    pending.reject(new Error('late failure after deadline'));
+    await sleep(0);
+  } finally {
+    restoreConsoleError();
+  }
+
+  expect(captured).toHaveLength(1);
+  expect(captured[0]).toContain('Log sink #1');
+  expect(captured[0]).toContain('late failure after deadline');
   expect(diagnostics).toHaveLength(1);
   expect(closeEvents).toBe(1);
 });
