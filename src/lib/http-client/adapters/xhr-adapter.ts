@@ -1,3 +1,4 @@
+import { defineEntry } from '../../internal/define-entry';
 import { promiseConstructorIntrinsic } from '../../internal/intrinsics';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 import { guardProgressCallback } from '../internal/progress';
@@ -11,7 +12,6 @@ import {
   resolveAbsoluteURLForRuntime,
   stripCrossOriginURLCredentials,
   stripURLCredentials,
-  defineOwnEntry,
 } from '../utils';
 
 /**
@@ -437,7 +437,7 @@ function parseXHRResponseHeaders(
     } else {
       // Defined, not assigned, as every other adapter does: a `__proto__` header
       // would otherwise hit the prototype setter and vanish.
-      defineOwnEntry(result, key, value);
+      defineEntry(result, key, value);
     }
   }
 

@@ -137,6 +137,47 @@ test('optional reads accept only true and name only the first thrown failure', (
   });
 });
 
+test('an optional read whose name lookup throws answers required, reports unlabelled, and does not silence a later named report', () => {
+  collectReports((reports) => {
+    const failure = new Error('optional failed');
+    const component = componentWithReads(
+      () => [],
+      () => {
+        throw failure;
+      },
+    );
+    let isNameBroken = true;
+    const reader = new ComponentMetadataReader(() => {
+      if (isNameBroken) {
+        throw new Error('name failed');
+      }
+      return 'recorded';
+    });
+    // A listener that reads the same component again while the unlabelled report is
+    // being made must not report - and recurse - again.
+    const reenter = (): void => {
+      expect(reader.isComponentOptional(component)).toBe(false);
+    };
+    globalThis.addEventListener('error', reenter);
+    try {
+      expect(reader.isComponentOptional(component)).toBe(false);
+    } finally {
+      globalThis.removeEventListener('error', reenter);
+    }
+    expect(reports).toHaveLength(1);
+    expect(reports[0].cause).toBe(failure);
+    expect(reports[0].message).toContain('isOptional of <unnamed component>');
+    expect(reader.reportMarks(component).optional).toBe(false);
+
+    isNameBroken = false;
+    expect(reader.isComponentOptional(component)).toBe(false);
+    expect(reader.isComponentOptional(component)).toBe(false);
+    expect(reports).toHaveLength(2);
+    expect(reports[1].message).toContain('isOptional of recorded');
+    expect(reader.reportMarks(component).optional).toBe(true);
+  });
+});
+
 test('rollback removes new report marks, preserves prior marks, and never recreates cleared marks', () => {
   collectReports((reports) => {
     const failure = new Error('broken metadata');

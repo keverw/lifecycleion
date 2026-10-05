@@ -5,6 +5,7 @@ import { generateID } from '../../id-helpers';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { isString } from '../../strings';
 import { isPlainObject } from '../../is-plain-object';
+import { isFunction } from '../../is-function';
 import { RetryPolicy } from './retry-policy';
 import { clampTimerDelayMS, toTimerDelayMS } from '../../internal/timer-limits';
 import type {
@@ -351,47 +352,26 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
     // Handle options
     if (isPlainObject(options)) {
-      // set the operation label
-      if (isString(options.operationLabel)) {
-        this._operationLabel = options.operationLabel;
+      // Caller options may be getters. Each field is read exactly once, into a local
+      // that is both checked and used: a second read could return a different value,
+      // registering a non-function the check never saw.
+      const operationLabel: unknown = options.operationLabel;
+      if (isString(operationLabel)) {
+        this._operationLabel = operationLabel;
       }
 
-      // subscribe the event handlers
-      //
-      // `typeof`, not `isFunction()`: its `instanceof Function` fallback accepts a
-      // non-callable object inheriting from `Function.prototype`, which was registered
-      // here and then reported as "not a function" on every emit. Anything that is not
-      // callable is ignored, as every other non-function value always has been.
-      if (typeof options.onOperationStarted === 'function') {
-        // operation started
-        this.on(
-          OPERATION_STARTED,
-          options.onOperationStarted as (data: unknown) => void,
-        );
-      }
+      // subscribe the event handlers. Anything that is not callable is ignored.
+      const hooks: Array<[event: string, hook: unknown]> = [
+        [OPERATION_STARTED, options.onOperationStarted],
+        [OPERATION_ENDED, options.onOperationEnded],
+        [ATTEMPT_STARTED, options.onAttemptStarted],
+        [ATTEMPT_HANDLED, options.onAttemptHandled],
+      ];
 
-      // operation ended
-      if (typeof options.onOperationEnded === 'function') {
-        this.on(
-          OPERATION_ENDED,
-          options.onOperationEnded as (data: unknown) => void,
-        );
-      }
-
-      // attempt started
-      if (typeof options.onAttemptStarted === 'function') {
-        this.on(
-          ATTEMPT_STARTED,
-          options.onAttemptStarted as (data: unknown) => void,
-        );
-      }
-
-      // attempt handled
-      if (typeof options.onAttemptHandled === 'function') {
-        this.on(
-          ATTEMPT_HANDLED,
-          options.onAttemptHandled as (data: unknown) => void,
-        );
+      for (const [event, hook] of hooks) {
+        if (isFunction(hook)) {
+          this.on(event, hook as (data: unknown) => void);
+        }
       }
     }
   }
@@ -844,10 +824,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // This starts a NEW ATTEMPT (attempt timer resets) but keeps the SAME OPERATION
       // (operation timer continues - we're just accelerating a scheduled retry, not starting over).
       if (this.currentState.retryTimeoutHandle !== null) {
-        clearTimeout(this.currentState.retryTimeoutHandle);
-        this.currentState.retryTimeoutHandle = null;
-        this.currentState.retryTimeoutStartTime = null;
-        this.currentState.retryTimeoutDelayMS = null;
+        this.clearRetryTimer();
         this.currentState.lastAttemptWasForceTry = true;
 
         void this.attemptOperation(true);
@@ -991,14 +968,24 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     return undefined;
   }
 
+  /**
+   * Clear the pending retry timer, if any, and the bookkeeping that describes it.
+   * Clearing a timer that has already fired is a no-op, so the timer's own callback
+   * uses this too.
+   */
+  private clearRetryTimer(): void {
+    if (this.currentState.retryTimeoutHandle !== null) {
+      clearTimeout(this.currentState.retryTimeoutHandle);
+    }
+
+    this.currentState.retryTimeoutHandle = null;
+    this.currentState.retryTimeoutStartTime = null;
+    this.currentState.retryTimeoutDelayMS = null;
+  }
+
   private cleanupTimers(): void {
     // Clear any pending retry or cancellation timers.
-    if (this.currentState.retryTimeoutHandle) {
-      clearTimeout(this.currentState.retryTimeoutHandle);
-      this.currentState.retryTimeoutHandle = null;
-      this.currentState.retryTimeoutStartTime = null;
-      this.currentState.retryTimeoutDelayMS = null;
-    }
+    this.clearRetryTimer();
 
     if (this.currentState.cancellationTimeoutHandle) {
       clearTimeout(this.currentState.cancellationTimeoutHandle);
@@ -1116,14 +1103,18 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       data?: T;
       error?: unknown;
     },
-    // Set only by the `catch` around `this.operation`, which routes a thrown error here
-    // as `'error'`. It changes nothing about how a live attempt is handled and only names
-    // the already-settled case correctly: an operation that reports its outcome and *then*
-    // throws never called `reportResult` twice, so telling its author that a second report
-    // "arrived after the attempt was settled" points at code they did not write. The
-    // throw is still reported - a failure after a successful report is exactly the kind
+    // Where an outcome that did not come through `reportResult` came from: `'throw'` from
+    // the `catch` around `this.operation`, or the `UnreadableReturn` for a returned value
+    // whose `then` could not be read. Both are routed here as `'error'`. It changes
+    // nothing about how a live attempt is handled and only names the already-settled case
+    // correctly: an operation that reports its outcome and *then* throws - or returns a
+    // malformed thenable - never called `reportResult` twice, so telling its author that a
+    // second report "arrived after the attempt was settled" points at code they did not
+    // write, and a malformed return is not a throw either (the distinction
+    // `safe-handle-callback` and `failure-reporter` keep with `UnreadableReturn`). The
+    // failure is still reported - a failure after a successful report is exactly the kind
     // that otherwise disappears - it is simply reported as what it is.
-    didOperationThrow: boolean = false,
+    source: 'report' | 'throw' | UnreadableReturn = 'report',
   ): void {
     // Guard against multiple calls to reportResult
     if (
@@ -1165,17 +1156,30 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       }
 
       if (!wasAborted) {
-        reportCallbackError(
-          didOperationThrow
-            ? 'RetryRunner operation threw after the attempt was settled'
-            : 'RetryRunner reportResult (attempt already settled)',
-          valueInfo.error ??
-            new Error(
-              didOperationThrow
-                ? 'the operation threw after the attempt was settled'
-                : `reportResult('${status}') arrived after the attempt was settled`,
-            ),
-        );
+        if (source instanceof UnreadableReturn) {
+          // The return-contract failure, worded as one, with the getter's own error kept
+          // on `cause`.
+          reportCallbackError(
+            'RetryRunner operation returned an unreadable then after the attempt was settled',
+            new Error(source.describe('RetryRunner operation'), {
+              cause: source.cause,
+            }),
+          );
+        } else {
+          const didOperationThrow = source === 'throw';
+
+          reportCallbackError(
+            didOperationThrow
+              ? 'RetryRunner operation threw after the attempt was settled'
+              : 'RetryRunner reportResult (attempt already settled)',
+            valueInfo.error ??
+              new Error(
+                didOperationThrow
+                  ? 'the operation threw after the attempt was settled'
+                  : `reportResult('${status}') arrived after the attempt was settled`,
+              ),
+          );
+        }
       }
 
       return; // Ensures we only handle the result once per context
@@ -1268,9 +1272,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
             this.currentState.retryTimeoutStartTime = Date.now();
             this.currentState.retryTimeoutDelayMS = delayMS;
             this.currentState.retryTimeoutHandle = setTimeout(() => {
-              this.currentState.retryTimeoutHandle = null;
-              this.currentState.retryTimeoutStartTime = null;
-              this.currentState.retryTimeoutDelayMS = null;
+              this.clearRetryTimer();
               void this.attemptOperation(false);
             }, delayMS);
           } else {
@@ -1322,13 +1324,6 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   }
 
   private async attemptOperation(wasForced: boolean): Promise<void> {
-    // If there's an existing attempt that has already been handled but not yet cleaned up, return early
-    if (this.currentState.currentAttemptContext instanceof AttemptContext) {
-      if (this.currentState.currentAttemptContext.handled) {
-        return;
-      }
-    }
-
     // make sure the operation is running still, and not pending cancellation or canceled
     if (this.currentState.runnerState === 'running') {
       this.currentState.lastAttemptWasForceTry = wasForced;
@@ -1384,6 +1379,18 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         }
       };
 
+      // Whether `failure` repeats the error this attempt already reported (see the
+      // `catch` below for why that is not a second outcome).
+      const isReportedErrorAgain = (failure: unknown): boolean =>
+        didReport &&
+        context.handled &&
+        (reportedStatus === 'error' || reportedStatus === 'fatal') &&
+        failure === reportedValue;
+
+      // A returned value whose `then` could not be read: a return-contract failure, kept
+      // apart from a throw so a settled attempt reports it as what it is.
+      let unreadableReturn: UnreadableReturn | undefined;
+
       try {
         const result = this.operation(
           reportResult,
@@ -1396,10 +1403,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         // `constructor`. Classification and adoption share one captured then read.
         const pending = adoptResult(result);
         if (pending instanceof UnreadableReturn) {
-          // Match await's rejection reason and preserve reported-error identity.
-          throw pending.cause;
-        }
-        if (pending !== undefined) {
+          unreadableReturn = pending;
+        } else if (pending !== undefined) {
           await awaitBoxedPromise(pending);
         }
       } catch (error) {
@@ -1419,12 +1424,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         // compared equal and was dropped - the runner stayed `completed`/`success` and the
         // `'error'` channel never heard of it, which is precisely the post-success failure
         // `handleReportResult` exists to keep.
-        if (
-          didReport &&
-          context.handled &&
-          (reportedStatus === 'error' || reportedStatus === 'fatal') &&
-          error === reportedValue
-        ) {
+        if (isReportedErrorAgain(error)) {
           return;
         }
 
@@ -1435,7 +1435,24 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           {
             error: error,
           },
-          true,
+          'throw',
+        );
+        return;
+      }
+
+      // Outside the `try`, so nothing here can be caught and handled a second time as a
+      // throw. A live attempt records the getter's own error, as `await` would reject with
+      // it, so its identity is preserved. A getter rethrowing the error already reported
+      // is the rethrow shape above and is not a second outcome.
+      if (
+        unreadableReturn !== undefined &&
+        !isReportedErrorAgain(unreadableReturn.cause)
+      ) {
+        this.handleReportResult(
+          context,
+          'error',
+          { error: unreadableReturn.cause },
+          unreadableReturn,
         );
       }
     }

@@ -1714,9 +1714,11 @@ describe('ProcessSignalManager', () => {
       };
     }
 
-    test('a detach reports a raw-mode restore failure after its listener cleanup failures', async () => {
-      // The restore is the last cleanup step, so its report comes last too, after the
-      // later listener failures; the first listener failure is the one thrown.
+    test('a throwing detach reports its raw-mode restore failure before the throw and its listener cleanup failures after', async () => {
+      // The first listener failure is the one thrown. The broken terminal is reported
+      // before that throw, as a failed attach() reports it: a caller that exits from its
+      // catch - try { detach() } catch { process.exit(1) } - never drains a microtask.
+      // The later listener failures still wait until the throw has reached the caller.
       let shouldFailDisable = true;
       const tty = mockRawTTY(() => {
         if (shouldFailDisable) {
@@ -1748,24 +1750,34 @@ describe('ProcessSignalManager', () => {
           throw new Error(`off ${event} failed`);
         }) as typeof process.off);
 
+        let reportsAtThrow: string[] = [];
         try {
-          expect(() => manager.detach()).toThrow('off SIGINT failed');
+          expect(() => {
+            try {
+              manager.detach();
+            } finally {
+              reportsAtThrow = reports.map((report) => report.message);
+            }
+          }).toThrow('off SIGINT failed');
         } finally {
           offSpy.mockRestore();
         }
-        expect(reports).toEqual([]);
+        expect(reportsAtThrow).toEqual([
+          'Error in a callback ProcessSignalManager stdin raw mode restore',
+        ]);
+        expect((reports[0]?.cause as Error).message).toBe('tty refused');
+        expect(manager.isAttached).toBe(false);
+
         await Promise.resolve();
 
-        const names = reports.map((report) => report.message);
-        expect(names.length).toBeGreaterThan(1);
-        expect(names.at(-1)).toContain(
-          'ProcessSignalManager stdin raw mode restore',
-        );
-        for (const name of names.slice(0, -1)) {
-          expect(name).toContain('ProcessSignalManager listener cleanup');
+        const later = reports.slice(1);
+        expect(later.length).toBeGreaterThan(0);
+        for (const report of later) {
+          expect(report.message).toContain(
+            'ProcessSignalManager listener cleanup',
+          );
         }
-        expect((reports.at(-1)?.cause as Error).message).toBe('tty refused');
-        expect((reports.at(-2)?.cause as Error).message).toBe(
+        expect((later.at(-1)?.cause as Error).message).toBe(
           'off SIGHUP failed',
         );
       } finally {

@@ -117,20 +117,47 @@ test('late reconciliation and report-selection failures reach the terminal warni
       level: 'warn',
     },
   ]);
-  // The hook's own failure is still reported, under the fallback details, and the
-  // selection failure is labelled as a reporting failure, not a resolution failure.
+  // The hook's own failure is still reported, under the fallback message and - with no
+  // selector to downgrade it - at `error`. The selection failure has its own label:
+  // neither a resolution failure nor a hook failure that went unreported.
   expect(rejected.reports).toEqual([
     {
       error: expect.objectContaining({ message: 'hook failure' }),
       message: 'unused',
-      level: 'warn',
+      level: 'error',
     },
     {
       error: selectionError,
-      message: 'Late stop failure could not be reported',
+      message: 'Late stop report selection failed',
       level: 'warn',
     },
   ]);
+});
+
+test('a failed report selection falls back to the level given up front', async () => {
+  const { observer, reports } = setup();
+  const hookError = new Error('hook failure');
+  const selectionError = new Error('report selection failed');
+  observer.observe(Promise.reject(hookError), 'fallback', {
+    level: 'warn',
+    getReport: () => {
+      throw selectionError;
+    },
+  });
+  await flushObservers();
+  expect(reports).toEqual([
+    { error: hookError, message: 'fallback', level: 'warn' },
+    {
+      error: selectionError,
+      message: 'Late stop report selection failed',
+      level: 'warn',
+    },
+  ]);
+  expect(
+    reports.some(
+      ({ message }) => message === 'Late stop failure could not be reported',
+    ),
+  ).toBe(false);
 });
 
 test('terminal reporting contains a reporter that throws again', async () => {

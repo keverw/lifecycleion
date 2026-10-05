@@ -45,7 +45,6 @@ function fixture() {
     }),
     nameOf: (component) => component.getName(),
     isComponentRunning: (name) => runningComponents.has(name),
-    isComponentUp: (name) => componentStates.get(name) === 'running',
     getComponent: (name) =>
       state.components.find((component) => component.getName() === name),
     isRawStartPending: (name) => pendingStarts.has(name),
@@ -673,6 +672,53 @@ test('a component under late-start cleanup is refused by every access operation'
   expect(
     (await sendMessageInternal(state.context, 'late', 'hi', null)).code,
   ).toBe('sent');
+  expect(calls).toBe(1);
+});
+
+test('message, value, health and signal dispatch share one entry rule for a running component whose start() is pending', async () => {
+  const state = fixture();
+  const component = state.add('pending');
+  let calls = 0;
+  for (const hook of ['onMessage', 'getValue', 'healthCheck']) {
+    Object.defineProperty(component, hook, {
+      value: () => {
+        calls++;
+        return hook === 'getValue' ? { found: true, value: 1 } : true;
+      },
+    });
+  }
+  // Running by membership and state, but a start of it is still running: health and
+  // signals used to ask only whether it was up, while messaging refused it.
+  state.pendingStarts.add('pending');
+
+  expect(
+    await sendMessageInternal(state.context, 'pending', 'hi', null),
+  ).toMatchObject({ sent: false, code: 'stopped' });
+  expect(getValueInternal(state.context, 'pending', 'key', null)).toMatchObject(
+    { found: false, code: 'stopped' },
+  );
+  expect(
+    await checkComponentHealthOperation(state.context, 'pending'),
+  ).toMatchObject({ healthy: false, code: 'stopped' });
+  const signals = await runSignalBroadcast(state.context, {
+    signal: 'reload',
+    pickHandler: () => () => {
+      calls++;
+    },
+    startupLog: 'starting',
+    timeoutLog: 'timeout',
+    errorLog: 'failed',
+    emitStarted: () => {},
+    emitCompleted: () => {},
+    emitFailed: () => {},
+  });
+  expect(signals.results).toEqual([]);
+  expect(calls).toBe(0);
+
+  state.pendingStarts.delete('pending');
+  expect(
+    await checkComponentHealthOperation(state.context, 'pending'),
+  ).toMatchObject({ healthy: true, code: 'ok' });
   expect(calls).toBe(1);
 });
 

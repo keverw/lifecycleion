@@ -14,7 +14,6 @@ import {
   checkComponentHealthOperation,
   checkAllHealthOperation,
   runSignalBroadcast,
-  type SignalBroadcastDescriptor,
 } from './internal/component-inspection';
 import {
   type DependencyRead,
@@ -34,7 +33,6 @@ import {
   failedSignalCallbackResult,
   crashedHealthCheckResult,
   crashedHealthReport,
-  type SettledFailureCode,
   settledFailureCode,
   crashedComponentResult,
   refusedStartupResult,
@@ -754,7 +752,7 @@ export class LifecycleManager
       wasRegistered: this.isNameRegistered(name),
     };
 
-    return this.settleOperation(
+    return settleOperation(
       'unregisterComponent',
       () => this.unregisterComponentOperation(name, options, progress),
       (error, reason, code) => ({
@@ -1085,10 +1083,13 @@ export class LifecycleManager
     const { reads } = this.readRegistry((component) => ({
       // The one rule startup applies, through the one helper: a throw is reported once
       // and read as required.
-      isOptional: this.isComponentOptional(component),
+      isOptional: this.componentMetadata.isComponentOptional(component),
       // Reported once per registration, like every other read of it: the failure is in
       // the result already, and a caller polling this would flood the channel.
-      read: this.readDependenciesReported(component, 'validateDependencies'),
+      read: this.componentMetadata.readDependenciesReported(
+        component,
+        'validateDependencies',
+      ),
     }));
 
     for (const component of this.components) {
@@ -1230,7 +1231,7 @@ export class LifecycleManager
    * Shutdown occurs in reverse topological order.
    *
    * Behavior:
-   * - Rejects if some components are already running (partial state)
+   * - Refuses, resolving with `code: 'partial_state'`, if some components are already running
    * - Sets isStarting flag during operation
    * - On failure: attempts rollback; dependencies of unfinished or failed cleanup remain running
    * - Optional components don't trigger rollback on failure
@@ -1238,10 +1239,10 @@ export class LifecycleManager
    * - Handles shutdown during startup (aborts; shutdown owns cleanup)
    */
   public startAllComponents(options?: StartupOptions): Promise<StartupResult> {
-    return this.settleOperation(
+    return settleOperation(
       'startAllComponents',
       () => this.startAllComponentsOperation(options),
-      (error, reason, code) => this.crashedStartupResult(error, reason, code),
+      (error, reason, code) => crashedStartupResult(error, reason, code),
     );
   }
 
@@ -1278,7 +1279,7 @@ export class LifecycleManager
    * @param options - Optional shutdown options
    */
   public stopAllComponents(options?: StopAllOptions): Promise<ShutdownResult> {
-    return this.settleOperation(
+    return settleOperation(
       'stopAllComponents',
       () => this.stopAllComponentsOperation(options),
       (error, reason, code) => crashedShutdownResult(error, reason, code),
@@ -1310,13 +1311,13 @@ export class LifecycleManager
     // stopping; failures from later phase bookkeeping still retain this result.
     const phases: { shutdownResult?: ShutdownResult } = {};
 
-    return this.settleOperation(
+    return settleOperation(
       'restartAllComponents',
       () => this.restartAllComponentsOperation(options, phases),
       (error, reason, code) => ({
         shutdownResult:
           phases.shutdownResult ?? crashedShutdownResult(error, reason, code),
-        startupResult: this.crashedStartupResult(error, reason, code),
+        startupResult: crashedStartupResult(error, reason, code),
         success: false,
       }),
     );
@@ -1333,7 +1334,7 @@ export class LifecycleManager
     name: string,
     options?: StartComponentOptions,
   ): Promise<ComponentOperationResult> {
-    return this.settleOperation(
+    return settleOperation(
       'startComponent',
       () => this.startComponentInternal(name, options),
       (error, reason, code) =>
@@ -1348,7 +1349,7 @@ export class LifecycleManager
     name: string,
     options?: StopComponentOptions,
   ): Promise<ComponentOperationResult> {
-    return this.settleOperation(
+    return settleOperation(
       'stopComponent',
       () => this.stopComponentOperation(name, options),
       (error, reason, code) =>
@@ -1363,7 +1364,7 @@ export class LifecycleManager
     name: string,
     options?: RestartComponentOptions,
   ): Promise<ComponentOperationResult> {
-    return this.settleOperation(
+    return settleOperation(
       'restartComponent',
       () => this.restartComponentOperation(name, options),
       (error, reason, code) =>
@@ -1405,21 +1406,21 @@ export class LifecycleManager
           // resolves under this manager's own label rather than relying on
           // `ProcessSignalManager` to catch its rejection.
           onReloadRequested: () =>
-            this.settleOperation(
+            settleOperation(
               'reload signal',
               () => this.handleReloadRequest('signal'),
               (error, _reason, code) =>
                 crashedSignalBroadcastResult('reload', error, code),
             ),
           onInfoRequested: () =>
-            this.settleOperation(
+            settleOperation(
               'info signal',
               () => this.handleInfoRequest('signal'),
               (error, _reason, code) =>
                 crashedSignalBroadcastResult('info', error, code),
             ),
           onDebugRequested: () =>
-            this.settleOperation(
+            settleOperation(
               'debug signal',
               () => this.handleDebugRequest('signal'),
               (error, _reason, code) =>
@@ -1704,7 +1705,7 @@ export class LifecycleManager
    * @returns Result of broadcasting reload to components
    */
   public triggerReload(): Promise<SignalBroadcastResult> {
-    return this.settleOperation(
+    return settleOperation(
       'triggerReload',
       () => this.handleReloadRequest(),
       (error, _reason, code) =>
@@ -1717,7 +1718,7 @@ export class LifecycleManager
    * @returns Result of broadcasting info to components
    */
   public triggerInfo(): Promise<SignalBroadcastResult> {
-    return this.settleOperation(
+    return settleOperation(
       'triggerInfo',
       () => this.handleInfoRequest(),
       (error, _reason, code) =>
@@ -1730,7 +1731,7 @@ export class LifecycleManager
    * @returns Result of broadcasting debug to components
    */
   public triggerDebug(): Promise<SignalBroadcastResult> {
-    return this.settleOperation(
+    return settleOperation(
       'triggerDebug',
       () => this.handleDebugRequest(),
       (error, _reason, code) =>
@@ -1792,9 +1793,9 @@ export class LifecycleManager
    * @returns Health check result with status, message, details, and timing
    */
   public checkComponentHealth(name: string): Promise<HealthCheckResult> {
-    return this.settleOperation(
+    return settleOperation(
       'checkComponentHealth',
-      () => this.checkComponentHealthOperation(name),
+      () => checkComponentHealthOperation(this.componentAccess, name),
       (error, _reason, code) => crashedHealthCheckResult(name, error, code),
     );
   }
@@ -1808,9 +1809,9 @@ export class LifecycleManager
    * @returns Aggregate health report with individual component results
    */
   public checkAllHealth(): Promise<HealthReport> {
-    return this.settleOperation(
+    return settleOperation(
       'checkAllHealth',
-      () => this.checkAllHealthOperation(),
+      () => checkAllHealthOperation(this.componentAccess),
       (error, _reason, code) => crashedHealthReport(error, code),
     );
   }
@@ -1874,11 +1875,11 @@ export class LifecycleManager
       },
       nameOf: (component) => manager.nameOf(component),
       isComponentRunning: (name) => manager.isComponentRunning(name),
-      isComponentUp: (name) => manager.isComponentUp(name),
       getComponent: (name) => manager.getComponent(name),
       isRawStartPending: (name) => manager.isRawStartPending(name),
       // A late start's cleanup marks its component running only to stop it: messaging,
-      // value reads, health checks and signals must not enter it as if it were up.
+      // value reads, health checks, signals and shutdown warnings must not enter it as
+      // if it were up.
       isLateStartCleanupPending: (name) =>
         manager.pendingBulkStartupCleanup.has(name),
       sendMessageSettled: (name, payload, from, options) =>
@@ -1980,7 +1981,7 @@ export class LifecycleManager
     from: string | null,
     options?: SendMessageOptions,
   ): Promise<MessageResult> {
-    return this.settleOperation(
+    return settleOperation(
       'sendMessageToComponent',
       () => this.sendMessageInternal(componentName, payload, from, options),
       (error, _reason, code) => ({
@@ -2009,7 +2010,7 @@ export class LifecycleManager
     from: string | null,
     options?: BroadcastOptions,
   ): Promise<BroadcastResult[]> {
-    return this.settleOperation(
+    return settleOperation(
       'broadcastMessage',
       () => this.broadcastMessageInternal(payload, from, options),
       (error, _reason, code) => {
@@ -2118,7 +2119,7 @@ export class LifecycleManager
     // fields as it would.
     const progress = newRegistrationProgress();
 
-    return this.settleOperation(
+    return settleOperation(
       isInsertAction ? 'insertComponentAt' : 'registerComponent',
       () =>
         this.registerComponentInternal(
@@ -3003,7 +3004,11 @@ export class LifecycleManager
           // be tearing down - and the startup is over, without going on to clear the
           // deferred auto-starts as if it would start them.
           const registryRead = this.readRegistry(
-            (component) => this.readDependenciesReported(component, 'startup'),
+            (component) =>
+              this.componentMetadata.readDependenciesReported(
+                component,
+                'startup',
+              ),
             startupReads,
             () => !hasShutdownBegun(),
           );
@@ -3090,7 +3095,10 @@ export class LifecycleManager
               }
               const registryRead = this.readRegistry(
                 (component) =>
-                  this.readDependenciesReported(component, 'startup'),
+                  this.componentMetadata.readDependenciesReported(
+                    component,
+                    'startup',
+                  ),
                 startupReads,
                 canContinueOrdering,
               );
@@ -3211,7 +3219,7 @@ export class LifecycleManager
               // to crash, and roll back, the whole startup.
               const isDependencyOptional = (): boolean =>
                 depComponent !== undefined &&
-                this.isComponentOptional(depComponent);
+                this.componentMetadata.isComponentOptional(depComponent);
 
               if (skippedDueToDependency.has(depName)) {
                 if (!isDependencyOptional()) {
@@ -3251,13 +3259,28 @@ export class LifecycleManager
 
             // Start the component (allow during bulk startup since we ARE the bulk operation)
             frozenAutoStarts.delete(name);
+            // Whether this start's timeout was the bulk deadline's, as opposed to the
+            // component's own `startupTimeoutMS`: the bulk timer can also fire after the
+            // component's own timer and before this loop resumes, and that timeout is
+            // still a required failure to roll back, not a bulk timeout.
+            let didStartMeetBulkDeadline = false;
+            const startDeadlineContext =
+              deadlineContext === undefined
+                ? undefined
+                : {
+                    ...deadlineContext,
+                    onTimeout: (): void => {
+                      didStartMeetBulkDeadline = true;
+                      deadlineContext.onTimeout();
+                    },
+                  };
             const result = await this.startComponentInternal(
               name,
               {
                 allowDuringBulkStartup: true,
               },
               // Every follow-up batch shares the original deadline.
-              deadlineContext,
+              startDeadlineContext,
               dependencyRead,
               bulkStartup.dependencyReads,
               restartSnapshots?.get(name),
@@ -3276,7 +3299,13 @@ export class LifecycleManager
             // A bulk timeout has no completed outcome to account for. Other results
             // must be handled before checking the clock so failures retain their errors
             // and rollback, and already-running components remain in the snapshot.
-            if (hasTimedOut && result.code === 'component_startup_timeout') {
+            // Only a timeout the bulk deadline caused: the component's own one is a
+            // failure like any other, even when the bulk deadline has also passed.
+            if (
+              hasTimedOut &&
+              didStartMeetBulkDeadline &&
+              result.code === 'component_startup_timeout'
+            ) {
               break;
             }
 
@@ -3372,17 +3401,19 @@ export class LifecycleManager
                   result.reason ?? 'Could not attach process signals',
                   Date.now() - startTime,
                 ),
-                // Whatever the rollback could not stop, so the result matches the registry.
-                startedComponents: [...startedComponents, name].filter(
-                  (startedName) => this.runningComponents.has(startedName),
-                ),
+                // Whatever the rollback could not stop, so the result matches the registry,
+                // excluding teardown as every other failure exit does.
+                startedComponents: this.runningStartupSnapshot([
+                  ...startedComponents,
+                  name,
+                ]),
                 failedOptionalComponents,
                 skippedDueToDependency: Array.from(skippedDueToDependency),
                 error: result.error,
               };
             } else {
               // Check if component is optional
-              if (this.isComponentOptional(component)) {
+              if (this.componentMetadata.isComponentOptional(component)) {
                 this.logger
                   .entity(name)
                   .warn(
@@ -3641,7 +3672,7 @@ export class LifecycleManager
         }
 
         return {
-          ...this.crashedStartupResult(
+          ...crashedStartupResult(
             crashError,
             `startAllComponents() failed unexpectedly: ${describeError(crashError)}`,
             // Reported above, so a crash even for a branded option refusal: this
@@ -3960,11 +3991,12 @@ export class LifecycleManager
     if (afterInfoLog) {
       return afterInfoLog;
     }
-    const changedBeforeStop = changedSnapshotName();
-    if (changedBeforeStop !== undefined) {
-      const reason = `Component "${changedBeforeStop}" changed while restart was being prepared`;
-      // The info log above can itself change registration through a sink. Keep the
-      // check after it, and report this refusal without announcing a shutdown pass.
+    // A refusal made before the stop phase: nothing was stopped, and no shutdown pass
+    // is announced.
+    const refuseBeforeStop = (
+      reason: string,
+      shutdownCode: 'partial_state' | 'cleanup_incomplete',
+    ): RestartResult => {
       this.logger.warn('Restart refused before shutdown: {{reason}}', {
         params: { reason },
       });
@@ -3975,11 +4007,32 @@ export class LifecycleManager
           stalledComponents: [],
           durationMS: 0,
           reason,
-          code: 'partial_state',
+          code: shutdownCode,
         },
         startupResult: refusedStartupResult('partial_state', reason),
         success: false,
       };
+    };
+    // The info log above can itself change registration through a sink. Keep the
+    // check after it.
+    const changedBeforeStop = changedSnapshotName();
+    if (changedBeforeStop !== undefined) {
+      return refuseBeforeStop(
+        `Component "${changedBeforeStop}" changed while restart was being prepared`,
+        'partial_state',
+      );
+    }
+    // A start that already timed out with its `start()` still unresolved is not waited
+    // for by the stop phase, which then ends `cleanup_incomplete` and skips startup -
+    // after stopping every component that start does not depend on, leaving the
+    // application half down. Known now, so refused now, as an invalid stop budget is.
+    // Nothing between here and the stop phase's acceptance runs caller code.
+    const unresolvedStarts = this.unresolvedTimedOutStartNames();
+    if (unresolvedStarts.length > 0) {
+      return refuseBeforeStop(
+        `Timed-out start still unresolved for: ${unresolvedStarts.join(', ')}; restart refused before stopping anything, startup skipped`,
+        'cleanup_incomplete',
+      );
     }
 
     const pendingAutoStarts = new Set<string>();
@@ -4095,7 +4148,7 @@ export class LifecycleManager
 
         return {
           shutdownResult,
-          startupResult: this.crashedStartupResult(
+          startupResult: crashedStartupResult(
             shutdownResult.error,
             wasRefused
               ? 'Startup skipped: the restart shutdown phase refused invalid options'
@@ -4139,11 +4192,11 @@ export class LifecycleManager
       for (const name of this.staleRestartSnapshotNames(restartSnapshots)) {
         restartSnapshots.delete(name);
       }
-      const startupResult = await this.settleOperation(
+      const startupResult = await settleOperation(
         'startAllComponents',
         () =>
           this.startAllComponentsOperation(startupOptions, restartSnapshots),
-        (error, reason, code) => this.crashedStartupResult(error, reason, code),
+        (error, reason, code) => crashedStartupResult(error, reason, code),
       );
 
       const isSuccess = shutdownResult.success && startupResult.success;
@@ -4320,7 +4373,8 @@ export class LifecycleManager
       return activity;
     };
     const { reads } = this.readRegistry(
-      (component) => this.readDependencies(component, 'dependents'),
+      (component) =>
+        this.componentMetadata.readDependencies(component, 'dependents'),
       undefined,
       undefined,
       undefined,
@@ -4375,6 +4429,53 @@ export class LifecycleManager
         },
       });
     return result;
+  }
+
+  /**
+   * The start settlements that still describe each component's current start: the
+   * attempt holding its claim, or the registration and attempt token it last ran under.
+   * Keyed by name. Shared by the shutdown pass and restart's preflight so the two agree
+   * on which starts are current.
+   */
+  private currentStartSettlements(): Map<string, StartSettlement> {
+    const currentStarts = new Map<string, StartSettlement>();
+    for (const [claim, settlement] of this.startSettlements) {
+      if (
+        this.componentClaims.get(settlement.name)?.claim === claim ||
+        (settlement.component !== undefined &&
+          this.getComponent(settlement.name) === settlement.component &&
+          this.componentStartAttemptTokens.get(settlement.name) ===
+            settlement.token)
+      ) {
+        currentStarts.set(settlement.name, settlement);
+      }
+    }
+    return currentStarts;
+  }
+
+  /**
+   * A start that already timed out - abandoned to late cleanup, or settled by its abort
+   * hook - while its raw `start()` is still unresolved. A shutdown pass does not spend
+   * its budget waiting for one, and reports it as `cleanup_incomplete`.
+   */
+  private isUnresolvedTimedOutStart(
+    settlement: StartSettlement | undefined,
+  ): boolean {
+    return (
+      settlement !== undefined &&
+      settlement.rawStartPending &&
+      (settlement.isAwaitingLateStart === true || settlement.didSettle)
+    );
+  }
+
+  /** Names whose current start is {@link isUnresolvedTimedOutStart}, in registry order. */
+  private unresolvedTimedOutStartNames(): string[] {
+    const currentStarts = this.currentStartSettlements();
+    return this.components
+      .map((component) => this.nameOf(component))
+      .filter((name) =>
+        this.isUnresolvedTimedOutStart(currentStarts.get(name)),
+      );
   }
 
   /**
@@ -4522,7 +4623,7 @@ export class LifecycleManager
     // refused by a concurrent restart's stop phase asks the same, and leaves no pass
     // running either once that restart skips its startup.
     const stayDownRequestCountAtStop = this.stayDownRequestCount;
-    const stopResult = await this.settleOperation(
+    const stopResult = await settleOperation(
       'stopComponent',
       () => this.stopComponentOperation(name, stopOptions, stopContext),
       (error, reason, code) =>
@@ -4579,7 +4680,7 @@ export class LifecycleManager
       };
     }
 
-    const startResult = await this.settleOperation(
+    const startResult = await settleOperation(
       'startComponent',
       () =>
         this.startComponentInternal(
@@ -4609,16 +4710,6 @@ export class LifecycleManager
       componentName: name,
       status: this.getComponentStatus(name),
     };
-  }
-
-  private checkComponentHealthOperation(
-    name: string,
-  ): Promise<HealthCheckResult> {
-    return checkComponentHealthOperation(this.componentAccess, name);
-  }
-
-  private checkAllHealthOperation(): Promise<HealthReport> {
-    return checkAllHealthOperation(this.componentAccess);
   }
 
   private updateStartedFlag(): void {
@@ -4695,7 +4786,10 @@ export class LifecycleManager
       let candidateRead: DependencyRead = { dependencies: [] };
       // Kept as reads, as a bulk startup keeps them: one snapshot type for ordering.
       const readRegistered = (registered: BaseComponent): DependencyRead =>
-        this.readDependenciesReported(registered, 'registration');
+        this.componentMetadata.readDependenciesReported(
+          registered,
+          'registration',
+        );
       let registryRead = {
         reads: new Map<BaseComponent, DependencyRead>(),
         isSettled: true,
@@ -5833,18 +5927,7 @@ export class LifecycleManager
       // each through the stop pipeline once `start()` settles - but they are part of what
       // it reports: one that came up during the pass and is still stopping, or stalled
       // stopping, when the pass ends leaves the pass short of its goal, not successful.
-      const currentStarts = new Map<string, StartSettlement>();
-      for (const [claim, settlement] of this.startSettlements) {
-        if (
-          this.componentClaims.get(settlement.name)?.claim === claim ||
-          (settlement.component !== undefined &&
-            this.getComponent(settlement.name) === settlement.component &&
-            this.componentStartAttemptTokens.get(settlement.name) ===
-              settlement.token)
-        ) {
-          currentStarts.set(settlement.name, settlement);
-        }
-      }
+      const currentStarts = this.currentStartSettlements();
       startingAtPassStart = shutdownOrder.filter(
         (name) =>
           this.componentStates.get(name) === 'starting' ||
@@ -5856,10 +5939,8 @@ export class LifecycleManager
       // Optional bulk-start failures are labelled failed, not starting-timed-out.
       // The settlement records whether late startup is still pending in either case.
       const timedOutStarts = new Set(
-        startsToJoin.filter(
-          (settlement) =>
-            settlement?.rawStartPending &&
-            (settlement.isAwaitingLateStart || settlement.didSettle),
+        startsToJoin.filter((settlement) =>
+          this.isUnresolvedTimedOutStart(settlement),
         ),
       );
 
@@ -5884,7 +5965,7 @@ export class LifecycleManager
 
         return component === undefined
           ? []
-          : this.readDependencies(component, 'shutdown');
+          : this.componentMetadata.readDependencies(component, 'shutdown');
       };
       const protectDependencies = (
         name: string,
@@ -5964,6 +6045,10 @@ export class LifecycleManager
       // running at the end, they are reported apart from the stops that actually failed:
       // naming them under "Failed to stop" said their `stop()` had run and failed.
       const haltSkippedNames = new Set<string>();
+      // Components whose stop this pass actually ran. A dependency skipped to keep it
+      // available for a component still up after a failed stop never is: still running
+      // at the end, it is reported under "Not attempted" too, not as a failed stop.
+      const attemptedStopNames = new Set<string>();
 
       const isStartStillInProgress = (name: string): boolean =>
         isStartUnfinished(currentStarts.get(name)) ||
@@ -6180,6 +6265,7 @@ export class LifecycleManager
               continue;
             }
 
+            attemptedStopNames.add(name);
             const result: ComponentOperationResult = isRunning
               ? await this.stopComponentInternal(name)
               : shouldRetryStalled
@@ -6391,11 +6477,16 @@ export class LifecycleManager
           !stoppingComponents.has(name) &&
           !finalStalledNames.has(name),
       );
+      // Never tried by this pass: past a `haltOnStall` break, or held up for a component
+      // still running after a failed stop.
+      const wasNotAttempted = (name: string): boolean =>
+        haltSkippedNames.has(name) ||
+        (concurrentlyProtectedSkips.has(name) && !attemptedStopNames.has(name));
       const failedToStopComponents = stillRunningComponents.filter(
-        (name) => !haltSkippedNames.has(name),
+        (name) => !wasNotAttempted(name),
       );
       const notAttemptedComponents = stillRunningComponents.filter((name) =>
-        haltSkippedNames.has(name),
+        wasNotAttempted(name),
       );
       const isSuccess =
         !hasTimedOut &&
@@ -6855,26 +6946,6 @@ export class LifecycleManager
   /** Whether `claim` is the attempt that last claimed `name`. */
   private ownsClaim(name: string, claim: symbol): boolean {
     return this.componentClaims.get(name)?.claim === claim;
-  }
-
-  // Metadata policy and report-once state live together; these small delegates retain
-  // the manager's existing read boundaries for orchestration callers.
-  private readDependencies(
-    component: BaseComponent,
-    context: string,
-  ): string[] {
-    return this.componentMetadata.readDependencies(component, context);
-  }
-
-  private readDependenciesReported(
-    component: BaseComponent,
-    context: string,
-  ): DependencyRead {
-    return this.componentMetadata.readDependenciesReported(component, context);
-  }
-
-  private isComponentOptional(component: BaseComponent): boolean {
-    return this.componentMetadata.isComponentOptional(component);
   }
 
   private reportDependencyReadFailureOnce(
@@ -7397,7 +7468,8 @@ export class LifecycleManager
           )
         : this.registrationReads.currentGeneration(component);
     const ownDependencies =
-      preReadDependencies ?? this.readDependenciesReported(component, 'start');
+      preReadDependencies ??
+      this.componentMetadata.readDependenciesReported(component, 'start');
 
     if (
       !('dependencies' in ownDependencies) ||
@@ -7433,7 +7505,7 @@ export class LifecycleManager
         if (
           dependency !== undefined &&
           !this.isComponentUp(dependencyName) &&
-          this.isComponentOptional(dependency)
+          this.componentMetadata.isComponentOptional(dependency)
         ) {
           optionalDependencies.set(dependencyName, dependency);
         }
@@ -9395,8 +9467,10 @@ export class LifecycleManager
       this.lifecycleEvents.componentStartupRollback(name);
 
       // Shutdown may also begin from either rollback notification. It owns teardown
-      // and its halt-on-stall policy must not be bypassed by this older startup.
+      // and its halt-on-stall policy must not be bypassed by this older startup. Not
+      // marked rolled back, as the refusal below is not: this rollback never stopped it.
       if (hasShutdownBegun()) {
+        rolledBackNames.delete(name);
         return;
       }
       // Retain dependency protection for independently started work, while allowing
@@ -9674,12 +9748,14 @@ export class LifecycleManager
         await promiseResolveIntrinsic(undefined);
         const timeoutState = this.componentStates.get(name);
         const timeoutError = this.componentErrors.get(name) ?? null;
-        // A forced start that reported an unexpected stop before its deadline ended as
-        // that stop, not as a timeout. Read before cleanup's own stop clears it.
+        // A start - forced or not - that reported an unexpected stop before its deadline
+        // ended as that stop, not as a timeout. Read before cleanup's own stop clears it.
         const didStopUnexpectedly =
           this.componentUnexpectedStopHadError.has(name);
 
         // A forced start still owes cleanup if the old stalled stop finished first.
+        // So does any start, forced or not, that reported an unexpected stop before its
+        // deadline: `start()` fulfilled anyway, and what it brought up is owned by nothing.
         // The instance and startup token must still belong to this attempt.
         if (
           this.getComponent(name) !== component ||
@@ -9692,7 +9768,10 @@ export class LifecycleManager
               timeoutState === 'stalled' &&
               this.stalledComponents.has(name)
             ) &&
-            !(wasForcedFromStall && timeoutState === 'stopped'))
+            !(
+              (wasForcedFromStall || didStopUnexpectedly) &&
+              timeoutState === 'stopped'
+            ))
         ) {
           return;
         }
@@ -9807,7 +9886,10 @@ export class LifecycleManager
     error: Error,
     failedOptionalComponents: Array<{ name: string; error: Error }>,
   ): boolean {
-    if (component !== undefined && this.isComponentOptional(component)) {
+    if (
+      component !== undefined &&
+      this.componentMetadata.isComponentOptional(component)
+    ) {
       if (!failedOptionalComponents.some((entry) => entry.name === name)) {
         failedOptionalComponents.push({ name, error });
       }
@@ -10671,7 +10753,7 @@ export class LifecycleManager
           ? candidate.dependencies
           : dependencySnapshot !== undefined
             ? dependenciesOf(dependencySnapshot.get(component))
-            : this.readDependencies(component, 'ordering'),
+            : this.componentMetadata.readDependencies(component, 'ordering'),
     );
   }
 
@@ -10917,23 +10999,6 @@ export class LifecycleManager
     }
 
     return { accepted: false, result: refusedShutdownResult() };
-  }
-
-  private settleOperation<T>(
-    operation: string,
-    run: () => Promise<T>,
-    toFailure: (error: Error, reason: string, code: SettledFailureCode) => T,
-  ): Promise<T> {
-    return settleOperation(operation, run, toFailure);
-  }
-
-  private crashedStartupResult(
-    error: Error | undefined,
-    reason: string,
-    code: SettledFailureCode,
-    durationMS = 0,
-  ): StartupResult {
-    return crashedStartupResult(error, reason, code, durationMS);
   }
 
   /** The shutdown latch: set exactly while a shutdown pass is running. */
@@ -11389,7 +11454,7 @@ export class LifecycleManager
         `lifecycle-manager ${descriptor.signal} request callback`,
         descriptor.customCallback,
         (): Promise<SignalBroadcastResult> =>
-          this.settleOperation(
+          settleOperation(
             `${descriptor.signal} broadcast`,
             descriptor.broadcast,
             (error, _reason, code) =>
@@ -11458,19 +11523,13 @@ export class LifecycleManager
     );
   }
 
-  private runSignalBroadcast(
-    descriptor: SignalBroadcastDescriptor,
-  ): Promise<SignalBroadcastResult> {
-    return runSignalBroadcast(this.componentAccess, descriptor);
-  }
-
   /**
    * Broadcast reload signal to all running components.
    * Calls onReload() on components that implement it.
    * Continues on errors - collects all results.
    */
   private async broadcastReload(): Promise<SignalBroadcastResult> {
-    return await this.runSignalBroadcast({
+    return await runSignalBroadcast(this.componentAccess, {
       signal: 'reload',
       pickHandler: (component) => Reflect.get(component, 'onReload'),
       startupLog:
@@ -11491,7 +11550,7 @@ export class LifecycleManager
    * Continues on errors - collects all results.
    */
   private async broadcastInfo(): Promise<SignalBroadcastResult> {
-    return await this.runSignalBroadcast({
+    return await runSignalBroadcast(this.componentAccess, {
       signal: 'info',
       pickHandler: (component) => Reflect.get(component, 'onInfo'),
       startupLog:
@@ -11512,7 +11571,7 @@ export class LifecycleManager
    * Continues on errors - collects all results.
    */
   private async broadcastDebug(): Promise<SignalBroadcastResult> {
-    return await this.runSignalBroadcast({
+    return await runSignalBroadcast(this.componentAccess, {
       signal: 'debug',
       pickHandler: (component) => Reflect.get(component, 'onDebug'),
       startupLog:

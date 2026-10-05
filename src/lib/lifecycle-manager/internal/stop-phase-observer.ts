@@ -74,7 +74,6 @@ export function createStopPhaseObserver(
           options?.onResolved?.();
         },
         (error: unknown) => {
-          terminalLabel = 'Late stop failure could not be reported';
           // A selector that throws must not swallow the hook's own failure: that is
           // still reported, with the details given up front, before the selector's.
           let selected:
@@ -85,12 +84,22 @@ export function createStopPhaseObserver(
           } catch (selectionError) {
             selectionFailure = { error: selectionError };
           }
+          // Only a failure of this report itself is one the terminal observer may call
+          // unreported.
+          terminalLabel = 'Late stop failure could not be reported';
           report(
             error,
             selected?.message ?? message,
-            selected?.level ?? options?.level,
+            // The selector exists to choose the level - it may downgrade an abandoned
+            // hook to a warning - so without its answer nothing justifies downgrading:
+            // the level given up front, or `error`.
+            selected?.level ??
+              options?.level ??
+              (selectionFailure !== undefined ? 'error' : undefined),
           );
           if (selectionFailure !== undefined) {
+            // The hook's failure was reported above; what failed is the selection.
+            terminalLabel = 'Late stop report selection failed';
             throw selectionFailure.error;
           }
         },

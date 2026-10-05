@@ -4,6 +4,7 @@ import {
 } from '../global-event-target';
 import { reportToConsole } from './report-to-console';
 import { applyIntrinsic } from './intrinsics';
+import { isFunction } from '../is-function';
 
 /**
  * Reporting state shared by every bundled copy of Lifecycleion in this realm.
@@ -225,13 +226,7 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
   const dispatchEvent = readGlobal('dispatchEvent');
   const errorEventConstructor = readGlobal('ErrorEvent');
 
-  // `typeof`, not `isFunction()`: its `instanceof Function` fallback also accepts a
-  // non-callable object that inherits from `Function.prototype`, which would pass here
-  // as available when nothing can actually be called.
-  if (
-    typeof dispatchEvent !== 'function' ||
-    typeof errorEventConstructor !== 'function'
-  ) {
+  if (!isFunction(dispatchEvent) || !isFunction(errorEventConstructor)) {
     return 'unavailable';
   }
 
@@ -267,7 +262,11 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
 
   try {
     // Preserve the host receiver without reading a caller-owned call property.
-    return applyIntrinsic(dispatchEvent, globalThis, [event]) === false
+    return applyIntrinsic(
+      dispatchEvent as (event: Event) => boolean,
+      globalThis,
+      [event],
+    ) === false
       ? 'handled'
       : 'unhandled';
   } catch {
@@ -357,10 +356,9 @@ export function reportToHost(
     if (outcome === 'unavailable') {
       const reportError = readGlobal('reportError');
 
-      // `typeof`, for the reason `dispatchErrorEvent()` gives.
-      if (typeof reportError === 'function') {
+      if (isFunction(reportError)) {
         try {
-          applyIntrinsic(reportError, globalThis, [
+          applyIntrinsic(reportError as (error: unknown) => void, globalThis, [
             // Rendered, like the console rung below it, and for the same reason: this rung
             // is only reached when dispatch is unavailable, so there is no listener to hand
             // the structured failure to - only a host that will print it. Handing over the

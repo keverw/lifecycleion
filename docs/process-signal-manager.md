@@ -611,7 +611,9 @@ attachment can adopt ownership and retry restoration when it detaches.
 
 If removing a signal listener fails, `detach()` still removes the rest and restores the
 terminal, then throws the first removal failure; any further failures are reported on the
-`'error'` channel in a microtask, after that throw has reached the caller.
+`'error'` channel in a microtask, after that throw has reached the caller. A terminal-mode
+restore failure in the same `detach()` is still reported before the throw, so a caller
+that exits from its `catch` does not lose it.
 
 ### Trigger Methods
 

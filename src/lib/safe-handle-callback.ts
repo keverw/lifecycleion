@@ -10,6 +10,7 @@ import { installGlobalEventTarget } from './global-event-target';
 import { reportToHost } from './internal/report-to-host';
 import { UnreadableReturn, adoptResult } from './internal/adopt-promise';
 import { reportThroughHandler } from './internal/failure-reporter';
+import { isFunction } from './is-function';
 
 // Node.js has a global `ErrorEvent` constructor (Node 25+) but does not make `globalThis`
 // an EventTarget, so the global event methods must be supplied before anything can be
@@ -165,11 +166,7 @@ function invokeCallbackSafely(
   onError: ((error: unknown) => void) | undefined,
   thisArg: unknown,
 ): void {
-  // `typeof`, not `isFunction()`: its `instanceof Function` fallback also accepts an
-  // object that merely inherits from `Function.prototype` without being callable, which
-  // would reach the call below and throw there instead of being reported as not a
-  // function. Anything callable is `typeof 'function'` anyway.
-  if (typeof callback !== 'function') {
+  if (!isFunction(callback)) {
     reportToOnError(
       callbackName,
       new Error(`Callback provided for ${callbackName} is not a function`),
@@ -301,12 +298,15 @@ export async function safeHandleCallbackAndWait<T>(
     return { success: false, error: toError(error) };
   };
 
-  // `typeof`, for the reason `runCallbackSafely()` gives.
-  if (typeof callback === 'function') {
+  if (isFunction(callback)) {
     try {
       // Use `applyIntrinsic` and `adoptResult()`, as `runCallbackSafely()` does:
       // one path for how an untrusted callback is invoked and how its promise is read.
-      const result: unknown = applyIntrinsic(callback, undefined, args);
+      const result: unknown = applyIntrinsic(
+        callback as (...args: unknown[]) => unknown,
+        undefined,
+        args,
+      );
 
       const pending = adoptResult(result);
       if (pending instanceof UnreadableReturn) {

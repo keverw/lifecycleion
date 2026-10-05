@@ -1,3 +1,4 @@
+import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
 import { clampTimerDelayMS } from '../internal/timer-limits';
 import {
@@ -28,7 +29,6 @@ import {
   mergeObservedHeaders,
   mergeHeaders,
   normalizeMergedHeaderValue,
-  defineOwnEntry,
   normalizeAdapterResponseHeaders,
   parseContentType,
   resolveAbsoluteURL,
@@ -1991,12 +1991,11 @@ export class BaseHTTPClient {
           if (
             Object.getOwnPropertyDescriptor(rawAdapterResponse, key)?.enumerable
           ) {
-            Object.defineProperty(adapterResponse, key, {
-              value: Reflect.get(rawAdapterResponse, key),
-              enumerable: true,
-              configurable: true,
-              writable: true,
-            });
+            defineEntry(
+              adapterResponse as unknown as Record<string, unknown>,
+              key,
+              Reflect.get(rawAdapterResponse, key),
+            );
           }
         }
         adapterResponse.headers = normalizeAdapterResponseHeaders(headers);
@@ -3244,7 +3243,7 @@ export class BaseHTTPClient {
 
     for (const name of headerNames) {
       try {
-        defineOwnEntry(
+        defineEntry(
           headers,
           name.toLowerCase(),
           normalizeMergedHeaderValue(sourceHeaders[name]),
@@ -3548,12 +3547,12 @@ function snapshotHeaderRecord(
 
     for (const [name, headerValue] of Object.entries(value)) {
       if (typeof headerValue === 'string') {
-        defineOwnEntry(snapshot, name, headerValue);
+        defineEntry(snapshot, name, headerValue);
       } else if (
         Array.isArray(headerValue) &&
         headerValue.every((item) => typeof item === 'string')
       ) {
-        defineOwnEntry(snapshot, name, [...headerValue]);
+        defineEntry(snapshot, name, [...headerValue]);
       } else {
         return undefined;
       }
@@ -3725,13 +3724,10 @@ function stableUploadError(error: Error): Error {
   // Define own data properties so inherited setters cannot intercept the copies.
   const code = readObjectMember(error, 'code');
   if (code !== undefined) {
-    Object.defineProperty(wrapped, 'code', {
-      value: code,
-      writable: true,
-      configurable: true,
-      enumerable: true,
-    });
+    defineEntry(wrapped as unknown as Record<string, unknown>, 'code', code);
   }
+  // Not `defineEntry`: `stack` stays non-enumerable, as a native Error's own is, and
+  // `then` below is deliberately locked rather than an ordinary entry.
   const stack = readObjectMember(error, 'stack');
   if (typeof stack === 'string') {
     Object.defineProperty(wrapped, 'stack', {

@@ -37,7 +37,8 @@ import {
   materializeNodeRequestHeaders,
   normalizeNodeRequestHeaders,
 } from './node-adapter-utils';
-import { resolveDetectedRedirectURL, defineOwnEntry } from '../utils';
+import { resolveDetectedRedirectURL } from '../utils';
+import { defineEntry } from '../../internal/define-entry';
 // Shared error normalization preserves Error instances and wraps other thrown values.
 // Non-Error values receive a "Non-error value thrown: <description>" message, with the
 // original value retained on cause for consumers of the normalized error.
@@ -2630,7 +2631,7 @@ function normalizeResponseHeaders(
       continue;
     }
     // Keys are already lowercase from Node's http parser
-    defineOwnEntry(result, key, Array.isArray(value) ? value : String(value));
+    defineEntry(result, key, Array.isArray(value) ? value : String(value));
   }
 
   return result;

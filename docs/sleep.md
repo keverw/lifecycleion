@@ -21,8 +21,8 @@ import { sleep } from 'lifecycleion/sleep';
 ### sleep
 
 Pauses execution for the specified number of milliseconds. Returns a `Promise<void>` that resolves after the delay.
-The delay is required and must be a number other than `NaN`. Invalid values reject
-the promise. Zero and negative values (including `-Infinity`) schedule the next timer
+The delay is required and must be a number other than `NaN`. Invalid values (`NaN`,
+`undefined`, or any non-number) reject the promise with a `TypeError`. Zero and negative values (including `-Infinity`) schedule the next timer
 turn, never a synchronous continuation. `Infinity` and finite values above
 2,147,483,647 ms use that maximum supported timer delay.
 

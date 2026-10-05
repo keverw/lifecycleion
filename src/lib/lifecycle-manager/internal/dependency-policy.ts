@@ -111,37 +111,27 @@ export function getStartupOrder<T>(
     }
   }
 
-  const available = new Set<string>();
-  for (const name of names) {
+  // Stable pick: the available name with the lowest registration index, kept in a
+  // min-heap of those indices. A scan of every available name per step made ordering
+  // O(n²) - and it runs on every registration - where the heap is O((n + e) log n).
+  // Keyed by `regIndex`, one entry per distinct name, so the order is the scan's.
+  const available = new MinIndexHeap();
+  for (const [name, index] of regIndex) {
     if ((inDegree.get(name) ?? 0) === 0) {
-      available.add(name);
+      available.push(index);
     }
   }
 
   const order: string[] = [];
   while (available.size > 0) {
-    // Stable pick: lowest registration index. Scanned rather than sorted - a sort per
-    // step made ordering O(n² log n), and it runs on every registration.
-    let next = '';
-    let nextIndex = Infinity;
-
-    for (const candidateName of available) {
-      const index = regIndex.get(candidateName) ?? 0;
-
-      if (index < nextIndex) {
-        next = candidateName;
-        nextIndex = index;
-      }
-    }
-
-    available.delete(next);
+    const next = names[available.pop()];
     order.push(next);
 
     for (const neighbor of adjacency.get(next) ?? []) {
       const nextInDegree = (inDegree.get(neighbor) ?? 0) - 1;
       inDegree.set(neighbor, nextInDegree);
       if (nextInDegree === 0) {
-        available.add(neighbor);
+        available.push(regIndex.get(neighbor) ?? 0);
       }
     }
   }
@@ -156,6 +146,61 @@ export function getStartupOrder<T>(
   }
 
   return order;
+}
+
+/** A binary min-heap of registration indices, for {@link getStartupOrder}'s pick. */
+class MinIndexHeap {
+  private readonly items: number[] = [];
+
+  public get size(): number {
+    return this.items.length;
+  }
+
+  public push(value: number): void {
+    const { items } = this;
+    let index = items.length;
+    items.push(value);
+
+    while (index > 0) {
+      const parent = (index - 1) >> 1;
+      if (items[parent] <= value) {
+        break;
+      }
+      items[index] = items[parent];
+      index = parent;
+    }
+    items[index] = value;
+  }
+
+  /** The smallest index. Only called while `size > 0`. */
+  public pop(): number {
+    const { items } = this;
+    const top = items[0];
+    const last = items.pop() as number;
+
+    if (items.length > 0) {
+      let index = 0;
+      const { length } = items;
+
+      for (;;) {
+        const left = index * 2 + 1;
+        if (left >= length) {
+          break;
+        }
+        const right = left + 1;
+        const child =
+          right < length && items[right] < items[left] ? right : left;
+        if (items[child] >= last) {
+          break;
+        }
+        items[index] = items[child];
+        index = child;
+      }
+      items[index] = last;
+    }
+
+    return top;
+  }
 }
 
 /**

@@ -22,6 +22,7 @@ import {
 } from './operation-policy';
 import {
   dispatchAnnouncedHook,
+  isComponentEnterable,
   readHookThenRecheck,
 } from './component-dispatch';
 
@@ -54,9 +55,8 @@ const HEALTH_CHECK_TIMEOUT_RESULT: ComponentHealthResult = Object.freeze({
 });
 
 /**
- * Why a health hook must not be entered now, or `undefined` if it may be. Teardown may
- * outlive the bulk shutdown latch, so neither stop phase may still be using the
- * component; a late start's cleanup marks its component running only to stop it.
+ * Why a health hook must not be entered now, or `undefined` if it may be: the shared
+ * rule (see `isComponentEnterable()`), answered with the health check's own codes.
  */
 function healthRefusal(
   context: ComponentAccessContext,
@@ -66,7 +66,7 @@ function healthRefusal(
   if (context.getComponent(name) !== component) {
     return 'not_found';
   }
-  if (context.isComponentUp(name) && !context.isLateStartCleanupPending(name)) {
+  if (isComponentEnterable(context, name)) {
     return undefined;
   }
   return context.stalledComponents.has(name) ? 'stalled' : 'stopped';
@@ -414,10 +414,7 @@ export async function runSignalBroadcast(
 
     return (
       context.getComponent(name) === component &&
-      context.componentStates.get(name) === 'running' &&
-      context.runningComponents.has(name) &&
-      // A late start's cleanup marks its component running only to stop it.
-      !context.isLateStartCleanupPending(name)
+      isComponentEnterable(context, name)
     );
   };
   const targets = context.components.filter(canDispatch);

@@ -21,7 +21,6 @@ export interface ComponentAccessContext {
   readonly lifecycleEvents: LifecycleManagerEvents;
   readonly nameOf: (component: BaseComponent) => string;
   readonly isComponentRunning: (name: string) => boolean;
-  readonly isComponentUp: (name: string) => boolean;
   readonly getComponent: (name: string) => BaseComponent | undefined;
   /** Whether a `start()` of the component is still running, whatever its state says. */
   readonly isRawStartPending: (name: string) => boolean;

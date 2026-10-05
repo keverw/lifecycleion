@@ -1,4 +1,5 @@
 import qs from 'qs';
+import { defineEntry } from '../internal/define-entry';
 import {
   matchesWildcardDomain,
   normalizeDomain,
@@ -308,24 +309,6 @@ function getBrowserResolutionBase(): string | undefined {
 }
 
 /**
- * Store one entry - a header, cookie, or form field - as an own key of a record built
- * from caller-controlled names. Defined, not assigned: a `__proto__` key would
- * otherwise set the record's prototype (an object value) or vanish (a string).
- */
-export function defineOwnEntry<V>(
-  record: Record<string, V>,
-  key: string,
-  value: V,
-): void {
-  Object.defineProperty(record, key, {
-    value,
-    enumerable: true,
-    configurable: true,
-    writable: true,
-  });
-}
-
-/**
  * Normalizes header keys to lowercase.
  */
 export function normalizeHeaders(
@@ -334,7 +317,7 @@ export function normalizeHeaders(
   const result: Record<string, string> = {};
 
   for (const [key, value] of Object.entries(headers)) {
-    defineOwnEntry(result, key.toLowerCase(), value);
+    defineEntry(result, key.toLowerCase(), value);
   }
 
   return result;
@@ -355,11 +338,7 @@ export function mergeHeaders(
     }
 
     for (const [key, value] of Object.entries(headers)) {
-      defineOwnEntry(
-        result,
-        key.toLowerCase(),
-        normalizeMergedHeaderValue(value),
-      );
+      defineEntry(result, key.toLowerCase(), normalizeMergedHeaderValue(value));
     }
   }
 
@@ -391,7 +370,7 @@ export function mergeObservedHeaders(
     }
 
     for (const [key, value] of Object.entries(headers)) {
-      defineOwnEntry(
+      defineEntry(
         result,
         key.toLowerCase(),
         Array.isArray(value)
@@ -540,7 +519,7 @@ export function extractFetchHeaders(
     const lower = key.toLowerCase();
 
     if (lower !== 'set-cookie') {
-      defineOwnEntry(result, lower, value);
+      defineEntry(result, lower, value);
     }
   }
 
@@ -601,7 +580,7 @@ export function normalizeAdapterResponseHeaders(
         result[lower] = [...existingLines, ...chunk];
       }
     } else {
-      defineOwnEntry(
+      defineEntry(
         result,
         lower,
         Array.isArray(value) ? (value[0] ?? '') : value,

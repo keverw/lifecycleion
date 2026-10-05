@@ -296,10 +296,11 @@ test('the dependencies of a component whose own stop failed and left it running 
   }
 
   // `api` holds `database` up, but nothing is still stopping or starting either.
+  // `database` was never tried: it is not a failed stop.
   expect(result).toMatchObject({
     success: false,
     code: 'partial_state',
-    reason: 'Failed to stop: api, database',
+    reason: 'Failed to stop: api; Not attempted: database',
   });
   expect(manager.getComponentStatus('api')?.state).toBe('running');
   expect(manager.getComponentStatus('database')?.state).toBe('running');

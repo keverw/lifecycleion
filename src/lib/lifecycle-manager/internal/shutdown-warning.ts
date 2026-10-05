@@ -11,12 +11,14 @@ import {
 import { raceDeadline } from '../../internal/race-deadline';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { toError } from '../../to-error';
+import { isHookEntryBlocked } from './component-dispatch';
 
 export type ShutdownWarningContext = Pick<
   ComponentAccessContext,
   | 'getComponent'
   | 'componentStates'
   | 'isRawStartPending'
+  | 'isLateStartCleanupPending'
   | 'logger'
   | 'lifecycleEvents'
 >;
@@ -64,13 +66,16 @@ export async function runShutdownWarningPhase(
     }
 
     // A global timeout releases the manager-wide latch while this component can still
-    // be stopping. Do not run its warning hook alongside stop()/onShutdownForce(), nor
-    // alongside a timed-out forced start() that left it `stalled`.
+    // be stopping. Do not run its warning hook alongside stop()/onShutdownForce(),
+    // alongside a timed-out forced start() that left it `stalled`, nor on a late
+    // start's cleanup, which marks it `running` only to stop it: the shared rule (see
+    // `isHookEntryBlocked()`). Unlike the other hooks, a `stalled` component the pass
+    // retries is warned too, so this does not also require running membership.
     if (
       component !== undefined &&
       typeof warningHook === 'function' &&
       (state === 'running' || state === 'stalled') &&
-      !context.isRawStartPending(name)
+      !isHookEntryBlocked(context, name, state)
     ) {
       warningTargets.push({
         name,
@@ -116,7 +121,13 @@ export async function runShutdownWarningPhase(
         // target selected as stalled was explicitly included for another stop try.
         const current = context.getComponent(name);
         const state = context.componentStates.get(name);
-        if (current !== component || state !== selectedState) {
+        if (
+          current !== component ||
+          state !== selectedState ||
+          // The same state, but a phase took the component meanwhile - a late start's
+          // cleanup keeps it `running` - and owns it until that phase ends.
+          isHookEntryBlocked(context, name, state)
+        ) {
           // Unregistered and replaced are told apart: `component_changed` for a target
           // that was simply removed sent listeners looking for a replacement.
           context.lifecycleEvents.componentShutdownWarningSkipped(

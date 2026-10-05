@@ -133,3 +133,94 @@ test('cycle search handles a chain deeper than the call stack', () => {
   expect(findDependencyCycle(graph)).toHaveLength(depth);
   expect(findAllCircularCycles(graph)).toHaveLength(1);
 });
+
+// The order before the pick moved to a heap: scan every available name for the lowest
+// registration index. Kept as the reference the heap must reproduce exactly.
+function referenceStartupOrder(
+  names: string[],
+  dependencies: Record<string, string[]>,
+): string[] {
+  const regIndex = new Map(names.map((name, index) => [name, index]));
+  const adjacency = new Map(names.map((name) => [name, new Set<string>()]));
+  const inDegree = new Map(names.map((name) => [name, 0]));
+  for (const dependent of names) {
+    for (const dependency of dependencies[dependent]) {
+      const neighbors = adjacency.get(dependency);
+      if (neighbors === undefined || neighbors.has(dependent)) {
+        continue;
+      }
+      neighbors.add(dependent);
+      inDegree.set(dependent, (inDegree.get(dependent) ?? 0) + 1);
+    }
+  }
+  const available = new Set(names.filter((name) => inDegree.get(name) === 0));
+  const order: string[] = [];
+  while (available.size > 0) {
+    let next = '';
+    let nextIndex = Infinity;
+    for (const name of available) {
+      const index = regIndex.get(name) ?? 0;
+      if (index < nextIndex) {
+        next = name;
+        nextIndex = index;
+      }
+    }
+    available.delete(next);
+    order.push(next);
+    for (const neighbor of adjacency.get(next) ?? []) {
+      const remaining = (inDegree.get(neighbor) ?? 0) - 1;
+      inDegree.set(neighbor, remaining);
+      if (remaining === 0) {
+        available.add(neighbor);
+      }
+    }
+  }
+  return order;
+}
+
+test('ordering matches the lowest-registration-index scan on random acyclic graphs', () => {
+  // A small deterministic generator, so a failure reproduces.
+  let seed = 0x2f6b1d;
+  const random = (): number => {
+    seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+    return seed / 2_147_483_648;
+  };
+
+  for (let round = 0; round < 200; round++) {
+    const size = 1 + Math.floor(random() * 40);
+    // Acyclic by construction: each node depends only on lower ranks, and the ranks
+    // are then shuffled into a different registration order.
+    const ranked = Array.from({ length: size }, (_, index) => `c${index}`);
+    const dependencies: Record<string, string[]> = {};
+    for (const [rank, name] of ranked.entries()) {
+      dependencies[name] = ranked
+        .slice(0, rank)
+        .filter(() => random() < 0.15)
+        .concat(random() < 0.1 ? ['missing'] : []);
+    }
+    const names = [...ranked];
+    for (let index = names.length - 1; index > 0; index--) {
+      const other = Math.floor(random() * (index + 1));
+      [names[index], names[other]] = [names[other], names[index]];
+    }
+
+    expect(
+      getStartupOrder(
+        names,
+        (name) => name,
+        (name) => dependencies[name],
+      ),
+    ).toEqual(referenceStartupOrder(names, dependencies));
+  }
+});
+
+test('ordering a wide registry with no dependencies keeps registration order', () => {
+  const names = Array.from({ length: 5_000 }, (_, index) => `c${index}`);
+  expect(
+    getStartupOrder(
+      names,
+      (name) => name,
+      () => [],
+    ),
+  ).toEqual(names);
+});

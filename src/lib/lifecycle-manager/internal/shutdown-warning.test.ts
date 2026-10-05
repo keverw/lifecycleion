@@ -19,10 +19,12 @@ function fixture() {
   const componentStates = new Map<string, ComponentState>();
   const events: { name: string; payload: unknown }[] = [];
   const pendingStarts = new Set<string>();
+  const cleanupPending = new Set<string>();
   const context: ShutdownWarningContext = {
     getComponent: (name) => components.get(name),
     componentStates,
     isRawStartPending: (name) => pendingStarts.has(name),
+    isLateStartCleanupPending: (name) => cleanupPending.has(name),
     logger: logger.service('warning-test'),
     lifecycleEvents: new LifecycleManagerEvents((name, payload) => {
       events.push({ name, payload });
@@ -37,7 +39,15 @@ function fixture() {
     componentStates.set(name, 'running');
     return component;
   };
-  return { context, add, events, components, componentStates, pendingStarts };
+  return {
+    context,
+    add,
+    events,
+    components,
+    componentStates,
+    pendingStarts,
+    cleanupPending,
+  };
 }
 
 test('a stalled component whose start() is still running gets no warning', async () => {
@@ -53,6 +63,43 @@ test('a stalled component whose start() is still running gets no warning', async
 
   expect(calls).toBe(0);
   expect(events).toEqual([]);
+});
+
+test('a running component under late-start cleanup gets no warning', async () => {
+  const { context, add, events, cleanupPending } = fixture();
+  let calls = 0;
+  add('late', () => {
+    calls++;
+  });
+  // Marked running only so the normal stop path can stop it.
+  cleanupPending.add('late');
+
+  await runShutdownWarningPhase(context, ['late'], 100);
+
+  expect(calls).toBe(0);
+  expect(events).toEqual([]);
+});
+
+test('a target whose late-start cleanup begins after selection is skipped, not warned', async () => {
+  const { context, add, events, cleanupPending } = fixture();
+  let calls = 0;
+  add('late', () => {
+    calls++;
+  });
+  const phase = runShutdownWarningPhase(context, ['late'], 100);
+  // Selected and announced; cleanup takes it before the recheck a microtask later,
+  // leaving its state `running`.
+  cleanupPending.add('late');
+  await phase;
+
+  expect(calls).toBe(0);
+  expect(
+    events
+      .filter(({ name }) => name === 'component:shutdown-warning-skipped')
+      .map(({ payload }) => payload),
+  ).toStrictEqual([
+    { name: 'late', reason: 'component_not_available', state: 'running' },
+  ]);
 });
 
 async function flushWarnings() {

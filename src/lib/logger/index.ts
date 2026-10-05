@@ -62,6 +62,17 @@ import { resolveTimeoutMS } from '../internal/timer-limits';
 const DEFAULT_LOGGER_CLOSE_TIMEOUT_MS = 60_000;
 
 /**
+ * An exit between its first request and its commit (see `Logger.recordExitRequest`).
+ * `code` is what the requests made so far settled on; the other two bound the
+ * replacement reports to one line, plus a count reported at the commit.
+ */
+interface PendingExit {
+  code: number;
+  didReportReplacement: boolean;
+  suppressedReplacements: number;
+}
+
+/**
  * Main Logger class with sink-based architecture and EventEmitter support
  */
 /**
@@ -261,13 +272,14 @@ export class Logger extends EventEmitter {
   // code. Its first request creates it, and every request made before the commit
   // settles `code` (see `recordExitRequest`). Undefined while no exit is pending. A
   // request keeps a reference to the exit it joined, so one that proceeds after that
-  // exit committed can tell it has nothing left to publish.
-  private _pendingExit: { code: number } | undefined;
+  // exit committed can tell it has nothing left to publish. Also the source of
+  // `isPendingExit`, so that answer holds for every exit - a simulated exit after the
+  // first included - rather than only until the first one commits.
+  private _pendingExit: PendingExit | undefined;
   // Whether an exit's `exit-called` listeners are running.
   private _isEmittingExitCalled = false;
   private _hasScheduledProcessExit = false;
   private _isEmittingExitProcess = false;
-  private _isPendingExit = false;
   private _closed = false;
 
   private _closePromise: Promise<void> | undefined;
@@ -299,12 +311,23 @@ export class Logger extends EventEmitter {
     return this._didExit;
   }
 
+  /**
+   * The code of the last exit to commit (0 before any has). It changes when an exit
+   * commits, not while one is pending: during a later simulated exit it still reads the
+   * previous exit's code until that exit publishes `exit-process`.
+   */
   public get exitCode(): number {
     return this._exitCode;
   }
 
+  /**
+   * Whether an exit has been requested and has not yet committed its code - true from its
+   * first `exit()` until `exit-process`, for every exit, including a simulated exit made
+   * after an earlier one completed. A request ignored because a real exit has already
+   * committed starts nothing, so it leaves this false.
+   */
   public get isPendingExit(): boolean {
-    return this._isPendingExit;
+    return this._pendingExit !== undefined;
   }
 
   /**
@@ -319,7 +342,7 @@ export class Logger extends EventEmitter {
   }
 
   public get hasExitedOrPending(): boolean {
-    return this._didExit || this._isPendingExit;
+    return this._didExit || this.isPendingExit;
   }
 
   public get closed(): boolean {
@@ -372,10 +395,6 @@ export class Logger extends EventEmitter {
     const pendingExit = this.recordExitRequest(requestedCode, code);
 
     this._exitRequested = true;
-
-    if (!this._didExit) {
-      this._isPendingExit = true;
-    }
 
     // Neither these listeners nor `beforeExit` is the sink close hook that may have
     // called this; see `withoutActiveSinkClose`.
@@ -1104,8 +1123,19 @@ export class Logger extends EventEmitter {
     template: string,
     callerOptions?: SnapshotLogOptions,
   ): void {
-    // Don't log if logger is closed
+    // A closed logger writes nothing, but an exit request on the entry still counts.
+    // Committing an exit closes the logger synchronously, so returning before the exit
+    // dropped every `{ exitCode }` logged from then on without a trace: a failure logged
+    // behind a committed real exit 0 never reached the ignored-failure report, and one
+    // logged after a simulated exit completed never started the next exit, though a
+    // direct `exit()` did both. The same held for an exit still pending when `close()`
+    // was called: a failure logged then never replaced the pending code. Only the
+    // member that matters is read, through the guard, since nothing else is used here.
     if (this._closed) {
+      const closedExitCode = readUnknownMember(callerOptions, 'exitCode');
+      if (isNumber(closedExitCode)) {
+        this.exit(closedExitCode);
+      }
       return;
     }
 
@@ -1941,14 +1971,18 @@ export class Logger extends EventEmitter {
   private recordExitRequest(
     requested: number,
     code: number,
-  ): { code: number } | undefined {
+  ): PendingExit | undefined {
     if (this._hasScheduledProcessExit) {
       this.reportIgnoredFailureExit(requested, code);
       return undefined;
     }
     const pendingExit = this._pendingExit;
     if (pendingExit === undefined) {
-      this._pendingExit = { code };
+      this._pendingExit = {
+        code,
+        didReportReplacement: false,
+        suppressedReplacements: 0,
+      };
       return this._pendingExit;
     }
     const pendingCode = pendingExit.code;
@@ -1957,10 +1991,19 @@ export class Logger extends EventEmitter {
       return pendingExit;
     }
     pendingExit.code = code;
-    // Each replacement is reported, so the code the exit settles on is never a surprise.
-    // Bounded by the requests made before the code commits; a repeat of the pending code
-    // changes nothing and is not reported. Names the normalized code when it differs
-    // from the request, as `exit(300)` does.
+    // The first replacement is reported, so the code changing is never a surprise. Later
+    // ones are counted rather than each written, as the file's other exit reports are
+    // bounded: requests alternating between failure codes while a shutdown runs would
+    // otherwise write a line apiece to the console the logger falls back to. The commit
+    // reports the count and the code they settled on (see `processExit`). Once per
+    // pending exit, which for a real exit is once per logger. A repeat of the pending
+    // code changes nothing and is neither reported nor counted. Names the normalized code
+    // when it differs from the request, as `exit(300)` does.
+    if (pendingExit.didReportReplacement) {
+      pendingExit.suppressedReplacements++;
+      return pendingExit;
+    }
+    pendingExit.didReportReplacement = true;
     reportToConsole(
       `Logger exit(${String(requested)}) replaces the pending exit code ${String(pendingCode)}${
         Object.is(requested, code) ? '' : ` with ${String(code)}`
@@ -2017,7 +2060,7 @@ export class Logger extends EventEmitter {
   /**
    * Process the exit
    */
-  private processExit(pendingExit: { code: number } | undefined): void {
+  private processExit(pendingExit: PendingExit | undefined): void {
     // A real exit has already committed the process's exit code. A later one would only
     // publish a code the process never exits with and call process.exit() again. Not
     // reported here: `exit()` recorded this request when it was made - against the
@@ -2041,10 +2084,28 @@ export class Logger extends EventEmitter {
     // here, and a request made after this commit starts a new pending exit.
     this._pendingExit = undefined;
     this._hasScheduledProcessExit = this.endsProcessOnExit;
-    const exitCode = pendingExit.code;
+    let exitCode = pendingExit.code;
+    // Replacements past the first were counted rather than reported (see
+    // `recordExitRequest`); say once what they settled on, so the bound costs no answer.
+    if (pendingExit.suppressedReplacements > 0) {
+      reportToConsole(
+        `Logger exit code settled on ${String(exitCode)} after ${String(pendingExit.suppressedReplacements)} further replacement${pendingExit.suppressedReplacements === 1 ? '' : 's'} not reported`,
+      );
+    }
+    // Each request was normalized in the mode that held when it was made, but the mode
+    // that counts is the one this commit runs in. A code kept by a simulated request -
+    // `exit(256)` while `process.exit` was absent - would otherwise reach a real
+    // `process.exit()` here and wrap to 0 at the OS boundary: a failure exiting as
+    // success. A real commit happens at most once per logger, so this report is bounded
+    // by that alone.
+    if (this._hasScheduledProcessExit && this.isInvalidExitCode(exitCode)) {
+      reportToConsole(
+        `Logger exit code ${String(exitCode)} is invalid for a real exit; exiting with code 1`,
+      );
+      exitCode = 1;
+    }
     this._didExit = true;
     this._exitCode = exitCode;
-    this._isPendingExit = false;
 
     // Nor are these listeners; see `withoutActiveSinkClose`.
     this.withoutActiveSinkClose(() => {

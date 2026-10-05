@@ -533,8 +533,13 @@ slow start, even if it would have finished shortly. `restartAllComponents()` alw
 keeps this override disabled; an incomplete stop prevents restart's startup phase,
 so dropping dependency protection would not help it finish the restart.
 
-Restart skips its startup phase when shutdown reports `cleanup_incomplete`. The
-reason's 'still in progress' names include dependencies deliberately left running;
+Restart skips its startup phase when shutdown reports `cleanup_incomplete`. A start
+that had already timed out with its `start()` still unresolved when the restart is
+called would always end the stop phase that way, so restart refuses up front instead,
+before stopping anything: `shutdownResult` is `cleanup_incomplete` with no stopped
+components (no shutdown pass runs), and `startupResult` is `partial_state`. Otherwise
+the stop phase would stop every component that start does not depend on and then
+leave them down. The reason's 'still in progress' names include dependencies deliberately left running;
 it does not mean a background shutdown pass will stop them. Individual stops also
 refuse to stop dependencies while this late recovery is pending, unless
 `allowStopWithRunningDependents` is explicitly enabled.
@@ -799,7 +804,7 @@ interface UnregisterOptions {
 - `forceStop` only applies when `stopIfRunning` is true (passes through to `stopComponent` as `allowStopWithRunningDependents`).
 - If a component is stalled and `stopIfRunning` is true, unregister is blocked.
 - While a start or stop is in flight, unregister is refused with `component_starting` / `component_stopping`: the operation writes its outcome when it settles, so the component has to be left registered until then. This is checked again after unregister's own stop, since a `component:stopped` listener may have started the component again; one that is already back up is refused with `component_running`.
-- The registration itself is rechecked immediately before anything is removed, on every path. Reading `stopIfRunning` off the options object runs caller code, so a getter can unregister the component and register a replacement under the same name before the removal begins. The call then reports `component_not_found` - or `bulk_operation_in_progress`, if that code started a bulk startup or shutdown - and the replacement keeps the name and its state.
+- The registration itself is rechecked immediately before anything is removed, on every path. Reading `stopIfRunning` off the options object runs caller code, so a getter can unregister the component and register a replacement under the same name before the removal begins. The call then reports `component_not_found`, and the replacement keeps the name and its state. If the getter instead started a bulk startup or shutdown without replacing the component, the usual refusals are checked first, in this order: a start or stop in flight (`component_starting` / `component_stopping`), a stalled component with `stopIfRunning` true (`stop_failed`), and a running component with `stopIfRunning: false` (`component_running`). Otherwise the call reports `bulk_operation_in_progress` before stopping or removing anything.
 - Successfully unregistering a component automatically clears its `lifecycle` reference (setting it to `undefined`) and marks it as unregistered, which allows the same component instance to be registered again (either with the same manager or with a different one).
 
 **Returns:**
@@ -1042,7 +1047,7 @@ interface StopAllOptions {
 **Option Details:**
 
 - `retryStalled`: If `true`, attempts to stop components that are currently in the `stalled` state from previous shutdown attempts. If `false`, skips components already marked as stalled. **Note:** retry goes directly to the force phase (`onShutdownForce`), not the graceful phase. `stop()` is not called again. The assumption is that graceful already had its chance, and the retry is an escalation. A retry keeps the original stall's start time: a component without `onShutdownForce` attempts nothing new, so it stays stalled under its original record and answers with that stop's result without emitting `component:shutdown-force` or `component:stalled`. A retry that runs `onShutdownForce` emits `component:shutdown-force` describing only that attempt (`gracefulPhaseRan: false`, `gracefulTimedOut: false`). If it succeeds it emits `component:stalled-resolved`; if it fails again it records a fresh force-phase stall: `reason: 'timeout'` when `onShutdownForce` times out again, otherwise `'both'` when the original graceful phase timed out and `'error'` when it did not.
-- `haltOnStall`: If `true`, stops processing remaining components after a stop failure or refusal, including invalid configuration. If `false`, continues independent cleanup. Either way, a component another operation is already stopping or starting does not halt the pass: its dependencies are skipped while that work is in flight, and the pass goes back to them once if it has settled by the end of the loop. The pass does not wait for that work. Dependencies of any component still running after a failed stop remain protected, including when a getter throws before cleanup starts. The aggregate result stays unsuccessful; validation refusals retain `invalid_options`. Its `reason` names components a `haltOnStall` break never reached under `Not attempted:`, apart from the ones whose stop actually failed (`Failed to stop:`).
+- `haltOnStall`: If `true`, stops processing remaining components after a stop failure or refusal, including invalid configuration. If `false`, continues independent cleanup. Either way, a component another operation is already stopping or starting does not halt the pass: its dependencies are skipped while that work is in flight, and the pass goes back to them once if it has settled by the end of the loop. The pass does not wait for that work. Dependencies of any component still running after a failed stop remain protected, including when a getter throws before cleanup starts. The aggregate result stays unsuccessful; validation refusals retain `invalid_options`. Its `reason` names components the pass never tried to stop under `Not attempted:` - those a `haltOnStall` break never reached, and dependencies left running because a component still up after a failed stop needs them - apart from the ones whose stop actually failed (`Failed to stop:`).
 
 **Timeout Behavior:**
 
@@ -1175,7 +1180,9 @@ implements `onShutdownForce()` - so an invalid one refuses the restart with
 `invalid_options` before any component is stopped, rather than halting the stop phase
 partway with some components already down. If the registry changes during this
 initial check, restart logs a warning and refuses both phases with `partial_state`,
-before stopping anything.
+before stopping anything. A start that already timed out with its `start()` still
+unresolved is refused the same way, with `shutdownResult.code` `cleanup_incomplete`
+(see [Multi-Phase Shutdown](#multi-phase-shutdown)).
 
 Restart skips its startup phase, logs a warning, and answers `partial_state` for
 `startupResult` when the stop phase timed out, left cleanup incomplete, or ended with
@@ -1527,7 +1534,7 @@ interface BroadcastResult {
 
 #### `checkComponentHealth(name)`
 
-Health hooks are skipped during `stopping` and `force-stopping`, and the result is unhealthy, including after a bulk shutdown timeout.
+Health hooks are skipped during `stopping` and `force-stopping`, and the result is unhealthy, including after a bulk shutdown timeout. They are also skipped for a running component while a `start()` of it is still pending, or while a timed-out start's late cleanup is pending - the same entry rule messaging and signal broadcasts use.
 
 Check the health of a specific component.
 
@@ -1790,7 +1797,7 @@ if (escalation.configured && escalation.isArmed) {
 
 #### Manual Signal Triggers
 
-Reload/info/debug broadcasts check that each component is still running immediately before invoking its handler. Components that begin teardown during an earlier callback are skipped. A synchronous signal-started event that makes its target unavailable produces a per-component `unavailable` result and a matching signal-failed event. Unavailable targets count toward the aggregate `error` or `partial_error` code. A handler timeout also emits signal-failed, while retaining the `timeout` result code; late settlement does not emit a second terminal event. An already-running signal handler is not cancelled by teardown. A timeout event carries an explanatory Error, while its result retains `error: null` and `timedOut: true`; the timeout is not a handler exception. Inspect `code` and `timedOut` as well as `error`.
+Reload/info/debug broadcasts check that each component is still running immediately before invoking its handler. Components that begin teardown during an earlier callback are skipped, as are running components whose `start()` is still pending or whose late-start cleanup is pending. A synchronous signal-started event that makes its target unavailable produces a per-component `unavailable` result and a matching signal-failed event. Unavailable targets count toward the aggregate `error` or `partial_error` code. A handler timeout also emits signal-failed, while retaining the `timeout` result code; late settlement does not emit a second terminal event. An already-running signal handler is not cancelled by teardown. A timeout event carries an explanatory Error, while its result retains `error: null` and `timedOut: true`; the timeout is not a handler exception. Inspect `code` and `timedOut` as well as `error`.
 
 ```typescript
 triggerReload(): Promise<SignalBroadcastResult>
@@ -4100,7 +4107,7 @@ When `start()` or `stop()` times out:
 - The manager calls `onStartupAborted()` or `onGracefulStopTimeout()` (if implemented)
 - The manager proceeds with next steps (rollback for startup, force phase for shutdown)
 - **Non-cooperative code continues running in the background** until completion or process exit
-- If `start()` times out and there is no `onStartupAborted()`, the manager will stop the component automatically if that delayed startup eventually completes. Bulk startup deadlines perform this late cleanup even when an abort hook is implemented.
+- If `start()` times out and there is no `onStartupAborted()`, the manager will stop the component automatically if that delayed startup eventually completes. Bulk startup deadlines perform this late cleanup even when an abort hook is implemented. This includes a start that reported an unexpected stop before its deadline (answered `component_unexpected_stop`): if its `start()` still fulfills later, `stop()` runs and the component stays `stopped`, whether or not the start used `forceStalled`.
 - If shutdown begins while `start()` is in flight, a finite shutdown budget bounds the wait for startup and its automatic cleanup. When that budget expires, or the global shutdown deadline is disabled, unfinished work and its dependencies can remain for a later cleanup pass. A synchronous shutdown request from `start()` does not wait for that same start to finish.
 
 How to avoid surprises:

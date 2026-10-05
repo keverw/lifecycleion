@@ -1,3 +1,4 @@
+import { defineEntry } from '../../internal/define-entry';
 import {
   applyIntrinsic,
   promiseConstructorIntrinsic,
@@ -20,7 +21,6 @@ import {
   normalizeAdapterResponseHeaders,
   parseContentType,
   resolveDetectedRedirectURL,
-  defineOwnEntry,
 } from '../utils';
 import type {
   HTTPAdapter,
@@ -651,7 +651,7 @@ function parseCookieHeader(
 
     if (name) {
       // Defined, not assigned: a `__proto__` cookie would otherwise vanish.
-      defineOwnEntry(cookies, name, value);
+      defineEntry(cookies, name, value);
     }
   }
 
@@ -664,7 +664,7 @@ function materializeMockRequestHeaders(
   const result: Record<string, string> = {};
 
   for (const [key, value] of Object.entries(headers)) {
-    defineOwnEntry(
+    defineEntry(
       result,
       key,
       Array.isArray(value)
@@ -740,9 +740,9 @@ function extractFormData(fd: FormData): MockFormData {
     // Defined, not assigned: a `__proto__` field would otherwise vanish, and a
     // `__proto__` file would become the record's prototype.
     if (typeof value === 'string') {
-      defineOwnEntry(fields, key, value);
+      defineEntry(fields, key, value);
     } else {
-      defineOwnEntry(files, key, value);
+      defineEntry(files, key, value);
     }
   }
 

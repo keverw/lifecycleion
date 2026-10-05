@@ -1267,3 +1267,108 @@ test.each(['error', 'fatal'] as const)(
     }
   },
 );
+
+test('an unreadable then after a settled attempt is reported as a return-contract failure, not a throw', async () => {
+  const getterError = new Error('then getter failed');
+  const reports: unknown[] = [];
+  const onGlobalError = (event: Event): void => {
+    reports.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onGlobalError);
+
+  try {
+    const runner = new RetryRunner(
+      { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 0 },
+      (reportResult) => {
+        reportResult('success', 'done');
+        return {
+          get then() {
+            throw getterError;
+          },
+        } as unknown as Promise<void>;
+      },
+    );
+
+    const result = await runner.run(true);
+    await sleep(10);
+
+    expect(result).toEqual({ status: 'attempt_success', data: 'done' });
+    expect(runner.runnerState).toBe('completed');
+    expect(reports).toHaveLength(1);
+
+    const report = reports[0] as Error;
+    expect(report.message).toContain('returned an unreadable then');
+    expect(report.message).not.toContain('threw');
+
+    const cause = report.cause as Error;
+    expect(cause.message).toContain(
+      'RetryRunner operation returned a value whose then could not be read',
+    );
+    expect(cause.cause).toBe(getterError);
+  } finally {
+    globalThis.removeEventListener('error', onGlobalError);
+  }
+});
+
+test('runner options are each read exactly once', async () => {
+  const reads: Record<string, number> = {};
+  const calls: string[] = [];
+  // Each getter hands out a usable value the first time only, so a second read would
+  // see a non-function (or a non-string label) the first check never did.
+  const once = <V>(name: string, value: V): (() => V | undefined) => {
+    return () => {
+      reads[name] = (reads[name] ?? 0) + 1;
+      return reads[name] === 1 ? value : undefined;
+    };
+  };
+  const options = {};
+  for (const [name, value] of [
+    ['operationLabel', 'labelled'],
+    ['onOperationStarted', () => calls.push('operation-started')],
+    ['onOperationEnded', () => calls.push('operation-ended')],
+    ['onAttemptStarted', () => calls.push('attempt-started')],
+    ['onAttemptHandled', () => calls.push('attempt-handled')],
+  ] as const) {
+    Object.defineProperty(options, name, {
+      get: once(name, value),
+      enumerable: true,
+    });
+  }
+
+  const reports: unknown[] = [];
+  const onGlobalError = (event: Event): void => {
+    reports.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onGlobalError);
+
+  try {
+    const runner = new RetryRunner(
+      { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 0 },
+      (reportResult) => {
+        reportResult('success');
+      },
+      options,
+    );
+
+    expect(await runner.run(true)).toEqual({ status: 'attempt_success' });
+    expect(runner.operationLabel).toBe('labelled');
+    expect(reads).toEqual({
+      operationLabel: 1,
+      onOperationStarted: 1,
+      onOperationEnded: 1,
+      onAttemptStarted: 1,
+      onAttemptHandled: 1,
+    });
+    expect(calls).toEqual([
+      'operation-started',
+      'attempt-started',
+      'attempt-handled',
+      'operation-ended',
+    ]);
+    expect(reports).toEqual([]);
+  } finally {
+    globalThis.removeEventListener('error', onGlobalError);
+  }
+});

@@ -53,3 +53,35 @@ it('returns false for a revoked object proxy', () => {
   revoke();
   expect(isFunction(proxy)).toBe(false);
 });
+
+it('returns false for a non-callable object inheriting from Function.prototype', () => {
+  const fake: unknown = Object.create(Function.prototype);
+
+  expect(isFunction(fake)).toBe(false);
+});
+
+it('returns true for every callable shape', () => {
+  class Example {}
+
+  expect(isFunction(async () => {})).toBe(true);
+  expect(isFunction(function* generator() {})).toBe(true);
+  expect(isFunction(Example)).toBe(true);
+  expect(isFunction((() => undefined).bind(null))).toBe(true);
+  expect(isFunction(new Proxy(() => undefined, {}))).toBe(true);
+});
+
+it('never runs proxy traps', () => {
+  let trapCalls = 0;
+  const proxy = new Proxy(
+    {},
+    {
+      getPrototypeOf() {
+        trapCalls++;
+        return Function.prototype;
+      },
+    },
+  );
+
+  expect(isFunction(proxy)).toBe(false);
+  expect(trapCalls).toBe(0);
+});

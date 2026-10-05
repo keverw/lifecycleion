@@ -7,14 +7,66 @@ import {
   promiseResolveIntrinsic,
 } from '../../internal/intrinsics';
 import { adoptPromise } from '../../internal/adopt-promise';
+import type { ComponentState } from '../types';
 
 /**
  * The two steps every component hook dispatch - message, value, health check, signal -
  * shares. Each operation keeps its own events, result shapes and refusal labels; only
  * the order of reads, rechecks and the deadline lives here, so it cannot drift between
- * them. The availability rule itself is the caller's: `recheck` answers a refusal, or
- * `undefined` while the component may still be entered.
+ * them. Each operation's refusal codes stay the caller's: `recheck` answers a refusal,
+ * or `undefined` while the component may still be entered. The core of that rule -
+ * {@link isHookEntryBlocked} and {@link isComponentEnterable} - is shared below.
  */
+
+/** What {@link isHookEntryBlocked} reads. */
+export type HookEntryContext = Pick<
+  ComponentAccessContext,
+  'componentStates' | 'isRawStartPending' | 'isLateStartCleanupPending'
+>;
+
+/**
+ * Whether a lifecycle phase owns the component, so none of its hooks - message, value,
+ * health check, signal, shutdown warning - may be entered whatever else its state
+ * allows: a start or stop is in progress, a forced start that timed out is back to
+ * `stalled` while its `start()` still runs, or a late start's cleanup marks it
+ * `running` only to stop it. Teardown may outlive the bulk shutdown latch, so this is
+ * asked of the component itself, never of the manager's latches.
+ *
+ * `state` is the caller's own read of the component's state, so a check that already
+ * read it - and a test tracing those reads - does not read it twice.
+ */
+export function isHookEntryBlocked(
+  context: HookEntryContext,
+  name: string,
+  state: ComponentState | undefined,
+): boolean {
+  return (
+    state === 'starting' ||
+    state === 'starting-timed-out' ||
+    state === 'stopping' ||
+    state === 'force-stopping' ||
+    context.isRawStartPending(name) ||
+    context.isLateStartCleanupPending(name)
+  );
+}
+
+/**
+ * Whether the component is up and its hooks may be entered: running - by membership
+ * and by state - and not blocked by {@link isHookEntryBlocked}. Registration identity
+ * (the instance still registered under `name`) is each caller's own check.
+ */
+export function isComponentEnterable(
+  context: HookEntryContext &
+    Pick<ComponentAccessContext, 'isComponentRunning'>,
+  name: string,
+  state: ComponentState | undefined = context.componentStates.get(name),
+): boolean {
+  return (
+    context.isComponentRunning(name) &&
+    state === 'running' &&
+    !isHookEntryBlocked(context, name, state)
+  );
+}
 
 /** What {@link readHookThenRecheck} found. */
 export type HookRead<TValue, TRefusal> =

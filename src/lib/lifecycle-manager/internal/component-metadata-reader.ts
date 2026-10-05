@@ -17,6 +17,9 @@ export class ComponentMetadataReader {
   private readonly reportedDependencyReadFailures =
     new WeakSet<BaseComponent>();
   private readonly reportedOptionalReadFailures = new WeakSet<BaseComponent>();
+  // Components whose `isOptional()` failure is being reported without a name - and so
+  // without a mark - right now; see `isComponentOptional()`.
+  private readonly unlabelledOptionalReports = new WeakSet<BaseComponent>();
 
   constructor(private readonly nameOf: (component: BaseComponent) => string) {}
 
@@ -103,12 +106,42 @@ export class ComponentMetadataReader {
     try {
       return component.isOptional() === true;
     } catch (error) {
-      if (!this.reportedOptionalReadFailures.has(component)) {
-        this.reportedOptionalReadFailures.add(component);
-        reportCallbackError(
-          `lifecycle-manager isOptional of ${this.nameOf(component)}`,
-          error,
-        );
+      if (
+        !this.reportedOptionalReadFailures.has(component) &&
+        !this.unlabelledOptionalReports.has(component)
+      ) {
+        // Named before the mark, as `reportDependencyReadFailureOnce()` names its
+        // report. The name lookup can run the component's own `getName()`, which may
+        // throw too: that must neither escape this read - it answers, never throws - nor
+        // leave a mark for a report that was never labelled. The failure is still
+        // reported, unlabelled and unmarked, so a later read that can name the
+        // component reports it once more.
+        let label: string | undefined;
+        try {
+          label = this.nameOf(component);
+        } catch {
+          label = undefined;
+        }
+
+        if (label === undefined) {
+          // Unmarked, so held only while it is made: an error listener that reads
+          // the same component again must not report - and recurse - again.
+          this.unlabelledOptionalReports.add(component);
+          try {
+            reportCallbackError(
+              'lifecycle-manager isOptional of <unnamed component>',
+              error,
+            );
+          } finally {
+            this.unlabelledOptionalReports.delete(component);
+          }
+        } else {
+          this.reportedOptionalReadFailures.add(component);
+          reportCallbackError(
+            `lifecycle-manager isOptional of ${label}`,
+            error,
+          );
+        }
       }
 
       return false;

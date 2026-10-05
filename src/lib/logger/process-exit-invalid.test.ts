@@ -1055,3 +1055,155 @@ test('an invalid exit absorbed by a scheduled exit does not claim to exit with 1
     exit.mockRestore();
   }
 });
+
+test('a failure exitCode logged after a real exit committed 0 is reported as ignored, not dropped', async () => {
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: true });
+    logger.exit(0);
+    // The commit closed the logger synchronously; this entry is not written, but its
+    // exit request still reaches `exit()`.
+    logger.error('component failed after the exit committed', {
+      exitCode: 1,
+    });
+    await logger.close();
+    await Promise.resolve();
+
+    expect(sink.logs.map((entry) => entry.message)).toEqual([]);
+    expect(exit.mock.calls).toEqual([[0]]);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit(1) ignored: an exit with code 0 is already processing',
+    ]);
+  } finally {
+    output.mockRestore();
+    exit.mockRestore();
+  }
+});
+
+test('a failure exitCode logged after a simulated exit completed starts the next exit', async () => {
+  const beforeExitCodes: number[] = [];
+  const logger = new Logger({
+    sinks: [],
+    callProcessExit: false,
+    beforeExitCallback: (code) => {
+      beforeExitCodes.push(code);
+      return { action: 'proceed' };
+    },
+  });
+  const processed = recordExitProcess(logger);
+  logger.exit(0);
+  await logger.close();
+
+  logger.error('fatal after the first exit', { exitCode: 1 });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  expect(beforeExitCodes).toEqual([0, 1]);
+  expect(processed).toEqual([0, 1]);
+  expect(logger.exitCode).toBe(1);
+});
+
+test('a failure exitCode logged after close() while an exit is pending replaces its code', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = simulatedShutdownLogger((shuttingDown) => {
+      void shuttingDown.close();
+      shuttingDown.error('component failed to stop', { exitCode: 1 });
+    });
+    const processed = recordExitProcess(logger);
+    logger.exit(0);
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(processed).toEqual([1]);
+    expect(logger.exitCode).toBe(1);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit(1) replaces the pending exit code 0',
+    ]);
+  } finally {
+    output.mockRestore();
+  }
+});
+
+test('isPendingExit holds for every pending exit, including a later simulated one', async () => {
+  const logger = simulatedShutdownLogger();
+  expect(logger.isPendingExit).toBe(false);
+
+  logger.exit(0);
+  expect(logger.isPendingExit).toBe(true);
+  expect(logger.hasExitedOrPending).toBe(true);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  expect(logger.isPendingExit).toBe(false);
+  expect(logger.didExit).toBe(true);
+  expect(logger.exitCode).toBe(0);
+
+  // `isFirstExit` is false from here, so this logger's callback answers 'wait' and the
+  // exit stays pending until another request proceeds.
+  logger.exit(1);
+  expect(logger.isPendingExit).toBe(true);
+  // The previous exit's code until this one commits.
+  expect(logger.exitCode).toBe(0);
+});
+
+test('a code kept by a simulated request is normalized when the exit commits as real', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  const actualExit = Object.getOwnPropertyDescriptor(process, 'exit');
+  try {
+    const calls: number[] = [];
+    const stub = ((code?: number) => {
+      calls.push(code ?? 0);
+    }) as typeof process.exit;
+    let proceed!: () => void;
+    const logger = new Logger({
+      sinks: [],
+      callProcessExit: true,
+      beforeExitCallback: () =>
+        new Promise((resolve) => {
+          proceed = () => resolve({ action: 'proceed' });
+        }),
+    });
+    const processed = recordExitProcess(logger);
+    // Simulated when requested: no callable process.exit, so 256 is kept as written.
+    (process as { exit?: unknown }).exit = undefined;
+    logger.exit(256);
+    // Real by the time it commits. Unnormalized, 256 would wrap to status 0.
+    process.exit = stub;
+    proceed();
+    await logger.close();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(processed).toEqual([1]);
+    expect(logger.exitCode).toBe(1);
+    expect(calls).toEqual([1]);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit code 256 is invalid for a real exit; exiting with code 1',
+    ]);
+  } finally {
+    if (actualExit !== undefined) {
+      Object.defineProperty(process, 'exit', actualExit);
+    }
+    output.mockRestore();
+  }
+});
+
+test('replacement reports are bounded to one line per exit plus a settled-code summary', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const logger = simulatedShutdownLogger();
+    const processed = recordExitProcess(logger);
+    for (const code of [0, 1, 2, 1, 2, 3]) {
+      logger.exit(code);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    expect(processed).toEqual([3]);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit(1) replaces the pending exit code 0',
+      'Logger exit code settled on 3 after 4 further replacements not reported',
+    ]);
+  } finally {
+    output.mockRestore();
+  }
+});

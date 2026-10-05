@@ -1,4 +1,4 @@
-import { defineOwnEntry } from '../utils';
+import { defineEntry } from '../../internal/define-entry';
 
 export function normalizeNodeRequestHeaders(
   headers: Record<string, string | string[] | number | undefined>,
@@ -10,7 +10,7 @@ export function normalizeNodeRequestHeaders(
       continue;
     }
 
-    defineOwnEntry(
+    defineEntry(
       result,
       key.toLowerCase(),
       Array.isArray(value) ? value.map((item) => String(item)) : String(value),
@@ -27,11 +27,11 @@ export function materializeNodeRequestHeaders(
 
   for (const [key, value] of Object.entries(headers)) {
     if (!Array.isArray(value)) {
-      defineOwnEntry(result, key, value);
+      defineEntry(result, key, value);
       continue;
     }
 
-    defineOwnEntry(
+    defineEntry(
       result,
       key,
       key.toLowerCase() === 'cookie'

@@ -504,21 +504,28 @@ export class ProcessSignalManager {
     // that blocks re-attachment attempts
     this._isAttached = false;
 
+    const listenerReports = laterFailures.map(
+      (failure) => ['ProcessSignalManager listener cleanup', failure] as const,
+    );
     const reports = [
-      ...laterFailures.map(
-        (failure) =>
-          ['ProcessSignalManager listener cleanup', failure] as const,
-      ),
+      ...listenerReports,
       ...rawModeRestoreReport(rawModeRestoreFailure),
     ];
 
     if (firstFailure) {
-      // Reported after the first failure reaches the caller, so they follow it in order
-      // and a listener that attaches from a report does so after the caller has seen
-      // this detach finish - not before a throw that would read as this detach failing
-      // over an instance that listener just attached. A process that exits straight
-      // after the throw loses these, but the error it was thrown has already reached it.
-      this.reportCleanupFailuresLater(reports);
+      // Listener failures are reported after the first failure reaches the caller, so
+      // they follow it in order and a listener that attaches from a report does so after
+      // the caller has seen this detach finish - not before a throw that would read as
+      // this detach failing over an instance that listener just attached. A process that
+      // exits straight after the throw loses these, but the error it was thrown has
+      // already reached it, and a leaked listener dies with the process.
+      //
+      // Except a raw-mode restore failure, reported now, before the throw, exactly as a
+      // failed `attach()` reports it: a caller that exits from its catch -
+      // `try { detach() } catch { process.exit(1) }` - never drains the microtask, and a
+      // terminal left in raw mode outlives the process.
+      reportCleanupFailures(rawModeRestoreReport(rawModeRestoreFailure));
+      this.reportCleanupFailuresLater(listenerReports);
       throw firstFailure.error;
     }
 

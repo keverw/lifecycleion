@@ -22,6 +22,8 @@ import {
 import { copyBoundedArray } from './bounded-array-copy';
 import {
   dispatchAnnouncedHook,
+  isComponentEnterable,
+  isHookEntryBlocked,
   readHookThenRecheck,
 } from './component-dispatch';
 
@@ -32,20 +34,14 @@ function readAvailability(
   allowStopped: boolean,
   allowStalled: boolean,
 ) {
-  // Neither override permits entering a provider during startup or teardown - a
-  // forced start that timed out is back to `stalled` while its `start()` still runs,
-  // and a late start's cleanup marks its component `running` only to stop it.
+  // Neither override permits entering a provider the shared rule blocks - startup or
+  // teardown owning it (see `isHookEntryBlocked()`); they only admit a stopped or
+  // stalled component that nothing owns.
   const isCurrent = context.getComponent(componentName) === component;
   const state = context.componentStates.get(componentName);
-  const isUnavailable =
-    state === 'starting' ||
-    state === 'starting-timed-out' ||
-    state === 'stopping' ||
-    state === 'force-stopping' ||
-    context.isRawStartPending(componentName) ||
-    context.isLateStartCleanupPending(componentName);
+  const isUnavailable = isHookEntryBlocked(context, componentName, state);
   const isRunning =
-    isCurrent && !isUnavailable && context.isComponentRunning(componentName);
+    isCurrent && isComponentEnterable(context, componentName, state);
   // The label does not depend on availability: a stall whose forced `start()` is still
   // pending is refused, but it is still `stalled` - as `checkComponentHealth()` and the
   // broadcast skip both call it. Gating this on availability made the same component
@@ -430,10 +426,13 @@ export async function broadcastMessageInternal(
   };
 
   // The one eligibility rule for both the selection and each send: running, or a
-  // non-running state the caller opted into. Finer refusals - startup, teardown - are
-  // `sendMessageInternal()`'s.
+  // non-running state the caller opted into. Deliberately coarser than the shared
+  // `isComponentEnterable()`: selection is by running membership, so a running
+  // component that is mid-stop is still selected and answered `stopped` in the results
+  // by `sendMessageInternal()`, which applies the shared rule to every send. Only a
+  // late start's cleanup is excluded here - it marks its component running only to
+  // stop it, so it is not a running member the caller asked about.
   const skipCodeFor = (name: string): 'stalled' | 'stopped' | undefined => {
-    // A late start's cleanup marks its component running only to stop it.
     if (
       context.isComponentRunning(name) &&
       !context.isLateStartCleanupPending(name)

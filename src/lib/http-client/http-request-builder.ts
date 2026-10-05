@@ -2,7 +2,7 @@ import { isNullish } from '../internal/is-nullish';
 import { generateID } from '../id-helpers';
 import { validateRequestTimeoutMS } from './consts';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
-import { defineOwnEntry } from './utils';
+import { defineEntry } from '../internal/define-entry';
 import type {
   HTTPMethod,
   HTTPResponse,
@@ -101,7 +101,7 @@ export class HTTPRequestBuilder<T = unknown> {
     // prototype (an array value) or vanish (a string). A nullish argument stays a
     // no-op, as `Object.assign` treated it.
     for (const [key, value] of Object.entries(headers ?? {})) {
-      defineOwnEntry(this._headers, key, value);
+      defineEntry(this._headers, key, value);
     }
     return this;
   }
