@@ -12,6 +12,7 @@ A comprehensive lifecycle orchestration system that manages startup, shutdown, a
   - [3. Graceful Shutdown](#3-graceful-shutdown)
 - [Core Concepts](#core-concepts)
   - [Component Lifecycle States](#component-lifecycle-states)
+  - [Abort Signals at a Glance](#abort-signals-at-a-glance)
   - [Startup Abort Signal](#startup-abort-signal)
   - [Dependency Management](#dependency-management)
   - [Optional Components](#optional-components)
@@ -385,13 +386,53 @@ start result and `component:start-timeout` event report the timeout.
 
 **Automatic late resolution:** If `stop()` eventually completes after the graceful timeout (e.g., a server waiting on keep-alive connections), the manager automatically clears the stall and emits `component:stalled-resolved`. No manual retry is needed. The same applies to `onShutdownForce()`: if it eventually resolves after its own timeout, the stall is cleared automatically. If neither ever completes, the stall persists until you intervene.
 
+### Abort Signals at a Glance
+
+`start()`, `stop()` and `onShutdownForce()` each receive an `AbortSignal`. A signal
+fires when the manager stops needing that call's work, or wants it wrapped up
+sooner. JavaScript cannot cancel a running promise, so the signal is how the manager
+asks your code to wind down.
+
+| Call                      | Its signal fires when...                                                                                              |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `start(signal)`           | `startupTimeoutMS` (or a bulk startup deadline) passes, or a shutdown with `abortPendingStarts: true` begins          |
+| `stop(signal)`            | `shutdownGracefulTimeoutMS` (or a `stopComponent()` `timeout`) passes - then `onShutdownForce()` runs, if implemented |
+| `onShutdownForce(signal)` | `shutdownForceTimeoutMS` passes, or the earlier `stop()` finishes after all, so the component is already down         |
+
+It never fires because the call itself resolved, rejected or threw. Each attempt gets a
+fresh signal.
+
+A stop that escalates, end to end - one stop operation, holding the component's lock
+throughout:
+
+```text
+t=0     stop(signalA) called
+t=5s    shutdownGracefulTimeoutMS passes
+          -> signalA aborts, onGracefulStopTimeout() runs
+          -> onShutdownForce(signalB) called; stop() may still be running
+t=6s    the original stop() finishes after all - the component is down
+          -> the stop succeeds, signalB aborts (its work is no longer needed)
+```
+
+All a component needs to do: pass the signal to its async work (`fetch`, `listen`,
+a pool connect, `setTimeout` from `node:timers/promises`) or check `signal.aborted`
+between steps, and stop when it fires.
+
+**Signals or hooks?** The `onStartupAborted()`, `onGracefulStopTimeout()` and
+`onShutdownForceAborted()` hooks fire at the same deadlines, right after the signal.
+Prefer the signal: it reaches the work in progress directly and composes with
+standard APIs. The hooks remain for instance-level cleanup the signal cannot reach,
+and `onStartupAborted()` carries one extra meaning: implementing it tells the manager
+your component cleans up its own timed-out start, so the manager does not stop it
+automatically if that start completes late (bulk startup deadlines still do).
+
 ### Startup Abort Signal
 
 `start(signal)` receives a fresh `AbortSignal` for each start attempt. Every signal
 the manager hands a hook - this one, and the [stop and force
 signals](#stop-abort-signals) - follows one rule: it aborts when the manager no longer
-needs that still-pending call's work, either at the call's deadline or when another
-path has already made it moot, and never because the call itself settled. For
+needs that still-pending call's work - see [Abort Signals at a
+Glance](#abort-signals-at-a-glance) - and never because the call itself settled. For
 `start()`, that is exactly when the manager stops waiting on a call that is still
 pending, or is told to stop wanting it:
 
