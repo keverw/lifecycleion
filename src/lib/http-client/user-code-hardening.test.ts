@@ -119,10 +119,45 @@ describe('NodeAdapter: a sink returned after its request was torn down', () => {
   // in flight. The adapter destroys it, but `destroy()` does not suppress an error the
   // stream is already on its way to emitting - and with no `'error'` listener on it,
   // that was an uncaught exception.
+  let lateSinks: fs.WriteStream[] = [];
+  afterEach(() => {
+    lateSinks = [];
+  });
+
   const lateMissingFile = async (): Promise<WritableLike> => {
     await sleep(80);
-    return fs.createWriteStream(missingDirectoryPath());
+    const sink = fs.createWriteStream(missingDirectoryPath());
+    lateSinks.push(sink);
+    return sink;
   };
+
+  // Waits for the late sink to exist and close, rather than for a fixed time: on a slow
+  // runner the failed open can land after any fixed sleep, and the assertions then ran
+  // before anything had happened. `'close'` follows the stream's `'error'`, and a tick
+  // later lets the adapter's report reach the `'error'` channel.
+  async function settleLateSink(): Promise<void> {
+    const deadline = Date.now() + 5000;
+    while (lateSinks.length === 0 && Date.now() < deadline) {
+      await sleep(10);
+    }
+    const [sink] = lateSinks;
+    if (sink === undefined) {
+      throw new Error('The late sink was never created');
+    }
+    if (!sink.closed) {
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(
+          () => reject(new Error('The late sink never closed')),
+          Math.max(deadline - Date.now(), 0),
+        );
+        sink.once('close', () => {
+          clearTimeout(timer);
+          resolve();
+        });
+      });
+    }
+    await sleep(20);
+  }
 
   test('cancelled by the caller during the factory', async () => {
     muteConsoleError();
@@ -138,7 +173,7 @@ describe('NodeAdapter: a sink returned after its request was torn down', () => {
     const pending = builder.send();
     setTimeout(() => builder.cancel('bye'), 20);
     const response = await pending;
-    await sleep(300);
+    await settleLateSink();
 
     expect(response.isCancelled).toBe(true);
     expect(escaped).toEqual([]);
@@ -161,7 +196,7 @@ describe('NodeAdapter: a sink returned after its request was torn down', () => {
       .get('/', { timeout: 30 })
       .streamResponse(lateMissingFile)
       .send();
-    await sleep(300);
+    await settleLateSink();
 
     expect(response.isTimeout).toBe(true);
     expect(escaped).toEqual([]);
@@ -181,7 +216,7 @@ describe('NodeAdapter: a sink returned after its request was torn down', () => {
       .get('/')
       .streamResponse(lateMissingFile)
       .send();
-    await sleep(300);
+    await settleLateSink();
 
     expect(response.isStreamError).toBe(true);
     expect(escaped).toEqual([]);
