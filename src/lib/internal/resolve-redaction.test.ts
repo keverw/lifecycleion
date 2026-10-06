@@ -8,6 +8,7 @@ import {
   REDACTED_PLACEHOLDER,
   type RedactValueFunction,
 } from './default-redact-function';
+import { hostileRejections } from './hostile-promise-test-utils';
 
 /** A `redactFunction` answering a value the declared type does not admit, as JavaScript can. */
 function answering(value: unknown): RedactValueFunction {
@@ -163,4 +164,107 @@ test('negative percentages do not partially expose derived values', () => {
       resolveRedaction('secret', 'derived-secret-value', true, () => request),
     ).toBe(REDACTED_PLACEHOLDER);
   }
+});
+
+describe('resolveRedaction with a redactFunction that returns a promise', () => {
+  /** Run `body`, then wait long enough for an unobserved rejection to surface. */
+  async function collectUnhandled(body: () => void): Promise<unknown[]> {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      body();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+
+    return unhandled;
+  }
+
+  test('a rejecting promise is a contract failure, and its rejection is observed', async () => {
+    // The function is called synchronously, so a promise cannot be the answer. Treated
+    // as an object it landed on the default masking and was dropped, and its rejection
+    // went unhandled - fatal under Node's default `--unhandled-rejections=throw`.
+    let thrown: unknown;
+
+    const unhandled = await collectUnhandled(() => {
+      try {
+        resolveRedaction('card', '4111111111111111', false, (() =>
+          Promise.reject(
+            new Error('redact rejects'),
+          )) as unknown as RedactValueFunction);
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toBeInstanceOf(TypeError);
+    expect((thrown as Error).message).toContain('returned a promise');
+    expect(unhandled).toEqual([]);
+  });
+
+  test('an async function is refused the same way', async () => {
+    let thrown: unknown;
+
+    const unhandled = await collectUnhandled(() => {
+      try {
+        resolveRedaction('card', '4111111111111111', false, (async () => {
+          await Promise.resolve();
+          throw new Error('redact rejects later');
+        }) as unknown as RedactValueFunction);
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toBeInstanceOf(TypeError);
+    expect(unhandled).toEqual([]);
+  });
+
+  test.each(hostileRejections)(
+    'a rejected promise with %s is observed rather than trusted',
+    async (_label, make) => {
+      const unhandled = await collectUnhandled(() => {
+        expect(() =>
+          resolveRedaction(
+            'card',
+            '4111111111111111',
+            false,
+            answering(make(new Error('hostile rejection'))),
+          ),
+        ).toThrow(TypeError);
+      });
+
+      expect(unhandled).toEqual([]);
+    },
+  );
+
+  test('a plain thenable is refused too', () => {
+    // Not a native promise, but `await` would adopt it, which is the same mistake.
+    expect(() =>
+      resolveRedaction(
+        'card',
+        '4111111111111111',
+        false,
+        answering({ then: (resolve: (value: string) => void) => resolve('x') }),
+      ),
+    ).toThrow(TypeError);
+  });
+
+  test('a returned value whose then cannot be read is a failure, not a request', () => {
+    const answer = Object.defineProperty({}, 'then', {
+      get(): never {
+        throw new Error('then refused');
+      },
+    });
+
+    expect(() =>
+      resolveRedaction('card', '4111111111111111', false, answering(answer)),
+    ).toThrow('then refused');
+  });
 });

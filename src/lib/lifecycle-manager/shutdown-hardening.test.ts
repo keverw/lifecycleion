@@ -6,6 +6,7 @@ import { LifecycleManager } from './lifecycle-manager';
 import type { ForceShutdownContext, ShutdownResult } from './types';
 import { sleep } from '../sleep';
 import { claimReports, hasReport } from './test-helpers';
+import { FailingStopComponent } from './test-components';
 
 function setup(shutdownTimeoutMS?: number) {
   const logger = new Logger({
@@ -947,6 +948,82 @@ describe('LifecycleManager - shutdown hardening', () => {
     expect(order).toEqual(['completed', 'armed']);
     expect(armedStatesSeen).toEqual([true]);
     expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+  });
+
+  test('arms escalation where setTimeout returns a number instead of a Node timer', async () => {
+    // Browsers and Deno hand back a numeric id with no `unref`. Calling it bare threw out
+    // of the arming transition: a spurious `'error'` report, and the armed event never
+    // emitted. Stubbed here around the real timers, so the ids still fire and clear.
+    const realSetTimeout = globalThis.setTimeout;
+    const realClearTimeout = globalThis.clearTimeout;
+    const handles = new Map<number, ReturnType<typeof setTimeout>>();
+    let nextID = 1;
+
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 3,
+        withinMS: 1000,
+        armedAfterFailureMS: 60_000,
+        onForceShutdown: (): void => {},
+      },
+    });
+
+    await manager.registerComponent(new FailingStopComponent(logger));
+    await manager.startAllComponents();
+
+    let armedEvents = 0;
+    manager.on('lifecycle-manager:shutdown-escalation-armed', () => {
+      armedEvents++;
+    });
+
+    const { reports, release } = claimReports();
+
+    globalThis.setTimeout = ((
+      callback: (...args: unknown[]) => void,
+      delayMS?: number,
+      ...args: unknown[]
+    ): number => {
+      const id = nextID++;
+      handles.set(
+        id,
+        realSetTimeout(() => {
+          handles.delete(id);
+          callback(...args);
+        }, delayMS),
+      );
+      return id;
+    }) as unknown as typeof setTimeout;
+    globalThis.clearTimeout = (id?: unknown): void => {
+      if (typeof id === 'number' && handles.has(id)) {
+        realClearTimeout(handles.get(id));
+        handles.delete(id);
+        return;
+      }
+      realClearTimeout(id as ReturnType<typeof setTimeout>);
+    };
+
+    try {
+      const result = await manager.stopAllComponents();
+      expect(result.success).toBe(false);
+      await sleep(0);
+
+      expect(armedEvents).toBe(1);
+      expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+      expect(hasReport(reports, 'unref')).toBe(false);
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+      globalThis.clearTimeout = realClearTimeout;
+      release();
+      for (const handle of handles.values()) {
+        realClearTimeout(handle);
+      }
+    }
   });
 
   test('a crashed pass leaves escalation reachable for the presses that follow', async () => {

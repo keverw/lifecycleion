@@ -823,7 +823,7 @@ export class Logger extends EventEmitter {
         // rung left, as it is for a failing sink.
         //
         // Through `reportToConsole`, because `console.error` is itself a call that can
-        // throw - a broken stdout, or a harness that replaced it - and a throw here defeats
+        // throw - a replaced or missing console, or one that throws on write - and a throw here defeats
         // this very guard: it escapes the listener *and* skips the `preventDefault()`
         // below, so the report is neither logged nor claimed.
         reportToConsole(describeError(error_));
@@ -1827,8 +1827,8 @@ export class Logger extends EventEmitter {
    * a throw leaves the caller's own `logger.info()`; from `result.catch(...)` on a sink
    * that returned a promise, where it becomes an unhandled rejection; and from `close()`,
    * where it would reject a shutdown. The console rung goes through `reportToConsole` for
-   * that reason - `console.error` throws on a broken stdout, which is precisely the
-   * condition `close()` runs under.
+   * that reason - `console.error` can throw synchronously, and shutdown, when `close()`
+   * runs, is when a console is most likely to be replaced or torn down.
    */
   private handleSinkError(
     error: unknown,

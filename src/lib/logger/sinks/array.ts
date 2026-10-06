@@ -3,6 +3,8 @@ import {
   describeContainer,
   namedArrayKeys,
 } from '../../internal/container-entries';
+import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
+import { observeRejection } from '../../internal/intrinsics';
 import { isPlainContainer } from '../../internal/is-plain-container';
 import { MAX_REDACTION_ENTRIES } from '../../internal/redact-paths';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
@@ -312,8 +314,9 @@ export class ArraySink implements LogSink {
     transformer?: ArrayLogTransformer;
     /**
      * Notified when a param could not be copied into the stored snapshot (`kind` is
-     * `'render'`), or when the `transformer` threw and the untransformed entry was stored
-     * instead (`kind` is `'transform'`, `path` is `<transformer>`), so a
+     * `'render'`), or when the `transformer` threw or returned a promise and the
+     * untransformed entry was stored instead (`kind` is `'transform'`, `path` is
+     * `<transformer>`; a promise that later rejects is reported again with its reason), so a
      * `<value could not be copied>` marker or a silently passed-through entry leaves a
      * diagnosis. Defaults to `console.error`. Fires at most once per kind per entry
      * written.
@@ -353,6 +356,8 @@ export class ArraySink implements LogSink {
     if (this.transformer) {
       try {
         const transformed = this.transformer(stored);
+
+        this.refuseDeferredTransform(transformed);
 
         if (transformed !== false) {
           // Store the transformed entry
@@ -396,6 +401,39 @@ export class ArraySink implements LogSink {
    */
   public close(): void {
     this.closed = true;
+  }
+
+  /**
+   * Throw if the transformer answered with a promise or other thenable.
+   *
+   * The transformer is called synchronously, so a promise is never a transformed entry:
+   * stored as one, `logs` held the promise rather than an entry, and a promise that
+   * rejected - an `async` transformer that throws - had nothing observing it, which is an
+   * unhandled rejection and fatal under Node's default `--unhandled-rejections=throw`.
+   *
+   * The throw lands in `write()`'s `catch`, so this is treated exactly as a throwing
+   * transformer is: reported as `'transform'` and the untransformed entry stored. The
+   * promise's rejection is observed and reported on the same channel when it arrives,
+   * with its own reporter, since the contract failure has already spent this entry's
+   * once-per-kind report. A value whose `then` cannot be read is thrown with the read's
+   * own failure.
+   */
+  private refuseDeferredTransform(transformed: unknown): void {
+    const pending = adoptResult(transformed);
+
+    if (pending instanceof UnreadableReturn) {
+      throw pending;
+    }
+
+    if (pending !== undefined) {
+      observeRejection(pending, (error: unknown) => {
+        this.createGuardedFormatReporter('transform')(error, '<transformer>');
+      });
+
+      throw new TypeError(
+        'ArraySink transformer returned a promise; it is called synchronously and must return an entry or false directly',
+      );
+    }
   }
 
   /**

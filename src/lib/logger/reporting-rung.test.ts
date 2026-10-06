@@ -13,10 +13,11 @@ import { hostileRejections } from '../internal/hostile-promise-test-utils';
 
 /**
  * The last rung of every reporting path is `console.error`, and it is a call that can
- * throw: Node raises `EPIPE` writing to a pipe whose reader has gone, a stream destroyed
- * during shutdown throws on write, and a harness that patches it to fail a build on
- * warnings is an ordinary setup. Every one of those is a *shutdown-time* condition, which
- * is exactly when sinks fail and handlers are torn down.
+ * throw synchronously: a console that writes to a destination that refuses the write, or
+ * a harness that patches it to fail a build on warnings, is an ordinary setup, and a
+ * console torn down during shutdown is most likely exactly when sinks fail and handlers
+ * are torn down. (Node's `EPIPE` on a broken stdout pipe is not one of these: it arrives
+ * later as a stream `'error'` event, which the application handles.)
  *
  * Reporting a failure must never raise one. These drive each site that falls through to
  * that rung with the rung itself broken, and assert the original failure is still the only

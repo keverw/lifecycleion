@@ -2329,6 +2329,67 @@ describe('NamedPipeSink', () => {
       reader.stop();
     }
   }, 15000);
+  test('a formatter that returned a promise falls back to the default format', async () => {
+    // The formatter is called synchronously, so `formatter(entry) + '\n'` wrote the text
+    // `[object Promise]` to the pipe, and a promise that rejected - an `async` formatter
+    // that throws - went unhandled, which is fatal under Node's default settings.
+    const pipePath = `${tmpDir.path}/formatter-promise.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const failures: SinkFailure[] = [];
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    const sink = new NamedPipeSink({
+      pipePath,
+      formatter: (async () => {
+        await Promise.resolve();
+        throw new Error('formatter rejected');
+      }) as unknown as (entry: LogEntry) => string,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'still-written',
+        message: 'still-written',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      const formatFailures = failures.filter(
+        (entry) => entry.kind === 'format',
+      );
+
+      expect(unhandled).toEqual([]);
+      expect(formatFailures).toHaveLength(2);
+      expect(formatFailures[0]?.disposition).toBe('fallback');
+      expect(
+        (formatFailures[0]?.error.cause as Error | undefined)?.message,
+      ).toContain('returned a promise');
+      expect(
+        (formatFailures[1]?.error.cause as Error | undefined)?.message,
+      ).toBe('formatter rejected');
+      expect(sink.getHealth().isHealthy).toBe(true);
+      expect(reader.data.join('')).toContain('still-written');
+      expect(reader.data.join('')).not.toContain('[object Promise]');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      await sink.close();
+      reader.stop();
+    }
+  }, 15000);
+
   test('a line that could not be rendered is counted, not just reported', async () => {
     // `disposition: 'lost'` and a `droppedEntries` that never moved disagreed about the
     // same entry: three unrenderable lines reported three `format`/`lost` failures while

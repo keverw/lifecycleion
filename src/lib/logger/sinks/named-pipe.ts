@@ -11,6 +11,7 @@ import { renderOnce, type RenderedLine } from './internal/rendered-line';
 import { renderJSONLine } from './internal/render-json-line';
 import { renderTextLine } from './internal/render-text-line';
 import { reportThroughHandler } from '../../internal/failure-reporter';
+import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { readUnknownMember } from '../../internal/read-member';
 import { sleep } from '../../sleep';
 import {
@@ -67,9 +68,9 @@ export interface NamedPipeSinkOptions {
    *
    * One object rather than three positional arguments, and the same one `FileSink` hands
    * back: `kind` says what failed - `'write'` means a line is at risk, `'format'` means
-   * your `formatter` threw and the default format went out in its place - `target` is the
-   * pipe path, and `attempt` / `disposition` say which try this was and what became of
-   * the line.
+   * your `formatter` threw or returned a promise and the default format went out in its
+   * place - `target` is the pipe path, and `attempt` / `disposition` say which try this
+   * was and what became of the line.
    *
    * `entry` is set on a failure tied to a line - a write that failed, a render that
    * threw, the oldest line dropped at the cap or abandoned at close - exactly as
@@ -2530,7 +2531,13 @@ export class NamedPipeSink implements LogSink {
     // ordinary log lines and never learned it had not run.
     if (this.formatter) {
       try {
-        return this.formatter(entry) + '\n';
+        const custom: unknown = this.formatter(entry);
+
+        if (typeof custom !== 'string') {
+          this.refuseDeferredFormat(custom, entry);
+        }
+
+        return (custom as string) + '\n';
       } catch (error) {
         // `FORMAT`, not `WRITE`: the fallback below still produces a line and the pipe is
         // untouched, so this is advisory. It also keeps the both-threw case honest - if
@@ -2607,6 +2614,51 @@ export class NamedPipeSink implements LogSink {
     }
 
     return formatted + '\n';
+  }
+
+  /**
+   * Throw if the formatter answered with a promise or other thenable.
+   *
+   * The formatter is called synchronously, so a promise is never a line: concatenated, it
+   * wrote the text `[object Promise]` to the pipe, and a promise that rejected - an
+   * `async` formatter that throws - had nothing observing it, which is an unhandled
+   * rejection and fatal under Node's default `--unhandled-rejections=throw`.
+   *
+   * The throw lands in `formatEntry`'s `catch`, so this is treated exactly as a throwing
+   * formatter is: the default format goes out and a `'format'`/`'fallback'` failure is
+   * reported. The promise's rejection is observed and reported the same way when it
+   * arrives, through the same re-entry guard. A value whose `then` cannot be read is
+   * thrown with the read's own failure.
+   */
+  private refuseDeferredFormat(custom: unknown, entry: LogEntry): void {
+    const pending = adoptResult(custom);
+
+    if (pending instanceof UnreadableReturn) {
+      throw pending;
+    }
+
+    if (pending !== undefined) {
+      observeRejection(pending, (error: unknown) => {
+        this.scheduleFormatReport((onReported) => {
+          this.handleError(
+            'format',
+            new Error(
+              'NamedPipeSink formatter returned a promise that rejected; the default format was used',
+              { cause: toError(error) },
+            ),
+            {
+              disposition: 'fallback',
+              entry,
+              onReported,
+            },
+          );
+        });
+      });
+
+      throw new TypeError(
+        'NamedPipeSink formatter returned a promise; it is called synchronously and must return a string directly',
+      );
+    }
   }
 
   /** Deliver one format report now and retain at most one that arrives while it settles. */
@@ -2691,8 +2743,8 @@ export class NamedPipeSink implements LogSink {
     // an uncaught exception that ends the process, and from `initializePipe`, whose promise
     // the constructor starts without a `.catch`, where it would be an unhandled rejection
     // raised out of a constructor. The console rung is guarded for the same reason -
-    // `console.error` throws on a broken stdout, which is exactly the condition a pipe sink
-    // fails under.
+    // `console.error` can throw synchronously, and a pipe sink fails at exactly the
+    // shutdown-time moments a console is most likely to be replaced or torn down.
     reportThroughHandler(
       this.onError === undefined
         ? undefined

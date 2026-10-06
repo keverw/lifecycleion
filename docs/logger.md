@@ -585,11 +585,12 @@ import { REDACTION_FAILED_MARKER } from 'lifecycleion/logger';
 REDACTION_FAILED_MARKER; // '***REDACTION FAILED***'
 ```
 
-Four failure modes, all fail closed:
+Five failure modes, all fail closed:
 
 | What failed                                                                         | Result                                                                                                           |
 | ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
 | Your `redactFunction` throws for a key                                              | That key becomes the marker, while every other param redacts normally                                            |
+| Your `redactFunction` returns a promise (an `async` function)                       | Same - that key becomes the marker, and a rejection of the promise is observed rather than left unhandled        |
 | A value cannot be stringified (a `toString` that throws)                            | Same - that key becomes the marker                                                                               |
 | A param cannot be read (a getter that throws)                                       | That key becomes the marker where it sits, while every other param, including the redacted one, redacts normally |
 | The `params` object cannot be read at all (a revoked `Proxy`, a throwing `ownKeys`) | **Only** the redacted keys are returned, each set to the marker. Other params are dropped from `redactedParams`  |
@@ -1152,6 +1153,15 @@ new ConsoleSink({
 `debug` is filtered at the default `INFO` level. `raw` bypasses level filtering, but like
 every other type it is still suppressed while the sink is muted or closed.
 
+A console method that throws synchronously during a write is contained by the logger and
+reported as a sink failure, and the library's own last-resort `console.error` reports are
+guarded the same way. On Node, a write to a stdout or stderr pipe whose reader has gone
+(`| head`, a supervisor that exited first) does not throw: the `EPIPE` arrives later as an
+`'error'` event on `process.stdout` / `process.stderr`, exactly as it does for a plain
+`console.log`, and with no listener Node treats it as an uncaught exception. The library
+installs no listener on the standard streams; an application that runs with piped output
+decides what a broken pipe means for it, for example with `process.stdout.on('error', ...)`.
+
 #### Log Level Control
 
 Dynamically change what log levels are shown:
@@ -1252,6 +1262,8 @@ const service = logger.service('Auth');
 service.error('Login failed');
 // Stored message: "[Auth] ERROR: Login failed"
 ```
+
+The transformer is called synchronously. One that throws or returns a promise (an `async` transformer) leaves the untransformed entry stored, and the failure is reported to `onFormatError` under `kind: 'transform'`. A rejection of that promise is observed and reported there too when it arrives.
 
 ### FileSink
 
@@ -1665,7 +1677,7 @@ const pipeSink = new NamedPipeSink({
 });
 ```
 
-The formatter receives the full `LogEntry` and should return a string (newline is added automatically).
+The formatter receives the full `LogEntry` and should return a string (newline is added automatically). It is called synchronously: a formatter that throws or returns a promise (an `async` formatter) is reported to `onError` as `kind: 'format'` with `disposition: 'fallback'`, and the default format is written instead. A rejection of that promise is observed and reported the same way when it arrives.
 
 #### Setup
 
@@ -2088,8 +2100,8 @@ or `'render'`. Formatting diagnostics include their structural `path`. Sink diag
 include `context` and the failing `sink`. Event-handler diagnostics include `event`.
 
 `FileSink` and `NamedPipeSink` have their own `onError`, and
-`ArraySink` has `onFormatError` (which also reports a throwing `transformer`, under
-`kind: 'transform'`), while `ConsoleSink` has none, since it does not queue or
+`ArraySink` has `onFormatError` (which also reports a `transformer` that throws or
+returns a promise, under `kind: 'transform'`), while `ConsoleSink` has none, since it does not queue or
 transform anything. See [Built-In Sinks](#built-in-sinks).
 
 While an ArraySink format-error handler is pending, later format failures go to the

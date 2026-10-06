@@ -594,6 +594,115 @@ test('should report a transformer that throws rather than silently ignoring it',
   expect(sink.logs[0]?.message).toBe('m');
 });
 
+describe('ArraySink - a transformer that returns a promise', () => {
+  const entry: LogEntry = {
+    timestamp: 1,
+    type: 'info',
+    template: 't',
+    message: 'm',
+  };
+
+  /** Run `body`, then wait long enough for an unobserved rejection to surface. */
+  async function collectUnhandled(body: () => void): Promise<unknown[]> {
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      body();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+
+    return unhandled;
+  }
+
+  test('stores the original entry and reports both the contract failure and the rejection', async () => {
+    // The transformer is called synchronously, so the promise itself was pushed into
+    // `logs` and its rejection went unhandled - fatal under Node's default settings.
+    const seen: string[] = [];
+    const sink = new ArraySink({
+      transformer: (async () => {
+        await Promise.resolve();
+        throw new Error('transformer rejected');
+      }) as unknown as (entry: LogEntry) => LogEntry,
+      onFormatError: (error, kind, subject) =>
+        seen.push(`${kind}|${subject}|${error.message}`),
+    });
+
+    const unhandled = await collectUnhandled(() => sink.write(entry));
+
+    expect(unhandled).toEqual([]);
+    expect(sink.logs).toHaveLength(1);
+    expect(sink.logs[0]).toEqual(entry);
+    expect(seen).toHaveLength(2);
+    expect(seen[0]).toContain('transform|<transformer>|');
+    expect(seen[0]).toContain('returned a promise');
+    expect(seen[1]).toBe('transform|<transformer>|transformer rejected');
+  });
+
+  test('a promise that fulfills is still refused, and the original entry kept', async () => {
+    const seen: string[] = [];
+    const sink = new ArraySink({
+      transformer: ((stored: LogEntry) =>
+        Promise.resolve({ ...stored, message: 'late' })) as unknown as (
+        entry: LogEntry,
+      ) => LogEntry,
+      onFormatError: (error, kind) => seen.push(`${kind}|${error.message}`),
+    });
+
+    const unhandled = await collectUnhandled(() => sink.write(entry));
+
+    expect(unhandled).toEqual([]);
+    expect(sink.logs).toEqual([entry]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain('returned a promise');
+  });
+
+  test.each(hostileRejections)(
+    'a rejected promise with %s is observed rather than trusted',
+    async (_label, make) => {
+      const seen: string[] = [];
+      const sink = new ArraySink({
+        transformer: (() =>
+          make(new Error('hostile rejection'))) as unknown as (
+          entry: LogEntry,
+        ) => LogEntry,
+        onFormatError: (error) => seen.push(error.message),
+      });
+
+      const unhandled = await collectUnhandled(() => sink.write(entry));
+
+      expect(unhandled).toEqual([]);
+      expect(sink.logs).toEqual([entry]);
+      expect(seen).toContain('hostile rejection');
+    },
+  );
+
+  test('a returned value whose then cannot be read is reported and not stored', () => {
+    const seen: string[] = [];
+    const sink = new ArraySink({
+      transformer: () =>
+        Object.defineProperty({ ...entry }, 'then', {
+          get(): never {
+            throw new Error('then refused');
+          },
+        }),
+      onFormatError: (error, kind) => seen.push(`${kind}|${error.message}`),
+    });
+
+    sink.write(entry);
+
+    expect(sink.logs).toEqual([entry]);
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toContain('then refused');
+  });
+});
+
 describe('ArraySink - a self-logging onFormatError cannot recurse', () => {
   // The guard `FileSink` and `NamedPipeSink` hold over a format failure, which this sink
   // lacked. Each `write()` built a fresh reporter, so a handler that logged back into the

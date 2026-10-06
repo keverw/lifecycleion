@@ -11693,7 +11693,10 @@ export class LifecycleManager
       this.expireRepeatedShutdownRequestState();
     }, policy.armedAfterFailureMS);
     // Expiry should not keep the process alive when nothing else is pending.
-    this.repeatedShutdownExpiryTimer.unref();
+    // Where setTimeout returns a numeric id (browsers, Deno) there is nothing to unref.
+    if (typeof this.repeatedShutdownExpiryTimer === 'object') {
+      this.repeatedShutdownExpiryTimer.unref?.();
+    }
   }
 
   /**

@@ -1,4 +1,6 @@
 import type { RedactValueFunction } from './default-redact-function';
+import { adoptResult, UnreadableReturn } from './adopt-promise';
+import { observeRejection } from './intrinsics';
 import { capToMaxRenderLength, MAX_RENDER_LENGTH } from './render-budget';
 import {
   defaultRedactValue,
@@ -28,6 +30,8 @@ import {
  *   `undefined` in both. Masking by default is the one answer that means the same thing
  *   everywhere and never prints what was named for redaction
  * - any other non-object is used literally - a boolean, a `bigint`, a symbol
+ * - a promise or any other thenable is a failure, thrown as a throw from the function
+ *   itself is - see {@link refuseDeferredAnswer}
  *
  * @param isDerived Whether the value reaching here was something other than a string -
  *                  a number, an object, a function. The default never masks such a value
@@ -86,6 +90,13 @@ export function resolveRedaction(
       return maskWithConfig(value, { percent: requested });
     }
 
+    if (
+      requested !== null &&
+      (typeof requested === 'object' || typeof requested === 'function')
+    ) {
+      refuseDeferredAnswer(requested);
+    }
+
     const match = matchRedactMaskConfig(requested);
 
     if (match.kind === 'settings') {
@@ -109,4 +120,40 @@ export function resolveRedaction(
   }
 
   return isDerived ? REDACTED_PLACEHOLDER : defaultRedactValue(key, value);
+}
+
+/**
+ * Throw if a `redactFunction` answered with a promise or other thenable.
+ *
+ * The function is called synchronously, so a promise is never an answer: the value it
+ * would settle to arrives after the leaf has been written. Read as an object, it landed on
+ * the default masking with nothing said, and a promise that rejected - an `async`
+ * function that throws - had nothing observing it, which is an unhandled rejection and
+ * fatal under Node's default `--unhandled-rejections=throw`.
+ *
+ * Its rejection is observed and contained here. The throw is the report: it reaches the
+ * caller's `catch` exactly as a synchronous throw from the function does, so the entry is
+ * marked `***REDACTION FAILED***` and the failure goes to the operation's `'redaction'`
+ * channel. That channel reports at most once per operation, and this failure has already
+ * spent that report by the time the promise settles, so the rejection reason is not
+ * reported separately.
+ *
+ * A returned value whose `then` cannot be read is refused the same way, with the read's
+ * own failure: whether it was a thenable is unknowable, and nothing read from it can be
+ * trusted as a masking request.
+ */
+function refuseDeferredAnswer(requested: object): void {
+  const pending = adoptResult(requested);
+
+  if (pending instanceof UnreadableReturn) {
+    throw pending;
+  }
+
+  if (pending !== undefined) {
+    observeRejection(pending, () => undefined);
+
+    throw new TypeError(
+      'redactFunction returned a promise; it is called synchronously and must return its answer directly',
+    );
+  }
 }
