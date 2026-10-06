@@ -156,6 +156,87 @@ test('registration hooks cannot unregister or re-register their reserved instanc
   }
 });
 
+test('individual start refuses dependencies read before the same instance was re-registered', async () => {
+  const { logger, manager } = setup();
+  const component = new Plain(logger, 'a');
+  const dependency = new Plain(logger, 'b');
+  await manager.registerComponent(component);
+  await manager.registerComponent(dependency);
+
+  let startCalls = 0;
+  component.start = (): Promise<void> => {
+    startCalls++;
+    return Promise.resolve();
+  };
+  let didReRegister = false;
+  let removal: ReturnType<typeof manager.unregisterComponent> | undefined;
+  let registration: ReturnType<typeof manager.registerComponent> | undefined;
+  Object.defineProperty(component, 'startupTimeoutMS', {
+    get(): number {
+      if (!didReRegister) {
+        didReRegister = true;
+        component.dependencies.push('b');
+        removal = manager.unregisterComponent('a');
+        registration = manager.registerComponent(component);
+      }
+      return 1000;
+    },
+  });
+
+  const staleStart = await manager.startComponent('a');
+  expect((await removal)?.success).toBe(true);
+  expect((await registration)?.registered).toBe(true);
+  expect(staleStart.code).toBe('component_not_found');
+  expect(startCalls).toBe(0);
+  expect(manager.getRunningComponentNames()).toEqual([]);
+
+  // The new registration must enforce the dependency the rejected start missed.
+  expect((await manager.startComponent('a')).code).toBe(
+    'dependency_not_running',
+  );
+  expect((await manager.startComponent('b')).success).toBe(true);
+  expect((await manager.startComponent('a')).success).toBe(true);
+  expect(startCalls).toBe(1);
+  await manager.stopAllComponents();
+});
+
+test('individual start does not reuse optionality from an earlier dependency registration', async () => {
+  const { logger, manager } = setup();
+  const dependency = new Plain(logger, 'b');
+  const component = new Plain(logger, 'a', ['b']);
+  await manager.registerComponent(dependency);
+  await manager.registerComponent(component);
+
+  let startCalls = 0;
+  component.start = (): Promise<void> => {
+    startCalls++;
+    return Promise.resolve();
+  };
+  let didReRegister = false;
+  let removal: ReturnType<typeof manager.unregisterComponent> | undefined;
+  let registration: ReturnType<typeof manager.registerComponent> | undefined;
+  dependency.isOptional = (): boolean => {
+    if (!didReRegister) {
+      didReRegister = true;
+      removal = manager.unregisterComponent('b');
+      dependency.isOptional = () => false;
+      registration = manager.registerComponent(dependency);
+    }
+    return true;
+  };
+
+  const staleStart = await manager.startComponent('a');
+  expect((await removal)?.success).toBe(true);
+  expect((await registration)?.registered).toBe(true);
+  expect(staleStart.code).toBe('dependency_not_running');
+  expect(startCalls).toBe(0);
+
+  expect((await manager.startComponent('b')).success).toBe(true);
+  expect((await manager.startComponent('a')).success).toBe(true);
+  expect(startCalls).toBe(1);
+  await manager.stopAllComponents();
+});
+
 test('provisional registration is invisible to lookup, health and unregister', async () => {
   const { logger, manager } = setup();
   const component = new Plain(logger, 'a');

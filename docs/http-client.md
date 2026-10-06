@@ -509,17 +509,19 @@ client.addRequestInterceptor((request) => {
 });
 ```
 
-**The request an interceptor chain returns is read once.** When the chain finishes, the
-client copies `requestURL`, `method`, `headers` and `body` into a request object of its
-own. Header entries are copied at that point: a single value is converted to a string, an
-array stays an array with each element converted to a string, and a one-element array
-becomes that element's string. Every later check and use (URL validation, the
-browser-restricted header check, cookie-jar lookup, dispatch) reads that copy. A getter on
+**On a successful copy, the request an interceptor chain returns is read once.** When
+the chain finishes, the client copies `requestURL`, `method`, `headers` and `body` into a
+request object of its own. Header entries are copied at that point: a single
+value is converted to a string, an array stays an array with each element
+converted to a string, and a one-element array becomes that element's string.
+Every later check and use (URL validation, the browser-restricted header check,
+cookie-jar lookup, dispatch) reads that copy. A getter on
 the returned object, on the header record or on one of its entries is therefore consulted
-exactly once, and a URL that passed validation is the URL the request is sent to. Any
-failure while taking that copy is an `interceptor_error`: a `requestURL` that is not a
-string, `headers` that is not an object, a getter that throws, or a header value whose
-string conversion throws.
+exactly once when the copy succeeds, and a URL that passed validation is the URL the
+request is sent to. If copying fails, the best-effort snapshot for error observers may
+read those values again. Any failure while taking that copy is an `interceptor_error`:
+a `requestURL` that is not a string, `headers` that is not an object, a getter that
+throws, or a header value whose string conversion throws.
 
 ### Filter Options
 

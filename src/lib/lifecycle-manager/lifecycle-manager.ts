@@ -7933,20 +7933,27 @@ export class LifecycleManager
     // Read only where it decides something: a dependency that is not up, and only
     // without the override, which ignores the answer. One that stops after this read
     // has no answer and is held to required below - the conservative reading. Kept by
-    // instance: the answer is that instance's, and one that has since been replaced
-    // under its name answered nothing.
-    const optionalDependencies = new Map<string, BaseComponent>();
+    // registration: the same instance can be unregistered and registered again while
+    // its optionality is read, so instance identity alone does not keep the answer
+    // current.
+    const optionalDependencies = new Map<
+      string,
+      { component: BaseComponent; generation: number | undefined }
+    >();
 
     if (!flags.allowNonRunningDependencies) {
       for (const dependencyName of ownDependencies.dependencies) {
         const dependency = this.getComponent(dependencyName);
 
-        if (
-          dependency !== undefined &&
-          !this.isComponentUp(dependencyName) &&
-          this.componentMetadata.isComponentOptional(dependency)
-        ) {
-          optionalDependencies.set(dependencyName, dependency);
+        if (dependency !== undefined && !this.isComponentUp(dependencyName)) {
+          const generation =
+            this.registrationReads.currentGeneration(dependency);
+          if (this.componentMetadata.isComponentOptional(dependency)) {
+            optionalDependencies.set(dependencyName, {
+              component: dependency,
+              generation,
+            });
+          }
         }
       }
     }
@@ -7986,6 +7993,20 @@ export class LifecycleManager
     if (staleBeforeClaim !== undefined) {
       return staleBeforeClaim;
     }
+    // The same instance may have been unregistered and registered again by one of the
+    // component-owned reads above. Its old dependency list and optionality answers no
+    // longer describe the registration this start would claim.
+    if (
+      this.registrationReads.currentGeneration(component) !==
+      dependencyGeneration
+    ) {
+      return {
+        success: false,
+        componentName: name,
+        reason: `Component "${name}" was re-registered while its start was being prepared`,
+        code: 'component_not_found',
+      };
+    }
 
     const skippedDependencyWarnings: string[] = [];
 
@@ -8014,7 +8035,12 @@ export class LifecycleManager
         continue;
       }
 
-      if (optionalDependencies.get(dependencyName) === dependency) {
+      const optionalDependency = optionalDependencies.get(dependencyName);
+      if (
+        optionalDependency?.component === dependency &&
+        optionalDependency.generation ===
+          this.registrationReads.currentGeneration(dependency)
+      ) {
         // Optional dependencies never block startup
         skippedDependencyWarnings.push(
           `Starting with non-running optional dependency "${dependencyName}"`,
