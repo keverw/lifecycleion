@@ -1,4 +1,9 @@
-import { awaitBoxedPromise } from '../../internal/intrinsics';
+import {
+  awaitBoxedPromise,
+  createOwnedAbortController,
+  type OwnedAbortController,
+} from '../../internal/intrinsics';
+import { guardAbortListeners } from '../../internal/guarded-abort-signal';
 import { PromiseProtectedResolver } from '../../promise-protected-resolver';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { generateID } from '../../id-helpers';
@@ -68,13 +73,41 @@ export type CancelResult = 'canceled' | 'forced' | 'not-running' | 'superseded';
 class AttemptContext {
   public handled = false;
   public id: string;
-  public abortController: AbortController;
   public startTime: number;
+  /** Set before the abort is dispatched, so the operation's listeners already see it. */
+  public isAborted = false;
+  private readonly abortController: OwnedAbortController;
 
   constructor() {
     this.id = generateID('ulid');
-    this.abortController = new AbortController();
+    // From the `AbortController` captured at module initialization, never the live
+    // global: an attempt is started from a floating promise, where a replaced global
+    // that throws would be an unhandled rejection that leaves the runner `running`.
+    this.abortController = createOwnedAbortController();
+    // An operation's abort listener runs inside `abort()`, where what it throws is the
+    // runtime's to report - as an uncaught exception, fatal to a process with no handler.
+    guardAbortListeners(
+      this.abortController.signal,
+      'RetryRunner operation abort listener',
+    );
     this.startTime = Date.now();
+  }
+
+  public get signal(): AbortSignal {
+    return this.abortController.signal;
+  }
+
+  /**
+   * Abort this attempt's signal. Tracked here rather than read back from
+   * `signal.aborted`, a getter application code can replace on `AbortSignal.prototype`;
+   * the runner is the only code holding this controller.
+   */
+  public abort(): void {
+    if (this.isAborted) {
+      return;
+    }
+    this.isAborted = true;
+    this.abortController.abort(undefined);
   }
 }
 
@@ -585,7 +618,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   } {
     const operationResolver = this.currentOperationResolver;
     const stopRequestToken = this.stopRequestToken;
-    context.abortController.abort();
+    context.abort();
     return {
       operationResolver,
       isAttemptActive:
@@ -1153,15 +1186,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // attached to it, as a synthetic uncaught error, for an operation that did exactly
       // what it was asked. The runner's own suite reports it: "should abort running attempt
       // when shouldAbortRunning is true".
-      let wasAborted = false;
-
-      try {
-        wasAborted = context.abortController.signal.aborted;
-      } catch {
-        // A context whose controller cannot be read is not one this can clear, so it falls
-        // through to being reported - the safe direction, since a genuine double report is
-        // what this exists to surface.
-      }
+      const wasAborted = context.isAborted;
 
       if (!wasAborted) {
         if (source instanceof UnreadableReturn) {
@@ -1342,8 +1367,22 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     if (this.currentState.runnerState === 'running') {
       this.currentState.lastAttemptWasForceTry = wasForced;
 
-      // Create a new context for this attempt
-      const context = new AttemptContext();
+      // Create a new context for this attempt. This runs from a floating promise, so a
+      // throw here would be an unhandled rejection that leaves the runner `running`: the
+      // id generator reads the live `crypto` global, which application code can replace.
+      // An attempt that cannot even be set up ends the operation, like a fatal attempt.
+      let context: AttemptContext;
+      try {
+        context = new AttemptContext();
+      } catch (error) {
+        this.policy.shouldRetry(error, false);
+        this.confirmCancellation('fatal-error', {
+          status: 'attempt_fatal',
+          code: 'unexpected_error',
+          error,
+        });
+        return;
+      }
       this.currentState.currentAttemptContext = context;
 
       // emit the attempt started event
@@ -1362,7 +1401,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       ) {
         return;
       }
-      if (context.abortController.signal.aborted) {
+      if (context.isAborted) {
         this.handleReportResult(context, 'skip', { data: undefined });
         return;
       }
@@ -1406,10 +1445,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       let unreadableReturn: UnreadableReturn | undefined;
 
       try {
-        const result = this.operation(
-          reportResult,
-          context.abortController.signal,
-        );
+        const result = this.operation(reportResult, context.signal);
 
         // Adopted, not awaited as it is: a native promise whose own `then` is not a
         // function failed `isPromise()`, so its rejection was never awaited and went

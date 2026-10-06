@@ -11,6 +11,7 @@ import { reportToHost } from './internal/report-to-host';
 import { UnreadableReturn, adoptResult } from './internal/adopt-promise';
 import { reportThroughHandler } from './internal/failure-reporter';
 import { isFunction } from './is-function';
+import { renderName } from './internal/render-name';
 
 // Node.js has a global `ErrorEvent` constructor (Node 25+) but does not make `globalThis`
 // an EventTarget, so the global event methods must be supplied before anything can be
@@ -21,6 +22,14 @@ installGlobalEventTarget();
 // `reportCallbackError` is a normalizer for raw thrown values; see `reportToHost`'s own
 // docs for when each one applies. Imported above as well, because this module calls it.
 export { reportToHost } from './internal/report-to-host';
+
+/**
+ * The callback name as a string, never a throw: see `renderName`. A name that cannot be
+ * rendered is reported as `<unnamed callback>`.
+ */
+function renderCallbackName(callbackName: unknown): string {
+  return renderName(callbackName, '<unnamed callback>');
+}
 
 /**
  * Report a callback failure on the standard `'error'` channel. See {@link reportToHost}.
@@ -46,7 +55,8 @@ export function reportCallbackError(
   callbackName: string,
   error: unknown,
 ): void {
-  const report = new Error(`Error in a callback ${callbackName}`, {
+  const name = renderCallbackName(callbackName);
+  const report = new Error(`Error in a callback ${name}`, {
     cause: error,
   });
 
@@ -65,8 +75,7 @@ export function reportCallbackError(
     // and `42` come back on the `Cause` row. The two exceptions are `throw null` and
     // `throw undefined`: `addErrorTail` emits the row only for a `cause` that is neither,
     // so those render as the wrapper alone - the message still names the callback.
-    () =>
-      `Error in a callback ${callbackName}: ${DOUBLE_EOL}${errorToString(report)}`,
+    () => `Error in a callback ${name}: ${DOUBLE_EOL}${errorToString(report)}`,
   );
 }
 
@@ -169,7 +178,9 @@ function invokeCallbackSafely(
   if (!isFunction(callback)) {
     reportToOnError(
       callbackName,
-      new Error(`Callback provided for ${callbackName} is not a function`),
+      new Error(
+        `Callback provided for ${renderCallbackName(callbackName)} is not a function`,
+      ),
       onError,
     );
 
@@ -213,10 +224,13 @@ function invokeCallbackSafely(
  * - allocates nothing for a failure it never had.
  */
 function reportToOnError(
-  callbackName: string,
+  rawCallbackName: string,
   error: unknown,
   onError: ((error: unknown) => void) | undefined,
 ): void {
+  // Rendered here, on the failure path, so a callback that succeeds never has its name
+  // stringified.
+  const callbackName = renderCallbackName(rawCallbackName);
   if (onError === undefined) {
     // The standard channel. `reportToHost` never throws - a hostile global it reads
     // included - so this needs no rung beneath it.
@@ -325,7 +339,9 @@ export async function safeHandleCallbackAndWait<T>(
     }
   } else {
     return handleError(
-      new Error(`Callback provided for ${callbackName} is not a function`),
+      new Error(
+        `Callback provided for ${renderCallbackName(callbackName)} is not a function`,
+      ),
     );
   }
 }

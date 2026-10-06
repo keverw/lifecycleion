@@ -320,6 +320,8 @@ const manager = new ProcessSignalManager({
 // Errors will now be reported with your custom names
 ```
 
+A name that is not a string (a symbol, an object, a number) is a `TypeError` from the constructor, so a bad name surfaces when the manager is created rather than when a signal arrives. `null` or `undefined` uses the default name.
+
 ### Reload-Only Manager
 
 For specialized use cases, you can create a manager that only handles reload:
@@ -464,16 +466,20 @@ Creates a new ProcessSignalManager instance.
     - Common uses: Toggle debug mode, dump full state, enable verbose logging
   - `shutdownCallbackName?`: `string` **(optional)**
     - Custom name for the shutdown callback used in error reporting
-    - Default: `'onShutdownRequested'`
+    - Default: `'onShutdownRequested'` (also used for `null`)
+    - A value that is not a string throws a `TypeError` from the constructor
   - `reloadCallbackName?`: `string` **(optional)**
     - Custom name for the reload callback used in error reporting
-    - Default: `'onReloadRequested'`
+    - Default: `'onReloadRequested'` (also used for `null`)
+    - A value that is not a string throws a `TypeError` from the constructor
   - `infoCallbackName?`: `string` **(optional)**
     - Custom name for the info callback used in error reporting
-    - Default: `'onInfoRequested'`
+    - Default: `'onInfoRequested'` (also used for `null`)
+    - A value that is not a string throws a `TypeError` from the constructor
   - `debugCallbackName?`: `string` **(optional)**
     - Custom name for the debug callback used in error reporting
-    - Default: `'onDebugRequested'`
+    - Default: `'onDebugRequested'` (also used for `null`)
+    - A value that is not a string throws a `TypeError` from the constructor
   - `keypressThrottleMS?`: `number | null` **(optional)**
     - Throttle interval in milliseconds for keyboard events (uses leading-edge rate limiting)
     - Allows an action to trigger at most once per interval

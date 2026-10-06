@@ -401,3 +401,47 @@ describe('EventEmitterProtected', () => {
     expect(callback2.mock.calls.length).toBe(1);
   });
 });
+
+describe('event names that are not strings', () => {
+  // Typed `string`, but a JavaScript caller can subscribe and emit with any key a `Map`
+  // accepts. The handler name was a template literal over the event, which throws for a
+  // symbol - out of `emit`, before any handler ran.
+  test('a symbol event dispatches, and its handler failure is reported', () => {
+    const reports: Error[] = [];
+    const onError = (event: Event): void => {
+      reports.push((event as ErrorEvent).error as Error);
+      event.preventDefault();
+    };
+    globalThis.addEventListener('error', onError);
+    try {
+      const emitter = new EventEmitter();
+      const event = Symbol('ready') as unknown as string;
+      const thrown = new Error('handler failed');
+      const seen: unknown[] = [];
+      emitter.on(event, () => {
+        throw thrown;
+      });
+      emitter.on(event, (data) => {
+        seen.push(data);
+      });
+
+      expect(() => emitter.emit(event, 1)).not.toThrow();
+      expect(seen).toEqual([1]);
+      expect(reports.map((report) => report.message)).toEqual([
+        'Error in a callback event handler for Symbol(ready)',
+      ]);
+      expect(reports[0].cause).toBe(thrown);
+    } finally {
+      globalThis.removeEventListener('error', onError);
+    }
+  });
+
+  test('a symbol event whose handler succeeds does not throw', () => {
+    const emitter = new EventEmitter();
+    const event = Symbol('ok') as unknown as string;
+    const callback = mock(() => {});
+    emitter.on(event, callback);
+    expect(() => emitter.emit(event, 'x')).not.toThrow();
+    expect(callback).toHaveBeenCalledWith('x');
+  });
+});

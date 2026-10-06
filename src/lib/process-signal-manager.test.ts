@@ -2742,3 +2742,99 @@ test('one Ctrl+C is forwarded once when its leader detaches during SIGINT', () =
     process.stdin.setRawMode = raw;
   }
 });
+
+describe('callback name options', () => {
+  const OPTION_NAMES = [
+    'shutdownCallbackName',
+    'reloadCallbackName',
+    'infoCallbackName',
+    'debugCallbackName',
+  ] as const;
+
+  // A name that is not a string threw out of every signal and keypress dispatch - an
+  // uncaught exception - when the report was built from it. Refused when constructed.
+  for (const option of OPTION_NAMES) {
+    test(`${option} that is not a string is a TypeError at construction`, () => {
+      for (const value of [Symbol('name'), 42, {}, () => 'name']) {
+        expect(
+          () =>
+            new ProcessSignalManager({
+              [option]: value as unknown as string,
+            }),
+        ).toThrow(TypeError);
+      }
+    });
+
+    test(`${option} that is null or undefined uses the default`, () => {
+      for (const value of [null, undefined]) {
+        const manager = new ProcessSignalManager({
+          [option]: value as unknown as string,
+        });
+        expect(
+          (manager as unknown as Record<string, unknown>)[option],
+        ).toBeString();
+      }
+    });
+  }
+
+  test('a custom string name is used in the report', () => {
+    const reports: Error[] = [];
+    const onError = (event: Event): void => {
+      reports.push((event as ErrorEvent).error as Error);
+      event.preventDefault();
+    };
+    globalThis.addEventListener('error', onError);
+    try {
+      const manager = new ProcessSignalManager({
+        onReloadRequested: () => {
+          throw new Error('reload failed');
+        },
+        reloadCallbackName: 'customReload',
+      });
+      manager.triggerReload(true);
+      expect(reports.map((report) => report.message)).toEqual([
+        'Error in a callback customReload',
+      ]);
+    } finally {
+      globalThis.removeEventListener('error', onError);
+    }
+  });
+});
+
+describe('keypress events whose key is not a readable object', () => {
+  const hostileKey = {
+    get name(): string {
+      throw new Error('name getter failed');
+    },
+  };
+
+  test.each([
+    ['undefined', undefined],
+    ['null', null],
+    ['a string', 'r'],
+    ['an object whose name getter throws', hostileKey],
+  ])('a key that is %s is ignored', (_kind, key) => {
+    const wasTTY = process.stdin.isTTY;
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const raw = process.stdin.setRawMode;
+    (process.stdin as any).isTTY = true;
+    process.stdin.setRawMode = mock(() => process.stdin);
+    const reload = mock(() => {});
+    const manager = new ProcessSignalManager({
+      onReloadRequested: reload,
+      keypressThrottleMS: 0,
+    });
+    try {
+      manager.attach();
+      expect(() => process.stdin.emit('keypress', 'r', key)).not.toThrow();
+      expect(reload).not.toHaveBeenCalled();
+      // The handler still works for the next ordinary key.
+      process.stdin.emit('keypress', 'r', { name: 'r' });
+      expect(reload).toHaveBeenCalledTimes(1);
+    } finally {
+      manager.detach();
+      (process.stdin as any).isTTY = wasTTY;
+      process.stdin.setRawMode = raw;
+    }
+  });
+});

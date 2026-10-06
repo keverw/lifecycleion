@@ -6,6 +6,7 @@ import { ulid } from 'ulid';
 import readline from 'readline';
 import { resolveTimeoutMS } from './internal/timer-limits';
 import { queueMicrotaskIntrinsic } from './internal/intrinsics';
+import { isObjectLike } from './internal/is-object-like';
 
 /**
  * The shutdown signal types that can trigger the shutdown callback
@@ -118,6 +119,25 @@ function transferRawModeOwnership(
   // Fallback: no valid instances (shouldn't happen, but be safe)
   shared.rawModeOwner = null;
   return null;
+}
+
+/**
+ * A `*CallbackName` option: its default when null or undefined, and a `TypeError` when
+ * it is not a string, so a name every report is built from fails at construction rather
+ * than on each signal or keypress.
+ */
+function resolveCallbackName(
+  requested: unknown,
+  defaultName: string,
+  label: string,
+): string {
+  if (requested === null || requested === undefined) {
+    return defaultName;
+  }
+  if (typeof requested !== 'string') {
+    throw new TypeError(`${label} must be a string, got: ${typeof requested}`);
+  }
+  return requested;
 }
 
 /**
@@ -339,11 +359,26 @@ export class ProcessSignalManager {
     this.onReloadRequested = options.onReloadRequested;
     this.onInfoRequested = options.onInfoRequested;
     this.onDebugRequested = options.onDebugRequested;
-    this.shutdownCallbackName =
-      options.shutdownCallbackName ?? 'onShutdownRequested';
-    this.reloadCallbackName = options.reloadCallbackName ?? 'onReloadRequested';
-    this.infoCallbackName = options.infoCallbackName ?? 'onInfoRequested';
-    this.debugCallbackName = options.debugCallbackName ?? 'onDebugRequested';
+    this.shutdownCallbackName = resolveCallbackName(
+      options.shutdownCallbackName,
+      'onShutdownRequested',
+      'shutdownCallbackName',
+    );
+    this.reloadCallbackName = resolveCallbackName(
+      options.reloadCallbackName,
+      'onReloadRequested',
+      'reloadCallbackName',
+    );
+    this.infoCallbackName = resolveCallbackName(
+      options.infoCallbackName,
+      'onInfoRequested',
+      'infoCallbackName',
+    );
+    this.debugCallbackName = resolveCallbackName(
+      options.debugCallbackName,
+      'onDebugRequested',
+      'debugCallbackName',
+    );
     // Default to 200ms throttle (leading-edge rate limiting), 0 disables
     this.keypressThrottleMS = resolveTimeoutMS(
       options.keypressThrottleMS,
@@ -795,15 +830,28 @@ export class ProcessSignalManager {
     // Ctrl+C is forwarded once as SIGINT because raw mode suppresses the terminal's
     // normal signal generation.
     this.keypressHandler = (str, key): void => {
+      // `readline` always passes a plain object, but anything can emit `'keypress'` on
+      // stdin, and a throw here goes back to whoever emitted it. A key that is not an
+      // object, or whose fields cannot be read, is not a key this handles.
+      if (!isObjectLike(key)) {
+        return;
+      }
       const keyObj = key as Record<string, unknown>;
-      const keyName = keyObj.name as string;
+      let keyName: unknown;
+      let isCtrl: unknown;
+      try {
+        keyName = keyObj.name;
+        isCtrl = keyObj.ctrl;
+      } catch {
+        return;
+      }
       // Note: key.name is always lowercase for letter keys, regardless of shift state
       // So checking for 'r' catches both 'r' and 'R' (making it case-insensitive)
 
       // Raw mode suppresses the terminal driver's normal Ctrl+C -> SIGINT behavior.
       // Forward it once for all attached managers, even when this is a reload-only
       // manager, so the process default (or any external SIGINT listener) still works.
-      if (keyObj.ctrl && keyName === 'c') {
+      if (isCtrl && keyName === 'c') {
         // Older copies invoke their callback directly. Forwarding SIGINT alongside
         // them would invoke that callback twice; electing an old leader loses ours.
         // Keep shared terminal ownership, but use direct callbacks in a mixed cohort.

@@ -175,3 +175,108 @@ describe('SingleEventObserverProtected', () => {
     expect(() => counter.emit(1)).not.toThrow();
   });
 });
+
+describe('subscriber names and values', () => {
+  let reports: Error[] = [];
+  const onError = (event: Event): void => {
+    reports.push((event as ErrorEvent).error as Error);
+    event.preventDefault();
+  };
+
+  beforeEach(() => {
+    reports = [];
+    globalThis.addEventListener('error', onError);
+  });
+
+  afterEach(() => {
+    globalThis.removeEventListener('error', onError);
+  });
+
+  // The report's callback name is read from the subscriber's `name`, which is an
+  // ordinary property: a getter can throw, and a value can be a symbol. Either threw out
+  // of `notify` and skipped every subscriber after it.
+  const NAMES: [string, PropertyDescriptor, string][] = [
+    [
+      'a name getter that throws',
+      {
+        get: () => {
+          throw new Error('name getter failed');
+        },
+      },
+      'SingleEventObserver_anonymous',
+    ],
+    [
+      'a symbol name',
+      { value: Symbol('named') },
+      'SingleEventObserver_anonymous',
+    ],
+    ['an ordinary name', { value: 'named' }, 'SingleEventObserver_named'],
+  ];
+
+  for (const [kind, descriptor, callbackName] of NAMES) {
+    test(`a subscriber with ${kind} is notified, and so are the rest`, () => {
+      const observer = new SingleEventObserver<number>();
+      const seen: string[] = [];
+      const thrown = new Error('subscriber failed');
+      const odd = (value: number): void => {
+        seen.push(`odd ${value}`);
+        throw thrown;
+      };
+      Object.defineProperty(odd, 'name', {
+        configurable: true,
+        ...descriptor,
+      });
+
+      observer.subscribe(odd);
+      observer.subscribe((value) => {
+        seen.push(`next ${value}`);
+      });
+
+      expect(() => observer.notify(1)).not.toThrow();
+      expect(seen).toEqual(['odd 1', 'next 1']);
+      expect(reports.map((report) => report.message)).toEqual([
+        `Error in a callback ${callbackName}`,
+      ]);
+      expect(reports[0].cause).toBe(thrown);
+    });
+  }
+
+  test('a function proxy whose name read throws is still notified', () => {
+    const observer = new SingleEventObserver<number>();
+    const seen: number[] = [];
+    const subscriber = new Proxy(
+      (value: number): void => {
+        seen.push(value);
+      },
+      {
+        get: () => {
+          throw new Error('proxy get failed');
+        },
+      },
+    );
+
+    observer.subscribe(subscriber);
+    observer.subscribe((value) => {
+      seen.push(value * 10);
+    });
+
+    expect(() => observer.notify(2)).not.toThrow();
+    expect(seen).toEqual([2, 20]);
+    expect(reports).toEqual([]);
+  });
+
+  test.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['a string', 'subscriber'],
+    ['an object', { handleEvent: () => {} }],
+  ])('subscribing %s is a TypeError', (_kind, value) => {
+    const observer = new SingleEventObserver<number>();
+    expect(() =>
+      observer.subscribe(value as unknown as (data: number) => void),
+    ).toThrow(TypeError);
+    expect(
+      observer.hasSubscriber(value as unknown as (data: number) => void),
+    ).toBe(false);
+  });
+});

@@ -282,6 +282,8 @@ type ReportResult<T> = {
 > **Important:** When `cancel()` is called, the operation receives an abort signal via the `signal` parameter. If the operation doesn't call `reportResult` within the `graceCancelPeriodMS` (default 1000ms, configurable via `overrideGraceCancelPeriodMS()`), the cancellation is forced. Always check `signal.aborted` in long-running operations to respond to cancellation requests.
 >
 > **Note:** If cancellation is forced, the runner will emit `attempt-handled` with a `'skip'` status and `wasCanceled: true` for the in-flight attempt before emitting `operation-ended`.
+>
+> **Abort listeners:** Listeners the operation adds to `signal` - with `addEventListener('abort', ...)` (a function or a `handleEvent` object) or `onabort` - run inside `cancel()` and `forceTry({ shouldAbortRunning: true })`. One that throws, or an `async` one that rejects, is reported on the global `'error'` channel as `Error in a callback RetryRunner operation abort listener`, with the thrown value on `cause`; the listeners after it still run, and the abort proceeds. The signal comes from the `AbortController` captured when the module loaded, so replacing the `AbortController` global or `AbortSignal.prototype.aborted` afterwards does not affect attempts.
 
 ```typescript
 const operation = async (reportResult, signal) => {
@@ -354,6 +356,8 @@ Returns `Promise<RunResult<T>>`:
   - `'unexpected_error'` - an unexpected internal error occurred
 
 > **Note:** `unexpected_error` should not occur in normal use and indicates an internal state inconsistency in the library. If you encounter this, call `reset()` before trying again and consider reporting a bug.
+>
+> The same code also appears on `{ status: 'attempt_fatal', code: 'unexpected_error', error }` when an attempt cannot be set up at all - its id generator reads the `crypto` global, and a replacement that throws stops it. The operation is not invoked; the runner ends in `'fatal-error'` with `error` (also `lastError`) holding what was thrown.
 
 ```typescript
 // Start and wait for completion

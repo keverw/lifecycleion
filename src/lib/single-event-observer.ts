@@ -21,9 +21,15 @@ export class SingleEventObserverProtected<T> {
   /**
    * Subscribes a function to the observer.
    * @param fn The function to be subscribed.
+   * @throws {TypeError} When `fn` is not a function.
    */
 
   public subscribe(fn: (data: T) => void | Promise<void>): void {
+    if (typeof fn !== 'function') {
+      throw new TypeError(
+        `SingleEventObserver subscriber must be a function, got: ${fn === null ? 'null' : typeof fn}`,
+      );
+    }
     this.subscribers.add(fn);
   }
 
@@ -55,12 +61,28 @@ export class SingleEventObserverProtected<T> {
   protected notify(data: T): void {
     for (const subscriber of this.subscribers) {
       safeHandleCallback(
-        `SingleEventObserver_${(subscriber as EventListener).name || 'anonymous'}`,
+        `SingleEventObserver_${readSubscriberName(subscriber)}`,
         subscriber,
         data,
       );
     }
   }
+}
+
+/**
+ * The subscriber's `name` for its report, or `'anonymous'`. Read outside
+ * `safeHandleCallback`'s guard, so it must not throw: `name` is an ordinary property a
+ * getter (or a proxy) can throw from, or redefine as a symbol, and a throw here would
+ * end `notify` before the subscribers after this one.
+ */
+function readSubscriberName(subscriber: unknown): string {
+  let name: unknown;
+  try {
+    name = (subscriber as { name?: unknown }).name;
+  } catch {
+    return 'anonymous';
+  }
+  return typeof name === 'string' && name !== '' ? name : 'anonymous';
 }
 
 /**

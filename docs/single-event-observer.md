@@ -32,11 +32,13 @@ import {
 ## Behavior
 
 - Subscribers are stored in a `Set`, so the same function cannot be added twice.
+- `subscribe` throws a `TypeError` for anything that is not a function.
 - Subscribers are called in subscription order.
 - `notify` is fire-and-forget:
   - Sync subscribers run immediately.
   - Async subscribers are started, but `notify` does not wait for completion.
 - Errors thrown (or promise rejections) in subscribers are reported on the global `'error'` event channel instead of breaking other subscribers.
+- Each report names its subscriber as `SingleEventObserver_<name>`, from the function's `name`. A subscriber with no usable name - empty, not a string, or a `name` getter (or proxy) that throws - is reported as `SingleEventObserver_anonymous`, and is still notified like any other.
 
 ## API
 
@@ -61,7 +63,7 @@ observer.unsubscribe(callback);
 
 **Methods:**
 
-- `subscribe(fn)` - Add a subscriber.
+- `subscribe(fn)` - Add a subscriber. Throws a `TypeError` when `fn` is not a function.
 - `unsubscribe(fn)` - Remove a subscriber.
 - `hasSubscriber(fn)` - Check whether a subscriber is currently registered.
 - `notify(data)` - Notify all subscribers with the provided event payload.
@@ -84,7 +86,7 @@ emitter.emit('hello');
 
 **Methods:**
 
-- `subscribe(fn)` - Add a subscriber.
+- `subscribe(fn)` - Add a subscriber. Throws a `TypeError` when `fn` is not a function.
 - `unsubscribe(fn)` - Remove a subscriber.
 - `hasSubscriber(fn)` - Check whether a subscriber is currently registered.
 - `notify(data)` _(protected)_ - Notify all subscribers. Only accessible inside the class or subclasses.

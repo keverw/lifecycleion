@@ -7,6 +7,7 @@
  */
 
 import { reportCallbackError, runCallbackSafely } from './safe-handle-callback';
+import { renderName } from './internal/render-name';
 
 type EventCallback<T = unknown> = (data: T) => void | Promise<void>;
 
@@ -135,6 +136,10 @@ export class EventEmitterProtected {
       return;
     }
 
+    // Rendered once per emission, through `renderEventName`: a template literal over a
+    // symbol event would throw here, out of `emit` and before any handler ran.
+    const handlerName = `event handler for ${renderEventName(event)}`;
+
     // Loop-invariant: the reporter depends on the event, not on which handler failed.
     const handleFailure = (error: unknown): void => {
       this.handleEventHandlerFailure(event, error, data);
@@ -149,12 +154,7 @@ export class EventEmitterProtected {
       // overridable reporter in place of the global `'error'` channel. The callback name
       // matches what `safeHandleCallback` produced before, so the "is not a function"
       // message is unchanged for consumers matching on it.
-      runCallbackSafely(
-        `event handler for ${event}`,
-        callback,
-        [data],
-        handleFailure,
-      );
+      runCallbackSafely(handlerName, callback, [data], handleFailure);
     }
   }
 
@@ -178,8 +178,16 @@ export class EventEmitterProtected {
     error: unknown,
     _data?: unknown,
   ): void {
-    reportCallbackError(`event handler for ${event}`, error);
+    reportCallbackError(`event handler for ${renderEventName(event)}`, error);
   }
+}
+
+/**
+ * The event name for a handler's report, never a throw: `event` is typed `string`, but a
+ * JavaScript caller can use any `Map` key, and a symbol renders as `Symbol(description)`.
+ */
+function renderEventName(event: unknown): string {
+  return renderName(event, '<unnamed event>');
 }
 
 /**

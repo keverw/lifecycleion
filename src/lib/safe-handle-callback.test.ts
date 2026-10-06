@@ -1319,3 +1319,92 @@ for (const shouldWait of [false, true]) {
     }
   });
 }
+
+describe('a callback name that is not a string', () => {
+  // Typed `string`, but nothing stops a JavaScript caller - or an option passed through
+  // from one - handing over a symbol or an object. A template literal over a symbol, or
+  // over an object whose `toString` throws, threw before any guard ran.
+  const hostileName = {
+    toString(): string {
+      throw new Error('toString failed');
+    },
+  };
+  const NAMES: [string, unknown, string][] = [
+    ['a symbol', Symbol('named'), 'Symbol(named)'],
+    ['an object whose toString throws', hostileName, '<unnamed callback>'],
+    ['an object', { toString: () => 'rendered' }, 'rendered'],
+    ['a number', 42, '42'],
+  ];
+
+  let reports: Error[] = [];
+  const onError = (event: Event): void => {
+    reports.push((event as ErrorEvent).error as Error);
+    event.preventDefault();
+  };
+
+  beforeEach(() => {
+    reports = [];
+    globalThis.addEventListener('error', onError);
+  });
+
+  afterEach(() => {
+    globalThis.removeEventListener('error', onError);
+  });
+
+  for (const [kind, name, rendered] of NAMES) {
+    const callbackName = name as string;
+
+    it(`reportCallbackError does not throw for ${kind}`, () => {
+      const thrown = new Error('failed');
+      expect(() => reportCallbackError(callbackName, thrown)).not.toThrow();
+      expect(reports).toHaveLength(1);
+      expect(reports[0].message).toBe(`Error in a callback ${rendered}`);
+      expect(reports[0].cause).toBe(thrown);
+    });
+
+    it(`safeHandleCallback reports a throw for ${kind}`, () => {
+      const thrown = new Error('failed');
+      expect(() =>
+        safeHandleCallback(callbackName, () => {
+          throw thrown;
+        }),
+      ).not.toThrow();
+      expect(reports.map((report) => report.cause)).toEqual([thrown]);
+    });
+
+    it(`safeHandleCallback reports a non-function for ${kind}`, () => {
+      expect(() => safeHandleCallback(callbackName, 'nope')).not.toThrow();
+      expect(reports).toHaveLength(1);
+      expect((reports[0].cause as Error).message).toBe(
+        `Callback provided for ${rendered} is not a function`,
+      );
+    });
+
+    it(`safeHandleCallbackAndWait resolves for ${kind}`, async () => {
+      const thrown = new Error('failed');
+      const thrownResult = await safeHandleCallbackAndWait(callbackName, () => {
+        throw thrown;
+      });
+      expect(thrownResult).toEqual({ success: false, error: thrown });
+
+      const notAFunction = await safeHandleCallbackAndWait(callbackName, 42);
+      expect(notAFunction.success).toBe(false);
+      expect(notAFunction.error?.message).toBe(
+        `Callback provided for ${rendered} is not a function`,
+      );
+      expect(reports).toHaveLength(2);
+    });
+
+    it(`runCallbackSafely hands a failure to onError for ${kind}`, () => {
+      const failures: unknown[] = [];
+      expect(() =>
+        runCallbackSafely(callbackName, null, [], (error) => {
+          failures.push(error);
+        }),
+      ).not.toThrow();
+      expect((failures[0] as Error).message).toBe(
+        `Callback provided for ${rendered} is not a function`,
+      );
+    });
+  }
+});

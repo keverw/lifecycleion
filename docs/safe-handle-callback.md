@@ -38,7 +38,7 @@ safeHandleCallback('onData', myCallback, arg1, arg2);
 
 **Parameters:**
 
-- `callbackName` - Name used in error messages for identification
+- `callbackName` - Name used in error messages for identification. Typed `string`; any other value is rendered with `String()` (a symbol as `Symbol(description)`), or as `<unnamed callback>` when that throws, so a bad name never turns a reported failure into a thrown one. It is rendered only when there is a failure to report.
 - `callback` - The function to execute (sync or async)
 - `...args` - Arguments forwarded to the callback
 
@@ -97,7 +97,7 @@ Checking `result.success` narrows the type, so neither field needs a non-null as
 function reportCallbackError(callbackName: string, error: unknown): void;
 ```
 
-Reports a caught callback failure through the same standard `'error'` channel and fallback chain used by `safeHandleCallback`. The dispatched wrapper identifies `callbackName` and keeps the original thrown value on `event.error.cause`.
+Reports a caught callback failure through the same standard `'error'` channel and fallback chain used by `safeHandleCallback`. The dispatched wrapper identifies `callbackName` (rendered as described under [safeHandleCallback](#safehandlecallback) when it is not a string) and keeps the original thrown value on `event.error.cause`.
 
 ### runCallbackSafely
 
