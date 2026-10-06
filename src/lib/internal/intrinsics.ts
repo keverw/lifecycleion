@@ -22,6 +22,10 @@ export const speciesSymbolIntrinsic: typeof Symbol.species = Symbol.species;
  */
 export const definePropertyIntrinsic: typeof Reflect.defineProperty =
   Reflect.defineProperty;
+const deletePropertyIntrinsic: typeof Reflect.deleteProperty =
+  Reflect.deleteProperty;
+const getOwnPropertyDescriptorIntrinsic: typeof Object.getOwnPropertyDescriptor =
+  Object.getOwnPropertyDescriptor;
 /**
  * `Object.prototype.hasOwnProperty` as it was at module initialization, so a later patch
  * cannot misreport which properties a value carries itself.
@@ -124,6 +128,13 @@ export const promiseThenIntrinsic = nativePromisePrototype.then;
 /** Construct promises compatible with native async functions and our observers. */
 export const promiseConstructorIntrinsic =
   nativePromisePrototype.constructor as PromiseConstructor;
+// An own constructor for a throwaway species promise. Naming Promise itself would still
+// consult its live Symbol.species getter, which application code can replace after load.
+const safePromiseSpeciesConstructor = Object.freeze({
+  // eslint-disable-next-line @typescript-eslint/naming-convention
+  __proto__: null,
+  [speciesSymbolIntrinsic]: promiseConstructorIntrinsic,
+});
 // eslint-disable-next-line @typescript-eslint/unbound-method
 const promiseResolveMethodIntrinsic = promiseConstructorIntrinsic.resolve;
 
@@ -150,8 +161,9 @@ export function promiseResolveIntrinsic<T>(
  * its derived promise from that promise's live `constructor`/species: a getter that
  * changes between reads could have it built by a class whose `then` never settles, and
  * a caller awaiting it would wait forever. The reactions are attached to the input
- * itself whatever that class is, so they settle the promise returned here instead, and
- * the derived one is discarded.
+ * itself whatever that class is, so they settle the promise returned here instead. The
+ * derived value is observed only to contain an independent rejection: a caller's species
+ * can return an already-rejected promise even when both reactions succeed.
  *
  * Never throws. A `constructor` getter that throws on this read, or a species that
  * cannot build a promise, keeps the intrinsic from attaching to the input at all: the
@@ -204,8 +216,8 @@ export function observePromise<T, TResult1 = T, TResult2 = never>(
 
 /**
  * The attachment beneath {@link observePromise}, for a caller whose reactions settle a
- * promise it owns and never throw. The intrinsic's derived promise is discarded: it is
- * built by the input's live species, so nothing may wait on it. A `then` that refuses
+ * promise it owns and never throw. The intrinsic's derived promise is not used to settle
+ * the caller, but its rejection is contained. A `then` that refuses
  * the input - a throwing `constructor` getter, an unusable species - hands the reactions
  * a rejection with its error instead, on a later microtask as a reaction would run.
  */
@@ -215,11 +227,88 @@ function attachReactions<T>(
   onrejected: (reason: unknown) => void,
 ): void {
   try {
-    applyIntrinsic(promiseThenIntrinsic, promise, [onfulfilled, onrejected]);
+    const derived: unknown = applyIntrinsic(promiseThenIntrinsic, promise, [
+      onfulfilled,
+      onrejected,
+    ]);
+    if (derived !== promise) {
+      containDerivedRejection(derived);
+    }
   } catch (error) {
     void runOnMicrotask(() => {
       onrejected(error);
     });
+  }
+}
+
+/**
+ * A species may return a rejected promise unrelated to either reaction's result. For a
+ * native promise, temporarily shadow its constructor while attaching a terminal reaction:
+ * otherwise its own species can create another rejected promise at every observation.
+ * This value is the throwaway return of our intrinsic `then`, not the input promise. It is
+ * restored synchronously before application code can receive another event. A species
+ * that returns the input itself needs no second observer: its rejection is already wired
+ * to `onrejected` above.
+ *
+ * A value that refuses the temporary definition, or is not a native promise, is followed
+ * as a thenable. That path contains ordinary rejected species promises and throwing then
+ * methods, but a frozen native promise with a recursively rejecting species cannot be
+ * contained without modifying it or a lower-level promise reaction primitive.
+ */
+function containDerivedRejection(derived: unknown): void {
+  if (!isObjectLike(derived)) {
+    return;
+  }
+
+  let previous: PropertyDescriptor | undefined;
+  let didShadow = false;
+  try {
+    previous = getOwnPropertyDescriptorIntrinsic(derived, 'constructor');
+    if (previous === undefined || previous.configurable || previous.writable) {
+      didShadow = definePropertyIntrinsic(derived, 'constructor', {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        __proto__: null,
+        value: safePromiseSpeciesConstructor,
+        configurable: previous?.configurable ?? true,
+        enumerable: previous?.enumerable ?? false,
+        writable: previous?.writable ?? true,
+      } as PropertyDescriptor);
+    }
+  } catch {
+    // The species result may be a frozen object or a Proxy that refuses definitions.
+  }
+
+  if (didShadow) {
+    try {
+      // Both reactions return undefined, so this newly derived, intrinsic Promise cannot
+      // reject through either callback or re-adopt the original fulfilled value.
+      void applyIntrinsic(promiseThenIntrinsic, derived, [noop, noop]);
+      return;
+    } catch {
+      // A non-native species value has no Promise internal slot. Try its then below.
+    } finally {
+      try {
+        if (previous === undefined) {
+          deletePropertyIntrinsic(derived, 'constructor');
+        } else {
+          definePropertyIntrinsic(derived, 'constructor', previous);
+        }
+      } catch {
+        // A hostile Proxy can refuse restoration; reporting cannot repair it.
+      }
+    }
+  }
+
+  void containDerivedThenable(derived);
+}
+
+function noop(): void {}
+
+async function containDerivedThenable(derived: unknown): Promise<void> {
+  try {
+    await derived;
+  } catch {
+    // Its rejection is separate from the operation's outcome.
   }
 }
 

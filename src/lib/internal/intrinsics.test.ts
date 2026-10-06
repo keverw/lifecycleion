@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { adoptPromise } from './adopt-promise';
+import { safeHandleCallbackAndWait } from '../safe-handle-callback';
 import {
   allPromises,
   allSettledPromises,
@@ -224,6 +225,106 @@ class NeverSettles {
 
 const neverSettlesConstructor = (): unknown => ({
   [Symbol.species]: NeverSettles,
+});
+
+for (const speciesKind of [
+  'base promise',
+  'self-reproducing subclass',
+] as const) {
+  test(`a ${speciesKind} rejected by the input's species cannot crash an awaited callback`, async () => {
+    const orphan = new Error('species rejected its derived promise');
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    const species =
+      speciesKind === 'base promise'
+        ? function ReturningRejectedPromise(
+            this: unknown,
+            executor: (resolve: () => void, reject: () => void) => void,
+          ): object {
+            executor(
+              () => {},
+              () => {},
+            );
+            return Promise.reject(orphan);
+          }
+        : class RejectingSpecies extends Promise<unknown> {
+            constructor(
+              executor: (
+                resolve: (value: unknown) => void,
+                reject: (reason?: unknown) => void,
+              ) => void,
+            ) {
+              super((resolve, reject) => {
+                executor(resolve, reject);
+                reject(orphan);
+              });
+            }
+          };
+    const source = Promise.resolve(7);
+    let constructorReads = 0;
+    void Object.defineProperty(source, 'constructor', {
+      get: () =>
+        ++constructorReads === 1 ? Promise : { [Symbol.species]: species },
+    });
+
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      expect(
+        await safeHandleCallbackAndWait<number>('callback', () => source),
+      ).toEqual({
+        success: true,
+        value: 7,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+  });
+}
+
+test('a realm-wide rejecting species cannot recurse through the terminal observer', async () => {
+  const original = Object.getOwnPropertyDescriptor(Promise, Symbol.species);
+  const orphan = new Error('realm species rejected');
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  class RejectingSpecies extends Promise<unknown> {
+    constructor(
+      executor: (
+        resolve: (value: unknown) => void,
+        reject: (reason?: unknown) => void,
+      ) => void,
+    ) {
+      super((resolve, reject) => {
+        executor(resolve, reject);
+        reject(orphan);
+      });
+    }
+  }
+
+  process.on('unhandledRejection', onUnhandled);
+  Object.defineProperty(Promise, Symbol.species, {
+    configurable: true,
+    get: () => RejectingSpecies,
+  });
+  try {
+    expect(await observePromise(Promise.resolve(7), (value) => value)).toBe(7);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  } finally {
+    if (original === undefined) {
+      delete (Promise as unknown as Record<PropertyKey, unknown>)[
+        Symbol.species
+      ];
+    } else {
+      Object.defineProperty(Promise, Symbol.species, original);
+    }
+    process.off('unhandledRejection', onUnhandled);
+  }
+  expect(unhandled).toEqual([]);
 });
 
 function watchdog(ms = 100): Promise<'hung'> {
