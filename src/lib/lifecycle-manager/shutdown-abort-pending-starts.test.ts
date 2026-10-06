@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { Logger } from '../logger';
+import type { ArraySink } from '../logger/sinks/array';
 import { sleep } from '../sleep';
 import { BaseComponent } from './base-component';
 import {
@@ -139,18 +140,154 @@ test('abortPendingStarts aborts a pending start signal as the pass begins, and t
   expect(worker.order).toEqual(['abort']);
 });
 
-test('any failure of a start whose signal the shutdown aborted is answered shutdown_in_progress', async () => {
-  const { manager, worker, starting } = await withPendingStart();
-  const shutdown = manager.stopAllComponents({ abortPendingStarts: true });
+// What a start that honors the cue may reject with: the signal's reason itself, a
+// library's error carrying it on `cause` (at any depth within the bound), or an
+// `AbortError` - the `DOMException` `fetch` and timers reject with, or a library's own.
+const LINKED_FAILURES: [string, (reason: unknown) => unknown][] = [
+  ['the reason itself', (reason) => reason],
+  [
+    'an error wrapping the reason',
+    (reason) => new Error('connect aborted', { cause: reason }),
+  ],
+  [
+    'an error wrapping the reason two levels down',
+    (reason) =>
+      new Error('pool failed', {
+        cause: new Error('connect aborted', { cause: reason }),
+      }),
+  ],
+  [
+    'an AbortError DOMException',
+    () => new DOMException('This operation was aborted', 'AbortError'),
+  ],
+  [
+    'an error named AbortError',
+    () => Object.assign(new Error('aborted'), { name: 'AbortError' }),
+  ],
+  [
+    'an error wrapping an AbortError',
+    () =>
+      new Error('request failed', {
+        cause: new DOMException('This operation was aborted', 'AbortError'),
+      }),
+  ],
+];
 
-  // A library that wraps the reason in its own error.
-  worker.gate.reject(
-    new Error('connect aborted', { cause: worker.signals[0].reason }),
-  );
-  const result = await starting;
-  expect(result.code).toBe('shutdown_in_progress');
-  expect(result.error?.message).toBe('connect aborted');
-  expect((await shutdown).success).toBe(true);
+test.each(LINKED_FAILURES)(
+  'a start that rejects with %s after the shutdown aborted it is answered shutdown_in_progress',
+  async (_, failure) => {
+    const { manager, worker, starting } = await withPendingStart();
+    const shutdown = manager.stopAllComponents({ abortPendingStarts: true });
+
+    const thrown = failure(worker.signals[0].reason);
+    worker.gate.reject(thrown);
+    const result = await starting;
+    expect(result.code).toBe('shutdown_in_progress');
+    expect(result.error).toBe(thrown as Error);
+    expect(result.reason).toStartWith(
+      'Shutdown interrupted component startup: ',
+    );
+    expect((await shutdown).success).toBe(true);
+  },
+);
+
+// Each value is unrelated to the abort, so the failure is reported exactly as it would
+// be without the option.
+const UNRELATED_FAILURES: [string, (reason: unknown) => unknown][] = [
+  ['an unrelated error', () => new Error('connection refused')],
+  ['a thrown string', () => 'connection refused'],
+  [
+    'an error whose cause getter throws',
+    () =>
+      Object.defineProperty(new Error('connection refused'), 'cause', {
+        get(): never {
+          throw new Error('hostile cause');
+        },
+      }),
+  ],
+  [
+    'an error whose name getter throws',
+    () =>
+      Object.defineProperty(new Error('connection refused'), 'name', {
+        get(): never {
+          throw new Error('hostile name');
+        },
+      }),
+  ],
+  [
+    'a cyclic cause chain without the reason',
+    () => {
+      const first = new Error('connection refused');
+      const second = new Error('retry failed', { cause: first });
+      Object.assign(first, { cause: second });
+      return first;
+    },
+  ],
+  [
+    'a self-referencing cause',
+    () => {
+      const error = new Error('connection refused');
+      Object.assign(error, { cause: error });
+      return error;
+    },
+  ],
+  [
+    'the reason deeper than the cause walk follows',
+    (reason) => {
+      let error: unknown = reason;
+      for (let depth = 0; depth < 20; depth++) {
+        error = new Error('connection refused', { cause: error });
+      }
+      return error;
+    },
+  ],
+];
+
+test.each(UNRELATED_FAILURES)(
+  'a start that rejects with %s after the shutdown aborted it is reported as the error it is',
+  async (_, failure) => {
+    const { logger, manager } = setup();
+    const sink = logger.getSinks()[0] as ArraySink;
+    const database = new Plain(logger, 'database');
+    const worker = new StartsWithHook(logger, 'worker', ['database']);
+    await manager.registerComponent(database);
+    await manager.registerComponent(worker);
+    await manager.startComponent('database');
+    const starting = manager.startComponent('worker');
+    const shutdown = manager.stopAllComponents({ abortPendingStarts: true });
+    expect(worker.signals[0].aborted).toBe(true);
+
+    worker.gate.reject(failure(worker.signals[0].reason));
+    const result = await starting;
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('error');
+    expect(result.reason).not.toContain('Shutdown interrupted');
+    const startLogs = sink.logs.filter(
+      (entry) =>
+        entry.message.startsWith('Component failed to start') ||
+        entry.message.startsWith('Component startup interrupted'),
+    );
+    expect(startLogs.map((entry) => entry.type)).toEqual(['error']);
+    expect((await shutdown).success).toBe(true);
+    expect(manager.getRunningComponentNames()).toEqual([]);
+  },
+);
+
+test('an unrelated failure reports the same reason with and without abortPendingStarts', async () => {
+  const reasons: (string | undefined)[] = [];
+  for (const shouldAbortPendingStarts of [false, true]) {
+    const { manager, worker, starting } = await withPendingStart();
+    const shutdown = manager.stopAllComponents({
+      abortPendingStarts: shouldAbortPendingStarts,
+    });
+    await sleep(5);
+    worker.gate.reject(new Error('connection refused'));
+    const result = await starting;
+    expect(result.code).toBe('error');
+    reasons.push(result.reason);
+    await shutdown;
+  }
+  expect(reasons[0]).toBe(reasons[1]);
 });
 
 test('a start that ignores the cue and resolves is stopped by the pass, as without the option', async () => {

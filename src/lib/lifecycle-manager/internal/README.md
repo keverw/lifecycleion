@@ -6,16 +6,16 @@ component-facing operations, and narrowly scoped bookkeeping owners. They do not
 lifecycle claims or orchestrate bulk operations. They are internal implementation
 details, not exports of the package's lifecycle-manager entry.
 
-| Module                        | Responsibility                                                                                          |
-| ----------------------------- | ------------------------------------------------------------------------------------------------------- |
-| `component-messaging.ts`      | Message delivery, message broadcasts, and synchronous value access.                                     |
-| `component-inspection.ts`     | Individual and aggregate health checks, plus reload/info/debug broadcasts.                              |
-| `component-access-context.ts` | The readonly live view and dispatch callbacks used by those operations.                                 |
-| `component-dispatch.ts`       | The shared hook entry rule, read-then-recheck, and announce-recheck-invoke-under-deadline steps.        |
-| `bounded-array-copy.ts`       | The bounded by-index copy of caller arrays (dependency lists, broadcast `componentNames`).              |
-| `dependency-policy.ts`        | Bounded dependency reads, stable dependency ordering, and cycle discovery.                              |
-| `operation-policy.ts`         | Lifecycle-specific timeout error provenance, async failure containment, and common result construction. |
-| `registration-policy.ts`      | Registration progress reports and placement predicates.                                                 |
+| Module                        | Responsibility                                                                                                                          |
+| ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
+| `component-messaging.ts`      | Message delivery, message broadcasts, and synchronous value access.                                                                     |
+| `component-inspection.ts`     | Individual and aggregate health checks, plus reload/info/debug broadcasts.                                                              |
+| `component-access-context.ts` | The readonly live view and dispatch callbacks used by those operations.                                                                 |
+| `component-dispatch.ts`       | The shared hook entry rule, read-then-recheck, and announce-recheck-invoke-under-deadline steps.                                        |
+| `bounded-array-copy.ts`       | The bounded by-index copy of caller arrays (dependency lists, broadcast `componentNames`).                                              |
+| `dependency-policy.ts`        | Bounded dependency reads, stable dependency ordering, and cycle discovery.                                                              |
+| `operation-policy.ts`         | Lifecycle-specific timeout error provenance, abort-linked failure detection, async failure containment, and common result construction. |
+| `registration-policy.ts`      | Registration progress reports and placement predicates.                                                                                 |
 
 `shutdown-warning.ts` owns warning-hook dispatch, its shared deadline, and warning
 notifications. The manager chooses when this phase runs and retains shutdown ownership.

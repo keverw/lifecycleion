@@ -2,7 +2,10 @@ import { expect, test } from 'bun:test';
 import type { Logger } from '../logger';
 import { sleep } from '../sleep';
 import { BaseComponent } from './base-component';
-import { LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT } from './constants';
+import {
+  LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_SUPERSEDED,
+  LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
+} from './constants';
 import { ComponentStopTimeoutError } from './errors';
 import { claimReports, deferred, setup } from './test-helpers';
 
@@ -572,6 +575,138 @@ test.each(THROWING_LISTENERS)(
       a.stopGate.resolve();
       await sleep(10);
       expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+    } finally {
+      release();
+    }
+  },
+);
+
+// Escalates to a force phase whose `onShutdownForce()` stays pending, then lets the
+// graceful `stop()` it escalated from complete late, which ends that force phase first.
+async function lateGracefulDuringForce(
+  forceTimeoutMS: number,
+  onForceSignal: (signal: AbortSignal) => void = () => {},
+): Promise<{
+  a: RecordsWithHooks;
+  result: Awaited<
+    ReturnType<ReturnType<typeof setup>['manager']['stopComponent']>
+  >;
+  forceGate: ReturnType<typeof deferred<void>>;
+}> {
+  const { logger, manager } = setup();
+  const a = await started(
+    manager,
+    new RecordsWithHooks(logger, 'a', { graceful: 20, force: forceTimeoutMS }),
+  );
+  const stopGate = deferred();
+  const forceGate = deferred();
+  a.onStop = () => stopGate.promise;
+  a.onForce = (signal) => {
+    onForceSignal(signal);
+    return forceGate.promise;
+  };
+
+  const stopping = manager.stopComponent('a');
+  while (a.forceSignals.length === 0) {
+    await sleep(5);
+  }
+  expect(a.forceSignals[0].aborted).toBe(false);
+
+  stopGate.resolve();
+  const result = await stopping;
+  expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+  return { a, result, forceGate };
+}
+
+test.each([
+  ['with a force deadline', 5_000],
+  ['with the force timeout disabled', 0],
+])(
+  'a late graceful completion that ends the force phase first aborts the force signal (%s), without onShutdownForceAborted()',
+  async (_, forceTimeoutMS) => {
+    const { a, result, forceGate } =
+      await lateGracefulDuringForce(forceTimeoutMS);
+
+    expect(result.success).toBe(true);
+    expect(a.forceSignals).toHaveLength(1);
+    expect(a.forceSignals[0].aborted).toBe(true);
+    const reason = a.forceSignals[0].reason as Error;
+    expect(reason).toBeInstanceOf(Error);
+    expect(reason.message).toBe(
+      LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_SUPERSEDED,
+    );
+    // The hook is the force deadline's alone.
+    expect(a.forceSignalAbortedInHook).toBeUndefined();
+    expect(a.order).toEqual(['stop-abort', 'graceful-hook', 'force-abort']);
+
+    // Aborted once: a late settlement does not abort it again.
+    forceGate.resolve();
+    await sleep(10);
+    expect(a.forceSignals[0].reason).toBe(reason);
+    expect(a.order).toEqual(['stop-abort', 'graceful-hook', 'force-abort']);
+  },
+);
+
+test.each([
+  ['resolves', (): void => {}],
+  ['rejects', (): Promise<void> => Promise.reject(new Error('force failed'))],
+])(
+  'a force call that %s as a late graceful completion lands is not aborted',
+  async (_, settle) => {
+    const { logger, manager } = setup();
+    const a = await started(
+      manager,
+      new RecordsWithHooks(logger, 'a', { graceful: 20, force: 5_000 }),
+    );
+    const stopGate = deferred();
+    a.onStop = () => stopGate.promise;
+    // Settles itself and, in the same moment, releases the graceful `stop()`.
+    a.onForce = () => {
+      stopGate.resolve();
+      return settle();
+    };
+
+    const result = await manager.stopComponent('a');
+
+    expect(result.success).toBe(true);
+    expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+    await sleep(10);
+    expect(a.forceSignals).toHaveLength(1);
+    expect(a.forceSignals[0].aborted).toBe(false);
+    expect(a.order).toEqual(['stop-abort', 'graceful-hook']);
+  },
+);
+
+test.each(THROWING_LISTENERS)(
+  'a throwing %s on a force signal a late graceful completion aborts is reported, not uncaught',
+  async (_, attach) => {
+    const { reports, release } = claimReports();
+    try {
+      const thrown = new Error('force listener');
+      const { a, result, forceGate } = await lateGracefulDuringForce(
+        5_000,
+        (signal) => {
+          attach(signal, thrown);
+        },
+      );
+
+      expect(result.success).toBe(true);
+      expect(a.forceSignals[0].aborted).toBe(true);
+      // The recording listener added before it still ran.
+      expect(a.order).toEqual(['stop-abort', 'graceful-hook', 'force-abort']);
+      expect(
+        reports.map((report) => [
+          (report as Error).message,
+          (report as Error).cause,
+        ]),
+      ).toEqual([
+        [
+          'Error in a callback lifecycle-manager force abort listener for a',
+          thrown,
+        ],
+      ]);
+      forceGate.resolve();
+      await sleep(10);
     } finally {
       release();
     }

@@ -36,6 +36,7 @@ import {
   settledFailureCode,
   crashedComponentResult,
   refusedStartupResult,
+  isLinkedToAbort,
 } from './internal/operation-policy';
 import {
   type RegistrationProgress,
@@ -133,6 +134,7 @@ import {
   LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
   LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE,
   LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE_EXTERNAL,
+  LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_SUPERSEDED,
   LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
   LIFECYCLE_MANAGER_MESSAGE_GRACEFUL_SHUTDOWN_TIMED_OUT,
   LIFECYCLE_MANAGER_MESSAGE_PROCESS_EXITING,
@@ -7013,8 +7015,9 @@ export class LifecycleManager
 
   /**
    * Abort the signal an attempt handed to one of the component's hooks - `start()`,
-   * `stop()`, `onShutdownForce()` - from inside its deadline's timer, once the manager
-   * has stopped waiting on that still-pending call.
+   * `stop()`, `onShutdownForce()` - once the manager no longer needs that still-pending
+   * call's work: from inside its deadline's timer, as a shutdown pass begins
+   * (`abortPendingStarts`), or when a late graceful completion ends a force phase first.
    *
    * Abort listeners are the component's code, but they are the runtime's to call: an
    * error one throws never reaches `abort()`'s caller, and Node and Bun would report it
@@ -7874,6 +7877,9 @@ export class LifecycleManager
     // `abortPendingStarts` cue. The signal aborts once; the cause decides how a failure
     // of `start()` after that is answered.
     let startAbortCause: 'timeout' | 'shutdown' | undefined;
+    // The reason a shutdown's cue aborted the signal with: a failure linked to it is the
+    // interruption that cue asked for, not a failed start (see `isLinkedToAbort()`).
+    let shutdownAbortReason: StartupInterruptedByShutdownError | undefined;
     // What the `finally` names a detach of the signals this start attached after:
     // only a failure is a failed startup. Set by the paths that end otherwise.
     let detachTrigger = 'failed component startup';
@@ -7931,6 +7937,7 @@ export class LifecycleManager
             return false;
           }
           startAbortCause = 'shutdown';
+          shutdownAbortReason = reason;
           this.abortHookSignal(startAbort, reason, name, 'start');
           return true;
         };
@@ -8311,6 +8318,17 @@ export class LifecycleManager
       // Read before the writes below, with the hook above, so all of the caller code this
       // failure path runs ahead of them is behind the supersession check that follows.
       const reason = describeError(err);
+      // A shutdown pass asked this start to give up (`abortPendingStarts`) and it did:
+      // answered as a start a shutdown interrupted, as one that resolved anyway is. Only
+      // a failure linked to that abort - its reason, an `AbortError`, or an error carrying
+      // either on `cause` - counts: an unrelated failure is answered as it would be without
+      // the option. Its members are the caller's, so this is read here, with `reason`,
+      // ahead of the supersession check below.
+      const wasInterruptedByShutdown =
+        !isStartupTimeout &&
+        didStartHookFail &&
+        startAbortCause === 'shutdown' &&
+        isLinkedToAbort(error, shutdownAbortReason);
 
       // Asked again, not only at the top of the `catch`: the hook above is overridable,
       // and the error's own `message` is the caller's. Either can have the component
@@ -8369,11 +8387,6 @@ export class LifecycleManager
         };
       }
 
-      // A shutdown pass asked this start to give up (`abortPendingStarts`) and it did:
-      // answered as a start a shutdown interrupted, as one that resolved anyway is,
-      // whatever it threw - a library may wrap the signal's reason in its own error.
-      const wasInterruptedByShutdown =
-        !isStartupTimeout && didStartHookFail && startAbortCause === 'shutdown';
       const code = isStartupTimeout
         ? 'component_startup_timeout'
         : wasInterruptedByShutdown
@@ -9315,10 +9328,15 @@ export class LifecycleManager
     // notification or the result's status, not the stop.
     let didMarkStopped = false;
     // One controller per force attempt - an escalation, a `forceImmediate` stop, or a
-    // stalled retry - its signal handed to `onShutdownForce()`. Aborted only at this
-    // attempt's force deadline - the timer below - never because the hook settled, nor
-    // when a late graceful completion ends the phase first.
+    // stalled retry - its signal handed to `onShutdownForce()`. Aborted where the manager
+    // no longer needs that still-pending call: at this attempt's force deadline - the
+    // timer below - or when another path stopped the component first and ended the phase
+    // (see the superseded return below). Never because the hook itself settled.
     const forceAbort = this.createHookAbortController(name, 'force');
+    // Set once `onShutdownForce()`'s own promise has settled, either way: a call that
+    // finished is not aborted, even when a late graceful completion ends the phase in the
+    // same moment.
+    let didForceHookSettle = false;
 
     try {
       // The value read and checked above, not a second read. A synchronous throw races
@@ -9335,6 +9353,15 @@ export class LifecycleManager
       }
       // Adopted, for the reason `startComponentAttempt()` adopts `start()`'s.
       const forcePromise = adoptPromise(forceReturn);
+      // Attached before the races below, so it runs before their continuation does.
+      const markForceHookSettled = (): void => {
+        didForceHookSettle = true;
+      };
+      void observePromise(
+        forcePromise,
+        markForceHookSettled,
+        markForceHookSettled,
+      );
 
       // Both races attach rejection handlers in this turn, including when the
       // timeout is disabled or graceful completion wins. No separate no-op catch
@@ -9413,11 +9440,25 @@ export class LifecycleManager
         // A fired deadline already installed the late-outcome reporter. Keeping
         // both would report the same subsequent hook rejection twice.
         outcomeObserver.observe(forcePromise, abandonedForceMessage);
-        return {
+        const supersededResult: ComponentOperationResult = {
           success: true,
           componentName: name,
           status: this.getComponentStatus(name),
         };
+        // The phase ended before its deadline with `onShutdownForce()` still pending:
+        // the manager no longer needs that call's work, so it hears so through its
+        // signal, as it would at the deadline. `onShutdownForceAborted()` stays the
+        // deadline's alone. Last, once the result is built: the listeners are the
+        // component's code. A deadline that fired already aborted it.
+        if (!didForceHookSettle && forceTimeoutError === undefined) {
+          this.abortHookSignal(
+            forceAbort,
+            new Error(LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_SUPERSEDED),
+            name,
+            'onShutdownForce',
+          );
+        }
+        return supersededResult;
       }
 
       return this.withTransition(() => {

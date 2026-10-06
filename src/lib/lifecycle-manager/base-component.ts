@@ -222,8 +222,12 @@ export abstract class BaseComponent {
    * It is never aborted because `start()` resolved or threw, nor by a stop. A shutdown
    * pass aborts it only with `abortPendingStarts`, as the pass begins, with a
    * `StartupInterruptedByShutdownError` as `signal.reason` - a cue: the pass still
-   * waits for this call, and a rejection after it is answered `shutdown_in_progress`. Pass it to cancellable work (`fetch`, `listen`, a pool connect) or check
-   * `signal.aborted` between steps; settling promptly once it aborts releases the
+   * waits for this call. A rejection after it that is linked to the abort - the reason
+   * itself, an `AbortError`, or an error carrying either on its `cause` chain - is
+   * answered `shutdown_in_progress`; any other failure is answered `error`, as without
+   * the option. Like the stop signals, it aborts only when the manager no longer needs
+   * this call's work. Pass it to cancellable work (`fetch`, `listen`, a pool connect)
+   * or check `signal.aborted` between steps; settling promptly once it aborts releases the
    * dependencies the manager keeps up for this start. It is scoped to this start, not
    * to the run it begins. Declaring `start()` without the parameter is fine.
    *
@@ -312,11 +316,15 @@ export abstract class BaseComponent {
    * Can be sync or async - manager will await if Promise is returned.
    *
    * `signal` is fresh for each force attempt, a stalled retry's included, and separate
-   * from the one `stop()` received. The manager aborts it when `shutdownForceTimeoutMS`
-   * passes while this call is still pending, with the error the stall result carries as
-   * `signal.reason`, just before `onShutdownForceAborted()`. It is never aborted because
-   * the call resolved or threw, nor when a late graceful completion ends the force phase
-   * first. Listener errors are reported as
+   * from the one `stop()` received. The manager aborts it when it no longer needs this
+   * call's work while the call is still pending: when `shutdownForceTimeoutMS` passes,
+   * with the error the stall result carries as `signal.reason`, just before
+   * `onShutdownForceAborted()`; and when another path stopped the component first and
+   * ended the force phase early - the graceful `stop()` it escalated from completing
+   * late - with an `Error` whose message is
+   * `Force shutdown superseded: component already stopped` as `signal.reason`, without
+   * calling `onShutdownForceAborted()`. It is never aborted because the call resolved or
+   * threw. Listener errors are reported as
    * `lifecycle-manager force abort listener for <name>`. Declaring it without the
    * parameter is fine.
    */
@@ -328,6 +336,8 @@ export abstract class BaseComponent {
    * Invoked when onShutdownForce() exceeds shutdownForceTimeoutMS before component is
    * marked stalled, right after the signal passed to onShutdownForce() is aborted.
    * Prefer that signal; use this hook for instance-level cleanup it cannot reach.
+   * Deadline-only: not called when the signal aborts because a late graceful completion
+   * ended the force phase first - the component did stop.
    * Must be synchronous and fast - manager won't wait for it to complete.
    */
   public onShutdownForceAborted?(): void;

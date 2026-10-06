@@ -1,5 +1,6 @@
 import { describeError, toError } from '../../to-error';
 import { reportCallbackError } from '../../safe-handle-callback';
+import { readMember } from '../../internal/read-member';
 import {
   isTimeoutValidationError,
   resolveTimeoutMS,
@@ -45,6 +46,55 @@ export function invalidOperationOptionError(message: string): TypeError {
 /** Whether this manager's own option validation (timeouts included) refused `error`. */
 export function isOperationOptionRefusal(error: unknown): error is Error {
   return operationOptionRefusals.has(error as Error);
+}
+
+/** How many `cause` links {@link isLinkedToAbort} follows past the thrown value itself. */
+const ABORT_LINK_MAX_CAUSE_HOPS = 16;
+
+/**
+ * Whether a hook's failure is the abort of the signal it was handed - so the manager may
+ * answer it as the interruption it asked for, rather than as a failure of its own. Linked
+ * means the thrown value is `reason` itself, or an `AbortError` (`name`; the
+ * `DOMException` `fetch` and timers reject with, or a library's own), or carries either
+ * on its `cause` chain - a library wrapping the reason, or the `AbortError` its own
+ * cancellable call threw. Anything else is a failure unrelated to the abort, and is
+ * reported as it would be had the signal never aborted.
+ *
+ * The thrown value is the component's, so every member is read through `readMember()`:
+ * a getter that throws, or a `Proxy` that refuses, reads as absent - not linked - and
+ * ends the walk. The walk follows at most {@link ABORT_LINK_MAX_CAUSE_HOPS} links, and
+ * stops at a value it has already visited, so a cyclic or endless chain cannot hold the
+ * failure path. A reason buried deeper than that is not recognized: the failure is
+ * reported as the error it reads as.
+ */
+export function isLinkedToAbort(thrown: unknown, reason: unknown): boolean {
+  const visited: unknown[] = [];
+  let current = thrown;
+  for (let hop = 0; ; hop++) {
+    if (current === reason) {
+      return true;
+    }
+    if (
+      current === null ||
+      (typeof current !== 'object' && typeof current !== 'function')
+    ) {
+      return false;
+    }
+    // Compared by identity: a cycle ends the walk without reading its links again.
+    for (const seen of visited) {
+      if (seen === current) {
+        return false;
+      }
+    }
+    visited.push(current);
+    if (readMember(current, 'name') === 'AbortError') {
+      return true;
+    }
+    if (hop === ABORT_LINK_MAX_CAUSE_HOPS) {
+      return false;
+    }
+    current = readMember(current, 'cause');
+  }
 }
 
 export function resolveOperationTimeoutMS(

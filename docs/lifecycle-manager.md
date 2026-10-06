@@ -387,8 +387,13 @@ start result and `component:start-timeout` event report the timeout.
 
 ### Startup Abort Signal
 
-`start(signal)` receives a fresh `AbortSignal` for each start attempt. The manager
-aborts it exactly when it stops waiting on a `start()` call that is still pending:
+`start(signal)` receives a fresh `AbortSignal` for each start attempt. Every signal
+the manager hands a hook - this one, and the [stop and force
+signals](#stop-abort-signals) - follows one rule: it aborts when the manager no longer
+needs that still-pending call's work, either at the call's deadline or when another
+path has already made it moot, and never because the call itself settled. For
+`start()`, that is exactly when the manager stops waiting on a call that is still
+pending, or is told to stop wanting it:
 
 - the component's own `startupTimeoutMS` passes;
 - a `startAllComponents()` / `restartAllComponents()` deadline bounds the start and
@@ -400,7 +405,8 @@ aborts it exactly when it stops waiting on a `start()` call that is still pendin
 - a shutdown pass using `abortPendingStarts` begins while the start is pending (see
   [Multi-Phase Shutdown](#multi-phase-shutdown)). That abort is only a cue, with a
   `StartupInterruptedByShutdownError` as `signal.reason`: `onStartupAborted()` is not
-  called and nothing is marked timed out.
+  called and nothing is marked timed out. Only a failure linked to it is answered
+  `shutdown_in_progress`; an unrelated one is still `error`.
 
 It is never aborted because `start()` resolved, rejected or threw. Without
 `abortPendingStarts`, a shutdown pass does not abort it either - including one using
@@ -677,10 +683,19 @@ would without the option. Two starts are left alone:
   its `this.lifecycle` handle. It already knows, the pass does not join it, and it may
   be awaiting the pass's result.
 
-A start that honors the cue by rejecting or throwing - with `signal.reason`, an
-`AbortError`, or a library's own error wrapping either - is answered by
-`startComponent()` with `code: 'shutdown_in_progress'` (the thrown value as `error`),
-as a start that resolved after a shutdown began already is, rather than `error`. It
+A start that honors the cue by rejecting or throwing with a failure linked to the
+abort is answered by `startComponent()` with `code: 'shutdown_in_progress'` (the thrown
+value as `error`, the reason prefixed `Shutdown interrupted component startup: `, and a
+warning log), as a start that resolved after a shutdown began already is, rather than
+`error`. Linked means the thrown value is `signal.reason` itself, is an `AbortError`
+(by `name` - the `DOMException` `fetch` and timers reject with, or a library's own), or
+carries either on its `cause` chain - a library wrapping the reason, say
+`new Error('connect aborted', { cause: signal.reason })`. The chain is followed for at
+most 16 links and stops at a cycle, and `name` and `cause` are read defensively: a
+getter that throws, or a `Proxy` that refuses, reads as not linked. Any other failure -
+a connection refused just after the abort, say - is reported exactly as it would be
+without the option: `code: 'error'`, the same reason text, and an error log, so the
+option never relabels a real startup failure as an interruption. Either way the start
 still emits `component:start-failed` and returns to the state it had before the
 attempt, which releases its dependencies to the pass. A start that ignores the cue and
 resolves is stopped by the pass as before. `startAllComponents()` already answers
@@ -737,7 +752,7 @@ The shutdown process has three phases:
    - Timeout or error triggers force phase for that component
 
 3. **Force Phase** (per-component)
-   - Calls `onShutdownForce(signal)` with a fresh signal, aborted at `shutdownForceTimeoutMS` just before `onShutdownForceAborted()`
+   - Calls `onShutdownForce(signal)` with a fresh signal, aborted at `shutdownForceTimeoutMS` just before `onShutdownForceAborted()`, or earlier if a late graceful completion ends the force phase first
    - Called if graceful `stop()` times out or throws
    - Also called (skipping graceful) when retrying a previously stalled component via `retryStalled: true`
    - Component is marked as `stalled` if force phase is not implemented, times out, or throws
@@ -765,10 +780,12 @@ class WorkerComponent extends BaseComponent {
 ### Stop Abort Signals
 
 `stop(signal)` and `onShutdownForce(signal)` each receive an `AbortSignal`, the same
-way `start(signal)` does (see [Startup Abort Signal](#startup-abort-signal)). The
-signal is the primary cue that the manager has given up waiting on that call; the
-`onGracefulStopTimeout()` and `onShutdownForceAborted()` hooks remain, for
-instance-level work the signal cannot reach.
+way `start(signal)` does (see [Startup Abort Signal](#startup-abort-signal)), under the
+same rule: a signal aborts when the manager no longer needs that still-pending call's
+work - at the call's deadline, or when another path already finished the job - and
+never because the call itself resolved, rejected or threw. The signal is the primary
+cue; the `onGracefulStopTimeout()` and `onShutdownForceAborted()` hooks remain, for
+instance-level work the signal cannot reach, and stay deadline-only.
 
 - **`stop(signal)`** gets a fresh signal for each graceful stop attempt. It is aborted
   when the component's `shutdownGracefulTimeoutMS` (or a `stopComponent()` `timeout`)
@@ -784,16 +801,24 @@ instance-level work the signal cannot reach.
   graceful phase's. It is aborted when `shutdownForceTimeoutMS` passes while the call
   is still pending, with the error the stalled result carries as `error` (message
   `Force shutdown timed out`) as `signal.reason`, immediately before
-  `onShutdownForceAborted()`.
+  `onShutdownForceAborted()`. It is also aborted when another path stops the component
+  first and ends the force phase before its deadline while the call is still pending -
+  the graceful `stop()` it escalated from completing late. The component did stop, so
+  the stop answers success, the call's work is no longer needed, and the signal says
+  so with an `Error` whose message is
+  `Force shutdown superseded: component already stopped` as `signal.reason`. That abort
+  happens with timeouts disabled too, and `onShutdownForceAborted()` is not called for
+  it: that hook means the force deadline passed, which it did not. A call that settled
+  itself in the same moment is not aborted.
 
-Neither signal is aborted because its call resolved, rejected or threw, nor when a late
-graceful completion ends the force phase first, nor with timeouts disabled (`0`). A
-`stopAllComponents()` / `restartAllComponents()` `timeoutMS` does not abort them
-either: it halts the pass's further stops, while the stop in progress keeps its own
-per-component deadlines, which abort as usual. Every path that stops a component runs
-these same phases, so the signals behave identically for `stopComponent()`,
-`stopAllComponents()`, `restartComponent()` / `restartAllComponents()`,
-`unregisterComponent()` with `stopIfRunning`, startup rollback, and late-start cleanup.
+Neither signal is aborted because its call resolved, rejected or threw, nor at a
+deadline with timeouts disabled (`0`). A `stopAllComponents()` /
+`restartAllComponents()` `timeoutMS` does not abort them either: it halts the pass's
+further stops, while the stop in progress keeps its own per-component deadlines, which
+abort as usual. Every path that stops a component runs these same phases, so the
+signals behave identically for `stopComponent()`, `stopAllComponents()`,
+`restartComponent()` / `restartAllComponents()`, `unregisterComponent()` with
+`stopIfRunning`, startup rollback, and late-start cleanup.
 
 A graceful phase whose `stop()` settles promptly once its signal aborts still wins the
 race as the success it is - the timeout's rejection waits one macrotask after the
@@ -2706,10 +2731,12 @@ onGracefulStopTimeout?(): void;
 onShutdownWarning?(): Promise<void> | void;
 
 // Optional: Called for force shutdown if graceful shutdown times out or throws.
-// `signal` is fresh per force attempt, aborted if shutdownForceTimeoutMS passes.
+// `signal` is fresh per force attempt, aborted if shutdownForceTimeoutMS passes, or if
+// a late graceful completion stops the component first; see Stop Abort Signals.
 onShutdownForce?(signal: AbortSignal): Promise<void> | void;
 
-// Optional: Called if onShutdownForce() times out, right after its signal is aborted
+// Optional: Called if onShutdownForce() times out, right after its signal is aborted.
+// Not called when a late graceful completion aborts the signal instead.
 onShutdownForceAborted?(): void;
 ```
 

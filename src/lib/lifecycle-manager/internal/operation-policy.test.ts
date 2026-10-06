@@ -8,6 +8,7 @@ import {
   crashedSignalBroadcastResult,
   crashedStartupResult,
   invalidOperationOptionError,
+  isLinkedToAbort,
   isOperationOptionRefusal,
   resolveOperationTimeoutMS,
   settleOperation,
@@ -125,4 +126,89 @@ test('aggregate results of operations without caller options never answer invali
   } finally {
     release();
   }
+});
+
+test('isLinkedToAbort recognizes the reason, an AbortError, and either on the cause chain', () => {
+  const reason = new Error('interrupted');
+  expect(isLinkedToAbort(reason, reason)).toBe(true);
+  expect(isLinkedToAbort(new Error('wrapped', { cause: reason }), reason)).toBe(
+    true,
+  );
+  expect(
+    isLinkedToAbort(new DOMException('aborted', 'AbortError'), reason),
+  ).toBe(true);
+  expect(
+    isLinkedToAbort(
+      new Error('wrapped', {
+        cause: Object.assign(new Error('aborted'), { name: 'AbortError' }),
+      }),
+      reason,
+    ),
+  ).toBe(true);
+
+  expect(isLinkedToAbort(new Error('unrelated'), reason)).toBe(false);
+  expect(isLinkedToAbort('interrupted', reason)).toBe(false);
+  expect(isLinkedToAbort(undefined, reason)).toBe(false);
+  expect(
+    isLinkedToAbort(new DOMException('late', 'TimeoutError'), reason),
+  ).toBe(false);
+});
+
+test('isLinkedToAbort reads hostile values defensively and bounds its walk', () => {
+  const reason = new Error('interrupted');
+  const refusing = new Proxy(
+    {},
+    {
+      get(): never {
+        throw new Error('refused');
+      },
+    },
+  );
+  const revocable = Proxy.revocable({}, {});
+  revocable.revoke();
+  const throwingCause = Object.defineProperty(new Error('x'), 'cause', {
+    get(): never {
+      throw new Error('hostile cause');
+    },
+  });
+
+  expect(isLinkedToAbort(refusing, reason)).toBe(false);
+  expect(isLinkedToAbort(revocable.proxy, reason)).toBe(false);
+  expect(isLinkedToAbort(throwingCause, reason)).toBe(false);
+
+  // A cycle is visited once; every link is read at most once.
+  let causeReads = 0;
+  const first = new Error('first');
+  const second = new Error('second', { cause: first });
+  Object.defineProperty(first, 'cause', {
+    get(): unknown {
+      causeReads++;
+      return second;
+    },
+  });
+  expect(isLinkedToAbort(first, reason)).toBe(false);
+  expect(causeReads).toBe(1);
+
+  // An endless chain: each read mints a fresh wrapper, so only the bound stops it.
+  let mints = 0;
+  const endless = (): Error =>
+    Object.defineProperty(new Error('endless'), 'cause', {
+      get(): Error {
+        mints++;
+        return endless();
+      },
+    });
+  expect(isLinkedToAbort(endless(), reason)).toBe(false);
+  expect(mints).toBe(16);
+
+  // Within the bound the reason is found; past it, it is not.
+  const wrap = (depth: number): unknown => {
+    let error: unknown = reason;
+    for (let level = 0; level < depth; level++) {
+      error = new Error(`level ${level}`, { cause: error });
+    }
+    return error;
+  };
+  expect(isLinkedToAbort(wrap(16), reason)).toBe(true);
+  expect(isLinkedToAbort(wrap(17), reason)).toBe(false);
 });

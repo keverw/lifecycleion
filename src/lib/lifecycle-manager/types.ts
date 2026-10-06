@@ -439,7 +439,10 @@ export interface StopAllOptions {
    * keeps their dependencies up until they settle (unless allowStopWithPendingStarts
    * releases them; those starts are aborted too). Skipped: a start already aborted by
    * its own timeout, and a start that requested this shutdown itself. A start that then
-   * rejects or throws is answered `shutdown_in_progress`, as one that resolves is.
+   * rejects or throws with a failure linked to the abort - `signal.reason`, an
+   * `AbortError`, or an error carrying either on its `cause` chain - is answered
+   * `shutdown_in_progress`, as one that resolves is; any other failure is answered
+   * `error`, exactly as without this option.
    * restartAllComponents always disables this, including when configured globally.
    */
   abortPendingStarts?: boolean;

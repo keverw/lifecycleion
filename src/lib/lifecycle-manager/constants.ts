@@ -30,6 +30,8 @@ export const LIFECYCLE_MANAGER_MESSAGE_GRACEFUL_SHUTDOWN_TIMED_OUT =
   'Graceful shutdown timed out';
 export const LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT =
   'Force shutdown timed out';
+export const LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_SUPERSEDED =
+  'Force shutdown superseded: component already stopped';
 
 export const LIFECYCLE_MANAGER_LOG_OPTIONAL_COMPONENT_UNEXPECTED_STOP_DURING_STARTUP =
   'Optional component stopped unexpectedly during startup, continuing: {{error.message}}';
