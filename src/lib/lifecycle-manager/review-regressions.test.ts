@@ -3269,12 +3269,11 @@ describe('LifecycleManager - review regressions', () => {
 
     expect(manager.getComponentNames().sort()).toEqual(['a', 'b']);
     expect(result.valid).toBe(false);
-    // Nothing settled, so neither answer is relied on - including the stale one.
+    // Only the component left holding a list read for a replaced registration is
+    // unread; one holding its current registration's answer is not reported as broken.
     expect(
-      result.unreadableDependencies
-        .map(({ componentName }) => componentName)
-        .sort(),
-    ).toEqual(['a', 'b']);
+      result.unreadableDependencies.map(({ componentName }) => componentName),
+    ).toEqual(['b']);
     for (const { error } of result.unreadableDependencies) {
       expect(error.message).toContain('kept changing');
     }
