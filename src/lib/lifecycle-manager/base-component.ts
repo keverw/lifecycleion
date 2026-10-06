@@ -245,9 +245,23 @@ export abstract class BaseComponent {
    *
    * Can be sync or async - manager will await if Promise is returned.
    *
+   * `signal` is fresh for each graceful stop attempt. The manager aborts it when this
+   * call's `shutdownGracefulTimeoutMS` (or a `stopComponent()` `timeout`) passes while
+   * it is still pending, with the `ComponentStopTimeoutError` of that timeout as
+   * `signal.reason`, just before `onGracefulStopTimeout()`. It is never aborted because
+   * `stop()` resolved or threw, nor by the force phase or a shutdown's `timeoutMS`.
+   * Prefer it over `onGracefulStopTimeout()` as the cue to give up on graceful work
+   * (pass it to `server.close()` waits, drains, flushes); a `stop()` that settles
+   * promptly once it aborts may still complete the stop before the force phase begins.
+   * Declaring `stop()` without the parameter is fine.
+   *
+   * An `'abort'` listener added through `signal.addEventListener()`, or `signal.onabort`,
+   * that throws (or rejects) is reported on the global `'error'` channel as
+   * `lifecycle-manager stop abort listener for <name>`, as for the start signal.
+   *
    * @throws Should throw an error if stop fails (will trigger force phase)
    */
-  public abstract stop(): Promise<void> | void;
+  public abstract stop(signal: AbortSignal): Promise<void> | void;
 
   /**
    * Called when start() times out
@@ -268,8 +282,10 @@ export abstract class BaseComponent {
   /**
    * Called when stop() times out
    *
-   * Invoked when stop() exceeds shutdownGracefulTimeoutMS before force shutdown begins.
-   * Use this to set flags or prepare for more aggressive cleanup in onShutdownForce().
+   * Invoked when stop() exceeds shutdownGracefulTimeoutMS before force shutdown begins,
+   * right after the signal passed to stop() is aborted. Prefer that signal for
+   * cancelling graceful work; use this hook for instance-level preparation the signal
+   * cannot reach (flags for onShutdownForce(), say).
    * Must be synchronous and fast - manager won't wait for it to complete.
    */
   public onGracefulStopTimeout?(): void;
@@ -287,17 +303,29 @@ export abstract class BaseComponent {
   /**
    * Called for force shutdown if graceful shutdown times out or throws
    *
-   * Optional lifecycle hook called after stop() fails.
+   * Optional lifecycle hook called after stop() fails, for a `forceImmediate` stop, and
+   * for a stalled component's retry.
    * Use this for more aggressive cleanup (kill connections, abandon work, etc.)
    *
    * Can be sync or async - manager will await if Promise is returned.
+   *
+   * `signal` is fresh for each force attempt, a stalled retry's included, and separate
+   * from the one `stop()` received. The manager aborts it when `shutdownForceTimeoutMS`
+   * passes while this call is still pending, with the error the stall result carries as
+   * `signal.reason`, just before `onShutdownForceAborted()`. It is never aborted because
+   * the call resolved or threw, nor when a late graceful completion ends the force phase
+   * first. Listener errors are reported as
+   * `lifecycle-manager force abort listener for <name>`. Declaring it without the
+   * parameter is fine.
    */
-  public onShutdownForce?(): Promise<void> | void;
+  public onShutdownForce?(signal: AbortSignal): Promise<void> | void;
 
   /**
    * Called when onShutdownForce() times out
    *
-   * Invoked when onShutdownForce() exceeds shutdownForceTimeoutMS before component is marked stalled.
+   * Invoked when onShutdownForce() exceeds shutdownForceTimeoutMS before component is
+   * marked stalled, right after the signal passed to onShutdownForce() is aborted.
+   * Prefer that signal; use this hook for instance-level cleanup it cannot reach.
    * Must be synchronous and fast - manager won't wait for it to complete.
    */
   public onShutdownForceAborted?(): void;

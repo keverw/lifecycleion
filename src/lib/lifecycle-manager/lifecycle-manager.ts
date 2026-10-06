@@ -6945,29 +6945,47 @@ export class LifecycleManager
   }
 
   /**
-   * Abort the signal a start attempt handed to `start()`, from inside its deadline's
-   * timer, once the manager has stopped waiting on that `start()`.
+   * Abort the signal an attempt handed to one of the component's hooks - `start()`,
+   * `stop()`, `onShutdownForce()` - from inside its deadline's timer, once the manager
+   * has stopped waiting on that still-pending call.
    *
    * Abort listeners are the component's code, but they are the runtime's to call: an
    * error one throws never reaches `abort()`'s caller, and Node and Bun would report it
    * as an uncaught exception. `guardAbortListeners()` wrapped the listeners the
    * component added through the signal's own methods and `onabort`, so theirs are
-   * reported (`lifecycle-manager start abort listener for <name>`) instead. Listeners
+   * reported (`lifecycle-manager <phase> abort listener for <name>`) instead. Listeners
    * it cannot see - on a signal derived from this one, or added through
    * `EventTarget.prototype` directly - remain the runtime's. Every caller has finished
    * its bookkeeping before this runs. The `catch` only covers a runtime that let such
    * an error escape: reported, so it cannot unwind the timer and skip the hook after it.
    */
-  private abortStartSignal(
-    startAbort: OwnedAbortController,
-    reason: ComponentStartTimeoutError,
+  private abortHookSignal(
+    hookAbort: OwnedAbortController,
+    reason: Error,
     name: string,
+    hookName: 'start' | 'stop' | 'onShutdownForce',
   ): void {
     try {
-      startAbort.abort(reason);
+      hookAbort.abort(reason);
     } catch (error) {
-      reportCallbackError(`${name}.start abort signal listener`, error);
+      reportCallbackError(`${name}.${hookName} abort signal listener`, error);
     }
+  }
+
+  /**
+   * A fresh controller for one call of a component hook, its signal guarded before the
+   * hook sees it so a listener the component adds cannot throw out of the abort.
+   */
+  private createHookAbortController(
+    name: string,
+    phase: 'start' | 'stop' | 'force',
+  ): OwnedAbortController {
+    const hookAbort = createOwnedAbortController();
+    guardAbortListeners(
+      hookAbort.signal,
+      `lifecycle-manager ${phase} abort listener for ${name}`,
+    );
+    return hookAbort;
   }
 
   /**
@@ -7835,11 +7853,7 @@ export class LifecycleManager
       // the manager stops waiting on this attempt's still-pending `start()` - the timer
       // below - never because `start()` settled, either way. Guarded before `start()`
       // sees it, so a listener the component adds cannot throw out of that abort.
-      const startAbort = createOwnedAbortController();
-      guardAbortListeners(
-        startAbort.signal,
-        `lifecycle-manager start abort listener for ${name}`,
-      );
+      const startAbort = this.createHookAbortController(name, 'start');
       // Race against timeout
       // Adopted, not raced as it is: a native promise carrying its own no-op `then`
       // never settled the race, and its rejection went unhandled. See `adoptPromise()`.
@@ -7912,7 +7926,12 @@ export class LifecycleManager
                   name,
                   'Superseded start() failed after its deadline',
                 );
-                this.abortStartSignal(startAbort, startupTimeoutError, name);
+                this.abortHookSignal(
+                  startAbort,
+                  startupTimeoutError,
+                  name,
+                  'start',
+                );
                 return;
               }
               if (useBulkDeadline) {
@@ -7936,7 +7955,12 @@ export class LifecycleManager
               // code) find the abandonment and any late cleanup already arranged.
               // Aborted even when those sinks superseded the attempt: the signal is
               // only this attempt's, unlike the instance's hook below.
-              this.abortStartSignal(startAbort, startupTimeoutError, name);
+              this.abortHookSignal(
+                startAbort,
+                startupTimeoutError,
+                name,
+                'start',
+              );
               // The bulk deadline, the late-cleanup announcement, and abort listeners
               // can all run code that supersedes this start. Recheck at the hook.
               if (!isSuperseded()) {
@@ -8816,12 +8840,20 @@ export class LifecycleManager
     // run `stop()`, so it reaches the stop net as a crash (`operation_crashed`,
     // reported) rather than a failed graceful phase (`error`).
     const stopHook: unknown = Reflect.get(component, 'stop');
+    // One controller per graceful attempt, its signal handed to `stop()`. Aborted only
+    // at this attempt's graceful deadline - the timer below - never because `stop()`
+    // settled, either way, and never by the force phase that may follow.
+    const stopAbort = this.createHookAbortController(name, 'stop');
 
     try {
       // Race against graceful timeout
       // Adopted, for the reason `startComponentAttempt()` adopts `start()`'s.
       const stopPromise = adoptPromise(
-        applyIntrinsic(stopHook as () => unknown, component, []),
+        applyIntrinsic(
+          stopHook as (signal: AbortSignal) => unknown,
+          component,
+          [stopAbort.signal],
+        ),
       );
 
       const delayMS = optionalValidatedTimerDelayMS(timeoutMS);
@@ -8833,6 +8865,16 @@ export class LifecycleManager
                 componentName: name,
                 timeoutMS,
               });
+              // The signal first, then the hook, as a start's timeout orders them, so
+              // both cues describe one moment and the signal is already aborted inside
+              // the hook. Listeners that release `stop()` win the race below exactly
+              // as the hook does: its rejection waits a macrotask.
+              this.abortHookSignal(
+                stopAbort,
+                gracefulTimeoutError,
+                name,
+                'stop',
+              );
               this.invokeAbortHook(
                 component,
                 onGracefulStopTimeout,
@@ -9170,6 +9212,11 @@ export class LifecycleManager
     // that - the success log, a `getComponentStatus()` override - fails only the
     // notification or the result's status, not the stop.
     let didMarkStopped = false;
+    // One controller per force attempt - an escalation, a `forceImmediate` stop, or a
+    // stalled retry - its signal handed to `onShutdownForce()`. Aborted only at this
+    // attempt's force deadline - the timer below - never because the hook settled, nor
+    // when a late graceful completion ends the phase first.
+    const forceAbort = this.createHookAbortController(name, 'force');
 
     try {
       // The value read and checked above, not a second read. A synchronous throw races
@@ -9177,9 +9224,9 @@ export class LifecycleManager
       let forceReturn: unknown;
       try {
         forceReturn = applyIntrinsic(
-          onShutdownForce as () => unknown,
+          onShutdownForce as (signal: AbortSignal) => unknown,
           component,
-          [],
+          [forceAbort.signal],
         );
       } catch (hookError) {
         forceReturn = promiseRejectIntrinsic(hookError);
@@ -9197,6 +9244,13 @@ export class LifecycleManager
             timeoutHandle = setTimeout(() => {
               forceTimeoutError = new Error(
                 LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
+              );
+              // The signal first, then the hook, as in the graceful phase.
+              this.abortHookSignal(
+                forceAbort,
+                forceTimeoutError,
+                name,
+                'onShutdownForce',
               );
               this.invokeAbortHook(
                 component,

@@ -177,7 +177,8 @@ export interface StartComponentOptions {
 export interface StopComponentOptions {
   /**
    * If true, force immediate shutdown without graceful period
-   * Calls onShutdownForce() directly, bypassing normal stop() flow
+   * Calls onShutdownForce(signal) directly, bypassing normal stop() flow; its signal
+   * aborts at the component's shutdownForceTimeoutMS, as in any force phase
    * (default: false)
    */
   forceImmediate?: boolean;
@@ -185,7 +186,8 @@ export interface StopComponentOptions {
   /**
    * Override the component's configured shutdown timeout in milliseconds
    * If not specified, uses the component's shutdownGracefulTimeoutMS
-   * Only applies when forceImmediate is false
+   * Only applies when forceImmediate is false. It is also when the signal passed to
+   * stop(signal) aborts if stop() is still pending.
    */
   timeout?: number | null;
 
