@@ -12,6 +12,7 @@ import {
 import { generateID } from '../id-helpers';
 import { safeHandleCallback } from '../safe-handle-callback';
 import { reportToHost } from '../internal/report-to-host';
+import { guardAbortListeners } from '../internal/guarded-abort-signal';
 import { deepClone } from '../deep-clone';
 import { RetryPolicy } from '../retry-utils';
 import { FetchAdapter } from './adapters/fetch-adapter';
@@ -1772,6 +1773,13 @@ export class BaseHTTPClient {
         timeoutController.signal,
         signalReleasers,
       );
+
+      // Guarded before the adapter sees it. `HTTPAdapter` is a public extension point,
+      // and an `'abort'` listener a custom adapter adds runs inside `builder.cancel()`,
+      // `cancelAll()` or this attempt's timer - where, on an ordinary signal, a throw is
+      // an uncaught exception rather than anything this client can catch. Always a
+      // fresh signal (see `_composeSignals`), so nothing has listened on it yet.
+      guardAbortListeners(attemptSignal, 'HTTPClient attempt abort listener');
 
       // End an attempt that never reached the adapter - a retry interceptor that
       // cancelled or threw, or request setup that failed. Its timer and start event

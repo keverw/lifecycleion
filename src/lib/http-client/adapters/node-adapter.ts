@@ -1,6 +1,7 @@
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import {
   awaitBoxedPromise,
+  createOwnedAbortController,
   promiseResolveIntrinsic,
   observePromise,
   observeRejection,
@@ -42,6 +43,7 @@ import { defineEntry } from '../../internal/define-entry';
 // original value retained on cause for consumers of the normalized error.
 import { toError as normalizeError, describeError } from '../../to-error';
 import { reportCallbackError } from '../../safe-handle-callback';
+import { guardAbortListeners } from '../../internal/guarded-abort-signal';
 import { reportToHost } from '../../internal/report-to-host';
 import { readUnknownMember as readObjectMember } from '../../internal/read-member';
 
@@ -316,7 +318,12 @@ export class NodeAdapter implements HTTPAdapter {
     return 'node';
   }
 
-  public async send(request: AdapterRequest): Promise<AdapterResponse> {
+  public async send(adapterRequest: AdapterRequest): Promise<AdapterResponse> {
+    // Every member read once, here, where a getter that throws rejects this send. Read
+    // later, from an emitter or `AbortSignal` callback, the same throw was an uncaught
+    // exception and the send never settled. See `snapshotAdapterRequest`.
+    const request = snapshotAdapterRequest(adapterRequest);
+
     // Guarded once, at the boundary, so every call site below is covered - including the
     // ones handed to `streamResponseBody`, `writeRequestBodyChunked` and
     // `serializeMultipartFormData`. Progress reporting is advisory and must not be able to
@@ -1112,7 +1119,21 @@ export class NodeAdapter implements HTTPAdapter {
             // separate from the top-level request signal so we can fire it on local
             // write failures (disk full, etc.) without aborting the request itself —
             // the factory's cleanup listener fires, and we resolve with isStreamError.
-            const streamAbort = new AbortController();
+            //
+            // Guarded before the factory sees it: the factory's `'abort'` listeners run
+            // inside `abortStream()`, and on an ordinary signal one that throws is an
+            // uncaught exception rather than an error this adapter can catch. The guard
+            // reports it on the host `'error'` channel and runs the listeners after it.
+            const streamAbort = createOwnedAbortController();
+
+            guardAbortListeners(
+              streamAbort.signal,
+              'NodeAdapter streamResponse abort listener',
+            );
+
+            const abortStream = (): void => {
+              streamAbort.abort(undefined);
+            };
 
             // Propagate external cancellation (user abort, timeout) into the
             // factory's signal so cleanup listeners fire in all terminal cases.
@@ -1122,11 +1143,11 @@ export class NodeAdapter implements HTTPAdapter {
               const signal = request.signal;
 
               if (signal.aborted) {
-                streamAbort.abort();
+                abortStream();
               }
 
               const relayAbortToStream = (): void => {
-                streamAbort.abort();
+                abortStream();
               };
 
               signal.addEventListener('abort', relayAbortToStream, {
@@ -1153,10 +1174,10 @@ export class NodeAdapter implements HTTPAdapter {
 
             try {
               isStreamFactoryPending = true;
-              abortStreamSetup = () => streamAbort.abort();
+              abortStreamSetup = abortStream;
               failStreamSetupOnSocketError = (error: Error): void => {
                 failStreamSetupOnSocketError = undefined;
-                streamAbort.abort();
+                abortStream();
                 // Guarded, because this one runs from inside `req.on('error', ...)`.
                 // Every other destroy on this path is in the request's own promise chain,
                 // where a throw is rejected into it; a throw out of an event handler is the
@@ -1211,7 +1232,7 @@ export class NodeAdapter implements HTTPAdapter {
               // Factory threw — non-retryable setup error, equivalent to an
               // interceptor throw. Abort the stream signal so any partial cleanup
               // listeners run, destroy the request, and propagate as a setup failure.
-              streamAbort.abort();
+              abortStream();
               destroyRequestQuietly(req);
               failRequest(markStreamFactoryError(error, req, request.headers));
               return;
@@ -1224,17 +1245,17 @@ export class NodeAdapter implements HTTPAdapter {
             isStreamFactoryPending = false;
             failStreamSetupOnSocketError = undefined;
 
-            // The request may have been cancelled or timed out while an async
-            // factory was still setting up its sink. In that case the outer
-            // promise has already settled through the abort listener; make a
-            // best effort to close the newly created writable and stop here.
+            // The request may have been cancelled, timed out or lost its socket while
+            // an async factory was still setting up its sink. In that case the outer
+            // promise has already settled through the abort listener or
+            // `failStreamSetupOnSocketError`; close the newly created writable and stop
+            // here. This is the one exit between the factory returning and
+            // `streamResponseBody` attaching its listeners that holds a writable - the
+            // others hold `null`, a cancel object, or nothing - so it is the one that
+            // must cover the writable's `'error'` itself: see `discardUnstreamedWritable`.
             if (streamAbort.signal.aborted) {
               if (writable && !isStreamResponseCancel(writable)) {
-                // `destroyWritableQuietly`, as the two sibling cleanup sites already use.
-                // A bare `destroy()` is caller code: a throw from it lands in the IIFE's
-                // `.catch` below, which calls `reject` on a promise the abort listener has
-                // already settled - a no-op - so the cleanup silently did not happen.
-                destroyWritableQuietly(writable);
+                discardUnstreamedWritable(writable);
               }
 
               return;
@@ -1249,7 +1270,7 @@ export class NodeAdapter implements HTTPAdapter {
                   ? readObjectMember(writable, 'reason')
                   : undefined;
 
-              streamAbort.abort();
+              abortStream();
               destroyRequestQuietly(req);
               const abortErr = new Error(
                 'Request cancelled by streamResponse factory',
@@ -1301,7 +1322,7 @@ export class NodeAdapter implements HTTPAdapter {
               // isStreamError rather than throwing/retrying.
               //   - The stream signal fires so factory cleanup listeners run
               //   - Non-retryable once streaming has started
-              streamAbort.abort();
+              abortStream();
               destroyWritableQuietly(writable);
               destroyRequestQuietly(req);
               settleResponse({
@@ -1437,8 +1458,22 @@ export class NodeAdapter implements HTTPAdapter {
 
       // Network / transport errors (DNS failure, connection refused, cert errors)
       req.on('error', (error) => {
+        // Read guarded: this runs as an emitter listener, where a throw is an uncaught
+        // exception and the request never settles. The signal is the caller's, and one
+        // that is not a native `AbortSignal` can refuse the read; that fails the request
+        // with the refusal rather than taking the process down.
+        let isAborted: boolean;
+
+        try {
+          isAborted = request.signal?.aborted === true;
+        } catch (readError) {
+          failRequest(normalizeError(readError));
+
+          return;
+        }
+
         // Abort signal fired before network error — priorities the abort path
-        if (request.signal?.aborted) {
+        if (isAborted) {
           const abortErr = new Error('Request aborted');
           abortErr.name = 'AbortError';
           failRequest(abortErr);
@@ -1861,360 +1896,6 @@ async function streamResponseBody(
     let isSettled = false;
     let didReceiveEnd = false;
 
-    /**
-     * Absorb an `error` the writable has not delivered yet.
-     *
-     * A failed write destroys the stream and emits its `error` on a later tick, usually
-     * after this request has settled and its listeners are gone - and an `error` event
-     * with no listener is an uncaught exception that takes the process down.
-     *
-     * Keyed on the writable rather than on the request, because `streamResponse` may hand
-     * the same sink to several requests at once. A per-request absorber meant a dozen
-     * concurrent failures on one shared writable attached a dozen listeners within the
-     * same turn, before any removal ran, which is the `MaxListenersExceededWarning` this
-     * is meant to avoid. One absorber per writable is also all that is needed: it is
-     * attached with `on`, not `once`, so it keeps absorbing for as long as it is there
-     * instead of standing down after the first error and leaving a sibling's unhandled.
-     *
-     * Its lifetime is bounded by the stream's own delivery: the absorber removes itself
-     * once the error arrives, and a `'close'` listener removes it once the stream has
-     * finished tearing down. A `setImmediate` is the fallback, and only for a writable
-     * that would not take a `'close'` listener - a hand-written {@link WritableLike} that
-     * throws from `write` or `end` is not obliged to emit anything afterwards, so a
-     * listener waiting for delivery could otherwise wait forever.
-     *
-     * Skipped entirely for a writable with no listener-removal method, because an
-     * absorber attached to one could never be taken back: the `setImmediate` would drop
-     * the `WeakMap` entry while the listener stayed, and the next failure would attach
-     * another, which is the unbounded growth this exists to prevent. Nothing is lost by
-     * skipping it - such a writable is listened to through the permanent fan-out at
-     * {@link attachWritableListener}, whose listener stays attached whatever this request
-     * does, so a late error still lands on `onWritableError` and settles nothing because
-     * `settle` has already run.
-     */
-    const absorbPendingWritableError = (): void => {
-      // Captured once, here, rather than looked up again inside the removal below. Two
-      // lookups is two answers: the member is caller code and could be gone, or changed,
-      // by the time the removal runs, and a removal that cannot find its method is one
-      // that silently does not happen.
-      const removeListener = getWritableListenerRemover(writable);
-
-      if (removeListener === null) {
-        return;
-      }
-
-      try {
-        const existing = pendingWritableErrorAbsorbers.get(writable);
-
-        if (existing !== undefined && existing.extend()) {
-          // One is already attached to this writable and still absorbing. Its deadline is
-          // pushed out to a full window from *here*, because this request is now relying
-          // on it and has no listener of its own left.
-          return;
-        }
-
-        // `extend` answered that the absorber was out of lifetime and took itself off, so
-        // there is nothing on this writable now. Falling through attaches a fresh one,
-        // which is exactly the path a writable with no absorber at all takes - a new
-        // request getting its own window is what the cap is for, as against one absorber
-        // extending itself forever.
-      } catch {
-        // Not a usable `WeakMap` key, so it cannot be tracked or protected.
-        return;
-      }
-
-      // Whether the `WeakMap` still names this absorber. A read that throws answers `true`
-      // - the safe direction, since the cost of believing an absorber is present is one
-      // late error absorbed twice, and the cost of believing it is gone is a second
-      // listener attached on top of one that never came off.
-      const isStillAttached = (): boolean => {
-        try {
-          return pendingWritableErrorAbsorbers.get(writable)?.absorb === absorb;
-        } catch {
-          return true;
-        }
-      };
-
-      // Takes the absorber back off, whichever signal got here first. Guarded on the
-      // `WeakMap` still naming this absorber so a second call, or a removal that has
-      // already run, does nothing.
-      const detach = (): void => {
-        try {
-          if (pendingWritableErrorAbsorbers.get(writable)?.absorb !== absorb) {
-            return;
-          }
-        } catch {
-          return;
-        }
-
-        try {
-          removeListener('error', absorb);
-        } catch {
-          // The removal itself is caller code and can refuse. The listener is therefore
-          // still attached, so the bookkeeping that says so is kept: dropping it would
-          // let the next failure add a second listener on top of one that never came
-          // off, which is the accumulation being prevented. The one still attached goes
-          // on absorbing, so nothing is left uncovered.
-          return;
-        }
-
-        try {
-          removeListener('close', onClose);
-        } catch {
-          // Not the same trade as the `'error'` removal above, because the `'error'`
-          // listener is already off by the time this runs. Keeping the entry here said
-          // an absorber was attached when none was, so every later failure on this
-          // writable short-circuited and attached nothing - and `cleanup` had taken that
-          // request's own `onWritableError` off too, leaving the late `'error'` event
-          // with no listener at all, which is the uncaught exception this exists to
-          // prevent. A stale `onClose` is the lesser cost and an inert one: it only
-          // calls `detach`, which returns immediately once the entry below is gone.
-        }
-
-        pendingWritableErrorAbsorbers.delete(writable);
-
-        // Nothing left for it to do, and it holds this closure until it fires otherwise.
-        if (backstop !== undefined) {
-          clearTimeout(backstop);
-          backstop = undefined;
-        }
-      };
-
-      // Detach on the next turn of the loop rather than now, so an error delivered in
-      // this one still finds the listener. `unref` so a pending removal cannot hold the
-      // process open.
-      //
-      // Cancelled by a renewal, which is what `generation` counts. The queued removal
-      // only knows that *at the time it was scheduled* nothing further was expected; a
-      // request settling in the meantime calls `extend` and is handed a fresh window, and
-      // tearing the absorber down anyway left that request covered by nothing - the same
-      // uncaught-`'error'` gap, reached from the other side. The `'close'` and backstop
-      // paths call `detach` directly and are unaffected: those are deliveries, not
-      // guesses about one.
-      const scheduleDetach = (): void => {
-        const scheduledAt = generation;
-
-        try {
-          const removal = setImmediate(() => {
-            if (generation !== scheduledAt) {
-              return;
-            }
-
-            detach();
-          });
-
-          removal.unref?.();
-        } catch {
-          // No way to schedule it, so the listener stays. `'close'` may still take it off,
-          // and holding one absorber is the safe direction of the two.
-        }
-      };
-
-      const absorb = (error?: unknown): void => {
-        // Reported, then absorbed. "Already reported through `settle`" held while this
-        // listener only ever ran after a failed request had been settled with the error in
-        // hand; it stopped holding once the absorber was attached on the success path too.
-        // A sink that accepted every byte and then failed its own `close(fd)` inside this
-        // window - a truncated file, reported to the caller as a completed download - had
-        // its error discarded here with no trace anywhere: not on the response, not on the
-        // global `'error'` channel, not in the log. Absorbing an event so it cannot kill
-        // the process is the job; deciding nobody needs to know is not.
-        //
-        // Guarded, and deliberately not allowed to rethrow: this runs as an `'error'`
-        // listener, and a listener that throws is the uncaught exception this whole
-        // mechanism exists to prevent.
-        // Decided a turn later, not now. Whether this error has a home depends on listener
-        // order, and that order is not this function's to control: one absorber covers
-        // every request sharing a writable, so a sibling's absorber can already be attached
-        // when a later request registers its own `onWritableError` - and `EventEmitter`
-        // then runs the absorber first, before the listener that would have claimed the
-        // error. Asking after the emit has finished lets every listener have its say, and
-        // the answer is the same for the ordinary case where the claim came first.
-        const reportIfUnclaimed = (): void => {
-          let wasDelivered = false;
-
-          try {
-            wasDelivered =
-              typeof error === 'object' &&
-              error !== null &&
-              deliveredWritableErrors.delete(error);
-          } catch {
-            // Unreadable as a key; treated as undelivered, so it is reported rather than
-            // lost.
-          }
-
-          if (wasDelivered) {
-            return;
-          }
-
-          try {
-            const failure = normalizeError(
-              error ??
-                new Error(
-                  'A writable passed to streamResponse emitted an error after the request settled',
-                ),
-            );
-
-            // Rendered for the console rung; see the other `reportToHost` call above.
-            reportToHost(failure, () => describeError(failure));
-          } catch {
-            // Nothing left to report with; the event is still absorbed either way.
-          }
-        };
-
-        try {
-          const deferred = setImmediate(reportIfUnclaimed);
-
-          deferred.unref?.();
-        } catch {
-          // No way to schedule it, so the question is answered now. Reporting an error the
-          // caller also received is the safe direction; losing one silently is not.
-          reportIfUnclaimed();
-        }
-
-        // Beyond the report, this exists to keep the event from
-        // going unhandled.
-        //
-        // Stands down a turn after delivery, not on it. `streamResponse` may hand the same
-        // writable to several requests at once and one absorber covers them all, so
-        // detaching the moment the first error lands would leave a sibling's unhandled -
-        // but staying attached until a `'close'` that a writable is not obliged to emit
-        // keeps this closure, and with it the whole request scope it was declared in,
-        // alive for as long as the writable is. Deferring by one turn covers the siblings
-        // and still bounds it.
-        scheduleDetach();
-      };
-
-      const onClose = (): void => {
-        // The stream has finished tearing down, so nothing further is coming.
-        detach();
-      };
-
-      // Restarts the backstop from now, within the absorber's own lifetime cap. Called once
-      // below for the request that attaches the absorber, and again by every later request
-      // that finds it already in place, so the window each of them gets is its own full one
-      // rather than the remainder of the first request's.
-      let backstop: ReturnType<typeof setTimeout> | undefined;
-      const attachedAt = Date.now();
-
-      // Bumped by every renewal, so a `detach` already queued by `scheduleDetach` knows
-      // its answer is stale. See `scheduleDetach`.
-      let generation = 0;
-
-      /**
-       * @param isRenewal Whether a *later* request is asking, rather than the attach below.
-       *        Only a renewal invalidates a queued detach: the attach path runs after the
-       *        `'close'` fallback may have scheduled one, and that fallback is the only
-       *        bound a writable refusing listeners has.
-       * @returns Whether an absorber is still attached afterwards.
-       */
-      const extend = (isRenewal: boolean = false): boolean => {
-        const remainingLifetime =
-          MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS - (Date.now() - attachedAt);
-
-        // Out of lifetime, so this is the last word rather than another window: see
-        // `MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS` for why an unconditional restart is a
-        // deadline that never arrives.
-        if (remainingLifetime <= 0) {
-          detach();
-
-          // Not simply `false`: `detach` returns early when the writable refuses to give
-          // the listener back, and the bookkeeping is deliberately kept in that case
-          // because the listener really is still attached and still absorbing. The caller
-          // is covered, so it must not add a second one on top.
-          return isStillAttached();
-        }
-
-        try {
-          // Scheduled before the old one is cleared, never after. A `setTimeout` that
-          // refuses would otherwise leave this absorber with the bound it already had
-          // cleared and no replacement - unbounded, by way of the code that bounds it.
-          const next = setTimeout(
-            detach,
-            Math.min(PENDING_WRITABLE_ERROR_WINDOW_MS, remainingLifetime),
-          );
-
-          next.unref?.();
-
-          if (backstop !== undefined) {
-            clearTimeout(backstop);
-          }
-
-          backstop = next;
-
-          if (isRenewal) {
-            generation++;
-          }
-        } catch {
-          // No way to schedule it. Whatever was already pending still stands, and on the
-          // attach path that is nothing - the two signals above are the bound, which is the
-          // behaviour that shipped before this one existed.
-        }
-
-        return true;
-      };
-
-      try {
-        writable.on('error', absorb);
-        pendingWritableErrorAbsorbers.set(writable, {
-          absorb,
-          extend: () => extend(true),
-        });
-      } catch {
-        // A writable that will not take a listener cannot be protected. Nothing else
-        // here depends on it.
-        return;
-      }
-
-      // Bounded by delivery, and by the stream's own teardown, rather than by a turn of
-      // the loop counted from here.
-      //
-      // A `setImmediate` scheduled at this point used to remove it unconditionally, on the
-      // measurement that a failed write emits within the same turn. That is not true of
-      // every stream: a real `fs.WriteStream` destroys itself through an asynchronous
-      // `fs.close(fd)` before it emits, so the error lands a poll phase later - after the
-      // removal had run and after `cleanup` had taken `onWritableError` off too. With no
-      // listener left, Node turned a `stream_write_error` this had already reported
-      // correctly into an uncaught exception that killed the process. It could not be
-      // caught here either: Bun emits inside the window, so the suite never saw it.
-      //
-      // Both signals are used because neither alone is enough. `absorb` cannot cover a
-      // writable that is never going to emit at all - a hand-written {@link WritableLike}
-      // that throws from `write` or `end` is not obliged to. `'close'` cannot cover one
-      // that emits `'error'` and nothing after it, and waiting on a close that never comes
-      // is what would pin this closure, and the request scope around it, to the writable's
-      // lifetime.
-      try {
-        writable.on('close', onClose);
-      } catch {
-        // Neither bound is available: this writable would not take the `'close'` listener,
-        // and `absorb` only fires if the error actually arrives. A writable that emits
-        // nothing at all would keep the absorber, and the request scope it closes over,
-        // for as long as it lives - so fall back to the turn-counted removal. It is the
-        // timing that was wrong for a real stream, and a writable that refuses a listener
-        // is not one.
-        scheduleDetach();
-      }
-
-      // A last bound, because the two above only cover streams that eventually say
-      // something. A writable handed to `streamResponse` belongs to the *caller* and may
-      // well outlive the request without ever closing - `process.stdout`, a pooled sink, a
-      // long-lived socket - and for one of those neither `'error'` nor `'close'` is coming.
-      // Left unbounded, this absorber would stay on the caller's stream for the life of the
-      // process: swallowing the first genuine error it emits long after this request
-      // succeeded, and pinning the whole request scope - `res`, its listeners, the
-      // accumulated state - to the stream it closes over. That is the hazard the comment
-      // above names, and it applied to the throw paths before this was reached from
-      // `cleanup` on every settle.
-      //
-      // Long enough for the case the `'close'` listener exists for - a real `fs.WriteStream`
-      // destroys itself through an asynchronous `fs.close(fd)` and emits a poll phase later,
-      // which a `setImmediate` lands before - and short enough that "for the life of the
-      // process" is never the answer. `unref` so a pending removal cannot hold the process
-      // open on its own.
-      extend();
-    };
-
     const cleanup = (): void => {
       // Before the removal, and on *every* settle path rather than only the three that
       // asked for it explicitly. `cleanup` takes `onWritableError` off unconditionally, so
@@ -2237,7 +1918,7 @@ async function streamResponseBody(
       // Cheap and idempotent to call here: it is keyed on the writable through a `WeakMap`,
       // returns immediately when one is already attached, and takes itself back off on
       // delivery or on `'close'`.
-      absorbPendingWritableError();
+      absorbPendingWritableError(writable);
 
       detachWritableListener(writable, 'drain', onWritableDrain);
       detachWritableListener(writable, 'error', onWritableError);
@@ -2315,7 +1996,7 @@ async function streamResponseBody(
           // stream's event arriving on the next tick would otherwise be uncaught.
           if (error) {
             claimWritableError(error);
-            absorbPendingWritableError();
+            absorbPendingWritableError(writable);
             settle({
               code: 'stream_write_error',
               cause: normalizeError(error),
@@ -2347,7 +2028,7 @@ async function streamResponseBody(
         // its own `error` event is still on the way - carrying this same object, which is
         // why it is claimed here rather than left for the absorber to report again.
         claimWritableError(error);
-        absorbPendingWritableError();
+        absorbPendingWritableError(writable);
         settle({
           code: 'stream_write_error',
           cause: normalizeError(error),
@@ -2404,7 +2085,7 @@ async function streamResponseBody(
 
           if (writeFailure) {
             claimWritableError(writeFailure);
-            absorbPendingWritableError();
+            absorbPendingWritableError(writable);
             settle({
               code: 'stream_write_error',
               cause: normalizeError(writeFailure),
@@ -2431,7 +2112,7 @@ async function streamResponseBody(
         // stream is being torn down, and its own `error` event is still on the way -
         // after `settle` has removed every listener this function registered.
         claimWritableError(error);
-        absorbPendingWritableError();
+        absorbPendingWritableError(writable);
         settle({
           code: 'stream_write_error',
           cause: normalizeError(error),
@@ -2476,6 +2157,445 @@ async function streamResponseBody(
     res.on('aborted', onResponseAborted);
     res.on('close', onResponseClose);
   });
+}
+
+/**
+ * Absorb an `error` the writable has not delivered yet.
+ *
+ * A failed write destroys the stream and emits its `error` on a later tick, usually
+ * after this request has settled and its listeners are gone - and an `error` event
+ * with no listener is an uncaught exception that takes the process down.
+ *
+ * Module-level, not inside {@link streamResponseBody}, because that function is not the
+ * only owner of a writable it has to cover: a sink the factory hands back after its
+ * request was already torn down never reaches it, and is destroyed by
+ * {@link discardUnstreamedWritable} with this attached first.
+ *
+ * Keyed on the writable rather than on the request, because `streamResponse` may hand
+ * the same sink to several requests at once. A per-request absorber meant a dozen
+ * concurrent failures on one shared writable attached a dozen listeners within the
+ * same turn, before any removal ran, which is the `MaxListenersExceededWarning` this
+ * is meant to avoid. One absorber per writable is also all that is needed: it is
+ * attached with `on`, not `once`, so it keeps absorbing for as long as it is there
+ * instead of standing down after the first error and leaving a sibling's unhandled.
+ *
+ * Its lifetime is bounded by the stream's own delivery: the absorber removes itself
+ * once the error arrives, and a `'close'` listener removes it once the stream has
+ * finished tearing down. A `setImmediate` is the fallback, and only for a writable
+ * that would not take a `'close'` listener - a hand-written {@link WritableLike} that
+ * throws from `write` or `end` is not obliged to emit anything afterwards, so a
+ * listener waiting for delivery could otherwise wait forever.
+ *
+ * Skipped entirely for a writable with no listener-removal method, because an
+ * absorber attached to one could never be taken back: the `setImmediate` would drop
+ * the `WeakMap` entry while the listener stayed, and the next failure would attach
+ * another, which is the unbounded growth this exists to prevent. Nothing is lost by
+ * skipping it - such a writable is listened to through the permanent fan-out at
+ * {@link attachWritableListener}, whose listener stays attached whatever this request
+ * does, so a late error still lands on `onWritableError` and settles nothing because
+ * `settle` has already run.
+ */
+function absorbPendingWritableError(writable: WritableLike): void {
+  // Captured once, here, rather than looked up again inside the removal below. Two
+  // lookups is two answers: the member is caller code and could be gone, or changed,
+  // by the time the removal runs, and a removal that cannot find its method is one
+  // that silently does not happen.
+  const removeListener = getWritableListenerRemover(writable);
+
+  if (removeListener === null) {
+    return;
+  }
+
+  try {
+    const existing = pendingWritableErrorAbsorbers.get(writable);
+
+    if (existing !== undefined && existing.extend()) {
+      // One is already attached to this writable and still absorbing. Its deadline is
+      // pushed out to a full window from *here*, because this request is now relying
+      // on it and has no listener of its own left.
+      return;
+    }
+
+    // `extend` answered that the absorber was out of lifetime and took itself off, so
+    // there is nothing on this writable now. Falling through attaches a fresh one,
+    // which is exactly the path a writable with no absorber at all takes - a new
+    // request getting its own window is what the cap is for, as against one absorber
+    // extending itself forever.
+  } catch {
+    // Not a usable `WeakMap` key, so it cannot be tracked or protected.
+    return;
+  }
+
+  // Whether the `WeakMap` still names this absorber. A read that throws answers `true`
+  // - the safe direction, since the cost of believing an absorber is present is one
+  // late error absorbed twice, and the cost of believing it is gone is a second
+  // listener attached on top of one that never came off.
+  const isStillAttached = (): boolean => {
+    try {
+      return pendingWritableErrorAbsorbers.get(writable)?.absorb === absorb;
+    } catch {
+      return true;
+    }
+  };
+
+  // Takes the absorber back off, whichever signal got here first. Guarded on the
+  // `WeakMap` still naming this absorber so a second call, or a removal that has
+  // already run, does nothing.
+  const detach = (): void => {
+    try {
+      if (pendingWritableErrorAbsorbers.get(writable)?.absorb !== absorb) {
+        return;
+      }
+    } catch {
+      return;
+    }
+
+    try {
+      removeListener('error', absorb);
+    } catch {
+      // The removal itself is caller code and can refuse. The listener is therefore
+      // still attached, so the bookkeeping that says so is kept: dropping it would
+      // let the next failure add a second listener on top of one that never came
+      // off, which is the accumulation being prevented. The one still attached goes
+      // on absorbing, so nothing is left uncovered.
+      return;
+    }
+
+    try {
+      removeListener('close', onClose);
+    } catch {
+      // Not the same trade as the `'error'` removal above, because the `'error'`
+      // listener is already off by the time this runs. Keeping the entry here said
+      // an absorber was attached when none was, so every later failure on this
+      // writable short-circuited and attached nothing - and `cleanup` had taken that
+      // request's own `onWritableError` off too, leaving the late `'error'` event
+      // with no listener at all, which is the uncaught exception this exists to
+      // prevent. A stale `onClose` is the lesser cost and an inert one: it only
+      // calls `detach`, which returns immediately once the entry below is gone.
+    }
+
+    pendingWritableErrorAbsorbers.delete(writable);
+
+    // Nothing left for it to do, and it holds this closure until it fires otherwise.
+    if (backstop !== undefined) {
+      clearTimeout(backstop);
+      backstop = undefined;
+    }
+  };
+
+  // Detach on the next turn of the loop rather than now, so an error delivered in
+  // this one still finds the listener. `unref` so a pending removal cannot hold the
+  // process open.
+  //
+  // Cancelled by a renewal, which is what `generation` counts. The queued removal
+  // only knows that *at the time it was scheduled* nothing further was expected; a
+  // request settling in the meantime calls `extend` and is handed a fresh window, and
+  // tearing the absorber down anyway left that request covered by nothing - the same
+  // uncaught-`'error'` gap, reached from the other side. The `'close'` and backstop
+  // paths call `detach` directly and are unaffected: those are deliveries, not
+  // guesses about one.
+  const scheduleDetach = (): void => {
+    const scheduledAt = generation;
+
+    try {
+      const removal = setImmediate(() => {
+        if (generation !== scheduledAt) {
+          return;
+        }
+
+        detach();
+      });
+
+      removal.unref?.();
+    } catch {
+      // No way to schedule it, so the listener stays. `'close'` may still take it off,
+      // and holding one absorber is the safe direction of the two.
+    }
+  };
+
+  const absorb = (error?: unknown): void => {
+    // Reported, then absorbed. "Already reported through `settle`" held while this
+    // listener only ever ran after a failed request had been settled with the error in
+    // hand; it stopped holding once the absorber was attached on the success path too.
+    // A sink that accepted every byte and then failed its own `close(fd)` inside this
+    // window - a truncated file, reported to the caller as a completed download - had
+    // its error discarded here with no trace anywhere: not on the response, not on the
+    // global `'error'` channel, not in the log. Absorbing an event so it cannot kill
+    // the process is the job; deciding nobody needs to know is not.
+    //
+    // Guarded, and deliberately not allowed to rethrow: this runs as an `'error'`
+    // listener, and a listener that throws is the uncaught exception this whole
+    // mechanism exists to prevent.
+    // Decided a turn later, not now. Whether this error has a home depends on listener
+    // order, and that order is not this function's to control: one absorber covers
+    // every request sharing a writable, so a sibling's absorber can already be attached
+    // when a later request registers its own `onWritableError` - and `EventEmitter`
+    // then runs the absorber first, before the listener that would have claimed the
+    // error. Asking after the emit has finished lets every listener have its say, and
+    // the answer is the same for the ordinary case where the claim came first.
+    const reportIfUnclaimed = (): void => {
+      let wasDelivered = false;
+
+      try {
+        wasDelivered =
+          typeof error === 'object' &&
+          error !== null &&
+          deliveredWritableErrors.delete(error);
+      } catch {
+        // Unreadable as a key; treated as undelivered, so it is reported rather than
+        // lost.
+      }
+
+      if (wasDelivered) {
+        return;
+      }
+
+      try {
+        const failure = normalizeError(
+          error ??
+            new Error(
+              'A writable passed to streamResponse emitted an error after the request settled',
+            ),
+        );
+
+        // Rendered for the console rung; see the other `reportToHost` call above.
+        reportToHost(failure, () => describeError(failure));
+      } catch {
+        // Nothing left to report with; the event is still absorbed either way.
+      }
+    };
+
+    try {
+      const deferred = setImmediate(reportIfUnclaimed);
+
+      deferred.unref?.();
+    } catch {
+      // No way to schedule it, so the question is answered now. Reporting an error the
+      // caller also received is the safe direction; losing one silently is not.
+      reportIfUnclaimed();
+    }
+
+    // Beyond the report, this exists to keep the event from
+    // going unhandled.
+    //
+    // Stands down a turn after delivery, not on it. `streamResponse` may hand the same
+    // writable to several requests at once and one absorber covers them all, so
+    // detaching the moment the first error lands would leave a sibling's unhandled -
+    // but staying attached until a `'close'` that a writable is not obliged to emit
+    // keeps this closure, and with it the whole request scope it was declared in,
+    // alive for as long as the writable is. Deferring by one turn covers the siblings
+    // and still bounds it.
+    scheduleDetach();
+  };
+
+  const onClose = (): void => {
+    // The stream has finished tearing down, so nothing further is coming.
+    detach();
+  };
+
+  // Restarts the backstop from now, within the absorber's own lifetime cap. Called once
+  // below for the request that attaches the absorber, and again by every later request
+  // that finds it already in place, so the window each of them gets is its own full one
+  // rather than the remainder of the first request's.
+  let backstop: ReturnType<typeof setTimeout> | undefined;
+  const attachedAt = Date.now();
+
+  // Bumped by every renewal, so a `detach` already queued by `scheduleDetach` knows
+  // its answer is stale. See `scheduleDetach`.
+  let generation = 0;
+
+  /**
+   * @param isRenewal Whether a *later* request is asking, rather than the attach below.
+   *        Only a renewal invalidates a queued detach: the attach path runs after the
+   *        `'close'` fallback may have scheduled one, and that fallback is the only
+   *        bound a writable refusing listeners has.
+   * @returns Whether an absorber is still attached afterwards.
+   */
+  const extend = (isRenewal: boolean = false): boolean => {
+    const remainingLifetime =
+      MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS - (Date.now() - attachedAt);
+
+    // Out of lifetime, so this is the last word rather than another window: see
+    // `MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS` for why an unconditional restart is a
+    // deadline that never arrives.
+    if (remainingLifetime <= 0) {
+      detach();
+
+      // Not simply `false`: `detach` returns early when the writable refuses to give
+      // the listener back, and the bookkeeping is deliberately kept in that case
+      // because the listener really is still attached and still absorbing. The caller
+      // is covered, so it must not add a second one on top.
+      return isStillAttached();
+    }
+
+    try {
+      // Scheduled before the old one is cleared, never after. A `setTimeout` that
+      // refuses would otherwise leave this absorber with the bound it already had
+      // cleared and no replacement - unbounded, by way of the code that bounds it.
+      const next = setTimeout(
+        detach,
+        Math.min(PENDING_WRITABLE_ERROR_WINDOW_MS, remainingLifetime),
+      );
+
+      next.unref?.();
+
+      if (backstop !== undefined) {
+        clearTimeout(backstop);
+      }
+
+      backstop = next;
+
+      if (isRenewal) {
+        generation++;
+      }
+    } catch {
+      // No way to schedule it. Whatever was already pending still stands, and on the
+      // attach path that is nothing - the two signals above are the bound, which is the
+      // behaviour that shipped before this one existed.
+    }
+
+    return true;
+  };
+
+  try {
+    writable.on('error', absorb);
+    pendingWritableErrorAbsorbers.set(writable, {
+      absorb,
+      extend: () => extend(true),
+    });
+  } catch {
+    // A writable that will not take a listener cannot be protected. Nothing else
+    // here depends on it.
+    return;
+  }
+
+  // Bounded by delivery, and by the stream's own teardown, rather than by a turn of
+  // the loop counted from here.
+  //
+  // A `setImmediate` scheduled at this point used to remove it unconditionally, on the
+  // measurement that a failed write emits within the same turn. That is not true of
+  // every stream: a real `fs.WriteStream` destroys itself through an asynchronous
+  // `fs.close(fd)` before it emits, so the error lands a poll phase later - after the
+  // removal had run and after `cleanup` had taken `onWritableError` off too. With no
+  // listener left, Node turned a `stream_write_error` this had already reported
+  // correctly into an uncaught exception that killed the process. It could not be
+  // caught here either: Bun emits inside the window, so the suite never saw it.
+  //
+  // Both signals are used because neither alone is enough. `absorb` cannot cover a
+  // writable that is never going to emit at all - a hand-written {@link WritableLike}
+  // that throws from `write` or `end` is not obliged to. `'close'` cannot cover one
+  // that emits `'error'` and nothing after it, and waiting on a close that never comes
+  // is what would pin this closure, and the request scope around it, to the writable's
+  // lifetime.
+  try {
+    writable.on('close', onClose);
+  } catch {
+    // Neither bound is available: this writable would not take the `'close'` listener,
+    // and `absorb` only fires if the error actually arrives. A writable that emits
+    // nothing at all would keep the absorber, and the request scope it closes over,
+    // for as long as it lives - so fall back to the turn-counted removal. It is the
+    // timing that was wrong for a real stream, and a writable that refuses a listener
+    // is not one.
+    scheduleDetach();
+  }
+
+  // A last bound, because the two above only cover streams that eventually say
+  // something. A writable handed to `streamResponse` belongs to the *caller* and may
+  // well outlive the request without ever closing - `process.stdout`, a pooled sink, a
+  // long-lived socket - and for one of those neither `'error'` nor `'close'` is coming.
+  // Left unbounded, this absorber would stay on the caller's stream for the life of the
+  // process: swallowing the first genuine error it emits long after this request
+  // succeeded, and pinning the whole request scope - `res`, its listeners, the
+  // accumulated state - to the stream it closes over. That is the hazard the comment
+  // above names, and it applied to the throw paths before this was reached from
+  // `cleanup` on every settle.
+  //
+  // Long enough for the case the `'close'` listener exists for - a real `fs.WriteStream`
+  // destroys itself through an asynchronous `fs.close(fd)` and emits a poll phase later,
+  // which a `setImmediate` lands before - and short enough that "for the life of the
+  // process" is never the answer. `unref` so a pending removal cannot hold the process
+  // open on its own.
+  extend();
+}
+
+/**
+ * Destroy a writable the `streamResponse` factory handed back after its request was
+ * already over - cancelled, timed out, or its socket lost while an async factory was
+ * still awaiting - covered first by the listener {@link streamResponseBody} would have
+ * left behind.
+ *
+ * `destroy()` does not stop an error the stream is already on its way to emitting: a
+ * `fs.createWriteStream()` into a missing directory fails its asynchronous `open` and
+ * emits `'error'` whether or not it has been destroyed in the meantime. This sink never
+ * reached `streamResponseBody`, so nothing of ours was listening, and that event was an
+ * uncaught exception. The same bounded absorber a settled request leaves covers it -
+ * reported through the host error reporter, since the request it belonged to has already
+ * answered - and a writable with no listener-removal method joins the permanent fan-out
+ * from {@link attachWritableListener} instead, exactly as a streamed request leaves it.
+ * Never throws.
+ */
+function discardUnstreamedWritable(writable: WritableLike): void {
+  try {
+    if (getWritableListenerRemover(writable) === null) {
+      attachWritableListener(writable, 'error', ignoreWritableError);
+      detachWritableListener(writable, 'error', ignoreWritableError);
+    } else {
+      absorbPendingWritableError(writable);
+    }
+  } catch {
+    // Not a value a listener can be tracked on - a factory that returned a primitive.
+    // Nothing of ours can be attached to it, and nothing can emit on it either.
+  }
+
+  destroyWritableQuietly(writable);
+}
+
+/** Registered and at once deregistered, so only the permanent fan-out stays behind. */
+function ignoreWritableError(): void {
+  // Intentionally empty.
+}
+
+/**
+ * Read every member of an {@link AdapterRequest} once, into a plain object this adapter
+ * owns.
+ *
+ * `send()` is public, and the request it is handed may be any object: its members can be
+ * getters. Most of them are consulted again long after `send()` has returned - the URL
+ * and headers when the response settles, the signal from the request's `'error'` handler,
+ * the headers from the abort listener - and those run as emitter or `AbortSignal`
+ * callbacks, where a throw is an uncaught exception rather than a rejection, and the
+ * request never settles. Read here, inside `send()`'s own promise, a member that throws
+ * fails this send instead. `headers` is copied for the same reason: its entries are read
+ * again each time the effective request headers are snapshotted.
+ */
+function snapshotAdapterRequest(request: AdapterRequest): AdapterRequest {
+  const {
+    requestURL,
+    method,
+    headers,
+    body,
+    signal,
+    onUploadProgress,
+    onDownloadProgress,
+    streamResponse,
+    attemptNumber,
+    requestID,
+    initialURL,
+  } = request;
+
+  return {
+    requestURL,
+    method,
+    headers: { ...headers },
+    body,
+    signal,
+    onUploadProgress,
+    onDownloadProgress,
+    streamResponse,
+    attemptNumber,
+    requestID,
+    initialURL,
+  };
 }
 
 // ---------------------------------------------------------------------------

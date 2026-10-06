@@ -41,6 +41,7 @@ A TypeScript HTTP client with a fluent request builder, request/response interce
   - [ID-Scoped Cancel](#id-scoped-cancel)
   - [Tracker-Wide Cancel](#tracker-wide-cancel)
   - [AbortSignal Integration](#abortsignal-integration)
+  - [Abort Listeners That Throw](#abort-listeners-that-throw)
 - [Client Identity](#client-identity)
 - [Request Tracking](#request-tracking)
 - [Sub-Client Creation](#sub-client-creation)
@@ -1044,6 +1045,44 @@ controller.abort('user_navigated_away');
 
 The external signal is composed with the client's cancel signal (`builder.cancel()`, `client.cancelAll()`, etc.). Either one will abort the request and set `isCancelled: true`. The per-attempt timeout is independent. It fires its own abort but sets `isTimeout: true` instead. If `controller.abort()` is called with an explicit string reason, it appears on `HTTPClientError.cancelReason`.
 
+### Abort Listeners That Throw
+
+The client hands two signals of its own to code it does not own: the per-attempt
+`AdapterRequest.signal` an adapter receives (which matters for a custom `HTTPAdapter`),
+and the `signal` a [`streamResponse` factory](#streaming-responses) receives. Their
+`'abort'` listeners run inside `builder.cancel()`, `client.cancelAll()`, the per-attempt
+timer, or the adapter's own teardown. On an ordinary `AbortSignal`, a listener that throws
+is reported by the runtime as an uncaught exception (`process` `'uncaughtException'` in
+Node and Bun), which terminates a process that has no handler.
+
+Both signals guard against that. An error thrown by an `'abort'` listener added with
+`signal.addEventListener()` (a function, or an object's `handleEvent`) or by
+`signal.onabort` - or a rejection from an async one - is reported on the global `'error'`
+channel like any other callback failure (see
+[safe-handle-callback](./safe-handle-callback.md)), as
+`Error in a callback HTTPClient attempt abort listener` or
+`Error in a callback NodeAdapter streamResponse abort listener`, with the thrown value as
+`cause`. The listeners after it still run, and the request settles as it otherwise would.
+
+The guard is the signal's own `addEventListener`, `removeEventListener` and `onabort`,
+defined on that instance (non-writable, non-configurable) and backed by the `EventTarget`
+methods captured when the library loads, so replacing the prototype methods later does not
+bypass it. They otherwise behave as natively: a duplicate listener with the same capture
+flag is still ignored, `removeEventListener()` with the original listener removes it,
+`once`, `passive` and `signal` options apply, a `null` listener is ignored, `onabort` runs
+at the position where it was first set, and other event types are not wrapped. Native
+consumers such as `fetch(url, { signal })` and `AbortSignal.any([signal])` follow it as
+usual. Two gaps remain the runtime's:
+
+- Listeners on a signal **derived** from it - `AbortSignal.any([signal, ...])`, for
+  instance - belong to that signal and are not guarded.
+- Calling `EventTarget.prototype.addEventListener.call(signal, ...)` (or the prototype's
+  `onabort` setter) registers the raw listener, deliberately bypassing the guard.
+
+Catch inside listeners in those two cases. A signal you pass in yourself, through
+`.signal()` or the `signal` request option, is yours and is not modified: its listeners
+run when you call `abort()`.
+
 ## Client Identity
 
 ```typescript
@@ -1258,6 +1297,8 @@ an unparseable `initialURL` is treated as cross-origin.
 
 **The socket you configured stays with the origin you addressed, too.** `socketPath` is your chosen endpoint, and often a privileged one. `/var/run/docker.sock` is the usual example. A redirect to a different origin is sent over TCP to the host the `Location` actually names, not over your socket with only the request line and `Host` header changed. Otherwise a remote server's `Location` would become a request you never made against that socket. Same-origin redirects keep the socket, and the adapter driven directly (no `initialURL`) uses it as configured.
 
+**Driven directly, `send()` reads the request once.** Each member of the `AdapterRequest` is read when `send()` is called, and `headers` is copied, so a getter is never consulted again from the socket, response or abort handlers that run later. A getter that throws on that first read rejects that `send()`.
+
 #### Certificate Revocation (`crl`)
 
 `crl` rejects a server certificate whose serial has been revoked, even though its chain and hostname still verify. A revoked certificate fails the handshake with `CERT_REVOKED`, surfacing as status `495`.
@@ -1383,7 +1424,10 @@ error as the cause, without retrying the route handler even when retries are ena
 `onHandlerError` receives the original thrown or rejected value, including non-Error
 values, regardless of whether the request has an AbortSignal. If a route or error
 handler aborts its own request, the request ends with AbortError while its returned
-promise remains observed so a later rejection cannot become unhandled.
+promise remains observed so a later rejection cannot become unhandled. The same holds
+for a signal that refuses listeners: one whose `addEventListener` throws fails the wait
+as a handler error would, one whose `removeEventListener` throws does not hold up the
+response, and the handler's promise is observed either way.
 
 `mock.routes.clear()` removes all registered mock routes.
 
@@ -1515,6 +1559,8 @@ type StreamResponseFactory = (
   | Promise<WritableLike | null | StreamResponseCancel>;
 ```
 
+The `signal` is guarded against `'abort'` listeners that throw; see [Abort Listeners That Throw](#abort-listeners-that-throw).
+
 `StreamResponseFactory` can also be supplied via `HTTPRequestOptions.streamResponse` when passing options directly to `client.get(...)`, `client.post(...)`, and the other request helpers.
 
 ```typescript
@@ -1592,6 +1638,13 @@ When the ceiling is reached the listener detaches, and the next request to settl
 writable attaches a fresh one with a fresh ceiling. Continuous traffic therefore does keep a
 listener on the sink continuously. What it cannot do is keep any one request's scope alive
 behind it.
+
+The same listener covers a writable the factory returns after its request has already
+ended. When the request is cancelled, times out, or loses its connection while an async
+factory is still awaiting, the adapter destroys the writable the factory eventually
+returns, with this listener attached first. An error that writable emits anyway, such as a
+`createWriteStream()` into a missing directory failing to open, is reported through the
+host error reporter, because the request it belonged to has already answered.
 
 The practical consequence for a sink you wrote: an error emitted more than a few seconds
 after the last request touching it settled is yours to handle. On a Node stream with no

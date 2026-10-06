@@ -9,7 +9,9 @@ test.each(['string', 'bytes', 'multipart'] as const)(
   '%s upload settles and reports a throw in its failure handler',
   async (kind) => {
     const writeFailure = new Error('request end failed');
-    const handlerFailure = new Error('signal getter failed during recovery');
+    const handlerFailure = new Error(
+      'signal aborted getter failed during recovery',
+    );
     let hasWriteFailed = false;
     const req = Object.assign(new EventEmitter(), {
       destroyed: false,
@@ -50,12 +52,19 @@ test.each(['string', 'bytes', 'multipart'] as const)(
             : kind === 'bytes'
               ? new TextEncoder().encode('payload')
               : 'payload',
-        get signal() {
-          if (hasWriteFailed) {
-            throw handlerFailure;
-          }
-          return undefined;
-        },
+        // The request itself is read once, when `send()` is called, so the throw that
+        // reaches the recovery handler comes from the signal's own `aborted`, which a
+        // signal that is not a native `AbortSignal` can still refuse at any read.
+        signal: {
+          get aborted() {
+            if (hasWriteFailed) {
+              throw handlerFailure;
+            }
+            return false;
+          },
+          addEventListener() {},
+          removeEventListener() {},
+        } as unknown as AbortSignal,
       };
       const pending = new NodeAdapter().send(request);
       let deadline: ReturnType<typeof setTimeout> | undefined;
