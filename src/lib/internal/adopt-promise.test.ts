@@ -1,5 +1,10 @@
 import { describe, expect, test } from 'bun:test';
-import { adoptPromise, adoptResult, UnreadableReturn } from './adopt-promise';
+import {
+  adoptPromise,
+  adoptResult,
+  containDeferredResult,
+  UnreadableReturn,
+} from './adopt-promise';
 
 // The rejection's message, or `'resolved'`.
 async function settle(promise: Promise<unknown>): Promise<string> {
@@ -8,6 +13,94 @@ async function settle(promise: Promise<unknown>): Promise<string> {
     return 'resolved';
   } catch (error) {
     return (error as Error).message;
+  }
+}
+
+for (const entry of [
+  'adoptPromise',
+  'adoptResult',
+  'containDeferredResult',
+] as const) {
+  for (const hasRecursiveSpecies of [false, true]) {
+    for (const isSourceRejected of [false, true]) {
+      test(`${entry} contains a ${hasRecursiveSpecies ? 'recursive' : 'plain'} rejected species result from a ${isSourceRejected ? 'rejected' : 'fulfilled'} source`, async () => {
+        const orphan = new Error('unused species rejection');
+        const failure = new Error('source rejection');
+        const source = isSourceRejected
+          ? Promise.reject(failure)
+          : Promise.resolve(7);
+        const species = hasRecursiveSpecies
+          ? class RejectingSpecies extends Promise<unknown> {
+              constructor(
+                executor: (
+                  resolve: (value: unknown) => void,
+                  reject: (reason?: unknown) => void,
+                ) => void,
+              ) {
+                super((resolve, reject) => {
+                  executor(resolve, reject);
+                  reject(orphan);
+                });
+              }
+            }
+          : function ReturningRejectedPromise(
+              this: unknown,
+              executor: (resolve: () => void, reject: () => void) => void,
+            ): object {
+              executor(
+                () => {},
+                () => {},
+              );
+              return Promise.reject(orphan);
+            };
+        const constructor = { [Symbol.species]: species };
+        void Object.defineProperty(source, 'constructor', {
+          value: constructor,
+        });
+        let ownThenCalls = 0;
+        if (entry !== 'containDeferredResult') {
+          void Object.defineProperty(source, 'then', {
+            value: (): void => {
+              ownThenCalls++;
+            },
+          });
+        }
+        const unhandled: unknown[] = [];
+        const onUnhandled = (reason: unknown): void => {
+          unhandled.push(reason);
+        };
+        process.on('unhandledRejection', onUnhandled);
+        try {
+          if (entry === 'containDeferredResult') {
+            expect(containDeferredResult(source)).toBe(true);
+          } else {
+            const pending =
+              entry === 'adoptPromise'
+                ? adoptPromise(source)
+                : adoptResult(source);
+            expect(pending).toBeDefined();
+            if (pending === undefined || pending instanceof UnreadableReturn) {
+              throw new Error('Expected an adopted promise');
+            }
+            if (isSourceRejected) {
+              expect(await pending.catch((error: unknown) => error)).toBe(
+                failure,
+              );
+            } else {
+              expect(await pending).toBe(7);
+            }
+          }
+          expect(ownThenCalls).toBe(0);
+          expect(
+            Object.getOwnPropertyDescriptor(source, 'constructor')?.value,
+          ).toBe(constructor);
+          await new Promise((resolve) => setTimeout(resolve, 0));
+        } finally {
+          process.off('unhandledRejection', onUnhandled);
+        }
+        expect(unhandled).toEqual([]);
+      });
+    }
   }
 }
 

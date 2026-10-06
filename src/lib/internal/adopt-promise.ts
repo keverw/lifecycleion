@@ -14,6 +14,7 @@ import {
   promiseResolveIntrinsic,
   promiseRejectIntrinsic,
   promiseThenIntrinsic,
+  attachIntrinsicReactions,
 } from './intrinsics';
 import { isObjectLike } from './is-object-like';
 import { describeError } from '../to-error';
@@ -306,7 +307,7 @@ function adoptOwnPromise<T>(
   const pending = new promiseConstructorIntrinsic<Awaited<T>>(
     (resolve, reject) => {
       try {
-        applyIntrinsic(promiseThenIntrinsic, value, [resolve, reject]);
+        attachIntrinsicReactions<Awaited<T>>(value, resolve, reject);
         didAdopt = true;
       } catch (error) {
         // A foreign-realm promise fails `inheritsFromPromise`. The slot check refuses a
@@ -443,7 +444,7 @@ export function containDeferredResult(
   // A plain object of this realm is no native promise; spared the probe's throw.
   if (!hasObjectPrototype(result)) {
     try {
-      void applyIntrinsic(promiseThenIntrinsic, result, [noop, noop]);
+      attachIntrinsicReactions(result, noop, noop);
       return true;
     } catch (error) {
       if (

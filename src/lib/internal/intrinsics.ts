@@ -227,17 +227,30 @@ function attachReactions<T>(
   onrejected: (reason: unknown) => void,
 ): void {
   try {
-    const derived: unknown = applyIntrinsic(promiseThenIntrinsic, promise, [
-      onfulfilled,
-      onrejected,
-    ]);
-    if (derived !== promise) {
-      containDerivedRejection(derived);
-    }
+    attachIntrinsicReactions(promise, onfulfilled, onrejected);
   } catch (error) {
     void runOnMicrotask(() => {
       onrejected(error);
     });
+  }
+}
+
+/**
+ * Attach non-throwing terminal reactions through the captured native `then`, containing
+ * its unused species result. Unlike {@link observePromise}, an attachment failure
+ * throws synchronously so callers can distinguish it from the input's rejection.
+ */
+export function attachIntrinsicReactions<T>(
+  promise: object,
+  onfulfilled: (value: T) => void,
+  onrejected: (reason: unknown) => void,
+): void {
+  const derived: unknown = applyIntrinsic(promiseThenIntrinsic, promise, [
+    onfulfilled,
+    onrejected,
+  ]);
+  if (derived !== promise) {
+    containDerivedRejection(derived);
   }
 }
 

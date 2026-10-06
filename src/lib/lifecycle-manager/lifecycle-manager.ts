@@ -61,7 +61,7 @@ import {
   type OwnedAbortController,
   promiseRejectIntrinsic,
   promiseResolveIntrinsic,
-  promiseThenIntrinsic,
+  attachIntrinsicReactions,
   queueMicrotaskIntrinsic,
   racePromises,
 } from '../internal/intrinsics';
@@ -206,7 +206,7 @@ interface ShutdownPassOptions {
 interface StartSettlement {
   readonly name: string;
   readonly promise: Promise<void>;
-  /** The raw start timed out; its eventual cleanup is still owned by `promise`. */
+  /** Waiting on raw startup ended; its eventual cleanup is still owned by `promise`. */
   readonly abandoned: Promise<void>;
   readonly abandon: () => void;
   readonly finish: () => void;
@@ -223,6 +223,8 @@ interface StartSettlement {
   readonly settleRawStart: () => void;
   recovery?: Promise<void>;
   isAwaitingLateStart?: boolean;
+  /** An observation failure must not let unregister orphan raw startup or its cleanup. */
+  didFailRawStartObservation?: boolean;
   component?: BaseComponent;
   token?: string;
   /**
@@ -2585,11 +2587,15 @@ export class LifecycleManager
     name: string,
     wasStopped: boolean,
   ): UnregisterComponentResult | null {
-    if (!this.isComponentInFlight(name)) {
+    const settlement = this.currentStartSettlements().get(name);
+    const isStarting =
+      this.componentStates.get(name) === 'starting' ||
+      (settlement?.didFailRawStartObservation === true &&
+        isStartUnfinished(settlement));
+    if (!this.isComponentInFlight(name) && !isStarting) {
       return null;
     }
 
-    const isStarting = this.componentStates.get(name) === 'starting';
     const reason = isStarting
       ? 'Component is starting. Wait for the start to settle before unregistering'
       : 'Component is stopping. Wait for the stop to settle before unregistering';
@@ -8238,6 +8244,7 @@ export class LifecycleManager
       // A `start` getter that throws has not run `start()`: it is a crash of this
       // attempt (`operation_crashed`, reported), not a failed hook (`error`).
       let didReadStartHook = false;
+      let didRawStartObservationFail = false;
       try {
         if (settlement) {
           settlement.rawStartPending = true;
@@ -8258,17 +8265,66 @@ export class LifecycleManager
               this.deleteStartSettlement(claim);
             }
           };
-          // The intrinsic directly, not `observePromise()`: a `constructor`/species
-          // read that throws here must fail this start, as it did before. Observed as
-          // a rejection instead, it cleared `rawStartPending` a microtask later while
-          // a later read let the race keep waiting on the still-running start().
-          void applyIntrinsic(promiseThenIntrinsic, startPromise, [
-            markRawStartSettled,
-            markRawStartSettled,
-          ]);
+          try {
+            // Preserve a synchronous observation failure as this attempt's failure,
+            // while containing the intrinsic's unused species result.
+            attachIntrinsicReactions(
+              startPromise,
+              markRawStartSettled,
+              markRawStartSettled,
+            );
+          } catch (error) {
+            // Failing to observe start() does not mean it settled. Keep ownership of
+            // its resources and dependencies, and retry attachment once through a
+            // manager-owned promise. A permanently broken constructor/species may
+            // refuse this too; then ownership must remain pending rather than falsely
+            // announcing that the still-running hook finished.
+            didRawStartObservationFail = true;
+            settlement.didFailRawStartObservation = true;
+            const unobservedStart = startPromise;
+            const recoveryStart = new promiseConstructorIntrinsic<void>(
+              (resolve, reject) => {
+                try {
+                  attachIntrinsicReactions(
+                    unobservedStart,
+                    () => {
+                      markRawStartSettled();
+                      resolve();
+                    },
+                    (reason) => {
+                      markRawStartSettled();
+                      // Preserve the raw hook's arbitrary rejection value.
+                      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+                      reject(reason);
+                    },
+                  );
+                } catch {
+                  // The public result carries the original observation failure.
+                }
+              },
+            );
+            this.monitorLateStartupCompletion(
+              name,
+              recoveryStart,
+              startAttemptToken,
+              claim,
+              stateBeforeStart === 'stalled',
+              isSuperseded,
+              'observation-failed',
+            );
+            settlement.abandon();
+            this.observeFailureAfterTimeout(
+              recoveryStart,
+              name,
+              'start() failed after its observation failed',
+            );
+            throw error;
+          }
         }
       } catch (error) {
-        settlement?.settleRawStart();
+        if (!didRawStartObservationFail) {
+          settlement?.settleRawStart();
+        }
         didStartHookFail = didReadStartHook;
         throw error;
       } finally {
@@ -10462,6 +10518,7 @@ export class LifecycleManager
     wasForcedFromStall: boolean,
     // The attempt's own check: whether its instance and start token still own the name.
     isSuperseded: () => boolean,
+    failureKind: 'timeout' | 'observation-failed' = 'timeout',
   ): void {
     const settlement = this.startSettlements.get(claim);
     if (settlement) {
@@ -10469,9 +10526,14 @@ export class LifecycleManager
     }
     this.logger
       .entity(name)
-      .warn('Startup timed out, stopping component if startup completes later');
+      .warn(
+        failureKind === 'timeout'
+          ? 'Startup timed out, stopping component if startup completes later'
+          : 'Startup observation failed, stopping component if startup completes later',
+      );
 
-    // Both callers pass the same adopted promise used by the startup race.
+    // Timeout callers pass the startup race's adopted promise; an observation failure
+    // passes a manager-owned promise attached to that same raw startup instead.
     const recovery = (async (): Promise<void> => {
       try {
         try {
@@ -10504,6 +10566,10 @@ export class LifecycleManager
           (timeoutState !== 'starting-timed-out' &&
             timeoutState !== 'failed' &&
             !(
+              failureKind === 'observation-failed' &&
+              (timeoutState === 'registered' || timeoutState === 'stopped')
+            ) &&
+            !(
               wasForcedFromStall &&
               timeoutState === 'stalled' &&
               this.stalledComponents.has(name)
@@ -10516,20 +10582,20 @@ export class LifecycleManager
           return;
         }
 
-        // Late startup completed after the manager had already timed out. Mark
+        // Late startup completed after the manager had stopped waiting. Mark
         // it running briefly so the normal stop path can clean it up.
         // Lock recovery only while cleanup is actually running. An abandoned
         // start may never settle; the attempt token protects a replacement run.
         this.pendingBulkStartupCleanup.set(name, startAttemptToken);
         // What the cleanup's stop leaves, applied by `markComponentStopped()` so its
         // `component:stopped` carries it. Successful cleanup retires any pre-existing
-        // stall from a forced start, so a stall leaves the timeout - or the unexpected
-        // stop the start reported.
+        // stall from a forced start. A deadline leaves the timeout; an observation
+        // failure or unexpected stop leaves stopped, retaining its failure.
         this.lateStartCleanupOutcomes.set(name, {
           token: startAttemptToken,
           state:
             timeoutState === 'stalled'
-              ? didStopUnexpectedly
+              ? didStopUnexpectedly || failureKind === 'observation-failed'
                 ? 'stopped'
                 : 'starting-timed-out'
               : timeoutState,
@@ -10545,7 +10611,9 @@ export class LifecycleManager
         this.logger
           .entity(name)
           .warn(
-            'Component completed startup after timeout, stopping automatically',
+            failureKind === 'timeout'
+              ? 'Component completed startup after timeout, stopping automatically'
+              : 'Component completed startup after observation failed, stopping automatically',
           );
 
         // Retirement events and logging can replace this registration. Cleanup
@@ -10558,12 +10626,17 @@ export class LifecycleManager
         if (!stopResult.success) {
           this.logger
             .entity(name)
-            .warn('Automatic stop after startup timeout failed', {
-              params: {
-                error: stopResult.error,
-                code: stopResult.code,
+            .warn(
+              failureKind === 'timeout'
+                ? 'Automatic stop after startup timeout failed'
+                : 'Automatic stop after startup observation failed',
+              {
+                params: {
+                  error: stopResult.error,
+                  code: stopResult.code,
+                },
               },
-            });
+            );
         }
       } catch (error) {
         // The recovery body above failed - after the component was marked running, and
