@@ -22,6 +22,7 @@ import {
   TestComponent,
 } from './test-components';
 import { BaseComponent } from './base-component';
+import { deferred } from './test-helpers';
 import { sleep } from '../sleep';
 
 describe('LifecycleManager Integration Tests', () => {
@@ -343,11 +344,26 @@ describe('LifecycleManager Integration Tests', () => {
       await lifecycle.registerComponent(database);
       await lifecycle.registerComponent(slowStart);
 
-      // Start in background and immediately trigger shutdown
-      const startPromise = lifecycle.startAllComponents();
+      // Signals once the slow component's start() is underway - the database has
+      // started by then, since the slow component is ordered after it.
+      const slowStartEntered = deferred();
+      const runSlowStart = slowStart.start.bind(slowStart);
+      slowStart.start = (): Promise<void> => {
+        slowStartEntered.resolve();
+        return runSlowStart();
+      };
 
-      // Wait just enough for database to start
-      await sleep(30);
+      // Signals once the late start's automatic cleanup has stopped the component.
+      const lateCleanupStopped = deferred();
+      lifecycle.on('component:stopped', (event) => {
+        if ((event as { name: string }).name === 'slow-component') {
+          lateCleanupStopped.resolve();
+        }
+      });
+
+      // Start in background and trigger shutdown once the slow start is underway
+      const startPromise = lifecycle.startAllComponents();
+      await slowStartEntered.promise;
 
       // Trigger shutdown while slow component is still starting
       const stopPromise = lifecycle.stopAllComponents();
@@ -363,7 +379,7 @@ describe('LifecycleManager Integration Tests', () => {
       expect(stopResult.code).toBe('cleanup_incomplete');
 
       // Once the late start settles and its cleanup runs, another pass finishes.
-      await sleep(100);
+      await lateCleanupStopped.promise;
       expect((await lifecycle.stopAllComponents()).success).toBe(true);
       expect(lifecycle.getRunningComponentNames()).toEqual([]);
     });

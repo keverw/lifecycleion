@@ -1091,7 +1091,7 @@ export class LifecycleManager
     // over the registry as it was when the loop began listed components that were gone
     // and missed ones that had arrived - `valid: true` for a registry whose startup then
     // failed. The graph is the live registry once the reads settle.
-    const { reads } = this.readRegistry((component) => ({
+    const { reads, isSettled } = this.readRegistry((component) => ({
       // The one rule startup applies, through the one helper: a throw is reported once
       // and read as required.
       isOptional: this.componentMetadata.isComponentOptional(component),
@@ -1105,9 +1105,13 @@ export class LifecycleManager
 
     for (const component of this.components) {
       const name = this.nameOf(component);
-      // Only missing for a registry that every read kept changing: nothing is known
-      // about the component, which is no basis for "valid".
-      const { isOptional, read } = reads.get(component) ?? {
+      // A registry that every read kept changing has no settled answer for any of its
+      // components, and one of them may hold a list read for a registration that has
+      // since been replaced, or none at all. That is no basis for "valid": each is
+      // reported as unread, as is any answer that is not the current registration's.
+      const isUnread = !isSettled || !this.isReadCurrent(reads, component);
+      const current = isUnread ? undefined : reads.get(component);
+      const { isOptional, read } = current ?? {
         isOptional: false,
         read: {
           error: new Error(

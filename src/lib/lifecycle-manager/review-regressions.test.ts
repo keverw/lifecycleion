@@ -3225,6 +3225,61 @@ describe('LifecycleManager - review regressions', () => {
     ]);
   });
 
+  test('validateDependencies() does not answer valid from a stale read of an unsettled registry', async () => {
+    const { logger, manager } = setup();
+    let isInside = false;
+
+    // Each one's read unregisters and registers the other again, so every round of
+    // reads leaves the other's answer stale - for a registration that is gone - and
+    // the reads never settle. Every list is `[]`, so stale answers would look valid.
+    class Swapper extends Plain {
+      public partner?: Swapper;
+
+      public override getDependencies(): string[] {
+        if (!isInside && this.partner !== undefined) {
+          isInside = true;
+          void manager.unregisterComponent(this.partner.getName());
+          void manager.registerComponent(this.partner);
+          isInside = false;
+        }
+
+        return [];
+      }
+    }
+
+    const a = new Swapper(logger, 'a');
+    const b = new Swapper(logger, 'b');
+    a.partner = b;
+    b.partner = a;
+    isInside = true;
+    await manager.registerComponent(a);
+    await manager.registerComponent(b);
+    isInside = false;
+
+    const { release } = claimReports();
+    let result;
+
+    try {
+      result = manager.validateDependencies();
+    } finally {
+      isInside = true;
+      await sleep(0);
+      release();
+    }
+
+    expect(manager.getComponentNames().sort()).toEqual(['a', 'b']);
+    expect(result.valid).toBe(false);
+    // Nothing settled, so neither answer is relied on - including the stale one.
+    expect(
+      result.unreadableDependencies
+        .map(({ componentName }) => componentName)
+        .sort(),
+    ).toEqual(['a', 'b']);
+    for (const { error } of result.unreadableDependencies) {
+      expect(error.message).toContain('kept changing');
+    }
+  });
+
   test('a registration made while dependents are listed does not list one twice', async () => {
     const { logger, manager } = setup();
     const a = new Plain(logger, 'a', ['db']);
