@@ -146,6 +146,7 @@ import {
   type ShutdownSignal,
 } from '../process-signal-manager';
 import { adoptPromise } from '../internal/adopt-promise';
+import { guardAbortListeners } from '../internal/guarded-abort-signal';
 import {
   reportCallbackError,
   runCallbackSafely,
@@ -6948,11 +6949,14 @@ export class LifecycleManager
    * timer, once the manager has stopped waiting on that `start()`.
    *
    * Abort listeners are the component's code, but they are the runtime's to call: an
-   * error one throws does not reach `abort()`'s caller. Node and Bun report it as an
-   * uncaught exception (browsers on the global `error` event) - fatal to a process that
-   * has no handler, as for any listener on any signal. Every caller has finished its
-   * bookkeeping before this runs. The `catch` only covers a runtime that let such an
-   * error escape: reported, so it cannot unwind the timer and skip the hook after it.
+   * error one throws never reaches `abort()`'s caller, and Node and Bun would report it
+   * as an uncaught exception. `guardAbortListeners()` wrapped the listeners the
+   * component added through the signal's own methods and `onabort`, so theirs are
+   * reported (`lifecycle-manager start abort listener for <name>`) instead. Listeners
+   * it cannot see - on a signal derived from this one, or added through
+   * `EventTarget.prototype` directly - remain the runtime's. Every caller has finished
+   * its bookkeeping before this runs. The `catch` only covers a runtime that let such
+   * an error escape: reported, so it cannot unwind the timer and skip the hook after it.
    */
   private abortStartSignal(
     startAbort: OwnedAbortController,
@@ -7829,8 +7833,13 @@ export class LifecycleManager
       }
       // One controller per attempt, its signal handed to `start()`. Aborted only where
       // the manager stops waiting on this attempt's still-pending `start()` - the timer
-      // below - never because `start()` settled, either way.
+      // below - never because `start()` settled, either way. Guarded before `start()`
+      // sees it, so a listener the component adds cannot throw out of that abort.
       const startAbort = createOwnedAbortController();
+      guardAbortListeners(
+        startAbort.signal,
+        `lifecycle-manager start abort listener for ${name}`,
+      );
       // Race against timeout
       // Adopted, not raced as it is: a native promise carrying its own no-op `then`
       // never settled the race, and its rejection went unhandled. See `adoptPromise()`.

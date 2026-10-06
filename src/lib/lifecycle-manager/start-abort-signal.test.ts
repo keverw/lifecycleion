@@ -3,7 +3,7 @@ import type { Logger } from '../logger';
 import { sleep } from '../sleep';
 import { BaseComponent } from './base-component';
 import { ComponentStartTimeoutError } from './errors';
-import { deferred, setup } from './test-helpers';
+import { claimReports, deferred, setup } from './test-helpers';
 
 // A component that records the signal each `start()` receives and what happened to it.
 class Records extends BaseComponent {
@@ -272,82 +272,181 @@ test('aborting does not consult an AbortController.prototype.abort replaced afte
   await sleep(10);
 });
 
-// Abort listeners are the component's code, run by the runtime's EventTarget: an error
-// one throws never reaches `abort()`'s caller - the runtime reports it as an uncaught
-// exception. That is fatal in a test runner, so this runs in its own process with an
-// `uncaughtException` handler installed, as an application that tolerates such errors
-// would have.
-test('a throwing abort listener does not break the timeout result, the hook, or late cleanup', async () => {
-  const script = `
-    import { Logger } from ${JSON.stringify(new URL('../logger/index.ts', import.meta.url).href)};
-    import { LifecycleManager } from ${JSON.stringify(new URL('./lifecycle-manager.ts', import.meta.url).href)};
-    import { BaseComponent } from ${JSON.stringify(new URL('./base-component.ts', import.meta.url).href)};
-    const watchdog = setTimeout(() => process.exit(42), 2000);
-    const uncaught = [];
-    process.on('uncaughtException', (error) => { uncaught.push(error.message); });
-    const logger = new Logger({ callProcessExit: false, sinks: [{ write() {}, close: async () => {} }] });
-    const manager = new LifecycleManager({ logger, shutdownWarningTimeoutMS: -1 });
-    let releaseLate;
-    const late = new Promise((resolve) => { releaseLate = resolve; });
-    class Component extends BaseComponent {
-      stops = 0;
-      hookCalls = 0;
-      start(signal) {
-        signal.addEventListener('abort', () => { throw new Error(this.name + ' listener'); });
-        signal.onabort = () => { throw new Error(this.name + ' onabort'); };
-        return late;
-      }
-      stop() { this.stops++; }
-    }
-    class WithHook extends Component {
-      onStartupAborted() { this.hookCalls++; }
-    }
-    const hooked = new WithHook(logger, { name: 'hooked', startupTimeoutMS: 30 });
-    const plain = new Component(logger, { name: 'plain', startupTimeoutMS: 30 });
-    await manager.registerComponent(hooked);
-    await manager.registerComponent(plain);
-    const results = await Promise.all([manager.startComponent('hooked'), manager.startComponent('plain')]);
-    const statesAfterTimeout = [manager.getComponentStatus('hooked').state, manager.getComponentStatus('plain').state];
-    releaseLate();
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    const restarted = await manager.startComponent('hooked');
-    const stopped = await manager.stopAllComponents();
-    clearTimeout(watchdog);
-    process.stdout.write(JSON.stringify({
-      codes: results.map((result) => result.code),
-      statesAfterTimeout,
-      hookCalls: hooked.hookCalls,
-      plainStops: plain.stops,
-      plainState: manager.getComponentStatus('plain').state,
-      restarted: restarted.success,
-      stopped: stopped.success,
-      uncaught: uncaught.sort(),
-    }));
-  `;
-  const child = Bun.spawn([process.execPath, '--eval', script], {
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
+// How a component's throwing abort listener is attached to its start signal.
+const THROWING_LISTENERS: [
+  string,
+  (signal: AbortSignal, thrown: Error) => void,
+][] = [
+  [
+    'function listener',
+    (signal, thrown) => {
+      signal.addEventListener('abort', () => {
+        throw thrown;
+      });
+    },
+  ],
+  [
+    'handleEvent object',
+    (signal, thrown) => {
+      signal.addEventListener('abort', {
+        handleEvent: () => {
+          throw thrown;
+        },
+      });
+    },
+  ],
+  [
+    'onabort handler',
+    (signal, thrown) => {
+      signal.onabort = () => {
+        throw thrown;
+      };
+    },
+  ],
+];
 
-  expect({ code, stderr }).toEqual({ code: 0, stderr: '' });
-  expect(JSON.parse(stdout)).toEqual({
-    codes: ['component_startup_timeout', 'component_startup_timeout'],
-    statesAfterTimeout: ['starting-timed-out', 'starting-timed-out'],
-    hookCalls: 1,
-    plainStops: 1,
-    plainState: 'starting-timed-out',
-    restarted: true,
-    stopped: true,
-    uncaught: [
-      'hooked listener',
-      'hooked onabort',
-      'plain listener',
-      'plain onabort',
-    ],
-  });
+// A component whose start signal carries a throwing listener between two that record.
+class ThrowsOnAbort extends BaseComponent {
+  public readonly order: string[] = [];
+  public readonly thrown: Error;
+  public stops = 0;
+  public late = deferred();
+
+  constructor(
+    logger: Logger,
+    name: string,
+    private readonly attach: (signal: AbortSignal, thrown: Error) => void,
+  ) {
+    super(logger, { name, startupTimeoutMS: 30 });
+    this.thrown = new Error(`${name} listener`);
+  }
+
+  public start(signal: AbortSignal): Promise<void> {
+    signal.addEventListener('abort', () => this.order.push('before'));
+    this.attach(signal, this.thrown);
+    signal.addEventListener('abort', () => this.order.push('after'));
+    return this.late.promise;
+  }
+
+  public stop(): void {
+    this.stops++;
+  }
+}
+
+class ThrowsOnAbortWithHook extends ThrowsOnAbort {
+  public onStartupAborted(): void {
+    this.order.push('hook');
+  }
+}
+
+// A listener error used to be the runtime's: an uncaught exception, fatal to a process
+// with no handler (and to this test, which fails on any uncaught error). It is now
+// reported on the manager's failure channel, and nothing else about the timeout changes.
+test.each(THROWING_LISTENERS)(
+  'a throwing %s is reported, and the timeout result, the hook, and late cleanup are unaffected',
+  async (_, attach) => {
+    const { reports, release } = claimReports();
+    try {
+      const { logger, manager } = setup();
+      const hooked = new ThrowsOnAbortWithHook(logger, 'hooked', attach);
+      const plain = new ThrowsOnAbort(logger, 'plain', attach);
+      await manager.registerComponent(hooked);
+      await manager.registerComponent(plain);
+
+      const results = await Promise.all([
+        manager.startComponent('hooked'),
+        manager.startComponent('plain'),
+      ]);
+
+      expect(results.map((result) => result.code)).toEqual([
+        'component_startup_timeout',
+        'component_startup_timeout',
+      ]);
+      expect(hooked.order).toEqual(['before', 'after', 'hook']);
+      expect(plain.order).toEqual(['before', 'after']);
+      expect(manager.getComponentStatus('hooked')?.state).toBe(
+        'starting-timed-out',
+      );
+      expect(manager.getComponentStatus('plain')?.state).toBe(
+        'starting-timed-out',
+      );
+      expect(
+        reports.map((report) => [
+          (report as Error).message,
+          (report as Error).cause,
+        ]),
+      ).toEqual([
+        [
+          'Error in a callback lifecycle-manager start abort listener for hooked',
+          hooked.thrown,
+        ],
+        [
+          'Error in a callback lifecycle-manager start abort listener for plain',
+          plain.thrown,
+        ],
+      ]);
+
+      // A late success is still cleaned up without the hook, and left alone with it.
+      hooked.late.resolve();
+      plain.late.resolve();
+      await sleep(30);
+      expect(plain.stops).toBe(1);
+      expect(hooked.stops).toBe(0);
+
+      hooked.late = deferred();
+      hooked.late.resolve();
+      expect((await manager.startComponent('hooked')).success).toBe(true);
+      expect((await manager.stopAllComponents()).success).toBe(true);
+      expect(hooked.stops).toBe(1);
+    } finally {
+      release();
+    }
+  },
+);
+
+test('the start signal guards its listeners even after EventTarget.prototype.addEventListener is replaced', async () => {
+  const { reports, release } = claimReports();
+  const descriptor = Object.getOwnPropertyDescriptor(
+    EventTarget.prototype,
+    'addEventListener',
+  );
+  if (descriptor === undefined) {
+    throw new Error('EventTarget.prototype.addEventListener is missing');
+  }
+  try {
+    const { logger, manager } = setup();
+    const a = new ThrowsOnAbortWithHook(logger, 'a', (signal, thrown) => {
+      signal.addEventListener('abort', () => {
+        throw thrown;
+      });
+    });
+    await manager.registerComponent(a);
+
+    Object.defineProperty(EventTarget.prototype, 'addEventListener', {
+      ...descriptor,
+      value: () => {
+        throw new Error('replaced addEventListener');
+      },
+    });
+    let result;
+    try {
+      result = await manager.startComponent('a');
+    } finally {
+      Object.defineProperty(
+        EventTarget.prototype,
+        'addEventListener',
+        descriptor,
+      );
+    }
+
+    expect(result.code).toBe('component_startup_timeout');
+    expect(a.order).toEqual(['before', 'after', 'hook']);
+    expect(reports.map((report) => (report as Error).cause)).toEqual([
+      a.thrown,
+    ]);
+    a.late.resolve();
+    await sleep(10);
+  } finally {
+    release();
+  }
 });

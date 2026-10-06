@@ -225,8 +225,12 @@ export abstract class BaseComponent {
    * dependencies the manager keeps up for this start. It is scoped to this start, not
    * to the run it begins. Declaring `start()` without the parameter is fine.
    *
-   * An abort listener that throws is not reported to the manager: the runtime reports
-   * it as an uncaught exception, as for any `AbortSignal`. Catch inside listeners.
+   * An `'abort'` listener added through `signal.addEventListener()`, or `signal.onabort`,
+   * that throws (or rejects) is reported on the global `'error'` channel as
+   * `lifecycle-manager start abort listener for <name>` instead of becoming an uncaught
+   * exception; the listeners after it still run. Listeners on a signal derived from it
+   * (`AbortSignal.any()`) and ones added through `EventTarget.prototype` directly are
+   * not guarded - catch inside those.
    *
    * @throws Should throw an error if startup fails
    */

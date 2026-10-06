@@ -34,6 +34,7 @@ export interface OwnedAbortController {
   /**
    * Abort the signal with `reason`. Never throws for a listener's error: the runtime
    * reports those itself (as an uncaught exception), not to the caller of `abort()`.
+   * `guardAbortListeners()` turns them into reports for a signal it was given.
    */
   readonly abort: (reason: unknown) => void;
 }

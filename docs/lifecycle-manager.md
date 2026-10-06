@@ -415,14 +415,37 @@ the timeout (late-start cleanup is already arranged) and immediately before
 built after both.
 
 Abort listeners run synchronously inside the manager's timer, as the hook does: keep
-them fast. An error thrown by an abort listener (or `onabort`) does not reach the
-manager. As with any `AbortSignal`, the runtime reports it as an uncaught exception
-(`process` `'uncaughtException'` in Node and Bun, the global `error` event in
-browsers), which terminates a Node or Bun process that has no handler. The manager's
-timeout result, `onStartupAborted()` and late-start cleanup are unaffected, but catch
-inside listeners. The manager aborts through `AbortController` methods captured when
-the library loads, so a later replacement of `AbortController.prototype.abort` does
-not stop it.
+them fast. On an ordinary `AbortSignal`, a listener that throws is reported by the
+runtime as an uncaught exception (`process` `'uncaughtException'` in Node and Bun),
+which terminates a process that has no handler. The signal handed to `start()` guards
+against that: an error thrown by an `'abort'` listener added with
+`signal.addEventListener()` (a function, or an object's `handleEvent`) or by
+`signal.onabort` - or a rejection from an async one - is reported on the global
+`'error'` channel like any other callback failure (see
+[safe-handle-callback](./safe-handle-callback.md)), as
+`Error in a callback lifecycle-manager start abort listener for <name>` with the
+thrown value as `cause`. The listeners after it still run, and the manager's timeout
+result, `onStartupAborted()` and late-start cleanup are unaffected.
+
+The guard is the signal's own `addEventListener`, `removeEventListener` and `onabort`,
+defined on that instance (non-writable, non-configurable) and backed by the
+`EventTarget` methods captured when the library loads, so replacing the prototype
+methods later does not bypass it. They otherwise behave as natively: a duplicate
+listener with the same capture flag is still ignored, `removeEventListener()` with the
+original listener removes it, `once`, `passive` and `signal` options apply, a `null`
+listener is ignored, `onabort` runs at the position where it was first set, and other
+event types are not wrapped. Native consumers such as `fetch(url, { signal })` and
+`AbortSignal.any([signal])` follow it as usual. Two gaps remain the runtime's:
+
+- Listeners on a signal **derived** from it - `AbortSignal.any([signal, ...])`, for
+  instance - belong to that signal and are not guarded.
+- Calling `EventTarget.prototype.addEventListener.call(signal, ...)` (or the
+  prototype's `onabort` setter) registers the raw listener, deliberately bypassing
+  the guard.
+
+Catch inside listeners in those two cases. The manager aborts through
+`AbortController` methods captured when the library loads, so a later replacement of
+`AbortController.prototype.abort` does not stop it.
 
 Late-start cleanup does not depend on the signal: a timed-out `start()` that resolves
 anyway is stopped automatically unless the component implements `onStartupAborted()`
@@ -3453,7 +3476,7 @@ class ServerComponent extends BaseComponent {
 }
 ```
 
-**Cooperative Cancellation during Startup:** The signal passed to `start(signal)` covers the manager giving up on a start (a timeout); pass it to your startup operations (like database connections or fetch requests). It is not aborted when `stop()` or a shutdown arrives while `start()` is still in flight. To also cancel startup from `stop()`, create your own `AbortController` for each startup attempt, store it as an instance property on your component, pass `AbortSignal.any([signal, this.abortController.signal])` to your startup operations, and call `this.abortController.abort()` at the very beginning of your `stop()` method. Because an aborted signal stays aborted permanently, create a fresh controller before each retry or restart. Because `stop()` is protected by the `stopPromise` guard, this abort will only ever be triggered once for each stop attempt. If the underlying operations honor cancellation, awaiting the in-flight `startPromise` immediately after allows shutdown to proceed once they settle. Aborting the signal alone does not guarantee prompt completion. However, for standard single-step operations (like binding an HTTP server via `listen()`), awaiting the in-flight promise to settle and then immediately shutting it down remains the simplest and safest path.
+**Cooperative Cancellation during Startup:** The signal passed to `start(signal)` covers the manager giving up on a start (a timeout); pass it to your startup operations (like database connections or fetch requests). It is not aborted when `stop()` or a shutdown arrives while `start()` is still in flight. To also cancel startup from `stop()`, create your own `AbortController` for each startup attempt, store it as an instance property on your component, pass `AbortSignal.any([signal, this.abortController.signal])` to your startup operations (listeners on that derived signal are not guarded like `signal`'s, so catch inside them), and call `this.abortController.abort()` at the very beginning of your `stop()` method. Because an aborted signal stays aborted permanently, create a fresh controller before each retry or restart. Because `stop()` is protected by the `stopPromise` guard, this abort will only ever be triggered once for each stop attempt. If the underlying operations honor cancellation, awaiting the in-flight `startPromise` immediately after allows shutdown to proceed once they settle. Aborting the signal alone does not guarantee prompt completion. However, for standard single-step operations (like binding an HTTP server via `listen()`), awaiting the in-flight promise to settle and then immediately shutting it down remains the simplest and safest path.
 
 If the start signal aborts (or `onStartupAborted()` returns) but `start()` stays
 pending, the manager keeps that component's dependencies protected. Prefer making
