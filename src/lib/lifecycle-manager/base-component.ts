@@ -319,9 +319,9 @@ export abstract class BaseComponent {
    * from the one `stop()` received. The manager aborts it when it no longer needs this
    * call's work while the call is still pending: when `shutdownForceTimeoutMS` passes,
    * with the error the stall result carries as `signal.reason`, just before
-   * `onShutdownForceAborted()`; and when another path stopped the component first and
-   * ended the force phase early - the graceful `stop()` it escalated from completing
-   * late - with an `Error` whose message is
+   * `onShutdownForceAborted()`; and when the graceful `stop()` it escalated from,
+   * still running within the same stop, completes late and ends the force phase early,
+   * with an `Error` whose message is
    * `Force shutdown superseded: component already stopped` as `signal.reason`, without
    * calling `onShutdownForceAborted()`. It is never aborted because the call resolved or
    * threw. Listener errors are reported as

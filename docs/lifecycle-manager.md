@@ -782,8 +782,9 @@ class WorkerComponent extends BaseComponent {
 `stop(signal)` and `onShutdownForce(signal)` each receive an `AbortSignal`, the same
 way `start(signal)` does (see [Startup Abort Signal](#startup-abort-signal)), under the
 same rule: a signal aborts when the manager no longer needs that still-pending call's
-work - at the call's deadline, or when another path already finished the job - and
-never because the call itself resolved, rejected or threw. The signal is the primary
+work - at the call's deadline, or, for `onShutdownForce()`, when the `stop()` it
+escalated from finishes first within the same stop - and never because the call itself
+resolved, rejected or threw. The signal is the primary
 cue; the `onGracefulStopTimeout()` and `onShutdownForceAborted()` hooks remain, for
 instance-level work the signal cannot reach, and stay deadline-only.
 
@@ -801,9 +802,11 @@ instance-level work the signal cannot reach, and stay deadline-only.
   graceful phase's. It is aborted when `shutdownForceTimeoutMS` passes while the call
   is still pending, with the error the stalled result carries as `error` (message
   `Force shutdown timed out`) as `signal.reason`, immediately before
-  `onShutdownForceAborted()`. It is also aborted when another path stops the component
-  first and ends the force phase before its deadline while the call is still pending -
-  the graceful `stop()` it escalated from completing late. The component did stop, so
+  `onShutdownForceAborted()`. It is also aborted when the graceful `stop()` it
+  escalated from - still running, since a promise cannot be cancelled - completes late
+  and ends the force phase before its deadline while the call is still pending. Both
+  calls belong to the one stop holding the component's lock; no other operation can
+  trigger this. The component did stop, so
   the stop answers success, the call's work is no longer needed, and the signal says
   so with an `Error` whose message is
   `Force shutdown superseded: component already stopped` as `signal.reason`. That abort
