@@ -1029,8 +1029,9 @@ export type RegistrationFailureCode =
   | 'target_not_found'
   | 'invalid_position'
   | 'dependency_cycle'
-  // The component still defines a timeout hook the abort signals replaced. The reason
-  // names it and its replacement.
+  // The component defines onStartupAborted(), onGracefulStopTimeout() or
+  // onShutdownForceAborted(), which are not supported. The reason names each one and the
+  // abort signal to use instead.
   | 'invalid_options'
   | 'operation_crashed';
 

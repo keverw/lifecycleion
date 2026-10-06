@@ -295,9 +295,8 @@ export class BaseHTTPClient {
    * Cancel one in-flight request by id.
    *
    * @returns How many requests were cancelled - `1`, or `0` when no request with that id
-   *          was in flight. The tracker has always known this and these wrappers used to
-   *          throw the answer away, so `cancel('typo')` was a silent no-op a caller could
-   *          only detect by calling `listRequests()` first.
+   *          was in flight, so a `cancel('typo')` that matched nothing is visible without
+   *          calling `listRequests()` first.
    */
   public cancel(requestID: string, reason?: string): number {
     return this._tracker.cancel(requestID, reason);

@@ -453,14 +453,6 @@ between steps, and stop when it fires. For work the signal cannot reach directly
 flags, instance-level cleanup - add an `'abort'` listener:
 `signal.addEventListener('abort', () => this.closeAll())`.
 
-A component that still defines one of the removed timeout hooks - `onStartupAborted()`,
-`onGracefulStopTimeout()` or `onShutdownForceAborted()` - is refused at registration
-(`code: 'invalid_options'`, the reason naming the hook and its replacement), rather than
-registered with the hook silently ignored. Move its body into an `'abort'` listener on
-the matching signal, or check `signal.aborted`; where `onStartupAborted()` was there to
-opt out of the manager's late-start cleanup, set
-[`ownsLateStartCleanup: true`](#late-start-cleanup).
-
 ### Startup Abort Signal
 
 `start(signal)` receives a fresh `AbortSignal` for each start attempt. Every signal
@@ -705,9 +697,9 @@ begins between dependency stops, the pass preserves its remaining dependencies.
 That protection lasts for the rest of this pass; after cleanup finishes, call
 shutdown again to stop those dependencies. The pass does not revisit earlier skips.
 Any remaining startup work still makes the result unsuccessful (`cleanup_incomplete`, or
-`shutdown_timeout` if the pass exhausts its budget). Existing late-start cleanup
-behavior remains unchanged, including the component's cleanup responsibility when
-it sets `ownsLateStartCleanup: true`.
+`shutdown_timeout` if the pass exhausts its budget). Late-start cleanup works as it does
+on any other pass, including the component's cleanup responsibility when it sets
+`ownsLateStartCleanup: true`.
 
 ```typescript
 const result = await lifecycle.stopAllComponents();
@@ -1048,7 +1040,7 @@ interface RegisterComponentResult {
 
 - **Single Manager Binding**: A component instance can only be registered with one `LifecycleManager` at a time. Attempting to register a component instance that is already registered (either with the same manager under a different name, or with a different manager instance) will fail with `code: 'duplicate_instance'`.
 - **Unique Name Constraint**: The component name must be unique within a manager instance. Registering a component with a name that is already taken will fail with `code: 'duplicate_name'`. That holds even when a component's own code registers the name while the registration is in progress, for example from `getDependencies()`: registration checks again right before it commits.
-- **Removed Timeout Hooks**: A component that still defines a timeout hook the abort signals replaced - as its own property or an inherited one - is refused with `code: 'invalid_options'` and a reason naming the hook and its replacement (see [Abort Signals at a Glance](#abort-signals-at-a-glance)). It is checked by both `registerComponent()` and `insertComponentAt()`.
+- **Unsupported Timeout Hooks**: A component that defines `onStartupAborted()`, `onGracefulStopTimeout()` or `onShutdownForceAborted()` - as its own property or an inherited one, including behind a getter - is refused with `code: 'invalid_options'` and a reason naming each such hook and the abort signal to use instead (see [Abort Signals at a Glance](#abort-signals-at-a-glance)); a component that cleans up its own late start sets [`ownsLateStartCleanup: true`](#late-start-cleanup). It is checked by both `registerComponent()` and `insertComponentAt()`.
 - **Bulk Operation Guard**: Registration/insertion is blocked while the manager is shutting down (`isShuttingDown = true`), failing with `code: 'shutdown_in_progress'`. During startup (`isStarting = true`), registration/insertion is only blocked when the new component is a required dependency of an already-registered component, failing with `code: 'startup_in_progress'`.
 
 **Example:**
@@ -1285,8 +1277,8 @@ can correct it and retry. Graceful stop also validates its force timeout before 
 Individual restart returns pre-stop refusals directly, including `component_not_found`,
 `component_not_running`, `component_stalled`, `component_already_starting`,
 `component_already_stopping`, `has_running_dependents`, and `invalid_options`.
-Callers that previously handled only `restart_stop_failed` must handle these codes too.
-`restart_stop_failed` applies once the restart has claimed a stop attempt.
+`restart_stop_failed` applies only once the restart has claimed a stop attempt, so
+callers need to handle these refusal codes alongside it.
 
 Availability refusals take precedence over options that would never be used: an active
 bulk startup returns `already_in_progress` without reading new options, and messages
@@ -1295,16 +1287,15 @@ to missing, unavailable, or handlerless components retain `not_found`, `stopped`
 any recipients. A message that can be dispatched validates its budget before emitting
 `message-sent` or invoking the handler.
 
-Zero retains its documented disabled meaning where supported. BaseComponent graceful
-and force timeouts still enforce their 1,000ms and 500ms minimums after validation.
+Zero means disabled wherever an option documents it. BaseComponent graceful and force
+timeouts enforce their 1,000ms and 500ms minimums after validation.
 The warning phase is the exception for negatives: any negative duration skips
 the warning phase entirely. HTTP request timeouts have their own documented
-disable sentinels; logger/sink zero budgets expire immediately. These meanings are
-preserved even though all modules share numeric validation.
+disable sentinels; logger/sink zero budgets expire immediately. All modules share the
+same numeric validation; these per-option meanings apply on top of it.
 
 Validate environment-derived values before passing them in, or omit an unset option:
-`Number(undefined)` is `NaN` and is now rejected rather than selecting a default or a
-multi-week wait.
+`Number(undefined)` is `NaN`, which is rejected as a configuration error.
 
 **1. Global Timeout (Bulk Operation)**
 
@@ -2845,8 +2836,10 @@ onShutdownForce?(signal: AbortSignal): Promise<void> | void;
 ```
 
 The signals are the only timeout notifications: there are no separate timeout hooks
-(see [Abort Signals at a Glance](#abort-signals-at-a-glance) for migrating from the
-removed ones).
+(see [Abort Signals at a Glance](#abort-signals-at-a-glance)). A component that defines
+`onStartupAborted()`, `onGracefulStopTimeout()` or `onShutdownForceAborted()` is refused
+at registration with `code: 'invalid_options'` (see
+[`registerComponent()`](#registercomponentcomponent-options)).
 
 **Shutdown contract:** `stop()` should always eventually settle (resolve or reject) on every path. If you implement `onShutdownForce()`, it should also eventually settle. In many components, `onShutdownForce()` should not start a completely separate shutdown flow. Instead, it should help the in-flight `stop()` finish or await the same underlying stop work.
 
@@ -3081,10 +3074,10 @@ Three **synchronous control events** can overtake queued notifications:
   A synchronous `logger.exit()` from this listener can proceed without waiting for a
   blocked shutdown pass. The event cannot run if the force callback exits the process.
 
-**Timing compatibility:** state notification listeners now see completed bookkeeping.
-Code relying on intermediate state must adapt. There is no global FIFO across state
-notifications and control events, and synchronous control guards do not extend past an
-async listener's `await`.
+**Timing:** state notification listeners see completed bookkeeping, not the
+intermediate state of a transition still in progress. There is no global FIFO across
+state notifications and control events, and synchronous control guards do not extend
+past an async listener's `await`.
 
 ### Subscribing to Events
 
@@ -3376,7 +3369,7 @@ type RegistrationFailureCode =
   | 'target_not_found'
   | 'invalid_position'
   | 'dependency_cycle'
-  | 'invalid_options' // The component still defines a removed timeout hook
+  | 'invalid_options' // The component defines onStartupAborted(), onGracefulStopTimeout() or onShutdownForceAborted(), which are not supported; use the abort signals
   | 'operation_crashed';
 
 // Unregister failure codes
