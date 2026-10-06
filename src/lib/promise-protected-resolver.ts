@@ -1,5 +1,8 @@
 import { promiseConstructorIntrinsic } from './internal/intrinsics';
-import { safeHandleCallback } from './safe-handle-callback';
+import {
+  reportCallbackError,
+  safeHandleCallback,
+} from './safe-handle-callback';
 
 interface PromiseProtectedResolverOptions {
   beforeResolveOrReject?: (
@@ -50,10 +53,21 @@ export class PromiseProtectedResolver<T> {
     action: 'resolve' | 'reject',
     valueOrReason: unknown,
   ): void {
-    if (this.options.beforeResolveOrReject) {
+    let callback: PromiseProtectedResolverOptions['beforeResolveOrReject'];
+
+    try {
+      callback = this.options.beforeResolveOrReject;
+    } catch (error) {
+      // The resolver is already claimed. Report a broken options getter without
+      // leaving its promise pending or allowing a later call to settle it first.
+      reportCallbackError('beforeResolveOrReject', error);
+      return;
+    }
+
+    if (callback) {
       safeHandleCallback(
         'beforeResolveOrReject',
-        this.options.beforeResolveOrReject,
+        callback,
         action,
         valueOrReason,
       );
