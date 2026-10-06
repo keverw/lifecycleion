@@ -605,7 +605,9 @@ export class LifecycleManager
   // Set once a logger exit that ends the process has been told to proceed. The logger
   // still closes its sinks before calling `process.exit()`, and nothing may start in that
   // window: it would be killed by the exit without a graceful stop. Never cleared - the
-  // process is ending. See `proceedWithLoggerExit()`.
+  // process is ending. That holds even if `process.exit` is removed or replaced after
+  // this is set and the logger ends the exit as simulated: the app asked to exit, so
+  // staying down is the safer failure than restarting. See `proceedWithLoggerExit()`.
   private isProcessExitCommitted = false;
   // Held while a forced logger exit logs that it is exiting, so a sink that exits from
   // that line waits instead of re-entering the forced branch without bound.
