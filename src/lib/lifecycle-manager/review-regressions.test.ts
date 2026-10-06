@@ -382,20 +382,18 @@ describe('LifecycleManager - review regressions', () => {
     expect(manager.isComponentRunning('a')).toBe(false);
   });
 
-  test('a stop released by its own timeout hook succeeds rather than stalling', async () => {
+  test('a stop released by its own abort listener succeeds rather than stalling', async () => {
     const { logger, manager } = setup();
     const stopGate = deferred();
     const a = new Plain(logger, 'a');
-    a.stop = async (): Promise<void> => {
+    a.stop = async (signal?: AbortSignal): Promise<void> => {
+      signal?.addEventListener('abort', () => {
+        stopGate.resolve();
+      });
       await stopGate.promise;
     };
     (a as unknown as { onShutdownForce: undefined }).onShutdownForce =
       undefined;
-    (
-      a as unknown as { onGracefulStopTimeout: () => void }
-    ).onGracefulStopTimeout = (): void => {
-      stopGate.resolve();
-    };
     await manager.registerComponent(a);
     await manager.startComponent('a');
 
@@ -1232,16 +1230,14 @@ describe('LifecycleManager - review regressions', () => {
     const { logger, manager } = setup();
     const x = new Plain(logger, 'x');
     const stopGate = deferred();
-    x.stop = async (): Promise<void> => {
+    x.stop = async (signal?: AbortSignal): Promise<void> => {
+      signal?.addEventListener('abort', () => {
+        stopGate.resolve();
+      });
       await stopGate.promise;
     };
     (x as unknown as { onShutdownForce: undefined }).onShutdownForce =
       undefined;
-    (
-      x as unknown as { onGracefulStopTimeout: () => void }
-    ).onGracefulStopTimeout = (): void => {
-      stopGate.resolve();
-    };
     Object.assign(x, { shutdownGracefulTimeoutMS: 10 });
     const a = new Plain(logger, 'a');
     let aStopCalls = 0;
@@ -1261,17 +1257,15 @@ describe('LifecycleManager - review regressions', () => {
     expect(manager.getComponentStatus('x')?.state).toBe('stopped');
   });
 
-  test('a graceful stop released by its timeout hook skips a hanging force phase', async () => {
+  test('a graceful stop released by its abort listener skips a hanging force phase', async () => {
     const { logger, manager } = setup();
     const stopGate = deferred();
     const a = new Plain(logger, 'a');
-    a.stop = async (): Promise<void> => {
+    a.stop = async (signal?: AbortSignal): Promise<void> => {
+      signal?.addEventListener('abort', () => {
+        stopGate.resolve();
+      });
       await stopGate.promise;
-    };
-    (
-      a as unknown as { onGracefulStopTimeout: () => void }
-    ).onGracefulStopTimeout = (): void => {
-      stopGate.resolve();
     };
     (a as unknown as { onShutdownForce: () => Promise<void> }).onShutdownForce =
       (): Promise<void> => new Promise<void>(() => {});
@@ -1321,23 +1315,21 @@ describe('LifecycleManager - review regressions', () => {
     const a = new Plain(logger, 'a');
     let stopCalls = 0;
     let release: (() => void) | null = null;
-    a.stop = async (): Promise<void> => {
+    a.stop = async (signal?: AbortSignal): Promise<void> => {
       stopCalls++;
+      signal?.addEventListener('abort', () => {
+        release?.();
+      });
       await new Promise<void>((resolve) => {
         release = resolve;
       });
-    };
-    (
-      a as unknown as { onGracefulStopTimeout: () => void }
-    ).onGracefulStopTimeout = (): void => {
-      release?.();
     };
     (a as unknown as { onShutdownForce: undefined }).onShutdownForce =
       undefined;
     await manager.registerComponent(a);
     await manager.startComponent('a');
 
-    // Settled by its own timeout hook: succeeds, leaving nothing behind.
+    // Settled by its own abort listener: succeeds, leaving nothing behind.
     expect((await manager.stopComponent('a', { timeout: 10 })).success).toBe(
       true,
     );
@@ -1358,26 +1350,27 @@ describe('LifecycleManager - review regressions', () => {
     expect(manager.getComponentStatus('a')?.state).toBe('stalled');
   });
 
-  test('a force retry released by its own abort hook stops rather than staying stalled', async () => {
+  test('a force retry released by its own abort listener stops rather than staying stalled', async () => {
     const { logger, manager } = setup();
     const a = new Plain(logger, 'a');
     a.stop = (): Promise<void> => Promise.reject(new Error('stop failed'));
     let forceCalls = 0;
     let releaseForce: (() => void) | null = null;
-    (a as unknown as { onShutdownForce: () => Promise<void> }).onShutdownForce =
-      async (): Promise<void> => {
-        forceCalls++;
-        if (forceCalls === 1) {
-          throw new Error('force failed');
-        }
-        await new Promise<void>((resolve) => {
-          releaseForce = resolve;
-        });
-      };
     (
-      a as unknown as { onShutdownForceAborted: () => void }
-    ).onShutdownForceAborted = (): void => {
-      releaseForce?.();
+      a as unknown as {
+        onShutdownForce: (signal: AbortSignal) => Promise<void>;
+      }
+    ).onShutdownForce = async (signal: AbortSignal): Promise<void> => {
+      forceCalls++;
+      if (forceCalls === 1) {
+        throw new Error('force failed');
+      }
+      signal.addEventListener('abort', () => {
+        releaseForce?.();
+      });
+      await new Promise<void>((resolve) => {
+        releaseForce = resolve;
+      });
     };
     Object.assign(a, { shutdownForceTimeoutMS: 10 });
     await manager.registerComponent(a);
@@ -2212,18 +2205,17 @@ describe('LifecycleManager - review regressions', () => {
     const { logger, manager } = setup();
     const a = new Plain(logger, 'a');
     let release: (() => void) | null = null;
-    a.stop = (): Promise<void> =>
-      new Promise<void>((resolve) => {
+    a.stop = (signal?: AbortSignal): Promise<void> => {
+      // Released on a later timer than the timeout's own rejection.
+      signal?.addEventListener('abort', () => {
+        setTimeout(() => release?.(), 1);
+      });
+      return new Promise<void>((resolve) => {
         release = resolve;
       });
+    };
     (a as unknown as { onShutdownForce: undefined }).onShutdownForce =
       undefined;
-    // Released on a later timer than the timeout's own rejection.
-    (
-      a as unknown as { onGracefulStopTimeout: () => void }
-    ).onGracefulStopTimeout = (): void => {
-      setTimeout(() => release?.(), 1);
-    };
     await manager.registerComponent(a);
     await manager.startComponent('a');
 
@@ -4833,7 +4825,7 @@ describe('LifecycleManager - round two review regressions', () => {
     await logger.close();
   });
 
-  test('a forced start that reports an unexpected stop and times out with an abort hook keeps its stall', async () => {
+  test('a forced start that reports an unexpected stop and times out while owning its late cleanup keeps its stall', async () => {
     const { logger, manager } = setup();
     const oldStop = deferred();
     const startGate = deferred();
@@ -4849,10 +4841,9 @@ describe('LifecycleManager - round two review regressions', () => {
     await manager.startComponent('a');
     await manager.stopComponent('a', { timeout: 5 });
 
-    // No late cleanup: an abort hook outside a bulk deadline is the start's own cleanup.
+    // No late cleanup: outside a bulk deadline, the component owns its late start.
     a.start = (): Promise<void> => startGate.promise;
-    (a as unknown as { onStartupAborted: () => void }).onStartupAborted =
-      (): void => {};
+    Object.defineProperty(a, 'ownsLateStartCleanup', { value: true });
     (a as unknown as { startupTimeoutMS: number }).startupTimeoutMS = 30;
     const forced = manager.startComponent('a', { forceStalled: true });
     await sleep(1);

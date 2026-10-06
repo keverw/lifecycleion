@@ -34,17 +34,6 @@ class Records extends BaseComponent {
   }
 }
 
-class RecordsWithHook extends Records {
-  public hookCalls = 0;
-  public signalAbortedInHook: boolean | undefined;
-
-  public onStartupAborted(): void {
-    this.hookCalls++;
-    this.order.push('hook');
-    this.signalAbortedInHook = this.signals.at(-1)?.aborted;
-  }
-}
-
 // Declares `start()` with no parameters, as every component written before the signal
 // existed does. It must still compile and behave exactly as before.
 class IgnoresSignal extends BaseComponent {
@@ -87,9 +76,9 @@ test('start() receives a fresh AbortSignal that is not aborted when it succeeds'
   expect(a.signals[1].aborted).toBe(false);
 });
 
-test('the signal is aborted on a per-component startup timeout, before onStartupAborted(), with the result error as its reason', async () => {
+test('the signal is aborted on a per-component startup timeout, with the result error as its reason', async () => {
   const { logger, manager } = setup();
-  const a = new RecordsWithHook(logger, 'a', 30);
+  const a = new Records(logger, 'a', 30);
   const gate = deferred();
   a.onStart = () => gate.promise;
   await manager.registerComponent(a);
@@ -103,8 +92,7 @@ test('the signal is aborted on a per-component startup timeout, before onStartup
   expect(signal.aborted).toBe(true);
   expect(signal.reason).toBeInstanceOf(ComponentStartTimeoutError);
   expect(signal.reason).toBe(result.error);
-  expect(a.order).toEqual(['abort', 'hook']);
-  expect(a.signalAbortedInHook).toBe(true);
+  expect(a.order).toEqual(['abort']);
   expect(manager.getComponentStatus('a')?.state).toBe('starting-timed-out');
 
   gate.resolve();
@@ -138,7 +126,9 @@ test('a start that honors the signal settles, and the next attempt gets an unabo
 
 test('the signal is aborted when the startAllComponents() deadline abandons the start', async () => {
   const { logger, manager } = setup();
-  const a = new RecordsWithHook(logger, 'a', 10_000);
+  const a = new Records(logger, 'a', 10_000);
+  // Owns its late cleanup, which a bulk deadline overrides.
+  Object.defineProperty(a, 'ownsLateStartCleanup', { value: true });
   const gate = deferred();
   a.onStart = () => gate.promise;
   await manager.registerComponent(a);
@@ -152,9 +142,9 @@ test('the signal is aborted when the startAllComponents() deadline abandons the 
   expect(a.signals).toHaveLength(1);
   expect(a.signals[0].aborted).toBe(true);
   expect(a.signals[0].reason).toBeInstanceOf(ComponentStartTimeoutError);
-  expect(a.order).toEqual(['abort', 'hook']);
+  expect(a.order).toEqual(['abort']);
 
-  // Bulk deadlines still clean up a late success, hook or not.
+  // Bulk deadlines still clean up a late success, whether or not the component owns it.
   gate.resolve();
   await sleep(20);
   expect(a.stops).toBe(1);
@@ -163,9 +153,9 @@ test('the signal is aborted when the startAllComponents() deadline abandons the 
 
 test('the signal is not aborted when start() rejects or throws', async () => {
   const { logger, manager } = setup();
-  const rejects = new RecordsWithHook(logger, 'rejects', 30);
+  const rejects = new Records(logger, 'rejects', 30);
   rejects.onStart = () => Promise.reject(new Error('start failed'));
-  const throws = new RecordsWithHook(logger, 'throws', 30);
+  const throws = new Records(logger, 'throws', 30);
   throws.onStart = () => {
     throw new Error('start threw');
   };
@@ -178,7 +168,6 @@ test('the signal is not aborted when start() rejects or throws', async () => {
   await sleep(60);
   expect(rejects.signals[0].aborted).toBe(false);
   expect(throws.signals[0].aborted).toBe(false);
-  expect(rejects.hookCalls + throws.hookCalls).toBe(0);
 });
 
 test('a component that ignores the signal keeps its timeout and late-cleanup behavior', async () => {
@@ -202,11 +191,11 @@ test('a component that ignores the signal keeps its timeout and late-cleanup beh
   expect(b.stops).toBe(1);
 });
 
-test('a superseded start has its signal aborted at its deadline, without calling the hook on the newer run', async () => {
+test('a superseded start has its signal aborted at its deadline, and the newer run keeps its own', async () => {
   const { logger, manager } = setup();
   const firstGate = deferred();
   let calls = 0;
-  const a = new RecordsWithHook(logger, 'a', 40);
+  const a = new Records(logger, 'a', 40);
   a.onStart = () => {
     calls++;
     if (calls === 1) {
@@ -231,7 +220,6 @@ test('a superseded start has its signal aborted at its deadline, without calling
   expect(a.signals[0].aborted).toBe(true);
   expect(a.signals[0].reason).toBeInstanceOf(ComponentStartTimeoutError);
   expect(a.signals[1].aborted).toBe(false);
-  expect(a.hookCalls).toBe(0);
   expect(manager.isComponentRunning('a')).toBe(true);
 
   firstGate.resolve();
@@ -240,7 +228,7 @@ test('a superseded start has its signal aborted at its deadline, without calling
 
 test('aborting does not consult an AbortController.prototype.abort replaced after import', async () => {
   const { logger, manager } = setup();
-  const a = new RecordsWithHook(logger, 'a', 30);
+  const a = new Records(logger, 'a', 30);
   const gate = deferred();
   a.onStart = () => gate.promise;
   await manager.registerComponent(a);
@@ -267,7 +255,7 @@ test('aborting does not consult an AbortController.prototype.abort replaced afte
   }
 
   expect(a.signals[0].aborted).toBe(true);
-  expect(a.order).toEqual(['abort', 'hook']);
+  expect(a.order).toEqual(['abort']);
   gate.resolve();
   await sleep(10);
 });
@@ -316,8 +304,13 @@ class ThrowsOnAbort extends BaseComponent {
     logger: Logger,
     name: string,
     private readonly attach: (signal: AbortSignal, thrown: Error) => void,
+    doesOwnCleanup = false,
   ) {
-    super(logger, { name, startupTimeoutMS: 30 });
+    super(logger, {
+      name,
+      startupTimeoutMS: 30,
+      ownsLateStartCleanup: doesOwnCleanup,
+    });
     this.thrown = new Error(`${name} listener`);
   }
 
@@ -333,28 +326,22 @@ class ThrowsOnAbort extends BaseComponent {
   }
 }
 
-class ThrowsOnAbortWithHook extends ThrowsOnAbort {
-  public onStartupAborted(): void {
-    this.order.push('hook');
-  }
-}
-
 // A listener error used to be the runtime's: an uncaught exception, fatal to a process
 // with no handler (and to this test, which fails on any uncaught error). It is now
 // reported on the manager's failure channel, and nothing else about the timeout changes.
 test.each(THROWING_LISTENERS)(
-  'a throwing %s is reported, and the timeout result, the hook, and late cleanup are unaffected',
+  'a throwing %s is reported, and the timeout result and late cleanup are unaffected',
   async (_, attach) => {
     const { reports, release } = claimReports();
     try {
       const { logger, manager } = setup();
-      const hooked = new ThrowsOnAbortWithHook(logger, 'hooked', attach);
+      const owner = new ThrowsOnAbort(logger, 'owner', attach, true);
       const plain = new ThrowsOnAbort(logger, 'plain', attach);
-      await manager.registerComponent(hooked);
+      await manager.registerComponent(owner);
       await manager.registerComponent(plain);
 
       const results = await Promise.all([
-        manager.startComponent('hooked'),
+        manager.startComponent('owner'),
         manager.startComponent('plain'),
       ]);
 
@@ -362,9 +349,9 @@ test.each(THROWING_LISTENERS)(
         'component_startup_timeout',
         'component_startup_timeout',
       ]);
-      expect(hooked.order).toEqual(['before', 'after', 'hook']);
+      expect(owner.order).toEqual(['before', 'after']);
       expect(plain.order).toEqual(['before', 'after']);
-      expect(manager.getComponentStatus('hooked')?.state).toBe(
+      expect(manager.getComponentStatus('owner')?.state).toBe(
         'starting-timed-out',
       );
       expect(manager.getComponentStatus('plain')?.state).toBe(
@@ -377,8 +364,8 @@ test.each(THROWING_LISTENERS)(
         ]),
       ).toEqual([
         [
-          'Error in a callback lifecycle-manager start abort listener for hooked',
-          hooked.thrown,
+          'Error in a callback lifecycle-manager start abort listener for owner',
+          owner.thrown,
         ],
         [
           'Error in a callback lifecycle-manager start abort listener for plain',
@@ -386,18 +373,19 @@ test.each(THROWING_LISTENERS)(
         ],
       ]);
 
-      // A late success is still cleaned up without the hook, and left alone with it.
-      hooked.late.resolve();
+      // A late success is still cleaned up by the manager, and left alone for a
+      // component that owns its late cleanup.
+      owner.late.resolve();
       plain.late.resolve();
       await sleep(30);
       expect(plain.stops).toBe(1);
-      expect(hooked.stops).toBe(0);
+      expect(owner.stops).toBe(0);
 
-      hooked.late = deferred();
-      hooked.late.resolve();
-      expect((await manager.startComponent('hooked')).success).toBe(true);
+      owner.late = deferred();
+      owner.late.resolve();
+      expect((await manager.startComponent('owner')).success).toBe(true);
       expect((await manager.stopAllComponents()).success).toBe(true);
-      expect(hooked.stops).toBe(1);
+      expect(owner.stops).toBe(1);
     } finally {
       release();
     }
@@ -415,7 +403,7 @@ test('the start signal guards its listeners even after EventTarget.prototype.add
   }
   try {
     const { logger, manager } = setup();
-    const a = new ThrowsOnAbortWithHook(logger, 'a', (signal, thrown) => {
+    const a = new ThrowsOnAbort(logger, 'a', (signal, thrown) => {
       signal.addEventListener('abort', () => {
         throw thrown;
       });
@@ -440,7 +428,7 @@ test('the start signal guards its listeners even after EventTarget.prototype.add
     }
 
     expect(result.code).toBe('component_startup_timeout');
-    expect(a.order).toEqual(['before', 'after', 'hook']);
+    expect(a.order).toEqual(['before', 'after']);
     expect(reports.map((report) => (report as Error).cause)).toEqual([
       a.thrown,
     ]);

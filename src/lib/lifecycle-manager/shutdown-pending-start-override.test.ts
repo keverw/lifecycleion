@@ -407,7 +407,7 @@ for (const isForceImmediate of [false, true]) {
 }
 
 for (const allowStopWithPendingStarts of [false, true]) {
-  test(`hook-aborted pending start honors dependency override: ${allowStopWithPendingStarts}`, async () => {
+  test(`self-cleaning timed-out pending start honors dependency override: ${allowStopWithPendingStarts}`, async () => {
     const { logger, manager } = setup();
     const database = new Plain(logger, 'database');
     const worker = new Plain(logger, 'worker', ['database']);
@@ -419,15 +419,18 @@ for (const allowStopWithPendingStarts of [false, true]) {
       databaseStops++;
       return Promise.resolve();
     };
-    worker.start = () => start.promise;
+    worker.start = (signal: AbortSignal) => {
+      signal.addEventListener('abort', () => {
+        aborts++;
+      });
+      return start.promise;
+    };
     worker.stop = () => {
       workerStops++;
       return Promise.resolve();
     };
-    worker.onStartupAborted = () => {
-      aborts++;
-    };
     Object.defineProperty(worker, 'startupTimeoutMS', { value: 5 });
+    Object.defineProperty(worker, 'ownsLateStartCleanup', { value: true });
     await manager.registerComponent(database);
     await manager.registerComponent(worker);
     await manager.startComponent('database');
@@ -446,7 +449,7 @@ for (const allowStopWithPendingStarts of [false, true]) {
       expect(manager.getComponentStatus('database')?.state).toBe(
         allowStopWithPendingStarts ? 'stopped' : 'running',
       );
-      // An abort hook owns the late cleanup; the manager must not add a stop.
+      // The component owns its late cleanup; the manager must not add a stop.
       start.resolve();
       await new Promise((resolve) => setTimeout(resolve, 0));
       expect((await manager.stopAllComponents()).success).toBe(true);

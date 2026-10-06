@@ -31,6 +31,17 @@ export interface ComponentOptions {
 
   /** Time to wait for onReload/onInfo/onDebug in milliseconds (default: 5000, 0 = disabled) */
   signalTimeoutMS?: number | null;
+
+  /**
+   * Whether the component cleans up after its own timed-out start (default: false).
+   * When `start()` passes its own `startupTimeoutMS` and then completes anyway, the
+   * manager calls `stop()` on it automatically - unless this is `true`, in which case
+   * the component is trusted to undo that late start itself (typically by checking
+   * `signal.aborted` once `start()`'s work finishes). A start that a
+   * `startAllComponents()` / `restartAllComponents()` deadline abandons is cleaned up
+   * by the manager regardless. Must be a boolean.
+   */
+  ownsLateStartCleanup?: boolean | null;
 }
 
 /**
@@ -434,9 +445,9 @@ export interface StopAllOptions {
   /**
    * Abort the start signal of each start still in flight as the pass begins, before its
    * warning phase, with a `StartupInterruptedByShutdownError` as `signal.reason`
-   * (default: false). A cue to give up, not abandonment: `onStartupAborted()` is not
-   * called, nothing is marked timed out, and the pass still waits for those starts and
-   * keeps their dependencies up until they settle (unless allowStopWithPendingStarts
+   * (default: false). A cue to give up, not abandonment: nothing is marked timed out,
+   * and the pass still waits for those starts and keeps their dependencies up until
+   * they settle (unless allowStopWithPendingStarts
    * releases them; those starts are aborted too). Skipped: a start already aborted by
    * its own timeout, and a start that requested this shutdown itself. A start that then
    * rejects or throws with a failure linked to the abort - `signal.reason`, an
@@ -1018,6 +1029,9 @@ export type RegistrationFailureCode =
   | 'target_not_found'
   | 'invalid_position'
   | 'dependency_cycle'
+  // The component still defines a timeout hook the abort signals replaced. The reason
+  // names it and its replacement.
+  | 'invalid_options'
   | 'operation_crashed';
 
 /**

@@ -20,16 +20,19 @@ for (const phase of ['graceful', 'force'] as const) {
         const settle = () =>
           outcome === 'resolve' ? pending.resolve() : pending.reject(failure);
         const component = new Plain(logger, 'a');
-        component.stop = () => pending.promise;
+        // In the abort window, the phase's own abort listener settles it.
+        const pendingCall = (signal?: AbortSignal): Promise<void> => {
+          if (window === 'abort') {
+            signal?.addEventListener('abort', settle);
+          }
+          return pending.promise;
+        };
+        component.stop =
+          phase === 'graceful' ? pendingCall : () => pending.promise;
         Object.assign(component, {
           shutdownGracefulTimeoutMS: window === 'before' ? 100 : 5,
           shutdownForceTimeoutMS: window === 'before' ? 100 : 5,
-          onShutdownForce:
-            phase === 'force' ? () => pending.promise : undefined,
-          [phase === 'graceful'
-            ? 'onGracefulStopTimeout'
-            : 'onShutdownForceAborted']:
-            window === 'abort' ? settle : undefined,
+          onShutdownForce: phase === 'force' ? pendingCall : undefined,
         });
         let stopped = 0;
         let stalled = 0;

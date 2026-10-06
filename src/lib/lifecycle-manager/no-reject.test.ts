@@ -1378,31 +1378,6 @@ describe('LifecycleManager - public methods never reject', () => {
     );
   });
 
-  test('a throwing onStartupAborted getter cannot escape the startup timer', async () => {
-    const { logger, manager } = setup();
-    const component = new Plain(logger, 'a');
-    await manager.registerComponent(component);
-
-    Object.defineProperty(component, 'onStartupAborted', {
-      get: (): never => {
-        throw new Error('getter exploded');
-      },
-    });
-
-    const { release } = claimReports();
-    let result;
-
-    try {
-      result = await manager.startComponent('a');
-    } finally {
-      release();
-    }
-
-    // Read before the start, so it fails there - not later, inside the timer.
-    expect(result.code).toBe('operation_crashed');
-    expect(manager.getComponentStatus('a')?.state).toBe('registered');
-  });
-
   test('a throwing broadcast option fails the broadcast before it announces itself', async () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new Plain(logger, 'a'));
@@ -1466,31 +1441,6 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(manager.isComponentRunning('a')).toBe(true);
     expect(result.success).toBe(false);
     expect(result.reason).toContain('Failed to stop: a');
-  });
-
-  test('a throwing onGracefulStopTimeout getter fails the stop up front, not in the timer', async () => {
-    const { logger, manager } = setup();
-    const component = new Plain(logger, 'a');
-    await manager.registerComponent(component);
-    await manager.startComponent('a');
-
-    Object.defineProperty(component, 'onGracefulStopTimeout', {
-      get: (): never => {
-        throw new Error('getter exploded');
-      },
-    });
-
-    const { release } = claimReports();
-    let result;
-
-    try {
-      result = await manager.stopComponent('a');
-    } finally {
-      release();
-    }
-
-    expect(result.code).toBe('operation_crashed');
-    expect(manager.getComponentStatus('a')?.state).toBe('running');
   });
 
   test('a signal:shutdown listener that stops everything keeps the signal as the cycle start', async () => {

@@ -1,8 +1,8 @@
 import { expect, test } from 'bun:test';
 import { deferred, Plain, setup } from './test-helpers';
 
-for (const hasAbortHook of [false, true]) {
-  test(`restart refuses before stopping anything while a timed-out start is unresolved (abort hook: ${hasAbortHook})`, async () => {
+for (const doesOwnCleanup of [false, true]) {
+  test(`restart refuses before stopping anything while a timed-out start is unresolved (ownsLateStartCleanup: ${doesOwnCleanup})`, async () => {
     const { logger, manager } = setup();
     const database = new Plain(logger, 'database');
     const unrelated = new Plain(logger, 'unrelated');
@@ -24,9 +24,9 @@ for (const hasAbortHook of [false, true]) {
     await manager.startComponent('database');
     await manager.startComponent('unrelated');
     worker.start = () => gate.promise;
-    if (hasAbortHook) {
-      worker.onStartupAborted = () => {};
-    }
+    Object.defineProperty(worker, 'ownsLateStartCleanup', {
+      value: doesOwnCleanup,
+    });
     Object.defineProperty(worker, 'startupTimeoutMS', { value: 10 });
     expect((await manager.startComponent('worker')).code).toBe(
       'component_startup_timeout',

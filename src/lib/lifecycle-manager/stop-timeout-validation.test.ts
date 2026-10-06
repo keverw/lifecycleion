@@ -128,20 +128,6 @@ test('force-immediate stop does not consult graceful configuration', async () =>
   expect(component.forceCalls).toBe(1);
 });
 
-test('a successful graceful stop does not read the force abort hook', async () => {
-  const { logger, manager } = setup();
-  const component = new Plain(logger, 'a');
-  Object.defineProperty(component, 'onShutdownForceAborted', {
-    get: (): never => {
-      throw new Error('unused force abort hook');
-    },
-  });
-  await manager.registerComponent(component);
-  await manager.startComponent('a');
-  expect((await manager.stopComponent('a')).success).toBe(true);
-  expect(component.forceCalls).toBe(0);
-});
-
 test('a stalled force retry does not reread graceful configuration', async () => {
   const { logger, manager } = setup();
   const component = new Plain(logger, 'a');

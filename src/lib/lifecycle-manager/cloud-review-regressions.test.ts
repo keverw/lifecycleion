@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from 'bun:test';
 import { Logger } from '../logger';
 import { LifecycleManager } from './lifecycle-manager';
+import { sleep } from '../sleep';
 import { claimReports, deferred, Plain, setup } from './test-helpers';
 
 class Reporter extends Plain {
@@ -77,12 +78,10 @@ test('an obsolete start deadline never aborts the newer run', async () => {
   const { logger, manager } = setup();
   const component = new Reporter(logger, 'x');
   const oldStart = deferred();
-  let calls = 0;
-  let abortCalls = 0;
-  component.start = () =>
-    ++calls === 1 ? oldStart.promise : Promise.resolve();
-  component.onStartupAborted = () => {
-    abortCalls++;
+  const signals: AbortSignal[] = [];
+  component.start = (signal: AbortSignal) => {
+    signals.push(signal);
+    return signals.length === 1 ? oldStart.promise : Promise.resolve();
   };
   await manager.registerComponent(component);
   Object.defineProperty(component, 'startupTimeoutMS', { value: 10 });
@@ -90,7 +89,10 @@ test('an obsolete start deadline never aborts the newer run', async () => {
   component.reportStopped();
   expect((await manager.startComponent('x')).success).toBe(true);
   await first;
-  expect(abortCalls).toBe(0);
+  await sleep(20);
+  // The old attempt's own signal aborts at its deadline; the newer run's never does.
+  expect(signals[0].aborted).toBe(true);
+  expect(signals[1].aborted).toBe(false);
   expect(manager.getComponentStatus('x')?.state).toBe('running');
   oldStart.resolve();
   await manager.stopAllComponents();
@@ -357,11 +359,10 @@ test('a bulk deadline callback cannot abort the replacement start it triggers', 
   });
   const component = new Reporter(logger, 'x');
   const gate = deferred();
-  let starts = 0;
-  let aborts = 0;
-  component.start = () => (++starts === 1 ? gate.promise : Promise.resolve());
-  component.onStartupAborted = () => {
-    aborts++;
+  const signals: AbortSignal[] = [];
+  component.start = (signal: AbortSignal) => {
+    signals.push(signal);
+    return signals.length === 1 ? gate.promise : Promise.resolve();
   };
   await manager.registerComponent(component);
   let replacement: ReturnType<typeof manager.startComponent> | undefined;
@@ -377,7 +378,9 @@ test('a bulk deadline callback cannot abort the replacement start it triggers', 
   try {
     await manager.startAllComponents({ timeoutMS: 10 });
     expect((await replacement)?.success).toBe(true);
-    expect(aborts).toBe(0);
+    expect(signals).toHaveLength(2);
+    expect(signals[1].aborted).toBe(false);
+    expect(manager.getComponentStatus('x')?.state).toBe('running');
   } finally {
     gate.resolve();
     await manager.stopAllComponents();

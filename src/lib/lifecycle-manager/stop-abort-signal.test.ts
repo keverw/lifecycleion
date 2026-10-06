@@ -17,7 +17,7 @@ import { claimReports, deferred, setup } from './test-helpers';
 type Hook = (signal: AbortSignal) => void | Promise<void>;
 
 // Records the signal each `stop()` and `onShutdownForce()` receives, and the order in
-// which their aborts and timeout hooks happen.
+// which their aborts happen.
 class Records extends BaseComponent {
   public readonly stopSignals: AbortSignal[] = [];
   public readonly forceSignals: AbortSignal[] = [];
@@ -59,21 +59,6 @@ class Records extends BaseComponent {
   }
 }
 
-class RecordsWithHooks extends Records {
-  public stopSignalAbortedInHook: boolean | undefined;
-  public forceSignalAbortedInHook: boolean | undefined;
-
-  public onGracefulStopTimeout(): void {
-    this.order.push('graceful-hook');
-    this.stopSignalAbortedInHook = this.stopSignals.at(-1)?.aborted;
-  }
-
-  public onShutdownForceAborted(): void {
-    this.order.push('force-hook');
-    this.forceSignalAbortedInHook = this.forceSignals.at(-1)?.aborted;
-  }
-}
-
 // No force handler at all, so a failed graceful phase stalls with its own error.
 class GracefulOnly extends BaseComponent {
   public readonly stopSignals: AbortSignal[] = [];
@@ -94,10 +79,6 @@ class GracefulOnly extends BaseComponent {
     });
     return this.onStop(signal);
   }
-
-  public onGracefulStopTimeout(): void {
-    this.order.push('graceful-hook');
-  }
 }
 
 // Declares `stop()` and `onShutdownForce()` without parameters, as every component
@@ -107,8 +88,6 @@ class IgnoresSignals extends BaseComponent {
   public readonly forceGate = deferred();
   public stops = 0;
   public forces = 0;
-  public gracefulHooks = 0;
-  public forceHooks = 0;
 
   constructor(logger: Logger, name: string) {
     super(logger, {
@@ -128,14 +107,6 @@ class IgnoresSignals extends BaseComponent {
   public async onShutdownForce(): Promise<void> {
     this.forces++;
     await this.forceGate.promise;
-  }
-
-  public onGracefulStopTimeout(): void {
-    this.gracefulHooks++;
-  }
-
-  public onShutdownForceAborted(): void {
-    this.forceHooks++;
   }
 }
 
@@ -173,12 +144,12 @@ test('the stop signal is not aborted when stop() rejects or throws, and the forc
   const { logger, manager } = setup();
   const rejects = await started(
     manager,
-    new RecordsWithHooks(logger, 'rejects', { graceful: 30, force: 30 }),
+    new Records(logger, 'rejects', { graceful: 30, force: 30 }),
   );
   rejects.onStop = () => Promise.reject(new Error('stop failed'));
   const throws = await started(
     manager,
-    new RecordsWithHooks(logger, 'throws', { graceful: 30, force: 30 }),
+    new Records(logger, 'throws', { graceful: 30, force: 30 }),
   );
   throws.onStop = () => {
     throw new Error('stop threw');
@@ -203,12 +174,12 @@ test('the force signal is not aborted when onShutdownForce() rejects or throws',
   const { logger, manager } = setup();
   const rejects = await started(
     manager,
-    new RecordsWithHooks(logger, 'rejects', { force: 30 }),
+    new Records(logger, 'rejects', { force: 30 }),
   );
   rejects.onForce = () => Promise.reject(new Error('force failed'));
   const throws = await started(
     manager,
-    new RecordsWithHooks(logger, 'throws', { force: 30 }),
+    new Records(logger, 'throws', { force: 30 }),
   );
   throws.onForce = () => {
     throw new Error('force threw');
@@ -228,7 +199,7 @@ test('the force signal is not aborted when onShutdownForce() rejects or throws',
   expect(throws.order).toEqual([]);
 });
 
-test('the stop signal is aborted at the graceful deadline, before onGracefulStopTimeout(), with the stop timeout error as its reason', async () => {
+test('the stop signal is aborted at the graceful deadline, with the stop timeout error as its reason', async () => {
   const { logger, manager } = setup();
   const a = await started(manager, new GracefulOnly(logger, 'a', 30));
   const gate = deferred();
@@ -244,7 +215,7 @@ test('the stop signal is aborted at the graceful deadline, before onGracefulStop
   expect(signal.aborted).toBe(true);
   expect(signal.reason).toBeInstanceOf(ComponentStopTimeoutError);
   expect(signal.reason).toBe(result.error);
-  expect(a.order).toEqual(['stop-abort', 'graceful-hook']);
+  expect(a.order).toEqual(['stop-abort']);
 
   // A stop that settles late still clears the stall, as before.
   gate.resolve();
@@ -271,11 +242,11 @@ test('a stop that honors its signal settles, and the stall is cleared by the lat
   expect(manager.getComponentStatus('a')?.state).toBe('stopped');
 });
 
-test('the force signal is aborted at the force deadline, before onShutdownForceAborted(), with the force timeout error as its reason', async () => {
+test('the force signal is aborted at the force deadline, with the force timeout error as its reason', async () => {
   const { logger, manager } = setup();
   const a = await started(
     manager,
-    new RecordsWithHooks(logger, 'a', { graceful: 30, force: 30 }),
+    new Records(logger, 'a', { graceful: 30, force: 30 }),
   );
   const stopGate = deferred();
   const forceGate = deferred();
@@ -302,7 +273,6 @@ test('the force signal is aborted at the force deadline, before onShutdownForceA
   expect(a.stopSignals[0].aborted).toBe(true);
   expect(a.stopSignals[0].reason).toBeInstanceOf(ComponentStopTimeoutError);
   expect(timeouts).toEqual([a.stopSignals[0].reason]);
-  expect(a.stopSignalAbortedInHook).toBe(true);
 
   // The force signal at the force deadline, with the error the result carries.
   expect(a.forceSignals[0].aborted).toBe(true);
@@ -320,14 +290,8 @@ test('the force signal is aborted at the force deadline, before onShutdownForceA
   );
   // The stall record keeps the same instance.
   expect(manager.getComponentStatus('a')?.stallInfo?.error).toBe(forceReason);
-  expect(a.forceSignalAbortedInHook).toBe(true);
 
-  expect(a.order).toEqual([
-    'stop-abort',
-    'graceful-hook',
-    'force-abort',
-    'force-hook',
-  ]);
+  expect(a.order).toEqual(['stop-abort', 'force-abort']);
   expect(manager.getComponentStatus('a')?.state).toBe('stalled');
 
   forceGate.resolve();
@@ -338,10 +302,7 @@ test('the force signal is aborted at the force deadline, before onShutdownForceA
 
 test('a forceImmediate stop hands onShutdownForce() its own signal, aborted at its deadline', async () => {
   const { logger, manager } = setup();
-  const a = await started(
-    manager,
-    new RecordsWithHooks(logger, 'a', { force: 30 }),
-  );
+  const a = await started(manager, new Records(logger, 'a', { force: 30 }));
   const forceGate = deferred();
   a.onForce = () => forceGate.promise;
 
@@ -352,7 +313,7 @@ test('a forceImmediate stop hands onShutdownForce() its own signal, aborted at i
   expect(a.forceSignals).toHaveLength(1);
   expect(a.forceSignals[0].aborted).toBe(true);
   expect(a.forceSignals[0].reason).toBe(result.error);
-  expect(a.order).toEqual(['force-abort', 'force-hook']);
+  expect(a.order).toEqual(['force-abort']);
   forceGate.resolve();
   await sleep(10);
 });
@@ -361,7 +322,7 @@ test('a stalled retry gets a fresh force signal, aborted only at its own deadlin
   const { logger, manager } = setup();
   const a = await started(
     manager,
-    new RecordsWithHooks(logger, 'a', { graceful: 20, force: 20 }),
+    new Records(logger, 'a', { graceful: 20, force: 20 }),
   );
   const stopGate = deferred();
   const firstForce = deferred();
@@ -394,10 +355,7 @@ test('a stalled retry gets a fresh force signal, aborted only at its own deadlin
 
 test('a stalled retry that times out again aborts its own fresh force signal', async () => {
   const { logger, manager } = setup();
-  const a = await started(
-    manager,
-    new RecordsWithHooks(logger, 'a', { force: 20 }),
-  );
+  const a = await started(manager, new Records(logger, 'a', { force: 20 }));
   const forceGate = deferred();
   a.onForce = () => forceGate.promise;
 
@@ -415,7 +373,7 @@ test('a stalled retry that times out again aborts its own fresh force signal', a
   expect(a.forceSignals[1].reason).toBeInstanceOf(ComponentForceTimeoutError);
   expect(a.forceSignals[1].reason).not.toBe(a.forceSignals[0].reason);
   expect(shutdown.stalledComponents[0]?.error).toBe(a.forceSignals[1].reason);
-  expect(a.order).toEqual(['force-abort', 'force-hook']);
+  expect(a.order).toEqual(['force-abort']);
   forceGate.resolve();
   await sleep(10);
 });
@@ -447,21 +405,19 @@ test.each(STOP_PATHS)(
     expect(a.stopSignals).toHaveLength(1);
     expect(a.stopSignals[0].aborted).toBe(true);
     expect(a.stopSignals[0].reason).toBeInstanceOf(ComponentStopTimeoutError);
-    expect(a.order).toEqual(['stop-abort', 'graceful-hook']);
+    expect(a.order).toEqual(['stop-abort']);
     expect(manager.getComponentStatus('a')?.state).toBe('stalled');
   },
 );
 
-test('a component that ignores the signals keeps its timeout, hook and late-resolution behavior', async () => {
+test('a component that ignores the signals keeps its timeout and late-resolution behavior', async () => {
   const { logger, manager } = setup();
   const a = await started(manager, new IgnoresSignals(logger, 'a'));
 
   const result = await manager.stopComponent('a');
 
   expect(result.code).toBe('component_shutdown_timeout');
-  expect([a.stops, a.forces, a.gracefulHooks, a.forceHooks]).toEqual([
-    1, 1, 1, 1,
-  ]);
+  expect([a.stops, a.forces]).toEqual([1, 1]);
   expect(manager.getComponentStatus('a')?.state).toBe('stalled');
 
   a.forceGate.resolve();
@@ -540,20 +496,12 @@ class ThrowsOnAbort extends BaseComponent {
     signal.addEventListener('abort', () => this.order.push('force-after'));
     return this.forceGate.promise;
   }
-
-  public onGracefulStopTimeout(): void {
-    this.order.push('graceful-hook');
-  }
-
-  public onShutdownForceAborted(): void {
-    this.order.push('force-hook');
-  }
 }
 
 // Unguarded, a listener error is the runtime's: an uncaught exception, fatal to a process
 // with no handler (and to this test, which fails on any uncaught error).
 test.each(THROWING_LISTENERS)(
-  'a throwing %s on either stop signal is reported, and the timeouts, hooks and stall are unaffected',
+  'a throwing %s on either stop signal is reported, and the timeouts and stall are unaffected',
   async (_, attach) => {
     const { reports, release } = claimReports();
     try {
@@ -566,10 +514,8 @@ test.each(THROWING_LISTENERS)(
       expect(a.order).toEqual([
         'stop-before',
         'stop-after',
-        'graceful-hook',
         'force-before',
         'force-after',
-        'force-hook',
       ]);
       expect(manager.getComponentStatus('a')?.state).toBe('stalled');
       expect(
@@ -604,7 +550,7 @@ async function lateGracefulDuringForce(
   forceTimeoutMS: number,
   onForceSignal: (signal: AbortSignal) => void = () => {},
 ): Promise<{
-  a: RecordsWithHooks;
+  a: Records;
   result: Awaited<
     ReturnType<ReturnType<typeof setup>['manager']['stopComponent']>
   >;
@@ -613,7 +559,7 @@ async function lateGracefulDuringForce(
   const { logger, manager } = setup();
   const a = await started(
     manager,
-    new RecordsWithHooks(logger, 'a', { graceful: 20, force: forceTimeoutMS }),
+    new Records(logger, 'a', { graceful: 20, force: forceTimeoutMS }),
   );
   const stopGate = deferred();
   const forceGate = deferred();
@@ -639,7 +585,7 @@ test.each([
   ['with a force deadline', 5_000],
   ['with the force timeout disabled', 0],
 ])(
-  'a late graceful completion that ends the force phase first aborts the force signal (%s), without onShutdownForceAborted()',
+  'a late graceful completion that ends the force phase first aborts the force signal (%s)',
   async (_, forceTimeoutMS) => {
     const { a, result, forceGate } =
       await lateGracefulDuringForce(forceTimeoutMS);
@@ -654,15 +600,13 @@ test.each([
     expect(reason.message).toBe(
       LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_SUPERSEDED,
     );
-    // The hook is the force deadline's alone.
-    expect(a.forceSignalAbortedInHook).toBeUndefined();
-    expect(a.order).toEqual(['stop-abort', 'graceful-hook', 'force-abort']);
+    expect(a.order).toEqual(['stop-abort', 'force-abort']);
 
     // Aborted once: a late settlement does not abort it again.
     forceGate.resolve();
     await sleep(10);
     expect(a.forceSignals[0].reason).toBe(reason);
-    expect(a.order).toEqual(['stop-abort', 'graceful-hook', 'force-abort']);
+    expect(a.order).toEqual(['stop-abort', 'force-abort']);
   },
 );
 
@@ -675,7 +619,7 @@ test.each([
     const { logger, manager } = setup();
     const a = await started(
       manager,
-      new RecordsWithHooks(logger, 'a', { graceful: 20, force: 5_000 }),
+      new Records(logger, 'a', { graceful: 20, force: 5_000 }),
     );
     const stopGate = deferred();
     a.onStop = () => stopGate.promise;
@@ -692,7 +636,7 @@ test.each([
     await sleep(10);
     expect(a.forceSignals).toHaveLength(1);
     expect(a.forceSignals[0].aborted).toBe(false);
-    expect(a.order).toEqual(['stop-abort', 'graceful-hook']);
+    expect(a.order).toEqual(['stop-abort']);
   },
 );
 
@@ -712,7 +656,7 @@ test.each(THROWING_LISTENERS)(
       expect(result.success).toBe(true);
       expect(a.forceSignals[0].aborted).toBe(true);
       // The recording listener added before it still ran.
-      expect(a.order).toEqual(['stop-abort', 'graceful-hook', 'force-abort']);
+      expect(a.order).toEqual(['stop-abort', 'force-abort']);
       expect(
         reports.map((report) => [
           (report as Error).message,

@@ -91,37 +91,37 @@ describe('LifecycleManager hardening regressions', () => {
   });
 
   test.each(
-    [false, true].flatMap((hasAbort) =>
+    [false, true].flatMap((doesOwnCleanup) =>
       (['cleanup', 'restart', 'bulk-restart', 'replace'] as const).map(
-        (recovery) => ({ hasAbort, recovery }),
+        (recovery) => ({ doesOwnCleanup, recovery }),
       ),
     ),
   )(
     'bulk deadline permits recovery and handles late completion (%p)',
-    async ({ hasAbort, recovery }) => {
+    async ({ doesOwnCleanup, recovery }) => {
       const { logger, manager } = setup();
       const gate = deferred();
       let starts = 0,
         stops = 0,
         aborts = 0;
       class Component extends BaseComponent {
-        public start() {
+        public start(signal: AbortSignal) {
           starts++;
+          signal.addEventListener('abort', () => {
+            aborts++;
+          });
           return starts === 1 ? gate.promise : undefined;
         }
         public stop() {
           stops++;
         }
       }
+      // A bulk deadline cleans up a late start even for a component that owns it.
       const component = new Component(logger, {
         name: 'hung',
         startupTimeoutMS: 0,
+        ownsLateStartCleanup: doesOwnCleanup,
       });
-      if (hasAbort) {
-        component.onStartupAborted = () => {
-          aborts++;
-        };
-      }
       await manager.registerComponent(component);
       const startedAt = Date.now();
       const result = await manager.startAllComponents({ timeoutMS: 20 });
@@ -137,7 +137,7 @@ describe('LifecycleManager hardening regressions', () => {
         });
         await sleep(10);
         expect(starts).toBe(1);
-        expect(aborts).toBe(hasAbort ? 1 : 0);
+        expect(aborts).toBe(1);
         if (recovery === 'replace') {
           expect((await manager.unregisterComponent('hung')).success).toBe(
             true,
@@ -343,16 +343,16 @@ describe('LifecycleManager hardening regressions', () => {
   });
 });
 
-test('late cleanup still runs when an abort hook immediately resolves start', async () => {
+test('late cleanup still runs when an abort listener immediately resolves start', async () => {
   const { logger, manager } = setup();
   const gate = deferred();
   let stops = 0;
   class Component extends BaseComponent {
-    public start() {
+    public start(signal: AbortSignal) {
+      signal.addEventListener('abort', () => {
+        gate.resolve();
+      });
       return gate.promise;
-    }
-    public onStartupAborted() {
-      gate.resolve();
     }
     public stop() {
       stops++;

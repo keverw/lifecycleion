@@ -37,6 +37,8 @@ import {
   crashedComponentResult,
   refusedStartupResult,
   isLinkedToAbort,
+  invalidOperationOptionError,
+  toOperationFlag,
 } from './internal/operation-policy';
 import {
   type RegistrationProgress,
@@ -47,6 +49,7 @@ import {
   committedRegistrationReport,
   isInsertPosition,
   isManualPositionRespected,
+  removedTimeoutHooksReason,
 } from './internal/registration-policy';
 import {
   observeRejection,
@@ -153,7 +156,6 @@ import { adoptPromise } from '../internal/adopt-promise';
 import { guardAbortListeners } from '../internal/guarded-abort-signal';
 import {
   reportCallbackError,
-  runCallbackSafely,
   safeHandleCallback,
   safeHandleCallbackAndWait,
 } from '../safe-handle-callback';
@@ -225,11 +227,12 @@ function isStartUnfinished(settlement: StartSettlement | undefined): boolean {
   );
 }
 
-/** The running registration and timeout approved before restart stops it. */
+/** The running registration and start options approved before restart stops it. */
 interface RestartStartSnapshot {
   readonly component: BaseComponent;
   readonly generation: number | undefined;
   readonly timeoutMS: number;
+  readonly ownsLateStartCleanup: boolean;
 }
 
 /** Everything restart preparation reads from the caller, validated before any stop. */
@@ -3905,13 +3908,19 @@ export class LifecycleManager
       const componentTimeoutMS = this.readRestartInput(
         () => component.startupTimeoutMS,
       );
+      const timeoutMS = toOperationTimerDelayMS(
+        componentTimeoutMS,
+        `${name}.startupTimeoutMS`,
+      );
+      const doesOwnLateStartCleanup = toOperationFlag(
+        this.readRestartInput(() => component.ownsLateStartCleanup),
+        `${name}.ownsLateStartCleanup`,
+      );
       restartSnapshots.set(name, {
         component,
         generation,
-        timeoutMS: toOperationTimerDelayMS(
-          componentTimeoutMS,
-          `${name}.startupTimeoutMS`,
-        ),
+        timeoutMS,
+        ownsLateStartCleanup: doesOwnLateStartCleanup,
       });
       this.validateRestartStopBudgets(name, component, currentStarts);
     }
@@ -4607,6 +4616,10 @@ export class LifecycleManager
         component.startupTimeoutMS,
         `${name}.startupTimeoutMS`,
       ),
+      ownsLateStartCleanup: toOperationFlag(
+        component.ownsLateStartCleanup,
+        `${name}.ownsLateStartCleanup`,
+      ),
     };
 
     // A timeout getter can synchronously stop or replace its own component.
@@ -4828,6 +4841,16 @@ export class LifecycleManager
         reads: new Map<BaseComponent, DependencyRead>(),
         isSettled: true,
       };
+      // Why the component cannot be registered because it still defines a removed
+      // timeout hook. Read first, as the component's own: a getter there is its code.
+      let removedHooksReason: string | undefined;
+
+      if (canRead()) {
+        removedHooksReason = removedTimeoutHooksReason(
+          component,
+          componentName,
+        );
+      }
 
       if (canRead()) {
         candidateRead = tryReadDependencies(component);
@@ -4898,6 +4921,19 @@ export class LifecycleManager
           code: 'shutdown_in_progress',
           message: LIFECYCLE_MANAGER_MESSAGE_REGISTER_SHUTDOWN_IN_PROGRESS,
           logLine: 'Cannot register component during shutdown',
+        });
+      }
+
+      // A component written for the timeout hooks the abort signals replaced. Refused
+      // rather than registered with those hooks silently ignored - along with, for the
+      // startup one, the late-start cleanup opt-out it implied.
+      if (removedHooksReason !== undefined) {
+        return this.refuseRegistration({
+          ...refusal,
+          code: 'invalid_options',
+          message: removedHooksReason,
+          logLine: 'Component defines a removed timeout hook',
+          error: invalidOperationOptionError(removedHooksReason),
         });
       }
 
@@ -6916,10 +6952,10 @@ export class LifecycleManager
   }
 
   /**
-   * Reject a stop's timeout one macrotask after its timeout hook ran, not at once.
+   * Reject a stop's timeout one macrotask after its signal aborted, not at once.
    *
-   * A hook that releases what `stop()` or `onShutdownForce()` awaits settles it
-   * synchronously, but the settlement reaches the race through several promise hops -
+   * An abort listener that releases what `stop()` or `onShutdownForce()` awaits settles
+   * it synchronously, but the settlement reaches the race through several promise hops -
    * the component's own `async` function, then `adoptPromise()` - while a rejection made
    * in the same turn gets there in one. The stop finished, yet the timeout won, and the
    * component was stalled or sent on to a force phase it no longer needed. Past a
@@ -6929,10 +6965,10 @@ export class LifecycleManager
    * Returns the timer, which the caller keeps as its timeout handle so its `finally`
    * clears it once the stop has settled either way.
    *
-   * Stops only. A start's timeout still rejects at once: its abort hook exists to abort
-   * the start, and a `start()` it released is a timed-out start, not a successful one.
+   * Stops only. A start's timeout still rejects at once: its signal exists to abort the
+   * start, and a `start()` it released is a timed-out start, not a successful one.
    */
-  private rejectAfterTimeoutHook(
+  private rejectAfterAbort(
     reject: (error: Error) => void,
     error: Error,
   ): NodeJS.Timeout {
@@ -6942,48 +6978,12 @@ export class LifecycleManager
   }
 
   /**
-   * Call a component's timeout hook - `onStartupAborted`, `onGracefulStopTimeout`,
-   * `onShutdownForceAborted` - from inside the timer that fired.
-   *
-   * Takes the hook already read: each caller reads it before its timer starts, because
-   * the timer callback runs outside every guard, and a hook behind a getter that threw
-   * there was an uncaught exception - fatal to a Node process - that also skipped the
-   * timeout's rejection and its late-settlement watcher, leaving the operation waiting
-   * forever. A sync throw and a returned rejection are both logged and contained.
-   */
-  private invokeAbortHook(
-    component: BaseComponent,
-    hook: unknown,
-    hookName: string,
-    name: string,
-  ): void {
-    if (typeof hook !== 'function') {
-      return;
-    }
-
-    runCallbackSafely(
-      `${name}.${hookName}`,
-      hook,
-      [],
-      (error) => {
-        this.logger
-          .entity(name)
-          .warn(`Error in ${hookName} callback: {{error.message}}`, {
-            params: { error: toError(error) },
-          });
-      },
-      component,
-    );
-  }
-
-  /**
    * `abortPendingStarts`: abort the start signal of each start a shutdown pass found in
    * flight as it began - the cue to give up. Only that: the pass still joins those starts
    * and protects their dependencies as it would without it, and nothing here records a
-   * timeout or calls `onStartupAborted()`. A start that requested this shutdown is left
-   * alone - it already knows, and may be awaiting the pass - as is one whose `start()`
-   * has settled or whose own deadline already aborted its signal (`interruptStart()`
-   * checks both). Each settlement is asked in turn; abort listeners are the component's
+   * timeout. A start that requested this shutdown is left alone - it already knows, and
+   * may be awaiting the pass - as is one whose `start()` has settled or whose own
+   * deadline already aborted its signal (`interruptStart()` checks both). Each settlement is asked in turn; abort listeners are the component's
    * code and may change the others, which each check again for itself.
    */
   private interruptPendingStarts(
@@ -7028,7 +7028,7 @@ export class LifecycleManager
    * it cannot see - on a signal derived from this one, or added through
    * `EventTarget.prototype` directly - remain the runtime's. Every caller has finished
    * its bookkeeping before this runs. The `catch` only covers a runtime that let such
-   * an error escape: reported, so it cannot unwind the timer and skip the hook after it.
+   * an error escape: reported, so it cannot unwind the timer and skip what follows.
    */
   private abortHookSignal(
     hookAbort: OwnedAbortController,
@@ -7291,7 +7291,7 @@ export class LifecycleManager
     let abandon!: () => void;
     const finishSettlement = (): void => {
       settlement.didSettle = true;
-      // An abort hook may return without actually settling raw startup. Keep its
+      // An aborted start may not have actually settled raw startup. Keep its
       // dependency protection until that work finishes or ownership is released.
       if (!settlement.rawStartPending) {
         this.startSettlements.delete(claim);
@@ -7711,11 +7711,14 @@ export class LifecycleManager
       );
     // Read here for the same reason, and because the timer callback that uses it runs
     // outside every guard: a getter that threw there was an uncaught exception - fatal
-    // to a Node process - and skipped the late-completion monitor as well.
-    const onStartupAborted: unknown = Reflect.get(
-      component,
-      'onStartupAborted',
-    );
+    // to a Node process - and skipped the late-completion monitor as well. Validated
+    // like the timeout: anything but a boolean is refused (`invalid_options`).
+    const doesOwnLateStartCleanup =
+      restartSnapshot?.ownsLateStartCleanup ??
+      toOperationFlag(
+        component.ownsLateStartCleanup,
+        `${name}.ownsLateStartCleanup`,
+      );
 
     // From here to the claim, nothing runs the component's code - logging included,
     // since the logger is the caller's too: the warnings wait until the claim is made.
@@ -8027,7 +8030,9 @@ export class LifecycleManager
               if (useBulkDeadline) {
                 bulkStartup?.onTimeout();
               }
-              if (useBulkDeadline || typeof onStartupAborted !== 'function') {
+              // A component that owns its late-start cleanup undoes a late success of
+              // its own timed-out start itself; a bulk deadline cleans up regardless.
+              if (useBulkDeadline || !doesOwnLateStartCleanup) {
                 this.monitorLateStartupCompletion(
                   name,
                   component,
@@ -8040,12 +8045,11 @@ export class LifecycleManager
                 // monitor call handles an already fulfilled start and must join cleanup.
                 settlement?.abandon();
               }
-              // The signal first, then the hook, so both cues describe one moment -
-              // and after the bookkeeping above, so abort listeners (the component's
-              // code) find the abandonment and any late cleanup already arranged.
-              // Aborted even when those sinks superseded the attempt: the signal is
-              // only this attempt's, unlike the instance's hook below. A shutdown that
-              // already aborted it keeps its reason; aborting again does nothing.
+              // After the bookkeeping above, so abort listeners (the component's code)
+              // find the abandonment and any late cleanup already arranged. Aborted
+              // even when those sinks superseded the attempt: the signal is only this
+              // attempt's. A shutdown that already aborted it keeps its reason;
+              // aborting again does nothing.
               startAbortCause ??= 'timeout';
               this.abortHookSignal(
                 startAbort,
@@ -8053,16 +8057,6 @@ export class LifecycleManager
                 name,
                 'start',
               );
-              // The bulk deadline, the late-cleanup announcement, and abort listeners
-              // can all run code that supersedes this start. Recheck at the hook.
-              if (!isSuperseded()) {
-                this.invokeAbortHook(
-                  component,
-                  onStartupAborted,
-                  'onStartupAborted',
-                  name,
-                );
-              }
 
               this.observeFailureAfterTimeout(
                 startPromise,
@@ -8470,8 +8464,8 @@ export class LifecycleManager
       return result;
     } finally {
       // Ensure we always clean up the timeout handle, even if component.start()
-      // rejects (non-timeout failure). Otherwise onStartupAborted() can fire
-      // unexpectedly later and the timer handle leaks.
+      // rejects (non-timeout failure). Otherwise the deadline can abort the signal of a
+      // start that already settled, and the timer handle leaks.
       if (timeoutHandle) {
         clearTimeout(timeoutHandle);
       }
@@ -8741,10 +8735,6 @@ export class LifecycleManager
     // Prepare both phases before claiming the component or calling stop(). An invalid
     // force budget must not first shut down part of the component. Keep the values we
     // validated: a getter or stop() can change the component before escalation.
-    const onGracefulStopTimeout: unknown = Reflect.get(
-      component,
-      'onGracefulStopTimeout',
-    );
     const requestedTimeoutMS = options?.timeout;
     const isUsingComponentTimeout = isNullish(requestedTimeoutMS);
     const timeoutMS = toOperationTimerDelayMS(
@@ -8764,7 +8754,6 @@ export class LifecycleManager
     // observer records a resolution that the foreground race must consume.
     const gracefulPreparation = {
       timeoutMS,
-      onGracefulStopTimeout,
       startedAt: shutdownStartedAt,
       lateResolution: undefined as string | undefined,
     };
@@ -8896,14 +8885,13 @@ export class LifecycleManager
     component: BaseComponent,
     preparation: {
       timeoutMS: number;
-      onGracefulStopTimeout: unknown;
       startedAt: number;
       lateResolution?: string;
     },
     claim: symbol,
     stopContext: IndividualStopContext | undefined,
   ): Promise<ComponentOperationResult> {
-    const { timeoutMS, onGracefulStopTimeout, startedAt } = preparation;
+    const { timeoutMS, startedAt } = preparation;
 
     if (stopContext) {
       const refusal = this.checkIndividualStopClaim(name, stopContext);
@@ -8940,7 +8928,7 @@ export class LifecycleManager
     // exported error class and component name for an unrelated reason.
     let gracefulTimeoutError: ComponentStopTimeoutError | undefined;
     // Set once that rejection has been delivered to the race - a macrotask after the
-    // deadline fired (see `rejectAfterTimeoutHook()`), as in the force phase. A stop
+    // deadline fired (see `rejectAfterAbort()`), as in the force phase. A stop
     // rejection before then still settles the race as a graceful failure.
     let didDeadlineReject = false;
     const outcomeObserver = this.createStopPhaseObserver(name);
@@ -8981,26 +8969,18 @@ export class LifecycleManager
                 componentName: name,
                 timeoutMS,
               });
-              // The signal first, then the hook, as a start's timeout orders them, so
-              // both cues describe one moment and the signal is already aborted inside
-              // the hook. Listeners that release `stop()` win the race below exactly
-              // as the hook does: its rejection waits a macrotask.
+              // Listeners that release `stop()` win the race below: the timeout's
+              // rejection waits a macrotask (see `rejectAfterAbort()`).
               this.abortHookSignal(
                 stopAbort,
                 gracefulTimeoutError,
                 name,
                 'stop',
               );
-              this.invokeAbortHook(
-                component,
-                onGracefulStopTimeout,
-                'onGracefulStopTimeout',
-                name,
-              );
 
               // Detect if stop() eventually resolves after the timeout so the stall
               // can be cleared automatically without a manual retry. From here on
-              // this observer owns rejection reporting, even if the abort hook makes
+              // this observer owns rejection reporting, even if an abort listener makes
               // stop() reject before the deferred deadline wins the foreground race.
               outcomeObserver.observe(
                 stopPromise,
@@ -9025,7 +9005,7 @@ export class LifecycleManager
                   },
                 },
               );
-              timeoutHandle = this.rejectAfterTimeoutHook((timeoutError) => {
+              timeoutHandle = this.rejectAfterAbort((timeoutError) => {
                 didDeadlineReject = true;
                 reject(timeoutError);
               }, gracefulTimeoutError);
@@ -9105,7 +9085,7 @@ export class LifecycleManager
         };
       } else {
         // Keep the failure result even when the timeout observer owns its log.
-        // Otherwise a rejection from the abort hook is reported by both paths.
+        // Otherwise a rejection caused by an abort listener is reported by both paths.
         outcomeObserver.reportForeground(
           err,
           'Graceful shutdown threw error: {{error.message}}',
@@ -9175,11 +9155,6 @@ export class LifecycleManager
     const { onShutdownForce, timeoutMS } =
       preparation ?? this.prepareForceShutdown(name, component);
     const hasForceHandler = typeof onShutdownForce === 'function';
-    // The abort hook is needed only if this phase actually runs. A graceful success
-    // must not consult it merely to preflight the force handler's timeout.
-    const onShutdownForceAborted: unknown = hasForceHandler
-      ? Reflect.get(component, 'onShutdownForceAborted')
-      : undefined;
 
     // An individual attempt must respect bulk work started by prepared getters.
     // An already claimed graceful stop still owns its escalation during bulk work.
@@ -9318,7 +9293,7 @@ export class LifecycleManager
     // anything `onShutdownForce()` rejects with.
     let forceTimeoutError: ComponentForceTimeoutError | undefined;
     // Set once that rejection has been delivered to the race - a macrotask after the
-    // deadline fired (see `rejectAfterTimeoutHook()`). A hook rejection before then still
+    // deadline fired (see `rejectAfterAbort()`). A hook rejection before then still
     // settles the race as the hook's own failure, and is reported as one.
     let didDeadlineReject = false;
     // Set once the force race has settled without a failure: a throw after that is the
@@ -9376,18 +9351,11 @@ export class LifecycleManager
                 componentName: name,
                 timeoutMS,
               });
-              // The signal first, then the hook, as in the graceful phase.
               this.abortHookSignal(
                 forceAbort,
                 forceTimeoutError,
                 name,
                 'onShutdownForce',
-              );
-              this.invokeAbortHook(
-                component,
-                onShutdownForceAborted,
-                'onShutdownForceAborted',
-                name,
               );
 
               // Detect if onShutdownForce() eventually resolves after the timeout
@@ -9417,7 +9385,7 @@ export class LifecycleManager
                     ),
                 },
               );
-              timeoutHandle = this.rejectAfterTimeoutHook((timeoutError) => {
+              timeoutHandle = this.rejectAfterAbort((timeoutError) => {
                 didDeadlineReject = true;
                 reject(timeoutError);
               }, forceTimeoutError);
@@ -9449,9 +9417,8 @@ export class LifecycleManager
         };
         // The phase ended before its deadline with `onShutdownForce()` still pending:
         // the manager no longer needs that call's work, so it hears so through its
-        // signal, as it would at the deadline. `onShutdownForceAborted()` stays the
-        // deadline's alone. Last, once the result is built: the listeners are the
-        // component's code. A deadline that fired already aborted it.
+        // signal, as it would at the deadline. Last, once the result is built: the
+        // listeners are the component's code. A deadline that fired already aborted it.
         if (!didForceHookSettle && forceTimeoutError === undefined) {
           this.abortHookSignal(
             forceAbort,
@@ -10071,7 +10038,7 @@ export class LifecycleManager
         }
       }
       try {
-        // An abort hook can settle start() inside the timeout callback. Let the
+        // An abort listener can settle start() inside the timeout callback. Let the
         // timed-out start's catch record its state before beginning late cleanup.
         await promiseResolveIntrinsic(undefined);
         const timeoutState = this.componentStates.get(name);
@@ -10394,8 +10361,8 @@ export class LifecycleManager
    * caller emits `component:stalled` and anything particular to its path.
    *
    * A stop that settles after the stall is recorded clears it through
-   * `handleLateStopResolution()`; one released by its own timeout hook never gets here,
-   * since its timeout rejects a macrotask later (`rejectAfterTimeoutHook()`).
+   * `handleLateStopResolution()`; one released by its own abort listener never gets here,
+   * since its timeout rejects a macrotask later (`rejectAfterAbort()`).
    */
   private markComponentStalled(
     name: string,
@@ -10589,8 +10556,8 @@ export class LifecycleManager
           (hasGracefulRaceFinished && currentState === 'stopping'));
 
       // Still in flight for this very attempt - it settled as its timeout fired. The
-      // attempt decides how it ended: its timeout rejects a macrotask after the hook ran
-      // (`rejectAfterTimeoutHook()`), so a stop that settled then wins the race. Ahead of
+      // attempt decides how it ended: its timeout rejects a macrotask after the abort
+      // (`rejectAfterAbort()`), so a stop that settled then wins the race. Ahead of
       // Guard 2, which would take a stalled component's force retry - `force-stopping`,
       // with the old stall entry still in place - for a newer attempt and discard the
       // stall under it.

@@ -112,9 +112,10 @@ export class Plain extends BaseComponent {
     super(logger, { name, dependencies });
   }
 
-  public async start(): Promise<void> {}
-  public async stop(): Promise<void> {}
-  public onShutdownForce(): void {
+  // The signals are accepted so tests can replace these with versions that use them.
+  public async start(_signal?: AbortSignal): Promise<void> {}
+  public async stop(_signal?: AbortSignal): Promise<void> {}
+  public onShutdownForce(_signal?: AbortSignal): void {
     this.forceCalls++;
   }
 }

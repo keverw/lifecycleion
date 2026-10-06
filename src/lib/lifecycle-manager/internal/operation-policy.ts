@@ -115,6 +115,20 @@ export function toOperationTimerDelayMS(
 }
 
 /**
+ * A component's boolean option as the operation about to use it reads it - `true` or
+ * `false`, nothing else. The constructor validates it too, but the property is the
+ * component's and can be redefined after construction: anything other than a boolean
+ * is refused as this manager's own option refusal (`invalid_options`), as an invalid
+ * component timeout is, rather than read as truthy or falsy.
+ */
+export function toOperationFlag(requested: unknown, label: string): boolean {
+  if (typeof requested !== 'boolean') {
+    throw invalidOperationOptionError(`${label} must be a boolean`);
+  }
+  return requested;
+}
+
+/**
  * The refusal `acceptShutdownPass()` returns when it will not run a pass because one
  * is already running - whether the latch was already set on entry or was taken by a
  * nested request while this one was still being set up. Shared so the two refusals

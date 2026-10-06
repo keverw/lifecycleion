@@ -47,15 +47,6 @@ class Starts extends BaseComponent {
   }
 }
 
-class StartsWithHook extends Starts {
-  public hookCalls = 0;
-
-  public onStartupAborted(): void {
-    this.hookCalls++;
-    this.order.push('hook');
-  }
-}
-
 // A start that rejects with the signal's reason as soon as it is aborted.
 function honorsSignal(signal: AbortSignal): Promise<void> {
   return new Promise<void>((_, reject) => {
@@ -70,12 +61,12 @@ async function withPendingStart(
 ): Promise<{
   manager: ReturnType<typeof setup>['manager'];
   database: Plain;
-  worker: StartsWithHook;
+  worker: Starts;
   starting: ReturnType<ReturnType<typeof setup>['manager']['startComponent']>;
 }> {
   const { logger, manager } = setup(options);
   const database = new Plain(logger, 'database');
-  const worker = new StartsWithHook(logger, 'worker', ['database']);
+  const worker = new Starts(logger, 'worker', ['database']);
   await manager.registerComponent(database);
   await manager.registerComponent(worker);
   expect((await manager.startComponent('database')).success).toBe(true);
@@ -120,7 +111,6 @@ test('abortPendingStarts aborts a pending start signal as the pass begins, and t
   await sleep(20);
   expect(manager.getComponentStatus('worker')?.state).toBe('starting');
   expect(manager.isComponentRunning('database')).toBe(true);
-  expect(worker.hookCalls).toBe(0);
 
   // The start honors the cue by rejecting with the reason.
   worker.gate.reject(reason);
@@ -132,7 +122,6 @@ test('abortPendingStarts aborts a pending start signal as the pass begins, and t
   const shutdownResult = await shutdown;
   expect(shutdownResult.success).toBe(true);
   expect(manager.getRunningComponentNames()).toEqual([]);
-  expect(worker.hookCalls).toBe(0);
   expect(worker.stops).toBe(0);
   expect(manager.getComponentStatus('worker')?.state).not.toBe(
     'starting-timed-out',
@@ -249,7 +238,7 @@ test.each(UNRELATED_FAILURES)(
     const { logger, manager } = setup();
     const sink = logger.getSinks()[0] as ArraySink;
     const database = new Plain(logger, 'database');
-    const worker = new StartsWithHook(logger, 'worker', ['database']);
+    const worker = new Starts(logger, 'worker', ['database']);
     await manager.registerComponent(database);
     await manager.registerComponent(worker);
     await manager.startComponent('database');
@@ -305,7 +294,7 @@ test('a start that ignores the cue and resolves is stopped by the pass, as witho
 test('a start that honors the abort at once lets the pass stop its dependencies', async () => {
   const { logger, manager } = setup();
   const database = new Plain(logger, 'database');
-  const worker = new StartsWithHook(logger, 'worker', ['database']);
+  const worker = new Starts(logger, 'worker', ['database']);
   worker.onStart = honorsSignal;
   await manager.registerComponent(database);
   await manager.registerComponent(worker);
@@ -319,13 +308,12 @@ test('a start that honors the abort at once lets the pass stop its dependencies'
   expect(shutdown.success).toBe(true);
   expect(shutdown.stoppedComponents).toContain('database');
   expect((await starting).code).toBe('shutdown_in_progress');
-  expect(worker.hookCalls).toBe(0);
 });
 
 test('startAllComponents() reports shutdown_in_progress when a start honors the abort', async () => {
   const { logger, manager } = setup();
   const database = new Plain(logger, 'database');
-  const worker = new StartsWithHook(logger, 'worker', ['database']);
+  const worker = new Starts(logger, 'worker', ['database']);
   worker.onStart = honorsSignal;
   await manager.registerComponent(database);
   await manager.registerComponent(worker);
@@ -342,7 +330,6 @@ test('startAllComponents() reports shutdown_in_progress when a start honors the 
   expect(result.code).toBe('shutdown_in_progress');
   expect(shutdown.success).toBe(true);
   expect(manager.getRunningComponentNames()).toEqual([]);
-  expect(worker.hookCalls).toBe(0);
 });
 
 test('a start that already timed out keeps its timeout abort and is not aborted again', async () => {
@@ -367,9 +354,9 @@ test('a start that already timed out keeps its timeout abort and is not aborted 
   expect(worker.stops).toBe(1);
 });
 
-test('a start that times out after the shutdown aborted it keeps the shutdown reason and still gets onStartupAborted()', async () => {
+test('a start that times out after the shutdown aborted it keeps the shutdown reason', async () => {
   const { logger, manager } = setup();
-  const worker = new StartsWithHook(logger, 'worker', [], 40);
+  const worker = new Starts(logger, 'worker', [], 40);
   await manager.registerComponent(worker);
   const starting = manager.startComponent('worker');
 
@@ -379,8 +366,8 @@ test('a start that times out after the shutdown aborted it keeps the shutdown re
 
   expect((await starting).code).toBe('component_startup_timeout');
   expect(worker.signals[0].reason).toBe(reason);
-  expect(worker.hookCalls).toBe(1);
-  expect(worker.order).toEqual(['abort', 'hook']);
+  // Aborted once: its own timeout does not abort it again.
+  expect(worker.order).toEqual(['abort']);
   expect((await shutdown).code).toBe('cleanup_incomplete');
   worker.gate.resolve();
   await sleep(10);

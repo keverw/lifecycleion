@@ -42,14 +42,19 @@ for (const isDatabaseFirst of [false, true]) {
   });
 }
 
-test('a timeout abort hook that settles startup leaves no incomplete cleanup', async () => {
+test('an abort listener that settles a timed-out startup leaves no incomplete cleanup', async () => {
   const { logger, manager } = setup();
   const database = new Plain(logger, 'database');
   const api = new Plain(logger, 'api', ['database']);
   const gate = deferred();
-  api.start = () => gate.promise;
-  api.onStartupAborted = () => gate.reject(new Error('aborted'));
+  api.start = (signal: AbortSignal) => {
+    signal.addEventListener('abort', () => {
+      gate.reject(new Error('aborted'));
+    });
+    return gate.promise;
+  };
   Object.defineProperty(api, 'startupTimeoutMS', { value: 10 });
+  Object.defineProperty(api, 'ownsLateStartCleanup', { value: true });
   await manager.registerComponent(database);
   await manager.registerComponent(api);
   await manager.startComponent('database');
@@ -100,14 +105,14 @@ test('known protected dependencies do not receive shutdown warnings', async () =
   }
 });
 
-test('an abort hook that leaves startup pending retains protection across shutdown passes', async () => {
+test('a self-cleaning timed-out start left pending retains protection across shutdown passes', async () => {
   const { logger, manager } = setup();
   const database = new Plain(logger, 'database');
   const api = new Plain(logger, 'api', ['database']);
   const gate = deferred();
   api.start = () => gate.promise;
-  api.onStartupAborted = () => {};
   Object.defineProperty(api, 'startupTimeoutMS', { value: 10 });
+  Object.defineProperty(api, 'ownsLateStartCleanup', { value: true });
   await manager.registerComponent(database);
   await manager.registerComponent(api);
   await manager.startComponent('database');

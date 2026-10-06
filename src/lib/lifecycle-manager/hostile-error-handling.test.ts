@@ -834,148 +834,6 @@ describe('LifecycleManager - hostile thrown values', () => {
     }
   });
 
-  test('an unreadable error from onStartupAborted does not escape the timer', async () => {
-    const lifecycle = new LifecycleManager({ logger });
-
-    class SlowComponent extends BaseComponent {
-      public async start(): Promise<void> {
-        await new Promise((resolve) => setTimeout(resolve, 200));
-      }
-      public stop(): void {}
-      public onStartupAborted(): void {
-        throw unreadableError();
-      }
-    }
-
-    await lifecycle.registerComponent(
-      new SlowComponent(logger, { name: 'slow', startupTimeoutMS: 50 }),
-    );
-
-    // The abort callback runs from a timer, where an escaping throw has no caller to
-    // catch it and the runtime treats it as uncaught.
-    await lifecycle.startComponent('slow');
-
-    expect(
-      arraySink.logs.some((log) =>
-        log.message.includes('Error in onStartupAborted callback'),
-      ),
-    ).toBe(true);
-
-    await lifecycle.stopAllComponents();
-  });
-
-  test('an async rejection from onStartupAborted is reported, not unhandled', async () => {
-    const lifecycle = new LifecycleManager({ logger });
-
-    class SlowComponent extends BaseComponent {
-      public async start(): Promise<void> {
-        await new Promise((resolve) => setTimeout(resolve, 100));
-      }
-      public stop(): void {}
-      public onStartupAborted(): void {
-        // TypeScript permits an async implementation at runtime even though the hook is
-        // declared `void`; spell that shape without weakening the production interface.
-        return Promise.reject(
-          new Error('async abort failed'),
-        ) as unknown as void;
-      }
-    }
-
-    await lifecycle.registerComponent(
-      new SlowComponent(logger, { name: 'async-abort', startupTimeoutMS: 10 }),
-    );
-
-    await lifecycle.startComponent('async-abort');
-    await Promise.resolve();
-
-    expect(
-      arraySink.logs.some(
-        (log) =>
-          log.message.includes('Error in onStartupAborted callback') &&
-          (log.params?.['error'] as Error | undefined)?.message ===
-            'async abort failed',
-      ),
-    ).toBe(true);
-
-    await lifecycle.stopAllComponents();
-  });
-
-  test('an async rejection from onGracefulStopTimeout is reported', async () => {
-    const lifecycle = new LifecycleManager({ logger });
-
-    class SlowStop extends BaseComponent {
-      public start(): void {}
-      public async stop(): Promise<void> {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      public onGracefulStopTimeout(): void {
-        return Promise.reject(
-          new Error('async graceful abort failed'),
-        ) as unknown as void;
-      }
-    }
-
-    const component = new SlowStop(logger, { name: 'async-graceful-abort' });
-
-    // Keep the regression quick; the public constructor intentionally clamps this value.
-    (
-      component as unknown as { shutdownGracefulTimeoutMS: number }
-    ).shutdownGracefulTimeoutMS = 10;
-
-    await lifecycle.registerComponent(component);
-    await lifecycle.startComponent(component.getName());
-    await lifecycle.stopComponent(component.getName());
-    await Promise.resolve();
-
-    expect(
-      arraySink.logs.some(
-        (log) =>
-          log.message.includes('Error in onGracefulStopTimeout callback') &&
-          (log.params?.['error'] as Error | undefined)?.message ===
-            'async graceful abort failed',
-      ),
-    ).toBe(true);
-  });
-
-  test('an async rejection from onShutdownForceAborted is reported', async () => {
-    const lifecycle = new LifecycleManager({ logger });
-
-    class SlowForce extends BaseComponent {
-      public start(): void {}
-      public stop(): void {
-        throw new Error('enter force phase');
-      }
-      public async onShutdownForce(): Promise<void> {
-        await new Promise((resolve) => setTimeout(resolve, 50));
-      }
-      public onShutdownForceAborted(): void {
-        return Promise.reject(
-          new Error('async force abort failed'),
-        ) as unknown as void;
-      }
-    }
-
-    const component = new SlowForce(logger, { name: 'async-force-abort' });
-
-    (
-      component as unknown as { shutdownForceTimeoutMS: number }
-    ).shutdownForceTimeoutMS = 10;
-
-    await lifecycle.registerComponent(component);
-    await lifecycle.startComponent(component.getName());
-    await lifecycle.stopComponent(component.getName());
-    await Promise.resolve();
-
-    expect(
-      arraySink.logs.some(
-        (log) =>
-          log.message.includes('Error in onShutdownForceAborted callback') &&
-          (log.params?.['error'] as Error | undefined)?.message ===
-            'async force abort failed',
-      ),
-    ).toBe(true);
-  });
-
   test('an unreadable error thrown from start() settles as a failure result', async () => {
     // `toError` returns an `Error`-branded value unchanged, so the `catch` in
     // `startComponent` was reading `.message` off the very value whose accessor throws -
@@ -1426,11 +1284,14 @@ describe('LifecycleManager timeouts that a timer cannot keep', () => {
           return new Promise<void>(() => {});
         }
         public stop(): void {}
-        public onStartupAborted(): void {}
       }
 
       await lifecycle.registerComponent(
-        new Pending(logger, { name: 'pending', startupTimeoutMS }),
+        new Pending(logger, {
+          name: 'pending',
+          startupTimeoutMS,
+          ownsLateStartCleanup: true,
+        }),
       );
       const originalSetTimeout = globalThis.setTimeout;
       const timeoutSpy = spyOn(globalThis, 'setTimeout').mockImplementation(((

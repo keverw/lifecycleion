@@ -85,8 +85,8 @@ test('continuing after a throwing stop getter protects the still-running compone
     await manager.registerComponent(component);
   }
   await manager.startAllComponents();
-  const failure = new Error('cannot read graceful timeout hook');
-  Object.defineProperty(refused, 'onGracefulStopTimeout', {
+  const failure = new Error('cannot read force handler');
+  Object.defineProperty(refused, 'onShutdownForce', {
     configurable: true,
     get() {
       throw failure;
@@ -101,7 +101,7 @@ test('continuing after a throwing stop getter protects the still-running compone
     expect(manager.isComponentRunning('refused')).toBe(true);
     expect(manager.isComponentRunning('dependency')).toBe(true);
     expect(reports).toHaveLength(1);
-    Object.defineProperty(refused, 'onGracefulStopTimeout', {
+    Object.defineProperty(refused, 'onShutdownForce', {
       value: undefined,
     });
     expect(

@@ -91,6 +91,14 @@ export abstract class BaseComponent {
   /** Time to wait for onReload/onInfo/onDebug in milliseconds */
   public readonly signalTimeoutMS: number;
 
+  /**
+   * Whether this component cleans up after its own timed-out start. When `false` (the
+   * default), a `start()` that passes its `startupTimeoutMS` and then completes anyway
+   * is stopped by the manager with `stop()`. When `true`, the manager leaves that late
+   * start to the component. A bulk startup deadline cleans up regardless.
+   */
+  public readonly ownsLateStartCleanup: boolean;
+
   /** Component logger (scoped to component name) */
   protected logger: LoggerService;
 
@@ -129,6 +137,15 @@ export abstract class BaseComponent {
     // Dependency configuration
     this.dependencies = options.dependencies ?? [];
     this.optional = options.optional ?? false;
+
+    // Null or omitted selects the default, as for the timeouts below. Anything else that
+    // is not a boolean is a configuration mistake, refused here rather than read as
+    // truthy or falsy.
+    const doesOwnLateStartCleanup = options.ownsLateStartCleanup ?? false;
+    if (typeof doesOwnLateStartCleanup !== 'boolean') {
+      throw new TypeError('ownsLateStartCleanup must be a boolean');
+    }
+    this.ownsLateStartCleanup = doesOwnLateStartCleanup;
 
     // Null or omitted configuration selects defaults. Validate before any lifecycle
     // operation can acquire resources; shutdown durations retain their documented
@@ -218,9 +235,9 @@ export abstract class BaseComponent {
    * `signal` is fresh for each start attempt. The manager aborts it when it stops
    * waiting on this call while it is still pending - its `startupTimeoutMS` or a
    * `startAllComponents()` deadline passed - with the `ComponentStartTimeoutError`
-   * the start's result carries as `signal.reason`, just before `onStartupAborted()`.
-   * It is never aborted because `start()` resolved or threw, nor by a stop. A shutdown
-   * pass aborts it only with `abortPendingStarts`, as the pass begins, with a
+   * the start's result carries as `signal.reason`. It is never aborted because
+   * `start()` resolved or threw, nor by a stop. A shutdown pass aborts it only with
+   * `abortPendingStarts`, as the pass begins, with a
    * `StartupInterruptedByShutdownError` as `signal.reason` - a cue: the pass still
    * waits for this call. A rejection after it that is linked to the abort - the reason
    * itself, an `AbortError`, or an error carrying either on its `cause` chain - is
@@ -230,6 +247,10 @@ export abstract class BaseComponent {
    * or check `signal.aborted` between steps; settling promptly once it aborts releases the
    * dependencies the manager keeps up for this start. It is scoped to this start, not
    * to the run it begins. Declaring `start()` without the parameter is fine.
+   *
+   * A timed-out `start()` that completes anyway is stopped by the manager with `stop()`,
+   * unless the component sets `ownsLateStartCleanup: true` and undoes it itself - for
+   * example `if (signal.aborted) { await this.teardown(); }` once its work finishes.
    *
    * An `'abort'` listener added through `signal.addEventListener()`, or `signal.onabort`,
    * that throws (or rejects) is reported on the global `'error'` channel as
@@ -254,10 +275,9 @@ export abstract class BaseComponent {
    * `signal` is fresh for each graceful stop attempt. The manager aborts it when this
    * call's `shutdownGracefulTimeoutMS` (or a `stopComponent()` `timeout`) passes while
    * it is still pending, with the `ComponentStopTimeoutError` of that timeout as
-   * `signal.reason`, just before `onGracefulStopTimeout()`. It is never aborted because
-   * `stop()` resolved or threw, nor by the force phase or a shutdown's `timeoutMS`.
-   * Prefer it over `onGracefulStopTimeout()` as the cue to give up on graceful work
-   * (pass it to `server.close()` waits, drains, flushes); a `stop()` that settles
+   * `signal.reason`. It is never aborted because `stop()` resolved or threw, nor by the
+   * force phase or a shutdown's `timeoutMS`. Use it as the cue to give up on graceful
+   * work (pass it to `server.close()` waits, drains, flushes); a `stop()` that settles
    * promptly once it aborts may still complete the stop before the force phase begins.
    * Declaring `stop()` without the parameter is fine.
    *
@@ -268,33 +288,6 @@ export abstract class BaseComponent {
    * @throws Should throw an error if stop fails (will trigger force phase)
    */
   public abstract stop(signal: AbortSignal): Promise<void> | void;
-
-  /**
-   * Called when start() times out
-   *
-   * Invoked when start() exceeds startupTimeoutMS (or a startAllComponents() deadline
-   * abandons it) before rollback begins, right after the signal passed to start() is
-   * aborted. Prefer that signal for cancelling startup work; use this hook for
-   * instance-level cleanup the signal cannot reach. Not called for a start that a newer
-   * attempt has already superseded, whose signal is still aborted.
-   *
-   * Implementing it for a start() that times out on its own startupTimeoutMS makes
-   * cleaning up after a late success the component's job: the manager's automatic
-   * late-start stop runs only without this hook (bulk deadlines always run it).
-   * Must be synchronous and fast - manager won't wait for it to complete.
-   */
-  public onStartupAborted?(): void;
-
-  /**
-   * Called when stop() times out
-   *
-   * Invoked when stop() exceeds shutdownGracefulTimeoutMS before force shutdown begins,
-   * right after the signal passed to stop() is aborted. Prefer that signal for
-   * cancelling graceful work; use this hook for instance-level preparation the signal
-   * cannot reach (flags for onShutdownForce(), say).
-   * Must be synchronous and fast - manager won't wait for it to complete.
-   */
-  public onGracefulStopTimeout?(): void;
 
   /**
    * Called before graceful shutdown to warn component
@@ -319,28 +312,15 @@ export abstract class BaseComponent {
    * from the one `stop()` received. The manager aborts it when it no longer needs this
    * call's work while the call is still pending: when `shutdownForceTimeoutMS` passes,
    * with a `ComponentForceTimeoutError` (`errCode: 'ForceTimeout'`) - the error the
-   * stall result carries - as `signal.reason`, just before `onShutdownForceAborted()`;
-   * and when the graceful `stop()` it escalated from, still running within the same
-   * stop, completes late and ends the force phase early, with a
-   * `ForceShutdownSupersededError` (`errCode: 'ForceSuperseded'`) as `signal.reason`,
-   * without calling `onShutdownForceAborted()`. It is never aborted because the call resolved or
-   * threw. Listener errors are reported as
+   * stall result carries - as `signal.reason`; and when the graceful `stop()` it
+   * escalated from, still running within the same stop, completes late and ends the
+   * force phase early, with a `ForceShutdownSupersededError`
+   * (`errCode: 'ForceSuperseded'`) as `signal.reason`. It is never aborted because the
+   * call resolved or threw. Listener errors are reported as
    * `lifecycle-manager force abort listener for <name>`. Declaring it without the
    * parameter is fine.
    */
   public onShutdownForce?(signal: AbortSignal): Promise<void> | void;
-
-  /**
-   * Called when onShutdownForce() times out
-   *
-   * Invoked when onShutdownForce() exceeds shutdownForceTimeoutMS before component is
-   * marked stalled, right after the signal passed to onShutdownForce() is aborted.
-   * Prefer that signal; use this hook for instance-level cleanup it cannot reach.
-   * Deadline-only: not called when the signal aborts because a late graceful completion
-   * ended the force phase first - the component did stop.
-   * Must be synchronous and fast - manager won't wait for it to complete.
-   */
-  public onShutdownForceAborted?(): void;
 
   /**
    * Called when reload signal (SIGHUP, R key) is received

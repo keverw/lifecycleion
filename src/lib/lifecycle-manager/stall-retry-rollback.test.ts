@@ -451,12 +451,25 @@ describe('LifecycleManager - stall retry and rollback', () => {
     const component = new HangsThenForceThrows(logger, 'early');
     await manager.registerComponent(component);
     await manager.startComponent('early');
-    Object.defineProperty(component, 'onShutdownForceAborted', {
-      configurable: true,
-      get(): never {
-        throw new Error('abort hook read crashed');
-      },
-    });
+    // The force phase's recheck, between the graceful timeout and the force claim, is
+    // where the escalation crashes - once.
+    const internals = manager as unknown as {
+      checkStopPreconditions: (
+        name: string,
+        expected?: unknown,
+        force?: unknown,
+      ) => unknown;
+    };
+    const checkStopPreconditions =
+      internals.checkStopPreconditions.bind(manager);
+    let shouldCrash = true;
+    internals.checkStopPreconditions = (name, expected, force) => {
+      if (shouldCrash && expected !== undefined && force !== undefined) {
+        shouldCrash = false;
+        throw new Error('force recheck crashed');
+      }
+      return checkStopPreconditions(name, expected, force);
+    };
 
     const stalledCodes: unknown[] = [];
     manager.on('component:stalled', (event) => {
@@ -478,7 +491,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
       success: false,
       code: 'operation_crashed',
       reason:
-        'Stop failed unexpectedly after its graceful phase timed out: abort hook read crashed',
+        'Stop failed unexpectedly after its graceful phase timed out: force recheck crashed',
       status: {
         state: 'stalled',
         stallInfo: { phase: 'graceful', reason: 'timeout' },
@@ -489,7 +502,6 @@ describe('LifecycleManager - stall retry and rollback', () => {
     expect(stall.startedAt).toBeGreaterThanOrEqual(beforeStop);
 
     // A retry that fails again still knows the graceful phase timed out.
-    Reflect.deleteProperty(component, 'onShutdownForceAborted');
     await retryStalled(manager, 'early');
     expect(manager.getStalledComponents()[0]).toMatchObject({
       phase: 'force',

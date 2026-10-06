@@ -1,3 +1,5 @@
+import { getIntrinsic } from '../../internal/intrinsics';
+import type { BaseComponent } from '../base-component';
 import type {
   ComponentOperationResult,
   InsertComponentAtResult,
@@ -169,4 +171,58 @@ export function isManualPositionRespected(input: {
   }
 
   return false;
+}
+
+/**
+ * The timeout hooks the abort signals replaced, each with the reason a registration of a
+ * component that still defines it is refused. The manager no longer calls them, so a
+ * component relying on one would otherwise lose that behavior silently - in
+ * `onStartupAborted()`'s case, also its opt-out of automatic late-start cleanup.
+ */
+const REMOVED_TIMEOUT_HOOKS: readonly (readonly [string, string])[] = [
+  [
+    'onStartupAborted',
+    'onStartupAborted() was removed: use the AbortSignal passed to start(); set ownsLateStartCleanup: true if the component cleans up a late start itself',
+  ],
+  [
+    'onGracefulStopTimeout',
+    'onGracefulStopTimeout() was removed: use the AbortSignal passed to stop()',
+  ],
+  [
+    'onShutdownForceAborted',
+    'onShutdownForceAborted() was removed: use the AbortSignal passed to onShutdownForce()',
+  ],
+];
+
+/**
+ * Why `component` cannot be registered because it still defines a removed timeout hook,
+ * as an own or inherited property, or `undefined` when it defines none. Each property is
+ * read once, through the `Reflect.get` captured at load: a value other than `undefined`
+ * defines the hook, and so does a getter that throws - an accessor there is a definition
+ * the component made. Never throws for the component's own code.
+ */
+export function removedTimeoutHooksReason(
+  component: BaseComponent,
+  componentName: string,
+): string | undefined {
+  const found: string[] = [];
+  for (const [hook, reason] of REMOVED_TIMEOUT_HOOKS) {
+    let isDefined: boolean;
+    try {
+      isDefined = getIntrinsic(component, hook) !== undefined;
+    } catch {
+      isDefined = true;
+    }
+    if (isDefined) {
+      found.push(reason);
+    }
+  }
+
+  if (found.length === 0) {
+    return undefined;
+  }
+
+  return found.length === 1
+    ? `Component "${componentName}" defines a removed hook: ${found[0]}`
+    : `Component "${componentName}" defines removed hooks: ${found.join('; ')}`;
 }

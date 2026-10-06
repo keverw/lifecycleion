@@ -285,23 +285,31 @@ test('restart wraps a validation-shaped failure after its stop claim', async () 
   if (!(validationError instanceof Error)) {
     throw new Error('Expected the timeout validation error');
   }
-  Object.defineProperty(component, 'onShutdownForceAborted', {
-    configurable: true,
-    get() {
-      // Reusing a validation error does not undo the graceful stop this restart
-      // already attempted. Classification must follow ownership, not its code.
+  // The force phase's recheck, after the graceful stop failed, rethrows the validation
+  // error - once. Reusing a validation error does not undo the graceful stop this
+  // restart already attempted. Classification must follow ownership, not its code.
+  const internals = manager as unknown as {
+    checkStopPreconditions: (
+      name: string,
+      expected?: unknown,
+      force?: unknown,
+    ) => unknown;
+  };
+  const checkStopPreconditions = internals.checkStopPreconditions.bind(manager);
+  let shouldThrow = true;
+  internals.checkStopPreconditions = (name, expected, force) => {
+    if (shouldThrow && expected !== undefined && force !== undefined) {
+      shouldThrow = false;
       throw validationError;
-    },
-  });
+    }
+    return checkStopPreconditions(name, expected, force);
+  };
   const { release } = claimReports();
   let result;
   try {
     result = await manager.restartComponent('target');
   } finally {
     release();
-    Object.defineProperty(component, 'onShutdownForceAborted', {
-      value: undefined,
-    });
   }
   expect(component.stops).toBe(1);
   expect(result.success).toBe(false);

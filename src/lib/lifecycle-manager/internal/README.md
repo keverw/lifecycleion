@@ -15,7 +15,7 @@ details, not exports of the package's lifecycle-manager entry.
 | `bounded-array-copy.ts`       | The bounded by-index copy of caller arrays (dependency lists, broadcast `componentNames`).                                              |
 | `dependency-policy.ts`        | Bounded dependency reads, stable dependency ordering, and cycle discovery.                                                              |
 | `operation-policy.ts`         | Lifecycle-specific timeout error provenance, abort-linked failure detection, async failure containment, and common result construction. |
-| `registration-policy.ts`      | Registration progress reports and placement predicates.                                                                                 |
+| `registration-policy.ts`      | Registration progress reports, placement predicates, and the removed-timeout-hook refusal reason.                                       |
 
 `shutdown-warning.ts` owns warning-hook dispatch, its shared deadline, and warning
 notifications. The manager chooses when this phase runs and retains shutdown ownership.

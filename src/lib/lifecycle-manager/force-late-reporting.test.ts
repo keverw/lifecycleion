@@ -15,9 +15,11 @@ for (const shouldDelayNotification of [false, true]) {
     Object.assign(component, {
       shutdownGracefulTimeoutMS: 5,
       shutdownForceTimeoutMS: 5,
-      onShutdownForce: (): Promise<void> => force.promise,
-      onShutdownForceAborted: (): void => {
-        graceful.resolve();
+      onShutdownForce: (signal: AbortSignal): Promise<void> => {
+        signal.addEventListener('abort', () => {
+          graceful.resolve();
+        });
+        return force.promise;
       },
     });
     if (shouldDelayNotification) {
@@ -59,26 +61,29 @@ for (const shouldDelayNotification of [false, true]) {
 }
 
 for (const phase of ['graceful', 'force', 'escalated-force'] as const) {
-  test(`${phase} rejection from its timeout hook has one failure reporter`, async () => {
+  test(`${phase} rejection from its abort listener has one failure reporter`, async () => {
     const { logger, manager } = setup();
     const sink = logger.getSinks()[0] as ArraySink;
     const pending = deferred();
     const failure = new Error('cleanup rejected during abort');
     const component = new Plain(logger, 'a');
-    component.stop = (): Promise<void> =>
-      phase === 'escalated-force' ? new Promise(() => {}) : pending.promise;
+    // Rejects the pending call from its own signal's abort listener.
+    const rejectOnAbort = (signal: AbortSignal): Promise<void> => {
+      signal.addEventListener('abort', () => {
+        pending.reject(failure);
+      });
+      return pending.promise;
+    };
+    component.stop = (signal: AbortSignal): Promise<void> =>
+      phase === 'escalated-force'
+        ? new Promise(() => {})
+        : phase === 'graceful'
+          ? rejectOnAbort(signal)
+          : pending.promise;
     Object.assign(component, {
       shutdownGracefulTimeoutMS: 5,
       shutdownForceTimeoutMS: 5,
-      ...(phase === 'graceful'
-        ? {
-            onShutdownForce: undefined,
-            onGracefulStopTimeout: () => pending.reject(failure),
-          }
-        : {
-            onShutdownForce: () => pending.promise,
-            onShutdownForceAborted: () => pending.reject(failure),
-          }),
+      onShutdownForce: phase === 'graceful' ? undefined : rejectOnAbort,
     });
     await manager.registerComponent(component);
     await manager.startComponent('a');
@@ -90,7 +95,7 @@ for (const phase of ['graceful', 'force', 'escalated-force'] as const) {
     expect(result.code).toBe('error');
     expect(result.error).toBe(failure);
     expect(manager.getComponentStatus('a')?.state).toBe('stalled');
-    // The deadline observer owns the actual hook rejection once installed.
+    // The deadline observer owns the actual rejection once installed.
     // The foreground catch must still update state and return the error. A rejection
     // that beat the deferred deadline - in either phase - is labelled as the failure
     // the result records, not as one after the deadline, which the result does not report.
@@ -140,10 +145,12 @@ test('same-turn graceful completion and force rejection use abandoned severity a
   Object.assign(component, {
     shutdownGracefulTimeoutMS: 5,
     shutdownForceTimeoutMS: 5,
-    onShutdownForce: () => force.promise,
-    onShutdownForceAborted: () => {
-      graceful.resolve();
-      force.reject(new Error('abandoned cleanup'));
+    onShutdownForce: (signal: AbortSignal) => {
+      signal.addEventListener('abort', () => {
+        graceful.resolve();
+        force.reject(new Error('abandoned cleanup'));
+      });
+      return force.promise;
     },
   });
   await manager.registerComponent(component);

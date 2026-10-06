@@ -59,11 +59,11 @@ test.each(['restart', 'replace'] as const)(
       public stop() {
         this.stops++;
       }
-      public onStartupAborted() {}
     }
     const component = new Recoverable(logger, {
       name: 'recoverable',
       startupTimeoutMS: 0,
+      ownsLateStartCleanup: true,
     });
     await manager.registerComponent(component);
     expect((await manager.startAllComponents()).timedOut).toBe(true);
@@ -74,7 +74,10 @@ test.each(['restart', 'replace'] as const)(
       expect((await manager.unregisterComponent('recoverable')).success).toBe(
         true,
       );
-      const replacement = new Recoverable(logger, { name: 'recoverable' });
+      const replacement = new Recoverable(logger, {
+        name: 'recoverable',
+        ownsLateStartCleanup: true,
+      });
       replacement.calls = 1;
       await manager.registerComponent(replacement);
       expect((await manager.startComponent('recoverable')).success).toBe(true);
@@ -3402,22 +3405,21 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect((errorLog?.params?.error as Error).message).toBe('Start error');
     });
 
-    test('onStartupAborted should be called on startup timeout', async () => {
+    test('the start signal should be aborted on startup timeout', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
       class AbortableStartComponent extends BaseComponent {
         public abortCalled = false;
 
-        public async start() {
+        public async start(signal: AbortSignal) {
+          signal.addEventListener('abort', () => {
+            this.abortCalled = true;
+          });
           await sleep(200);
         }
 
         public stop(): Promise<void> {
           return Promise.resolve();
-        }
-
-        public onStartupAborted() {
-          this.abortCalled = true;
         }
       }
 
@@ -3446,7 +3448,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       );
     });
 
-    test('should auto-stop a component after startup timeout when no onStartupAborted is defined', async () => {
+    test('should auto-stop a component after startup timeout by default (ownsLateStartCleanup: false)', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
       class LateResolvingStartComponent extends BaseComponent {
@@ -3600,22 +3602,21 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       );
     });
 
-    test('onStartupAborted should NOT be called when start() fails (non-timeout)', async () => {
+    test('the start signal should NOT be aborted when start() fails (non-timeout)', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
       class FailingStartComponent extends BaseComponent {
         public abortCalled = false;
 
-        public start(): Promise<void> {
+        public start(signal: AbortSignal): Promise<void> {
+          signal.addEventListener('abort', () => {
+            this.abortCalled = true;
+          });
           return Promise.reject(new Error('Start error'));
         }
 
         public stop(): Promise<void> {
           return Promise.resolve();
-        }
-
-        public onStartupAborted() {
-          this.abortCalled = true;
         }
       }
 
@@ -3634,7 +3635,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(component.abortCalled).toBe(false);
     });
 
-    test('onGracefulStopTimeout should be called on stop timeout', async () => {
+    test('the stop signal should be aborted on stop timeout', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
       class AbortableStopComponent extends BaseComponent {
@@ -3644,12 +3645,11 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
           return Promise.resolve();
         }
 
-        public async stop() {
+        public async stop(signal: AbortSignal) {
+          signal.addEventListener('abort', () => {
+            this.abortCalled = true;
+          });
           await sleep(2000);
-        }
-
-        public onGracefulStopTimeout() {
-          this.abortCalled = true;
         }
       }
 
@@ -3665,7 +3665,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(component.abortCalled).toBe(true);
     });
 
-    test('onGracefulStopTimeout should NOT be called when stop() fails (non-timeout)', async () => {
+    test('the stop signal should NOT be aborted when stop() fails (non-timeout)', async () => {
       const lifecycle = new LifecycleManager({ logger });
 
       class FailingStopComponent extends BaseComponent {
@@ -3675,12 +3675,11 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
           return Promise.resolve();
         }
 
-        public stop(): Promise<void> {
+        public stop(signal: AbortSignal): Promise<void> {
+          signal.addEventListener('abort', () => {
+            this.abortCalled = true;
+          });
           return Promise.reject(new Error('Stop error'));
-        }
-
-        public onGracefulStopTimeout() {
-          this.abortCalled = true;
         }
       }
 
@@ -7288,18 +7287,17 @@ describe('LifecycleManager - Multi-Phase Shutdown', () => {
     });
   });
 
-  describe('Abort Callbacks', () => {
-    test('should call onGracefulStopTimeout on graceful timeout', async () => {
+  describe('Abort Signals', () => {
+    test('should abort the stop signal on graceful timeout', async () => {
       const lifecycle = new LifecycleManager({ logger });
       let wasAbortCalled = false;
 
       class AbortComponent extends TestComponent {
-        public async stop() {
+        public async stop(signal: AbortSignal) {
+          signal.addEventListener('abort', () => {
+            wasAbortCalled = true;
+          });
           await sleep(2000);
-        }
-
-        public onGracefulStopTimeout() {
-          wasAbortCalled = true;
         }
 
         public onShutdownForce() {
@@ -7320,7 +7318,7 @@ describe('LifecycleManager - Multi-Phase Shutdown', () => {
       expect(wasAbortCalled).toBe(true);
     });
 
-    test('should call onShutdownForceAborted on force timeout', async () => {
+    test('should abort the force signal on force timeout', async () => {
       const lifecycle = new LifecycleManager({ logger });
       let wasAbortCalled = false;
 
@@ -7329,12 +7327,11 @@ describe('LifecycleManager - Multi-Phase Shutdown', () => {
           throw new Error('Stop failed');
         }
 
-        public async onShutdownForce() {
+        public async onShutdownForce(signal: AbortSignal) {
+          signal.addEventListener('abort', () => {
+            wasAbortCalled = true;
+          });
           await sleep(2000);
-        }
-
-        public onShutdownForceAborted() {
-          wasAbortCalled = true;
         }
       }
 
@@ -13342,15 +13339,15 @@ test('late startup clears its deadline before shutdown cleanup', async () => {
   const stop = Promise.withResolvers<void>();
   let aborted = 0;
   class Late extends BaseComponent {
-    public start() {
+    public start(signal: AbortSignal) {
+      signal.addEventListener('abort', () => {
+        aborted++;
+      });
       return start.promise;
     }
     public stop() {
       stopping.resolve();
       return stop.promise;
-    }
-    public onStartupAborted() {
-      aborted++;
     }
   }
   await manager.registerComponent(

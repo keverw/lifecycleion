@@ -9,11 +9,7 @@ class Reporter extends Plain {
 }
 
 describe('LifecycleManager stop ownership after caller property reads', () => {
-  for (const property of [
-    'onGracefulStopTimeout',
-    'shutdownGracefulTimeoutMS',
-    'timeout',
-  ] as const) {
+  for (const property of ['shutdownGracefulTimeoutMS', 'timeout'] as const) {
     test(`a re-entrant ${property} getter cannot make two stops own the component`, async () => {
       const { logger, manager } = setup();
       const component = new Plain(logger, 'a');
@@ -38,7 +34,7 @@ describe('LifecycleManager stop ownership after caller property reads', () => {
               didReenter = true;
               nested = manager.stopComponent('a');
             }
-            return property === 'onGracefulStopTimeout' ? undefined : 0;
+            return 0;
           },
         },
       );
@@ -125,7 +121,6 @@ describe('LifecycleManager stop ownership after caller property reads', () => {
 describe('LifecycleManager force ownership after caller property reads', () => {
   for (const property of [
     'onShutdownForce',
-    'onShutdownForceAborted',
     'shutdownForceTimeoutMS',
     'forceImmediate',
     '_clearUnexpectedStopHandler',
@@ -173,7 +168,7 @@ describe('LifecycleManager force ownership after caller property reads', () => {
               if (property === 'forceImmediate') {
                 return true;
               }
-              return property === 'shutdownForceTimeoutMS' ? 0 : undefined;
+              return 0;
             },
           },
         );
