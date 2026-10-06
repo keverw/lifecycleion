@@ -2,7 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ArraySink, Logger } from './index';
+import { ArraySink, Logger, type LogSink } from './index';
 
 // The codes `exit-process` publishes, so a test can check they agree with
 // `logger.exitCode` and the `process.exit()` call.
@@ -638,7 +638,7 @@ test('a simulated exit entry keeps the requested exit code', async () => {
   expect(logger.exitCode).toBe(300);
 });
 
-test('an exit-called listener during a repeat exit is judged against the scheduled code', async () => {
+test('a repeat exit behind a committed real exit reaches no exit-called listener', async () => {
   const exit = spyOn(process, 'exit').mockImplementation(
     () => undefined as never,
   );
@@ -646,17 +646,20 @@ test('an exit-called listener during a repeat exit is judged against the schedul
   try {
     const logger = new Logger({ sinks: [], callProcessExit: true });
     logger.exit(1);
-    // The repeat's own code is 0, but the process exits 1: the nested failure request
-    // changes nothing, so it is not reported as ignored behind a success.
+    let exitCalled = 0;
     logger.on<{ eventType: string }>('logger', ({ eventType }) => {
       if (eventType === 'exit-called') {
+        exitCalled++;
         logger.exit(5);
       }
     });
+    // Ignored behind the committed exit, so it starts nothing: no `exit-called`, and so
+    // no nested request from its listener either.
     logger.exit(0);
     await logger.close();
     await Promise.resolve();
 
+    expect(exitCalled).toBe(0);
     expect(exit.mock.calls).toEqual([[1]]);
     expect(output).not.toHaveBeenCalled();
   } finally {
@@ -1018,13 +1021,19 @@ test('a simulated exit requested after an earlier one completed starts fresh', a
   try {
     const logger = new Logger({ sinks: [], callProcessExit: false });
     const processed = recordExitProcess(logger);
+    // Each exit is allowed to finish closing before the next is requested: one requested
+    // while it still closes belongs to it, as behind a real exit.
+    const completed = (): Promise<void> =>
+      new Promise((resolve) => setTimeout(resolve, 0));
     logger.exit(0);
+    await completed();
     // Each later exit publishes its own code: the process is still running, so the
     // failure is not ignored behind the earlier success, and the success after it does
     // not inherit it.
     logger.exit(1);
+    await completed();
     logger.exit(0);
-    await logger.close();
+    await completed();
 
     expect(processed).toEqual([0, 1, 0]);
     expect(logger.exitCode).toBe(0);
@@ -1100,6 +1109,9 @@ test('a failure exitCode logged after a simulated exit completed starts the next
   const processed = recordExitProcess(logger);
   logger.exit(0);
   await logger.close();
+  // The exit proceeds after `beforeExitCallback` settles, so its cleanup completes a
+  // turn after this close() call's; a request before then would belong to it.
+  await new Promise((resolve) => setTimeout(resolve, 0));
 
   logger.error('fatal after the first exit', { exitCode: 1 });
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -1107,6 +1119,135 @@ test('a failure exitCode logged after a simulated exit completed starts the next
   expect(beforeExitCodes).toEqual([0, 1]);
   expect(processed).toEqual([0, 1]);
   expect(logger.exitCode).toBe(1);
+});
+
+// A logger whose one sink logs `exitCode` from its own `close()`, as a component that
+// reports its shutdown through the logger does, recording what the exit published.
+function exitLoggingFromSinkClose(
+  shouldCallProcessExit: boolean,
+  closeExitCode: number,
+): {
+  logger: Logger;
+  processed: number[];
+  exitCalled: number[];
+  beforeExitCodes: number[];
+} {
+  const self: { logger?: Logger } = {};
+  const sink: LogSink = {
+    write: () => {},
+    close: () => {
+      self.logger?.info('bye', { exitCode: closeExitCode });
+    },
+  };
+  const beforeExitCodes: number[] = [];
+  const logger = new Logger({
+    sinks: [sink],
+    callProcessExit: shouldCallProcessExit,
+    beforeExitCallback: (code) => {
+      beforeExitCodes.push(code);
+      return { action: 'proceed' };
+    },
+  });
+  self.logger = logger;
+  const processed = recordExitProcess(logger);
+  const exitCalled: number[] = [];
+  logger.on<{ eventType: string; code: number }>(
+    'logger',
+    ({ eventType, code }) => {
+      if (eventType === 'exit-called') {
+        exitCalled.push(code);
+      }
+    },
+  );
+  return { logger, processed, exitCalled, beforeExitCodes };
+}
+
+test.each([false, true])(
+  'a sink close logging exitCode 0 during exit(1) cannot downgrade it (callProcessExit: %p)',
+  async (shouldCallProcessExit) => {
+    // Simulated, the close's request started a new exit that committed 0, so
+    // `logger.exitCode` read 0 where the real exit it stands in for exits 1.
+    const exit = spyOn(process, 'exit').mockImplementation(
+      () => undefined as never,
+    );
+    const output = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { logger, processed, exitCalled, beforeExitCodes } =
+        exitLoggingFromSinkClose(shouldCallProcessExit, 0);
+      logger.exit(1);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(processed).toEqual([1]);
+      expect(logger.exitCode).toBe(1);
+      expect(logger.isPendingExit).toBe(false);
+      // Ignored, so it started nothing of its own.
+      expect(exitCalled).toEqual([1]);
+      expect(beforeExitCodes).toEqual([1]);
+      expect(exit.mock.calls).toEqual(shouldCallProcessExit ? [[1]] : []);
+      expect(output).not.toHaveBeenCalled();
+    } finally {
+      output.mockRestore();
+      exit.mockRestore();
+    }
+  },
+);
+
+test.each([false, true])(
+  'a sink close logging exitCode 1 during exit(0) is reported as ignored (callProcessExit: %p)',
+  async (shouldCallProcessExit) => {
+    const exit = spyOn(process, 'exit').mockImplementation(
+      () => undefined as never,
+    );
+    const output = spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      const { logger, processed, exitCalled, beforeExitCodes } =
+        exitLoggingFromSinkClose(shouldCallProcessExit, 1);
+      logger.exit(0);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(processed).toEqual([0]);
+      expect(logger.exitCode).toBe(0);
+      expect(exitCalled).toEqual([0]);
+      expect(beforeExitCodes).toEqual([0]);
+      expect(exit.mock.calls).toEqual(shouldCallProcessExit ? [[0]] : []);
+      expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+        'Logger exit(1) ignored: an exit with code 0 is already processing',
+      ]);
+    } finally {
+      output.mockRestore();
+      exit.mockRestore();
+    }
+  },
+);
+
+test('an exit ignored behind a committed real exit emits no exit-called and runs no beforeExit', async () => {
+  // `isPendingExit` says such a request starts nothing, yet it still emitted
+  // `exit-called` and called `beforeExitCallback` for an exit that never runs.
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const { logger, processed, exitCalled, beforeExitCodes } =
+      exitLoggingFromSinkClose(true, 0);
+    logger.exit(1);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Committed, with `process.exit()` stubbed: the latch stays, as it would in a
+    // process that was really on its way out.
+    logger.exit(2);
+    logger.error('after the exit', { exitCode: 3 });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(exitCalled).toEqual([1]);
+    expect(beforeExitCodes).toEqual([1]);
+    expect(processed).toEqual([1]);
+    expect(logger.isPendingExit).toBe(false);
+    expect(exit.mock.calls).toEqual([[1]]);
+    expect(output).not.toHaveBeenCalled();
+  } finally {
+    output.mockRestore();
+    exit.mockRestore();
+  }
 });
 
 test('a failure exitCode logged after close() while an exit is pending replaces its code', async () => {

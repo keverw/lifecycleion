@@ -1,5 +1,7 @@
 import { expect, test } from 'bun:test';
+import { setTimeout as delay } from 'node:timers/promises';
 import type { Logger } from '../logger';
+import type { ArraySink } from '../logger/sinks/array';
 import { sleep } from '../sleep';
 import { BaseComponent } from './base-component';
 import {
@@ -675,3 +677,190 @@ test.each(THROWING_LISTENERS)(
     }
   },
 );
+
+// Ways a hook honors its signal by rejecting: a cancellable call's `AbortError`, the
+// abort reason itself, and an error of its own that carries the reason as its cause.
+const HONORS_BY_REJECTING: Array<
+  [string, (signal: AbortSignal) => Promise<void>]
+> = [
+  [
+    'an AbortError from a cancellable call',
+    (signal) => delay(5_000, undefined, { signal }),
+  ],
+  [
+    'the abort reason itself',
+    (signal) =>
+      new Promise<void>((_, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(signal.reason as Error);
+        });
+      }),
+  ],
+  [
+    'an error caused by the abort reason',
+    (signal) =>
+      new Promise<void>((_, reject) => {
+        signal.addEventListener('abort', () => {
+          reject(new Error('cleanup gave up', { cause: signal.reason }));
+        });
+      }),
+  ],
+];
+
+test.each(HONORS_BY_REJECTING)(
+  'a stop that rejects with %s at its deadline is the graceful timeout',
+  async (_, honor) => {
+    const { logger, manager } = setup();
+    const sink = logger.getSinks()[0] as ArraySink;
+    const a = await started(manager, new GracefulOnly(logger, 'a', 30));
+    a.onStop = honor;
+    const timeouts: Error[] = [];
+    manager.on('component:stop-timeout', (data) => {
+      timeouts.push((data as { error: Error }).error);
+    });
+
+    const result = await manager.stopComponent('a');
+    await sleep(10);
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('component_shutdown_timeout');
+    // The event carries the error the signal was aborted with.
+    expect(timeouts).toEqual([a.stopSignals[0].reason as Error]);
+    expect(result.status?.stallInfo?.reason).toBe('timeout');
+    // Reported as a stop that failed once its deadline fired, not as its own failure.
+    expect(
+      sink.logs.some((entry) =>
+        entry.message.startsWith('Graceful shutdown threw error'),
+      ),
+    ).toBe(false);
+    expect(
+      sink.logs.some(
+        (entry) =>
+          entry.message === 'Component stop failed after deadline fired',
+      ),
+    ).toBe(true);
+  },
+);
+
+test.each(HONORS_BY_REJECTING)(
+  'a force handler that rejects with %s at its deadline is the force timeout',
+  async (_, honor) => {
+    const { logger, manager } = setup();
+    const sink = logger.getSinks()[0] as ArraySink;
+    const a = await started(
+      manager,
+      new Records(logger, 'a', { graceful: 30, force: 30 }),
+    );
+    a.onStop = honor;
+    a.onForce = honor;
+    const stopTimeouts: string[] = [];
+    const forceTimeouts: string[] = [];
+    manager.on('component:stop-timeout', (data) => {
+      stopTimeouts.push((data as { name: string }).name);
+    });
+    manager.on('component:shutdown-force-timeout', (data) => {
+      forceTimeouts.push((data as { name: string }).name);
+    });
+
+    const result = await manager.stopComponent('a');
+    await sleep(10);
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('component_shutdown_timeout');
+    expect(result.reason).toBe(
+      LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
+    );
+    expect(stopTimeouts).toEqual(['a']);
+    expect(forceTimeouts).toEqual(['a']);
+    // The force phase's own timeout, not a failure after a graceful one (`both`).
+    expect(result.status?.stallInfo?.reason).toBe('timeout');
+    expect(
+      sink.logs.some((entry) =>
+        entry.message.startsWith('Force shutdown failed - stalled'),
+      ),
+    ).toBe(false);
+  },
+);
+
+test('an unrelated rejection after the deadline fired is still the graceful failure', async () => {
+  const { logger, manager } = setup();
+  const a = await started(manager, new GracefulOnly(logger, 'a', 30));
+  const failure = new Error('cleanup failed');
+  a.onStop = (signal) =>
+    new Promise<void>((_, reject) => {
+      signal.addEventListener('abort', () => {
+        reject(failure);
+      });
+    });
+
+  const result = await manager.stopComponent('a');
+
+  expect(result.code).toBe('error');
+  expect(result.error).toBe(failure);
+  expect(result.status?.stallInfo?.reason).toBe('error');
+});
+
+test.each(HONORS_BY_REJECTING)(
+  'a force handler that rejects with %s when a late graceful completion supersedes it is not reported',
+  async (_, honor) => {
+    const { logger, manager } = setup();
+    const sink = logger.getSinks()[0] as ArraySink;
+    const a = await started(
+      manager,
+      new Records(logger, 'a', { graceful: 20, force: 5_000 }),
+    );
+    const stopGate = deferred();
+    a.onStop = () => stopGate.promise;
+    a.onForce = honor;
+
+    const stopping = manager.stopComponent('a');
+    while (a.forceSignals.length === 0) {
+      await sleep(5);
+    }
+    stopGate.resolve();
+    const result = await stopping;
+    await sleep(10);
+
+    expect(result.success).toBe(true);
+    expect(a.forceSignals[0].reason).toBeInstanceOf(
+      ForceShutdownSupersededError,
+    );
+    expect(
+      sink.logs.some((entry) =>
+        entry.message.startsWith('Force shutdown failed'),
+      ),
+    ).toBe(false);
+  },
+);
+
+test('a force handler that fails for its own reason once superseded is still reported', async () => {
+  const { logger, manager } = setup();
+  const sink = logger.getSinks()[0] as ArraySink;
+  const a = await started(
+    manager,
+    new Records(logger, 'a', { graceful: 20, force: 5_000 }),
+  );
+  const stopGate = deferred();
+  a.onStop = () => stopGate.promise;
+  a.onForce = (signal) =>
+    new Promise<void>((_, reject) => {
+      signal.addEventListener('abort', () => {
+        reject(new Error('cleanup failed'));
+      });
+    });
+
+  const stopping = manager.stopComponent('a');
+  while (a.forceSignals.length === 0) {
+    await sleep(5);
+  }
+  stopGate.resolve();
+  expect((await stopping).success).toBe(true);
+  await sleep(10);
+
+  const reports = sink.logs.filter((entry) =>
+    entry.message.startsWith('Force shutdown failed'),
+  );
+  expect(reports.map((entry) => [entry.type, entry.message])).toEqual([
+    ['warn', 'Force shutdown failed after graceful stop completed'],
+  ]);
+});

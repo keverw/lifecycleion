@@ -160,4 +160,39 @@ describe('PromiseProtectedResolver with beforeResolveOrRejectCallback', () => {
 
     expect(resolver.promise).resolves.toEqual('Error test');
   });
+
+  it.each([
+    ['resolveOnce', 'resolve'],
+    ['rejectOnce', 'reject'],
+  ] as const)(
+    'a %s from inside the callback cannot settle the promise first',
+    async (method, action) => {
+      const actions: string[] = [];
+      const resolver: PromiseProtectedResolver<number> =
+        new PromiseProtectedResolver<number>({
+          beforeResolveOrReject: (seenAction, valueOrReason) => {
+            actions.push(
+              `${seenAction} ${String(valueOrReason)} ${resolver.hasResolved}`,
+            );
+            resolver.resolveOnce(2);
+            resolver.rejectOnce(new Error('nested'));
+          },
+        });
+
+      if (method === 'resolveOnce') {
+        resolver.resolveOnce(1);
+        expect(await resolver.promise).toBe(1);
+      } else {
+        const reason = new Error('outer');
+        resolver.rejectOnce(reason);
+        expect(await resolver.promise.catch((error: unknown) => error)).toBe(
+          reason,
+        );
+      }
+
+      expect(actions).toEqual([
+        action === 'resolve' ? 'resolve 1 true' : 'reject Error: outer true',
+      ]);
+    },
+  );
 });

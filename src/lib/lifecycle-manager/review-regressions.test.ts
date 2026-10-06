@@ -2959,7 +2959,7 @@ describe('LifecycleManager - review regressions', () => {
     expect(startCalls).toBe(0);
   });
 
-  test('a registration made from inside a dependency read does not corrupt the order', async () => {
+  test('a registration made from inside a dependency read is ordered with the rest', async () => {
     const { logger, manager } = setup();
     const a = new Plain(logger, 'a');
     await manager.registerComponent(a);
@@ -2977,8 +2977,28 @@ describe('LifecycleManager - review regressions', () => {
 
     const order = manager.getStartupOrder();
 
+    // The live registry once the reads settle, as a startup would order it.
     expect(order.success).toBe(true);
-    expect(order.startupOrder).toEqual(['a', 'b']);
+    expect(order.startupOrder).toEqual(['z', 'a', 'b', 'y']);
+  });
+
+  test('a component unregistered from inside a dependency read is not in the order', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    await manager.registerComponent(a);
+    await manager.registerComponent(new Plain(logger, 'b'));
+    let removal: Promise<unknown> | undefined;
+    a.getDependencies = (): string[] => {
+      removal ??= manager.unregisterComponent('b');
+      return [];
+    };
+
+    const order = manager.getStartupOrder();
+    await removal;
+
+    expect(manager.getComponentNames()).toEqual(['a']);
+    expect(order.success).toBe(true);
+    expect(order.startupOrder).toEqual(['a']);
   });
 
   test('a dependency that is stopping does not count as running for a start', async () => {

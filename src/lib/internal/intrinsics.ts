@@ -11,8 +11,6 @@ export const getIntrinsic: typeof Reflect.get = Reflect.get;
 /** `Reflect.getPrototypeOf` as it was at module initialization. */
 export const getPrototypeOfIntrinsic: typeof Reflect.getPrototypeOf =
   Reflect.getPrototypeOf;
-/** `Reflect.construct` as it was at module initialization. */
-export const constructIntrinsic: typeof Reflect.construct = Reflect.construct;
 /** `Object.prototype`, read before application code can rebind the `Object` global. */
 export const objectPrototypeIntrinsic: object = Object.prototype;
 /** `Symbol.species`, read before application code can rebind the `Symbol` global. */

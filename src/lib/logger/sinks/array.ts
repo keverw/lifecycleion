@@ -311,6 +311,12 @@ export class ArraySink implements LogSink {
    */
   private formatReportsInFlight = 0;
 
+  /**
+   * How many of {@link formatReportsInFlight} are console reports, so a console shim that
+   * logs back into this sink is told apart from a pending handler.
+   */
+  private consoleFormatReportsInFlight = 0;
+
   /** Whether the report in flight is the deferred one below, which keeps no successor. */
   private deliveringDeferredFormatReport = false;
 
@@ -337,7 +343,8 @@ export class ArraySink implements LogSink {
      * `'render'`), or when the `transformer` threw, returned a promise, or returned
      * anything else that is neither an entry object nor `false`, and the
      * untransformed entry was stored instead (`kind` is `'transform'`, `path` is
-     * `<transformer>`; a promise that later rejects is reported again with its reason), so a
+     * `<transformer>`; a promise that later rejects is reported again with its reason, unless
+     * it was returned while a report was being delivered - see `refuseNonEntryTransform`), so a
      * `<value could not be copied>` marker or a silently passed-through entry leaves a
      * diagnosis. Defaults to `console.error`. Fires at most once per kind per entry
      * written.
@@ -441,6 +448,15 @@ export class ArraySink implements LogSink {
    * that first report (see `deferredFormatReport`). A value whose `then` cannot be read
    * is thrown with the read's own failure.
    *
+   * Where that rejection goes is decided when the promise is born, not when it rejects. A
+   * promise returned while a report is being delivered came from a write that report
+   * made - a handler logging the failure back into this sink - and handing its rejection
+   * to the handler fed it the next one: each delivery logged, each log returned a fresh
+   * promise, and each rejection arrived after the guard had come down, one handler call
+   * per microtask without end. Born during a handler's report, the rejection goes to the
+   * console instead; born during a console report, it is dropped, as the immediate
+   * failure of that same nested write already was.
+   *
    * A primitive - `undefined` from a transformer missing its `return`, `null`, a string -
    * was stored as the entry just as a promise was, leaving `logs` holding a value that is
    * no entry with nothing reported. It is refused the same way. Named by `typeof` alone,
@@ -454,10 +470,22 @@ export class ArraySink implements LogSink {
     }
 
     if (pending !== undefined) {
+      const wasBornDuringConsoleReport = this.consoleFormatReportsInFlight > 0;
+      const wasBornDuringReport = this.formatReportsInFlight > 0;
+
       observeRejection(pending, (error: unknown) => {
-        this.createGuardedFormatReporter('transform', {
-          canDefer: true,
-        })(error, '<transformer>');
+        if (wasBornDuringConsoleReport) {
+          return;
+        }
+
+        // Still through a reporter, which normalizes the reason and never throws.
+        const report = wasBornDuringReport
+          ? createFormatReporter('transform', (failure, kind, path): void => {
+              this.reportFormatFailureToConsole(failure, kind, path);
+            })
+          : this.createGuardedFormatReporter('transform', { canDefer: true });
+
+        report(error, '<transformer>');
       });
 
       throw new TypeError(
@@ -526,14 +554,7 @@ export class ArraySink implements LogSink {
             };
             return;
           }
-          if (this.formatReportsInFlight === 1) {
-            this.formatReportsInFlight++;
-            try {
-              consoleFormatHandler()(error, reportKind, path);
-            } finally {
-              this.formatReportsInFlight--;
-            }
-          }
+          this.reportFormatFailureToConsole(error, reportKind, path);
           return;
         }
 
@@ -557,5 +578,29 @@ export class ArraySink implements LogSink {
       },
       'ArraySink onFormatError',
     );
+  }
+
+  /**
+   * Report a format failure on the console, with the guard raised while it does, so a
+   * console shim that logs back into this sink cannot recurse. A failure raised by such a
+   * shim is suppressed; write() still stores its entry.
+   */
+  private reportFormatFailureToConsole(
+    error: Error,
+    kind: FormatFailureKind,
+    path: string,
+  ): void {
+    if (this.consoleFormatReportsInFlight > 0) {
+      return;
+    }
+
+    this.formatReportsInFlight++;
+    this.consoleFormatReportsInFlight++;
+    try {
+      consoleFormatHandler()(error, kind, path);
+    } finally {
+      this.consoleFormatReportsInFlight--;
+      this.formatReportsInFlight--;
+    }
   }
 }

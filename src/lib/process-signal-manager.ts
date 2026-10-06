@@ -7,6 +7,8 @@ import readline from 'readline';
 import { resolveTimeoutMS } from './internal/timer-limits';
 import { queueMicrotaskIntrinsic } from './internal/intrinsics';
 import { isObjectLike } from './internal/is-object-like';
+import { reportToConsole } from './internal/report-to-console';
+import { describeError } from './to-error';
 
 /**
  * The shutdown signal types that can trigger the shutdown callback
@@ -795,9 +797,18 @@ export class ProcessSignalManager {
       return;
     }
 
-    queueMicrotaskIntrinsic(() => {
-      reportCleanupFailures(reports);
-    });
+    queueMicrotaskIntrinsic(
+      () => {
+        reportCleanupFailures(reports);
+      },
+      // Reporting itself failed. The console is the only rung left, and without it the
+      // cleanup failures - listeners possibly left on `process` - would vanish silently.
+      (error: unknown) => {
+        reportToConsole(
+          `ProcessSignalManager could not report its cleanup failures: ${describeError(error)}`,
+        );
+      },
+    );
   }
 
   /**
@@ -820,12 +831,12 @@ export class ProcessSignalManager {
 
     // Only call emitKeypressEvents once per stream to avoid duplicate events
     // Node.js warns against calling this multiple times on the same stream
-    // IMPORTANT: Set flag BEFORE calling to prevent race condition where two instances
-    // both see false and both call emitKeypressEvents. The call is idempotent-ish
-    // (just causes warnings), but we want to avoid it.
+    // Set only once the call has succeeded: one that throws fails this attach, which
+    // rolls back, and a flag already set would make every later attach skip the call
+    // and listen for keypresses that are never emitted.
     if (!shared.keypressEventsEmittedOnStdin) {
-      shared.keypressEventsEmittedOnStdin = true;
       readline.emitKeypressEvents(process.stdin);
+      shared.keypressEventsEmittedOnStdin = true;
     }
 
     // Create the keypress handler. Letter keys and Escape invoke callbacks directly;

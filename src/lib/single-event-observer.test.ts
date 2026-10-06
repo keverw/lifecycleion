@@ -176,6 +176,68 @@ describe('SingleEventObserverProtected', () => {
   });
 });
 
+describe('subscriber changes during a notification', () => {
+  test('a subscriber added during notify runs from the next notification', () => {
+    const observer = new SingleEventObserver<number>();
+    const seen: string[] = [];
+    const late = (value: number): void => {
+      seen.push(`late ${value}`);
+    };
+
+    observer.subscribe((value) => {
+      seen.push(`first ${value}`);
+      observer.subscribe(late);
+    });
+
+    observer.notify(1);
+    expect(seen).toEqual(['first 1']);
+
+    observer.notify(2);
+    expect(seen).toEqual(['first 1', 'first 2', 'late 2']);
+  });
+
+  test('a subscriber that re-subscribes itself runs once per notification', () => {
+    // Re-adding moves it to the end of the live set, so iterating that set reached it
+    // again on every pass and never finished.
+    const observer = new SingleEventObserver<number>();
+    let calls = 0;
+    const resubscriber = (): void => {
+      calls++;
+      if (calls > 10) {
+        throw new Error('looped');
+      }
+      observer.unsubscribe(resubscriber);
+      observer.subscribe(resubscriber);
+    };
+
+    observer.subscribe(resubscriber);
+    observer.notify(1);
+    expect(calls).toBe(1);
+
+    observer.notify(2);
+    expect(calls).toBe(2);
+    expect(observer.hasSubscriber(resubscriber)).toBe(true);
+  });
+
+  test('a subscriber removed during notify still runs in that notification', () => {
+    const observer = new SingleEventObserver<number>();
+    const seen: string[] = [];
+    const second = (value: number): void => {
+      seen.push(`second ${value}`);
+    };
+
+    observer.subscribe((value) => {
+      seen.push(`first ${value}`);
+      observer.unsubscribe(second);
+    });
+    observer.subscribe(second);
+
+    observer.notify(1);
+    observer.notify(2);
+    expect(seen).toEqual(['first 1', 'second 1', 'first 2']);
+  });
+});
+
 describe('subscriber names and values', () => {
   let reports: Error[] = [];
   const onError = (event: Event): void => {
@@ -240,6 +302,25 @@ describe('subscriber names and values', () => {
       expect(reports[0].cause).toBe(thrown);
     });
   }
+
+  test("a subscriber's name is read only when it fails", () => {
+    const observer = new SingleEventObserver<number>();
+    let nameReads = 0;
+    const subscriber = (): void => {};
+    Object.defineProperty(subscriber, 'name', {
+      configurable: true,
+      get: () => {
+        nameReads++;
+        return 'counted';
+      },
+    });
+
+    observer.subscribe(subscriber);
+    observer.notify(1);
+    observer.notify(2);
+    expect(nameReads).toBe(0);
+    expect(reports).toEqual([]);
+  });
 
   test('a function proxy whose name read throws is still notified', () => {
     const observer = new SingleEventObserver<number>();

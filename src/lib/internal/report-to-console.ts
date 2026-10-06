@@ -1,3 +1,5 @@
+import { applyIntrinsic } from './intrinsics';
+
 /**
  * Write to `console.error` without letting it throw.
  *
@@ -48,8 +50,11 @@
  */
 export function reportToConsole(...args: unknown[]): void {
   try {
+    // Applied rather than spread: a spread goes through the live
+    // `Array.prototype[Symbol.iterator]`, and a patched iterator would silently turn
+    // off the one reporter that nothing else backs up.
     // eslint-disable-next-line no-console -- this function is the console rung itself
-    console.error(...args);
+    applyIntrinsic(console.error, console, args);
   } catch {
     // Nothing left to try, which is the whole point of this being the last rung. A
     // missing `console`, a replaced `error` that is not a function, and a console that

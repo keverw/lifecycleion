@@ -21,6 +21,7 @@ import type {
   StreamResponseCancel,
 } from '../types';
 import {
+  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   REDIRECT_STATUS_CODES,
   REQUEST_BODY_SETTLED_KEY,
@@ -503,8 +504,19 @@ export class NodeAdapter implements HTTPAdapter {
         httpsOptions.rejectUnauthorized = true;
       }
 
-      if (this._config.crl !== undefined) {
-        httpsOptions.crl = normalizeCRL(this._config.crl);
+      // Read once, outside the `try`: only the validation of the value read is terminal.
+      const crl = this._config.crl;
+
+      if (crl !== undefined) {
+        try {
+          httpsOptions.crl = normalizeCRL(crl);
+        } catch (error) {
+          // A refreshed value that fails validation is configuration, not transport:
+          // retrying reads the same bad value again, and reporting it as a network error
+          // hid what was wrong. Terminal, as the constructor's own check is.
+          markNonRetryableAdapterError(error);
+          throw error;
+        }
       }
 
       if (this._config.rejectUnauthorized === false) {
@@ -1165,6 +1177,10 @@ export class NodeAdapter implements HTTPAdapter {
           destroyRequestQuietly(req);
         });
 
+        // The stream signal's trigger, once a `streamResponse` factory is in play, so the
+        // failure handler below can reach it from outside the task that created it.
+        let abortResponseStream: (() => void) | undefined;
+
         const responseTask = (async () => {
           const status = res.statusCode ?? 0;
           const headers = normalizeResponseHeaders(res.headers);
@@ -1196,6 +1212,8 @@ export class NodeAdapter implements HTTPAdapter {
             const abortStream = (): void => {
               streamAbort.abort(undefined);
             };
+
+            abortResponseStream = abortStream;
 
             // Propagate external cancellation (user abort, timeout) into the
             // factory's signal so cleanup listeners fire in all terminal cases.
@@ -1287,6 +1305,23 @@ export class NodeAdapter implements HTTPAdapter {
                 await promiseResolveIntrinsic(undefined);
                 writable = returned as
                   WritableLike | null | StreamResponseCancel;
+              }
+
+              // A factory that forgot its `return` hands back `undefined`, which is neither
+              // a cancel nor a sink. Refused here, as a setup failure of the factory's own,
+              // rather than let through to `streamResponseBody`: there the first use of it
+              // threw inside a promise executor, and the failure reached the caller as a
+              // retryable error - the factory called again on every attempt, each leaving
+              // its connection open behind it.
+              if (
+                writable !== null &&
+                typeof writable !== 'object' &&
+                typeof writable !== 'function'
+              ) {
+                throw new TypeError(
+                  'streamResponse factory must return a writable, null, or ' +
+                    `{ cancel: true }, but returned ${typeof writable}`,
+                );
               }
             } catch (error) {
               isStreamFactoryPending = false;
@@ -1515,6 +1550,12 @@ export class NodeAdapter implements HTTPAdapter {
         })();
         observeTaskFailure(responseTask, (error: unknown) => {
           failRequest(normalizeError(error));
+          // Every exit the task means to take tears down what it opened. One it did not
+          // mean to take - a throw out of code with no `catch` of its own - left the
+          // socket open and the factory's signal unfired, so its cleanup listeners never
+          // ran. Torn down after the reject, so neither can stand in for the failure.
+          abortResponseStream?.();
+          destroyRequestQuietly(req);
         });
       });
 
@@ -2724,6 +2765,20 @@ function normalizeCRLEntry(entry: string | Buffer): string | Buffer | string[] {
   // A single block stays a Buffer: it needed no splitting, so hand back what
   // the caller gave rather than a re-encoded copy of it.
   return Array.isArray(split) ? split : entry;
+}
+
+/**
+ * Tag a terminal adapter configuration failure so `HTTPClient` reports it as a
+ * non-retryable `adapter_error` rather than retrying it as a network error.
+ */
+function markNonRetryableAdapterError(error: unknown): void {
+  try {
+    Object.defineProperty(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG, {
+      value: true,
+    });
+  } catch {
+    // Not an object, or one that refuses the property; it is retried as before.
+  }
 }
 
 function splitCRLString(crl: string): string | string[] {

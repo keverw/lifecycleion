@@ -2634,6 +2634,13 @@ export class NamedPipeSink implements LogSink {
    * reported. The promise's rejection is observed and reported the same way when it
    * arrives, through the same re-entry guard. A value whose `then` cannot be read is
    * thrown with the read's own failure.
+   *
+   * Unless the promise was born while a format report was active. Then it came from a line
+   * written while that report was being delivered - an `onError` logging the failure back
+   * through this sink - and its rejection arrived after the guard came down, so it started
+   * the next report, whose line returned the next promise: one `onError` call per
+   * microtask without end. Such a rejection is dropped, as the immediate failure of that
+   * same nested line already was; the line itself still went out in the default format.
    */
   private refuseDeferredFormat(custom: unknown, entry: LogEntry): void {
     const pending = adoptResult(custom);
@@ -2643,7 +2650,13 @@ export class NamedPipeSink implements LogSink {
     }
 
     if (pending !== undefined) {
+      const wasBornDuringReport = this.formatReportActive;
+
       observeRejection(pending, (error: unknown) => {
+        if (wasBornDuringReport) {
+          return;
+        }
+
         this.scheduleFormatReport((onReported) => {
           this.handleError(
             'format',

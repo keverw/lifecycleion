@@ -3,7 +3,7 @@ import { EventEmitter } from 'node:events';
 import * as http from 'node:http';
 import { NodeAdapter } from './node-adapter';
 import { REQUEST_BODY_SETTLED_KEY } from '../consts';
-import type { AdapterRequest } from '../types';
+import type { AdapterRequest, WritableLike } from '../types';
 
 test.each(['string', 'bytes', 'multipart'] as const)(
   '%s upload settles and reports a throw in its failure handler',
@@ -104,3 +104,77 @@ test.each(['string', 'bytes', 'multipart'] as const)(
   },
   1000,
 );
+
+test('an unexpected response-task failure aborts the stream and frees the connection', async () => {
+  // Nothing on the response path is meant to throw past its own `catch`, so the failure
+  // is injected: the shared-listener registry refuses this writable. That handler only
+  // rejected, which left the socket open with the response still streaming in and the
+  // factory's signal unfired, so its cleanup listeners never ran.
+  let closedResponses = 0;
+  const server = http.createServer((_req, res) => {
+    res.on('close', () => {
+      closedResponses++;
+    });
+    res.writeHead(200, { 'Content-Length': '1000' });
+    res.write('partial');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as { port: number };
+  // No `off` or `removeListener`, so its listeners go through the shared registry.
+  const writable: WritableLike = {
+    write: () => true,
+    end: () => {},
+    on() {
+      return this;
+    },
+    once() {
+      return this;
+    },
+    destroy: () => {},
+  };
+  const injected = new Error('listener registry refused the writable');
+  const originalSet = Object.getOwnPropertyDescriptor(WeakMap.prototype, 'set')
+    ?.value as (
+    this: WeakMap<WeakKey, unknown>,
+    key: WeakKey,
+    value: unknown,
+  ) => WeakMap<WeakKey, unknown>;
+  const setSpy = spyOn(WeakMap.prototype, 'set').mockImplementation(function (
+    this: WeakMap<WeakKey, unknown>,
+    key: WeakKey,
+    value: unknown,
+  ) {
+    if (key === writable) {
+      throw injected;
+    }
+    return originalSet.call(this, key, value);
+  });
+  let factorySignal: AbortSignal | undefined;
+  try {
+    const failure = await new NodeAdapter()
+      .send({
+        requestURL: `http://127.0.0.1:${port}/slow`,
+        method: 'GET',
+        headers: {},
+        streamResponse: (_info, context) => {
+          factorySignal = context.signal;
+          return writable;
+        },
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    expect(failure).toBe(injected);
+    expect(factorySignal?.aborted).toBe(true);
+    const deadline = Date.now() + 2000;
+    while (closedResponses === 0 && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    expect(closedResponses).toBe(1);
+  } finally {
+    setSpy.mockRestore();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});

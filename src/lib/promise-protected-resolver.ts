@@ -30,16 +30,18 @@ export class PromiseProtectedResolver<T> {
 
   public resolveOnce(value: T): void {
     if (!this._hasResolved && this.resolveHandler) {
-      this.executeBeforeCallback('resolve', value);
+      // Claimed before the callback runs, so a `resolveOnce`/`rejectOnce` it makes is
+      // a no-op rather than settling the promise ahead of this call.
       this._hasResolved = true;
+      this.executeBeforeCallback('resolve', value);
       this.resolveHandler(value);
     }
   }
 
   public rejectOnce(reason?: unknown): void {
     if (!this._hasResolved && this.rejectHandler) {
-      this.executeBeforeCallback('reject', reason);
       this._hasResolved = true;
+      this.executeBeforeCallback('reject', reason);
       this.rejectHandler(reason);
     }
   }

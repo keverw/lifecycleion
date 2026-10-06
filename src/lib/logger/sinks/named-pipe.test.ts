@@ -2390,6 +2390,68 @@ describe('NamedPipeSink', () => {
     }
   }, 15000);
 
+  test('a rejecting async formatter plus an onError that logs back is contained', async () => {
+    // Each report's line ran the formatter again, and the promise it returned rejected
+    // after the guard came down, so every delivery started the next one: one onError call
+    // per microtask, without end. A rejection from a promise born during a report is
+    // dropped, as that nested write's immediate failure already was.
+    const pipePath = `${tmpDir.path}/formatter-promise-self-log.pipe`;
+    await createNamedPipe(pipePath);
+
+    const reader = startPipeReader(pipePath);
+    const formatFailures: SinkFailure[] = [];
+    const self: { sink?: NamedPipeSink } = {};
+    const sink = new NamedPipeSink({
+      pipePath,
+      formatter: (async () => {
+        await Promise.resolve();
+        throw new Error('formatter rejected');
+      }) as unknown as (entry: LogEntry) => string,
+      onError: (failure) => {
+        if (failure.kind !== 'format') {
+          return;
+        }
+
+        formatFailures.push(failure);
+
+        // Capped so a regression fails the assertion below instead of hanging the run.
+        if (formatFailures.length < 100) {
+          self.sink?.write({
+            timestamp: Date.now(),
+            type: 'warn',
+            template: 'format failed',
+            message: 'format failed',
+          });
+        }
+      },
+    });
+    self.sink = sink;
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'one line',
+        message: 'one line',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 150));
+
+      // The contract failure and the original promise's rejection; nothing the handler's
+      // own lines started.
+      expect(formatFailures).toHaveLength(2);
+      expect(
+        (formatFailures[1]?.error.cause as Error | undefined)?.message,
+      ).toBe('formatter rejected');
+      expect(reader.data.join('')).toContain('one line');
+    } finally {
+      await sink.close();
+      reader.stop();
+    }
+  }, 15000);
+
   test.each([
     ['undefined', undefined, 'returned undefined'],
     ['a number', 42, 'returned number'],

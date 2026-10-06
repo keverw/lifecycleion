@@ -3539,6 +3539,9 @@ test('errorObject on a closed logger does not render the error, but its exitCode
     expect(sink.logs).toEqual([]);
 
     logger.errorObject('closed', hostileError, { exitCode: 2 });
+    // Once that simulated exit has finished; requested while it still closes, the next
+    // would belong to it, as behind a real exit.
+    await sleep(0);
     service.errorObject('closed', hostileError, { exitCode: 3 });
     await sleep(0);
     expect(reads).toBe(0);

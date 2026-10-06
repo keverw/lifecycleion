@@ -271,3 +271,57 @@ test('bulk restart startup refuses replacement of a later snapshot component', a
     await manager.stopAllComponents();
   }
 });
+
+// Starts `idle` - registered ahead of `trigger`, so preparation has already passed it -
+// from caller code that runs during restart preparation, with an invalid stop budget the
+// stop phase would only meet after stopping `trigger`.
+for (const startedFrom of [
+  'a later component getter',
+  'the restart info sink',
+]) {
+  test(`bulk restart validates the stop budget of a component started by ${startedFrom}`, async () => {
+    const manager = new LifecycleManager({ logger });
+    const idle = new Restartable(logger, { name: 'idle' });
+    const trigger = new Restartable(logger, { name: 'trigger' });
+    await manager.registerComponent(idle);
+    await manager.registerComponent(trigger);
+    expect((await manager.startComponent('trigger')).success).toBe(true);
+    Object.defineProperty(idle, 'shutdownGracefulTimeoutMS', {
+      value: -5,
+      configurable: true,
+    });
+    let idleStart: ReturnType<typeof manager.startComponent> | undefined;
+    const startIdle = (): void => {
+      idleStart ??= manager.startComponent('idle');
+    };
+    if (startedFrom === 'a later component getter') {
+      Object.defineProperty(trigger, 'startupTimeoutMS', {
+        get: () => {
+          startIdle();
+          return 1000;
+        },
+      });
+    } else {
+      logger.addSink({
+        write(entry) {
+          if (entry.message === 'Restarting all components') {
+            startIdle();
+          }
+        },
+      });
+    }
+
+    const result = await manager.restartAllComponents();
+    await idleStart;
+
+    expect(idleStart).toBeDefined();
+    expect(result.success).toBe(false);
+    expect(result.shutdownResult.code).toBe('invalid_options');
+    expect(result.startupResult.code).toBe('invalid_options');
+    // Refused before stopping anything: the application is not left half down.
+    expect(trigger.stops).toBe(0);
+    expect(manager.getComponentStatus('trigger')?.state).toBe('running');
+    Object.defineProperty(idle, 'shutdownGracefulTimeoutMS', { value: 1000 });
+    await manager.stopAllComponents();
+  });
+}

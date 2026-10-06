@@ -434,7 +434,7 @@ interface HTTPClientError {
 | `interceptor_error`     | A request interceptor threw, or returned a request that is unreadable or invalid                                                                               |
 | `stream_write_error`    | Writing chunks to the StreamResponseFactory writable failed                                                                                                    |
 | `stream_response_error` | The upstream response stream errored after headers arrived                                                                                                     |
-| `stream_setup_error`    | The StreamResponseFactory threw an error during setup                                                                                                          |
+| `stream_setup_error`    | The StreamResponseFactory threw an error during setup, or returned something other than a writable, `null`, or a cancel object                                 |
 
 ## Request Interceptors
 
@@ -1327,7 +1327,7 @@ The value is read and normalized on **every request**, so refreshing a revocatio
 
 **Bundles are split for you.** A PEM string or Buffer holding several concatenated CRLs, the format Apache's `SSLCARevocationFile`, nginx's `ssl_crl`, and HAProxy's `crl-file` all expect and CA tooling exports, is split into the array Node requires. This includes Buffers: `fs.readFileSync('bundle.pem')` without an encoding returns one, and its contents are PEM like any other bundle, so it would otherwise be truncated exactly as a string would. Strings and Buffers nested inside an array are split too, so `[bundleOfTwo, oneMore]` contributes three CRLs rather than two. DER Buffers are passed through untouched because DER encodes exactly one CRL, so there is nothing to split.
 
-**Only PEM blocks and whitespace are accepted.** Initial CRL framing is validated when `NodeAdapter` is constructed, before any request or retry, including for clients using plain HTTP. The CRL is still read and normalized per HTTPS request so callers can refresh it. Anything else in the string, such as a truncated or corrupted CRL, a damaged delimiter, or decoded text from `openssl ... -text`, is refused with an error rather than split. The rule is exact rather than a best guess: a parser cannot tell a half-written CRL from a line of commentary, so admitting commentary would mean silently dropping the truncated entry and enforcing a revocation set you never supplied. Strip any annotation before passing a bundle here.
+**Only PEM blocks and whitespace are accepted.** Initial CRL framing is validated when `NodeAdapter` is constructed, before any request or retry, including for clients using plain HTTP. The CRL is still read and normalized per HTTPS request so callers can refresh it. Anything else in the string, such as a truncated or corrupted CRL, a damaged delimiter, or decoded text from `openssl ... -text`, is refused with an error rather than split. The rule is exact rather than a best guess: a parser cannot tell a half-written CRL from a line of commentary, so admitting commentary would mean silently dropping the truncated entry and enforcing a revocation set you never supplied. Strip any annotation before passing a bundle here. A refreshed value that fails this check fails the request with `adapter_error` and the validation error as its cause, without retrying.
 
 **Do not put two CRLs for the same issuer in one bundle.** OpenSSL uses the **first** CRL it has for an issuer, not the newest. In testing, a stale CRL followed by one revoking the server's certificate accepted the connection, while the same pair in the opposite order rejected it. Splitting does not change this. It is how CRL selection works. Supply exactly one current CRL per issuer.
 
@@ -1666,7 +1666,7 @@ after the last request touching it settled is yours to handle. On a Node stream 
 stream you own, and the reason the two points above ask for an `'error'` or a `'close'`
 rather than silence.
 
-Return `null` or `{ cancel: true, reason? }` from the factory to cancel the request (produces `isCancelled: true`, error code `cancelled`). The `reason` string is surfaced on `HTTPClientError.cancelReason`. If the factory throws, the error code is `stream_setup_error` instead.
+Return `null` or `{ cancel: true, reason? }` from the factory to cancel the request (produces `isCancelled: true`, error code `cancelled`). The `reason` string is surfaced on `HTTPClientError.cancelReason`. If the factory throws, or returns anything other than a writable, `null`, or a cancel object (such as `undefined` from a forgotten `return`), the error code is `stream_setup_error` instead.
 
 When streaming is active on a retry attempt (before headers arrive), the factory is called again for the new attempt. The `signal` from the previous attempt will have fired, allowing cleanup code to run before the new stream is set up.
 

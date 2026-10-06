@@ -12,6 +12,7 @@ import {
   restoreConsoleError,
 } from './internal/console-test-utils';
 import { ProcessSignalManager } from './process-signal-manager';
+import readline from 'readline';
 import { sleep } from './sleep';
 
 // These suites deliberately drive the paths that fall through to `console.error` when
@@ -1036,6 +1037,57 @@ describe('ProcessSignalManager', () => {
       } finally {
         manager.detach();
         (process.stdin as any).isTTY = wasOriginallyTTY;
+        (process.stdin as any).setRawMode = savedSetRawMode;
+        (process.stdin as any).pause = savedPause;
+      }
+    });
+
+    test('an emitKeypressEvents that throws is called again by the next attach', () => {
+      const wasTTY = process.stdin.isTTY;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedSetRawMode = process.stdin.setRawMode;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedPause = process.stdin.pause;
+      const stateKey = Symbol.for('lifecycleion.ProcessSignalManager.v1');
+      const globals = globalThis as any;
+      const savedState = globals[stateKey];
+      const shared = {
+        keypressEventsEmittedOnStdin: false,
+        attachedInstances: new Set<string>(),
+        rawModeOwner: null,
+        rawModeEnabledByManager: false,
+      };
+      globals[stateKey] = shared;
+      (process.stdin as any).isTTY = true;
+      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).pause = mock(() => {});
+      const emitFailure = new Error('emitKeypressEvents failed');
+      const emitSpy = spyOn(readline, 'emitKeypressEvents').mockImplementation(
+        () => {
+          throw emitFailure;
+        },
+      );
+
+      try {
+        manager = new ProcessSignalManager({
+          onReloadRequested: reloadCallback,
+          keypressThrottleMS: 0,
+        });
+        expect(() => manager.attach()).toThrow(emitFailure);
+        expect(manager.isAttached).toBe(false);
+        // The flag was set before the call, so the next attach skipped it and listened
+        // for keypresses nothing would ever emit.
+        expect(shared.keypressEventsEmittedOnStdin).toBe(false);
+
+        emitSpy.mockImplementation(() => {});
+        manager.attach();
+        expect(emitSpy).toHaveBeenCalledTimes(2);
+        expect(shared.keypressEventsEmittedOnStdin).toBe(true);
+      } finally {
+        manager.detach();
+        emitSpy.mockRestore();
+        globals[stateKey] = savedState;
+        (process.stdin as any).isTTY = wasTTY;
         (process.stdin as any).setRawMode = savedSetRawMode;
         (process.stdin as any).pause = savedPause;
       }
@@ -2392,6 +2444,63 @@ describe('ProcessSignalManager', () => {
       expect((reports.at(-1) as Error).message).toContain(
         'ProcessSignalManager listener cleanup',
       );
+    });
+
+    test('a cleanup report that fails to deliver reaches the console', async () => {
+      manager = new ProcessSignalManager({
+        onShutdownRequested: shutdownCallback,
+        onReloadRequested: reloadCallback,
+      });
+      const registrationError = new Error('on failed');
+      const onSpy = spyOn(process, 'on').mockImplementation(((
+        event: string,
+      ) => {
+        if (event === 'SIGHUP') {
+          throw registrationError;
+        }
+        return process;
+      }) as typeof process.on);
+      const offSpy = spyOn(process, 'off').mockImplementation((() => {
+        throw new Error('off failed');
+      }) as typeof process.off);
+
+      try {
+        expect(() => manager.attach()).toThrow(registrationError);
+      } finally {
+        onSpy.mockRestore();
+        offSpy.mockRestore();
+      }
+
+      // Reading the queued reports goes through the array iterator; one that throws
+      // fails the deferred report, which was contained without a word. It throws once
+      // and restores itself, leaving the reporting that follows an ordinary iterator.
+      const captured = muteConsoleError();
+      const iterator = Object.getOwnPropertyDescriptor(
+        Array.prototype,
+        Symbol.iterator,
+      );
+      if (iterator === undefined) {
+        throw new Error('Array iterator is missing');
+      }
+      Object.defineProperty(Array.prototype, Symbol.iterator, {
+        ...iterator,
+        value: () => {
+          Object.defineProperty(Array.prototype, Symbol.iterator, iterator);
+          throw new Error('iterator failed');
+        },
+      });
+      try {
+        // The report, then the observer that hears it fail: a few turns, not a timer.
+        for (let turn = 0; turn < 5; turn++) {
+          await Promise.resolve();
+        }
+      } finally {
+        Object.defineProperty(Array.prototype, Symbol.iterator, iterator);
+      }
+
+      expect(captured).toEqual([
+        'ProcessSignalManager could not report its cleanup failures: iterator failed',
+      ]);
     });
 
     test('an attach from an attach cleanup report is not thrown over', async () => {

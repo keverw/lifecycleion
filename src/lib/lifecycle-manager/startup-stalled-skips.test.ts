@@ -146,3 +146,42 @@ test.each([true, false])(
     await manager.stopAllComponents();
   },
 );
+
+test.each([true, false])(
+  'every other component already running answers as all running when ignoring stalled components (one idle: %p)',
+  async (hasIdle) => {
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+    });
+    const running = new Component(logger, { name: 'running' });
+    const stalled = new Component(logger, { name: 'stalled' });
+    stalled.failStop = true;
+    await manager.registerComponent(running);
+    await manager.registerComponent(stalled);
+    if (hasIdle) {
+      await manager.registerComponent(new Component(logger, { name: 'idle' }));
+    }
+    await manager.startComponent('running');
+    await manager.startComponent('stalled');
+    await manager.stopComponent('stalled');
+    expect(manager.getComponentStatus('stalled')?.state).toBe('stalled');
+
+    const result = await manager.startAllComponents({
+      ignoreStalledComponents: true,
+    });
+
+    if (hasIdle) {
+      // Still a partial state: a component that is neither running nor stalled.
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('partial_state');
+      expect(manager.getComponentStatus('idle')?.state).toBe('registered');
+    } else {
+      expect(result.success).toBe(true);
+      expect(result.code).toBeUndefined();
+      expect(result.startedComponents).toEqual(['running']);
+      expect(result.skippedDueToStall).toEqual(['stalled']);
+    }
+  },
+);

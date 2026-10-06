@@ -182,6 +182,33 @@ test('cycle search handles a chain deeper than the call stack', () => {
   expect(findAllCircularCycles(graph)).toHaveLength(1);
 });
 
+test('cycle discovery bounds the names it reports for a densely connected graph', () => {
+  // Every back edge closes a cycle: unbounded, 800 mutually dependent components
+  // reported about 85 million names.
+  const count = 800;
+  const names = Array.from({ length: count }, (_, index) => `c${index}`);
+  const graph = new Map(
+    names.map((name) => [
+      name,
+      new Set(names.filter((other) => other !== name)),
+    ]),
+  );
+
+  const cycles = findAllCircularCycles(graph);
+  const reported = cycles.reduce((total, cycle) => total + cycle.length, 0);
+  expect(cycles.length).toBeGreaterThan(0);
+  // The bound is reached, and the cycle that reaches it is reported whole.
+  expect(reported).toBeGreaterThanOrEqual(10_000);
+  expect(reported).toBeLessThan(10_000 + count);
+  for (const cycle of cycles) {
+    for (let index = 0; index < cycle.length; index++) {
+      expect(
+        graph.get(cycle[index])?.has(cycle[(index + 1) % cycle.length]),
+      ).toBe(true);
+    }
+  }
+});
+
 // The order before the pick moved to a heap: scan every available name for the lowest
 // registration index. Kept as the reference the heap must reproduce exactly.
 function referenceStartupOrder(

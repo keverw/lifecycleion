@@ -103,7 +103,11 @@ export function guardAbortListeners(signal: AbortSignal, label: string): void {
       applyIntrinsic(addEventListenerIntrinsic, this, args);
       return;
     }
-    const [type, listener, options] = args;
+    // Indexed, not destructured: array destructuring reads the live
+    // `Array.prototype[Symbol.iterator]`, which caller code can replace.
+    const type = args[0];
+    const listener = args[1];
+    const options = args[2];
     // `ToString`, once, as the native method would - a symbol throws here as it would there.
     const typeString = `${type as string}`;
     // The DOM's no-op. Not handed to the native method, which in Bun and Node also
@@ -132,7 +136,9 @@ export function guardAbortListeners(signal: AbortSignal, label: string): void {
       applyIntrinsic(removeEventListenerIntrinsic, this, args);
       return;
     }
-    const [type, listener, options] = args;
+    const type = args[0];
+    const listener = args[1];
+    const options = args[2];
     const typeString = `${type as string}`;
     const isCapture = readCapture(options);
     // A listener this guard never wrapped may still have been added through the

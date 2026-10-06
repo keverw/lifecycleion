@@ -960,6 +960,21 @@ class ServerComponent extends BaseComponent {
 }
 ```
 
+A call that honors its signal by rejecting instead - say
+`await setTimeout(5000, undefined, { signal })` from `node:timers/promises`, which
+rejects with an `AbortError` - is answered as the timeout it was told of, even when its
+rejection reaches the race before the deferred deadline does: `code:
+'component_shutdown_timeout'`, the `component:stop-timeout` (or
+`component:shutdown-force-timeout`) event, and the stall reason a timeout leaves, with
+the timeout error - `signal.reason` - as the result's `error`. Its own rejection is
+logged as a stop that failed after its deadline fired. Linked follows the start
+signal's rule (see [Startup Abort Signal](#startup-abort-signal)): the thrown value is
+`signal.reason` itself, an `AbortError`, or carries either on its `cause` chain. Any
+other rejection is the call's own failure (`code: 'error'`), as it is before the
+deadline. Likewise, an `onShutdownForce()` that rejects linked to a
+`ForceShutdownSupersededError` abort is not reported; any other rejection after that
+abort is logged as a warning, `Force shutdown failed after graceful stop completed`.
+
 Abort listeners run synchronously inside the manager's timer: keep them fast. As with
 the start signal, an `'abort'` listener added through the signal's own
 `addEventListener()` or `onabort` that throws (or rejects) is reported on the global
@@ -1407,7 +1422,7 @@ interface StopAllOptions {
 **Option Details:**
 
 - `retryStalled`: If `true`, attempts to stop components that are currently in the `stalled` state from previous shutdown attempts. If `false`, skips components already marked as stalled. **Note:** retry goes directly to the force phase (`onShutdownForce`), not the graceful phase. `stop()` is not called again. The assumption is that graceful already had its chance, and the retry is an escalation. A retry keeps the original stall's start time: a component without `onShutdownForce` attempts nothing new, so it stays stalled under its original record and answers with that stop's result without emitting `component:shutdown-force` or `component:stalled`. A retry that runs `onShutdownForce` emits `component:shutdown-force` describing only that attempt (`gracefulPhaseRan: false`, `gracefulTimedOut: false`). If it succeeds it emits `component:stalled-resolved`; if it fails again it records a fresh force-phase stall: `reason: 'timeout'` when `onShutdownForce` times out again, otherwise `'both'` when the original graceful phase timed out and `'error'` when it did not.
-- `haltOnStall`: If `true`, stops processing remaining components after a stop failure or refusal, including invalid configuration. If `false`, continues independent cleanup. Either way, a component another operation is already stopping or starting does not halt the pass: its dependencies are skipped while that work is in flight, and the pass goes back to them once if it has settled by the end of the loop. The pass does not wait for that work. Dependencies of any component still running after a failed stop remain protected, including when a getter throws before cleanup starts. The aggregate result stays unsuccessful; validation refusals retain `invalid_options`. Its `reason` names components the pass never tried to stop under `Not attempted:` - those a `haltOnStall` break never reached, and dependencies left running because a component still up after a failed stop needs them - apart from the ones whose stop actually failed (`Failed to stop:`).
+- `haltOnStall`: If `true`, stops processing remaining components after a stop failure or refusal, including invalid configuration. If `false`, continues independent cleanup. Either way, a component another operation is already stopping or starting does not halt the pass: its dependencies are skipped while that work is in flight, and the pass goes back to them once if it has settled by the end of the loop. The pass does not wait for that work. Dependencies of any component still running after a failed stop remain protected, including when a getter throws before cleanup starts. The aggregate result stays unsuccessful; validation refusals retain `invalid_options`, also for a component still starting as the pass began, whose stop runs once its `start()` settles. Its `reason` names components the pass never tried to stop under `Not attempted:` - those a `haltOnStall` break never reached, and dependencies left running because a component still up after a failed stop needs them - apart from the ones whose stop actually failed (`Failed to stop:`).
 
 **Timeout Behavior:**
 
@@ -1545,7 +1560,10 @@ stop budgets its stop phase will use - `shutdownGracefulTimeoutMS` of each runni
 component, and `shutdownForceTimeoutMS` of each running or stalled component that
 implements `onShutdownForce()` - so an invalid one refuses the restart with
 `invalid_options` before any component is stopped, rather than halting the stop phase
-partway with some components already down. If the registry changes during this
+partway with some components already down. That includes a component the check had
+already passed while it was idle, started by caller code that runs during it - another
+component's getter, or a sink of the `Restarting all components` log. If the registry
+changes during this
 initial check, restart logs a warning and refuses both phases with `partial_state`,
 before stopping anything. A start that already timed out with its `start()` still
 unresolved is refused the same way, with `shutdownResult.code` `cleanup_incomplete`
@@ -2736,6 +2754,12 @@ if (lastShutdown && lastShutdown.stalledComponents.length > 0) {
 
 Get the computed startup order based on dependencies.
 
+Like `validateDependencies()` and a bulk startup, it reads every component's
+`getDependencies()` until the reads stop changing the registry, then orders the
+registry as it stands: a component a read registers is included, and one a read
+unregisters is not. A registry that keeps changing past 16 rounds of reads answers
+`operation_crashed`.
+
 ```typescript
 interface StartupOrderResult {
   success: boolean;
@@ -2794,7 +2818,7 @@ interface DependencyValidationResult {
 - `totalMissingDependencies`: Count of all missing dependency declarations (sum of required + optional)
 - `requiredMissingDependencies`: Missing dependencies that will prevent startup (required components depending on non-existent components)
 - `optionalMissingDependencies`: Missing dependencies that won't block startup but indicate configuration issues
-- `totalCircularCycles`: Number of dependency cycles detected (each cycle prevents startup)
+- `totalCircularCycles`: Number of dependency cycles detected (each cycle prevents startup). Cycles are reported until they hold 10,000 component names in total, so a densely connected graph lists a representative set rather than every cycle; each listed cycle is complete, and a cyclic graph always lists at least one
 
 **Example:**
 
@@ -3496,7 +3520,7 @@ if (shutdownResult.stalledComponents.length > 0) {
 }
 ```
 
-`ignoreStalledComponents` does not force-start stalled components during bulk startup. It lets startup continue for non-stalled components and skips stalled entries. Forced starts use `startComponent(name, { forceStalled: true })` and are only safe when the component's `start()` implementation does not report success while its own previous `stop()` work is still active. For server-like components, reject `start()` while a `stopPromise` exists so the manager does not mark the component running while the old shutdown can still close its resources.
+`ignoreStalledComponents` does not force-start stalled components during bulk startup. It lets startup continue for non-stalled components and skips stalled entries. Stalled components then count neither as running nor as left to start: when every other component is already running, the call answers as an all-running startup does - success, with those components as `startedComponents` and the stalled ones in `skippedDueToStall` - while some running and some not is still refused as `partial_state`. Forced starts use `startComponent(name, { forceStalled: true })` and are only safe when the component's `start()` implementation does not report success while its own previous `stop()` work is still active. For server-like components, reject `start()` while a `stopPromise` exists so the manager does not mark the component running while the old shutdown can still close its resources.
 
 **If `onShutdownForce()` should join the already-running `stop()`**, deduplicate the promise in `stop()` so that calling it again, or calling it from `onShutdownForce()`, simply awaits the same in-flight operation. Note: This example uses a simplified, idealized `this.server.close()` abstraction. For a complete, production-ready component that also coordinates startup and rejects start attempts while stopping, see [Best Practice #7](#7-make-component-startup-idempotent-and-coordinate-with-shutdown):
 

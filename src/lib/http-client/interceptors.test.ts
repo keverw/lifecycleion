@@ -30,7 +30,7 @@ function makeContext(
 }
 
 describe('RequestInterceptorManager', () => {
-  test('snapshot and run do not consult the registration array iterator', async () => {
+  test('snapshot does not consult the registration array iterator', async () => {
     const mgr = new RequestInterceptorManager();
     mgr.add((request) => ({ ...request, headers: { 'x-ran': 'yes' } }));
     // The registration list is the manager's own, but a spread or `for...of` over it goes
@@ -45,7 +45,7 @@ describe('RequestInterceptorManager', () => {
       },
     );
 
-    const result = await mgr.run(
+    const result = await mgr.snapshot()(
       makeRequest(),
       { type: 'initial' },
       makeContext(),
@@ -66,7 +66,7 @@ describe('RequestInterceptorManager', () => {
     });
 
     try {
-      const result = await mgr.run(
+      const result = await mgr.snapshot()(
         makeRequest(),
         { type: 'initial' },
         makeContext(),
@@ -79,17 +79,18 @@ describe('RequestInterceptorManager', () => {
     }
   });
 
-  test('run rejects rather than throwing synchronously', async () => {
+  test('a snapshot chain rejects rather than throwing synchronously', async () => {
     const mgr = new RequestInterceptorManager();
-    const failure = new Error('snapshot failed');
-    mgr.snapshot = () => {
+    const failure = new Error('interceptor failed');
+    mgr.add(() => {
       throw failure;
-    };
+    });
+    const chain = mgr.snapshot();
 
     let returned: Promise<unknown> | undefined;
 
     expect(() => {
-      returned = mgr.run(makeRequest(), { type: 'initial' }, makeContext());
+      returned = chain(makeRequest(), { type: 'initial' }, makeContext());
     }).not.toThrow();
     expect(
       await returned?.then(
@@ -99,7 +100,7 @@ describe('RequestInterceptorManager', () => {
     ).toBe(failure);
   });
 
-  test('changes during an awaited callback apply to the next run', async () => {
+  test('changes during an awaited callback apply to the next snapshot', async () => {
     const mgr = new RequestInterceptorManager();
     const calls: number[] = [];
     const remove = mgr.add(async (request) => {
@@ -116,10 +117,10 @@ describe('RequestInterceptorManager', () => {
       calls.push(2);
       return request;
     });
-    await mgr.run(makeRequest(), { type: 'initial' }, makeContext());
+    await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
     expect(calls).toEqual([1, 2]);
     calls.length = 0;
-    await mgr.run(makeRequest(), { type: 'initial' }, makeContext());
+    await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
     expect(calls).toEqual([2, 3]);
   });
 
@@ -140,7 +141,7 @@ describe('RequestInterceptorManager', () => {
       return req;
     });
 
-    await mgr.run(makeRequest(), { type: 'initial' }, makeContext());
+    await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
     expect(order).toEqual([1, 2, 3]);
   });
 
@@ -150,7 +151,7 @@ describe('RequestInterceptorManager', () => {
     mgr.add((req) => ({ ...req, headers: { ...req.headers, 'x-step': '1' } }));
     mgr.add((req) => ({ ...req, headers: { ...req.headers, 'x-step': '2' } }));
 
-    const result = await mgr.run(
+    const result = await mgr.snapshot()(
       makeRequest(),
       { type: 'initial' },
       makeContext(),
@@ -169,7 +170,7 @@ describe('RequestInterceptorManager', () => {
       return { ...req, headers: { ...req.headers, 'x-async': 'yes' } };
     });
 
-    const result = await mgr.run(
+    const result = await mgr.snapshot()(
       makeRequest(),
       { type: 'initial' },
       makeContext(),
@@ -189,11 +190,11 @@ describe('RequestInterceptorManager', () => {
       return req;
     });
 
-    await mgr.run(makeRequest(), { type: 'initial' }, makeContext());
+    await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
     expect(calls).toHaveLength(1);
 
     remove();
-    await mgr.run(makeRequest(), { type: 'initial' }, makeContext());
+    await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
     expect(calls).toHaveLength(1);
   });
 
@@ -209,14 +210,14 @@ describe('RequestInterceptorManager', () => {
       { methods: ['POST', 'PUT'] },
     );
 
-    await mgr.run(
+    await mgr.snapshot()(
       makeRequest({ method: 'GET' }),
       { type: 'initial' },
       makeContext(),
     );
     expect(calls).toHaveLength(0);
 
-    await mgr.run(
+    await mgr.snapshot()(
       makeRequest({ method: 'POST' }),
       { type: 'initial' },
       makeContext(),
@@ -236,7 +237,7 @@ describe('RequestInterceptorManager', () => {
       { hosts: ['api.example.com'] },
     );
 
-    await mgr.run(
+    await mgr.snapshot()(
       makeRequest({ requestURL: 'https://other.com/api' }),
       {
         type: 'initial',
@@ -245,7 +246,7 @@ describe('RequestInterceptorManager', () => {
     );
     expect(calls).toHaveLength(0);
 
-    await mgr.run(
+    await mgr.snapshot()(
       makeRequest({ requestURL: 'https://api.example.com/users' }),
       {
         type: 'initial',
@@ -267,7 +268,7 @@ describe('RequestInterceptorManager', () => {
       { hosts: ['*.example.com'] },
     );
 
-    await mgr.run(
+    await mgr.snapshot()(
       makeRequest({ requestURL: 'https://example.com/api' }),
       {
         type: 'initial',
@@ -276,7 +277,7 @@ describe('RequestInterceptorManager', () => {
     );
     expect(calls).toHaveLength(0);
 
-    await mgr.run(
+    await mgr.snapshot()(
       makeRequest({ requestURL: 'https://api.example.com/users' }),
       {
         type: 'initial',
@@ -295,8 +296,8 @@ describe('RequestInterceptorManager', () => {
       return req;
     });
 
-    await mgr.run(makeRequest(), { type: 'initial' }, makeContext());
-    await mgr.run(
+    await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
+    await mgr.snapshot()(
       makeRequest(),
       {
         type: 'retry',
@@ -305,7 +306,7 @@ describe('RequestInterceptorManager', () => {
       },
       makeContext(),
     );
-    await mgr.run(
+    await mgr.snapshot()(
       makeRequest(),
       {
         type: 'redirect',
@@ -332,8 +333,8 @@ describe('RequestInterceptorManager', () => {
       { phases: ['initial', 'retry'] },
     );
 
-    await mgr.run(makeRequest(), { type: 'initial' }, makeContext());
-    await mgr.run(
+    await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
+    await mgr.snapshot()(
       makeRequest(),
       {
         type: 'retry',
@@ -342,7 +343,7 @@ describe('RequestInterceptorManager', () => {
       },
       makeContext(),
     );
-    await mgr.run(
+    await mgr.snapshot()(
       makeRequest(),
       {
         type: 'redirect',
@@ -369,8 +370,8 @@ describe('RequestInterceptorManager', () => {
       { phases: [] },
     );
 
-    await mgr.run(makeRequest(), { type: 'initial' }, makeContext());
-    await mgr.run(
+    await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
+    await mgr.snapshot()(
       makeRequest(),
       {
         type: 'retry',
@@ -379,7 +380,7 @@ describe('RequestInterceptorManager', () => {
       },
       makeContext(),
     );
-    await mgr.run(
+    await mgr.snapshot()(
       makeRequest(),
       {
         type: 'redirect',
@@ -399,7 +400,7 @@ describe('RequestInterceptorManager', () => {
 
     mgr.add(() => ({ cancel: true as const, reason: 'token expired' }));
 
-    const result = await mgr.run(
+    const result = await mgr.snapshot()(
       makeRequest(),
       { type: 'initial' },
       makeContext(),
@@ -425,7 +426,7 @@ describe('RequestInterceptorManager', () => {
       return req;
     });
 
-    await mgr.run(makeRequest(), { type: 'initial' }, makeContext());
+    await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
     expect(calls).toEqual([1]);
   });
 
@@ -446,7 +447,7 @@ describe('RequestInterceptorManager', () => {
       attempt: 2,
       maxAttempts: 4,
     };
-    await mgr.run(makeRequest(), retryPhase, makeContext());
+    await mgr.snapshot()(makeRequest(), retryPhase, makeContext());
 
     expect(received).toHaveLength(1);
     expect(received[0]).toEqual(retryPhase);
@@ -471,7 +472,7 @@ describe('RequestInterceptorManager', () => {
       attemptNumber: 2,
     });
 
-    await mgr.run(
+    await mgr.snapshot()(
       makeRequest({ requestURL: 'https://example.com/hop-1' }),
       {
         type: 'redirect',

@@ -645,6 +645,74 @@ describe('NodeAdapter streamResponse factory failures', () => {
     }
   });
 
+  test.each([
+    ['undefined', undefined],
+    ['a number', 42],
+    ['a string', 'download.bin'],
+  ] as const)(
+    'a factory returning %s fails setup without retrying or leaking its connection',
+    async (_label, returned) => {
+      // A factory that forgot its `return`. It is neither a cancel nor a sink, and it
+      // used to reach the stream pipe, throw there, and be retried as a network error:
+      // the factory called once per attempt, each leaving its connection open with the
+      // response still streaming in, and its signal never fired.
+      let requests = 0;
+      let closedResponses = 0;
+      const server = http.createServer((_req, res) => {
+        requests++;
+        res.on('close', () => {
+          closedResponses++;
+        });
+        res.writeHead(200, { 'Content-Length': '1000' });
+        res.write('partial');
+      });
+
+      await new Promise<void>((resolve) =>
+        server.listen(0, '127.0.0.1', resolve),
+      );
+
+      const { port } = server.address() as { port: number };
+      const signals: AbortSignal[] = [];
+
+      try {
+        const client = new HTTPClient({
+          adapter: new NodeAdapter(),
+          baseURL: `http://127.0.0.1:${port}`,
+          retryPolicy: { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 1 },
+        });
+
+        const builder = client.get('/slow').streamResponse((_info, context) => {
+          signals.push(context.signal);
+          return returned as unknown as WritableLike;
+        });
+
+        const res = await builder.send();
+
+        expect(res.isFailed).toBe(true);
+        expect(res.isNetworkError).toBe(false);
+        expect(builder.error?.code).toBe('stream_setup_error');
+        expect(builder.error?.cause).toBeInstanceOf(TypeError);
+        expect(builder.error?.cause?.message).toContain(
+          `returned ${typeof returned}`,
+        );
+        expect(requests).toBe(1);
+        expect(signals).toHaveLength(1);
+        expect(signals[0]?.aborted).toBe(true);
+
+        const deadline = Date.now() + 2000;
+
+        while (closedResponses < requests && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+
+        expect(closedResponses).toBe(1);
+      } finally {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
+
   test('streamResponse on other adapters becomes request_setup_error', async () => {
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
@@ -7262,6 +7330,38 @@ describe('NodeAdapter — abort listeners are released when the request settles'
 
 test('rejects malformed initial CRLs before any request or retry', () => {
   expect(() => new NodeAdapter({ crl: 'garbage' })).toThrow();
+});
+
+test('a refreshed CRL that fails validation is a non-retryable adapter_error', async () => {
+  // Whitespace passes the constructor's check; the refresh is what is malformed. It is
+  // normalized per request, and its failure used to be retried as a network error.
+  const config: NodeAdapterConfig = { crl: '' };
+  const adapter = new NodeAdapter(config);
+  const requestSpy = spyOn(https, 'request');
+  let attempts = 0;
+
+  config.crl = 'not a crl';
+
+  try {
+    const builder = new HTTPClient({ adapter })
+      .get('https://crl.test/api')
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 3, delayMS: 1 })
+      .onAttemptEnd(() => {
+        attempts++;
+      });
+
+    const res = await builder.send();
+
+    expect(res.isFailed).toBe(true);
+    expect(res.isNetworkError).toBe(false);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(builder.error?.isRetriesExhausted).toBe(false);
+    expect(builder.error?.cause?.message).toMatch(/outside any complete/);
+    expect(attempts).toBe(1);
+    expect(requestSpy).not.toHaveBeenCalled();
+  } finally {
+    requestSpy.mockRestore();
+  }
 });
 
 describe('NodeAdapter upload finalization', () => {

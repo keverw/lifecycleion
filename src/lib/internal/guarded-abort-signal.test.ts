@@ -436,6 +436,48 @@ test('replacing the EventTarget methods after load does not bypass the guard', (
   expect(causes(reports)).toEqual([thrown]);
 });
 
+test('replacing the array iterator does not change which listener is added or removed', () => {
+  const reports = claimReports();
+  const { controller, signal } = guarded();
+  const thrown = new Error('listener failed');
+  const order: string[] = [];
+  const iterator = Object.getOwnPropertyDescriptor(
+    Array.prototype,
+    Symbol.iterator,
+  );
+  if (iterator === undefined) {
+    throw new Error('Array iterator is missing');
+  }
+
+  const kept = (): void => {
+    order.push('kept');
+    throw thrown;
+  };
+  const removed = (): void => {
+    order.push('removed');
+  };
+  // Destructuring the arguments went through this, so `add`/`remove` threw - or, with
+  // an iterator yielding other values, registered a listener the caller never passed.
+  Object.defineProperty(Array.prototype, Symbol.iterator, {
+    ...iterator,
+    value: function* () {
+      yield 'abort';
+      yield removed;
+    },
+  });
+  try {
+    signal.addEventListener('abort', kept);
+    signal.addEventListener('abort', removed);
+    signal.removeEventListener('abort', removed);
+  } finally {
+    Object.defineProperty(Array.prototype, Symbol.iterator, iterator);
+  }
+
+  controller.abort();
+  expect(order).toEqual(['kept']);
+  expect(causes(reports)).toEqual([thrown]);
+});
+
 test('the guard is own, non-writable and non-configurable', () => {
   const { signal } = guarded();
 

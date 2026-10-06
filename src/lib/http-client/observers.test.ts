@@ -64,15 +64,19 @@ function makeError(overrides: Partial<HTTPClientError> = {}): HTTPClientError {
 }
 
 test.each(['response', 'error'] as const)(
-  '%s observer changes during an awaited callback apply to the next run',
+  '%s observer changes during an awaited callback apply to the next snapshot',
   async (kind) => {
     const responseManager = new ResponseObserverManager();
     const errorManager = new ErrorObserverManager();
     const mgr = kind === 'response' ? responseManager : errorManager;
-    const run = () =>
+    const dispatch = () =>
       kind === 'response'
-        ? responseManager.run(makeResponse(), makeRequest(), { type: 'final' })
-        : errorManager.run(makeError(), makeRequest(), { type: 'final' });
+        ? responseManager.snapshot()(makeResponse(), makeRequest(), {
+            type: 'final',
+          })
+        : errorManager.snapshot()(makeError(), makeRequest(), {
+            type: 'final',
+          });
     const calls: number[] = [];
     const remove = mgr.add(async () => {
       calls.push(1);
@@ -85,16 +89,16 @@ test.each(['response', 'error'] as const)(
     mgr.add(() => {
       calls.push(2);
     });
-    await run();
+    await dispatch();
     expect(calls).toEqual([1, 2]);
     calls.length = 0;
-    await run();
+    await dispatch();
     expect(calls).toEqual([2, 3]);
   },
 );
 
 describe('ResponseObserverManager', () => {
-  test('snapshot and run do not consult the registration array iterator', async () => {
+  test('snapshot does not consult the registration array iterator', async () => {
     const mgr = new ResponseObserverManager();
     let calls = 0;
     mgr.add(() => {
@@ -111,22 +115,27 @@ describe('ResponseObserverManager', () => {
       },
     );
 
-    await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeResponse(), makeRequest(), { type: 'final' });
 
     expect(calls).toBe(1);
   });
 
-  test('run rejects rather than throwing synchronously', async () => {
+  test('a snapshot chain rejects rather than throwing synchronously', async () => {
     const mgr = new ResponseObserverManager();
-    const failure = new Error('snapshot failed');
-    mgr.snapshot = () => {
-      throw failure;
-    };
+    const failure = new Error('status read failed');
+    mgr.add(() => {});
+    const response = makeResponse();
+    void Object.defineProperty(response, 'status', {
+      get() {
+        throw failure;
+      },
+    });
+    const chain = mgr.snapshot();
 
     let returned: Promise<unknown> | undefined;
 
     expect(() => {
-      returned = mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+      returned = chain(response, makeRequest(), { type: 'final' });
     }).not.toThrow();
     expect(
       await returned?.then(
@@ -147,7 +156,7 @@ describe('ResponseObserverManager', () => {
       order.push(2);
     });
 
-    await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeResponse(), makeRequest(), { type: 'final' });
     expect(order).toEqual([1, 2]);
   });
 
@@ -160,7 +169,7 @@ describe('ResponseObserverManager', () => {
       calls.push('done');
     });
 
-    await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeResponse(), makeRequest(), { type: 'final' });
     expect(calls).toEqual(['done']);
   });
 
@@ -171,11 +180,11 @@ describe('ResponseObserverManager', () => {
       calls.push(1);
     });
 
-    await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeResponse(), makeRequest(), { type: 'final' });
     expect(calls).toHaveLength(1);
 
     remove();
-    await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeResponse(), makeRequest(), { type: 'final' });
     expect(calls).toHaveLength(1);
   });
 
@@ -190,13 +199,13 @@ describe('ResponseObserverManager', () => {
       { statusCodes: [401] },
     );
 
-    await mgr.run(makeResponse({ status: 200 }), makeRequest(), {
+    await mgr.snapshot()(makeResponse({ status: 200 }), makeRequest(), {
       type: 'final',
     });
 
     expect(statuses).toHaveLength(0);
 
-    await mgr.run(makeResponse({ status: 401 }), makeRequest(), {
+    await mgr.snapshot()(makeResponse({ status: 401 }), makeRequest(), {
       type: 'final',
     });
 
@@ -214,13 +223,13 @@ describe('ResponseObserverManager', () => {
       { methods: ['POST'] },
     );
 
-    await mgr.run(makeResponse(), makeRequest({ method: 'GET' }), {
+    await mgr.snapshot()(makeResponse(), makeRequest({ method: 'GET' }), {
       type: 'final',
     });
 
     expect(calls).toHaveLength(0);
 
-    await mgr.run(makeResponse(), makeRequest({ method: 'POST' }), {
+    await mgr.snapshot()(makeResponse(), makeRequest({ method: 'POST' }), {
       type: 'final',
     });
 
@@ -238,7 +247,7 @@ describe('ResponseObserverManager', () => {
       { contentTypes: ['json'] },
     );
 
-    await mgr.run(
+    await mgr.snapshot()(
       makeResponse({
         contentType: 'text',
         isJSON: false,
@@ -250,7 +259,7 @@ describe('ResponseObserverManager', () => {
       { type: 'final' },
     );
 
-    await mgr.run(
+    await mgr.snapshot()(
       makeResponse({
         contentType: 'json',
         isJSON: true,
@@ -275,7 +284,7 @@ describe('ResponseObserverManager', () => {
       { contentTypeHeaders: ['image/*'] },
     );
 
-    await mgr.run(
+    await mgr.snapshot()(
       makeResponse({
         status: 200,
         contentType: 'binary',
@@ -286,7 +295,7 @@ describe('ResponseObserverManager', () => {
       { type: 'final' },
     );
 
-    await mgr.run(
+    await mgr.snapshot()(
       makeResponse({
         status: 201,
         contentType: 'binary',
@@ -308,19 +317,19 @@ describe('ResponseObserverManager', () => {
       phases.push(phase.type);
     });
 
-    await mgr.run(makeResponse(), makeRequest(), {
+    await mgr.snapshot()(makeResponse(), makeRequest(), {
       type: 'redirect',
       hop: 1,
       from: 'a',
       to: 'b',
       statusCode: 301,
     });
-    await mgr.run(makeResponse(), makeRequest(), {
+    await mgr.snapshot()(makeResponse(), makeRequest(), {
       type: 'retry',
       attempt: 2,
       maxAttempts: 3,
     });
-    await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeResponse(), makeRequest(), { type: 'final' });
 
     expect(phases).toEqual(['final']);
   });
@@ -336,19 +345,19 @@ describe('ResponseObserverManager', () => {
       { phases: ['final', 'redirect'] },
     );
 
-    await mgr.run(makeResponse(), makeRequest(), {
+    await mgr.snapshot()(makeResponse(), makeRequest(), {
       type: 'retry',
       attempt: 1,
       maxAttempts: 3,
     });
-    await mgr.run(makeResponse(), makeRequest(), {
+    await mgr.snapshot()(makeResponse(), makeRequest(), {
       type: 'redirect',
       hop: 1,
       from: 'a',
       to: 'b',
       statusCode: 301,
     });
-    await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeResponse(), makeRequest(), { type: 'final' });
 
     expect(phases).toEqual(['redirect', 'final']);
   });
@@ -364,26 +373,26 @@ describe('ResponseObserverManager', () => {
       { phases: [] },
     );
 
-    await mgr.run(makeResponse(), makeRequest(), {
+    await mgr.snapshot()(makeResponse(), makeRequest(), {
       type: 'retry',
       attempt: 1,
       maxAttempts: 3,
     });
-    await mgr.run(makeResponse(), makeRequest(), {
+    await mgr.snapshot()(makeResponse(), makeRequest(), {
       type: 'redirect',
       hop: 1,
       from: 'a',
       to: 'b',
       statusCode: 301,
     });
-    await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeResponse(), makeRequest(), { type: 'final' });
 
     expect(phases).toEqual(['retry', 'redirect', 'final']);
   });
 });
 
 describe('ErrorObserverManager', () => {
-  test('snapshot and run do not consult the registration array iterator', async () => {
+  test('snapshot does not consult the registration array iterator', async () => {
     const mgr = new ErrorObserverManager();
     let calls = 0;
     mgr.add(() => {
@@ -400,22 +409,27 @@ describe('ErrorObserverManager', () => {
       },
     );
 
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeError(), makeRequest(), { type: 'final' });
 
     expect(calls).toBe(1);
   });
 
-  test('run rejects rather than throwing synchronously', async () => {
+  test('a snapshot chain rejects rather than throwing synchronously', async () => {
     const mgr = new ErrorObserverManager();
-    const failure = new Error('snapshot failed');
-    mgr.snapshot = () => {
-      throw failure;
-    };
+    const failure = new Error('method read failed');
+    mgr.add(() => {});
+    const request = makeRequest();
+    void Object.defineProperty(request, 'method', {
+      get() {
+        throw failure;
+      },
+    });
+    const chain = mgr.snapshot();
 
     let returned: Promise<unknown> | undefined;
 
     expect(() => {
-      returned = mgr.run(makeError(), makeRequest(), { type: 'final' });
+      returned = chain(makeError(), request, { type: 'final' });
     }).not.toThrow();
     expect(
       await returned?.then(
@@ -436,7 +450,7 @@ describe('ErrorObserverManager', () => {
       order.push(2);
     });
 
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeError(), makeRequest(), { type: 'final' });
     expect(order).toEqual([1, 2]);
   });
 
@@ -449,7 +463,7 @@ describe('ErrorObserverManager', () => {
       calls.push('done');
     });
 
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeError(), makeRequest(), { type: 'final' });
     expect(calls).toEqual(['done']);
   });
 
@@ -460,11 +474,11 @@ describe('ErrorObserverManager', () => {
       calls.push(1);
     });
 
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeError(), makeRequest(), { type: 'final' });
     expect(calls).toHaveLength(1);
 
     remove();
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeError(), makeRequest(), { type: 'final' });
     expect(calls).toHaveLength(1);
   });
 
@@ -479,12 +493,12 @@ describe('ErrorObserverManager', () => {
       { methods: ['POST'] },
     );
 
-    await mgr.run(makeError(), makeRequest({ method: 'GET' }), {
+    await mgr.snapshot()(makeError(), makeRequest({ method: 'GET' }), {
       type: 'final',
     });
     expect(calls).toHaveLength(0);
 
-    await mgr.run(makeError(), makeRequest({ method: 'POST' }), {
+    await mgr.snapshot()(makeError(), makeRequest({ method: 'POST' }), {
       type: 'final',
     });
     expect(calls).toHaveLength(1);
@@ -498,17 +512,17 @@ describe('ErrorObserverManager', () => {
       phases.push(phase.type);
     });
 
-    await mgr.run(makeError(), makeRequest(), {
+    await mgr.snapshot()(makeError(), makeRequest(), {
       type: 'retry',
       attempt: 1,
       maxAttempts: 3,
     });
-    await mgr.run(makeError(), makeRequest(), {
+    await mgr.snapshot()(makeError(), makeRequest(), {
       type: 'retry',
       attempt: 2,
       maxAttempts: 3,
     });
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeError(), makeRequest(), { type: 'final' });
 
     expect(phases).toEqual(['final']);
   });
@@ -524,13 +538,13 @@ describe('ErrorObserverManager', () => {
       { phases: ['final', 'retry'] },
     );
 
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
-    await mgr.run(makeError(), makeRequest(), {
+    await mgr.snapshot()(makeError(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeError(), makeRequest(), {
       type: 'retry',
       attempt: 2,
       maxAttempts: 3,
     });
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeError(), makeRequest(), { type: 'final' });
 
     expect(phases).toEqual(['final', 'retry', 'final']);
   });
@@ -546,13 +560,13 @@ describe('ErrorObserverManager', () => {
       { phases: [] },
     );
 
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
-    await mgr.run(makeError(), makeRequest(), {
+    await mgr.snapshot()(makeError(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeError(), makeRequest(), {
       type: 'retry',
       attempt: 2,
       maxAttempts: 3,
     });
-    await mgr.run(makeError(), makeRequest(), { type: 'final' });
+    await mgr.snapshot()(makeError(), makeRequest(), { type: 'final' });
 
     expect(phases).toEqual(['final', 'retry', 'final']);
   });

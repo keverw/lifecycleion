@@ -42,6 +42,23 @@ describe('reportToConsole', () => {
     expect(calls.attempts).toBe(1);
   });
 
+  test('still writes when the array iterator is patched to throw', () => {
+    const captured = muteConsoleError();
+    const iterator = Array.prototype[Symbol.iterator];
+
+    Array.prototype[Symbol.iterator] = function () {
+      throw new Error('iterator patched');
+    };
+
+    try {
+      reportToConsole('context:', 'still reported');
+    } finally {
+      Array.prototype[Symbol.iterator] = iterator;
+    }
+
+    expect(captured).toEqual(['context: still reported']);
+  });
+
   test('does not throw when console.error is missing', () => {
     removeConsoleError();
 

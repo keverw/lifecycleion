@@ -42,15 +42,6 @@ export class ResponseObserverManager {
     };
   }
 
-  // `async` for the reason `RequestInterceptorManager.run()` gives.
-  public async run(
-    response: HTTPResponse,
-    request: AttemptRequest,
-    phase: ResponseObserverPhase,
-  ): Promise<void> {
-    await this.snapshot()(response, request, phase);
-  }
-
   /**
    * Copy the current registrations into a chain that later `add()` and removal calls do
    * not reach. See `RequestInterceptorManager.snapshot()`.
@@ -134,15 +125,6 @@ export class ErrorObserverManager {
         this.observers.splice(idx, 1);
       }
     };
-  }
-
-  // `async` for the reason `RequestInterceptorManager.run()` gives.
-  public async run(
-    error: HTTPClientError,
-    request: AttemptRequest,
-    phase: ErrorObserverPhase,
-  ): Promise<void> {
-    await this.snapshot()(error, request, phase);
   }
 
   /**

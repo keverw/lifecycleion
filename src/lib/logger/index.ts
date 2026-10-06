@@ -276,6 +276,11 @@ export class Logger extends EventEmitter {
   // Whether an exit's `exit-called` listeners are running.
   private _isEmittingExitCalled = false;
   private _hasScheduledProcessExit = false;
+  // Whether a committed exit is still closing the sinks: from `processExit` committing its
+  // code until the close it joined settles, real or simulated. A request made then belongs
+  // to that exit and is ignored rather than starting the next one (see
+  // `recordExitRequest`), so a simulated exit settles on the code a real one exits with.
+  private _isFinishingExit = false;
   private _isEmittingExitProcess = false;
   private _closed = false;
 
@@ -320,8 +325,9 @@ export class Logger extends EventEmitter {
   /**
    * Whether an exit has been requested and has not yet committed its code - true from its
    * first `exit()` until `exit-process`, for every exit, including a simulated exit made
-   * after an earlier one completed. A request ignored because a real exit has already
-   * committed starts nothing, so it leaves this false.
+   * after an earlier one completed. A request ignored because an exit has already
+   * committed - real, or simulated and still closing its sinks - starts nothing, so it
+   * leaves this false.
    */
   public get isPendingExit(): boolean {
     return this._pendingExit !== undefined;
@@ -404,6 +410,14 @@ export class Logger extends EventEmitter {
     // Recorded before `exit-called` and `beforeExit` run, so a request either of them
     // makes - and one `beforeExit` answers 'wait' for - is judged against this one.
     const pendingExit = this.recordExitRequest(requestedCode, code);
+
+    // Ignored behind a committed exit, so it starts nothing: no `exit-called`, no
+    // `beforeExit`. That exit has published its code and is closing the sinks; telling
+    // listeners and the callback an exit was requested would describe one that never
+    // runs. `recordExitRequest` has already reported a failure dropped there.
+    if (pendingExit === undefined) {
+      return;
+    }
 
     this._exitRequested = true;
 
@@ -1157,12 +1171,14 @@ export class Logger extends EventEmitter {
     // A closed logger writes nothing, but an exit request on the entry still counts.
     // Committing an exit closes the logger synchronously, so returning before the exit
     // dropped every `{ exitCode }` logged from then on without a trace: a failure logged
-    // behind a committed real exit 0 never reached the ignored-failure report, and one
+    // behind a committed exit 0 never reached the ignored-failure report, and one
     // logged after a simulated exit completed never started the next exit, though a
     // direct `exit()` did both. The same held for an exit still pending when `close()`
     // was called: a failure logged then never replaced the pending code. With no exit in
     // progress at all - a plain `close()` - the request starts a full exit, real or
-    // simulated, exactly as a direct `exit()` on the closed logger does. Only the
+    // simulated, exactly as a direct `exit()` on the closed logger does. One logged while
+    // a committed exit still closes the sinks - from a sink's own `close()` - belongs to
+    // that exit, so `exit()` ignores it as a direct call is ignored. Only the
     // member that matters is read, through the guard, since nothing else is used here.
     if (this._closed) {
       const closedExitCode = readUnknownMember(callerOptions, 'exitCode');
@@ -1973,7 +1989,8 @@ export class Logger extends EventEmitter {
 
   /**
    * Fold an exit request into the code its exit will use, and return the pending exit
-   * it joined - undefined if a real exit has already committed its code.
+   * it joined - undefined if an exit has already committed its code and is still closing
+   * the sinks (or, for a real exit, at all).
    *
    * Until an exit commits its code in `processExit`, the last non-zero request wins.
    * Requests overlap during a shutdown: SIGTERM's `exit(0)` is still stopping components
@@ -1985,13 +2002,14 @@ export class Logger extends EventEmitter {
    * shutdown logging its own exit line - says the caller is done, not that the failure
    * already reported did not happen.
    *
-   * Simulated exits follow the same rule, so a test that runs a shutdown with
-   * `callProcessExit: false` sees the code production would exit with. They differ only
-   * after the commit, since a simulated exit leaves the process running: a real exit's
-   * code is final once `exit-process` has fired - published, with `process.exit()` only
-   * waiting for the sinks to close - so a later request is ignored, and a failure
-   * ignored behind a success is reported (see `reportIgnoredFailureExit`). A request
-   * made after a simulated exit committed starts the next exit instead.
+   * Once an exit commits, its code is final - published by `exit-process`, with
+   * `process.exit()` only waiting for the sinks to close - so a request made before that
+   * close settles is ignored, and a failure ignored behind a success is reported (see
+   * `reportIgnoredFailureExit`). Simulated exits follow the same rules, so a test that
+   * runs a shutdown with `callProcessExit: false` sees the code production would exit
+   * with: a sink's `close()` logging `exitCode: 0` during a simulated `exit(1)` cannot
+   * start an exit that commits 0. They differ only once that close has settled, since a
+   * simulated exit leaves the process running: a request made then starts the next exit.
    *
    * "Non-zero" is judged on the code the request stands for in its mode: normalized for
    * a real exit (`exit(300)` is a failure with code 1), as requested for a simulated one.
@@ -2006,7 +2024,7 @@ export class Logger extends EventEmitter {
     requested: number,
     code: number,
   ): PendingExit | undefined {
-    if (this._hasScheduledProcessExit) {
+    if (this._hasScheduledProcessExit || this._isFinishingExit) {
       this.reportIgnoredFailureExit(requested, code);
       return undefined;
     }
@@ -2047,7 +2065,7 @@ export class Logger extends EventEmitter {
   }
 
   /**
-   * Report a failure exit request ignored because a real exit with code 0 has already
+   * Report a failure exit request ignored because an exit with code 0 has already
    * committed its code. Only that pairing is reported: any other ignored code changes
    * nothing a supervisor reads (the process still fails, or both requests succeed), and
    * repeat exits are ordinary - a sink exiting from its own `close()`, a shutdown that
@@ -2094,7 +2112,7 @@ export class Logger extends EventEmitter {
   /**
    * Process the exit
    */
-  private processExit(pendingExit: PendingExit | undefined): void {
+  private processExit(pendingExit: PendingExit): void {
     // A real exit has already committed the process's exit code. A later one would only
     // publish a code the process never exits with and call process.exit() again. Not
     // reported here: `exit()` recorded this request when it was made - against the
@@ -2106,17 +2124,18 @@ export class Logger extends EventEmitter {
     // folded into, so it has nothing left to publish - for a simulated exit too, which
     // would otherwise emit `exit-process` again with a code the exit already settled
     // past. That also covers a request proceeding while `exit-process` listeners run:
-    // the exit was committed before they were called. (`pendingExit` is undefined only
-    // when the real exit above had committed.)
-    if (pendingExit === undefined || pendingExit !== this._pendingExit) {
+    // the exit was committed before they were called.
+    if (pendingExit !== this._pendingExit) {
       return;
     }
     // The pending code applies to whichever request proceeds, in the mode it proceeds in:
     // it settled on every request made for this exit, so a pending real failure still
     // counts when the exit turns out simulated (`process.exit` removed since the
     // request). No special case is needed to keep it out of a later exit: it is cleared
-    // here, and a request made after this commit starts a new pending exit.
+    // here, a request made while this exit closes the sinks is ignored, and one made after
+    // that starts a new pending exit.
     this._pendingExit = undefined;
+    this._isFinishingExit = true;
     this._hasScheduledProcessExit = this.endsProcessOnExit;
     let exitCode = pendingExit.code;
     // Replacements past the first were counted rather than reported (see
@@ -2156,6 +2175,9 @@ export class Logger extends EventEmitter {
     // dependency of the sink's return, and therefore runs once cleanup settles.
     const closing = this._closePromise ?? this.close();
     const finishExit = (): void => {
+      // Cleanup has settled, so a simulated exit is complete and the next request starts
+      // the next exit. A real one stays latched by `_hasScheduledProcessExit`.
+      this._isFinishingExit = false;
       if (!this._hasScheduledProcessExit) {
         return;
       }

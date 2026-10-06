@@ -1,4 +1,5 @@
 import { describe, expect, spyOn, test } from 'bun:test';
+import { Logger } from '../index';
 import { ArraySink } from './array';
 import { MAX_REDACTION_ENTRIES } from '../../internal/redact-paths';
 import type { LogEntry } from '../types';
@@ -938,6 +939,124 @@ describe('ArraySink - a self-logging onFormatError cannot recurse', () => {
     expect(capturedLater).toHaveLength(1);
     expect(calls).toBe(2);
     expect(sink.logs).toHaveLength(4);
+  });
+
+  test('through a rejecting async transformer and a handler that logs through the logger', async () => {
+    // Each write returned a fresh promise, and its rejection arrived after the guard came
+    // down, so it reached the handler as a new report: the handler logged, the log returned
+    // the next promise, and the chain ran one handler call per microtask without end -
+    // a timer never fired. A rejection born while a report is delivered goes to the console.
+    const self: { logger?: Logger } = {};
+    let calls = 0;
+
+    const sink = new ArraySink({
+      transformer: (async () => {
+        await Promise.resolve();
+        throw new Error('transformer rejected');
+      }) as unknown as (entry: LogEntry) => LogEntry,
+      onFormatError: (error) => {
+        calls++;
+
+        // Capped so a regression fails the assertion below instead of hanging the run.
+        if (calls < 100) {
+          self.logger?.warn(error.message);
+        }
+      },
+    });
+    const logger = new Logger({ sinks: [sink] });
+    self.logger = logger;
+
+    const captured = muteConsoleError();
+
+    try {
+      logger.info('one line');
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      restoreConsoleError();
+    }
+
+    // The contract failure and the original promise's rejection, nothing more.
+    expect(calls).toBe(2);
+    expect(captured.length).toBeGreaterThan(0);
+    expect(captured.every((line) => line.startsWith('Transform failed'))).toBe(
+      true,
+    );
+    expect(sink.logs.map((log) => log.message)).toContain('one line');
+  });
+
+  test('through a rejecting async transformer and an async handler that logs back', async () => {
+    let calls = 0;
+    const self: { sink?: ArraySink } = {};
+
+    const sink = new ArraySink({
+      transformer: (async () => {
+        await Promise.resolve();
+        throw new Error('transformer rejected');
+      }) as unknown as (entry: LogEntry) => LogEntry,
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises -- an async handler is the supported shape under test
+      onFormatError: async (error) => {
+        calls++;
+
+        await new Promise((resolve) => setTimeout(resolve, 1));
+
+        if (calls < 100) {
+          self.sink?.write(entry(error.message));
+        }
+      },
+    });
+
+    self.sink = sink;
+
+    const captured = muteConsoleError();
+
+    try {
+      sink.write(entry('first'));
+
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    } finally {
+      restoreConsoleError();
+    }
+
+    // The contract failure, then the held rejection once the handler settled.
+    expect(calls).toBe(2);
+    expect(captured.length).toBeGreaterThan(0);
+    expect(sink.logs.map((log) => log.message)).toContain('first');
+  });
+
+  test('through a rejecting async transformer and a console that logs back', async () => {
+    // With no handler the console is the handler, so a console shim that writes back into
+    // the sink is the same loop. A rejection born during a console report is dropped.
+    let consoleCalls = 0;
+    const self: { sink?: ArraySink } = {};
+
+    const sink = new ArraySink({
+      transformer: (async () => {
+        await Promise.resolve();
+        throw new Error('transformer rejected');
+      }) as unknown as (entry: LogEntry) => LogEntry,
+    });
+
+    self.sink = sink;
+
+    const output = spyOn(console, 'error').mockImplementation(() => {
+      consoleCalls++;
+
+      if (consoleCalls < 100) {
+        self.sink?.write(entry('console line'));
+      }
+    });
+
+    try {
+      sink.write(entry('first'));
+
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    } finally {
+      output.mockRestore();
+    }
+
+    expect(consoleCalls).toBeLessThan(10);
+    expect(sink.logs.map((log) => log.message)).toContain('first');
   });
 
   test('a handler that throws releases the guard for the next failure', () => {

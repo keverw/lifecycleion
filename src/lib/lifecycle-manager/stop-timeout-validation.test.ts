@@ -194,3 +194,41 @@ test('a force-timeout getter throwing its own TypeError is still a callback fail
     release();
   }
 });
+
+// The same refusal whether the pass stops the component itself or the start it joins
+// stops it once `start()` settles.
+for (const timing of ['running', 'starting'] as const) {
+  test(`a shutdown pass reports an invalid stop budget on a ${timing} component as invalid_options`, async () => {
+    const { logger, manager } = setup();
+    const component = new Plain(logger, 'a');
+    const startGate = deferred();
+    if (timing === 'starting') {
+      component.start = (): Promise<void> => startGate.promise;
+    }
+    await manager.registerComponent(component);
+    Object.defineProperty(component, 'shutdownGracefulTimeoutMS', {
+      value: -5,
+      configurable: true,
+    });
+    const starting = manager.startComponent('a');
+    if (timing === 'running') {
+      await starting;
+    }
+
+    const stopping = manager.stopAllComponents();
+    startGate.resolve();
+    const result = await stopping;
+    await starting;
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('invalid_options');
+    expect(result.error).toBeInstanceOf(Error);
+    expect(result.reason).toContain('a.shutdownGracefulTimeoutMS');
+    expect(manager.getComponentStatus('a')?.state).toBe('running');
+
+    Object.defineProperty(component, 'shutdownGracefulTimeoutMS', {
+      value: 1000,
+    });
+    expect((await manager.stopAllComponents()).success).toBe(true);
+  });
+}

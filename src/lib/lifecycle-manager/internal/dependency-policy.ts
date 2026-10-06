@@ -8,6 +8,14 @@ import { copyBoundedArray } from './bounded-array-copy';
  */
 const MAX_DECLARED_DEPENDENCIES = 10_000;
 
+/**
+ * The most component names `findAllCircularCycles()` reports across all its cycles.
+ * Every back edge closes a cycle, so a densely connected graph has far more of them
+ * than nodes: without a bound, 800 mutually dependent components report tens of
+ * millions of names. See `findAllCircularCycles()`.
+ */
+const MAX_REPORTED_CYCLE_ENTRIES = 10_000;
+
 /** One read of a component's `getDependencies()`; see `tryReadDependencies()`. */
 export type DependencyRead =
   { dependencies: string[]; invalidEntry?: TypeError } | { error: unknown };
@@ -226,16 +234,18 @@ class MinIndexHeap {
  */
 function walkForCycles(
   adjacency: Map<string, Set<string>>,
-  onBackEdge: (path: string[], cycleStart: number, neighbor: string) => boolean,
+  onBackEdge: (path: string[], cycleStart: number) => boolean,
 ): void {
   const visited = new Set<string>();
-  const inStack = new Set<string>();
+  // Each node on the current path, by its index in `path`: where a cycle closes is a
+  // lookup, not a scan of the path for every back edge.
+  const pathIndex = new Map<string, number>();
   const path: string[] = [];
   const frames: Array<{ node: string; neighbors: Iterator<string> }> = [];
 
   const enter = (node: string): void => {
     visited.add(node);
-    inStack.add(node);
+    pathIndex.set(node, path.length);
     path.push(node);
     frames.push({
       node,
@@ -255,7 +265,7 @@ function walkForCycles(
       const next = frame.neighbors.next();
 
       if (next.done) {
-        inStack.delete(frame.node);
+        pathIndex.delete(frame.node);
         path.pop();
         frames.pop();
         continue;
@@ -264,10 +274,11 @@ function walkForCycles(
       const neighbor = next.value;
       if (!visited.has(neighbor)) {
         enter(neighbor);
-      } else if (
-        inStack.has(neighbor) &&
-        onBackEdge(path, path.indexOf(neighbor), neighbor)
-      ) {
+        continue;
+      }
+
+      const cycleStart = pathIndex.get(neighbor);
+      if (cycleStart !== undefined && onBackEdge(path, cycleStart)) {
         return;
       }
     }
@@ -287,8 +298,8 @@ export function findDependencyCycle(
 ): string[] {
   let cycle: string[] = [];
 
-  walkForCycles(adjacency, (path, cycleStart, neighbor) => {
-    cycle = cycleStart >= 0 ? path.slice(cycleStart) : [neighbor];
+  walkForCycles(adjacency, (path, cycleStart) => {
+    cycle = path.slice(cycleStart);
     return true;
   });
 
@@ -300,12 +311,18 @@ export function findDependencyCycle(
  *
  * Algorithm: DFS with visited set and path-stack tracking
  * - Uses 'visited' set to ensure each node is processed exactly once (prevents infinite loops)
- * - Uses 'inStack' set to track the current DFS path
+ * - Indexes the current DFS path by node, so a back edge finds its cycle start directly
  * - When a node in the current path is encountered again, a cycle is detected
  * - Extracts the cycle from the path and continues searching for more cycles
  *
- * Time Complexity: O(V + E) where V = components, E = dependency edges
- * Space Complexity: O(V) for visited/inStack sets and the explicit frame stack
+ * Bounded: each back edge reports a cycle of up to V names, so a densely connected
+ * graph would report O(E·V) names. The walk stops once the cycles reported hold
+ * `MAX_REPORTED_CYCLE_ENTRIES` names in total. A cycle is never cut short - the one
+ * that reaches the bound is reported whole - and the first is always reported, so a
+ * cyclic graph never yields an empty result.
+ *
+ * Time Complexity: O(V + E) for the walk, plus the names copied into reported cycles
+ * Space Complexity: O(V) for the visited set, path index and explicit frame stack
  *
  * Performance note: This method finds a representative set of cycles while ensuring
  * each node is visited once (prevents infinite loops). For hot paths that only need
@@ -317,12 +334,13 @@ export function findAllCircularCycles(
   adjacency: Map<string, Set<string>>,
 ): string[][] {
   const cycles: string[][] = [];
+  let reportedEntries = 0;
 
   walkForCycles(adjacency, (path, cycleStart) => {
-    if (cycleStart >= 0) {
-      cycles.push(path.slice(cycleStart));
-    }
-    return false;
+    const cycle = path.slice(cycleStart);
+    cycles.push(cycle);
+    reportedEntries += cycle.length;
+    return reportedEntries >= MAX_REPORTED_CYCLE_ENTRIES;
   });
 
   return cycles;

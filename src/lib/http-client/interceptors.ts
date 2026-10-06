@@ -46,16 +46,6 @@ export class RequestInterceptorManager {
     };
   }
 
-  // `async` so anything the snapshot or the chain throws reaches the caller as a
-  // rejection, never as a synchronous throw from a method typed to return a promise.
-  public async run(
-    request: InterceptedRequest,
-    phase: InterceptorPhase,
-    context: RequestInterceptorContext,
-  ): Promise<InterceptedRequest | InterceptorCancel> {
-    return await this.snapshot()(request, phase, context);
-  }
-
   /**
    * Copy the current registrations into a chain that later `add()` and removal calls do
    * not reach. A client takes its parent's snapshot and its own together when a dispatch

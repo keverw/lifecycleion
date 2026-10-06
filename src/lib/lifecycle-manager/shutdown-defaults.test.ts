@@ -1,8 +1,9 @@
 import { expect, test } from 'bun:test';
 import { claimReports, Plain, setup, Stalls } from './test-helpers';
 
-test.each([undefined, null])(
-  'nullish constructor shutdown flags %s retain halt and retry defaults',
+// A non-boolean from untyped config keeps the default rather than switching by truthiness.
+test.each([undefined, null, 0, ''])(
+  'constructor shutdown flags %p retain halt and retry defaults',
   async (value) => {
     const { logger, manager } = setup({
       shutdownOptions: {
@@ -32,6 +33,36 @@ test.each([undefined, null])(
       expect(stalled.forceCalls).toBe(2);
       expect(manager.getComponentStatus('stalled')?.state).toBe('stopped');
       expect(manager.getComponentStatus('healthy')?.state).toBe('stopped');
+    } finally {
+      release();
+    }
+  },
+);
+
+test.each([0, '', 'no'])(
+  'per-call shutdown flags %p retain halt and retry defaults',
+  async (value) => {
+    const { logger, manager } = setup();
+    const healthy = new Plain(logger, 'healthy');
+    const stalled = new Stalls(logger, 'stalled');
+    await manager.registerComponent(healthy);
+    await manager.registerComponent(stalled);
+    await manager.startAllComponents();
+    const flags = {
+      retryStalled: value as unknown as boolean,
+      haltOnStall: value as unknown as boolean,
+    };
+    const { release } = claimReports();
+    try {
+      expect((await manager.stopAllComponents(flags)).success).toBe(false);
+      expect(manager.isComponentRunning('healthy')).toBe(true);
+
+      stalled.onShutdownForce = (): void => {
+        stalled.forceCalls++;
+      };
+      expect((await manager.stopAllComponents(flags)).success).toBe(true);
+      expect(stalled.forceCalls).toBe(2);
+      expect(manager.getComponentStatus('stalled')?.state).toBe('stopped');
     } finally {
       release();
     }

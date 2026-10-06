@@ -1,4 +1,4 @@
-import { safeHandleCallback } from './safe-handle-callback';
+import { reportCallbackError, runCallbackSafely } from './safe-handle-callback';
 
 /**
  * Instead of using `SingleEventObserver`, you could extend `SingleEventObserverProtected`
@@ -59,21 +59,32 @@ export class SingleEventObserverProtected<T> {
    */
 
   protected notify(data: T): void {
-    for (const subscriber of this.subscribers) {
-      safeHandleCallback(
-        `SingleEventObserver_${readSubscriberName(subscriber)}`,
+    // Snapshot at the start of this notification, as `EventEmitter.emit` does: a
+    // subscriber added (or removed and re-added) midway through runs from the next
+    // notification, not this one, so it cannot extend this pass - or loop it forever.
+    for (const subscriber of [...this.subscribers]) {
+      // The report's name is read only once the subscriber has failed, so a notify that
+      // succeeds never reads `name` - which can be a getter - or builds a label for it.
+      // `subscribe` admits only functions, so the fixed name below is never reported.
+      runCallbackSafely(
+        'SingleEventObserver subscriber',
         subscriber,
-        data,
+        [data],
+        (error: unknown) => {
+          reportCallbackError(
+            `SingleEventObserver_${readSubscriberName(subscriber)}`,
+            error,
+          );
+        },
       );
     }
   }
 }
 
 /**
- * The subscriber's `name` for its report, or `'anonymous'`. Read outside
- * `safeHandleCallback`'s guard, so it must not throw: `name` is an ordinary property a
- * getter (or a proxy) can throw from, or redefine as a symbol, and a throw here would
- * end `notify` before the subscribers after this one.
+ * The subscriber's `name` for its report, or `'anonymous'`. Read on the failure path,
+ * where a throw would replace the report it was building: `name` is an ordinary
+ * property a getter (or a proxy) can throw from, or redefine as a symbol.
  */
 function readSubscriberName(subscriber: unknown): string {
   let name: unknown;
