@@ -1072,11 +1072,11 @@ export class LifecycleManager
     // Each component read once, guarded: the reads run its own code, and one whose
     // `getDependencies()` or `isOptional()` threw made this - documented as not
     // throwing - throw to its caller. A component whose dependencies cannot be read is
-    // reported, listed in `unreadableDependencies`, and makes the result invalid: its own
+    // reported, listed in `invalidDependencyLists`, and makes the result invalid: its own
     // start fails on the same list, so "valid" would be a promise it cannot keep. An
     // `isOptional()` that throws does not: startup reads it as required and starts the
     // component normally, so validation answers the same.
-    const unreadableDependencies: Array<{
+    const invalidDependencyLists: Array<{
       componentName: string;
       error: Error;
     }> = [];
@@ -1122,7 +1122,7 @@ export class LifecycleManager
       };
 
       if (!('dependencies' in read) || read.invalidEntry !== undefined) {
-        unreadableDependencies.push({
+        invalidDependencyLists.push({
           componentName: name,
           error: toError(
             'dependencies' in read ? read.invalidEntry : read.error,
@@ -1195,7 +1195,7 @@ export class LifecycleManager
     const isValid =
       missingDependencies.length === 0 &&
       circularCycles.length === 0 &&
-      unreadableDependencies.length === 0 &&
+      invalidDependencyLists.length === 0 &&
       cycleCheckError === undefined;
 
     // Calculate summary counts
@@ -1211,14 +1211,14 @@ export class LifecycleManager
       valid: isValid,
       missingDependencies,
       circularCycles,
-      unreadableDependencies,
+      invalidDependencyLists,
       ...(cycleCheckError === undefined ? {} : { cycleCheckError }),
       summary: {
         totalMissingDependencies,
         requiredMissingDependencies,
         optionalMissingDependencies,
         totalCircularCycles: circularCycles.length,
-        totalUnreadableDependencies: unreadableDependencies.length,
+        totalInvalidDependencyLists: invalidDependencyLists.length,
       },
     };
   }

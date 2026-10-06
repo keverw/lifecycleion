@@ -1164,7 +1164,7 @@ export interface InsertComponentAtResult extends RegistrationResultBase {
  * flag affects startup behavior, not whether dependencies must exist.
  */
 export interface DependencyValidationResult {
-  /** True if all dependencies are valid (no circular cycles, no missing or unreadable dependencies) */
+  /** True if all dependencies are valid (no circular cycles, no missing dependencies or invalid dependency lists) */
   valid: boolean;
 
   /** Missing dependencies: components that depend on non-registered components */
@@ -1187,7 +1187,7 @@ export interface DependencyValidationResult {
    * here makes `valid` false. An `isOptional()` that throws is not listed: it is reported
    * and read as required, as startup reads it.
    */
-  unreadableDependencies: Array<{
+  invalidDependencyLists: Array<{
     componentName: string;
     error: Error;
   }>;
@@ -1210,8 +1210,8 @@ export interface DependencyValidationResult {
     optionalMissingDependencies: number;
     /** Total number of circular dependency cycles detected */
     totalCircularCycles: number;
-    /** Number of `unreadableDependencies` entries */
-    totalUnreadableDependencies: number;
+    /** Number of `invalidDependencyLists` entries */
+    totalInvalidDependencyLists: number;
   };
 }
 

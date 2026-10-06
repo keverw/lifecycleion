@@ -2064,7 +2064,7 @@ describe('LifecycleManager - review regressions', () => {
     // Startup would fail on it, so the graph is not valid.
     expect(result.valid).toBe(false);
     expect(
-      result.unreadableDependencies.map((entry) => entry.componentName),
+      result.invalidDependencyLists.map((entry) => entry.componentName),
     ).toEqual(['hostile']);
     expect(
       hasReport(reports, 'validateDependencies dependencies of hostile'),
@@ -2366,9 +2366,9 @@ describe('LifecycleManager - review regressions', () => {
 
     expect(result.valid).toBe(false);
     expect(
-      result.unreadableDependencies.map((entry) => entry.componentName),
+      result.invalidDependencyLists.map((entry) => entry.componentName),
     ).toEqual(['a']);
-    expect(result.summary.totalUnreadableDependencies).toBe(1);
+    expect(result.summary.totalInvalidDependencyLists).toBe(1);
   });
 
   test('a dependency list reporting an implausible length is rejected, not iterated', async () => {
@@ -2393,7 +2393,7 @@ describe('LifecycleManager - review regressions', () => {
     }
 
     expect(result.valid).toBe(false);
-    expect(result.unreadableDependencies[0]?.componentName).toBe('hostile');
+    expect(result.invalidDependencyLists[0]?.componentName).toBe('hostile');
   });
 
   test('a deferred auto-start whose startup is refused is warned about', async () => {
@@ -2505,8 +2505,8 @@ describe('LifecycleManager - review regressions', () => {
       release();
     }
 
-    expect(result.unreadableDependencies).toHaveLength(1);
-    expect(result.summary.totalUnreadableDependencies).toBe(1);
+    expect(result.invalidDependencyLists).toHaveLength(1);
+    expect(result.summary.totalInvalidDependencyLists).toBe(1);
   });
 
   test('a broken getDependencies() is reported once, not on every read', async () => {
@@ -2856,7 +2856,7 @@ describe('LifecycleManager - review regressions', () => {
     }
 
     expect(result.valid).toBe(true);
-    expect(result.unreadableDependencies).toHaveLength(0);
+    expect(result.invalidDependencyLists).toHaveLength(0);
     expect(
       reports.filter((report) =>
         (report as Error).message.includes('isOptional of a'),
@@ -3272,9 +3272,9 @@ describe('LifecycleManager - review regressions', () => {
     // Only the component left holding a list read for a replaced registration is
     // unread; one holding its current registration's answer is not reported as broken.
     expect(
-      result.unreadableDependencies.map(({ componentName }) => componentName),
+      result.invalidDependencyLists.map(({ componentName }) => componentName),
     ).toEqual(['b']);
-    for (const { error } of result.unreadableDependencies) {
+    for (const { error } of result.invalidDependencyLists) {
       expect(error.message).toContain('kept changing');
     }
   });

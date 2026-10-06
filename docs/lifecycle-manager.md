@@ -2746,14 +2746,14 @@ interface DependencyValidationResult {
     missingDependency: string;
   }>;
   circularCycles: string[][];
-  unreadableDependencies: Array<{ componentName: string; error: Error }>; // getDependencies() threw or returned a non-array, an array longer than 10,000, or a non-string entry (a throwing isOptional() is read as required, not listed)
+  invalidDependencyLists: Array<{ componentName: string; error: Error }>; // getDependencies() threw or returned a non-array, an array longer than 10,000, or a non-string entry (a throwing isOptional() is read as required, not listed)
   cycleCheckError?: Error; // Set only if cycle detection itself failed unexpectedly; valid is then false
   summary: {
     totalMissingDependencies: number; // Total number of missing dependencies across all components
     requiredMissingDependencies: number; // Missing dependencies on required components (blocks startup)
     optionalMissingDependencies: number; // Missing dependencies on optional components (degrades functionality)
     totalCircularCycles: number; // Number of circular dependency cycles detected
-    totalUnreadableDependencies: number; // Number of unreadableDependencies entries
+    totalInvalidDependencyLists: number; // Number of invalidDependencyLists entries
   };
 }
 ```
@@ -3272,7 +3272,7 @@ inspect their `error` for the named option. The array-only `broadcastMessage()` 
 has no aggregate error field, so its refusal is logged as a warning instead. The table
 above describes unexpected failures, including ordinary exceptions thrown by getters.
 
-Branch on `code` as usual; `operation_crashed` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around. Every call uses the same pair of codes. `error` means a method you wrote ran and failed: a component's `start()`, `stop()`, `onShutdownForce()`, `healthCheck()`, `onMessage()` or `getValue()` threw, rejected, or (for `healthCheck()`) returned a malformed result, or a custom `onReloadRequested` / `onInfoRequested` / `onDebugRequested` callback threw or rejected. That is an ordinary failure of that code, not of the manager. `operation_crashed` means something that should never throw did: the manager itself, or a property getter on a component - a handler such as `onMessage`, a timeout such as `healthCheckTimeoutMS`, or `getName()`. A `getDependencies()` that throws refuses its registration with `operation_crashed`, but once registered it fails only that component's own start, with `missing_dependency`. An array whose `length` is not a whole number from 0 to 10,000 is treated the same way, before any entry is read - the dependency-list counterpart of `broadcastMessage()`'s 100,000-name `componentNames` bound - and `validateDependencies()` lists it under `unreadableDependencies`.
+Branch on `code` as usual; `operation_crashed` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around. Every call uses the same pair of codes. `error` means a method you wrote ran and failed: a component's `start()`, `stop()`, `onShutdownForce()`, `healthCheck()`, `onMessage()` or `getValue()` threw, rejected, or (for `healthCheck()`) returned a malformed result, or a custom `onReloadRequested` / `onInfoRequested` / `onDebugRequested` callback threw or rejected. That is an ordinary failure of that code, not of the manager. `operation_crashed` means something that should never throw did: the manager itself, or a property getter on a component - a handler such as `onMessage`, a timeout such as `healthCheckTimeoutMS`, or `getName()`. A `getDependencies()` that throws refuses its registration with `operation_crashed`, but once registered it fails only that component's own start, with `missing_dependency`. An array whose `length` is not a whole number from 0 to 10,000 is treated the same way, before any entry is read - the dependency-list counterpart of `broadcastMessage()`'s 100,000-name `componentNames` bound - and `validateDependencies()` lists it under `invalidDependencyLists`.
 
 A stop that crashes still records the component as stalled, so it can be retried or unregistered. Its result carries `status`, whose `stallInfo` describes that stall, and its `reason` says so when the graceful phase had already timed out first. Its `component:stalled` event uses `component_shutdown_timeout` when it crashed while still in the graceful phase after that phase timed out, and `operation_crashed` otherwise - including a crash in the force phase after a graceful timeout (`reason: 'both'`).
 
