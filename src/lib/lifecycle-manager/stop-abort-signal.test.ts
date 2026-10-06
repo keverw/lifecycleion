@@ -6,7 +6,12 @@ import {
   LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_SUPERSEDED,
   LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
 } from './constants';
-import { ComponentStopTimeoutError } from './errors';
+import {
+  ComponentForceTimeoutError,
+  ComponentStopTimeoutError,
+  ForceShutdownSupersededError,
+  lifecycleManagerErrCodes,
+} from './errors';
 import { claimReports, deferred, setup } from './test-helpers';
 
 type Hook = (signal: AbortSignal) => void | Promise<void>;
@@ -302,9 +307,19 @@ test('the force signal is aborted at the force deadline, before onShutdownForceA
   // The force signal at the force deadline, with the error the result carries.
   expect(a.forceSignals[0].aborted).toBe(true);
   expect(a.forceSignals[0].reason).toBe(result.error);
-  expect((a.forceSignals[0].reason as Error).message).toBe(
+  const forceReason = a.forceSignals[0].reason as ComponentForceTimeoutError;
+  expect(forceReason).toBeInstanceOf(ComponentForceTimeoutError);
+  expect(forceReason.errCode).toBe(lifecycleManagerErrCodes.ForceTimeout);
+  // The force budget as the component resolved it (its 500ms minimum).
+  expect(forceReason.additionalInfo).toEqual({
+    componentName: 'a',
+    timeoutMS: a.shutdownForceTimeoutMS,
+  });
+  expect(forceReason.message).toBe(
     LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
   );
+  // The stall record keeps the same instance.
+  expect(manager.getComponentStatus('a')?.stallInfo?.error).toBe(forceReason);
   expect(a.forceSignalAbortedInHook).toBe(true);
 
   expect(a.order).toEqual([
@@ -397,7 +412,9 @@ test('a stalled retry that times out again aborts its own fresh force signal', a
   expect(a.forceSignals).toHaveLength(2);
   expect(a.forceSignals[1]).not.toBe(a.forceSignals[0]);
   expect(a.forceSignals[1].aborted).toBe(true);
-  expect(a.forceSignals[1].reason).toBeInstanceOf(Error);
+  expect(a.forceSignals[1].reason).toBeInstanceOf(ComponentForceTimeoutError);
+  expect(a.forceSignals[1].reason).not.toBe(a.forceSignals[0].reason);
+  expect(shutdown.stalledComponents[0]?.error).toBe(a.forceSignals[1].reason);
   expect(a.order).toEqual(['force-abort', 'force-hook']);
   forceGate.resolve();
   await sleep(10);
@@ -630,8 +647,10 @@ test.each([
     expect(result.success).toBe(true);
     expect(a.forceSignals).toHaveLength(1);
     expect(a.forceSignals[0].aborted).toBe(true);
-    const reason = a.forceSignals[0].reason as Error;
-    expect(reason).toBeInstanceOf(Error);
+    const reason = a.forceSignals[0].reason as ForceShutdownSupersededError;
+    expect(reason).toBeInstanceOf(ForceShutdownSupersededError);
+    expect(reason.errCode).toBe(lifecycleManagerErrCodes.ForceSuperseded);
+    expect(reason.additionalInfo).toEqual({ componentName: 'a' });
     expect(reason.message).toBe(
       LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_SUPERSEDED,
     );

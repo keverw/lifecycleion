@@ -119,6 +119,8 @@ import {
 import {
   ComponentStartTimeoutError,
   ComponentStopTimeoutError,
+  ComponentForceTimeoutError,
+  ForceShutdownSupersededError,
   StartupInterruptedByShutdownError,
   DependencyCycleError,
 } from './errors';
@@ -134,7 +136,6 @@ import {
   LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
   LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE,
   LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE_EXTERNAL,
-  LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_SUPERSEDED,
   LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
   LIFECYCLE_MANAGER_MESSAGE_GRACEFUL_SHUTDOWN_TIMED_OUT,
   LIFECYCLE_MANAGER_MESSAGE_PROCESS_EXITING,
@@ -9315,7 +9316,7 @@ export class LifecycleManager
 
     // This attempt's own timeout rejection, so the `catch` can tell it apart from
     // anything `onShutdownForce()` rejects with.
-    let forceTimeoutError: Error | undefined;
+    let forceTimeoutError: ComponentForceTimeoutError | undefined;
     // Set once that rejection has been delivered to the race - a macrotask after the
     // deadline fired (see `rejectAfterTimeoutHook()`). A hook rejection before then still
     // settles the race as the hook's own failure, and is reported as one.
@@ -9371,9 +9372,10 @@ export class LifecycleManager
         const timeoutPromise = new promiseConstructorIntrinsic<never>(
           (_, reject) => {
             timeoutHandle = setTimeout(() => {
-              forceTimeoutError = new Error(
-                LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
-              );
+              forceTimeoutError = new ComponentForceTimeoutError({
+                componentName: name,
+                timeoutMS,
+              });
               // The signal first, then the hook, as in the graceful phase.
               this.abortHookSignal(
                 forceAbort,
@@ -9453,7 +9455,7 @@ export class LifecycleManager
         if (!didForceHookSettle && forceTimeoutError === undefined) {
           this.abortHookSignal(
             forceAbort,
-            new Error(LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_SUPERSEDED),
+            new ForceShutdownSupersededError({ componentName: name }),
             name,
             'onShutdownForce',
           );

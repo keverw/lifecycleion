@@ -9,6 +9,11 @@ import {
   DependencyCycleError,
   MissingDependencyError,
   ComponentStartupError,
+  ComponentStartTimeoutError,
+  ComponentStopTimeoutError,
+  ComponentForceTimeoutError,
+  ForceShutdownSupersededError,
+  StartupInterruptedByShutdownError,
   StartupTimeoutError,
   ComponentNotFoundError,
   lifecycleManagerErrPrefix,
@@ -642,6 +647,61 @@ describe('LifecycleManager - BaseComponent', () => {
       expect(error.errCode).toBe('NotFound');
       expect(error.message).toContain('cache');
     });
+
+    // Every reason an abort signal the manager hands a hook can carry: each one an
+    // `Error` subclass with its own `errCode`, so a listener can switch on it.
+    test.each([
+      [
+        'ComponentStartTimeoutError',
+        new ComponentStartTimeoutError({ componentName: 'db', timeoutMS: 10 }),
+        'StartTimeout',
+        { componentName: 'db', timeoutMS: 10 },
+        'Component "db" start timed out after 10ms',
+      ],
+      [
+        'StartupInterruptedByShutdownError',
+        new StartupInterruptedByShutdownError({
+          componentName: 'db',
+          method: 'manual',
+        }),
+        'StartupInterrupted',
+        { componentName: 'db', method: 'manual' },
+        'Component "db" startup interrupted by shutdown (manual)',
+      ],
+      [
+        'ComponentStopTimeoutError',
+        new ComponentStopTimeoutError({ componentName: 'db', timeoutMS: 20 }),
+        'StopTimeout',
+        { componentName: 'db', timeoutMS: 20 },
+        'Component "db" stop timed out after 20ms',
+      ],
+      [
+        'ComponentForceTimeoutError',
+        new ComponentForceTimeoutError({ componentName: 'db', timeoutMS: 30 }),
+        'ForceTimeout',
+        { componentName: 'db', timeoutMS: 30 },
+        'Force shutdown timed out',
+      ],
+      [
+        'ForceShutdownSupersededError',
+        new ForceShutdownSupersededError({ componentName: 'db' }),
+        'ForceSuperseded',
+        { componentName: 'db' },
+        'Force shutdown superseded: component already stopped',
+      ],
+    ] as const)(
+      '%s should have correct properties',
+      (name, error, errCode, additionalInfo, message) => {
+        expect(error).toBeInstanceOf(Error);
+        expect(error.name).toBe(name);
+        expect(error.errPrefix).toBe('LifecycleManagerErr');
+        expect(error.errType).toBe('Component');
+        expect(error.errCode).toBe(errCode);
+        expect(lifecycleManagerErrCodes[errCode]).toBe(errCode);
+        expect(error.additionalInfo).toEqual(additionalInfo);
+        expect(error.message).toBe(message);
+      },
+    );
 
     test('error constants should be defined', () => {
       expect(lifecycleManagerErrPrefix).toBe('LifecycleManagerErr');

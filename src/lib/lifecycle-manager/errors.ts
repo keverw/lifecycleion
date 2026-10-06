@@ -1,4 +1,8 @@
 import type { ShutdownMethod } from './types';
+import {
+  LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_SUPERSEDED,
+  LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
+} from './constants';
 
 /**
  * Error thrown when a component name doesn't match kebab-case validation
@@ -170,6 +174,42 @@ export class ComponentStopTimeoutError extends Error {
 }
 
 /**
+ * The reason a component's `onShutdownForce()` signal aborts when `shutdownForceTimeoutMS`
+ * passes with the call still pending, and the `error` of the stalled result and stall
+ * record that timeout leaves.
+ */
+export class ComponentForceTimeoutError extends Error {
+  public errPrefix = 'LifecycleManagerErr';
+  public errType = 'Component';
+  public errCode = 'ForceTimeout';
+  public additionalInfo: { componentName: string; timeoutMS: number };
+
+  constructor(additionalInfo: { componentName: string; timeoutMS: number }) {
+    super(LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT);
+    this.name = 'ComponentForceTimeoutError';
+    this.additionalInfo = additionalInfo;
+  }
+}
+
+/**
+ * The reason a component's `onShutdownForce()` signal aborts when the graceful `stop()` it
+ * escalated from completes late and ends the force phase first, with the call still
+ * pending. Not a failure: the component did stop, and the stop answers success.
+ */
+export class ForceShutdownSupersededError extends Error {
+  public errPrefix = 'LifecycleManagerErr';
+  public errType = 'Component';
+  public errCode = 'ForceSuperseded';
+  public additionalInfo: { componentName: string };
+
+  constructor(additionalInfo: { componentName: string }) {
+    super(LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_SUPERSEDED);
+    this.name = 'ForceShutdownSupersededError';
+    this.additionalInfo = additionalInfo;
+  }
+}
+
+/**
  * Error thrown when the global startup timeout is exceeded
  */
 export class StartupTimeoutError extends Error {
@@ -230,4 +270,6 @@ export const lifecycleManagerErrCodes = {
   StartTimeout: 'StartTimeout',
   StartupInterrupted: 'StartupInterrupted',
   StopTimeout: 'StopTimeout',
+  ForceTimeout: 'ForceTimeout',
+  ForceSuperseded: 'ForceSuperseded',
 } as const;

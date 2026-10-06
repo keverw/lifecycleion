@@ -402,6 +402,39 @@ asks your code to wind down.
 It never fires because the call itself resolved, rejected or threw. Each attempt gets a
 fresh signal.
 
+`signal.reason` says why. Every reason is an exported `Error` subclass with an
+`errCode` (also listed in `lifecycleManagerErrCodes`), so it can be checked with
+`instanceof` or by code:
+
+| Signal                    | Reason class                        | `errCode`            | Fired by                                                                    |
+| ------------------------- | ----------------------------------- | -------------------- | --------------------------------------------------------------------------- |
+| `start(signal)`           | `ComponentStartTimeoutError`        | `StartTimeout`       | `startupTimeoutMS` or a bulk startup deadline (the start result's `error`)  |
+| `start(signal)`           | `StartupInterruptedByShutdownError` | `StartupInterrupted` | a shutdown pass with `abortPendingStarts: true` beginning                   |
+| `stop(signal)`            | `ComponentStopTimeoutError`         | `StopTimeout`        | `shutdownGracefulTimeoutMS` or a `stopComponent()` `timeout`                |
+| `onShutdownForce(signal)` | `ComponentForceTimeoutError`        | `ForceTimeout`       | `shutdownForceTimeoutMS` (the stalled result's `error`)                     |
+| `onShutdownForce(signal)` | `ForceShutdownSupersededError`      | `ForceSuperseded`    | the earlier `stop()` completing late - the component is down; not a failure |
+
+```typescript
+import { lifecycleManagerErrCodes } from 'lifecycleion/lifecycle-manager';
+
+class QueueComponent extends BaseComponent {
+  async onShutdownForce(signal: AbortSignal) {
+    signal.addEventListener('abort', () => {
+      switch (signal.reason?.errCode) {
+        case lifecycleManagerErrCodes.ForceTimeout:
+          this.logger.warn('Force cleanup ran out of time; dropping the queue');
+          this.queue.drop();
+          break;
+        case lifecycleManagerErrCodes.ForceSuperseded:
+          // stop() finished after all - nothing left to force.
+          break;
+      }
+    });
+    await this.queue.flush({ signal });
+  }
+}
+```
+
 A stop that escalates, end to end - one stop operation, holding the component's lock
 throughout:
 
@@ -841,16 +874,17 @@ instance-level work the signal cannot reach, and stay deadline-only.
   escalation after a failed graceful phase, a `forceImmediate` stop, and a stalled
   component's retry (`stopAllComponents({ retryStalled: true })`) alike - never the
   graceful phase's. It is aborted when `shutdownForceTimeoutMS` passes while the call
-  is still pending, with the error the stalled result carries as `error` (message
-  `Force shutdown timed out`) as `signal.reason`, immediately before
+  is still pending, with a `ComponentForceTimeoutError` (`errCode: 'ForceTimeout'`,
+  message `Force shutdown timed out`) - the error the stalled result carries as
+  `error` - as `signal.reason`, immediately before
   `onShutdownForceAborted()`. It is also aborted when the graceful `stop()` it
   escalated from - still running, since a promise cannot be cancelled - completes late
   and ends the force phase before its deadline while the call is still pending. Both
   calls belong to the one stop holding the component's lock; no other operation can
   trigger this. The component did stop, so
   the stop answers success, the call's work is no longer needed, and the signal says
-  so with an `Error` whose message is
-  `Force shutdown superseded: component already stopped` as `signal.reason`. That abort
+  so with a `ForceShutdownSupersededError` (`errCode: 'ForceSuperseded'`, message
+  `Force shutdown superseded: component already stopped`) as `signal.reason`. That abort
   happens with timeouts disabled too, and `onShutdownForceAborted()` is not called for
   it: that hook means the force deadline passed, which it did not. A call that settled
   itself in the same moment is not aborted.
