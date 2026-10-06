@@ -81,6 +81,7 @@ export {
   ComponentStartupError,
   ComponentStartTimeoutError,
   ComponentStopTimeoutError,
+  StartupInterruptedByShutdownError,
   StartupTimeoutError,
   ComponentNotFoundError,
   lifecycleManagerErrPrefix,

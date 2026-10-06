@@ -396,19 +396,27 @@ aborts it exactly when it stops waiting on a `start()` call that is still pendin
 - either of those passes for an attempt that a newer attempt has already superseded
   (for example, the component reported an unexpected stop from inside `start()` and a
   listener started it again). That old attempt's signal is still aborted, but
-  `onStartupAborted()` is not called, since it would reach the newer run.
+  `onStartupAborted()` is not called, since it would reach the newer run;
+- a shutdown pass using `abortPendingStarts` begins while the start is pending (see
+  [Multi-Phase Shutdown](#multi-phase-shutdown)). That abort is only a cue, with a
+  `StartupInterruptedByShutdownError` as `signal.reason`: `onStartupAborted()` is not
+  called and nothing is marked timed out.
 
-It is never aborted because `start()` resolved, rejected or threw. A shutdown pass
-does not abort it either - including one using `allowStopWithPendingStarts`, or one
-whose budget runs out while it waits on the start: the start attempt is still waiting
-on `start()`, and sends the component through the stop pipeline once it settles.
+It is never aborted because `start()` resolved, rejected or threw. Without
+`abortPendingStarts`, a shutdown pass does not abort it either - including one using
+`allowStopWithPendingStarts`, or one whose budget runs out while it waits on the
+start: the start attempt is still waiting on `start()`, and sends the component
+through the stop pipeline once it settles. Each signal aborts at most once: a start
+whose signal a shutdown already aborted keeps that reason if its own timeout passes
+later (`onStartupAborted()` is still called then), and a start whose signal its
+timeout already aborted is not aborted again by a shutdown.
 `stopComponent()` and `unregisterComponent()` are refused while a start is pending
 (`component_not_running` / `component_starting`), so they never abandon one. A
 start that resolved but lost to a bulk deadline in the same moment is handed to
 late-start cleanup without an abort; there is no pending work left to cancel. With
 startup timeouts disabled (`0`) and no bulk deadline, the signal never aborts.
 
-`signal.reason` is the same `ComponentStartTimeoutError` instance the result reports
+For a timeout, `signal.reason` is the same `ComponentStartTimeoutError` instance the result reports
 as `error`. The abort happens after the manager has finished its own bookkeeping for
 the timeout (late-start cleanup is already arranged) and immediately before
 `onStartupAborted()`, so both describe the same moment and the signal is already
@@ -648,6 +656,50 @@ that for `shutdown_timeout` after stopping more components, with startup skipped
 const result = await lifecycle.stopAllComponents({
   timeoutMS: 10000,
   waitForAbandonedStarts: true,
+});
+```
+
+To tell starts still in flight to give up, pass `abortPendingStarts: true` (default:
+`false`; it can also be set in `shutdownOptions`, and a per-call value overrides it).
+As the pass begins - once it is accepted, before its warning phase and before it waits
+on anything - it aborts the [start signal](#startup-abort-signal) of each start in
+flight at that moment, with a `StartupInterruptedByShutdownError` (exported;
+`additionalInfo: { componentName, method }`) as `signal.reason`. The sooner a start
+learns of the shutdown, the sooner it can settle and release what the pass keeps up
+for it. It is a cue, not the pass giving up on those starts: `onStartupAborted()` is
+not called, nothing is marked `starting-timed-out`, and the pass still waits for them
+within its budget and keeps their dependencies up until they settle, exactly as it
+would without the option. Two starts are left alone:
+
+- one whose own timeout already aborted its signal (a signal aborts at most once, so
+  its `ComponentStartTimeoutError` reason stays), and one whose `start()` has settled;
+- one that requested this shutdown itself - synchronously from `start()`, or through
+  its `this.lifecycle` handle. It already knows, the pass does not join it, and it may
+  be awaiting the pass's result.
+
+A start that honors the cue by rejecting or throwing - with `signal.reason`, an
+`AbortError`, or a library's own error wrapping either - is answered by
+`startComponent()` with `code: 'shutdown_in_progress'` (the thrown value as `error`),
+as a start that resolved after a shutdown began already is, rather than `error`. It
+still emits `component:start-failed` and returns to the state it had before the
+attempt, which releases its dependencies to the pass. A start that ignores the cue and
+resolves is stopped by the pass as before. `startAllComponents()` already answers
+`shutdown_in_progress` for any startup a shutdown interrupts. With
+`allowStopWithPendingStarts`, pending starts are aborted too - the pass is about to
+stop the dependencies they use - but not waited for. With `waitForAbandonedStarts`
+there is nothing to reconcile: the starts it waits for timed out, and their signals are
+already aborted. `restartAllComponents()` always keeps `abortPendingStarts` disabled,
+as it does the two options above: its stop phase is not a request to stay down, and the
+starts it would interrupt are ones the restart waits for and then starts again -
+cancelling them would only turn a slow start into a failed one ahead of the same
+start, and a global `true` meant for signal or logger shutdowns must not reach a
+restart.
+
+```typescript
+const lifecycle = new LifecycleManager({
+  logger,
+  // SIGTERM / logger.exit(): tell pending starts to give up, then wait for them.
+  shutdownOptions: { timeoutMS: 10000, abortPendingStarts: true },
 });
 ```
 
@@ -1203,6 +1255,7 @@ interface StopAllOptions {
   haltOnStall?: boolean; // Stop processing after a stop failure or refusal (default: true)
   allowStopWithPendingStarts?: boolean; // Release pending starts' dependency protection (default: false)
   waitForAbandonedStarts?: boolean; // Wait, within timeoutMS, for starts already past startupTimeoutMS (default: false)
+  abortPendingStarts?: boolean; // Abort in-flight starts' signals as the pass begins; still waits for them (default: false)
 }
 ```
 
@@ -2634,7 +2687,8 @@ interface ComponentOptions {
 
 ```typescript
 // Required: Start the component. `signal` is aborted if the manager stops waiting
-// on this start (a startup timeout or bulk deadline); see Startup Abort Signal.
+// on this start (a startup timeout or bulk deadline), or as a cue by a shutdown using
+// abortPendingStarts; see Startup Abort Signal.
 // Declaring start() without the parameter is fine.
 abstract start(signal: AbortSignal): Promise<void> | void;
 
@@ -3548,7 +3602,7 @@ class ServerComponent extends BaseComponent {
 }
 ```
 
-**Cooperative Cancellation during Startup:** The signal passed to `start(signal)` covers the manager giving up on a start (a timeout); pass it to your startup operations (like database connections or fetch requests). It is not aborted when `stop()` or a shutdown arrives while `start()` is still in flight. To also cancel startup from `stop()`, create your own `AbortController` for each startup attempt, store it as an instance property on your component, pass `AbortSignal.any([signal, this.abortController.signal])` to your startup operations (listeners on that derived signal are not guarded like `signal`'s, so catch inside them), and call `this.abortController.abort()` at the very beginning of your `stop()` method. Because an aborted signal stays aborted permanently, create a fresh controller before each retry or restart. Because `stop()` is protected by the `stopPromise` guard, this abort will only ever be triggered once for each stop attempt. If the underlying operations honor cancellation, awaiting the in-flight `startPromise` immediately after allows shutdown to proceed once they settle. Aborting the signal alone does not guarantee prompt completion. However, for standard single-step operations (like binding an HTTP server via `listen()`), awaiting the in-flight promise to settle and then immediately shutting it down remains the simplest and safest path.
+**Cooperative Cancellation during Startup:** The signal passed to `start(signal)` covers the manager giving up on a start (a timeout); pass it to your startup operations (like database connections or fetch requests). It is not aborted when `stop()` or a shutdown arrives while `start()` is still in flight, unless that shutdown uses `abortPendingStarts`. To also cancel startup from `stop()`, create your own `AbortController` for each startup attempt, store it as an instance property on your component, pass `AbortSignal.any([signal, this.abortController.signal])` to your startup operations (listeners on that derived signal are not guarded like `signal`'s, so catch inside them), and call `this.abortController.abort()` at the very beginning of your `stop()` method. Because an aborted signal stays aborted permanently, create a fresh controller before each retry or restart. Because `stop()` is protected by the `stopPromise` guard, this abort will only ever be triggered once for each stop attempt. If the underlying operations honor cancellation, awaiting the in-flight `startPromise` immediately after allows shutdown to proceed once they settle. Aborting the signal alone does not guarantee prompt completion. However, for standard single-step operations (like binding an HTTP server via `listen()`), awaiting the in-flight promise to settle and then immediately shutting it down remains the simplest and safest path.
 
 If the start signal aborts (or `onStartupAborted()` returns) but `start()` stays
 pending, the manager keeps that component's dependencies protected. Prefer making

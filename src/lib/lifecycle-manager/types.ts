@@ -431,6 +431,18 @@ export interface StopAllOptions {
    * restartAllComponents always disables this, including when configured globally.
    */
   waitForAbandonedStarts?: boolean;
+  /**
+   * Abort the start signal of each start still in flight as the pass begins, before its
+   * warning phase, with a `StartupInterruptedByShutdownError` as `signal.reason`
+   * (default: false). A cue to give up, not abandonment: `onStartupAborted()` is not
+   * called, nothing is marked timed out, and the pass still waits for those starts and
+   * keeps their dependencies up until they settle (unless allowStopWithPendingStarts
+   * releases them; those starts are aborted too). Skipped: a start already aborted by
+   * its own timeout, and a start that requested this shutdown itself. A start that then
+   * rejects or throws is answered `shutdown_in_progress`, as one that resolves is.
+   * restartAllComponents always disables this, including when configured globally.
+   */
+  abortPendingStarts?: boolean;
 }
 
 /**

@@ -219,8 +219,10 @@ export abstract class BaseComponent {
    * waiting on this call while it is still pending - its `startupTimeoutMS` or a
    * `startAllComponents()` deadline passed - with the `ComponentStartTimeoutError`
    * the start's result carries as `signal.reason`, just before `onStartupAborted()`.
-   * It is never aborted because `start()` resolved or threw, nor by a stop or
-   * shutdown. Pass it to cancellable work (`fetch`, `listen`, a pool connect) or check
+   * It is never aborted because `start()` resolved or threw, nor by a stop. A shutdown
+   * pass aborts it only with `abortPendingStarts`, as the pass begins, with a
+   * `StartupInterruptedByShutdownError` as `signal.reason` - a cue: the pass still
+   * waits for this call, and a rejection after it is answered `shutdown_in_progress`. Pass it to cancellable work (`fetch`, `listen`, a pool connect) or check
    * `signal.aborted` between steps; settling promptly once it aborts releases the
    * dependencies the manager keeps up for this start. It is scoped to this start, not
    * to the run it begins. Declaring `start()` without the parameter is fine.

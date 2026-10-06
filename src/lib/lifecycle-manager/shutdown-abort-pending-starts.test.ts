@@ -1,0 +1,387 @@
+import { expect, test } from 'bun:test';
+import type { Logger } from '../logger';
+import { sleep } from '../sleep';
+import { BaseComponent } from './base-component';
+import {
+  ComponentStartTimeoutError,
+  StartupInterruptedByShutdownError,
+} from './errors';
+import type { LifecycleManagerOptions } from './types';
+import { claimReports, deferred, Plain, setup } from './test-helpers';
+
+// `abortPendingStarts` makes a shutdown pass abort, as it begins, the start signals of
+// the starts still in flight - a cue to give up, not the pass giving up on them: it
+// still waits for them and keeps their dependencies up until they settle.
+
+class Starts extends BaseComponent {
+  public readonly signals: AbortSignal[] = [];
+  public readonly order: string[] = [];
+  public stops = 0;
+  public gate = deferred();
+
+  constructor(
+    logger: Logger,
+    name: string,
+    dependencies: string[] = [],
+    startupTimeoutMS = 30_000,
+  ) {
+    super(logger, { name, dependencies, startupTimeoutMS });
+  }
+
+  // By default the start ignores its signal and waits for the gate.
+  public onStart: (signal: AbortSignal) => void | Promise<void> = () =>
+    this.gate.promise;
+
+  public start(signal: AbortSignal): void | Promise<void> {
+    this.signals.push(signal);
+    signal.addEventListener('abort', () => {
+      this.order.push('abort');
+    });
+    return this.onStart(signal);
+  }
+
+  public stop(): void {
+    this.stops++;
+    this.order.push('stop');
+  }
+}
+
+class StartsWithHook extends Starts {
+  public hookCalls = 0;
+
+  public onStartupAborted(): void {
+    this.hookCalls++;
+    this.order.push('hook');
+  }
+}
+
+// A start that rejects with the signal's reason as soon as it is aborted.
+function honorsSignal(signal: AbortSignal): Promise<void> {
+  return new Promise<void>((_, reject) => {
+    signal.addEventListener('abort', () => {
+      reject(signal.reason as Error);
+    });
+  });
+}
+
+async function withPendingStart(
+  options: Partial<LifecycleManagerOptions> = {},
+): Promise<{
+  manager: ReturnType<typeof setup>['manager'];
+  database: Plain;
+  worker: StartsWithHook;
+  starting: ReturnType<ReturnType<typeof setup>['manager']['startComponent']>;
+}> {
+  const { logger, manager } = setup(options);
+  const database = new Plain(logger, 'database');
+  const worker = new StartsWithHook(logger, 'worker', ['database']);
+  await manager.registerComponent(database);
+  await manager.registerComponent(worker);
+  expect((await manager.startComponent('database')).success).toBe(true);
+  const starting = manager.startComponent('worker');
+  return { manager, database, worker, starting };
+}
+
+test('by default a shutdown pass does not abort a pending start signal', async () => {
+  const { manager, worker, starting } = await withPendingStart();
+
+  const shutdown = manager.stopAllComponents({ timeoutMS: 1000 });
+  await sleep(20);
+  expect(worker.signals[0].aborted).toBe(false);
+  expect(manager.isComponentRunning('database')).toBe(true);
+
+  worker.gate.resolve();
+  expect((await starting).code).toBe('shutdown_in_progress');
+  expect((await shutdown).success).toBe(true);
+  expect(worker.signals[0].aborted).toBe(false);
+  expect(worker.order).toEqual(['stop']);
+});
+
+test('abortPendingStarts aborts a pending start signal as the pass begins, and the pass still waits for it and protects its dependencies', async () => {
+  const { manager, worker, starting } = await withPendingStart();
+
+  const shutdown = manager.stopAllComponents({
+    timeoutMS: 1000,
+    abortPendingStarts: true,
+  });
+  // Synchronously, as the pass is accepted.
+  expect(worker.signals[0].aborted).toBe(true);
+  const reason = worker.signals[0].reason as StartupInterruptedByShutdownError;
+  expect(reason).toBeInstanceOf(StartupInterruptedByShutdownError);
+  expect(reason.additionalInfo).toEqual({
+    componentName: 'worker',
+    method: 'manual',
+  });
+  expect(reason.errCode).toBe('StartupInterrupted');
+
+  // A cue, not abandonment: the start still owns the component, no timeout is
+  // recorded, and its dependency stays up while it is pending.
+  await sleep(20);
+  expect(manager.getComponentStatus('worker')?.state).toBe('starting');
+  expect(manager.isComponentRunning('database')).toBe(true);
+  expect(worker.hookCalls).toBe(0);
+
+  // The start honors the cue by rejecting with the reason.
+  worker.gate.reject(reason);
+  const result = await starting;
+  expect(result.success).toBe(false);
+  expect(result.code).toBe('shutdown_in_progress');
+  expect(result.error).toBe(reason);
+
+  const shutdownResult = await shutdown;
+  expect(shutdownResult.success).toBe(true);
+  expect(manager.getRunningComponentNames()).toEqual([]);
+  expect(worker.hookCalls).toBe(0);
+  expect(worker.stops).toBe(0);
+  expect(manager.getComponentStatus('worker')?.state).not.toBe(
+    'starting-timed-out',
+  );
+  expect(worker.order).toEqual(['abort']);
+});
+
+test('any failure of a start whose signal the shutdown aborted is answered shutdown_in_progress', async () => {
+  const { manager, worker, starting } = await withPendingStart();
+  const shutdown = manager.stopAllComponents({ abortPendingStarts: true });
+
+  // A library that wraps the reason in its own error.
+  worker.gate.reject(
+    new Error('connect aborted', { cause: worker.signals[0].reason }),
+  );
+  const result = await starting;
+  expect(result.code).toBe('shutdown_in_progress');
+  expect(result.error?.message).toBe('connect aborted');
+  expect((await shutdown).success).toBe(true);
+});
+
+test('a start that ignores the cue and resolves is stopped by the pass, as without the option', async () => {
+  const { manager, worker, starting } = await withPendingStart();
+  const shutdown = manager.stopAllComponents({ abortPendingStarts: true });
+  expect(worker.signals[0].aborted).toBe(true);
+
+  worker.gate.resolve();
+  expect((await starting).code).toBe('shutdown_in_progress');
+  expect((await shutdown).success).toBe(true);
+  expect(worker.order).toEqual(['abort', 'stop']);
+  expect(manager.getRunningComponentNames()).toEqual([]);
+});
+
+test('a start that honors the abort at once lets the pass stop its dependencies', async () => {
+  const { logger, manager } = setup();
+  const database = new Plain(logger, 'database');
+  const worker = new StartsWithHook(logger, 'worker', ['database']);
+  worker.onStart = honorsSignal;
+  await manager.registerComponent(database);
+  await manager.registerComponent(worker);
+  await manager.startComponent('database');
+  const starting = manager.startComponent('worker');
+
+  const shutdown = await manager.stopAllComponents({
+    abortPendingStarts: true,
+  });
+
+  expect(shutdown.success).toBe(true);
+  expect(shutdown.stoppedComponents).toContain('database');
+  expect((await starting).code).toBe('shutdown_in_progress');
+  expect(worker.hookCalls).toBe(0);
+});
+
+test('startAllComponents() reports shutdown_in_progress when a start honors the abort', async () => {
+  const { logger, manager } = setup();
+  const database = new Plain(logger, 'database');
+  const worker = new StartsWithHook(logger, 'worker', ['database']);
+  worker.onStart = honorsSignal;
+  await manager.registerComponent(database);
+  await manager.registerComponent(worker);
+
+  const startup = manager.startAllComponents();
+  await sleep(10);
+  expect(manager.getComponentStatus('worker')?.state).toBe('starting');
+
+  const shutdown = await manager.stopAllComponents({
+    abortPendingStarts: true,
+  });
+  const result = await startup;
+
+  expect(result.code).toBe('shutdown_in_progress');
+  expect(shutdown.success).toBe(true);
+  expect(manager.getRunningComponentNames()).toEqual([]);
+  expect(worker.hookCalls).toBe(0);
+});
+
+test('a start that already timed out keeps its timeout abort and is not aborted again', async () => {
+  const { logger, manager } = setup();
+  const worker = new Starts(logger, 'worker', [], 20);
+  await manager.registerComponent(worker);
+
+  const started = await manager.startComponent('worker');
+  expect(started.code).toBe('component_startup_timeout');
+  expect(worker.signals[0].reason).toBe(started.error);
+
+  const shutdown = await manager.stopAllComponents({
+    abortPendingStarts: true,
+  });
+  expect(shutdown.code).toBe('cleanup_incomplete');
+  expect(worker.signals[0].reason).toBeInstanceOf(ComponentStartTimeoutError);
+  expect(worker.signals[0].reason).toBe(started.error);
+  expect(worker.order).toEqual(['abort']);
+
+  worker.gate.resolve();
+  await sleep(10);
+  expect(worker.stops).toBe(1);
+});
+
+test('a start that times out after the shutdown aborted it keeps the shutdown reason and still gets onStartupAborted()', async () => {
+  const { logger, manager } = setup();
+  const worker = new StartsWithHook(logger, 'worker', [], 40);
+  await manager.registerComponent(worker);
+  const starting = manager.startComponent('worker');
+
+  const shutdown = manager.stopAllComponents({ abortPendingStarts: true });
+  const reason = worker.signals[0].reason as unknown;
+  expect(reason).toBeInstanceOf(StartupInterruptedByShutdownError);
+
+  expect((await starting).code).toBe('component_startup_timeout');
+  expect(worker.signals[0].reason).toBe(reason);
+  expect(worker.hookCalls).toBe(1);
+  expect(worker.order).toEqual(['abort', 'hook']);
+  expect((await shutdown).code).toBe('cleanup_incomplete');
+  worker.gate.resolve();
+  await sleep(10);
+});
+
+test('shutdownOptions.abortPendingStarts sets the default, and a per-call value overrides it', async () => {
+  const first = await withPendingStart({
+    shutdownOptions: { abortPendingStarts: true },
+  });
+  const firstShutdown = first.manager.stopAllComponents();
+  expect(first.worker.signals[0].aborted).toBe(true);
+  first.worker.gate.resolve();
+  await first.starting;
+  expect((await firstShutdown).success).toBe(true);
+
+  const second = await withPendingStart({
+    shutdownOptions: { abortPendingStarts: true },
+  });
+  const secondShutdown = second.manager.stopAllComponents({
+    abortPendingStarts: false,
+  });
+  await sleep(10);
+  expect(second.worker.signals[0].aborted).toBe(false);
+  second.worker.gate.resolve();
+  await second.starting;
+  expect((await secondShutdown).success).toBe(true);
+});
+
+test('restartAllComponents() never aborts pending starts, even with shutdownOptions.abortPendingStarts', async () => {
+  const { manager, worker, starting } = await withPendingStart({
+    shutdownOptions: { abortPendingStarts: true },
+  });
+
+  const restart = manager.restartAllComponents();
+  await sleep(20);
+  expect(worker.signals[0].aborted).toBe(false);
+
+  worker.gate.resolve();
+  expect((await starting).code).toBe('shutdown_in_progress');
+  const result = await restart;
+  expect(result.success).toBe(true);
+  expect(worker.signals).toHaveLength(2);
+  expect(worker.signals.map((signal) => signal.aborted)).toEqual([
+    false,
+    false,
+  ]);
+  await manager.stopAllComponents({ abortPendingStarts: false });
+});
+
+// Asks for the shutdown from inside its own `start()`, through its lifecycle handle.
+class Requester extends Starts {
+  public shutdown: Promise<unknown> | undefined;
+
+  public override start(signal: AbortSignal): Promise<void> {
+    this.signals.push(signal);
+    this.shutdown = this.lifecycle.stopAllComponents({
+      abortPendingStarts: true,
+    });
+    return this.gate.promise;
+  }
+}
+
+test('a start that requested the shutdown itself is not aborted; other pending starts are', async () => {
+  const { logger, manager } = setup();
+  const other = new Starts(logger, 'other');
+  const requester = new Requester(logger, 'requester');
+  await manager.registerComponent(other);
+  await manager.registerComponent(requester);
+
+  const otherStarting = manager.startComponent('other');
+  const requesterStarting = manager.startComponent('requester');
+
+  expect(requester.shutdown).toBeDefined();
+  expect(other.signals[0].aborted).toBe(true);
+  expect(requester.signals[0].aborted).toBe(false);
+
+  other.gate.resolve();
+  requester.gate.resolve();
+  expect((await otherStarting).code).toBe('shutdown_in_progress');
+  expect((await requesterStarting).code).toBe('shutdown_in_progress');
+  await requester.shutdown;
+  expect(manager.getRunningComponentNames()).toEqual([]);
+});
+
+test('with allowStopWithPendingStarts the start is still aborted, and its dependencies are stopped without waiting', async () => {
+  const { manager, worker, starting } = await withPendingStart();
+
+  const shutdown = await manager.stopAllComponents({
+    abortPendingStarts: true,
+    allowStopWithPendingStarts: true,
+  });
+
+  expect(worker.signals[0].aborted).toBe(true);
+  expect(worker.signals[0].reason).toBeInstanceOf(
+    StartupInterruptedByShutdownError,
+  );
+  expect(manager.isComponentRunning('database')).toBe(false);
+  expect(shutdown.code).toBe('cleanup_incomplete');
+
+  worker.gate.reject(worker.signals[0].reason);
+  expect((await starting).code).toBe('shutdown_in_progress');
+});
+
+test('a throwing abort listener on a start the shutdown aborts is reported, and the pass is unaffected', async () => {
+  const { reports, release } = claimReports();
+  try {
+    const { manager, worker, starting } = await withPendingStart();
+    const thrown = new Error('listener');
+    worker.onStart = (signal) => {
+      signal.addEventListener('abort', () => {
+        throw thrown;
+      });
+      return honorsSignal(signal);
+    };
+    // The start in `withPendingStart()` already ran; run another one with the listener.
+    worker.gate.resolve();
+    await starting;
+    await manager.stopComponent('worker');
+    const again = manager.startComponent('worker');
+
+    const shutdown = await manager.stopAllComponents({
+      abortPendingStarts: true,
+    });
+
+    expect(shutdown.success).toBe(true);
+    expect((await again).code).toBe('shutdown_in_progress');
+    expect(
+      reports.map((report) => [
+        (report as Error).message,
+        (report as Error).cause,
+      ]),
+    ).toEqual([
+      [
+        'Error in a callback lifecycle-manager start abort listener for worker',
+        thrown,
+      ],
+    ]);
+  } finally {
+    release();
+  }
+});

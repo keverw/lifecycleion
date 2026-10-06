@@ -1,3 +1,5 @@
+import type { ShutdownMethod } from './types';
+
 /**
  * Error thrown when a component name doesn't match kebab-case validation
  *
@@ -127,6 +129,29 @@ export class ComponentStartTimeoutError extends Error {
 }
 
 /**
+ * The reason a shutdown pass with `abortPendingStarts` aborts the signal of a start still
+ * in flight as it begins. A cue to give up, not a failure the manager records: the pass
+ * still waits for that `start()` and keeps its dependencies up until it settles.
+ */
+export class StartupInterruptedByShutdownError extends Error {
+  public errPrefix = 'LifecycleManagerErr';
+  public errType = 'Component';
+  public errCode = 'StartupInterrupted';
+  public additionalInfo: { componentName: string; method: ShutdownMethod };
+
+  constructor(additionalInfo: {
+    componentName: string;
+    method: ShutdownMethod;
+  }) {
+    super(
+      `Component "${additionalInfo.componentName}" startup interrupted by shutdown (${additionalInfo.method})`,
+    );
+    this.name = 'StartupInterruptedByShutdownError';
+    this.additionalInfo = additionalInfo;
+  }
+}
+
+/**
  * Error thrown when a component stop operation times out
  */
 export class ComponentStopTimeoutError extends Error {
@@ -203,5 +228,6 @@ export const lifecycleManagerErrCodes = {
   StartupFailed: 'StartupFailed',
   StartupTimeout: 'StartupTimeout',
   StartTimeout: 'StartTimeout',
+  StartupInterrupted: 'StartupInterrupted',
   StopTimeout: 'StopTimeout',
 } as const;

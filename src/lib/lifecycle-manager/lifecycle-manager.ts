@@ -118,6 +118,7 @@ import {
 import {
   ComponentStartTimeoutError,
   ComponentStopTimeoutError,
+  StartupInterruptedByShutdownError,
   DependencyCycleError,
 } from './errors';
 import {
@@ -188,6 +189,7 @@ interface ShutdownPassOptions {
   readonly haltOnStall: boolean;
   readonly allowStopWithPendingStarts: boolean;
   readonly waitForAbandonedStarts: boolean;
+  readonly abortPendingStarts: boolean;
 }
 
 /** A start and any automatic cleanup it still owns. */
@@ -204,6 +206,12 @@ interface StartSettlement {
   isAwaitingLateStart?: boolean;
   component?: BaseComponent;
   token?: string;
+  /**
+   * Abort this attempt's start signal as a shutdown's cue (`abortPendingStarts`), unless
+   * `start()` has settled or its signal was already aborted. Set by the attempt once it
+   * has handed `start()` its signal.
+   */
+  interruptStart?: (reason: StartupInterruptedByShutdownError) => boolean;
 }
 
 /** Raw startup or its owned cleanup has not finished, regardless of display state. */
@@ -608,12 +616,14 @@ export class LifecycleManager
       haltOnStall: shouldHaltOnStall,
       allowStopWithPendingStarts,
       waitForAbandonedStarts: shouldWaitForAbandonedStarts,
+      abortPendingStarts: shouldAbortPendingStarts,
     } = options.shutdownOptions ?? {};
     this.shutdownOptions = {
       retryStalled: shouldRetryStalled ?? true,
       haltOnStall: shouldHaltOnStall ?? true,
       allowStopWithPendingStarts: allowStopWithPendingStarts === true,
       waitForAbandonedStarts: shouldWaitForAbandonedStarts === true,
+      abortPendingStarts: shouldAbortPendingStarts === true,
       timeoutMS: resolveTimeoutMS(
         shutdownTimeoutMS,
         30000,
@@ -4064,6 +4074,11 @@ export class LifecycleManager
           // ends the phase `cleanup_incomplete`. Waiting would only trade that for a
           // `shutdown_timeout` after stopping more components, startup skipped either way.
           waitForAbandonedStarts: false,
+          // Not a request to stay down: the starts it would interrupt are ones this
+          // restart waits for and then starts again. Cancelling them would only turn a
+          // slow start into a failed one ahead of the same start, and a global setting
+          // meant for signal or logger shutdowns must not reach a restart.
+          abortPendingStarts: false,
         },
         // Not a request to stay down: see `acceptShutdownPass()`.
         false,
@@ -5694,6 +5709,9 @@ export class LifecycleManager
         waitForAbandonedStarts:
           (options?.waitForAbandonedStarts ??
             this.shutdownOptions.waitForAbandonedStarts) === true,
+        abortPendingStarts:
+          (options?.abortPendingStarts ??
+            this.shutdownOptions.abortPendingStarts) === true,
       };
 
       this.normalizeRepeatedShutdownRequestStateArmedStatus();
@@ -5822,6 +5840,7 @@ export class LifecycleManager
       haltOnStall: shouldHaltOnStall,
       allowStopWithPendingStarts,
       waitForAbandonedStarts: shouldWaitForAbandonedStarts,
+      abortPendingStarts: shouldAbortPendingStarts,
     } = options;
 
     let hasTimedOut = false;
@@ -6137,6 +6156,16 @@ export class LifecycleManager
 
       // Create shutdown operation
       const shutdownOperation = async () => {
+        // First, before the warning phase and any wait: the sooner a start learns of the
+        // shutdown, the sooner it can settle and release what the pass is holding up.
+        if (shouldAbortPendingStarts) {
+          this.interruptPendingStarts(
+            startingAtPassStart,
+            currentStarts,
+            requestingStarts,
+            method,
+          );
+        }
         const startupDependencies = new Set<string>();
         const warningExcluded = new Set<string>();
         for (const name of startingAtPassStart) {
@@ -6942,6 +6971,44 @@ export class LifecycleManager
       },
       component,
     );
+  }
+
+  /**
+   * `abortPendingStarts`: abort the start signal of each start a shutdown pass found in
+   * flight as it began - the cue to give up. Only that: the pass still joins those starts
+   * and protects their dependencies as it would without it, and nothing here records a
+   * timeout or calls `onStartupAborted()`. A start that requested this shutdown is left
+   * alone - it already knows, and may be awaiting the pass - as is one whose `start()`
+   * has settled or whose own deadline already aborted its signal (`interruptStart()`
+   * checks both). Each settlement is asked in turn; abort listeners are the component's
+   * code and may change the others, which each check again for itself.
+   */
+  private interruptPendingStarts(
+    names: readonly string[],
+    currentStarts: ReadonlyMap<string, StartSettlement>,
+    requestingStarts: ReadonlySet<StartSettlement>,
+    method: ShutdownMethod,
+  ): void {
+    for (const name of names) {
+      const settlement = currentStarts.get(name);
+      if (
+        settlement?.interruptStart === undefined ||
+        requestingStarts.has(settlement) ||
+        !settlement.rawStartPending
+      ) {
+        continue;
+      }
+      if (
+        settlement.interruptStart(
+          new StartupInterruptedByShutdownError({
+            componentName: name,
+            method,
+          }),
+        )
+      ) {
+        this.logger.entity(name).info('Aborted pending start for shutdown');
+      }
+    }
   }
 
   /**
@@ -7803,6 +7870,10 @@ export class LifecycleManager
 
     let timeoutHandle: NodeJS.Timeout | undefined;
     let startupTimeoutError: ComponentStartTimeoutError | undefined;
+    // What first aborted this attempt's start signal: its deadline, or a shutdown pass's
+    // `abortPendingStarts` cue. The signal aborts once; the cause decides how a failure
+    // of `start()` after that is answered.
+    let startAbortCause: 'timeout' | 'shutdown' | undefined;
     // What the `finally` names a detach of the signals this start attached after:
     // only a failure is a failed startup. Set by the paths that end otherwise.
     let detachTrigger = 'failed component startup';
@@ -7854,6 +7925,16 @@ export class LifecycleManager
       // below - never because `start()` settled, either way. Guarded before `start()`
       // sees it, so a listener the component adds cannot throw out of that abort.
       const startAbort = this.createHookAbortController(name, 'start');
+      if (settlement) {
+        settlement.interruptStart = (reason): boolean => {
+          if (startAbortCause !== undefined || !settlement.rawStartPending) {
+            return false;
+          }
+          startAbortCause = 'shutdown';
+          this.abortHookSignal(startAbort, reason, name, 'start');
+          return true;
+        };
+      }
       // Race against timeout
       // Adopted, not raced as it is: a native promise carrying its own no-op `then`
       // never settled the race, and its rejection went unhandled. See `adoptPromise()`.
@@ -7926,6 +8007,7 @@ export class LifecycleManager
                   name,
                   'Superseded start() failed after its deadline',
                 );
+                startAbortCause ??= 'timeout';
                 this.abortHookSignal(
                   startAbort,
                   startupTimeoutError,
@@ -7954,7 +8036,9 @@ export class LifecycleManager
               // and after the bookkeeping above, so abort listeners (the component's
               // code) find the abandonment and any late cleanup already arranged.
               // Aborted even when those sinks superseded the attempt: the signal is
-              // only this attempt's, unlike the instance's hook below.
+              // only this attempt's, unlike the instance's hook below. A shutdown that
+              // already aborted it keeps its reason; aborting again does nothing.
+              startAbortCause ??= 'timeout';
               this.abortHookSignal(
                 startAbort,
                 startupTimeoutError,
@@ -8285,11 +8369,18 @@ export class LifecycleManager
         };
       }
 
+      // A shutdown pass asked this start to give up (`abortPendingStarts`) and it did:
+      // answered as a start a shutdown interrupted, as one that resolved anyway is,
+      // whatever it threw - a library may wrap the signal's reason in its own error.
+      const wasInterruptedByShutdown =
+        !isStartupTimeout && didStartHookFail && startAbortCause === 'shutdown';
       const code = isStartupTimeout
         ? 'component_startup_timeout'
-        : didStartHookFail
-          ? 'error'
-          : 'operation_crashed';
+        : wasInterruptedByShutdown
+          ? 'shutdown_in_progress'
+          : didStartHookFail
+            ? 'error'
+            : 'operation_crashed';
       const result = this.withTransition<ComponentOperationResult>(() => {
         // Store error
         this.componentErrors.set(name, err);
@@ -8324,11 +8415,20 @@ export class LifecycleManager
               : 'registered',
           );
 
-          this.logger
-            .entity(name)
-            .error('Component failed to start: {{error.message}}', {
-              params: { error: err },
-            });
+          if (wasInterruptedByShutdown) {
+            this.logger
+              .entity(name)
+              .warn(
+                'Component startup interrupted by shutdown: {{error.message}}',
+                { params: { error: err } },
+              );
+          } else {
+            this.logger
+              .entity(name)
+              .error('Component failed to start: {{error.message}}', {
+                params: { error: err },
+              });
+          }
 
           this.lifecycleEvents.componentStartFailed(name, err, {
             reason,
@@ -8338,7 +8438,9 @@ export class LifecycleManager
         return {
           success: false,
           componentName: name,
-          reason,
+          reason: wasInterruptedByShutdown
+            ? `Shutdown interrupted component startup: ${reason}`
+            : reason,
           code,
           error: err,
           status: this.getComponentStatus(name),
