@@ -218,3 +218,101 @@ test('restart refuses without starting when its stop phase is refused mid-accept
   expect(messages).not.toContain('Restart completed');
   await shutdown;
 });
+
+test('restart refuses during an active bulk startup without stopping anything', async () => {
+  const { logger, manager } = setup();
+  const running = new GatedStop(logger, 'running');
+  const slow = new Plain(logger, 'slow');
+  const gate = deferred();
+  slow.start = (): Promise<void> => gate.promise;
+  await manager.registerComponent(running);
+  await manager.registerComponent(slow);
+  const startup = manager.startAllComponents();
+  await sleepTick();
+
+  const result = await manager.restartAllComponents();
+  expect(result.success).toBe(false);
+  expect(result.startupResult.code).toBe('already_in_progress');
+  expect(result.shutdownResult).toMatchObject({
+    code: 'partial_state',
+    stoppedComponents: [],
+  });
+  expect(running.stops).toBe(0);
+
+  gate.resolve();
+  expect((await startup).success).toBe(true);
+});
+
+test('restart refuses when a preparation getter begins a bulk startup', async () => {
+  const { logger, manager } = setup();
+  const component = new GatedStop(logger, 'component');
+  const gate = deferred();
+  component.start = (): Promise<void> => gate.promise;
+  await manager.registerComponent(component);
+  let startup: ReturnType<typeof manager.startAllComponents> | undefined;
+
+  const result = await manager.restartAllComponents({
+    get startupOptions() {
+      startup = manager.startAllComponents();
+      return undefined;
+    },
+  });
+  expect(result.startupResult.code).toBe('already_in_progress');
+  expect(result.shutdownResult.stoppedComponents).toEqual([]);
+  expect(component.stops).toBe(0);
+
+  gate.resolve();
+  expect((await startup)?.success).toBe(true);
+  expect(manager.isComponentRunning('component')).toBe(true);
+});
+
+test('a registration from the escalation expiry log is caught by restart preflight', async () => {
+  const { logger, manager } = setup({
+    repeatedShutdownRequestPolicy: {
+      forceAfterCount: 3,
+      withinMS: 10_000,
+      onForceShutdown: () => {},
+    },
+  });
+  const component = new GatedStop(logger, 'component');
+  await manager.registerComponent(component);
+  await manager.startAllComponents();
+  // A lapsed post-failure window, which the restart expires before stopping anything.
+  const state = (
+    manager as unknown as {
+      repeatedShutdownRequestState: {
+        firstMethod: string | null;
+        firstRequestAt: number | null;
+        remainsArmedUntil: number | null;
+      };
+    }
+  ).repeatedShutdownRequestState;
+  state.firstMethod = 'SIGINT';
+  state.firstRequestAt = Date.now() - 10;
+  state.remainsArmedUntil = Date.now() - 1;
+  let registration: Promise<unknown> | undefined;
+  logger.addSink({
+    write(entry) {
+      if (
+        entry.message.startsWith('Repeated shutdown escalation window expired')
+      ) {
+        registration = manager.registerComponent(new Plain(logger, 'late'));
+      }
+    },
+  });
+
+  const result = await manager.restartAllComponents();
+  await registration;
+  expect(result.shutdownResult).toMatchObject({
+    code: 'partial_state',
+    stoppedComponents: [],
+  });
+  expect(result.shutdownResult.reason).toBe(
+    'Component "late" changed while restart was being prepared',
+  );
+  expect(component.stops).toBe(0);
+});
+
+function sleepTick(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, 0));
+}

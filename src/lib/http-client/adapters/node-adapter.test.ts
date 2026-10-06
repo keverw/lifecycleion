@@ -3530,12 +3530,30 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     expect(handlers.length).toBe(1);
 
     // It still absorbs the error the torn-down writable delivers late, and settles
-    // nothing, because the request has already settled.
-    expect(() => handlers[0]?.(new Error('late boom'))).not.toThrow();
+    // nothing, because the request has already settled. With no request registered
+    // behind it, the error is reported through the host error reporter, as the absorber
+    // on a writable that can be detached reports it.
+    const reports: ErrorEvent[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+    const lateError = new Error('late boom');
 
-    await new Promise<void>((done) => {
-      setImmediate(done);
-    });
+    globalThis.addEventListener('error', onError);
+
+    try {
+      expect(() => handlers[0]?.(lateError)).not.toThrow();
+
+      await new Promise<void>((done) => {
+        setImmediate(done);
+      });
+    } finally {
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(reports.length).toBe(1);
+    expect(reports[0]?.error).toBe(lateError);
 
     // And a second request through the same sink adds none: this is what a reused sink
     // used to pay two listeners and a retained request closure for, every time.
@@ -3761,6 +3779,107 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(wasDestroyed).toBe(true);
     } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
+  test('a late writable with no removal method reports an error it emits after being discarded', async () => {
+    // The writable an async factory hands back after the request was aborted is destroyed
+    // with a listener attached first. On a writable with no `off`/`removeListener`, that
+    // listener is the permanent fan-out - registered into and at once deregistered from -
+    // and an `'error'` reaching it with nothing registered was dropped without a trace,
+    // where the absorber on a detachable writable reports it.
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '3',
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    const errorHandlers: ((error: Error) => void)[] = [];
+    let wasDestroyed = false;
+    const writable = {
+      write: () => true,
+      end: () => {},
+      on: (event: string, listener: (error: Error) => void) => {
+        if (event === 'error') {
+          errorHandlers.push(listener);
+        }
+
+        return writable;
+      },
+      once: () => writable,
+      destroy: () => {
+        wasDestroyed = true;
+      },
+    } as unknown as WritableLike;
+
+    const reports: ErrorEvent[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    const controller = new AbortController();
+    let releaseFactory!: () => void;
+    const factoryGate = new Promise<void>((resolve) => {
+      releaseFactory = resolve;
+    });
+
+    try {
+      const promise = new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        signal: controller.signal,
+        streamResponse: async () => {
+          await factoryGate;
+          return writable;
+        },
+      });
+
+      controller.abort();
+
+      let caught: Error | undefined;
+
+      try {
+        await promise;
+      } catch (error) {
+        caught = error as Error;
+      }
+
+      expect(caught?.message).toContain('Request aborted');
+
+      releaseFactory();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(wasDestroyed).toBe(true);
+      expect(errorHandlers.length).toBe(1);
+
+      // The failed `open` a destroyed `createWriteStream()` emits regardless.
+      const lateError = new Error('ENOENT on open');
+
+      expect(() => errorHandlers[0]?.(lateError)).not.toThrow();
+
+      await new Promise<void>((done) => {
+        setImmediate(done);
+      });
+
+      expect(reports.length).toBe(1);
+      expect(reports[0]?.error).toBe(lateError);
+    } finally {
+      globalThis.removeEventListener('error', onError);
       requestSpy.mockRestore();
     }
   });

@@ -4,6 +4,7 @@ import fs, { promises as fsPromises } from 'fs';
 import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
 import { reportThroughHandler } from '../../internal/failure-reporter';
+import { reportToConsole } from '../../internal/report-to-console';
 import { renderJSONLine } from './internal/render-json-line';
 import { renderTextLine } from './internal/render-text-line';
 import {
@@ -375,8 +376,23 @@ export class FileSink implements LogSink {
       'FileSink maxQueueSize',
     );
 
-    // Initialize asynchronously
-    this.initPromise = this.initialize();
+    // Initialize asynchronously.
+    //
+    // `initialize` reports its own failures and is built never to reject, but `close()`,
+    // `flush()` and `write()` all wait on this promise, so that is contained here rather
+    // than trusted at each wait - the containment `NamedPipeSink.close()` gives its own
+    // init wait. Left raw, a rejection from a future change would reject `close()`, a
+    // shutdown step that must not raise, and go unhandled out of the constructor while
+    // nothing waits on it. Reported, not swallowed, since it would be a bug.
+    this.initPromise = observePromise(
+      this.initialize(),
+      undefined,
+      (error: unknown) => {
+        reportToConsole(
+          `FileSink initialization failed unexpectedly: ${describeError(error)}`,
+        );
+      },
+    );
   }
 
   public write(entry: LogEntry): void {

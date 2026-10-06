@@ -41,8 +41,13 @@ The stateful helpers have deliberately smaller scopes:
   must not bypass those checks or freeze an overridable method.
 - Hook receivers, property-read order, notifications, and failure channels are part
   of the behavior. Keep these in their existing order when moving code. In particular,
-  every hook dispatch rechecks availability after reading its hook and again after its
-  started event; `component-dispatch.ts` holds both steps so they cannot drift apart.
+  every hook dispatch rechecks availability after reading its hook. The asynchronous
+  ones - message, health check, signal - recheck again after their started event,
+  following its listeners even when it is only queued; `component-dispatch.ts` holds
+  both steps so they cannot drift apart. `getValueInternal()` is synchronous and cannot
+  wait for listeners: it emits `value-requested` before reading its hook, so the
+  post-read recheck is its last one, and a listener of a queued `value-requested` runs
+  only after the call has returned.
 - Availability includes a late start's cleanup, which marks its component running only
   to stop it. The manager exposes it through the `isLateStartCleanupPending`
   accessor.

@@ -1099,6 +1099,49 @@ describe('MockAdapter.send() — low-level contract', () => {
     expect(onHandlerErrorCalls).toBe(0);
   });
 
+  test('removes its abort listener when the signal throws reading `aborted` after the listener is attached', async () => {
+    // Pending until released: a handler that settles detaches the listener on its own,
+    // so only one still running shows whether the failed read left it attached.
+    let releaseHandler!: () => void;
+    const handlerGate = new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    });
+    adapter.routes.get('/item', async () => {
+      await handlerGate;
+      return { status: 200 };
+    });
+
+    // Readable until the adapter's wait attaches its listener, then throws: the
+    // post-attach `aborted` check is the read that fails.
+    const listeners = new Set<unknown>();
+    const readFailure = new Error('aborted read failed');
+    const signal = {
+      get aborted(): boolean {
+        if (listeners.size > 0) {
+          throw readFailure;
+        }
+
+        return false;
+      },
+      addEventListener: (_type: string, listener: unknown) => {
+        listeners.add(listener);
+      },
+      removeEventListener: (_type: string, listener: unknown) => {
+        listeners.delete(listener);
+      },
+    } as unknown as AbortSignal;
+
+    // The failed wait is reported as the handler's failure, so the adapter's default 500.
+    const res = await adapter.send(
+      makeAdapterRequest({ requestURL: '/item', signal }),
+    );
+
+    expect(res.status).toBe(500);
+    expect(listeners.size).toBe(0);
+
+    releaseHandler();
+  });
+
   test('handles path-only URL without host', async () => {
     adapter.routes.get('/items', () => ({ status: 200 }));
 

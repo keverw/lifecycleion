@@ -2,7 +2,12 @@ import { expect, spyOn, test } from 'bun:test';
 import { Logger } from '../../logger';
 import { BaseComponent } from '../base-component';
 import { LifecycleManagerEvents } from '../events';
-import type { ComponentStallInfo, ComponentState } from '../types';
+import type {
+  ComponentStallInfo,
+  ComponentState,
+  HealthCheckResult,
+  HealthReport,
+} from '../types';
 import type { ComponentAccessContext } from './component-access-context';
 import {
   broadcastMessageInternal,
@@ -38,7 +43,6 @@ function fixture() {
     },
     componentStates,
     stalledComponents,
-    runningComponents,
     isStarting: false,
     messageTimeoutMS: 0,
     logger: logger.service('access-test'),
@@ -582,7 +586,23 @@ test('a signal handler read that stops its component skips it without a started 
   expect(calls).toBe(0);
 });
 
-test.each([Infinity, 5e7, -1, 1.5, Number.NaN])(
+test.each<unknown>([
+  Infinity,
+  5e7,
+  -1,
+  1.5,
+  Number.NaN,
+  // Not numbers: refused without coercion - `Number()` throws for a symbol and runs an
+  // object's `valueOf`, and neither may escape as a crash instead of the refusal.
+  Symbol('length'),
+  {
+    valueOf() {
+      throw new Error('valueOf ran');
+    },
+  },
+  '1',
+  null,
+])(
   'broadcast refuses componentNames with an implausible length (%p) before reading entries',
   async (length) => {
     const { context, add, events } = fixture();
@@ -802,6 +822,90 @@ test('message availability evaluates the hook-entry block once per read', async 
 
   expect(result.code).toBe('no_handler');
   expect(blockReads).toBe(2);
+});
+
+test('getValue and health checks look the component up once before reading its hook', async () => {
+  const { context, add } = fixture();
+  add('target');
+  let lookups = 0;
+  const counted: ComponentAccessContext = {
+    ...context,
+    getComponent: (name) => {
+      lookups++;
+      return context.getComponent(name);
+    },
+  };
+
+  // No handler: the lookup that finds the component, then the recheck after the handler
+  // read. The first availability read follows that lookup with no caller code between,
+  // so it does not repeat it.
+  expect(getValueInternal(counted, 'target', 'key', null).code).toBe(
+    'no_handler',
+  );
+  expect(lookups).toBe(2);
+
+  lookups = 0;
+  expect((await checkComponentHealthOperation(counted, 'target')).code).toBe(
+    'no_handler',
+  );
+  expect(lookups).toBe(2);
+});
+
+test('checkAllHealth aggregates entry outcomes into its code', async () => {
+  const entry = (overrides: Partial<HealthCheckResult>): HealthCheckResult => ({
+    name: 'target',
+    healthy: true,
+    message: undefined,
+    checkedAt: 0,
+    durationMS: 0,
+    error: null,
+    timedOut: false,
+    code: 'ok',
+    ...overrides,
+  });
+  const cases: Array<{
+    entries: HealthCheckResult[];
+    code: HealthReport['code'];
+  }> = [
+    { entries: [entry({}), entry({ code: 'no_handler' })], code: 'ok' },
+    { entries: [entry({}), entry({ healthy: false })], code: 'degraded' },
+    {
+      entries: [entry({}), entry({ healthy: false, code: 'stopped' })],
+      code: 'degraded',
+    },
+    {
+      entries: [entry({ healthy: false, code: 'stalled' })],
+      code: 'degraded',
+    },
+    {
+      entries: [
+        entry({ healthy: false, code: 'stopped' }),
+        entry({ healthy: false, timedOut: true, code: 'timeout' }),
+      ],
+      code: 'timeout',
+    },
+    {
+      entries: [
+        entry({ healthy: false, timedOut: true, code: 'timeout' }),
+        entry({ healthy: false, error: new Error('boom'), code: 'error' }),
+      ],
+      code: 'error',
+    },
+  ];
+
+  for (const { entries, code } of cases) {
+    const { context, add } = fixture();
+    for (const [index] of entries.entries()) {
+      add(`c${String(index)}`);
+    }
+    let next = 0;
+    const report = await checkAllHealthOperation({
+      ...context,
+      checkComponentHealth: () => Promise.resolve(entries[next++]),
+    });
+    expect(report.code).toBe(code);
+    expect(report.healthy).toBe(code === 'ok');
+  }
 });
 
 test('isComponentEnterable answers from an explicitly passed undefined state', () => {

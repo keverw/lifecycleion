@@ -551,3 +551,94 @@ for (const entry of ['adoptPromise', 'adoptResult'] as const) {
     expect(await Promise.race([settle(pending), hung])).toBe('real rejection');
   });
 }
+
+for (const entry of ['adoptPromise', 'adoptResult'] as const) {
+  // Resolved, so the limit - a rejection left unhandled - does not fire here.
+  test(`${entry} rejects a re-prototyped promise with a broken constructor and no tag rather than trusting its own then`, async () => {
+    const promise: object = Promise.resolve(1);
+    void Object.setPrototypeOf(promise, { constructor: 5 });
+    let isOwnThenCalled = false;
+    void Object.defineProperty(promise, 'then', {
+      value: (): void => {
+        isOwnThenCalled = true;
+      },
+    });
+    expect(Object.prototype.toString.call(promise)).toBe('[object Object]');
+
+    const pending =
+      entry === 'adoptPromise'
+        ? adoptPromise(promise)
+        : (adoptResult(promise) as Promise<unknown>);
+    const hung = new Promise<string>((resolve) => {
+      setTimeout(() => resolve('hung'), 100);
+    });
+    const outcome = await Promise.race([
+      pending.then(
+        () => 'resolved',
+        (error: unknown) => error,
+      ),
+      hung,
+    ]);
+    expect(outcome).toBeInstanceOf(TypeError);
+    expect(isOwnThenCalled).toBe(false);
+  });
+
+  test(`${entry} adopts a thenable tagged as a promise with a non-object constructor`, async () => {
+    const thenable = new (class Deferred {
+      public then = (resolve: (value: string) => void): void => {
+        resolve('adopted');
+      };
+    })();
+    Object.defineProperty(thenable, Symbol.toStringTag, { value: 'Promise' });
+    Object.defineProperty(thenable, 'constructor', { value: 5 });
+    expect(Object.prototype.toString.call(thenable)).toBe('[object Promise]');
+
+    const pending =
+      entry === 'adoptPromise'
+        ? adoptPromise<unknown>(thenable)
+        : (adoptResult(thenable) as Promise<unknown>);
+    expect(await pending).toBe('adopted');
+  });
+}
+
+for (const entry of ['adoptPromise', 'adoptResult'] as const) {
+  // Each engine words a species executor called twice by whichever function it already
+  // holds, so a resolve left `undefined` the first time is refused in words of its own.
+  test(`${entry} rejects a re-prototyped promise whose species executor is called twice after an undefined resolve`, async () => {
+    const noop = (): void => {};
+    const promise: object = Promise.resolve(1);
+    void Object.setPrototypeOf(promise, {
+      constructor: {
+        [Symbol.species]: class {
+          constructor(executor: (...args: unknown[]) => void) {
+            executor(undefined, noop);
+            executor(noop, noop);
+          }
+        },
+      },
+    });
+    let isOwnThenCalled = false;
+    void Object.defineProperty(promise, 'then', {
+      value: (): void => {
+        isOwnThenCalled = true;
+      },
+    });
+
+    const pending =
+      entry === 'adoptPromise'
+        ? adoptPromise(promise)
+        : (adoptResult(promise) as Promise<unknown>);
+    const hung = new Promise<string>((resolve) => {
+      setTimeout(() => resolve('hung'), 100);
+    });
+    const outcome = await Promise.race([
+      pending.then(
+        () => 'resolved',
+        (error: unknown) => error,
+      ),
+      hung,
+    ]);
+    expect(outcome).toBeInstanceOf(TypeError);
+    expect(isOwnThenCalled).toBe(false);
+  });
+}

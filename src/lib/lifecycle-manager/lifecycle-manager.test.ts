@@ -1184,7 +1184,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(result.componentName).toBe('slow-stop');
       expect(result.wasRegistered).toBe(true);
       expect(result.wasStopped).toBe(false);
-      expect(result.reason).toBe('Component stop timed out');
+      expect(result.reason).toBe('Graceful shutdown timed out');
       expect(result.stopFailureReason).toBe('timeout');
 
       // Critical: component should remain registered when stop stalls.
@@ -2044,13 +2044,14 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       expect(waiters?.size ?? 0).toBe(0);
     }, 2500);
 
-    test('stop token guard should block old stop() from clearing stall when retryStalled has an onShutdownForce', async () => {
+    test('original stop() finishing late still clears the stall after a retryStalled force retry stalled again', async () => {
       // Timeouts are clamped to minimums (1000ms graceful, 500ms force).
       // stop() takes 2200ms — it floats through both the graceful and force phase
       // timeouts and resolves ~200ms after retryStalled's force phase also stalls.
       // onShutdownForce() takes 5000ms so it never resolves within the test window.
-      // This isolates the stop token guard: the only late resolution that fires is
-      // the original stop(), and the newer stop token should block it.
+      // The only late resolution that fires is the original stop(). The retry issued a
+      // newer stop token, but it continues the same stop, so that stop finishing clears
+      // the stall.
       class DualSlowComponent extends BaseComponent {
         constructor() {
           super(logger, {
@@ -2101,9 +2102,10 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       // a bit more. onShutdownForce() won't resolve for ~3000ms more.
       await sleep(400);
 
-      // Stop token guard should have blocked it — stall from the force-retry persists
-      expect(stalledResolvedEvents).toHaveLength(0);
-      expect(lifecycle.getComponentStatus('dual-slow')?.state).toBe('stalled');
+      // The original stop finished, so the stall the force retry left is cleared
+      expect(stalledResolvedEvents).toHaveLength(1);
+      expect(lifecycle.getComponentStatus('dual-slow')?.state).toBe('stopped');
+      expect(lifecycle.getStalledComponentNames()).toEqual([]);
     }, 3000);
 
     test('onShutdownForce late resolution should auto-clear stall and emit component:stalled-resolved', async () => {

@@ -14,8 +14,12 @@ export interface ComponentOptions {
   /** Names of components this one depends on (default: []) */
   dependencies?: string[];
 
-  /** If true, startup failure doesn't trigger rollback (default: false) */
-  optional?: boolean;
+  /**
+   * If true, startup failure doesn't trigger rollback (default: false). Must be a
+   * boolean: `null` or omitted selects the default, and anything else makes the
+   * constructor throw a `TypeError`.
+   */
+  optional?: boolean | null;
 
   /** Time to wait for start() in milliseconds (default: 30000, 0 = disabled) */
   startupTimeoutMS?: number | null;

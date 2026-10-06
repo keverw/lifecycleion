@@ -1,7 +1,6 @@
 import {
   promiseConstructorIntrinsic,
   applyIntrinsic,
-  constructIntrinsic,
   getIntrinsic,
   getPrototypeOfIntrinsic,
   objectPrototypeIntrinsic,
@@ -35,6 +34,7 @@ function inheritsFromPromise(value: unknown): boolean {
 // `false` would send a native promise's own no-op `then` down the trusting path.
 // eslint-disable-next-line @typescript-eslint/unbound-method
 const hasOwnPropertyIntrinsic = Object.prototype.hasOwnProperty;
+const definePropertyIntrinsic = Reflect.defineProperty;
 
 /**
  * Whether `value` carries `then` as an own property - the shape of a native promise
@@ -67,8 +67,6 @@ function hasObjectPrototype(value: object): boolean {
 }
 
 const typeErrorPrototype: object = TypeError.prototype;
-// eslint-disable-next-line @typescript-eslint/unbound-method
-const objectToStringIntrinsic = Object.prototype.toString;
 
 /** Whether `error` is this realm's `TypeError`, as a failed internal-slot check throws. */
 function isThisRealmTypeError(error: unknown): boolean {
@@ -82,60 +80,98 @@ function isThisRealmTypeError(error: unknown): boolean {
   }
 }
 
+// A `constructor` value whose species builds, then misuses the executor it is handed.
+function speciesThat(build: (executor: (...args: unknown[]) => void) => void) {
+  return {
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    __proto__: null,
+    [speciesSymbolIntrinsic]: class {
+      constructor(executor: (...args: unknown[]) => void) {
+        build(executor);
+      }
+    },
+  };
+}
+
 /**
- * Whether the intrinsic `then` could have refused a native promise of any realm after its
- * internal-slot check accepted it: SpeciesConstructor and NewPromiseCapability throw this
- * realm's `TypeError` too, for a non-object `constructor` or a species that is not a
- * constructor, throws, or never hands its executor callable resolve/reject functions. A
- * usable species path pins that error on the slot check instead. The species is built
- * again, as the intrinsic built it, only on this already-failed path, and only for a
- * value tagged as a promise: a thenable that subclasses `Array` or `Map` has a species
- * too, which its slot check never reached, and must not be built or refused. A
- * `constructor` read that throws stays ambiguous: a hostile non-promise proxy throws
- * there as well.
+ * The refusals the intrinsic `then` raises on its species path, in this engine's own
+ * wording: a `constructor` that is not an object, a species that is not a constructor, and
+ * a species that hands its executor no callable resolve or reject function, or calls it
+ * twice. Recorded once, from probe promises this module owns, so no engine's wording is
+ * written down here.
  */
-function hasUnusableSpecies(value: object): boolean {
-  try {
-    if (
-      applyIntrinsic(objectToStringIntrinsic, value, []) !== '[object Promise]'
-    ) {
-      return false;
+function recordSpeciesRefusals(): readonly string[] {
+  const noop = (): void => {};
+  const constructors: unknown[] = [
+    0,
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    { __proto__: null, [speciesSymbolIntrinsic]: 0 },
+    speciesThat(noop),
+    speciesThat((executor) => executor(noop, 0)),
+    speciesThat((executor) => {
+      executor(noop, noop);
+      executor(noop, noop);
+    }),
+    // Some engines word a second call by the first function already set: here, reject.
+    speciesThat((executor) => {
+      executor(undefined, noop);
+      executor(noop, noop);
+    }),
+  ];
+  const messages: string[] = [];
+  // eslint-disable-next-line unicorn/no-for-loop
+  for (let index = 0; index < constructors.length; index++) {
+    const probe = promiseResolveIntrinsic(undefined);
+    definePropertyIntrinsic(probe, 'constructor', {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      __proto__: null,
+      value: constructors[index],
+    } as PropertyDescriptor);
+    try {
+      void applyIntrinsic(promiseThenIntrinsic, probe, []);
+    } catch (error) {
+      if (isThisRealmTypeError(error)) {
+        messages[messages.length] = (error as TypeError).message;
+      }
     }
+  }
+  return messages;
+}
+
+const speciesRefusalMessages = recordSpeciesRefusals();
+
+/**
+ * Whether the intrinsic `then` threw `error` from its species path - the brand check a
+ * value that failed the intrinsic cannot fake. The internal-slot check refuses a
+ * non-promise first, with a refusal of its own wording, before `constructor` is read; only
+ * a native promise of some realm gets as far as these. Nothing the value inherits or
+ * carries - a `Symbol.toStringTag`, a prototype - reaches the engine's message, so a
+ * re-prototyped promise is caught and a thenable dressed as a promise is not.
+ *
+ * Known limit: a species path that throws this realm's `TypeError` in words of its own - a
+ * `constructor` or species getter, a species constructor - is not recognized, and such a
+ * value is taken for the thenable its own `then` claims it is. So is a refusal an engine
+ * words with the offending value in it, for a value other than the probe's, and every
+ * refusal if the probes record nothing: the failure mode is the own-`then` fallback,
+ * never a thenable refused.
+ */
+function isSpeciesRefusal(error: unknown): boolean {
+  if (!isThisRealmTypeError(error)) {
+    return false;
+  }
+  let message: unknown;
+  try {
+    message = getIntrinsic(error as object, 'message', error);
   } catch {
     return false;
   }
-  let constructor: unknown;
-  try {
-    constructor = getIntrinsic(value, 'constructor', value);
-  } catch {
-    return false;
-  }
-  if (constructor === undefined) {
-    return false;
-  }
-  if (!isObjectLike(constructor)) {
-    return true;
-  }
-  try {
-    const species: unknown = getIntrinsic(
-      constructor,
-      speciesSymbolIntrinsic,
-      constructor,
-    );
-    if (species === undefined || species === null) {
-      return false;
+  // eslint-disable-next-line unicorn/no-for-loop
+  for (let index = 0; index < speciesRefusalMessages.length; index++) {
+    if (speciesRefusalMessages[index] === message) {
+      return true;
     }
-    let isCapable = false;
-    constructIntrinsic(species as new (...args: unknown[]) => unknown, [
-      (resolve: unknown, reject: unknown): void => {
-        isCapable =
-          typeof resolve === 'function' && typeof reject === 'function';
-      },
-    ]);
-    return !isCapable;
-  } catch {
-    return true;
   }
+  return false;
 }
 
 /**
@@ -227,8 +263,10 @@ export function adoptPromise<T>(
  * instanceof and have a throwing or non-callable own then. Ordinary plain thenables
  * skip the probe. A failed probe on a local promise is an adoption failure (for
  * example a broken constructor/species), as is any failure other than this realm's
- * `TypeError` - only a value that passed the slot check gets far enough to throw one;
- * on other objects, normal thenable handling remains the fallback. Do not skip class or null prototypes: real native promises
+ * `TypeError` - only a value that passed the slot check gets far enough to throw one -
+ * and a `TypeError` in the species path's own wording, for the same reason. On other
+ * objects, normal thenable handling remains the fallback. Do not skip class or null
+ * prototypes: real native promises
  * can acquire either through setPrototypeOf, and foreign promises fail instanceof.
  * The intrinsic slot probe is necessary to keep their own then from hiding failures.
  * This one boundary is shared by both adoption entry points.
@@ -249,11 +287,11 @@ function adoptOwnPromise<T>(value: T): Promise<Awaited<T>> | undefined {
         // `constructor`, so any other failure - from a `constructor` getter, a species
         // getter or a species constructor - comes from a native promise of some realm,
         // whose own `then` must not be trusted to settle it. A broken species can fail
-        // with that same `TypeError`, so it is told apart by the species path itself.
+        // with that same `TypeError`, so it is told apart by the engine's wording.
         if (
           inheritsFromPromise(value) ||
           !isThisRealmTypeError(error) ||
-          hasUnusableSpecies(value)
+          isSpeciesRefusal(error)
         ) {
           didAdopt = true;
           // Preserve the original rejection value, as adoption does.

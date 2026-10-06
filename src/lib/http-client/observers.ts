@@ -1,5 +1,6 @@
 import { safeHandleCallbackAndWait } from '../safe-handle-callback';
 import { matchesFilter, scalarHeader } from './utils';
+import { copyRegistrations } from './interceptors';
 import type {
   ResponseObserverFilter,
   ErrorObserverFilter,
@@ -41,12 +42,13 @@ export class ResponseObserverManager {
     };
   }
 
-  public run(
+  // `async` for the reason `RequestInterceptorManager.run()` gives.
+  public async run(
     response: HTTPResponse,
     request: AttemptRequest,
     phase: ResponseObserverPhase,
   ): Promise<void> {
-    return this.snapshot()(response, request, phase);
+    await this.snapshot()(response, request, phase);
   }
 
   /**
@@ -54,7 +56,7 @@ export class ResponseObserverManager {
    * not reach. See `RequestInterceptorManager.snapshot()`.
    */
   public snapshot(): ResponseObserverChain {
-    const observers = [...this.observers];
+    const observers = copyRegistrations(this.observers);
 
     return (response, request, phase) =>
       runResponseObservers(observers, response, request, phase);
@@ -76,7 +78,11 @@ async function runResponseObservers(
   request: AttemptRequest,
   phase: ResponseObserverPhase,
 ): Promise<void> {
-  for (const { fn, filter } of observers) {
+  // Indexed for the reason `copyRegistrations()` gives.
+  // eslint-disable-next-line unicorn/no-for-loop
+  for (let index = 0; index < observers.length; index++) {
+    const { fn, filter } = observers[index];
+
     if (
       !matchesFilter(
         filter ?? {},
@@ -130,12 +136,13 @@ export class ErrorObserverManager {
     };
   }
 
-  public run(
+  // `async` for the reason `RequestInterceptorManager.run()` gives.
+  public async run(
     error: HTTPClientError,
     request: AttemptRequest,
     phase: ErrorObserverPhase,
   ): Promise<void> {
-    return this.snapshot()(error, request, phase);
+    await this.snapshot()(error, request, phase);
   }
 
   /**
@@ -143,7 +150,7 @@ export class ErrorObserverManager {
    * not reach. See `RequestInterceptorManager.snapshot()`.
    */
   public snapshot(): ErrorObserverChain {
-    const observers = [...this.observers];
+    const observers = copyRegistrations(this.observers);
 
     return (error, request, phase) =>
       runErrorObservers(observers, error, request, phase);
@@ -165,7 +172,11 @@ async function runErrorObservers(
   request: AttemptRequest,
   phase: ErrorObserverPhase,
 ): Promise<void> {
-  for (const { fn, filter } of observers) {
+  // Indexed for the reason `copyRegistrations()` gives.
+  // eslint-disable-next-line unicorn/no-for-loop
+  for (let index = 0; index < observers.length; index++) {
+    const { fn, filter } = observers[index];
+
     if (
       !matchesFilter(
         filter ?? {},

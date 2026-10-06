@@ -299,7 +299,8 @@ export class ArraySink implements LogSink {
    * storing thousands of entries on the way.
    *
    * While a handler is pending, another format failure goes to the console instead
-   * of re-entering that handler. The count rises during console reporting too, so a
+   * of re-entering that handler - apart from a transformer's late rejection, which
+   * `deferredFormatReport` holds for it until it settles. The count rises during console reporting too, so a
    * console shim that logs back into this sink cannot recurse. Only that further
    * diagnostic is suppressed; write() still stores the entry.
    *
@@ -310,11 +311,31 @@ export class ArraySink implements LogSink {
    */
   private formatReportsInFlight = 0;
 
+  /** Whether the report in flight is the deferred one below, which keeps no successor. */
+  private deliveringDeferredFormatReport = false;
+
+  /**
+   * At most one transformer-rejection report that arrived while a handler was still
+   * pending, held until that handler settles and then given to it.
+   *
+   * `write()` reports a transformer's returned promise at once, and the promise's
+   * rejection arrives a turn later - while an `async` handler is often still working on
+   * that first report. Routed to the console like any other failure behind a pending
+   * handler, the rejection never reached the handler, though it is promised the reason.
+   * The same deferral `NamedPipeSink` keeps for its formatter, limited to this report:
+   * an independent failure behind a pending handler still goes to the console, so a
+   * handler that logs back into this sink after its first `await` is still contained.
+   * One slot, and a deferred delivery keeps none of its own, so the handler never runs
+   * twice at once and rejections behind a slot already taken go to the console.
+   */
+  private deferredFormatReport?: () => void;
+
   constructor(options?: {
     transformer?: ArrayLogTransformer;
     /**
      * Notified when a param could not be copied into the stored snapshot (`kind` is
-     * `'render'`), or when the `transformer` threw or returned a promise and the
+     * `'render'`), or when the `transformer` threw, returned a promise, or returned
+     * anything else that is neither an entry object nor `false`, and the
      * untransformed entry was stored instead (`kind` is `'transform'`, `path` is
      * `<transformer>`; a promise that later rejects is reported again with its reason), so a
      * `<value could not be copied>` marker or a silently passed-through entry leaves a
@@ -357,7 +378,7 @@ export class ArraySink implements LogSink {
       try {
         const transformed = this.transformer(stored);
 
-        this.refuseDeferredTransform(transformed);
+        this.refuseNonEntryTransform(transformed);
 
         if (transformed !== false) {
           // Store the transformed entry
@@ -404,7 +425,8 @@ export class ArraySink implements LogSink {
   }
 
   /**
-   * Throw if the transformer answered with a promise or other thenable.
+   * Throw if the transformer answered with anything but an entry object or `false`: a
+   * promise or other thenable, or a primitive.
    *
    * The transformer is called synchronously, so a promise is never a transformed entry:
    * stored as one, `logs` held the promise rather than an entry, and a promise that
@@ -415,10 +437,16 @@ export class ArraySink implements LogSink {
    * transformer is: reported as `'transform'` and the untransformed entry stored. The
    * promise's rejection is observed and reported on the same channel when it arrives,
    * with its own reporter, since the contract failure has already spent this entry's
-   * once-per-kind report. A value whose `then` cannot be read is thrown with the read's
-   * own failure.
+   * once-per-kind report - and held until the handler settles if it is still working on
+   * that first report (see `deferredFormatReport`). A value whose `then` cannot be read
+   * is thrown with the read's own failure.
+   *
+   * A primitive - `undefined` from a transformer missing its `return`, `null`, a string -
+   * was stored as the entry just as a promise was, leaving `logs` holding a value that is
+   * no entry with nothing reported. It is refused the same way. Named by `typeof` alone,
+   * as is every value here, since stringifying it would run caller code.
    */
-  private refuseDeferredTransform(transformed: unknown): void {
+  private refuseNonEntryTransform(transformed: unknown): void {
     const pending = adoptResult(transformed);
 
     if (pending instanceof UnreadableReturn) {
@@ -427,11 +455,22 @@ export class ArraySink implements LogSink {
 
     if (pending !== undefined) {
       observeRejection(pending, (error: unknown) => {
-        this.createGuardedFormatReporter('transform')(error, '<transformer>');
+        this.createGuardedFormatReporter('transform', {
+          canDefer: true,
+        })(error, '<transformer>');
       });
 
       throw new TypeError(
         'ArraySink transformer returned a promise; it is called synchronously and must return an entry or false directly',
+      );
+    }
+
+    if (
+      transformed !== false &&
+      (transformed === null || typeof transformed !== 'object')
+    ) {
+      throw new TypeError(
+        `ArraySink transformer returned ${transformed === null ? 'null' : typeof transformed}; it must return an entry or false`,
       );
     }
   }
@@ -456,8 +495,10 @@ export class ArraySink implements LogSink {
    */
   private createGuardedFormatReporter(
     kind: FormatFailureKind,
+    options?: { canDefer?: boolean; isDeferred?: boolean },
   ): ReportFormatFailure {
     const handler = this.onFormatError ?? consoleFormatHandler();
+    const isDeferred = options?.isDeferred === true;
     let didEnter = false;
 
     return createFormatReporter(
@@ -468,8 +509,23 @@ export class ArraySink implements LogSink {
         // A pending handler must not hide independent failures forever, though. Send
         // those to the terminal console without invoking the handler again, and raise
         // the count while doing so to contain a console shim that logs back into us.
-        // Even a suppressed console re-entry still stores its entry in write().
+        // Even a suppressed console re-entry still stores its entry in write(). A
+        // transformer's late rejection is held for the handler instead; see
+        // `deferredFormatReport`.
         if (this.formatReportsInFlight > 0) {
+          if (
+            options?.canDefer === true &&
+            this.formatReportsInFlight === 1 &&
+            !this.deliveringDeferredFormatReport &&
+            this.deferredFormatReport === undefined
+          ) {
+            this.deferredFormatReport = (): void => {
+              this.createGuardedFormatReporter(reportKind, {
+                isDeferred: true,
+              })(error, path);
+            };
+            return;
+          }
           if (this.formatReportsInFlight === 1) {
             this.formatReportsInFlight++;
             try {
@@ -483,12 +539,21 @@ export class ArraySink implements LogSink {
 
         didEnter = true;
         this.formatReportsInFlight++;
+        this.deliveringDeferredFormatReport = isDeferred;
         return handler(error, reportKind, path);
       },
       () => {
-        if (didEnter) {
-          this.formatReportsInFlight--;
+        if (!didEnter) {
+          return;
         }
+        this.formatReportsInFlight--;
+        if (isDeferred) {
+          this.deliveringDeferredFormatReport = false;
+          return;
+        }
+        const pending = this.deferredFormatReport;
+        this.deferredFormatReport = undefined;
+        pending?.();
       },
       'ArraySink onFormatError',
     );

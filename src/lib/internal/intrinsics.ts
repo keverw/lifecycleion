@@ -1,3 +1,5 @@
+import { defineEntry } from './define-entry';
+
 /** Preserve invocation semantics if application code later replaces Reflect.apply. */
 export const applyIntrinsic: typeof Reflect.apply = Reflect.apply;
 
@@ -111,26 +113,85 @@ export function promiseResolveIntrinsic<T>(
  * Internal asynchronous continuations should await their owned promises instead of
  * returning them from these callbacks; their native resolution would read then again.
  *
- * Never throws. Adoption can hand back the caller's own native promise, and the
- * intrinsic `then` reads its `constructor`/species again - a getter that throws on that
- * read is observed as a rejection with its error, so `onrejected` still hears of it.
+ * Settles a promise of our own, as `then` would settle its derived promise: with a
+ * reaction's result, its throw, or - for a reaction left out - the input's own outcome.
+ * Adoption can hand back the caller's own native promise, and the intrinsic `then` builds
+ * its derived promise from that promise's live `constructor`/species: a getter that
+ * changes between reads could have it built by a class whose `then` never settles, and
+ * a caller awaiting it would wait forever. The reactions are attached to the input
+ * itself whatever that class is, so they settle the promise returned here instead, and
+ * the derived one is discarded.
+ *
+ * Never throws. A `constructor` getter that throws on this read, or a species that
+ * cannot build a promise, keeps the intrinsic from attaching to the input at all: the
+ * reactions observe a rejection with that error instead, so the caller hears that
+ * observation failed, but the input's own outcome is never seen - a rejection of it is
+ * left to the host's unhandled-rejection reporting, the broken-`constructor` limit
+ * `adoptPromise` documents.
  */
 export function observePromise<T, TResult1 = T, TResult2 = never>(
   promise: Promise<T>,
   onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
   onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
 ): Promise<TResult1 | TResult2> {
+  return new promiseConstructorIntrinsic<TResult1 | TResult2>(
+    (resolve, reject) => {
+      // Neither reaction throws, so a derived promise the intrinsic builds natively
+      // fulfills with undefined rather than rejecting unobserved.
+      attachReactions(
+        promise,
+        (value) => {
+          if (typeof onfulfilled !== 'function') {
+            resolve(value as unknown as TResult1);
+            return;
+          }
+          try {
+            resolve(onfulfilled(value));
+          } catch (error) {
+            // Preserve the reaction's original failure, as a derived promise would.
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+            reject(error);
+          }
+        },
+        (reason) => {
+          if (typeof onrejected !== 'function') {
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+            reject(reason);
+            return;
+          }
+          try {
+            resolve(onrejected(reason));
+          } catch (error) {
+            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+            reject(error);
+          }
+        },
+      );
+    },
+  );
+}
+
+/**
+ * The attachment beneath {@link observePromise}, for a caller whose reactions settle a
+ * promise it owns and never throw. The intrinsic's derived promise is discarded: it is
+ * built by the input's live species, so nothing may wait on it. A `then` that refuses
+ * the input - a throwing `constructor` getter, an unusable species - hands the reactions
+ * a rejection with its error instead.
+ */
+function attachReactions<T>(
+  promise: Promise<T>,
+  onfulfilled: (value: T) => void,
+  onrejected: (reason: unknown) => void,
+): void {
   const reactions = [onfulfilled, onrejected];
   try {
-    return applyIntrinsic(promiseThenIntrinsic, promise, reactions) as Promise<
-      TResult1 | TResult2
-    >;
+    applyIntrinsic(promiseThenIntrinsic, promise, reactions);
   } catch (error) {
-    return applyIntrinsic(
+    applyIntrinsic(
       promiseThenIntrinsic,
       promiseRejectIntrinsic(error),
       reactions,
-    ) as Promise<TResult1 | TResult2>;
+    );
   }
 }
 
@@ -201,8 +262,9 @@ export function boxPromiseValue<T>(value: T): PromiseResultBox<T> {
 /**
  * Await a captured observation, not a caller-owned native promise directly. Adoption
  * may preserve that promise's identity; a changing constructor getter can make await
- * consult its live then on the next read. Intrinsic observation avoids that detour,
- * and boxing prevents resolution from reading the fulfilled value's then again.
+ * consult its live then on the next read. Intrinsic observation avoids that detour and
+ * settles a promise of our own, and boxing prevents resolution from reading the
+ * fulfilled value's then again.
  * Callers unwrap only after awaiting; ignored results can leave the box unopened.
  */
 export function awaitBoxedPromise<T>(
@@ -240,9 +302,8 @@ export function racePromises<T extends readonly Promise<unknown>[]>(
       // Do not consult application-supplied array iterator hooks.
       // eslint-disable-next-line unicorn/no-for-loop
       for (let index = 0; index < promises.length; index++) {
-        const promise = promises[index];
-        void observePromise(
-          promise,
+        attachReactions(
+          promises[index],
           (value) => resolve(boxPromiseValue(value as Awaited<T[number]>)),
           reject,
         );
@@ -259,6 +320,7 @@ export function allPromises<T extends readonly Promise<unknown>[]>(
   return new promiseConstructorIntrinsic<PromiseResultBox<Results>>(
     (resolve, reject) => {
       const values: unknown[] = new Array(promises.length);
+      const valueEntries = values as unknown as Record<string, unknown>;
       let remaining = promises.length;
       if (remaining === 0) {
         resolve(boxPromiseValue(values as Results));
@@ -266,11 +328,12 @@ export function allPromises<T extends readonly Promise<unknown>[]>(
       }
       // eslint-disable-next-line unicorn/no-for-loop
       for (let index = 0; index < promises.length; index++) {
-        const promise = promises[index];
-        void observePromise(
-          promise,
+        attachReactions(
+          promises[index],
           (value) => {
-            values[index] = value;
+            // Defined, not assigned: `values` starts holey, so an assignment would
+            // reach an index setter an application added to `Array.prototype`.
+            defineEntry(valueEntries, index, value);
             remaining--;
             if (remaining === 0) {
               resolve(boxPromiseValue(values as Results));
@@ -299,6 +362,10 @@ export function allSettledPromises<T extends readonly Promise<unknown>[]>(
       const results: PromiseSettledResult<unknown>[] = new Array<
         PromiseSettledResult<unknown>
       >(promises.length);
+      const resultEntries = results as unknown as Record<
+        string,
+        PromiseSettledResult<unknown>
+      >;
       let remaining = promises.length;
       if (remaining === 0) {
         resolve(boxPromiseValue(results as Results));
@@ -308,7 +375,8 @@ export function allSettledPromises<T extends readonly Promise<unknown>[]>(
         index: number,
         outcome: PromiseSettledResult<unknown>,
       ): void => {
-        results[index] = outcome;
+        // Defined, not assigned, for the same reason as in `allPromises`.
+        defineEntry(resultEntries, index, outcome);
         remaining--;
         if (remaining === 0) {
           resolve(boxPromiseValue(results as Results));
@@ -316,7 +384,7 @@ export function allSettledPromises<T extends readonly Promise<unknown>[]>(
       };
       // eslint-disable-next-line unicorn/no-for-loop
       for (let index = 0; index < promises.length; index++) {
-        void observePromise(
+        attachReactions(
           promises[index],
           (value) =>
             record(index, {

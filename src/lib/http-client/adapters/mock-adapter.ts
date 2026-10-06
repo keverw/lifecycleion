@@ -899,7 +899,18 @@ function awaitAbortable<T>(
 
       // A handler can abort synchronously before returning its promise. Observe
       // that promise before ending the wait so its rejection is still consumed.
-      if (signal.aborted) {
+      let isAborted: boolean;
+
+      try {
+        isAborted = signal.aborted;
+      } catch (error) {
+        // The executor rejects with this, and nothing will settle the wait again, so the
+        // listener just attached is removed rather than left on the signal for good.
+        detach();
+        throw error;
+      }
+
+      if (isAborted) {
         onAbort();
       }
     },

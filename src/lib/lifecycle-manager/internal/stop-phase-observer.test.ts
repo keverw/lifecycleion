@@ -183,3 +183,40 @@ test('terminal reporting contains a reporter that throws again', async () => {
     },
   ]);
 });
+
+test('a selection failure is still reported when reporting the hook failure throws', async () => {
+  const hookError = new Error('hook failed');
+  const selectionError = new Error('report selection failed');
+  const reportError = new Error('report failed');
+  const reports: {
+    error: unknown;
+    message: string;
+    level: 'warn' | 'error';
+  }[] = [];
+  const observer = createStopPhaseObserver((error, message, level) => {
+    reports.push({ error, message, level });
+    // Only the hook's own error breaks the reporter, as a hostile error value can.
+    if (error === hookError) {
+      throw reportError;
+    }
+  });
+  observer.observe(Promise.reject(hookError), 'hook failure', {
+    getReport: () => {
+      throw selectionError;
+    },
+  });
+  await flushObservers();
+  expect(reports).toEqual([
+    { error: hookError, message: 'hook failure', level: 'error' },
+    {
+      error: reportError,
+      message: 'Late stop failure could not be reported',
+      level: 'warn',
+    },
+    {
+      error: selectionError,
+      message: 'Late stop report selection failed',
+      level: 'warn',
+    },
+  ]);
+});

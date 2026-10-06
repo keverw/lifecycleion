@@ -57,13 +57,15 @@ const HEALTH_CHECK_TIMEOUT_RESULT: ComponentHealthResult = Object.freeze({
 /**
  * Why a health hook must not be entered now, or `undefined` if it may be: the shared
  * rule (see `isComponentEnterable()`), answered with the health check's own codes.
+ * `isCurrent` is the caller's, as `readAvailability()` takes it: whether the checked
+ * instance is still the one registered under `name`.
  */
 function healthRefusal(
   context: ComponentAccessContext,
   name: string,
-  component: BaseComponent,
+  isCurrent: boolean,
 ): HealthRefusalCode | undefined {
-  if (context.getComponent(name) !== component) {
+  if (!isCurrent) {
     return 'not_found';
   }
   if (isComponentEnterable(context, name, context.componentStates.get(name))) {
@@ -110,9 +112,11 @@ export async function checkComponentHealthOperation(
     timedOut: false,
     code,
   });
-  const recheck = () => healthRefusal(context, name, component);
+  const recheck = () =>
+    healthRefusal(context, name, context.getComponent(name) === component);
 
-  const initialRefusal = recheck();
+  // `component` was just looked up by `name`, with no caller code since: still current.
+  const initialRefusal = healthRefusal(context, name, true);
   if (initialRefusal !== undefined) {
     return refused(initialRefusal);
   }
@@ -381,25 +385,22 @@ export async function checkAllHealthOperation(
 
   const { value: results } = await allPromises(healthChecks);
 
-  // Overall healthy only if all components are healthy
+  // Overall healthy only if all components are healthy. "no_handler" is healthy by
+  // design (implicit OK); every refusal - not_found, stopped, stalled - is not.
   const isOverallHealthy = results.every((r) => r.healthy);
   const hasTimeout = results.some((r) => r.timedOut);
-  // Every failing entry carries its error; no other entry does.
+  // Only an entry that failed with an error carries one: a throw, an unreadable hook or
+  // timeout, an invalid result. Refusals, timeouts and an unhealthy answer fail with
+  // `error: null`, and no healthy entry carries one.
   const hasError = results.some((r) => r.error !== null);
-  // "no_handler" is treated as healthy by design (implicit OK).
-  const hasDegraded = results.some(
-    (r) =>
-      r.code === 'stopped' ||
-      r.code === 'stalled' ||
-      (r.code !== 'no_handler' && !r.healthy),
-  );
+  // Any unhealthy entry without an error or a timeout leaves the report degraded.
   const code = hasError
     ? 'error'
     : hasTimeout
       ? 'timeout'
-      : hasDegraded
-        ? 'degraded'
-        : 'ok';
+      : isOverallHealthy
+        ? 'ok'
+        : 'degraded';
 
   return {
     healthy: isOverallHealthy,

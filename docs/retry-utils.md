@@ -92,7 +92,7 @@ Uses exponential backoff with jitter to calculate delays between retry attempts.
   factor?: number; // Multiplier for exponential growth. Default: 1.5, Min: 1; NaN or non-number throws
   minTimeoutMS?: number | null; // Shortest delay between retries. Default (omitted or null): 1000ms. 0 becomes 1ms; Infinity uses the timer ceiling; negative, NaN or non-number throws
   maxTimeoutMS?: number | null; // Longest delay between retries. Default (omitted or null): 30000ms. 0 becomes 1ms; Infinity uses the timer ceiling; negative, NaN or non-number throws
-  dispersion?: number; // Randomness added to delays (0 to 1 inclusive, e.g. 0.1 = 10%). Default: 0.1
+  dispersion?: number; // Randomness added to delays (0 to 1 inclusive, e.g. 0.1 = 10%). Default: 0.1, clamped to [0, 1]; NaN or non-number throws
 }
 ```
 
@@ -109,13 +109,15 @@ finalDelay = clamp(delay + randomOffset, minTimeoutMS, maxTimeoutMS);
 > non-number `delayMS`, `minTimeoutMS`, or `maxTimeoutMS` values throw `TypeError` at
 > construction, and negative ones throw `RangeError` - they are not clamped. Zero keeps the
 > existing 1 ms minimum; positive `Infinity` selects the timer ceiling.
-> `maxRetryAttempts` and `factor` also throw `TypeError` for an explicit `NaN` or
-> non-number value (no coercion: `'3'` throws too); omitted or `undefined` uses the
-> default. Past that check each is clamped to a minimum of `1` and accepts `Infinity`, so
+> `maxRetryAttempts`, `factor` and `dispersion` also throw `TypeError` for an explicit
+> `NaN` or non-number value (no coercion: `'3'` throws too, and so does `null`); only
+> omitted or `undefined` uses the default. Past that check `maxRetryAttempts` and
+> `factor` are each clamped to a minimum of `1` and accept `Infinity`, so
 > `maxRetryAttempts: 0` (or a negative count) still allows one retry - there is no
 > "no retries" value; skip the retry utilities for that. `maxRetryAttempts` is
-> additionally floored to an integer after clamping. Non-finite `dispersion` uses its
-> default. If `maxTimeoutMS < minTimeoutMS`, the values are swapped.
+> additionally floored to an integer after clamping. `dispersion` is clamped to
+> `[0, 1]`, so `-Infinity` reads as `0` and `Infinity` as `1`. If
+> `maxTimeoutMS < minTimeoutMS`, the values are swapped.
 
 > **Delays are capped at 2,147,483,647 ms (about 24.8 days).** `delayMS`, `minTimeoutMS` and `maxTimeoutMS` are each bounded there, and so is every delay computed from them. `setTimeout` keeps its delay in a signed 32-bit integer and reads anything larger as `1` ms, so an uncapped `delayMS: 3e9` would read as "wait 34 days" and retry roughly every millisecond instead. `maxRetryAttempts` is not a duration and `Infinity` remains a supported value there.
 

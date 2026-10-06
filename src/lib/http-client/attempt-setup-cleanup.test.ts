@@ -1,6 +1,12 @@
 import { expect, spyOn, test } from 'bun:test';
 import { HTTPClient } from './http-client';
-import type { AdapterResponse, AttemptEndEvent, HTTPAdapter } from './types';
+import { CookieJar } from './cookie-jar';
+import type {
+  AdapterRequest,
+  AdapterResponse,
+  AttemptEndEvent,
+  HTTPAdapter,
+} from './types';
 
 test.each(['bigint', 'circular', 'toJSON'] as const)(
   'failed %s serialization clears the attempt timer and ends the attempt',
@@ -209,7 +215,9 @@ test('retry setup failure retains the prior upload outcome and attempt count', a
   expect(request.attemptCount).toBe(2);
 });
 
-test('unstringifiable interceptor header stays a contained request_setup_error', async () => {
+test('unstringifiable interceptor header is a contained interceptor_error', async () => {
+  // Converted once, when the interceptor's request is snapshotted, so the failure is the
+  // interceptor's and no attempt is begun for it.
   let sends = 0;
   let conversions = 0;
   const adapter: HTTPAdapter = {
@@ -240,9 +248,11 @@ test('unstringifiable interceptor header stays a contained request_setup_error',
     'X-Trace': 'abc',
   });
   await request.send();
-  expect(request.error?.code).toBe('request_setup_error');
-  expect(request.attemptCount).toBe(1);
+  expect(request.error?.code).toBe('interceptor_error');
+  // No attempt began, as for any initial-phase interceptor failure.
+  expect(request.attemptCount).toBeNull();
   expect(sends).toBe(0);
+  // Once for the snapshot, once for the best-effort observer snapshot.
   expect(conversions).toBe(2);
   // Only the unconvertible entry is dropped from the best-effort snapshot.
   expect(observed).toHaveLength(1);
@@ -280,7 +290,7 @@ test('best-effort snapshot reads interceptor headers from a single object', asyn
   });
   const request = client.get('https://example.com/');
   await request.send();
-  expect(request.error?.code).toBe('request_setup_error');
+  expect(request.error?.code).toBe('interceptor_error');
   expect(observed).toHaveLength(1);
   expect(observed[0].first).toBeDefined();
   expect(observed[0].second).toBe(observed[0].first);
@@ -290,7 +300,9 @@ test('best-effort snapshot reads interceptor headers from a single object', asyn
 test.each([
   ['body', 'interceptor_error'],
   ['requestURL', 'interceptor_error'],
-  ['method', 'request_setup_error'],
+  // Every field is read once, when the interceptor's request is snapshotted, so a getter
+  // that throws is the interceptor's failure whichever field it is on.
+  ['method', 'interceptor_error'],
 ] as const)(
   'retry request with a throwing %s getter keeps its own failure and attempt count',
   async (field, expectedCode) => {
@@ -484,63 +496,176 @@ test('redirect interceptor request with a throwing requestURL getter stays an in
   expect(observed).toEqual(['interceptor_error']);
 });
 
+/**
+ * An adapter for the getter tests below: a `302` to `/next` first when the phase under
+ * test is `redirect`, a `503` first when it is `retry`, and a `200` otherwise. Every
+ * request it is handed is recorded.
+ */
+function makeRecordingAdapter(phase: 'initial' | 'retry' | 'redirect'): {
+  adapter: HTTPAdapter;
+  sent: AdapterRequest[];
+} {
+  const sent: AdapterRequest[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request): Promise<AdapterResponse> => {
+      sent.push(request);
+      const isFirst = sent.length === 1;
+      const response: AdapterResponse =
+        phase === 'redirect' && isFirst
+          ? { status: 302, headers: { location: '/next' }, body: null }
+          : phase === 'retry' && isFirst
+            ? { status: 503, headers: {}, body: null }
+            : { status: 200, headers: {}, body: null };
+      return Promise.resolve(response);
+    },
+  };
+
+  return { adapter, sent };
+}
+
 test.each(['initial', 'retry', 'redirect'] as const)(
-  'a %s interceptor URL getter that throws after its first read ends the attempt it began',
+  'a %s interceptor URL getter is read once, so a later answer cannot redirect the request or its cookies',
   async (phase) => {
-    let sends = 0;
-    const adapter: HTTPAdapter = {
-      getType: () => 'node',
-      send: (): Promise<AdapterResponse> => {
-        sends++;
-        const response: AdapterResponse =
-          phase === 'redirect' && sends === 1
-            ? { status: 302, headers: { location: '/next' }, body: null }
-            : { status: 503, headers: {}, body: null };
-        return Promise.resolve(response);
+    // Validated on one read and used on the next: a getter answering the real URL to the
+    // http(s) check and another host afterwards got that request sent elsewhere, with the
+    // real host's cookies attached by the jar.
+    const { adapter, sent } = makeRecordingAdapter(phase);
+    const jar = new CookieJar();
+    jar.setCookie({ name: 'session', value: 'secret', domain: 'example.com' });
+    const client = new HTTPClient({
+      adapter,
+      followRedirects: true,
+      cookieJar: jar,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+    });
+    const readCounts: number[] = [];
+    client.addRequestInterceptor(
+      (request) => {
+        const stateful = { ...request };
+        const { requestURL } = request;
+        const index = readCounts.push(0) - 1;
+        Object.defineProperty(stateful, 'requestURL', {
+          enumerable: true,
+          get(): string {
+            readCounts[index]++;
+            return readCounts[index] === 1
+              ? requestURL
+              : 'https://evil.example/steal';
+          },
+        });
+        return stateful;
       },
-    };
+      { phases: [phase] },
+    );
+
+    const response = await client.get('https://example.com/start').send();
+
+    expect(response.status).toBe(200);
+    expect(readCounts).toEqual([1]);
+    expect(sent.length).toBe(phase === 'initial' ? 1 : 2);
+
+    for (const request of sent) {
+      expect(request.requestURL).toStartWith('https://example.com/');
+      expect(request.headers.cookie).toBe('session=secret');
+    }
+
+    expect(response.requestURL).toStartWith('https://example.com/');
+  },
+);
+
+test.each(['initial', 'retry', 'redirect'] as const)(
+  'a %s interceptor headers getter is read once, so the headers checked are the headers sent',
+  async (phase) => {
+    // The header record is checked (the browser-restricted list) and then merged again
+    // for dispatch. A getter - on the record itself or on one of its entries - answering
+    // differently to the second read sent headers nothing had checked.
+    const { adapter, sent } = makeRecordingAdapter(phase);
     const client = new HTTPClient({
       adapter,
       followRedirects: true,
       retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
     });
+    let recordReads = 0;
+    let entryReads = 0;
+    let conversions = 0;
     client.addRequestInterceptor(
       (request) => {
-        const hostile = { ...request };
-        const { requestURL } = request;
-        let reads = 0;
-        Object.defineProperty(hostile, 'requestURL', {
+        const stateful = { ...request };
+        const original = request.headers;
+        Object.defineProperty(stateful, 'headers', {
           enumerable: true,
-          get(): string {
-            reads++;
-            if (reads > 1) {
-              throw new Error('hostile requestURL getter');
-            }
-            return requestURL;
+          get(): Record<string, string | string[]> {
+            recordReads++;
+            const record: Record<string, string | string[]> = {
+              ...original,
+              'x-record': recordReads === 1 ? 'first' : 'later',
+            };
+            Object.defineProperty(record, 'x-entry', {
+              enumerable: true,
+              get(): string {
+                entryReads++;
+                return entryReads === 1 ? 'first' : 'later';
+              },
+            });
+            record['x-converted'] = {
+              toString(): string {
+                conversions++;
+                return conversions === 1 ? 'first' : 'later';
+              },
+            } as unknown as string;
+            return record;
           },
         });
-        return hostile;
+        return stateful;
       },
       { phases: [phase] },
     );
-    const starts: number[] = [];
-    const ends: number[] = [];
-    const request = client
-      .get('https://example.com/start')
-      .onAttemptStart(({ attemptNumber }) => {
-        starts.push(attemptNumber);
-      })
-      .onAttemptEnd(({ attemptNumber }) => {
-        ends.push(attemptNumber);
-      });
+
+    const response = await client.get('https://example.com/start').send();
+
+    expect(response.status).toBe(200);
+    expect(recordReads).toBe(1);
+    expect(entryReads).toBe(1);
+    expect(conversions).toBe(1);
+
+    const intercepted = sent[sent.length - 1];
+    expect(intercepted.headers['x-record']).toBe('first');
+    expect(intercepted.headers['x-entry']).toBe('first');
+    expect(intercepted.headers['x-converted']).toBe('first');
+  },
+);
+
+test.each([
+  ['a string', 'abc'],
+  ['null', null],
+] as const)(
+  'an interceptor returning headers that are %s fails as interceptor_error with an empty header snapshot',
+  async (_label, headers) => {
+    let sends = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: () => {
+        sends++;
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+    const client = new HTTPClient({ adapter });
+    client.addRequestInterceptor((request) => ({
+      ...request,
+      headers: headers as unknown as Record<string, string>,
+    }));
+    const observed: Array<Record<string, string | string[]>> = [];
+    client.addErrorObserver((_error, attemptRequest) => {
+      observed.push(attemptRequest.headers);
+    });
+
+    const request = client.get('https://example.com/');
     await request.send();
-    expect(request.error?.code).toBe('request_setup_error');
-    expect((request.error?.cause as Error).message).toBe(
-      'hostile requestURL getter',
-    );
-    // Every attempt that began also ended, and is counted.
-    expect(ends).toEqual(starts);
-    expect(request.attemptCount).toBe(starts.length);
-    expect(sends).toBe(phase === 'initial' ? 0 : 1);
+
+    expect(request.error?.code).toBe('interceptor_error');
+    expect(sends).toBe(0);
+    // Not `{ 0: 'a', 1: 'b', 2: 'c' }`: a string is not a header record.
+    expect(observed).toEqual([{}]);
   },
 );

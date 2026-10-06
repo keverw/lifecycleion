@@ -264,7 +264,7 @@ test('a repeat real exit does not report or call process.exit with a later code'
   }
 });
 
-test('an exit skipped because process.exit disappeared keeps later exits from re-emitting', async () => {
+test('an exit skipped because process.exit disappeared releases later exits', async () => {
   const actualExit = Object.getOwnPropertyDescriptor(process, 'exit');
   const calls: number[] = [];
   const stub = ((code?: number) => {
@@ -280,29 +280,32 @@ test('an exit skipped because process.exit disappeared keeps later exits from re
       ({ eventType, code }) => {
         if (eventType === 'exit-process') {
           processed.push(code);
-          // Removed after the exit was scheduled, so finish finds nothing to call.
-          (process as { exit?: unknown }).exit = undefined;
+          if (processed.length === 1) {
+            // Removed after the exit was scheduled, so finish finds nothing to call.
+            (process as { exit?: unknown }).exit = undefined;
+          }
         }
       },
     );
 
-    logger.exit(1);
+    logger.exit(0);
     await logger.close();
     await Promise.resolve();
 
-    expect(output.mock.calls.flat().join('\n')).toContain(
-      'process.exit is no longer callable',
-    );
+    const reported = (): string => output.mock.calls.flat().join('\n');
+    expect(reported()).toContain('process.exit is no longer callable');
 
-    // Back again: a later exit still owns no second exit-process or process.exit().
+    // Nothing ended the process, so a later failure is not ignored behind the skipped
+    // 0: it starts the next exit, which finds process.exit back and calls it.
     process.exit = stub;
     logger.exit(2);
     await logger.close();
     await Promise.resolve();
 
-    expect(processed).toEqual([1]);
-    expect(logger.exitCode).toBe(1);
-    expect(calls).toEqual([]);
+    expect(processed).toEqual([0, 2]);
+    expect(logger.exitCode).toBe(2);
+    expect(calls).toEqual([2]);
+    expect(reported()).not.toContain('already processing');
   } finally {
     if (actualExit !== undefined) {
       Object.defineProperty(process, 'exit', actualExit);

@@ -111,3 +111,38 @@ test('a shutdown started from a skip listener ends the startup at that skip', as
     await manager.stopAllComponents();
   }
 });
+
+test.each([true, false])(
+  'a stalled dependency blocks its dependent only when required (optional: %s)',
+  async (isOptional) => {
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+    });
+    const stalled = new Component(logger, {
+      name: 'stalled',
+      optional: isOptional,
+    });
+    const dependent = new Component(logger, {
+      name: 'dependent',
+      dependencies: ['stalled'],
+    });
+    stalled.failStop = true;
+    await manager.registerComponent(stalled);
+    await manager.registerComponent(dependent);
+    await manager.startComponent('stalled');
+    await manager.stopComponent('stalled');
+    expect(manager.getComponentStatus('stalled')?.state).toBe('stalled');
+
+    const result = await manager.startAllComponents({
+      ignoreStalledComponents: true,
+    });
+    expect(result.skippedDueToStall).toEqual(['stalled']);
+    expect(result.skippedDueToDependency).toEqual(
+      isOptional ? [] : ['dependent'],
+    );
+    expect(result.startedComponents).toEqual(isOptional ? ['dependent'] : []);
+    await manager.stopAllComponents();
+  },
+);

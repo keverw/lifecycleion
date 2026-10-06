@@ -57,6 +57,44 @@ describe('FileSink', () => {
     await tmpDir.cleanup();
   });
 
+  test('an initialization that rejects is reported, and flush and close still settle', async () => {
+    // `initialize` is built never to reject, but `close()` and `flush()` awaited its
+    // promise raw, so they depended on that staying true: one rejection and `close()`
+    // rejected too, with the constructor's promise unhandled until something awaited it.
+    const initialize = spyOn(
+      FileSink.prototype as unknown as { initialize: () => Promise<void> },
+      'initialize',
+    ).mockImplementation(() => Promise.reject(new Error('init exploded')));
+    const captured = muteConsoleError();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      const sink = new FileSink({
+        logDir: tmpDir.path,
+        basename: 'init-rejects',
+      });
+
+      expect((await sink.flush(50)).timedOut).toBe(false);
+      await sink.close();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(unhandled).toEqual([]);
+      expect(captured).toHaveLength(1);
+      expect(captured[0]).toContain(
+        'FileSink initialization failed unexpectedly',
+      );
+      expect(captured[0]).toContain('init exploded');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      restoreConsoleError();
+      initialize.mockRestore();
+    }
+  });
+
   test('flush and close settle after global Promise and its methods are replaced', async () => {
     const sink = new FileSink({
       logDir: tmpDir.path,

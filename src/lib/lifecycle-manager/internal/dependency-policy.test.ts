@@ -69,6 +69,24 @@ test('cycle discovery covers disconnected cycles and ordering rejects cyclic gra
   ).toThrow(DependencyCycleError);
 });
 
+test('duplicate names fail as a broken invariant, not as an empty dependency cycle', () => {
+  let failure: unknown;
+  try {
+    getStartupOrder(
+      ['first', 'second', 'first'],
+      (name) => name,
+      () => [],
+    );
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(Error);
+  expect(failure).not.toBeInstanceOf(DependencyCycleError);
+  expect((failure as Error).message).toContain(
+    '"first" appears more than once',
+  );
+});
+
 test('dependency reads retain valid entries while exposing a malformed entry', () => {
   const component = new Plain(
     new Logger({ sinks: [], callProcessExit: false }),
@@ -104,6 +122,36 @@ test('implausible proxy lengths are refused without reading entries', () => {
   expect(entryReads).toBe(0);
   expect(dependenciesOf(read)).toEqual([]);
 });
+
+test.each<unknown>([
+  Symbol('length'),
+  {
+    valueOf() {
+      throw new Error('valueOf ran');
+    },
+  },
+  '1',
+])(
+  'a non-number proxy length (%p) is refused as a read error, not thrown',
+  (length) => {
+    const component = new Plain(
+      new Logger({ sinks: [], callProcessExit: false }),
+      'example',
+    );
+    const list = new Proxy(['dependency'], {
+      get: (target, property, receiver) =>
+        property === 'length'
+          ? length
+          : (Reflect.get(target, property, receiver) as unknown),
+    });
+    Object.defineProperty(component, 'getDependencies', { value: () => list });
+    const read = tryReadDependencies(component);
+    expect('error' in read && read.error).toBeInstanceOf(TypeError);
+    expect('error' in read && (read.error as Error).message).toContain(
+      'implausible length: a non-number',
+    );
+  },
+);
 
 test('a thrown dependency getter preserves the original failure', () => {
   const component = new Plain(

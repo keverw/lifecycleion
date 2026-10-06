@@ -94,6 +94,48 @@ test.each(['response', 'error'] as const)(
 );
 
 describe('ResponseObserverManager', () => {
+  test('snapshot and run do not consult the registration array iterator', async () => {
+    const mgr = new ResponseObserverManager();
+    let calls = 0;
+    mgr.add(() => {
+      calls++;
+    });
+    // See the same test in interceptors.test.ts.
+    void Object.defineProperty(
+      (mgr as unknown as { observers: unknown[] }).observers,
+      Symbol.iterator,
+      {
+        value() {
+          throw new Error('iterator used');
+        },
+      },
+    );
+
+    await mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+
+    expect(calls).toBe(1);
+  });
+
+  test('run rejects rather than throwing synchronously', async () => {
+    const mgr = new ResponseObserverManager();
+    const failure = new Error('snapshot failed');
+    mgr.snapshot = () => {
+      throw failure;
+    };
+
+    let returned: Promise<unknown> | undefined;
+
+    expect(() => {
+      returned = mgr.run(makeResponse(), makeRequest(), { type: 'final' });
+    }).not.toThrow();
+    expect(
+      await returned?.then(
+        () => 'resolved',
+        (error: unknown) => error,
+      ),
+    ).toBe(failure);
+  });
+
   test('calls observers in order', async () => {
     const mgr = new ResponseObserverManager();
     const order: number[] = [];
@@ -341,6 +383,48 @@ describe('ResponseObserverManager', () => {
 });
 
 describe('ErrorObserverManager', () => {
+  test('snapshot and run do not consult the registration array iterator', async () => {
+    const mgr = new ErrorObserverManager();
+    let calls = 0;
+    mgr.add(() => {
+      calls++;
+    });
+    // See the same test in interceptors.test.ts.
+    void Object.defineProperty(
+      (mgr as unknown as { observers: unknown[] }).observers,
+      Symbol.iterator,
+      {
+        value() {
+          throw new Error('iterator used');
+        },
+      },
+    );
+
+    await mgr.run(makeError(), makeRequest(), { type: 'final' });
+
+    expect(calls).toBe(1);
+  });
+
+  test('run rejects rather than throwing synchronously', async () => {
+    const mgr = new ErrorObserverManager();
+    const failure = new Error('snapshot failed');
+    mgr.snapshot = () => {
+      throw failure;
+    };
+
+    let returned: Promise<unknown> | undefined;
+
+    expect(() => {
+      returned = mgr.run(makeError(), makeRequest(), { type: 'final' });
+    }).not.toThrow();
+    expect(
+      await returned?.then(
+        () => 'resolved',
+        (error: unknown) => error,
+      ),
+    ).toBe(failure);
+  });
+
   test('calls observers in order', async () => {
     const mgr = new ErrorObserverManager();
     const order: number[] = [];

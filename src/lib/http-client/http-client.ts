@@ -616,6 +616,14 @@ export class BaseHTTPClient {
        */
       let uploadOutcome: Promise<Error | undefined> | undefined;
 
+      /**
+       * The request's URL as the initial-phase interceptors left it - `url` until they
+       * have run. Declared out here so the `catch` around the whole of `send()` reports
+       * the same `initialURL` every other terminal path does, rather than the URL from
+       * before an interceptor rewrote it.
+       */
+      let initialRequestURL = url;
+
       try {
         // streamResponse is NodeAdapter-only. Validate it inside the normal
         // request setup flow so builder/error observer state is updated the same
@@ -642,10 +650,6 @@ export class BaseHTTPClient {
         const initialPhase: InterceptorPhase = { type: 'initial' };
         let interceptResult: InterceptedRequest | InterceptorCancel;
         let initialRequestCandidate: InterceptedRequest = finalRequest;
-        // Read once, where it is validated: the interceptor's request may carry a
-        // `requestURL` getter, and every later use - failure paths included - takes this
-        // value rather than reading it again.
-        let initialRequestURL = url;
 
         try {
           interceptResult = await this._runInterceptors(
@@ -660,6 +664,11 @@ export class BaseHTTPClient {
           );
 
           if (!('cancel' in interceptResult)) {
+            // The interceptor's own object stays the candidate until the snapshot exists,
+            // so a getter that throws while it is taken is still reported best-effort
+            // from what the interceptor returned. See `snapshotInterceptedRequest`.
+            initialRequestCandidate = interceptResult;
+            interceptResult = snapshotInterceptedRequest(interceptResult);
             initialRequestCandidate = interceptResult;
             this._assertRequestIsSupported(interceptResult);
             initialRequestURL = interceptResult.requestURL;
@@ -1080,7 +1089,6 @@ export class BaseHTTPClient {
             // needs retrying.
             let redirectIntercept: InterceptedRequest | InterceptorCancel;
             let failedRedirectRequest: InterceptedRequest = redirectRequest;
-            // Read once inside the guarded block, as the initial phase does.
             let redirectInterceptURL = redirectURL;
 
             try {
@@ -1095,6 +1103,10 @@ export class BaseHTTPClient {
                 },
               );
               if (!('cancel' in redirectIntercept)) {
+                // Snapshotted as the initial phase does; see there.
+                failedRedirectRequest = redirectIntercept;
+                redirectIntercept =
+                  snapshotInterceptedRequest(redirectIntercept);
                 failedRedirectRequest = redirectIntercept;
                 this._assertRequestIsSupported(redirectIntercept);
                 redirectInterceptURL = redirectIntercept.requestURL;
@@ -1326,8 +1338,8 @@ export class BaseHTTPClient {
           wasCancelled: false,
           wasTimeout: false,
           adapterType: this._adapter.getType(),
-          initialURL: interceptedRequest.requestURL,
-          requestURL: interceptedRequest.requestURL,
+          initialURL: initialRequestURL,
+          requestURL: initialRequestURL,
           redirectHistory: [],
           isNetworkErrorOverride: false,
           // The one terminal path that dropped it: a throw *between* hops - a hostile
@@ -1353,8 +1365,9 @@ export class BaseHTTPClient {
         callbacks.setResponse(response);
         await this._runErrorObservers(
           normalizedError,
+          // The interceptor-rewritten request once there is one, matching the URLs above.
           this._bestEffortAttemptRequestFromPending(
-            interceptedRequest,
+            finalRequest,
             timeout,
             requestID,
           ),
@@ -1849,6 +1862,9 @@ export class BaseHTTPClient {
             { initialURL, redirectHistory, requestID, attemptNumber },
           );
           if (!('cancel' in retryIntercept)) {
+            // Snapshotted as the initial phase in `_execute` does; see there.
+            failedRetryRequest = retryIntercept;
+            retryIntercept = snapshotInterceptedRequest(retryIntercept);
             failedRetryRequest = retryIntercept;
             this._assertRequestIsSupported(retryIntercept);
             this._assertInterceptorResolvedURL(retryIntercept.requestURL);
@@ -1882,8 +1898,6 @@ export class BaseHTTPClient {
         // Only an origin change explicitly selects a new credential destination.
         // Editing a redirected URL's path, query or fragment must not authorize the
         // server-selected origin. Preserve this scope without changing observer URLs.
-        // Inside this block because it reads an interceptor's request again: a getter
-        // that throws now ends the attempt it began, as a setup failure.
         if (
           !hopContext ||
           (isRetry &&
@@ -3281,8 +3295,15 @@ export class BaseHTTPClient {
     let headerNames: string[] = [];
 
     try {
-      sourceHeaders = request.headers ?? {};
-      headerNames = Object.keys(sourceHeaders);
+      const candidate: unknown = request.headers;
+
+      // Only an object is a header record. `Object.keys` on a string answers its indices,
+      // so an interceptor that returned `headers: 'abc'` reported headers named `0`, `1`
+      // and `2`; anything that is not an object leaves the snapshot without headers.
+      if (typeof candidate === 'object' && candidate !== null) {
+        sourceHeaders = candidate as Record<string, string | string[]>;
+        headerNames = Object.keys(sourceHeaders);
+      }
     } catch {
       // An unreadable header object leaves the snapshot without headers.
     }
@@ -3510,6 +3531,56 @@ function readBestEffort<T>(read: () => T, fallback: T): T {
   } catch {
     return fallback;
   }
+}
+
+/**
+ * Read a request an interceptor chain returned once, into a plain object this client owns.
+ *
+ * The chain's result is caller code: any member can be a getter, and the header record a
+ * `Proxy` or an object whose entries are getters. Everything after the chain validates a
+ * field and then uses it - the URL is checked as http(s), then read again for the cookie
+ * jar and again for the adapter; the headers are checked against the browser-restricted
+ * list, then merged for dispatch - and each of those reads could answer differently. A
+ * `requestURL` getter that answered `https://api.example/x` to the check and
+ * `https://evil.example/` afterwards attached `api.example`'s cookies to a request sent
+ * to `evil.example`. Taken here, once, every later check and use sees the same values.
+ *
+ * Header values are converted to strings here, as dispatch would convert them, so a
+ * value whose `toString` answers differently on each call is checked and sent as one
+ * string. Names keep their case. Throws on a `requestURL` that is not a string or
+ * `headers` that is not an object, and on any read or conversion that throws; each
+ * phase reports that as the interceptor's failure.
+ */
+function snapshotInterceptedRequest(
+  request: InterceptedRequest,
+): InterceptedRequest {
+  const { requestURL, method, headers, body } = request;
+
+  if (typeof requestURL !== 'string') {
+    throw new TypeError(
+      `[HTTPClient] Interceptor returned a request whose requestURL is not a string (got ${requestURL === null ? 'null' : typeof requestURL}).`,
+    );
+  }
+
+  const candidateHeaders: unknown = headers;
+
+  if (typeof candidateHeaders !== 'object' || candidateHeaders === null) {
+    throw new TypeError(
+      `[HTTPClient] Interceptor returned a request whose headers is not an object (got ${candidateHeaders === null ? 'null' : typeof candidateHeaders}).`,
+    );
+  }
+
+  const headersSnapshot: Record<string, string | string[]> = {};
+
+  for (const [name, value] of Object.entries(candidateHeaders)) {
+    defineEntry(
+      headersSnapshot,
+      name,
+      normalizeMergedHeaderValue(value as string | string[]),
+    );
+  }
+
+  return { requestURL, method, headers: headersSnapshot, body };
 }
 
 function buildObservedAttemptBodies(rawBody: unknown): ObservedAttemptBodies {
@@ -3761,6 +3832,13 @@ function stableUploadError(error: Error): Error {
   try {
     let object: object | null = error;
     let hasNonCallableDataThen = false;
+    // Bounded because a proxy's `getPrototypeOf` trap can answer with a chain that never
+    // reaches `null` - itself, or a fresh proxy each time - and an unbounded walk would
+    // hang the request. A chain deeper than the bound leaves `object` non-null and falls
+    // through to the wrap below: identity is lost, but the wrapper keeps the message,
+    // name, code and stack, and carries the original as `cause`. That is the same
+    // conservative answer as any chain this walk cannot prove safe, and no real error
+    // class hierarchy comes near 32 levels.
     for (let depth = 0; object !== null && depth < 32; depth++) {
       const descriptor = Object.getOwnPropertyDescriptor(object, 'then');
       if (descriptor !== undefined) {

@@ -32,7 +32,7 @@ import type { ShutdownSignal } from '../process-signal-manager';
 export interface LifecycleManagerEventMap {
   'component:unregistered': { name: string; duringShutdown?: boolean };
   'component:start-skipped': { name: string; reason: string };
-  'component:start-failed-optional': { name: string; error?: Error };
+  'component:start-failed-optional': { name: string; error: Error };
   'lifecycle-manager:started': {
     startedComponents: string[];
     failedOptionalComponents: StartupResult['failedOptionalComponents'];
@@ -279,7 +279,7 @@ export class LifecycleManagerEvents {
     this.emit('component:start-skipped', { name, reason });
   }
 
-  public componentStartFailedOptional(name: string, error?: Error): void {
+  public componentStartFailedOptional(name: string, error: Error): void {
     this.emit('component:start-failed-optional', { name, error });
   }
 

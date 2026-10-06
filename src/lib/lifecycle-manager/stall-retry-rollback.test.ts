@@ -598,7 +598,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
     expect(stalledEvents).toEqual([]);
   });
 
-  test('a forceImmediate stop without a force handler records a graceful-phase stall', async () => {
+  test('a forceImmediate stop without a force handler records a force-phase stall', async () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new HangsWithoutForce(logger, 'hang'));
     await manager.startComponent('hang');
@@ -607,17 +607,17 @@ describe('LifecycleManager - stall retry and rollback', () => {
       forceImmediate: true,
     });
 
-    expect(result).toMatchObject({
-      success: false,
-      code: 'error',
-      reason: 'Graceful shutdown failed',
-    });
+    const reason =
+      'Component "hang" has no onShutdownForce() handler for a forceImmediate stop';
+    expect(result).toMatchObject({ success: false, code: 'error', reason });
+    expect(result.error?.message).toBe(reason);
     expect(manager.getStalledComponents()[0]).toMatchObject({
-      phase: 'graceful',
+      phase: 'force',
       reason: 'error',
     });
+    expect(manager.getComponentStatus('hang')?.lastError?.message).toBe(reason);
     expect(logMessages(logger)).toContain(
-      'Component stalled - graceful shutdown failed',
+      'Component stalled - no force handler for a forceImmediate stop',
     );
   });
 });

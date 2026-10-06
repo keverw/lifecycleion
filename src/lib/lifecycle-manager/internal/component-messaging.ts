@@ -1,5 +1,4 @@
 import type { ComponentAccessContext } from './component-access-context';
-import type { BaseComponent } from '../base-component';
 import { reportCallbackError } from '../../safe-handle-callback';
 import type {
   SendMessageOptions,
@@ -27,17 +26,22 @@ import {
   readHookThenRecheck,
 } from './component-dispatch';
 
+/**
+ * `isCurrent` is the caller's: whether `component` is still the instance registered
+ * under `componentName`. A recheck looks it up again; the first read follows the lookup
+ * that found `component` with no caller code between, so it passes `true` rather than
+ * repeat a lookup that scans the registry.
+ */
 function readAvailability(
   context: ComponentAccessContext,
   componentName: string,
-  component: BaseComponent,
+  isCurrent: boolean,
   allowStopped: boolean,
   allowStalled: boolean,
 ) {
   // Neither override permits entering a provider the shared rule blocks - startup or
   // teardown owning it (see `isHookEntryBlocked()`); they only admit a stopped or
   // stalled component that nothing owns.
-  const isCurrent = context.getComponent(componentName) === component;
   const state = context.componentStates.get(componentName);
   const isUnavailable = isHookEntryBlocked(context, componentName, state);
   // The shared rule (see `isComponentEnterable()`), with the block just evaluated
@@ -97,11 +101,12 @@ export async function sendMessageInternal(
   const allowStopped = options?.includeStopped === true;
   const allowStalled = options?.includeStalled === true;
   // The latest availability read, so each answer below reports what the last recheck
-  // found rather than what was true before caller code ran.
+  // found rather than what was true before caller code ran. Even this first one looks
+  // the component up again: the `options` reads above can run the caller's getters.
   let availability = readAvailability(
     context,
     componentName,
-    component,
+    context.getComponent(componentName) === component,
     allowStopped,
     allowStalled,
   );
@@ -109,7 +114,7 @@ export async function sendMessageInternal(
     availability = readAvailability(
       context,
       componentName,
-      component,
+      context.getComponent(componentName) === component,
       allowStopped,
       allowStalled,
     );
@@ -371,7 +376,7 @@ function copyTargetNames(names: unknown): Set<unknown> | undefined {
     MAX_BROADCAST_TARGET_NAMES,
     (length) =>
       invalidOperationOptionError(
-        `broadcastMessage componentNames has an implausible length: ${String(length)} (at most ${String(MAX_BROADCAST_TARGET_NAMES)})`,
+        `broadcastMessage componentNames has an implausible length: ${length} (at most ${String(MAX_BROADCAST_TARGET_NAMES)})`,
       ),
   );
   const copy = new Set<unknown>();
@@ -600,11 +605,12 @@ export function getValueInternal<T = unknown>(
     );
     return result;
   };
-  // The latest availability read; see `sendMessageInternal()`.
+  // The latest availability read; see `sendMessageInternal()`. The options were read
+  // before the lookup above, so nothing has run since it found `component`.
   let availability = readAvailability(
     context,
     componentName,
-    component,
+    true,
     allowStopped,
     allowStalled,
   );
@@ -630,7 +636,7 @@ export function getValueInternal<T = unknown>(
       availability = readAvailability(
         context,
         componentName,
-        component,
+        context.getComponent(componentName) === component,
         allowStopped,
         allowStalled,
       );

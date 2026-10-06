@@ -68,8 +68,8 @@ export interface NamedPipeSinkOptions {
    *
    * One object rather than three positional arguments, and the same one `FileSink` hands
    * back: `kind` says what failed - `'write'` means a line is at risk, `'format'` means
-   * your `formatter` threw or returned a promise and the default format went out in its
-   * place - `target` is the pipe path, and `attempt` / `disposition` say which try this
+   * your `formatter` threw or returned a promise or other non-string and the default
+   * format went out in its place - `target` is the pipe path, and `attempt` / `disposition` say which try this
    * was and what became of the line.
    *
    * `entry` is set on a failure tied to a line - a write that failed, a render that
@@ -1260,19 +1260,16 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
-    try {
-      const attempt = this.initializePipe();
+    const attempt = this.initializePipe();
 
-      // Held so a failure after the race is not an unhandled rejection, the way `close()`
-      // holds the init promise it may stop waiting on.
-      this.initPromise = observePromise(attempt, undefined, () => {
-        // Reported by `openPipe` itself; nothing further to do here.
-      });
+    // Held so a failure after the race is not an unhandled rejection, the way `close()`
+    // holds the init promise it may stop waiting on. Observed, the promise cannot reject,
+    // and neither can the race over it, so nothing here needs a `catch`.
+    this.initPromise = observePromise(attempt, undefined, () => {
+      // Reported by `openPipe` itself; nothing further to do here.
+    });
 
-      await raceDeadline(this.initPromise, remainingMS, () => undefined);
-    } catch {
-      // `openPipe` reports its own failures; a close does not get to raise one.
-    }
+    await raceDeadline(this.initPromise, remainingMS, () => undefined);
   }
 
   private async initializePipe(): Promise<void> {
@@ -2535,9 +2532,17 @@ export class NamedPipeSink implements LogSink {
 
         if (typeof custom !== 'string') {
           this.refuseDeferredFormat(custom, entry);
+          // Any other non-string is no more a line than a promise is: concatenated, it
+          // wrote `undefined` (a formatter missing its `return`) or `[object Object]`
+          // with nothing reported. Thrown into the catch below, so it is reported and
+          // replaced by the default format exactly as a throwing formatter is. Named by
+          // `typeof` alone, since stringifying the value would run its own code.
+          throw new TypeError(
+            `NamedPipeSink formatter returned ${custom === null ? 'null' : typeof custom}; it must return a string`,
+          );
         }
 
-        return (custom as string) + '\n';
+        return custom + '\n';
       } catch (error) {
         // `FORMAT`, not `WRITE`: the fallback below still produces a line and the pipe is
         // untouched, so this is advisory. It also keeps the both-threw case honest - if

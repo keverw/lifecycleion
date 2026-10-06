@@ -509,3 +509,25 @@ test('a throwing abort listener on a start the shutdown aborts is reported, and 
     release();
   }
 });
+
+// A pass that a `component:starting` listener begins runs after the start claimed its
+// component but before it could be interrupted: the start still gets the pass's cue once
+// `start()` has its signal, rather than the pass waiting out a start it never told.
+test("a pass begun by the start's own starting listener still aborts it", async () => {
+  const { logger, manager } = setup();
+  const worker = new Starts(logger, 'worker');
+  worker.onStart = honorsSignal;
+  await manager.registerComponent(worker);
+
+  let shutdown: Promise<unknown> | undefined;
+  manager.once('component:starting', () => {
+    shutdown = manager.stopAllComponents({ abortPendingStarts: true });
+  });
+
+  const result = await manager.startComponent('worker');
+  expect(result.code).toBe('shutdown_in_progress');
+  expect(worker.signals[0]?.reason).toBeInstanceOf(
+    StartupInterruptedByShutdownError,
+  );
+  expect(await shutdown).toMatchObject({ success: true });
+});

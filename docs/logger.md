@@ -891,6 +891,8 @@ console.log(logger.getSinks().length); // 0
   shared instance only once. Calls outside the synchronous sink-close invocation stack
   join the same promise, and the close event is emitted once when the cleanup attempt
   finishes. That event does **not** guarantee that every buffered log was flushed.
+  Close-time sink diagnostics, deadline timeouts included, reach `'diagnostic'`
+  listeners before it, so a listener that unsubscribes on close still hears them.
   Unexpected internal setup/reporting failures still release the sink lists and emit
   the close event. The shared promise retains its rejection; later calls do not retry
   potentially partially closed resources.
@@ -1263,7 +1265,7 @@ service.error('Login failed');
 // Stored message: "[Auth] ERROR: Login failed"
 ```
 
-The transformer is called synchronously. One that throws or returns a promise (an `async` transformer) leaves the untransformed entry stored, and the failure is reported to `onFormatError` under `kind: 'transform'`. A rejection of that promise is observed and reported there too when it arrives.
+The transformer is called synchronously. One that throws, returns a promise (an `async` transformer), or returns anything that is neither an entry object nor `false` (`undefined` from a missing `return`, `null`, a string) leaves the untransformed entry stored, and the failure is reported to `onFormatError` under `kind: 'transform'`. A rejection of that promise is observed and reported there too when it arrives; if an `async` `onFormatError` is still handling the first report, the rejection is held and handed to it once it settles, so the handler never runs twice at once.
 
 ### FileSink
 
@@ -1393,7 +1395,7 @@ const fileSink = new FileSink({
 
 Two things to know about `failure.entry`. It is the full `LogEntry`, so it carries `params` as well as `redactedParams`: a handler that serializes the whole failure for paging or a backup sink is serializing the raw values, including any the log line masked. Forward `redactedParams ?? params`, or only `message`, rather than the entry itself. And a handler that logs the failure back through this sink is safe: the sink refuses, and counts in `droppedEntries`, a line from inside a `'format'` report that cannot render either, which is what stops a failure carrying an unrenderable `entry` from reporting itself forever. A `'write'` failure is reported on every attempt, so a handler that logs each one through a sink that is also failing multiplies the queue by `maxRetries + 1` per line. The queue cap bounds it, but log elsewhere.
 
-A close-time `'lost'` or `'no_entry'` is this callback, not the logger's diagnostic channel. With no `onError` the sink already writes it to `console.error`. With one, a `logger.error(...)` inside the handler during `Logger.close()` is dropped (`handleLog` is already a no-op) and does not fall through to that console line, because the handler succeeded. The example uses `console.error` for that reason.
+A close-time `'lost'` or `'no_entry'` is this callback, not the logger's diagnostic channel. With no `onError` the sink already writes it to `console.error`. With one, a `logger.error(...)` inside the handler during `Logger.close()` is dropped (a closed logger's `handleLog` writes nothing) and does not fall through to that console line, because the handler succeeded. The example uses `console.error` for that reason.
 
 In text mode (`jsonFormat: false`), CR, LF, and the Unicode line/paragraph separators in the message are collapsed to spaces so one entry remains one physical line. JSON mode escapes them instead, preserving the characters in the parsed message while still keeping one entry per line.
 
@@ -1607,7 +1609,7 @@ the bytes in the stream's buffer are no longer lines the sink can name - so a fa
 handler learns that lines were lost, and how many from `getHealth().droppedEntries`.
 Those reports still reach `onError`. That is the sink's callback, not `writeDiagnostic`.
 If this sink is owned by a `Logger` that is itself closing, do not log them through that
-logger, because `handleLog` is already a no-op and there is no diagnostic fallback. The examples
+logger, because a closed logger's `handleLog` writes nothing and there is no diagnostic fallback. The examples
 use `console.error`.
 
 #### Error Handling & Reconnection
@@ -1677,7 +1679,7 @@ const pipeSink = new NamedPipeSink({
 });
 ```
 
-The formatter receives the full `LogEntry` and should return a string (newline is added automatically). It is called synchronously: a formatter that throws or returns a promise (an `async` formatter) is reported to `onError` as `kind: 'format'` with `disposition: 'fallback'`, and the default format is written instead. A rejection of that promise is observed and reported the same way when it arrives.
+The formatter receives the full `LogEntry` and should return a string (newline is added automatically). It is called synchronously: a formatter that throws, returns a promise (an `async` formatter), or returns any other non-string (`undefined` from a missing `return`, a number, an object) is reported to `onError` as `kind: 'format'` with `disposition: 'fallback'`, and the default format is written instead. A rejection of that promise is observed and reported the same way when it arrives.
 
 #### Setup
 
@@ -1885,8 +1887,8 @@ That console fallback is the diagnostic _delivery_ failing. It is not the same p
 `FileSink` / `NamedPipeSink` `onError`. Those callbacks are the sink's own report for a
 lost or abandoned line. The logger never turns them into a diagnostic. With no `onError`,
 the sink already writes the failure to guarded `console.error`. With one, that handler is
-the destination: if it logs through _this_ logger during `Logger.close()`, `handleLog` is
-already a no-op and nothing else runs, because the handler returned successfully. Use
+the destination: if it logs through _this_ logger during `Logger.close()`, `handleLog`
+already writes nothing and nothing else runs, because the handler returned successfully. Use
 `console.error` (or a destination this logger is not closing) inside `onError` for
 close-time `'lost'` / `'no_entry'`. See [Where Failures Go](#where-failures-go).
 
@@ -1904,8 +1906,10 @@ When a log includes an `exitCode`, the logger will:
 3. Attempt to close all sinks within `closeTimeoutMS`; report any unfinished cleanup
 4. Call `process.exit(code)` **only if** `callProcessExit: true` (default)
 
-The cleanup deadline starts when sink cleanup begins; it does not bound an awaited
-`beforeExitCallback` or override its explicit `{ action: 'wait' }` decision.
+The cleanup deadline starts once every sink's close hook has been invoked and its
+synchronous part has returned (see [Important Notes](#important-notes)); it does not
+bound an awaited `beforeExitCallback` or override its explicit `{ action: 'wait' }`
+decision.
 
 Invalid real exit codes produce one guarded `console.error` report per logger (`Logger exit code 300 is invalid; treating it as code 1`), on the first invalid request even if earlier requests used valid codes. Further invalid-code reports are suppressed; each request still uses the normalized code, and a log entry that requested the exit records the normalized code in `entry.exitCode`. The report describes the request, not the process's outcome: the normalized request joins a pending exit like any other - an `exit(300)` while an `exit(0)` is pending replaces its code with 1 - or is ignored once a real exit has committed its code (see below). Likewise `entry.exitCode` is the code the entry _requested_; read `logger.exitCode` or the `exit-process` event for the code the process actually uses. The report is not a `LoggerDiagnostic`: it is made synchronously as the exit begins, and the sinks a diagnostic would reach are about to be closed, so it would land on the console anyway.
 
@@ -1913,12 +1917,12 @@ An exit's code is settled while it is pending - from its first `exit()` until th
 
 While an exit is pending, `logger.isPendingExit` is `true` - for every exit, including a simulated exit made after an earlier one completed. `logger.exitCode` changes only when an exit commits, so during that later exit it still reads the previous exit's code. A request ignored behind a committed real exit starts nothing and leaves `isPendingExit` `false`. `logger.pendingExitCode` reads the code that pending exit will commit - the last non-zero code its requests settled on, normalized as `exit()` normalizes it - and is `undefined` whenever `isPendingExit` is `false`.
 
-An `exitCode` on a log entry counts even once the logger has closed - whether `close()` was called while the exit was pending or the exit's own commit closed it. The entry is not written, but its request reaches `exit()` as a direct call does, so it replaces a pending code, is reported as ignored behind a committed real exit (below), or starts the next simulated exit.
+An `exitCode` on a log entry counts even once the logger has closed - whether `close()` was called while the exit was pending, the exit's own commit closed it, or a plain `close()` ran with no exit requested at all. The entry is not written, but its request reaches `exit()` as a direct call does, so it replaces a pending code, is reported as ignored behind a committed real exit (below), or starts the next simulated exit. After a plain `close()` it starts a full exit: `exit-called`, `beforeExitCallback`, `exit-process` and, with `callProcessExit` on, `process.exit()` - so `logger.error('fatal', { exitCode: 1 })` on a closed logger still ends the process with 1. Its exit waits for that `close()` to finish if it is still running; otherwise there is nothing left to close and `process.exit()` follows once `beforeExitCallback` lets the exit proceed.
 
 Once a real exit's `exit-process` has fired, the code is final: it has been published, and `process.exit()` waits only for the sinks to close. A later `exit()` - one a sink makes from its own `close()`, or an `exit-process` listener makes - still emits `exit-called` and runs `beforeExitCallback`, but it cannot change the code or call `process.exit()` again. One case is reported rather than dropped silently, since it would otherwise let a run that asked to fail exit as a success: a non-zero request ignored after an exit with code 0 committed (`Logger exit(1) ignored: an exit with code 0 is already processing`). That report also goes to guarded `console.error`, once per logger. A simulated exit leaves the process running, so nothing is ignored once it has completed: an `exit()` made after its `exit-process` has fired starts the next exit, with a pending code of its own. (An `exit()` from that exit's own `exit-process` listener is still absorbed; see [Exit Event Phases](#exit-event-phases). Its code is not applied, but a failure absorbed there behind a simulated exit with code 0 is reported with the same once-per-logger `ignored` line a real exit uses.)
 
 **Exit Code Validation:** `exit(code: number)` accepts numeric codes, not numeric strings. Non-numeric `exitCode` values on log entries are ignored; a `NaN` `exitCode` is a number and is passed to `exit()` like any other, so it fails with 1 for a real exit.
-Normalization applies only when `callProcessExit` is enabled and the runtime exposes a callable `process.exit`. Browser/worker runtimes without it retain the requested code and make no invalid-code report. That decision is made again when the exit commits. A code kept while `process.exit` was missing is normalized to 1 if the exit turns out real, so it never reaches `process.exit()`, and that is reported once (`Logger exit code 256 is invalid for a real exit; exiting with code 1`).
+Normalization applies only when `callProcessExit` is enabled and the runtime exposes a callable `process.exit`. Browser/worker runtimes without it retain the requested code and make no invalid-code report. That decision is made again when the exit commits. A code kept while `process.exit` was missing is normalized to 1 if the exit turns out real, so it never reaches `process.exit()`, and that is reported once (`Logger exit code 256 is invalid for a real exit; exiting with code 1`). It is checked once more just before `process.exit()` is called: if it stopped being callable after the commit - a stub removed by an `exit-process` listener or a sink's `close()` - nothing is called, `Logger process exit skipped: process.exit is no longer callable` is reported, and the exit ends as a simulated one would, so a later `exit()` starts the next exit instead of being ignored.
 For a real exit, codes must be integers in the portable range `0–255` on every platform, including Windows. This deliberately excludes Windows-specific exit codes above 255; they normalize to 1 too. Any other value is reported to the guarded console and replaced
 with 1 before `exit-called`, `beforeExitCallback`, and cleanup. This prevents codes such as 256 from wrapping to success (status 0) at the OS boundary. If `process.exit()` throws, the logger reports that failure
 and makes one fallback call with code 1, including when 1 was requested originally.
@@ -2008,7 +2012,7 @@ Lifecycleion's own reports and uncaught script errors are untagged, so filtering
 
 This does not affect an ordinary React, Vue, Angular, or Svelte application: those render into the light DOM, where every failed load is on the normal path. It applies only where a shadow root is genuinely in play, such as with third-party web components or when mounting your own app into one, and then only to resources inside that root. The rest of the page still reports normally.
 
-**Closing:** `close()` unregisters the listener. A closed logger's log methods are no-ops, so a listener left registered would claim reports it cannot record and, by cancelling them, stop them from reaching the console either. A logger cannot be reopened, so registering after `close()` returns `'closed'` and attaches nothing rather than leaving an inert listener on `globalThis`.
+**Closing:** `close()` unregisters the listener. A closed logger's log methods write nothing (an `exitCode` on the entry is still forwarded to `exit()`; see [Exit Behavior](#exit-behavior)), so a listener left registered would claim reports it cannot record and, by cancelling them, stop them from reaching the console either. A logger cannot be reopened, so registering after `close()` returns `'closed'` and attaches nothing rather than leaving an inert listener on `globalThis`.
 
 **Feedback loops:** logging emits a `'logger'` event, so failures of this logger's own
 handlers use its separate asynchronous diagnostic channel rather than the global `'error'`
@@ -2101,13 +2105,15 @@ include `context` and the failing `sink`. Event-handler diagnostics include `eve
 
 `FileSink` and `NamedPipeSink` have their own `onError`, and
 `ArraySink` has `onFormatError` (which also reports a `transformer` that throws or
-returns a promise, under `kind: 'transform'`), while `ConsoleSink` has none, since it does not queue or
+returns a promise or other non-entry, under `kind: 'transform'`), while `ConsoleSink` has none, since it does not queue or
 transform anything. See [Built-In Sinks](#built-in-sinks).
 
 While an ArraySink format-error handler is pending, later format failures go to the
 terminal console instead of invoking that handler again. This keeps a never-settling
 handler from hiding subsequent failures and prevents asynchronous feedback loops.
 Console hooks that log back into the same sink are guarded too; entries are still stored.
+The one exception is the late rejection of a promise a `transformer` returned: one such
+report is held and handed to the handler once it settles.
 
 Logger diagnostics are delivered in a microtask, including diagnostics from synchronous sink failures. Calling `process.exit()` in the same turn can discard them before listeners or the console fallback run. Await `logger.close()` during orderly shutdown to allow queued diagnostics and sink cleanup to run.
 

@@ -8,9 +8,6 @@ import {
   promiseResolveIntrinsic,
   observePromise,
   queueMicrotaskIntrinsic,
-  racePromises,
-  boxPromiseValue,
-  type PromiseResultBox,
   allPromises,
 } from '../internal/intrinsics';
 import { EventEmitter } from '../event-emitter';
@@ -57,6 +54,7 @@ import { prepareErrorObjectLog } from './utils/error-object';
 import { LoggerService } from './logger-service';
 import { diagnosticEntry } from './internal/diagnostic-entry';
 import { resolveTimeoutMS } from '../internal/timer-limits';
+import { raceDeadline } from '../internal/race-deadline';
 
 const DEFAULT_LOGGER_CLOSE_TIMEOUT_MS = 60_000;
 
@@ -704,8 +702,8 @@ export class Logger extends EventEmitter {
       }
 
       // A closed logger cannot record anything: `handleLog` returns early, so logging
-      // here is a no-op. Cancelling the event as well would leave the error with nowhere
-      // to go at all, since the cancel is what suppresses the console fall-through.
+      // here writes nothing. Cancelling the event as well would leave the error with
+      // nowhere to go at all, since the cancel is what suppresses the console fall-through.
       // `close()` unregisters this listener, so reaching here means a close raced with a
       // report already in flight.
       if (this._closed) {
@@ -1038,9 +1036,13 @@ export class Logger extends EventEmitter {
    * boundary. Shared JavaScript has no caller provenance there; if one joins this
    * logger's close, the finite close deadline eventually reports unconfirmed cleanup.
    *
-   * The logger is marked closed *before* the sinks are, and stays so: `handleLog` is a
-   * no-op from the first line of this method. That is deliberate - the global error
-   * listener and every other `_closed` reader rely on it being set first - but it has a
+   * The logger is marked closed *before* the sinks are, and stays so: from the first line
+   * of this method `handleLog` writes nothing. The one thing it still does with an entry
+   * is forward an `exitCode` to `exit()`, so `logger.error('x', { exitCode: 1 })` on a
+   * closed logger with no exit pending starts a full exit - `exit-called`,
+   * `beforeExitCallback`, `exit-process` and, for a real exit, `process.exit(1)` - exactly
+   * as a direct `exit(1)` would. Being marked closed first is deliberate - the global
+   * error listener and every other `_closed` reader rely on it - but it has a
    * consequence for sink `onError` handlers. Close is when `FileSink` and `NamedPipeSink`
    * report the entries they gave up on, as `'close'` failures carrying `'lost'` or
    * `'no_entry'`, and a handler that logs those through *this* logger logs into one that
@@ -1158,7 +1160,9 @@ export class Logger extends EventEmitter {
     // behind a committed real exit 0 never reached the ignored-failure report, and one
     // logged after a simulated exit completed never started the next exit, though a
     // direct `exit()` did both. The same held for an exit still pending when `close()`
-    // was called: a failure logged then never replaced the pending code. Only the
+    // was called: a failure logged then never replaced the pending code. With no exit in
+    // progress at all - a plain `close()` - the request starts a full exit, real or
+    // simulated, exactly as a direct `exit()` on the closed logger does. Only the
     // member that matters is read, through the guard, since nothing else is used here.
     if (this._closed) {
       const closedExitCode = readUnknownMember(callerOptions, 'exitCode');
@@ -1640,9 +1644,9 @@ export class Logger extends EventEmitter {
   private async closeOwnedSinks(): Promise<void> {
     try {
       // Give up the global listener rather than holding one that can no longer log: a
-      // closed logger's `handleLog` is a no-op, so staying registered would claim reports
-      // it cannot record and, with the default `preventDefault`, stop anything else from
-      // reporting them either.
+      // closed logger's `handleLog` writes nothing, so staying registered would claim
+      // reports it cannot record and, with the default `preventDefault`, stop anything
+      // else from reporting them either.
       this.unregisterReportErrorListener();
 
       // Close all sinks
@@ -1673,7 +1677,6 @@ export class Logger extends EventEmitter {
       collect(diagnosticSinks, 'Diagnostic');
       const isPending = new Array<boolean>(sinksToClose.length).fill(true);
       let didReachDeadline = false;
-      let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
       const closeSink = async (index: number): Promise<void> => {
         const sink = sinksToClose[index];
         try {
@@ -1735,66 +1738,52 @@ export class Logger extends EventEmitter {
         }
       };
 
-      try {
-        // Started in order, each running synchronously up to its first await, exactly
-        // as `map` invoked them.
-        const closeOperations: Promise<void>[] = [];
-        for (let index = 0; index < sinksToClose.length; index++) {
-          closeOperations.push(closeSink(index));
-        }
+      // Started in order, each running synchronously up to its first await, exactly
+      // as `map` invoked them.
+      const closeOperations: Promise<void>[] = [];
+      for (let index = 0; index < sinksToClose.length; index++) {
+        closeOperations.push(closeSink(index));
+      }
 
-        // One budget for the whole close, started once every hook has been invoked
-        // rather than before the first. The hooks run one after another, synchronously
-        // up to their first await, and a timer cannot fire while they do: armed before
-        // them, synchronous time spent in an earlier hook was charged to every later
-        // sink, so a slow first hook could leave a later sink's asynchronous cleanup no
-        // time at all and report it as timed out though it was given none. Synchronous
-        // work is unbounded by any timer either way, so this costs the bound nothing.
-        //
-        // Zero still lets this turn's promise reactions run before the timer's next
-        // task. Keep this timer referenced: explicit cleanup must reach completion or
-        // report its deadline even if a pending sink promise is the only other work
-        // remaining.
-        const deadline = new promiseConstructorIntrinsic<
-          PromiseResultBox<number[]>
-        >((resolve) => {
-          timeoutHandle = setTimeout(() => {
-            didReachDeadline = true;
-            const expired: number[] = [];
-            // eslint-disable-next-line unicorn/no-for-loop
-            for (let index = 0; index < isPending.length; index++) {
-              if (isPending[index]) {
-                expired.push(index);
-              }
-            }
-            resolve(boxPromiseValue(expired));
-          }, this.closeTimeoutMS);
-        });
-
-        // Both helpers observe owned native promises through the captured method;
-        // native combinators would consult the inputs' replaceable then properties.
-        const completed = observePromise(
-          allPromises(closeOperations),
-          () => undefined,
-        );
-        const { value: expired } = await racePromises([completed, deadline]);
-        const expiredIndexes = expired?.value;
-        if (expiredIndexes !== undefined) {
+      // One budget for the whole close, started once every hook has been invoked
+      // rather than before the first. The hooks run one after another, synchronously
+      // up to their first await, and a timer cannot fire while they do: armed before
+      // them, synchronous time spent in an earlier hook was charged to every later
+      // sink, so a slow first hook could leave a later sink's asynchronous cleanup no
+      // time at all and report it as timed out though it was given none. Synchronous
+      // work is unbounded by any timer either way, so this costs the bound nothing.
+      //
+      // Zero still lets this turn's promise reactions run before the timer's next
+      // task. The timer stays referenced: explicit cleanup must reach completion or
+      // report its deadline even if a pending sink promise is the only other work
+      // remaining. `allPromises` observes owned native promises through the captured
+      // method; a native combinator would consult the inputs' replaceable then.
+      const { value: expiredIndexes } = await raceDeadline(
+        observePromise(allPromises(closeOperations), () => undefined),
+        this.closeTimeoutMS,
+        () => {
+          didReachDeadline = true;
+          const expired: number[] = [];
           // eslint-disable-next-line unicorn/no-for-loop
-          for (let position = 0; position < expiredIndexes.length; position++) {
-            const index = expiredIndexes[position];
-            this.handleSinkError(
-              new Error(
-                `${labels[index]} close timed out after ${String(this.closeTimeoutMS)}ms; sink cleanup/flush is unconfirmed`,
-              ),
-              'close',
-              sinksToClose[index],
-            );
+          for (let index = 0; index < isPending.length; index++) {
+            if (isPending[index]) {
+              expired.push(index);
+            }
           }
-        }
-      } finally {
-        if (timeoutHandle !== undefined) {
-          clearTimeout(timeoutHandle);
+          return expired;
+        },
+      );
+      if (expiredIndexes !== undefined) {
+        // eslint-disable-next-line unicorn/no-for-loop
+        for (let position = 0; position < expiredIndexes.length; position++) {
+          const index = expiredIndexes[position];
+          this.handleSinkError(
+            new Error(
+              `${labels[index]} close timed out after ${String(this.closeTimeoutMS)}ms; sink cleanup/flush is unconfirmed`,
+            ),
+            'close',
+            sinksToClose[index],
+          );
         }
       }
     } finally {
@@ -1803,6 +1792,14 @@ export class Logger extends EventEmitter {
       // but publish finalization on that exit as well as on success or deadline.
       this.sinks = [];
       this.diagnosticSinks = [];
+      // The close diagnostics above - a deadline's timeouts are reported just before
+      // this - reach 'diagnostic' listeners on a queued microtask, and 'close' is the
+      // usual cue for a listener to unsubscribe. Waiting on a task queued through the
+      // same queue lets every report already queued run first, so such a listener
+      // still hears why cleanup was unconfirmed.
+      await new promiseConstructorIntrinsic<void>((resolve) => {
+        queueMicrotaskIntrinsic(resolve);
+      });
       this.emit('logger', { eventType: 'close' });
     }
   }
@@ -2164,9 +2161,15 @@ export class Logger extends EventEmitter {
       }
       // The decision `endsProcessOnExit` made above, re-checked live: listeners and sink
       // close ran since, and may have removed a stubbed `process.exit`. No exit happened,
-      // so say so. The latch stays set: this exit owned the logger's one `exit-process`,
-      // and exits refused by it while cleanup ran are not replayed by a later one.
+      // so say so, and release the latch: the process is still running, so this exit
+      // ends as a simulated one does. Left set, every later `exit()` was ignored as if
+      // `process.exit()` were already on its way - a failure behind a skipped 0 was even
+      // reported as "an exit with code 0 is already processing" - and nothing would ever
+      // end the process. A later request starts the next exit, which re-decides whether
+      // it is real. Requests refused while this exit's cleanup ran are not replayed:
+      // each was judged, and a dropped failure reported, when it was made.
       if (typeof globalThis.process?.exit !== 'function') {
+        this._hasScheduledProcessExit = false;
         reportToConsole(
           'Logger process exit skipped: process.exit is no longer callable',
         );

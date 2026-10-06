@@ -31,6 +31,15 @@ export async function raceDeadline<T, U>(
   try {
     const outcome = new promiseConstructorIntrinsic<PromiseResultBox<T | U>>(
       (resolve, reject) => {
+        // Observed before the timer is armed: if arming throws, this executor rejects
+        // the race, and `pending`'s own later rejection must already have a reaction.
+        // Do not construct a second promise that resolves with a raw timeout value:
+        // its inherited then could stall before the result ever reached the race.
+        void observePromise(
+          pending,
+          (value) => resolve(boxPromiseValue(value)),
+          reject,
+        );
         timer = setTimeout(() => {
           try {
             resolve(boxPromiseValue(onTimeout()));
@@ -43,13 +52,6 @@ export async function raceDeadline<T, U>(
         if (options?.shouldUnref && typeof timer === 'object') {
           timer.unref?.();
         }
-        // Do not construct a second promise that resolves with a raw timeout value:
-        // its inherited then could stall before the result ever reached the race.
-        void observePromise(
-          pending,
-          (value) => resolve(boxPromiseValue(value)),
-          reject,
-        );
       },
     );
     return await outcome;

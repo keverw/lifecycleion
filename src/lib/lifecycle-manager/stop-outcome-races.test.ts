@@ -84,10 +84,12 @@ for (const phase of ['graceful', 'force'] as const) {
           settle();
         }
         await sleep(0);
+        // A retry continues the stop that stalled: the original hook resolving while
+        // it runs finishes that stop, and the retry then ends as superseded.
         const expectedState =
           window === 'restart'
             ? 'running'
-            : window === 'retry'
+            : window === 'retry' && outcome === 'reject'
               ? 'force-stopping'
               : outcome === 'resolve'
                 ? 'stopped'

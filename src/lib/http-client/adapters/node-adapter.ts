@@ -193,6 +193,68 @@ function claimWritableError(error: unknown): void {
   }
 }
 
+/**
+ * Report a writable `'error'` that reached one of this adapter's late listeners - the
+ * pending-error absorber, or the permanent fan-out with no request registered behind it -
+ * through the host error reporter, unless a request already handed it to its caller.
+ *
+ * Both listeners exist to keep the event from being an uncaught exception, and both run
+ * after the request that owned the writable has answered, so the error has nowhere else
+ * to go. Absorbing it is the job; dropping it without a trace is not. Never throws: this
+ * runs inside an `'error'` listener, where a throw is the uncaught exception being
+ * prevented.
+ */
+function reportUnclaimedWritableError(error: unknown): void {
+  // Decided a turn later, not now. Whether this error has a home depends on listener
+  // order, and that order is not this function's to control: one absorber covers
+  // every request sharing a writable, so a sibling's absorber can already be attached
+  // when a later request registers its own `onWritableError` - and `EventEmitter`
+  // then runs the absorber first, before the listener that would have claimed the
+  // error. Asking after the emit has finished lets every listener have its say, and
+  // the answer is the same for the ordinary case where the claim came first.
+  const reportIfUnclaimed = (): void => {
+    let wasDelivered = false;
+
+    try {
+      wasDelivered =
+        typeof error === 'object' &&
+        error !== null &&
+        deliveredWritableErrors.delete(error);
+    } catch {
+      // Unreadable as a key; treated as undelivered, so it is reported rather than
+      // lost.
+    }
+
+    if (wasDelivered) {
+      return;
+    }
+
+    try {
+      const failure = normalizeError(
+        error ??
+          new Error(
+            'A writable passed to streamResponse emitted an error after the request settled',
+          ),
+      );
+
+      // Rendered for the console rung, as every other `reportToHost` call in this file is.
+      reportToHost(failure, () => describeError(failure));
+    } catch {
+      // Nothing left to report with; the event is still absorbed either way.
+    }
+  };
+
+  try {
+    const deferred = setImmediate(reportIfUnclaimed);
+
+    deferred.unref?.();
+  } catch {
+    // No way to schedule it, so the question is answered now. Reporting an error the
+    // caller also received is the safe direction; losing one silently is not.
+    reportIfUnclaimed();
+  }
+}
+
 const pendingWritableErrorAbsorbers = new WeakMap<
   WritableLike,
   PendingWritableErrorEntry
@@ -1905,7 +1967,8 @@ async function streamResponseBody(
       // does not need to: `absorbPendingWritableError` returns early for it, and the
       // permanent fan-out listener from `attachWritableListener` stays on the writable
       // whatever this request does, so the `'error'` channel is never unhandled there.
-      // A late error lands on `onWritableError` and settles nothing.)
+      // A late error reaches it with no request registered and is reported through the
+      // host error reporter, as the absorber would report it.)
       //
       // The three call sites that asked were the ones where a `write`/`end` throw made the
       // late error obvious, which left the ordinary paths uncovered: `settle(true)` on
@@ -2192,8 +2255,9 @@ async function streamResponseBody(
  * another, which is the unbounded growth this exists to prevent. Nothing is lost by
  * skipping it - such a writable is listened to through the permanent fan-out at
  * {@link attachWritableListener}, whose listener stays attached whatever this request
- * does, so a late error still lands on `onWritableError` and settles nothing because
- * `settle` has already run.
+ * does. A late error reaches it once `cleanup` has deregistered `onWritableError`, finds
+ * no request behind it, and is reported through the host error reporter exactly as this
+ * absorber would report it.
  */
 function absorbPendingWritableError(writable: WritableLike): void {
   // Captured once, here, rather than looked up again inside the removal below. Two
@@ -2326,54 +2390,7 @@ function absorbPendingWritableError(writable: WritableLike): void {
     // Guarded, and deliberately not allowed to rethrow: this runs as an `'error'`
     // listener, and a listener that throws is the uncaught exception this whole
     // mechanism exists to prevent.
-    // Decided a turn later, not now. Whether this error has a home depends on listener
-    // order, and that order is not this function's to control: one absorber covers
-    // every request sharing a writable, so a sibling's absorber can already be attached
-    // when a later request registers its own `onWritableError` - and `EventEmitter`
-    // then runs the absorber first, before the listener that would have claimed the
-    // error. Asking after the emit has finished lets every listener have its say, and
-    // the answer is the same for the ordinary case where the claim came first.
-    const reportIfUnclaimed = (): void => {
-      let wasDelivered = false;
-
-      try {
-        wasDelivered =
-          typeof error === 'object' &&
-          error !== null &&
-          deliveredWritableErrors.delete(error);
-      } catch {
-        // Unreadable as a key; treated as undelivered, so it is reported rather than
-        // lost.
-      }
-
-      if (wasDelivered) {
-        return;
-      }
-
-      try {
-        const failure = normalizeError(
-          error ??
-            new Error(
-              'A writable passed to streamResponse emitted an error after the request settled',
-            ),
-        );
-
-        // Rendered for the console rung; see the other `reportToHost` call above.
-        reportToHost(failure, () => describeError(failure));
-      } catch {
-        // Nothing left to report with; the event is still absorbed either way.
-      }
-    };
-
-    try {
-      const deferred = setImmediate(reportIfUnclaimed);
-
-      deferred.unref?.();
-    } catch {
-      // No way to schedule it, so the question is answered now. Reporting an error the
-      // caller also received is the safe direction; losing one silently is not.
-      reportIfUnclaimed();
-    }
+    reportUnclaimedWritableError(error);
 
     // Beyond the report, this exists to keep the event from
     // going unhandled.
@@ -2537,6 +2554,8 @@ function absorbPendingWritableError(writable: WritableLike): void {
 function discardUnstreamedWritable(writable: WritableLike): void {
   try {
     if (getWritableListenerRemover(writable) === null) {
+      // Registered and at once deregistered: what is wanted is the permanent fan-out
+      // listener, which reports an `'error'` arriving with no request registered.
       attachWritableListener(writable, 'error', ignoreWritableError);
       detachWritableListener(writable, 'error', ignoreWritableError);
     } else {
@@ -2906,6 +2925,16 @@ function attachWritableListener(
   // this very set, and mutating a `Set` while iterating it would skip the sibling behind
   // it - two concurrent downloads into one sink, and only one of them hears the failure.
   const dispatch = (argument: never): void => {
+    // An `'error'` with no request behind it any more - every one that registered has
+    // settled, or the writable was discarded before any did - is reported rather than
+    // dropped. This listener is permanent, so it is the absorber for such a writable, and
+    // it answers the way `absorbPendingWritableError` does for one that can be detached.
+    if (event === 'error' && listeners.size === 0) {
+      reportUnclaimedWritableError(argument);
+
+      return;
+    }
+
     for (const registered of [...listeners]) {
       if (listeners.has(registered)) {
         registered(argument);

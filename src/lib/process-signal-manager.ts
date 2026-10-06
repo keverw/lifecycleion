@@ -286,6 +286,8 @@ export interface ProcessSignalManagerOptions {
    * Null or undefined uses the default. Zero disables throttling. Infinity and
    * values above 2,147,483,647ms use that cap (about 24.8 days between triggers
    * of the same keyboard action); Infinity does not select the default.
+   * An explicit `NaN` or non-number value throws a `TypeError`, and a negative one a
+   * `RangeError`, from the constructor.
    * @default 200 (200ms throttle, allowing 5 triggers per second maximum)
    * @example 300 // Custom 300ms throttle (3.33 triggers per second max)
    * @example 0 // Disable throttling entirely

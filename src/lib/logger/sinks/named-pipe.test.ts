@@ -2390,6 +2390,63 @@ describe('NamedPipeSink', () => {
     }
   }, 15000);
 
+  test.each([
+    ['undefined', undefined, 'returned undefined'],
+    ['a number', 42, 'returned number'],
+    ['an object', { line: 'x' }, 'returned object'],
+    ['null', null, 'returned null'],
+  ] as const)(
+    'a formatter that returned %s falls back to the default format',
+    async (label, returned, expected) => {
+      // Only a thenable was refused, so any other non-string was concatenated into the
+      // line - `undefined\n`, `42\n`, `[object Object]\n` - with nothing reported.
+      const pipePath = `${tmpDir.path}/formatter-${label.replaceAll(' ', '-')}.pipe`;
+      await createNamedPipe(pipePath);
+
+      const reader = startPipeReader(pipePath);
+      const failures: SinkFailure[] = [];
+      const sink = new NamedPipeSink({
+        pipePath,
+        formatter: (() => returned) as unknown as (entry: LogEntry) => string,
+        onError: (failure) => {
+          failures.push(failure);
+        },
+      });
+
+      try {
+        expect(await waitForOpenPipe(sink)).toBe(true);
+
+        sink.write({
+          timestamp: Date.now(),
+          type: 'info',
+          template: 'still-written',
+          message: 'still-written',
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 150));
+
+        const formatFailures = failures.filter(
+          (entry) => entry.kind === 'format',
+        );
+
+        expect(formatFailures).toHaveLength(1);
+        expect(formatFailures[0]?.disposition).toBe('fallback');
+        expect(
+          (formatFailures[0]?.error.cause as Error | undefined)?.message,
+        ).toContain(expected);
+        const written = reader.data.join('');
+        expect(written).toContain('[info] still-written');
+        expect(written).not.toContain('undefined');
+        expect(written).not.toContain('[object Object]');
+        expect(written).not.toContain('42');
+      } finally {
+        await sink.close();
+        reader.stop();
+      }
+    },
+    15000,
+  );
+
   test('a line that could not be rendered is counted, not just reported', async () => {
     // `disposition: 'lost'` and a `droppedEntries` that never moved disagreed about the
     // same entry: three unrenderable lines reported three `format`/`lost` failures while

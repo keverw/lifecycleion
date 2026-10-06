@@ -202,6 +202,37 @@ test('an unobserved timeout uses the usual console fallback', async () => {
   }
 });
 
+test('timeout diagnostics reach a listener that unsubscribes on close', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  const logger = new Logger({
+    callProcessExit: false,
+    closeTimeoutMS: 5,
+    sinks: [{ write: () => {}, close: () => new Promise<void>(() => {}) }],
+  });
+  const events: string[] = [];
+  const onDiagnostic = (diagnostic: LoggerDiagnostic): void => {
+    events.push(`diagnostic: ${diagnostic.message}`);
+  };
+  const unsubscribe = logger.on<LoggerDiagnostic>('diagnostic', onDiagnostic);
+  logger.on<{ eventType: string }>('logger', ({ eventType }) => {
+    if (eventType === 'close') {
+      events.push('close');
+      unsubscribe();
+    }
+  });
+  try {
+    await logger.close();
+    await sleep(0);
+    expect(events).toHaveLength(2);
+    expect(events[0]).toContain('timed out');
+    expect(events[1]).toBe('close');
+    // The listener heard it, so the console fallback stayed silent.
+    expect(output).not.toHaveBeenCalled();
+  } finally {
+    output.mockRestore();
+  }
+});
+
 for (const [requested, expected] of [
   [undefined, 60_000],
   [null, 60_000],

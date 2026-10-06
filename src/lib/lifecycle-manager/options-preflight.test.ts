@@ -122,3 +122,27 @@ test('null broadcast recipient filter uses the default without reporting failure
     await logger.close();
   }
 });
+
+test('startAllComponents availability refusals take precedence over an invalid timeout', async () => {
+  const { logger, manager } = setup();
+  expect(
+    await manager.startAllComponents({ timeoutMS: Number.NaN }),
+  ).toMatchObject({ code: 'no_components_registered' });
+
+  await manager.registerComponent(new Plain(logger, 'a'));
+  await manager.registerComponent(new Plain(logger, 'b'));
+  expect(
+    await manager.startAllComponents({ timeoutMS: Number.NaN }),
+  ).toMatchObject({ code: 'invalid_options' });
+
+  await manager.startComponent('a');
+  expect(
+    await manager.startAllComponents({ timeoutMS: Number.NaN }),
+  ).toMatchObject({ code: 'partial_state' });
+
+  await manager.startComponent('b');
+  expect(
+    await manager.startAllComponents({ timeoutMS: Number.NaN }),
+  ).toMatchObject({ success: true, startedComponents: ['a', 'b'] });
+  await manager.stopAllComponents();
+});

@@ -33,7 +33,7 @@ export function tryReadDependencies(component: BaseComponent): DependencyRead {
         MAX_DECLARED_DEPENDENCIES,
         (length) =>
           new TypeError(
-            `getDependencies() returned an implausible length: ${String(length)}`,
+            `getDependencies() returned an implausible length: ${length}`,
           ),
       );
       const copy: string[] = [];
@@ -81,6 +81,18 @@ export function getStartupOrder<T>(
   const regIndex = new Map<string, number>(
     names.map((name, idx) => [name, idx]),
   );
+
+  // The graph is keyed by name, so a repeated name collapses to one node and the order
+  // comes out shorter than `names` - which the check below would report as a cycle,
+  // with no cycle in it. Registration keeps names unique; a duplicate here is a broken
+  // invariant, so it fails as one rather than as a misleading `DependencyCycleError`.
+  if (regIndex.size !== names.length) {
+    // `regIndex` keeps a name's last index, so a repeated name's first one differs.
+    const duplicate = names.find((name, index) => regIndex.get(name) !== index);
+    throw new Error(
+      `Startup order needs unique component names, but "${String(duplicate)}" appears more than once`,
+    );
+  }
 
   const adjacency = new Map<string, Set<string>>();
   const inDegree = new Map<string, number>();

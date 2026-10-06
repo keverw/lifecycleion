@@ -43,7 +43,10 @@ export type ReportFailure = (error: unknown, subject: string) => void;
  *               guard across the report - the sinks hold one over a `'format'` failure -
  *               a boolean cleared on return was cleared before an `async` handler had
  *               done anything, and the loop it guards against resumed on the far side of
- *               the handler's first `await`.
+ *               the handler's first `await`. A handler whose returned thenable never
+ *               settles never ends its report, so this never fires and the caller's
+ *               guard stays up: releasing it on a timer instead would let a handler
+ *               slower than the timer resume the self-logging loop the guard stops.
  * @param options.handlerName Identifies the handler alongside the original failure when its
  *               return cannot be adopted. Delivery cannot be inferred from a return:
  *               lazy handlers may not have done any reporting yet.

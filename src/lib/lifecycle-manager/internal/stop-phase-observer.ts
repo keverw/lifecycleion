@@ -66,6 +66,9 @@ export function createStopPhaseObserver(
       // and a failure to report the hook's rejection is not a failed late resolution:
       // one label for both sent readers looking for a reconciliation that never ran.
       let terminalLabel = 'Late stop resolution failed';
+      // A selection failure the reaction could not throw itself, because reporting the
+      // hook's rejection threw first: the terminal observer reports it after that one.
+      let deferredSelectionFailure: { error: unknown } | undefined;
       // Already-adopted hook promises only. One chain owns both late success
       // reconciliation and rejection reporting, even when force is abandoned.
       const observed = observePromise(
@@ -87,16 +90,23 @@ export function createStopPhaseObserver(
           // Only a failure of this report itself is one the terminal observer may call
           // unreported.
           terminalLabel = 'Late stop failure could not be reported';
-          report(
-            error,
-            selected?.message ?? message,
-            // The selector exists to choose the level - it may downgrade an abandoned
-            // hook to a warning - so without its answer nothing justifies downgrading:
-            // the level given up front, or `error`.
-            selected?.level ??
-              options?.level ??
-              (selectionFailure !== undefined ? 'error' : undefined),
-          );
+          try {
+            report(
+              error,
+              selected?.message ?? message,
+              // The selector exists to choose the level - it may downgrade an abandoned
+              // hook to a warning - so without its answer nothing justifies downgrading:
+              // the level given up front, or `error`.
+              selected?.level ??
+                options?.level ??
+                (selectionFailure !== undefined ? 'error' : undefined),
+            );
+          } catch (reportingError) {
+            // Only one error can be thrown on: the report's own failure, under the label
+            // above. The selector's must not be lost behind it.
+            deferredSelectionFailure = selectionFailure;
+            throw reportingError;
+          }
           if (selectionFailure !== undefined) {
             // The hook's failure was reported above; what failed is the selection.
             terminalLabel = 'Late stop report selection failed';
@@ -105,7 +115,16 @@ export function createStopPhaseObserver(
         },
       );
       observeRejection(observed, (error: unknown) => {
-        report(error, terminalLabel);
+        try {
+          report(error, terminalLabel);
+        } finally {
+          if (deferredSelectionFailure !== undefined) {
+            report(
+              deferredSelectionFailure.error,
+              'Late stop report selection failed',
+            );
+          }
+        }
       });
     },
   };

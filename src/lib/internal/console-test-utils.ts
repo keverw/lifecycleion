@@ -58,9 +58,9 @@ export function muteConsoleError(): string[] {
  *
  * The condition every last-rung reporter has to survive. It is not contrived: a stream
  * destroyed during shutdown can throw on write, and a harness that patches
- * `console.error` to fail a build on warnings is an ordinary setup. Reporting a failure must never raise one, so a reporter reached
- * with no handler left has to absorb this rather than replace the failure it was
- * describing with its own.
+ * `console.error` to fail a build on warnings is an ordinary setup. Reporting a failure
+ * must never raise one, so a reporter reached with no handler left has to absorb this
+ * rather than replace the failure it was describing with its own.
  *
  * Restored by the same {@link restoreConsoleError} the mute helper uses.
  *

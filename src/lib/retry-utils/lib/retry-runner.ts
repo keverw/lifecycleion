@@ -864,7 +864,12 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // Case 1: Retry is scheduled (pending timeout), force it to run now.
       // This starts a NEW ATTEMPT (attempt timer resets) but keeps the SAME OPERATION
       // (operation timer continues - we're just accelerating a scheduled retry, not starting over).
-      if (this.currentState.retryTimeoutHandle !== null) {
+      // Only while `running`: `attemptOperation` does nothing in any other state, so
+      // accelerating a timer there would report `running` for an attempt never started.
+      if (
+        this.currentState.runnerState === 'running' &&
+        this.currentState.retryTimeoutHandle !== null
+      ) {
         this.clearRetryTimer();
         this.currentState.lastAttemptWasForceTry = true;
 
@@ -876,6 +881,10 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           return { status: 'running', reattached: false };
         }
       }
+
+      // Every path that leaves `running` clears the retry timer, so none should exist
+      // here. Clearing it anyway keeps a stray one from firing into the attempt below.
+      this.clearRetryTimer();
 
       // Case 2: No pending retry, start a brand-new forced attempt. startOperation()
       // gives it a new identity, since the abort above has already dispatched caller
@@ -1293,30 +1302,27 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         };
       } else {
         if (shouldRetryQuery.shouldRetry) {
-          // Written as `!(delayMS <= 0)` so a `NaN` takes the timer path: the synchronous
-          // branch below re-enters `attemptOperation` on this stack, and a delay that is
-          // not a number must never be read as "retry now".
-          if (!(shouldRetryQuery.delayMS <= 0)) {
-            // Bounded again here, not only in `RetryPolicy`. `this.policy` is always a
-            // `RetryPolicy` this runner built, whose delays are already finite and capped,
-            // so this is a backstop: a `setTimeout` past `MAX_TIMER_MS` fires on the next
-            // tick, turning "wait a month" into a busy retry loop. `clampTimerDelayMS` does
-            // not repair `NaN`, so that case takes `RetryPolicy`'s 1ms minimum. The same
-            // value is recorded, so the remaining-time bookkeeping describes the timer
-            // that actually exists.
-            const delayMS = Number.isNaN(shouldRetryQuery.delayMS)
-              ? 1
-              : clampTimerDelayMS(shouldRetryQuery.delayMS);
+          // Every retry goes through a timer, never a synchronous `attemptOperation`
+          // call: `attempt-handled` for this attempt is emitted below, after this
+          // branch, and the next attempt must not start before it.
+          //
+          // Bounded again here, not only in `RetryPolicy`. `this.policy` is always a
+          // `RetryPolicy` this runner built, whose delays are already finite, capped and at
+          // least 1ms, so this is a backstop: a `setTimeout` past `MAX_TIMER_MS` fires on
+          // the next tick, turning "wait a month" into a busy retry loop.
+          // `clampTimerDelayMS` does not repair `NaN`, so that case takes `RetryPolicy`'s
+          // 1ms minimum. The same value is recorded, so the remaining-time bookkeeping
+          // describes the timer that actually exists.
+          const delayMS = Number.isNaN(shouldRetryQuery.delayMS)
+            ? 1
+            : clampTimerDelayMS(shouldRetryQuery.delayMS);
 
-            this.currentState.retryTimeoutStartTime = Date.now();
-            this.currentState.retryTimeoutDelayMS = delayMS;
-            this.currentState.retryTimeoutHandle = setTimeout(() => {
-              this.clearRetryTimer();
-              void this.attemptOperation(false);
-            }, delayMS);
-          } else {
+          this.currentState.retryTimeoutStartTime = Date.now();
+          this.currentState.retryTimeoutDelayMS = delayMS;
+          this.currentState.retryTimeoutHandle = setTimeout(() => {
+            this.clearRetryTimer();
             void this.attemptOperation(false);
-          }
+          }, delayMS);
         } else {
           // No retry allowed: mark as exhausted.
           confirmCancellationInfo = {
@@ -1375,6 +1381,17 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       try {
         context = new AttemptContext();
       } catch (error) {
+        // A `forceTry` abort leaves the attempt it replaced current and unhandled until
+        // this replacement takes over. The operation ends here instead, so that attempt
+        // ends with it: left current, its late `reportResult('skip', 'aborted')` would be
+        // accepted as the live attempt's outcome and arm a retry in `fatal-error`, and
+        // `isAttemptRunning` would let a later `forceTry` reattach to it.
+        const replacedContext = this.currentState.currentAttemptContext;
+        if (replacedContext instanceof AttemptContext) {
+          replacedContext.handled = true;
+        }
+        this.currentState.currentAttemptContext = null;
+
         this.policy.shouldRetry(error, false);
         this.confirmCancellation('fatal-error', {
           status: 'attempt_fatal',

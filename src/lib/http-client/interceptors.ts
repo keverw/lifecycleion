@@ -1,6 +1,7 @@
 import { awaitBoxedPromise } from '../internal/intrinsics';
 import { matchesFilter } from './utils';
 import { adoptPromise } from '../internal/adopt-promise';
+import { defineEntry } from '../internal/define-entry';
 import type {
   RequestInterceptorFilter,
   RequestInterceptor,
@@ -45,12 +46,14 @@ export class RequestInterceptorManager {
     };
   }
 
-  public run(
+  // `async` so anything the snapshot or the chain throws reaches the caller as a
+  // rejection, never as a synchronous throw from a method typed to return a promise.
+  public async run(
     request: InterceptedRequest,
     phase: InterceptorPhase,
     context: RequestInterceptorContext,
   ): Promise<InterceptedRequest | InterceptorCancel> {
-    return this.snapshot()(request, phase, context);
+    return await this.snapshot()(request, phase, context);
   }
 
   /**
@@ -60,11 +63,30 @@ export class RequestInterceptorManager {
    * applies to the next dispatch, not this one.
    */
   public snapshot(): InterceptorChain {
-    const interceptors = [...this.interceptors];
+    const interceptors = copyRegistrations(this.interceptors);
 
     return (request, phase, context) =>
       runInterceptors(interceptors, request, phase, context);
   }
+}
+
+/**
+ * Copy a registration list with an indexed loop. Spread and `for...of` go through
+ * `Array.prototype[Symbol.iterator]`, which application code can replace; an indexed
+ * read of a manager-owned array cannot be redirected that way. Each entry is defined
+ * rather than assigned: the copy starts holey, so an assignment would reach an index
+ * setter added to `Array.prototype`.
+ */
+export function copyRegistrations<T>(source: readonly T[]): T[] {
+  const copy = new Array<T>(source.length);
+  const entries = copy as unknown as Record<string, T>;
+
+  // eslint-disable-next-line unicorn/no-for-loop
+  for (let index = 0; index < source.length; index++) {
+    defineEntry(entries, index, source[index]);
+  }
+
+  return copy;
 }
 
 export type InterceptorChain = (
@@ -81,7 +103,11 @@ async function runInterceptors(
 ): Promise<InterceptedRequest | InterceptorCancel> {
   let current = request;
 
-  for (const { fn, filter } of interceptors) {
+  // Indexed rather than `for...of`, for the reason `copyRegistrations()` gives.
+  // eslint-disable-next-line unicorn/no-for-loop
+  for (let index = 0; index < interceptors.length; index++) {
+    const { fn, filter } = interceptors[index];
+
     if (
       !matchesFilter(
         filter ?? {},

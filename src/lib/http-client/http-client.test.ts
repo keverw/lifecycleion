@@ -831,6 +831,55 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(await response.requestBodySettled).toBe(uploadFailure);
   });
 
+  test('a throw between hops reports the interceptor-rewritten URL, as every other failure does', async () => {
+    // The `catch` around the whole of `send()` built its response from the request as it
+    // was before the initial-phase interceptors ran, so `initialURL` there named a URL
+    // that was never sent, where every other terminal path names the rewritten one.
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (): Promise<AdapterResponse> =>
+        Promise.resolve({
+          status: 302,
+          headers: { location: '/next' },
+          body: null,
+        }),
+    };
+
+    const jar = new CookieJar();
+
+    jar.getCookieHeaderString = (url: string): string => {
+      if (url.includes('/next')) {
+        throw new Error('jar refused');
+      }
+
+      return '';
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+      cookieJar: jar,
+    });
+    client.addRequestInterceptor((request) => ({
+      ...request,
+      requestURL: 'http://example.test/rewritten',
+    }));
+
+    const observedURLs: string[] = [];
+    client.addErrorObserver((_error, request) => {
+      observedURLs.push(request.requestURL);
+    });
+
+    const builder = client.get('/original');
+    const response = await builder.send();
+
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(response.initialURL).toBe('http://example.test/rewritten');
+    expect(response.requestURL).toBe('http://example.test/rewritten');
+    expect(observedURLs).toEqual(['http://example.test/rewritten']);
+  });
+
   test("a followed redirect waits for the hop's upload to settle first", async () => {
     // `NodeAdapter.send()` resolves when the response is consumed, so an early `3xx`
     // arrives with the writer still running - and the next hop went out beside it. A

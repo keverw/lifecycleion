@@ -14,7 +14,6 @@ export interface ComponentAccessContext {
   readonly components: readonly BaseComponent[];
   readonly componentStates: ReadonlyMap<string, ComponentState>;
   readonly stalledComponents: ReadonlyMap<string, ComponentStallInfo>;
-  readonly runningComponents: ReadonlySet<string>;
   readonly isStarting: boolean;
   readonly messageTimeoutMS: number;
   readonly logger: LoggerService;

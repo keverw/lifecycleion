@@ -431,7 +431,7 @@ interface HTTPClientError {
 | `redirect_loop`         | The configured `maxRedirects` limit was reached                                                                                                                |
 | `request_setup_error`   | Request setup or local orchestration failure before a normal adapter response was produced (e.g. invalid configuration, unsupported body type, unresolved URL) |
 | `adapter_error`         | The adapter threw an unexpected error                                                                                                                          |
-| `interceptor_error`     | A request interceptor threw                                                                                                                                    |
+| `interceptor_error`     | A request interceptor threw, or returned a request that is unreadable or invalid                                                                               |
 | `stream_write_error`    | Writing chunks to the StreamResponseFactory writable failed                                                                                                    |
 | `stream_response_error` | The upstream response stream errored after headers arrived                                                                                                     |
 | `stream_setup_error`    | The StreamResponseFactory threw an error during setup                                                                                                          |
@@ -508,6 +508,16 @@ client.addRequestInterceptor((request) => {
   return { ...request, requestURL: u.href };
 });
 ```
+
+**The request an interceptor chain returns is read once.** When the chain finishes, the
+client copies `requestURL`, `method`, `headers` and `body` into a request object of its
+own. Header entries are copied and their values converted to strings at that point. Every
+later check and use (URL validation, the browser-restricted header check, cookie-jar
+lookup, dispatch) reads that copy. A getter on the returned object, on the header record or
+on one of its entries is therefore consulted exactly once, and a URL that passed validation
+is the URL the request is sent to. Any failure while taking that copy is an
+`interceptor_error`: a `requestURL` that is not a string, `headers` that is not an object,
+a getter that throws, or a header value whose string conversion throws.
 
 ### Filter Options
 
@@ -1587,8 +1597,12 @@ Expectations for a custom writable:
   takes them off again afterwards. With neither method it cannot, so it attaches one
   permanent listener per event to that writable instead and registers each request behind
   it - rather than adding a listener per request to a sink reused across many of them,
-  until Node warns about a leak. Behaviour is unchanged either way. What you save by
-  defining one is that listener. Either name works. A Node stream has both.
+  until Node warns about a leak. Behaviour is unchanged either way: an `'error'` that
+  reaches that permanent listener with no request registered behind it is reported through
+  the host error reporter, as the bounded listener described below reports it. The one
+  difference is that the permanent listener never detaches, so that coverage has no time
+  limit. What you save by defining one is that listener. Either name works. A Node stream
+  has both.
 - **Report a failed write.** Either call the callback passed to `write` / `end` with the
   error, or emit `'error'`, which is what a Node stream does. A write that fails destroys
   the stream and its `'error'` often arrives after the request has already settled, so the

@@ -30,6 +30,75 @@ function makeContext(
 }
 
 describe('RequestInterceptorManager', () => {
+  test('snapshot and run do not consult the registration array iterator', async () => {
+    const mgr = new RequestInterceptorManager();
+    mgr.add((request) => ({ ...request, headers: { 'x-ran': 'yes' } }));
+    // The registration list is the manager's own, but a spread or `for...of` over it goes
+    // through an iterator application code can replace.
+    void Object.defineProperty(
+      (mgr as unknown as { interceptors: unknown[] }).interceptors,
+      Symbol.iterator,
+      {
+        value() {
+          throw new Error('iterator used');
+        },
+      },
+    );
+
+    const result = await mgr.run(
+      makeRequest(),
+      { type: 'initial' },
+      makeContext(),
+    );
+
+    expect(result).toMatchObject({ headers: { 'x-ran': 'yes' } });
+  });
+
+  test('snapshot copies registrations past an Array.prototype index setter', async () => {
+    const mgr = new RequestInterceptorManager();
+    mgr.add((request) => ({ ...request, headers: { 'x-ran': 'yes' } }));
+    let setterCalls = 0;
+    void Object.defineProperty(Array.prototype, '0', {
+      configurable: true,
+      set() {
+        setterCalls++;
+      },
+    });
+
+    try {
+      const result = await mgr.run(
+        makeRequest(),
+        { type: 'initial' },
+        makeContext(),
+      );
+
+      expect(result).toMatchObject({ headers: { 'x-ran': 'yes' } });
+      expect(setterCalls).toBe(0);
+    } finally {
+      Reflect.deleteProperty(Array.prototype, '0');
+    }
+  });
+
+  test('run rejects rather than throwing synchronously', async () => {
+    const mgr = new RequestInterceptorManager();
+    const failure = new Error('snapshot failed');
+    mgr.snapshot = () => {
+      throw failure;
+    };
+
+    let returned: Promise<unknown> | undefined;
+
+    expect(() => {
+      returned = mgr.run(makeRequest(), { type: 'initial' }, makeContext());
+    }).not.toThrow();
+    expect(
+      await returned?.then(
+        () => 'resolved',
+        (error: unknown) => error,
+      ),
+    ).toBe(failure);
+  });
+
   test('changes during an awaited callback apply to the next run', async () => {
     const mgr = new RequestInterceptorManager();
     const calls: number[] = [];

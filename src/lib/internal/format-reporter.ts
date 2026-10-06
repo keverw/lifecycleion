@@ -77,11 +77,6 @@ const LABELS: Record<FormatFailureKind, string> = {
   transform: 'Transform',
 };
 
-/** The console label for one failure kind. */
-function formatFailureLabel(kind: FormatFailureKind): string {
-  return LABELS[kind];
-}
-
 /**
  * Build the reporter for one formatting operation.
  *
@@ -129,7 +124,7 @@ export function createFormatReporter(
         (error: Error, path: string): void => handler(error, kind, path);
 
   return createFailureReporter(
-    formatFailureLabel(kind),
+    LABELS[kind],
     bound,
     onHandlerSettled,
     handlerName,
@@ -147,7 +142,7 @@ export function createFormatReporter(
 export function consoleFormatHandler(): FormatErrorHandler {
   return (error: Error, kind: FormatFailureKind, path: string): void => {
     reportToConsole(
-      `${formatFailureLabel(kind)} failed for ${path}: ${describeError(error)}`,
+      `${LABELS[kind]} failed for ${path}: ${describeError(error)}`,
     );
   };
 }

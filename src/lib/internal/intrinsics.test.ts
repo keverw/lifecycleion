@@ -1,7 +1,9 @@
 import { expect, test } from 'bun:test';
+import { adoptPromise } from './adopt-promise';
 import {
   allPromises,
   allSettledPromises,
+  awaitBoxedPromise,
   observePromise,
   observeBoxed,
   observeRejection,
@@ -190,3 +192,132 @@ test('boxed mapping preserves a mapper throw as rejection', async () => {
   });
   expect(await result.catch((error: unknown) => error)).toBe(failure);
 });
+
+// A caller's own native promise whose `constructor` reads as `Promise` once - enough for
+// adoption to hand it back unchanged - and as `next` from then on. Returned adopted, as
+// every caller of these observers receives it.
+function withShiftingConstructor(
+  promise: Promise<unknown>,
+  next: () => unknown,
+): Promise<unknown> {
+  let reads = 0;
+  void Object.defineProperty(promise, 'constructor', {
+    get: () => (++reads === 1 ? Promise : next()),
+  });
+  const adopted = adoptPromise(promise);
+  expect(adopted).toBe(promise);
+  return adopted;
+}
+
+// A species that builds without complaint but whose instances never settle anyone.
+class NeverSettles {
+  constructor(executor: (resolve: unknown, reject: unknown) => void) {
+    executor(
+      () => {},
+      () => {},
+    );
+  }
+
+  public then(): void {}
+}
+
+const neverSettlesConstructor = (): unknown => ({
+  [Symbol.species]: NeverSettles,
+});
+
+function watchdog(ms = 100): Promise<'hung'> {
+  return new Promise((resolve) => setTimeout(() => resolve('hung'), ms));
+}
+
+for (const entry of [
+  'observePromise',
+  'awaitBoxedPromise',
+  'observeBoxed',
+] as const) {
+  test(`${entry} settles its own promise when the input's species turns into a class that never settles`, async () => {
+    const source = withShiftingConstructor(
+      Promise.resolve(7),
+      neverSettlesConstructor,
+    );
+    const observed: Promise<unknown> =
+      entry === 'observePromise'
+        ? observePromise(source, (value) => value)
+        : entry === 'awaitBoxedPromise'
+          ? awaitBoxedPromise(source).then((box) => box.value)
+          : observeBoxed(source, (value) => value).then((box) => box.value);
+    expect(Object.getPrototypeOf(observed)).toBe(Promise.prototype);
+    expect(await Promise.race([observed, watchdog()])).toBe(7);
+  });
+
+  test(`${entry} hears a rejection whose species turns into a class that never settles`, async () => {
+    const failure = new Error('real rejection');
+    const source = withShiftingConstructor(
+      Promise.reject(failure),
+      neverSettlesConstructor,
+    );
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const observed: Promise<unknown> =
+        entry === 'observePromise'
+          ? observePromise(source, undefined, (error) => error)
+          : entry === 'awaitBoxedPromise'
+            ? awaitBoxedPromise(source).catch((error: unknown) => error)
+            : observeBoxed(
+                source,
+                () => 'fulfilled',
+                (error) => error,
+              ).then((box) => box.value);
+      expect(await Promise.race([observed, watchdog()])).toBe(failure);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    expect(unhandled).toEqual([]);
+  });
+}
+
+// Pins the documented limit: once the `constructor` read throws, nothing can attach to
+// the input. The reactions hear the getter's error instead of hanging. Resolved here,
+// since a rejected one would be left unhandled - which is the limit.
+test('observePromise reports a constructor getter that starts throwing as a rejection', async () => {
+  const source = withShiftingConstructor(Promise.resolve(1), () => {
+    throw new Error('constructor exploded');
+  });
+  const observed = observePromise(
+    source,
+    () => 'fulfilled',
+    (error) => (error as Error).message,
+  );
+  expect(await Promise.race([observed, watchdog()])).toBe(
+    'constructor exploded',
+  );
+});
+
+for (const mode of ['all', 'allSettled'] as const) {
+  test(`${mode} defines results past an index setter on Array.prototype`, async () => {
+    let setterCalls = 0;
+    Object.defineProperty(Array.prototype, '0', {
+      configurable: true,
+      set() {
+        setterCalls++;
+      },
+    });
+    try {
+      const joined =
+        mode === 'all'
+          ? allPromises([Promise.resolve(1)])
+          : allSettledPromises([Promise.resolve(1)]);
+      const { value } = await joined;
+      expect(Object.getOwnPropertyDescriptor(value, '0')?.value).toEqual(
+        mode === 'all' ? 1 : { status: 'fulfilled', value: 1 },
+      );
+    } finally {
+      delete (Array.prototype as unknown as Record<string, unknown>)['0'];
+    }
+    expect(setterCalls).toBe(0);
+  });
+}

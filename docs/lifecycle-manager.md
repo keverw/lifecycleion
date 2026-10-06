@@ -349,6 +349,11 @@ A component becomes "stalled" when:
 1. The graceful `stop()` method exceeds `shutdownGracefulTimeoutMS` or throws an error, AND
 2. Either `onShutdownForce()` is not implemented, OR `onShutdownForce()` also fails by timing out or throwing an error
 
+Or when a `forceImmediate` stop - or a force retry - finds `onShutdownForce()` failing
+the same way. A `forceImmediate` stop of a component without `onShutdownForce()` stalls
+at once, with `phase: 'force'`, `reason: 'error'`, and an error saying the component has
+no force handler: no graceful phase ran, so none failed.
+
 Once stalled, a component remains registered but:
 
 - `startAllComponents()` will fail unless you pass `ignoreStalledComponents: true` (which skips stalled components during bulk startup)
@@ -384,7 +389,7 @@ If late startup retires the still-live stall first, successful cleanup preserves
 `starting-timed-out` and the startup timeout error. In both orders, the original
 start result and `component:start-timeout` event report the timeout.
 
-**Automatic late resolution:** If `stop()` eventually completes after the graceful timeout (e.g., a server waiting on keep-alive connections), the manager automatically clears the stall and emits `component:stalled-resolved`. No manual retry is needed. The same applies to `onShutdownForce()`: if it eventually resolves after its own timeout, the stall is cleared automatically. If neither ever completes, the stall persists until you intervene.
+**Automatic late resolution:** If `stop()` eventually completes after the graceful timeout (e.g., a server waiting on keep-alive connections), the manager automatically clears the stall and emits `component:stalled-resolved`. No manual retry is needed. The same applies to `onShutdownForce()`: if it eventually resolves after its own timeout, the stall is cleared automatically. A stalled component's force retry (`stopAllComponents({ retryStalled: true })`) continues the same stop, so the original `stop()` or `onShutdownForce()` - or an earlier retry's - finishing late still clears the stall, whether the retry is still running (it then ends as stopped) or has stalled again. If none ever completes, the stall persists until you intervene.
 
 ### Abort Signals at a Glance
 
@@ -537,9 +542,12 @@ stops again with `stop()` (see [Late-Start Cleanup](#late-start-cleanup)). Decla
 A `start()` that passes its `startupTimeoutMS` keeps running - the manager can only
 abort its signal. If it then completes successfully anyway, the component holds
 whatever it brought up while the manager considers it not running. By default the
-manager cleans that up: it calls `stop()` on the late start (state stays
-`starting-timed-out`), and refuses `startComponent()` / `stopComponent()` on the
-component with `component_already_stopping` until that cleanup settles.
+manager cleans that up: it calls `stop()` on the late start, and once that succeeds
+the component is back in `starting-timed-out` with the timeout error - the status
+the cleanup's `component:stopped` event carries (or wherever the timed-out start
+had left it, such as `stopped` after an unexpected stop it reported). Until that
+cleanup settles, it refuses `startComponent()` / `stopComponent()` on the component
+with `component_already_stopping`.
 
 A component that would rather undo a late start itself sets
 `ownsLateStartCleanup: true` (default `false`) in its constructor options. The manager
@@ -621,7 +629,7 @@ if (result.failedOptionalComponents.length > 0) {
 }
 ```
 
-Dependents still attempt to start if an optional component fails or isn't running, so they should handle missing optional dependencies gracefully. Optional dependencies are primarily for ordering and visibility, not hard requirements.
+Dependents still attempt to start if an optional component fails, is stalled, or isn't running, so they should handle missing optional dependencies gracefully. Optional dependencies are primarily for ordering and visibility, not hard requirements.
 
 **Handling Optional Dependencies:**
 
@@ -786,7 +794,11 @@ would without the option. Two starts are left alone:
   its `ComponentStartTimeoutError` reason stays), and one whose `start()` has settled;
 - one that requested this shutdown itself - synchronously from `start()`, or through
   its `this.lifecycle` handle. It already knows, the pass does not join it, and it may
-  be awaiting the pass's result.
+  be awaiting the pass's result. A start still unfinished when the pass ends - one
+  awaiting that result cannot settle sooner - keeps its dependencies up and leaves the
+  pass `cleanup_incomplete`, as any start the pass could not wait for does; once that
+  start settles (it stops itself, having found the shutdown), another shutdown stops
+  them.
 
 A start that honors the cue by rejecting or throwing with a failure linked to the
 abort is answered by `startComponent()` with `code: 'shutdown_in_progress'` (the thrown
@@ -906,9 +918,10 @@ resolved, rejected or threw. `signal.reason` tells the two force aborts apart (s
   message `Force shutdown timed out`) - the error the stalled result carries as
   `error` - as `signal.reason`. It is also aborted when the graceful `stop()` it
   escalated from - still running, since a promise cannot be cancelled - completes late
-  and ends the force phase before its deadline while the call is still pending. Both
-  calls belong to the one stop holding the component's lock; no other operation can
-  trigger this. The component did stop, so
+  and ends the force phase before its deadline while the call is still pending - or,
+  for a stalled component's retry, when an earlier attempt of the stop it retries
+  completes late. All of those calls belong to the one stop of the component; no other
+  operation can trigger this. The component did stop, so
   the stop answers success, the call's work is no longer needed, and the signal says
   so with a `ForceShutdownSupersededError` (`errCode: 'ForceSuperseded'`, message
   `Force shutdown superseded: component already stopped`) as `signal.reason`. That abort
@@ -1252,7 +1265,10 @@ or startup. Otherwise, the concise refusal reason is unchanged.
 `skippedDueToStall` lists stalled components the pass actually skipped, including
 on timeout and failure results. It is absent when no stalled components were
 skipped; it is separate from dependency skips and from components that blocked
-startup outright.
+startup outright. A component that depends on a stalled one skipped this way is
+itself skipped (listed in `skippedDueToDependency`) only when the stalled one is
+required; an optional stalled dependency does not block it, as an optional one that
+failed or was skipped does not.
 
 **Timeout Behavior:**
 
@@ -1515,6 +1531,13 @@ interface RestartResult {
 ```
 
 **Important:** `restartAllComponents` hardcodes `retryStalled: true` and `haltOnStall: true` for the shutdown phase to ensure clean restart. Only `shutdownTimeoutMS` can be customized.
+
+A restart that meets a bulk startup in progress - called during one, or one begun by
+its own option getters or log sinks while it prepares - is refused before stopping
+anything, with `startupResult.code` `already_in_progress` and `shutdownResult.code`
+`partial_state`: its stop phase would interrupt that startup, and its own startup phase
+would then be refused while the interrupted one unwound. One that meets an active
+shutdown is refused with `startupResult.code` `shutdown_in_progress`.
 
 Restart checks existing components' startup timeout settings before stopping them.
 It saves those settings for registrations that remain unchanged. It also checks the
@@ -2026,7 +2049,8 @@ counted as running, but Ctrl+C is how the operator retries or forces it - and
 come off once the last stall clears: by a later stop, by the original `stop()`
 or `onShutdownForce()` finishing late, or by unregistering it. They also stay
 while anything is still in flight - a startup or shutdown, a component starting
-or stopping - and come off once it ends, if nothing is left. A clean
+or stopping, or a timed-out `start()` still pending whose late completion the
+manager will stop - and come off once it ends, if nothing is left. A clean
 `stopAllComponents()` detaches them before it emits
 `lifecycle-manager:shutdown-completed`; a failed one keeps them, so the next
 Ctrl+C still reaches escalation.
@@ -2317,7 +2341,7 @@ enableLoggerExitHook(): void
 - Sets up the logger's `beforeExit` callback to call `stopAllComponents(shutdownOptions)`
 - When `logger.exit(code)` is called, components shut down gracefully first
 - When `logger.error('message', { exitCode: 1 })` is called, components shut down before exit
-- Uses the constructor's `shutdownOptions.timeoutMS` (default: 30000ms) to prevent hanging
+- Uses the constructor's `shutdownOptions.timeoutMS` (default: 30000ms) to prevent hanging - unless it is `0`, which disables the deadline (see Timeout Behavior below)
 - Overwrites any existing `beforeExit` callback on the logger
 - An exit that lands while a shutdown is already running waits for it rather than starting a second pass - and if that shutdown is a [`restartAllComponents()`](#restartallcomponentsoptions) stop phase, it cancels the restart's startup phase, so nothing is started again behind the exit
 - **Exit behavior depends on logger configuration:** `logger.exit()` only calls `process.exit()` when the logger is created with `callProcessExit: true` (default). Test-optimized and frontend-optimized loggers disable process exit.
@@ -2381,6 +2405,13 @@ const lifecycle = new LifecycleManager({
 logger.exit(0);
 // The shutdown-completed payload has timedOut: true, then exit proceeds.
 ```
+
+With `shutdownOptions.timeoutMS: 0` there is no deadline, and the exit waits for the
+shutdown however long it takes. Each component's stop is still bounded by its own
+`shutdownGracefulTimeoutMS` and `shutdownForceTimeoutMS` (a stop that exceeds both
+stalls, and the exit proceeds once the pass ends), but the pass also waits for any
+in-flight `start()`, and one without a startup timeout (`startupTimeoutMS: 0`) can hold
+the exit indefinitely. Keep a non-zero `timeoutMS` when an exit must never hang.
 
 **Important Notes:**
 
@@ -2801,7 +2832,7 @@ constructor(logger: Logger, options?: ComponentOptions)
 interface ComponentOptions {
   name: string; // Component name (kebab-case)
   dependencies?: string[]; // Component dependencies
-  optional?: boolean; // If true, failure doesn't stop startup
+  optional?: boolean | null; // If true, failure doesn't stop startup (default: false); must be a boolean
   startupTimeoutMS?: number | null; // Start timeout in milliseconds (default: 30000, 0 = disabled)
   shutdownGracefulTimeoutMS?: number | null; // Graceful shutdown timeout in ms (default: 5000, minimum: 1000)
   // Values below 1000ms are silently raised to 1000ms to ensure reasonable cleanup time
@@ -2812,6 +2843,11 @@ interface ComponentOptions {
   ownsLateStartCleanup?: boolean | null; // The component undoes its own late start (default: false); see Late-Start Cleanup
 }
 ```
+
+`optional` and `ownsLateStartCleanup` must be booleans: `null` or omitted selects the
+default (`false`), and anything else - `'yes'`, `1` - makes the constructor throw a
+`TypeError` (`optional must be a boolean`, `ownsLateStartCleanup must be a boolean`)
+rather than read it as truthy or falsy.
 
 ### Lifecycle Methods
 

@@ -208,17 +208,67 @@ describe('RetryPolicy - durations that are not finite', () => {
     }
   });
 
-  test('a NaN dispersion does not reach the delay', () => {
-    const policy = new RetryPolicy({
-      strategy: 'exponential',
-      dispersion: NaN,
-    });
+  test('a NaN, null or non-number dispersion throws at construction', () => {
+    // Fails like `factor` and `maxRetryAttempts` rather than quietly becoming the 0.1
+    // default, which would hide a typo such as `'0.5'` behind plausible-looking jitter.
+    for (const value of [NaN, null, '0.5', {}]) {
+      expect(
+        () =>
+          new RetryPolicy({
+            strategy: 'exponential',
+            dispersion: value as number,
+          }),
+      ).toThrow(TypeError);
+    }
+  });
 
-    policy.shouldDoFirstTry();
+  test('an out-of-range dispersion clamps to [0, 1]', () => {
+    for (const [value, expected] of [
+      [-0.5, 0],
+      [2, 1],
+      [-Infinity, 0],
+      [Infinity, 1],
+      [0.25, 0.25],
+    ] as const) {
+      expect(
+        new RetryPolicy({ strategy: 'exponential', dispersion: value })
+          .policyInfo,
+      ).toMatchObject({ dispersion: expected });
+    }
 
-    expect(Number.isFinite(policy.shouldRetry(new Error('boom')).delayMS)).toBe(
-      true,
-    );
+    expect(
+      new RetryPolicy({ strategy: 'exponential', dispersion: undefined })
+        .policyInfo,
+    ).toMatchObject({ dispersion: 0.1 });
+  });
+
+  test('null maxRetryAttempts or factor throws instead of selecting the default', () => {
+    // Only the durations accept `null` as "use the default"; these options default only
+    // when omitted or `undefined`.
+    for (const strategy of ['fixed', 'exponential'] as const) {
+      expect(
+        () =>
+          new RetryPolicy({
+            strategy,
+            maxRetryAttempts: null as unknown as number,
+          }),
+      ).toThrow(TypeError);
+    }
+    expect(
+      () =>
+        new RetryPolicy({
+          strategy: 'exponential',
+          factor: null as unknown as number,
+        }),
+    ).toThrow(TypeError);
+
+    expect(
+      new RetryPolicy({
+        strategy: 'exponential',
+        maxRetryAttempts: undefined,
+        factor: undefined,
+      }).policyInfo,
+    ).toMatchObject({ maxRetryAttempts: 10, factor: 1.5 });
   });
 
   test('a NaN or non-number factor throws at construction', () => {

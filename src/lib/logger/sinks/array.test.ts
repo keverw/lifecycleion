@@ -645,6 +645,45 @@ describe('ArraySink - a transformer that returns a promise', () => {
     expect(seen[1]).toBe('transform|<transformer>|transformer rejected');
   });
 
+  test('an async onFormatError still pending is handed the rejection once it settles', async () => {
+    // The contract-failure report held the guard while the handler awaited, so the
+    // rejection a turn later went to the console and the handler never saw its reason.
+    const seen: string[] = [];
+    let active = 0;
+    let maxActive = 0;
+    const sink = new ArraySink({
+      transformer: (async () => {
+        await Promise.resolve();
+        throw new Error('transformer rejected');
+      }) as unknown as (entry: LogEntry) => LogEntry,
+      // eslint-disable-next-line @typescript-eslint/no-misused-promises -- an async handler is the supported shape under test
+      onFormatError: async (error, kind, subject) => {
+        active++;
+        maxActive = Math.max(maxActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        seen.push(`${kind}|${subject}|${error.message}`);
+        active--;
+      },
+    });
+    const output = spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      const unhandled = await collectUnhandled(() => sink.write(entry));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(unhandled).toEqual([]);
+      expect(seen).toHaveLength(2);
+      expect(seen[0]).toContain('returned a promise');
+      expect(seen[1]).toBe('transform|<transformer>|transformer rejected');
+      // Held, not delivered alongside: the handler never ran twice at once.
+      expect(maxActive).toBe(1);
+      expect(output).not.toHaveBeenCalled();
+      expect(sink.logs).toEqual([entry]);
+    } finally {
+      output.mockRestore();
+    }
+  });
+
   test('a promise that fulfills is still refused, and the original entry kept', async () => {
     const seen: string[] = [];
     const sink = new ArraySink({
@@ -680,6 +719,37 @@ describe('ArraySink - a transformer that returns a promise', () => {
       expect(unhandled).toEqual([]);
       expect(sink.logs).toEqual([entry]);
       expect(seen).toContain('hostile rejection');
+    },
+  );
+
+  test.each([
+    ['undefined', undefined],
+    ['null', null],
+    ['a string', 'entry'],
+    ['a number', 0],
+    ['true', true],
+  ] as const)(
+    'a transformer that returned %s is reported and the original entry kept',
+    (_label, returned) => {
+      // Only `false` and thenables were handled, so any other non-entry - `undefined`
+      // from a transformer missing its `return` - was pushed into `logs` as the entry.
+      const seen: string[] = [];
+      const sink = new ArraySink({
+        transformer: (() => returned) as unknown as (
+          entry: LogEntry,
+        ) => LogEntry,
+        onFormatError: (error, kind, subject) =>
+          seen.push(`${kind}|${subject}|${error.message}`),
+      });
+
+      sink.write(entry);
+
+      expect(sink.logs).toEqual([entry]);
+      expect(seen).toHaveLength(1);
+      expect(seen[0]).toContain('transform|<transformer>|');
+      expect(seen[0]).toContain(
+        `returned ${returned === null ? 'null' : typeof returned}`,
+      );
     },
   );
 

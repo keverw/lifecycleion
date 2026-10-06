@@ -73,7 +73,7 @@ export abstract class BaseComponent {
   /** Names of components this one depends on */
   public readonly dependencies: string[];
 
-  /** If true, startup failure doesn't trigger rollback */
+  /** If true, startup failure doesn't trigger rollback. Must be a boolean. */
   public readonly optional: boolean;
 
   /** Time to wait for start() in milliseconds */
@@ -136,11 +136,17 @@ export abstract class BaseComponent {
 
     // Dependency configuration
     this.dependencies = options.dependencies ?? [];
-    this.optional = options.optional ?? false;
 
     // Null or omitted selects the default, as for the timeouts below. Anything else that
     // is not a boolean is a configuration mistake, refused here rather than read as
-    // truthy or falsy.
+    // truthy or falsy - the manager reads `optional` as `=== true`, so a stored `'yes'`
+    // would silently make a component required.
+    const isOptional: unknown = options.optional ?? false;
+    if (typeof isOptional !== 'boolean') {
+      throw new TypeError('optional must be a boolean');
+    }
+    this.optional = isOptional;
+
     const doesOwnLateStartCleanup = options.ownsLateStartCleanup ?? false;
     if (typeof doesOwnLateStartCleanup !== 'boolean') {
       throw new TypeError('ownsLateStartCleanup must be a boolean');

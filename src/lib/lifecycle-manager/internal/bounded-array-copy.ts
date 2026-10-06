@@ -9,16 +9,26 @@
  * which the caller builds so the refusal travels on its own channel (a returned read
  * error, a branded option refusal). Entries are copied as they are; validating them is
  * the caller's.
+ *
+ * Only a `number` length is accepted: it is never coerced. Coercion is more caller code -
+ * `Number()` throws for a symbol, and runs an object's `valueOf` - and a throw there
+ * would escape the refusal and reach the caller as a crash instead. `refuse` is handed a
+ * description that is safe to build for any value.
  */
 export function copyBoundedArray(
   array: readonly unknown[],
   maxLength: number,
-  refuse: (length: number) => Error,
+  refuse: (length: string) => Error,
 ): unknown[] {
-  const length = Number(Reflect.get(array, 'length'));
+  const length: unknown = Reflect.get(array, 'length');
 
-  if (!Number.isInteger(length) || length < 0 || length > maxLength) {
-    throw refuse(length);
+  if (
+    typeof length !== 'number' ||
+    !Number.isInteger(length) ||
+    length < 0 ||
+    length > maxLength
+  ) {
+    throw refuse(describeLength(length));
   }
 
   const copy: unknown[] = [];
@@ -26,4 +36,11 @@ export function copyBoundedArray(
     copy[index] = Reflect.get(array, index);
   }
   return copy;
+}
+
+/** Numbers by value; anything else by type - `String()` throws for some values. */
+function describeLength(length: unknown): string {
+  return typeof length === 'number'
+    ? String(length)
+    : `a non-number (${length === null ? 'null' : typeof length})`;
 }

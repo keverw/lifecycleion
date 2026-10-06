@@ -279,3 +279,82 @@ test('an attempt that cannot be set up ends the operation instead of escaping', 
   expect(runner.runnerState).toBe('fatal-error');
   expect(runner.lastError).toBe(thrown);
 });
+
+test('a forced replacement that cannot be set up detaches the aborted attempt', async () => {
+  // `forceTry({ shouldAbortRunning: true })` aborts the running attempt and moves on
+  // without handling it. If the replacement cannot even be set up, the operation ends
+  // fatally - and the aborted attempt must end with it, not stay current, where its late
+  // `reportResult` would be accepted, arm a retry in `fatal-error`, and let a later
+  // `forceTry` claim to be running.
+  const escaped = watchUncaught();
+  let reportAborted: (() => void) | undefined;
+  let attemptsHandled = 0;
+  const runner = new RetryRunner(policy, (reportResult, signal) => {
+    reportAborted = () => {
+      if (signal.aborted) {
+        reportResult('skip', 'aborted');
+      } else {
+        reportResult('success', 'stale');
+      }
+    };
+  });
+  runner.on('attempt-handled', () => {
+    attemptsHandled++;
+  });
+
+  expect(await runner.run()).toEqual({ status: 'running' });
+  expect(runner.isAttemptRunning).toBe(true);
+
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
+  const thrown = new Error('replaced crypto');
+  Object.defineProperty(globalThis, 'crypto', {
+    configurable: true,
+    writable: true,
+    value: {
+      getRandomValues: () => {
+        throw thrown;
+      },
+    },
+  });
+  cleanups.push(() => {
+    if (descriptor === undefined) {
+      Reflect.deleteProperty(globalThis, 'crypto');
+    } else {
+      Object.defineProperty(globalThis, 'crypto', descriptor);
+    }
+  });
+
+  const forced = await runner.forceTry({
+    shouldAbortRunning: true,
+    shouldWaitForCompletion: true,
+  });
+  cleanups.pop()?.();
+
+  expect(forced).toEqual({
+    status: 'attempt_fatal',
+    code: 'unexpected_error',
+    error: thrown,
+  });
+  expect(runner.runnerState).toBe('fatal-error');
+  expect(runner.isAttemptRunning).toBe(false);
+
+  // The aborted attempt's late acknowledgement is discarded.
+  reportAborted?.();
+  await sleep(20);
+
+  expect(escaped).toEqual([]);
+  expect(attemptsHandled).toBe(0);
+  expect(runner.isRetryPending).toBe(false);
+  expect(runner.runnerState).toBe('fatal-error');
+
+  // A later forceTry starts a fresh attempt rather than reattaching to the aborted one.
+  expect(await runner.forceTry()).toEqual({
+    status: 'running',
+    reattached: false,
+  });
+  expect(runner.runnerState).toBe('running');
+  expect(runner.isAttemptRunning).toBe(true);
+  const canceled = runner.cancel();
+  reportAborted?.();
+  expect(await canceled).toBe('canceled');
+});
