@@ -1393,7 +1393,7 @@ const fileSink = new FileSink({
 });
 ```
 
-Two things to know about `failure.entry`. It is the full `LogEntry`, so it carries `params` as well as `redactedParams`: a handler that serializes the whole failure for paging or a backup sink is serializing the raw values, including any the log line masked. Forward `redactedParams ?? params`, or only `message`, rather than the entry itself. And a handler that logs the failure back through this sink is safe: the sink refuses, and counts in `droppedEntries`, a line from inside a `'format'` report that cannot render either, which is what stops a failure carrying an unrenderable `entry` from reporting itself forever. A `'write'` failure is reported on every attempt, so a handler that logs each one through a sink that is also failing multiplies the queue by `maxRetries + 1` per line. The queue cap bounds it, but log elsewhere.
+Two things to know about `failure.entry`. It is the full `LogEntry`, so it carries `params` as well as `redactedParams`: a handler that serializes the whole failure for paging or a backup sink is serializing the raw values, including any the log line masked. Forward `redactedParams ?? params`, or only `message`, rather than the entry itself. And a handler that logs the failure back through this sink is safe: the sink refuses, and counts in `droppedEntries`, a line from inside a `'format'` report that cannot render either, and reports its failure on the console rather than to the handler, which is what stops a failure carrying an unrenderable `entry` from reporting itself forever. `'format'` reports reach the handler one at a time: while it is working on one - until it settles, `async` or not - one more is held and delivered after it, and any others go to the console. A `'write'` failure is reported on every attempt, so a handler that logs each one through a sink that is also failing multiplies the queue by `maxRetries + 1` per line. The queue cap bounds it, but log elsewhere.
 
 A close-time `'lost'` or `'no_entry'` is this callback, not the logger's diagnostic channel. With no `onError` the sink already writes it to `console.error`. With one, a `logger.error(...)` inside the handler during `Logger.close()` is dropped (a closed logger's `handleLog` writes nothing) and does not fall through to that console line, because the handler succeeded. The example uses `console.error` for that reason.
 
@@ -1597,20 +1597,21 @@ interface SinkFailure {
 }
 ```
 
-A `close()` that gives up at `closeTimeoutMS` reports differently on the two sinks, because
-they know different things. `FileSink` waits on one write at a time, so the write it
-abandons may already be on disk: reported as `'close'` / `'no_entry'` and not counted in
-`droppedEntries`. Bytes the stream still held when the final flush timed out are reported
-the same way, before `close()` resolves. `NamedPipeSink` hands the stream a burst, so what
-it abandons is whatever is still buffered for a reader that did not take it: reported once
-as `'close'` / `'lost'` before `close()` resolves, with each entry counted as its write
-callback fails. Neither report carries an `entry` -
-the bytes in the stream's buffer are no longer lines the sink can name - so a fallback
-handler learns that lines were lost, and how many from `getHealth().droppedEntries`.
-Those reports still reach `onError`. That is the sink's callback, not `writeDiagnostic`.
-If this sink is owned by a `Logger` that is itself closing, do not log them through that
-logger, because a closed logger's `handleLog` writes nothing and there is no diagnostic fallback. The examples
-use `console.error`.
+A `close()` that gives up at `closeTimeoutMS` reports differently on the two sinks,
+because they know different things. `FileSink` waits on one write at a time, so the write
+it abandons may already be on disk: reported as `'close'` / `'no_entry'` and not counted
+in `droppedEntries`. That is its only report: if the write fails after `close()` resolves,
+the failure is neither reported again nor counted. Bytes the stream still held when the
+final flush timed out are reported the same way, before `close()` resolves.
+`NamedPipeSink` hands the stream a burst, so what it abandons is whatever is still
+buffered for a reader that did not take it: reported once as `'close'` / `'lost'` before
+`close()` resolves, with each entry counted as its write callback fails. Neither report
+carries an `entry` - the bytes in the stream's buffer are no longer lines the sink can
+name - so a fallback handler learns that lines were lost, and how many from
+`getHealth().droppedEntries`. Those reports still reach `onError`. That is the sink's
+callback, not `writeDiagnostic`. If this sink is owned by a `Logger` that is itself
+closing, do not log them through that logger, because a closed logger's `handleLog` writes
+nothing and there is no diagnostic fallback. The examples use `console.error`.
 
 #### Error Handling & Reconnection
 
@@ -1679,7 +1680,7 @@ const pipeSink = new NamedPipeSink({
 });
 ```
 
-The formatter receives the full `LogEntry` and should return a string (newline is added automatically). It is called synchronously: a formatter that throws, returns a promise (an `async` formatter), or returns any other non-string (`undefined` from a missing `return`, a number, an object) is reported to `onError` as `kind: 'format'` with `disposition: 'fallback'`, and the default format is written instead. A rejection of that promise is observed and reported the same way when it arrives, unless the promise was returned while a `'format'` failure was being reported - a line the `onError` handler logged back through this sink - in which case it is dropped, as that line's immediate failure was, so the handler cannot feed itself the next report. The line itself still goes out in the default format.
+The formatter receives the full `LogEntry` and should return a string (newline is added automatically). It is called synchronously: a formatter that throws, returns a promise (an `async` formatter), or returns any other non-string (`undefined` from a missing `return`, a number, an object) is reported to `onError` as `kind: 'format'` with `disposition: 'fallback'`, and the default format is written instead. A rejection of that promise is observed and reported the same way when it arrives, unless the promise was returned while a `'format'` failure was being reported - a line the `onError` handler logged back through this sink - in which case its rejection goes to the console rather than to `onError` (or is dropped, if it was returned during that console report), so the handler cannot feed itself the next report. The line itself still goes out in the default format.
 
 #### Setup
 

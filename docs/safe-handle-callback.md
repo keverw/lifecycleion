@@ -38,7 +38,7 @@ safeHandleCallback('onData', myCallback, arg1, arg2);
 
 **Parameters:**
 
-- `callbackName` - Name used in error messages for identification. Typed `string`; any other value is rendered with `String()` (a symbol as `Symbol(description)`), or as `<unnamed callback>` when that throws, so a bad name never turns a reported failure into a thrown one. It is rendered only when there is a failure to report.
+- `callbackName` - Name used in error messages for identification: a `string`, or a function returning one (`type CallbackName = string | (() => string)`). A function is called only when there is a failure to report, so a name that costs something to build - such as one naming the event a handler belongs to - costs nothing when the callback succeeds. Any other value, or whatever the function returns, is rendered with `String()` (a symbol as `Symbol(description)`), or as `<unnamed callback>` when that throws; a function that throws is reported as `<unnamed callback>` too, so a bad name never turns a reported failure into a thrown one. It is rendered only when there is a failure to report.
 - `callback` - The function to execute (sync or async)
 - `...args` - Arguments forwarded to the callback
 
@@ -64,7 +64,7 @@ logger.registerReportErrorListener();
 
 ### safeHandleCallbackAndWait
 
-Async variant that waits for the callback to complete and returns a result object indicating success or failure. Also reports errors on the `'error'` channel like `safeHandleCallback`.
+Async variant that waits for the callback to complete and returns a result object indicating success or failure. Also reports errors on the `'error'` channel like `safeHandleCallback`, and takes the same `callbackName`.
 
 ```typescript
 const result = await safeHandleCallbackAndWait('onData', myCallback, arg1);
@@ -97,13 +97,13 @@ Checking `result.success` narrows the type, so neither field needs a non-null as
 function reportCallbackError(callbackName: string, error: unknown): void;
 ```
 
-Reports a caught callback failure through the same standard `'error'` channel and fallback chain used by `safeHandleCallback`. The dispatched wrapper identifies `callbackName` (rendered as described under [safeHandleCallback](#safehandlecallback) when it is not a string) and keeps the original thrown value on `event.error.cause`.
+Reports a caught callback failure through the same standard `'error'` channel and fallback chain used by `safeHandleCallback`. The dispatched wrapper identifies `callbackName` (rendered as described under [safeHandleCallback](#safehandlecallback) when it is not a string - though, since this is only ever called with a failure in hand, a function is rendered with `String()` rather than called) and keeps the original thrown value on `event.error.cause`.
 
 ### runCallbackSafely
 
 ```typescript
 function runCallbackSafely(
-  callbackName: string,
+  callbackName: CallbackName,
   callback: unknown,
   args: unknown[],
   onError: (error: unknown) => void,
@@ -115,7 +115,7 @@ Runs a callback without awaiting it, forwarding a synchronous throw, a returned 
 
 This is the lower-level invocation helper used by `safeHandleCallback()`. Choose `safeHandleCallback()` for the standard global error reporting and fallback chain. Choose `runCallbackSafely()` when you need to route failures yourself, such as to logger diagnostics or a local fallback. It does not report failures globally unless your `onError` handler does so. That handler should not throw, but one that throws - or is `async` and rejects - is contained: its failure goes to the console alongside the original, never escaping or becoming an unhandled rejection. Use `safeHandleCallbackAndWait()` when you need to await completion and receive a result.
 
-`thisArg` is the receiver the callback is invoked with. Omit it for a plain function or a closure, and supply the owning object when passing an extracted method.
+`callbackName` is described under [safeHandleCallback](#safehandlecallback). `thisArg` is the receiver the callback is invoked with. Omit it for a plain function or a closure, and supply the owning object when passing an extracted method.
 
 ### reportToHost
 

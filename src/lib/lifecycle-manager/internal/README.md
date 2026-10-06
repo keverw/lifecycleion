@@ -65,6 +65,8 @@ The stateful helpers have deliberately smaller scopes:
 - Timeout provenance has one WeakSet in `operation-policy.ts`. Constructor validation
   deliberately uses the unbranded shared timer helpers; a caller's validation error
   must not become an expected manager refusal just because it has the same type.
+  `settleOperation()` drops the brand from the errors a public result hands back, so a
+  caller that rethrows one is not taken for the manager's own refusal.
 - Promise-returning manager delegates return the helper promise directly. Adding an
   extra async wrapper or scheduled task can change when callers regain control.
 - These modules must remain usable in Node, Bun, and browsers. Do not import Node

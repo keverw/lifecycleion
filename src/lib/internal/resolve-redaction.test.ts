@@ -256,6 +256,56 @@ describe('resolveRedaction with a redactFunction that returns a promise', () => 
     ).toThrow(TypeError);
   });
 
+  test("a refused thenable's then is never called", async () => {
+    // A lazy thenable starts its work in `then`; a refused answer must not start it.
+    let thenCalls = 0;
+    const lazy = {
+      then(resolve: (value: string) => void): void {
+        thenCalls++;
+        resolve('x');
+      },
+    };
+
+    const unhandled = await collectUnhandled(() => {
+      expect(() =>
+        resolveRedaction('card', '4111111111111111', false, answering(lazy)),
+      ).toThrow(TypeError);
+    });
+
+    expect(thenCalls).toBe(0);
+    expect(unhandled).toEqual([]);
+  });
+
+  test("a refused promise subclass's then is never called, and its rejection is observed", async () => {
+    let thenCalls = 0;
+    class LazyPromise<T> extends Promise<T> {
+      public override then<TResult1 = T, TResult2 = never>(
+        onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
+        onrejected?:
+          ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+      ): Promise<TResult1 | TResult2> {
+        thenCalls++;
+        return super.then(onfulfilled, onrejected);
+      }
+    }
+    let thrown: unknown;
+
+    const unhandled = await collectUnhandled(() => {
+      const answer = new LazyPromise<never>((_resolve, reject) => {
+        reject(new Error('subclass rejects'));
+      });
+      try {
+        resolveRedaction('card', '4111111111111111', false, answering(answer));
+      } catch (error) {
+        thrown = error;
+      }
+    });
+
+    expect(thrown).toBeInstanceOf(TypeError);
+    expect(thenCalls).toBe(0);
+    expect(unhandled).toEqual([]);
+  });
+
   test('a returned value whose then cannot be read is a failure, not a request', () => {
     const answer = Object.defineProperty({}, 'then', {
       get(): never {

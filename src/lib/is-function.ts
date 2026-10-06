@@ -5,8 +5,7 @@
  * bound functions, and callable proxies - every value that can be called.
  *
  * An object that merely inherits from `Function.prototype` (`Object.create(Function.prototype)`)
- * is not callable and answers `false`. Earlier versions also accepted it through an
- * `instanceof Function` fallback, which let a value pass the check and then throw
+ * is not callable and answers `false`, so a value that passes the check never throws
  * "is not a function" when called.
  *
  * Never throws and reads nothing from `value`: `typeof` runs no caller code, even for

@@ -524,7 +524,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
                   context.handled = true;
                   this.currentState.currentAttemptContext = null;
 
-                  // Cleanup timers before emitting
+                  // Cleanup timers before emitting, so `attempt-handled` listeners
+                  // see no pending timer, as they do for a reported attempt.
                   this.cleanupTimers();
 
                   // Cache the attempt duration and emit attempt-handled for consistency
@@ -532,6 +533,10 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
                   this.currentState.lastAttemptTimeTakenMS =
                     attemptTimeElapsedMS;
 
+                  // The scope covers `attempt-handled`, not only the
+                  // `confirmCancellation` inside it (which opens its own): a listener
+                  // for this forced skip must not start a replacement before the
+                  // `'stopped'` outcome is published.
                   this.withTerminalDispatch(true, () => {
                     this.emit(ATTEMPT_HANDLED, {
                       attemptID: context.id,
@@ -1176,8 +1181,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       context.handled
     ) {
       // Discarding is right - the attempt is over and its outcome is already recorded -
-      // but it used to be silent, and `ReportResult` returns `void`, so an operation that
-      // reported twice, or reported its real failure after the runner had moved on, had no
+      // but not silently: `ReportResult` returns `void`, so an operation that reported
+      // twice, or reported its real failure after the runner had moved on, has no other
       // way to learn its outcome went nowhere. A double report is a caller bug that should
       // not have to be inferred from a missing event.
       //
@@ -1189,12 +1194,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // from this API's own documented flow. `forceTry({ shouldAbortRunning: true })` and
       // `cancel()`'s grace period both abort the running context and then move on, and the
       // contract tells the operation to call `reportResult('skip', 'aborted')` when it
-      // notices `signal.aborted` - so the ordinary, correct, documented response to being
-      // aborted was dispatching a global `'error'` `ErrorEvent` and printing a full console
-      // table. In a browser that also reaches `window.onerror` and any error monitoring
+      // notices `signal.aborted`. Reporting that would turn the ordinary, documented
+      // response to being aborted into a global `'error'` `ErrorEvent` and a full console
+      // table - in a browser also reaching `window.onerror` and any error monitoring
       // attached to it, as a synthetic uncaught error, for an operation that did exactly
-      // what it was asked. The runner's own suite reports it: "should abort running attempt
-      // when shouldAbortRunning is true".
+      // what it was asked.
       const wasAborted = context.isAborted;
 
       if (!wasAborted) {
@@ -1347,6 +1351,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       confirmCancellationInfo.run &&
       terminalRunnerState !== null &&
       terminalResolveInfo !== null;
+    // Opened here rather than left to `confirmCancellation`, so `attempt-handled` for a
+    // terminal report is inside the reentry scope too.
     this.withTerminalDispatch(isTerminalReport, () => {
       // emit the attempt handled event
       this.emit(ATTEMPT_HANDLED, {
@@ -1465,8 +1471,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         const result = this.operation(reportResult, context.signal);
 
         // Adopted, not awaited as it is: a native promise whose own `then` is not a
-        // function failed `isPromise()`, so its rejection was never awaited and went
-        // unhandled, and `await` calls an own `then` on one carrying its own
+        // function fails `isPromise()`, so its rejection would never be awaited and would
+        // go unhandled, and `await` calls an own `then` on one carrying its own
         // `constructor`. Classification and adoption share one captured then read.
         const pending = adoptResult(result);
         if (pending instanceof UnreadableReturn) {
@@ -1476,21 +1482,21 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         }
       } catch (error) {
         // A rethrow of what was already reported is not a second outcome, and reporting it
-        // as one dispatched a synthetic global `'error'` `ErrorEvent` per attempt - falling
-        // through to a full rendered error table on the console with nothing listening, and
-        // to `window.onerror` and any error monitoring behind it in a browser - for the
-        // most ordinary shape an operation can have:
+        // as one would dispatch a synthetic global `'error'` `ErrorEvent` per attempt -
+        // falling through to a full rendered error table on the console with nothing
+        // listening, and to `window.onerror` and any error monitoring behind it in a
+        // browser - for the most ordinary shape an operation can have:
         // `catch (e) { reportResult('error', e); throw e; }`. That is precisely the harm
         // the aborted case above is excluded for. A throw carrying anything else still
         // reports, which is the failure that would otherwise disappear.
         //
         // Only a rethrow of a reported *error* - `'error'` or `'fatal'` - is that shape.
-        // Comparing against whatever was reported matched a throw against success data
-        // too: `reportResult('success')` and `reportResult('skip')` store `undefined`, so
-        // a later `throw undefined` or a bare `Promise.reject()` from a cleanup step
-        // compared equal and was dropped - the runner stayed `completed`/`success` and the
-        // `'error'` channel never heard of it, which is precisely the post-success failure
-        // `handleReportResult` exists to keep.
+        // Comparing against whatever was reported would match a throw against success
+        // data too: `reportResult('success')` and `reportResult('skip')` store `undefined`,
+        // so a later `throw undefined` or a bare `Promise.reject()` from a cleanup step
+        // would compare equal and be dropped - the runner stays `completed`/`success` and
+        // the `'error'` channel never hears of it, which is precisely the post-success
+        // failure `handleReportResult` exists to keep.
         if (isReportedErrorAgain(error)) {
           return;
         }

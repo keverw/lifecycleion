@@ -652,7 +652,7 @@ export class BaseHTTPClient {
         let initialRequestCandidate: InterceptedRequest = finalRequest;
 
         try {
-          interceptResult = await this._runInterceptors(
+          const initialRun = await this._runInterceptors(
             finalRequest,
             initialPhase,
             {
@@ -663,12 +663,19 @@ export class BaseHTTPClient {
             },
           );
 
+          interceptResult = initialRun.result;
+
           if (!('cancel' in interceptResult)) {
             // The interceptor's own object stays the candidate until the snapshot exists,
             // so a getter that throws while it is taken is still reported best-effort
-            // from what the interceptor returned. See `snapshotInterceptedRequest`.
-            initialRequestCandidate = interceptResult;
-            interceptResult = snapshotInterceptedRequest(interceptResult);
+            // from what the interceptor returned. See `snapshotInterceptedRequest`. With
+            // no interceptor registered there is no caller object to copy; see
+            // `_runInterceptors`.
+            if (initialRun.isIntercepted) {
+              initialRequestCandidate = interceptResult;
+              interceptResult = snapshotInterceptedRequest(interceptResult);
+            }
+
             initialRequestCandidate = interceptResult;
             this._assertRequestIsSupported(interceptResult);
             initialRequestURL = interceptResult.requestURL;
@@ -1092,7 +1099,7 @@ export class BaseHTTPClient {
             let redirectInterceptURL = redirectURL;
 
             try {
-              redirectIntercept = await this._runInterceptors(
+              ({ result: redirectIntercept } = await this._runInterceptors(
                 redirectRequest,
                 { type: 'redirect', ...hopInfo },
                 {
@@ -1101,9 +1108,12 @@ export class BaseHTTPClient {
                   requestID,
                   attemptNumber: lastAttemptNumber + 1,
                 },
-              );
+              ));
               if (!('cancel' in redirectIntercept)) {
-                // Snapshotted as the initial phase does; see there.
+                // Snapshotted as the initial phase does; see there. Even with no
+                // interceptor registered: this request's headers come from the adapter's
+                // record of what it sent, not from `mergeHeaders`, so the snapshot is
+                // still what puts them in the shape the other phases' requests have.
                 failedRedirectRequest = redirectIntercept;
                 redirectIntercept =
                   snapshotInterceptedRequest(redirectIntercept);
@@ -1849,7 +1859,7 @@ export class BaseHTTPClient {
         let failedRetryRequest: InterceptedRequest = baseRequest;
 
         try {
-          retryIntercept = await this._runInterceptors(
+          const retryRun = await this._runInterceptors(
             {
               ...baseRequest,
               headers: this._withInternalRequestHeaders(
@@ -1861,10 +1871,17 @@ export class BaseHTTPClient {
             retryPhase,
             { initialURL, redirectHistory, requestID, attemptNumber },
           );
+
+          retryIntercept = retryRun.result;
+
           if (!('cancel' in retryIntercept)) {
-            // Snapshotted as the initial phase in `_execute` does; see there.
-            failedRetryRequest = retryIntercept;
-            retryIntercept = snapshotInterceptedRequest(retryIntercept);
+            // Snapshotted as the initial phase in `_execute` does, and skipped on the
+            // same condition; see there.
+            if (retryRun.isIntercepted) {
+              failedRetryRequest = retryIntercept;
+              retryIntercept = snapshotInterceptedRequest(retryIntercept);
+            }
+
             failedRetryRequest = retryIntercept;
             this._assertRequestIsSupported(retryIntercept);
             this._assertInterceptorResolvedURL(retryIntercept.requestURL);
@@ -3145,18 +3162,39 @@ export class BaseHTTPClient {
 
   /**
    * Runs parent + own interceptor chains in order.
-   * Returns the (possibly modified) request, or an InterceptorCancel signal.
+   * Returns the (possibly modified) request, or an InterceptorCancel signal, and whether
+   * any interceptor was registered to touch it.
    *
    * Both chains are snapshotted before either runs: a parent interceptor that registers
    * one on the sub-client (or the reverse) affects the next dispatch, as documented,
    * rather than this one. The observer runners below do the same.
+   *
+   * With nothing registered on either, `result` is `request` itself and `isIntercepted` is
+   * `false`. The initial and retry phases then skip `snapshotInterceptedRequest`: the
+   * request they pass is one this client built, with its headers through `mergeHeaders`,
+   * which normalizes them exactly as the snapshot would, so there is nothing caller-owned
+   * to take a copy of. The redirect phase snapshots regardless; see there.
    */
   private async _runInterceptors(
     request: InterceptedRequest,
     phase: InterceptorPhase,
     context: RequestInterceptorContext,
-  ): Promise<InterceptedRequest | InterceptorCancel> {
-    const parentChain = this._parentClient?._requestInterceptors.snapshot();
+  ): Promise<{
+    result: InterceptedRequest | InterceptorCancel;
+    isIntercepted: boolean;
+  }> {
+    const parentManager = this._parentClient?._requestInterceptors;
+
+    // Decided from the same registrations the chains below are taken from: nothing
+    // between this check and the snapshots runs caller code.
+    if (
+      (parentManager === undefined || parentManager.isEmpty) &&
+      this._requestInterceptors.isEmpty
+    ) {
+      return { result: request, isIntercepted: false };
+    }
+
+    const parentChain = parentManager?.snapshot();
     const ownChain = this._requestInterceptors.snapshot();
     let current: InterceptedRequest | InterceptorCancel = request;
 
@@ -3164,11 +3202,14 @@ export class BaseHTTPClient {
       current = await parentChain(request, phase, context);
 
       if ('cancel' in current) {
-        return current;
+        return { result: current, isIntercepted: true };
       }
     }
 
-    return await ownChain(current, phase, context);
+    return {
+      result: await ownChain(current, phase, context),
+      isIntercepted: true,
+    };
   }
 
   /**
@@ -3545,11 +3586,13 @@ function readBestEffort<T>(read: () => T, fallback: T): T {
  * `https://evil.example/` afterwards attached `api.example`'s cookies to a request sent
  * to `evil.example`. Taken here, once, every later check and use sees the same values.
  *
- * Header values are converted to strings here, as dispatch would convert them, so a
- * value whose `toString` answers differently on each call is checked and sent as one
- * string. Names keep their case. Throws on a `requestURL` that is not a string or
- * `headers` that is not an object, and on any read or conversion that throws; each
- * phase reports that as the interceptor's failure.
+ * Header values are normalized here as `mergeHeaders` normalizes them for dispatch - a
+ * single value converted to a string, an array's elements each converted, and a
+ * one-element array collapsed to its string - so a value whose `toString` answers
+ * differently on each call is checked and sent as one string. Names keep their case.
+ * Throws on a `requestURL` that is not a string or `headers` that is not an object, and
+ * on any read or conversion that throws; each phase reports that as the interceptor's
+ * failure.
  */
 function snapshotInterceptedRequest(
   request: InterceptedRequest,
@@ -3781,16 +3824,13 @@ function getRequestBodySettled(
 ): Promise<Error | undefined> | undefined {
   const settled = readObjectMember(err, REQUEST_BODY_SETTLED_KEY);
 
-  // Adopted rather than handed over as it arrived, and the thenable check made there,
-  // guarded: `readObjectMember` guards the read of the tag, but an `isPromise` on what
-  // came back read `.then` on it unguarded, so a tag that throws on that read escaped.
-  // `isPromise` accepts any object with a callable `then`, and `HTTPAdapter` is a public
-  // extension point: a custom adapter that tags `Promise.reject(...)` would otherwise put
-  // a rejecting promise on `HTTPResponse.requestBodySettled`, which is documented never
-  // to reject - so a caller following the docs and awaiting it without a `try` would
-  // throw, and one that ignores the field would get an unhandled rejection against the
-  // response object. A rejection becomes the failure it is; `Promise.resolve` also
-  // flattens a foreign thenable.
+  // Adopted rather than handed over as it arrived. `readObjectMember` guards the read of
+  // the tag, and `adoptRequestBodySettled` classifies what came back from a single
+  // guarded read of its `then`: a tag whose `then` cannot be read, or that is not a
+  // thenable at all, is treated as absent. `HTTPAdapter` is a public extension point, so
+  // a custom adapter may tag `Promise.reject(...)` or a foreign thenable; either is
+  // adopted onto a promise this client owns, and a rejection becomes the failure it
+  // reports, because `HTTPResponse.requestBodySettled` is documented never to reject.
   return adoptRequestBodySettled(settled);
 }
 

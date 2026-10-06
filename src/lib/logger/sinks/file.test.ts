@@ -2177,59 +2177,67 @@ describe('FileSink - bounded queue', () => {
     // will not render either - and `processQueue` was still draining when it was queued,
     // so the outer loop picked it up, reported it, and the handler logged again. A drain
     // that never returned, with every later line stuck behind it.
-    let calls = 0;
-    let depth = 0;
-    let maxDepth = 0;
+    const captured = muteConsoleError();
+    try {
+      let calls = 0;
+      let depth = 0;
+      let maxDepth = 0;
 
-    const self: { sink?: FileSink } = {};
+      const self: { sink?: FileSink } = {};
 
-    const sink = new FileSink({
-      logDir: tmpDir.path,
-      basename: 'self-logging-format',
-      jsonFormat: true,
-      onError: (failure) => {
-        calls++;
-        depth++;
-        maxDepth = Math.max(maxDepth, depth);
+      const sink = new FileSink({
+        logDir: tmpDir.path,
+        basename: 'self-logging-format',
+        jsonFormat: true,
+        onError: (failure) => {
+          calls++;
+          depth++;
+          maxDepth = Math.max(maxDepth, depth);
 
-        self.sink?.write({
-          timestamp: Date.now(),
-          type: 'error',
-          template: 'the log sink failed',
-          message: UNRENDERABLE_MESSAGE,
-          redactedParams: { failure },
-        });
+          self.sink?.write({
+            timestamp: Date.now(),
+            type: 'error',
+            template: 'the log sink failed',
+            message: UNRENDERABLE_MESSAGE,
+            redactedParams: { failure },
+          });
 
-        depth--;
-      },
-    });
+          depth--;
+        },
+      });
 
-    self.sink = sink;
+      self.sink = sink;
 
-    await sink.flush();
+      await sink.flush();
 
-    sink.write({
-      timestamp: Date.now(),
-      type: 'info',
-      template: 'unrenderable',
-      message: UNRENDERABLE_MESSAGE,
-    });
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'unrenderable',
+        message: UNRENDERABLE_MESSAGE,
+      });
 
-    // Would never resolve before the guard.
-    await sink.flush();
+      // Would never resolve before the guard.
+      await sink.flush();
 
-    expect(maxDepth).toBe(1);
-    expect(calls).toBe(1);
+      expect(maxDepth).toBe(1);
+      expect(calls).toBe(1);
 
-    // Both lines counted: the one that started this and the handler's own, which was
-    // refused at the door rather than silently forgotten.
-    expect(sink.getHealth().droppedEntries).toBe(2);
+      // Both lines counted: the one that started this and the handler's own, which was
+      // refused at the door and said on the console rather than handed back to the handler.
+      expect(sink.getHealth().droppedEntries).toBe(2);
+      expect(
+        captured.filter((line) => line.includes('Failed to format log entry')),
+      ).toHaveLength(1);
 
-    // And the sink keeps writing.
-    sink.write(makeEntry('still-working'));
+      // And the sink keeps writing.
+      sink.write(makeEntry('still-working'));
 
-    await sink.flush();
-    await sink.close();
+      await sink.flush();
+      await sink.close();
+    } finally {
+      restoreConsoleError();
+    }
 
     const files = await fsPromises.readdir(tmpDir.path);
     const logFile = files.find((name) =>
@@ -2262,57 +2270,66 @@ describe('FileSink - async self-logging onError', () => {
     // A flag cleared when the handler *returned* was cleared at its first `await`, so a
     // handler that logged the failure back after awaiting found no guard, and the chain
     // ran on: one report per turn of the event loop, for as long as the process lived.
-    let calls = 0;
+    const captured = muteConsoleError();
+    try {
+      let calls = 0;
 
-    const self: { sink?: FileSink } = {};
+      const self: { sink?: FileSink } = {};
 
-    const sink = new FileSink({
-      logDir: tmpDir.path,
-      basename: 'async-self-logging',
-      jsonFormat: true,
-      onError: async (failure) => {
-        calls++;
+      const sink = new FileSink({
+        logDir: tmpDir.path,
+        basename: 'async-self-logging',
+        jsonFormat: true,
+        onError: async (failure) => {
+          calls++;
 
-        await new Promise((resolve) => setTimeout(resolve, 5));
+          await new Promise((resolve) => setTimeout(resolve, 5));
 
-        self.sink?.write({
-          timestamp: Date.now(),
-          type: 'error',
-          template: 'the log sink failed',
-          message: UNRENDERABLE_MESSAGE,
-          redactedParams: { failure },
-        });
-      },
-    });
+          self.sink?.write({
+            timestamp: Date.now(),
+            type: 'error',
+            template: 'the log sink failed',
+            message: UNRENDERABLE_MESSAGE,
+            redactedParams: { failure },
+          });
+        },
+      });
 
-    self.sink = sink;
+      self.sink = sink;
 
-    await sink.flush();
+      await sink.flush();
 
-    sink.write({
-      timestamp: Date.now(),
-      type: 'info',
-      template: 'unrenderable',
-      message: UNRENDERABLE_MESSAGE,
-    });
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'unrenderable',
+        message: UNRENDERABLE_MESSAGE,
+      });
 
-    // Long enough for several rounds of the loop this used to be.
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    await sink.flush();
+      // Long enough for several rounds of the loop this used to be.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await sink.flush();
 
-    // One deferred report is allowed after the async handler settles; the line that
-    // handler logs is reported once, and its handler's own line is the recursion fuse.
-    expect(calls).toBe(2);
-    expect(sink.getHealth().droppedEntries).toBe(3);
-    // All three were format losses, and the breakdown says so.
-    expect(sink.getHealth().droppedByKind).toEqual({
-      queue_full: 0,
-      write: 0,
-      format: 3,
-      close: 0,
-    });
+      // One deferred report is allowed after the async handler settles; the line that
+      // handler logs is reported once, and its handler's own line is the recursion fuse:
+      // reported on the console, never to the handler.
+      expect(calls).toBe(2);
+      expect(sink.getHealth().droppedEntries).toBe(3);
+      expect(
+        captured.filter((line) => line.includes('Failed to format log entry')),
+      ).toHaveLength(1);
+      // All three were format losses, and the breakdown says so.
+      expect(sink.getHealth().droppedByKind).toEqual({
+        queue_full: 0,
+        write: 0,
+        format: 3,
+        close: 0,
+      });
 
-    await sink.close();
+      await sink.close();
+    } finally {
+      restoreConsoleError();
+    }
   });
 
   test('reports one concurrent format failure after the active handler settles', async () => {
@@ -2362,6 +2379,64 @@ describe('FileSink - async self-logging onError', () => {
     expect(sink.getHealth().droppedByKind.format).toBe(2);
 
     await sink.close();
+  });
+
+  test('a format failure the guard cannot hold for the handler goes to the console', async () => {
+    // One report active and the one deferred slot taken: a third failure had nowhere to
+    // go and was dropped without a word - counted, but said nowhere. `ArraySink` sends
+    // what its guard cannot hold to the console, and so does this.
+    const captured = muteConsoleError();
+    let releaseFirst!: () => void;
+    const firstPending = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const templates: string[] = [];
+
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'format-overflow',
+      jsonFormat: true,
+      onError: (failure) => {
+        if (failure.kind !== 'format' || failure.entry === undefined) {
+          return;
+        }
+
+        templates.push(failure.entry.template);
+
+        return templates.length === 1 ? firstPending : undefined;
+      },
+    });
+
+    try {
+      await sink.flush();
+
+      for (const template of ['first', 'second', 'third']) {
+        sink.write({
+          timestamp: Date.now(),
+          type: 'info',
+          template,
+          message: UNRENDERABLE_MESSAGE,
+        });
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(templates).toEqual(['first']);
+      expect(
+        captured.filter((line) => line.includes('Failed to format log entry')),
+      ).toHaveLength(1);
+
+      releaseFirst();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // The held one reaches the handler; the overflow already went to the console.
+      expect(templates).toEqual(['first', 'second']);
+      expect(sink.getHealth().droppedByKind.format).toBe(3);
+
+      await sink.close();
+    } finally {
+      restoreConsoleError();
+    }
   });
 
   test('droppedByKind splits the total by reason and always sums to it', async () => {
@@ -2531,71 +2606,80 @@ describe('FileSink - jsonFormat renders what JSON.stringify refuses', () => {
 
   test('a self-logging onError cannot recurse through the fallback report', async () => {
     // The handler logs the failure back, carrying the same throwing getter. Its line
-    // renders - marker and all - and is queued; only the nested report is skipped.
-    let calls = 0;
-    let maxDepth = 0;
-    let depth = 0;
+    // renders - marker and all - and is queued; only the nested report leaves the
+    // handler, for the console.
+    const captured = muteConsoleError();
+    try {
+      let calls = 0;
+      let maxDepth = 0;
+      let depth = 0;
 
-    const self: { sink?: FileSink } = {};
+      const self: { sink?: FileSink } = {};
 
-    const hostile = {
-      get boom(): never {
-        throw new Error('getter exploded');
-      },
-    };
+      const hostile = {
+        get boom(): never {
+          throw new Error('getter exploded');
+        },
+      };
 
-    const sink = new FileSink({
-      logDir: tmpDir.path,
-      basename: 'json-fallback-self-log',
-      jsonFormat: true,
-      onError: () => {
-        calls++;
-        depth++;
-        maxDepth = Math.max(maxDepth, depth);
+      const sink = new FileSink({
+        logDir: tmpDir.path,
+        basename: 'json-fallback-self-log',
+        jsonFormat: true,
+        onError: () => {
+          calls++;
+          depth++;
+          maxDepth = Math.max(maxDepth, depth);
 
-        self.sink?.write({
-          timestamp: Date.now(),
-          type: 'error',
-          template: 'the log sink failed',
-          message: 'the log sink failed',
-          redactedParams: { hostile },
-        });
+          self.sink?.write({
+            timestamp: Date.now(),
+            type: 'error',
+            template: 'the log sink failed',
+            message: 'the log sink failed',
+            redactedParams: { hostile },
+          });
 
-        depth--;
-      },
-    });
+          depth--;
+        },
+      });
 
-    self.sink = sink;
+      self.sink = sink;
 
-    await sink.flush();
+      await sink.flush();
 
-    sink.write({
-      timestamp: Date.now(),
-      type: 'info',
-      template: 'first',
-      message: 'first',
-      redactedParams: { hostile },
-    });
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'first',
+        message: 'first',
+        redactedParams: { hostile },
+      });
 
-    await sink.flush();
-    await sink.close();
+      await sink.flush();
+      await sink.close();
 
-    expect(calls).toBe(1);
-    expect(maxDepth).toBe(1);
+      expect(calls).toBe(1);
+      expect(maxDepth).toBe(1);
+      expect(
+        captured.filter((line) => line.includes('Failed to render a value')),
+      ).toHaveLength(1);
 
-    const files = await fsPromises.readdir(tmpDir.path);
-    const logFile = files.find((name) =>
-      name.startsWith('json-fallback-self-log'),
-    );
-    const contents = await fsPromises.readFile(
-      `${tmpDir.path}/${logFile ?? ''}`,
-      'utf8',
-    );
+      const files = await fsPromises.readdir(tmpDir.path);
+      const logFile = files.find((name) =>
+        name.startsWith('json-fallback-self-log'),
+      );
+      const contents = await fsPromises.readFile(
+        `${tmpDir.path}/${logFile ?? ''}`,
+        'utf8',
+      );
 
-    // Both lines written, the handler's included.
-    expect(contents).toContain('"message":"first"');
-    expect(contents).toContain('"message":"the log sink failed"');
-    expect(sink.getHealth().droppedEntries).toBe(0);
+      // Both lines written, the handler's included.
+      expect(contents).toContain('"message":"first"');
+      expect(contents).toContain('"message":"the log sink failed"');
+      expect(sink.getHealth().droppedEntries).toBe(0);
+    } finally {
+      restoreConsoleError();
+    }
   });
 });
 
@@ -3317,18 +3401,74 @@ describe('FileSink - entries written during close', () => {
     await sink.close();
 
     const droppedAtClose = sink.getHealth().droppedEntries;
+    const reportedAtClose = failures.length;
 
     // The destination answers after the close has already resolved.
     settleWrite?.(new Error('stalled write failed after the close'));
 
     await new Promise((resolve) => setTimeout(resolve, 200));
 
-    // Nothing waiting on a sink nothing will drain, and the line counted rather than
-    // retried into a queue that no longer exists.
+    // Nothing waiting on a sink nothing will drain, and the line not retried into a queue
+    // that no longer exists. Nor reported or counted a second time: the close already
+    // answered for it as `'close'` / `'no_entry'`.
     expect(sink.getHealth().queueSize).toBe(0);
-    expect(sink.getHealth().droppedEntries).toBe(droppedAtClose + 1);
+    expect(sink.getHealth().droppedEntries).toBe(droppedAtClose);
+    expect(failures).toHaveLength(reportedAtClose);
     expect(failures.some((failure) => failure.disposition === 'retrying')).toBe(
       false,
+    );
+  });
+
+  test('a write close() gave up on before it reached the stream is not reported again when its pass resumes', async () => {
+    // The pass `close()` abandons need not be in a write callback: it can be suspended in
+    // `rotateIfNeeded`, `setupLogFile` or a rotation's flush. Resumed after the close
+    // resolved, it meets a `closed` check in `writeEntry` and throws - and that throw was
+    // reported as `'close'` / `'lost'` and counted, after the close had already reported
+    // the same entry as `'close'` / `'no_entry'` and promised it was not counted.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'inflight-resumed',
+      closeTimeoutMS: 150,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    await sink.flush();
+
+    const held = Promise.withResolvers<void>();
+    const internals = sink as unknown as {
+      rotateIfNeeded: () => Promise<void>;
+    };
+
+    internals.rotateIfNeeded = () => held.promise;
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: 'held',
+      message: 'held',
+    });
+
+    await sink.close();
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.kind).toBe('close');
+    expect(failures[0]?.disposition).toBe('no_entry');
+    expect(failures[0]?.error.message).toMatch(/write still in flight/i);
+
+    // The pass resumes into a closed sink.
+    held.resolve();
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(failures).toHaveLength(1);
+    expect(sink.getHealth().droppedEntries).toBe(0);
+    expect(sink.getHealth().droppedByKind.close).toBe(0);
+    expect(sink.getHealth().lastError?.message).toMatch(
+      /write still in flight/i,
     );
   });
 

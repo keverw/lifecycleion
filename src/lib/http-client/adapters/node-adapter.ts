@@ -153,13 +153,6 @@ interface PendingWritableErrorEntry {
 }
 
 /**
- * The absorber currently attached to a writable, if any.
- *
- * Module-level and keyed on the writable, because `streamResponse` may hand the same sink
- * to several concurrent requests: a per-request absorber let a dozen simultaneous write
- * failures attach a dozen listeners inside one turn. See `absorbPendingWritableError`.
- */
-/**
  * Writable errors a request has already handed to its caller, so the absorber does not
  * report them a second time.
  *
@@ -256,6 +249,13 @@ function reportUnclaimedWritableError(error: unknown): void {
   }
 }
 
+/**
+ * The absorber currently attached to a writable, if any.
+ *
+ * Module-level and keyed on the writable, because `streamResponse` may hand the same sink
+ * to several concurrent requests: a per-request absorber let a dozen simultaneous write
+ * failures attach a dozen listeners inside one turn. See `absorbPendingWritableError`.
+ */
 const pendingWritableErrorAbsorbers = new WeakMap<
   WritableLike,
   PendingWritableErrorEntry
@@ -993,18 +993,48 @@ export class NodeAdapter implements HTTPAdapter {
         onFailure: (error: unknown) => void,
       ): void => {
         observeRejection(task, (error: unknown) => {
+          // Taken before the handler runs, because the handler may answer the request
+          // itself before it throws, and `reject` is first-call-wins: which of the two
+          // failures reached the caller decides what is left to report.
+          const wasAnswered = didSettleRequest;
+
           try {
             onFailure(error);
           } catch (error_) {
+            // Recovery also reads caller-owned values.
             const failure = normalizeError(error_);
-            // Recovery also reads caller-owned values. Reject before cleanup or
-            // reporting can throw; the outer rejection path settles the upload.
-            reject(failure);
-            try {
-              destroyRequestQuietly(req);
-            } catch {
-              // A patched request can even refuse its destroyed-state read.
+
+            if (!wasAnswered) {
+              // The request was still open when the task failed, so it is failing now and
+              // is torn down as the handler meant to. Answered first, before a teardown
+              // that can throw.
+              const didHandlerAnswer = didSettleRequest;
+
+              failRequest(failure);
+
+              try {
+                destroyRequestQuietly(req);
+              } catch {
+                // A patched request can even refuse its destroyed-state read.
+              }
+
+              // Delivered: the caller has the recovery failure, so it is not reported on
+              // the host channel as well. Only when the handler had already answered with
+              // the task's own error did `failure` go nowhere, and only then is it said.
+              if (didHandlerAnswer) {
+                reportCallbackError(
+                  'NodeAdapter task failure handler',
+                  failure,
+                );
+              }
+
+              return;
             }
+
+            // Already answered - an early-ack response resolved while the body was still
+            // going out, or a response delivered before its task's tail threw - so a
+            // reject would be a no-op and the host channel is the only place either
+            // failure can go.
             reportCallbackError(
               'NodeAdapter task failure handler',
               new AggregateError(
@@ -1012,6 +1042,19 @@ export class NodeAdapter implements HTTPAdapter {
                 'Task failed and its recovery handler also failed',
               ),
             );
+
+            // And no blanket teardown: an answered request may still be uploading to a
+            // server that is reading it, or streaming its response in, and destroying it
+            // here cut both short. Once a response has arrived its `'close'` handler owns
+            // that decision, and hands a writer still running to the stall watchdog. A
+            // request answered without one has nothing left in flight to protect.
+            if (!didReceiveResponse) {
+              try {
+                destroyRequestQuietly(req);
+              } catch {
+                // A patched request can even refuse its destroyed-state read.
+              }
+            }
           }
         });
       };
@@ -1312,15 +1355,18 @@ export class NodeAdapter implements HTTPAdapter {
               // rather than let through to `streamResponseBody`: there the first use of it
               // threw inside a promise executor, and the failure reached the caller as a
               // retryable error - the factory called again on every attempt, each leaving
-              // its connection open behind it.
+              // its connection open behind it. The same goes for an object that is neither
+              // a cancel object nor something with callable `write` and `end` - `{}`, or
+              // `{ cancel: false }` - which got as far as the first `write` and settled as a
+              // `stream_write_error` on a 200, blaming the sink for the factory's mistake.
               if (
                 writable !== null &&
-                typeof writable !== 'object' &&
-                typeof writable !== 'function'
+                !isStreamResponseCancel(writable) &&
+                !isWritableShaped(writable)
               ) {
                 throw new TypeError(
                   'streamResponse factory must return a writable, null, or ' +
-                    `{ cancel: true }, but returned ${typeof writable}`,
+                    `{ cancel: true }, but returned ${describeFactoryReturn(writable)}`,
                 );
               }
             } catch (error) {
@@ -1792,7 +1838,29 @@ export class NodeAdapter implements HTTPAdapter {
         // host's global `'error'` channel for a teardown that was asked for. The
         // outcome is settled above either way; `failRequest` is first-call-wins, so
         // the abort listener's own answer stands where it got there first.
-        if (request.signal?.aborted) {
+        //
+        // Read guarded, as `req.on('error')` reads it: the signal is the caller's, and
+        // one that is not a native `AbortSignal` can refuse the read. Before a response,
+        // the refusal is the failure, exactly as it is there. After one, it is read as
+        // "not aborted": the response path is answering, a real abort still reaches the
+        // request through its own listener, and the write failure is reported below
+        // rather than escaping to `observeTaskFailure`.
+        let isAborted: boolean;
+
+        try {
+          isAborted = request.signal?.aborted === true;
+        } catch (readError) {
+          if (!didReceiveResponse) {
+            destroyRequestQuietly(req);
+            failRequest(normalizeError(readError));
+
+            return;
+          }
+
+          isAborted = false;
+        }
+
+        if (isAborted) {
           destroyRequestQuietly(req);
 
           const abortErr = new Error('Request aborted');
@@ -3196,4 +3264,26 @@ function markResponseStreamAbortError(
 
 function isStreamResponseCancel(value: unknown): value is StreamResponseCancel {
   return readObjectMember(value, 'cancel') === true;
+}
+
+/**
+ * Whether a `streamResponse` factory's return can be streamed into: `write` and `end` are
+ * the two members the adapter cannot do without. The rest of `WritableLike` is used
+ * guardedly - a writable whose `on` throws only loses that channel - so it is not asked
+ * for here. Read guardedly too, so a member whose getter throws counts as absent.
+ */
+function isWritableShaped(value: unknown): value is WritableLike {
+  return (
+    typeof readObjectMember(value, 'write') === 'function' &&
+    typeof readObjectMember(value, 'end') === 'function'
+  );
+}
+
+/** Names what a refused `streamResponse` factory return was, for the setup error. */
+function describeFactoryReturn(value: unknown): string {
+  if (typeof value === 'object' || typeof value === 'function') {
+    return `${typeof value} without callable write() and end()`;
+  }
+
+  return typeof value;
 }

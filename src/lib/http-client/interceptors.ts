@@ -46,6 +46,11 @@ export class RequestInterceptorManager {
     };
   }
 
+  /** Whether nothing is registered, so a chain taken now would hand the request back. */
+  public get isEmpty(): boolean {
+    return this.interceptors.length === 0;
+  }
+
   /**
    * Copy the current registrations into a chain that later `add()` and removal calls do
    * not reach. A client takes its parent's snapshot and its own together when a dispatch

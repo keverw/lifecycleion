@@ -280,6 +280,40 @@ test('adoptResult rejects a proxy with an own bound then', async () => {
   expect(failure).toBeInstanceOf(TypeError);
 });
 
+for (const entry of ['adoptPromise', 'adoptResult'] as const) {
+  test(`${entry} classifies an own-then proxy by one answer from its getPrototypeOf trap`, async () => {
+    // Claims `Promise.prototype` once, then `null`: a classification that asked twice
+    // could call it a promise in one place and a plain thenable in the next, and follow
+    // the own `then` it refuses for anything on the promise chain.
+    let thenCalls = 0;
+    let prototypeReads = 0;
+    const proxy = new Proxy(
+      {
+        then(resolve: (value: unknown) => void): void {
+          thenCalls++;
+          resolve('followed');
+        },
+      },
+      {
+        getPrototypeOf: () =>
+          ++prototypeReads === 1 ? Promise.prototype : null,
+      },
+    );
+
+    const adopted =
+      entry === 'adoptPromise'
+        ? adoptPromise(proxy)
+        : (adoptResult(proxy) as Promise<unknown>);
+    const failure = await adopted.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect(failure).toBeInstanceOf(TypeError);
+    expect(thenCalls).toBe(0);
+    expect(prototypeReads).toBe(1);
+  });
+}
+
 test('a foreign promise proxy with an own bound then follows the thenable fallback', async () => {
   const { runInNewContext } = await import('node:vm');
   const target = runInNewContext('Promise.resolve(42)') as Promise<number>;

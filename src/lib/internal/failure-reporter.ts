@@ -3,6 +3,7 @@ import { adoptResult, UnreadableReturn } from './adopt-promise';
 import { reportToConsole } from './report-to-console';
 import { reportToHost } from './report-to-host';
 import { observePromise, observeRejection } from './intrinsics';
+import { resolveName } from './render-name';
 
 /**
  * A caller's handler for one kind of failure, and the reporter that feeds it.
@@ -49,12 +50,18 @@ export type ReportFailure = (error: unknown, subject: string) => void;
  *               slower than the timer resume the self-logging loop the guard stops.
  * @param options.handlerName Identifies the handler alongside the original failure when its
  *               return cannot be adopted. Delivery cannot be inferred from a return:
- *               lazy handlers may not have done any reporting yet.
+ *               lazy handlers may not have done any reporting yet. A string, or a
+ *               function building one, called only on that path - so a handler that
+ *               behaves never has its name built. A builder that throws, or a name that
+ *               cannot be rendered, is reported as `<unnamed callback>`.
  */
 export function reportThroughHandler(
   invoke: (() => unknown) | undefined,
   line: () => string,
-  options: { onSettled?: () => void; handlerName?: string } = {},
+  options: {
+    onSettled?: () => void;
+    handlerName?: string | (() => string);
+  } = {},
 ): void {
   const { onSettled, handlerName } = options;
   // The line is the caller's to build, and may throw: rendered through this, a report
@@ -126,7 +133,7 @@ export function reportThroughHandler(
       pending.report(
         handlerName === undefined
           ? 'A failure handler'
-          : `Failure handler (${handlerName})`,
+          : `Failure handler (${resolveName(handlerName, UNNAMED_HANDLER)})`,
         safeLine(),
       );
       settle();
@@ -155,6 +162,9 @@ export function reportThroughHandler(
   reportToConsole(safeLine());
   settle();
 }
+
+/** What a `handlerName` that cannot be built or rendered is reported as. */
+const UNNAMED_HANDLER = '<unnamed callback>';
 
 /**
  * Build a reporter for one operation: a handler, then the console, then nothing.

@@ -23,8 +23,8 @@ import {
   DEFAULT_CLOSE_TIMEOUT_MS,
   resolveMaxQueueSize,
   resolveMaxRetries,
-  resolveTimeoutMS,
 } from './internal/queue-policy';
+import { resolveTimeoutMS } from '../../internal/timer-limits';
 import {
   createDroppedEntryCounts,
   type DroppedEntryCounts,
@@ -33,6 +33,7 @@ import {
   type SinkFailureDisposition,
   type SinkFailureKind,
 } from './internal/sink-failure';
+import { FormatReportScheduler } from './internal/format-report-scheduler';
 
 export type {
   SinkErrorHandler,
@@ -577,15 +578,13 @@ export class NamedPipeSink implements LogSink {
   private isOpening = false;
 
   /**
-   * Set while a `formatter` failure is being reported, so that report cannot re-enter it.
-   *
-   * See the guard in {@link formatEntry}. A nested format failure is not lost output: the
-   * line still renders through the default format and still goes out.
+   * The `'format'` reports in flight, so a report cannot re-enter the failure that raised
+   * it. See the guard in {@link formatEntry}, and {@link FormatReportScheduler} for what
+   * is delivered to the handler, what waits, and what goes to the console instead. A
+   * nested format failure is not lost output: the line still renders through the default
+   * format and still goes out.
    */
-  private formatReportActive = false;
-  private invokingFormatReport = false;
-  private deliveringDeferredFormatReport = false;
-  private deferredFormatReport?: (onReported: () => void) => void;
+  private readonly formatReports = new FormatReportScheduler();
 
   /**
    * Whether the first entry refused because the sink is closing has been reported.
@@ -2390,22 +2389,19 @@ export class NamedPipeSink implements LogSink {
       // `onError` that logs through this sink re-entered `write()`, failed to render its
       // own line for the same reason, and reached this branch again: a synchronous
       // recursion that ended in a stack overflow. The nested line is counted above and
-      // left unreported, which is where the chain stops.
-      this.scheduleFormatReport((onReported) => {
-        this.handleError(
-          'format',
-          new Error('Failed to format a log entry; no line was written', {
-            cause: toError(queued.formatError),
-          }),
-          {
-            attempt: queued.attempts + 1,
-            // No line was produced, and rendering is never repeated, so this one is gone.
-            disposition: 'lost',
-            entry: queued.entry,
-            onReported,
-          },
-        );
-      });
+      // reported on the console rather than to the handler, which is where the chain
+      // stops.
+      this.scheduleFormatReport(
+        new Error('Failed to format a log entry; no line was written', {
+          cause: toError(queued.formatError),
+        }),
+        {
+          attempt: queued.attempts + 1,
+          // No line was produced, and rendering is never repeated, so this one is gone.
+          disposition: 'lost',
+          entry: queued.entry,
+        },
+      );
 
       return;
     }
@@ -2559,23 +2555,16 @@ export class NamedPipeSink implements LogSink {
         // again, runs the same throwing `formatter` again, and reports again, without
         // bound. The queue short-circuit that stops the no-pipe path does not help here:
         // the render happens before anything is queued.
-        // Held until the handler settles, not until it returns: an `async` handler that
-        // logged after its first `await` found a flag already cleared. A count, since a
-        // second report can start while the first is still pending.
-        this.scheduleFormatReport((onReported) => {
-          this.handleError(
-            'format',
-            new Error(
-              'NamedPipeSink formatter failed; the default format was used',
-              { cause: toError(error) },
-            ),
-            {
-              disposition: 'fallback',
-              entry,
-              onReported,
-            },
-          );
-        });
+        // Held until the handler settles, not until it returns: an `async` handler logs
+        // after its first `await`, past a guard cleared on return. See
+        // `FormatReportScheduler` for what a second report meanwhile does.
+        this.scheduleFormatReport(
+          new Error(
+            'NamedPipeSink formatter failed; the default format was used',
+            { cause: toError(error) },
+          ),
+          { disposition: 'fallback', entry },
+        );
       }
     }
 
@@ -2587,20 +2576,13 @@ export class NamedPipeSink implements LogSink {
       // as `'format'`/`'fallback'` - the line is still written. Guarded like the
       // throwing-formatter report above, and for the same reason.
       formatted = renderJSONLine(entry, (error) => {
-        this.scheduleFormatReport((onReported) => {
-          this.handleError(
-            'format',
-            new Error(
-              'Failed to render a value in the log entry; a marker was written in its place',
-              { cause: toError(error) },
-            ),
-            {
-              disposition: 'fallback',
-              entry,
-              onReported,
-            },
-          );
-        });
+        this.scheduleFormatReport(
+          new Error(
+            'Failed to render a value in the log entry; a marker was written in its place',
+            { cause: toError(error) },
+          ),
+          { disposition: 'fallback', entry },
+        );
       });
     } else {
       let text = '';
@@ -2635,12 +2617,15 @@ export class NamedPipeSink implements LogSink {
    * arrives, through the same re-entry guard. A value whose `then` cannot be read is
    * thrown with the read's own failure.
    *
-   * Unless the promise was born while a format report was active. Then it came from a line
-   * written while that report was being delivered - an `onError` logging the failure back
-   * through this sink - and its rejection arrived after the guard came down, so it started
-   * the next report, whose line returned the next promise: one `onError` call per
-   * microtask without end. Such a rejection is dropped, as the immediate failure of that
-   * same nested line already was; the line itself still went out in the default format.
+   * Where that rejection goes is decided when the promise is born, not when it rejects -
+   * the rule `ArraySink` applies to its transformer. A promise returned while a report is
+   * being delivered came from a line that report wrote - an `onError` logging the failure
+   * back through this sink - and handing its rejection to the handler fed it the next one:
+   * the rejection arrived after the guard came down, started the next report, whose line
+   * returned the next promise, one `onError` call per microtask without end. Born during a
+   * handler's report, the rejection goes to the console instead; born during a console
+   * report, it is dropped, as the immediate failure of that same nested line already was.
+   * The line itself still went out in the default format either way.
    */
   private refuseDeferredFormat(custom: unknown, entry: LogEntry): void {
     const pending = adoptResult(custom);
@@ -2650,26 +2635,31 @@ export class NamedPipeSink implements LogSink {
     }
 
     if (pending !== undefined) {
-      const wasBornDuringReport = this.formatReportActive;
+      const wasBornDuringConsoleReport =
+        this.formatReports.isConsoleReportActive;
+      const wasBornDuringReport = this.formatReports.isReportActive;
 
       observeRejection(pending, (error: unknown) => {
-        if (wasBornDuringReport) {
+        if (wasBornDuringConsoleReport) {
           return;
         }
 
-        this.scheduleFormatReport((onReported) => {
-          this.handleError(
-            'format',
-            new Error(
-              'NamedPipeSink formatter returned a promise that rejected; the default format was used',
-              { cause: toError(error) },
-            ),
-            {
-              disposition: 'fallback',
-              entry,
-              onReported,
-            },
+        const failure = new Error(
+          'NamedPipeSink formatter returned a promise that rejected; the default format was used',
+          { cause: toError(error) },
+        );
+
+        if (wasBornDuringReport) {
+          this.formatReports.reportToConsole(() =>
+            this.describeFailure('format', failure),
           );
+
+          return;
+        }
+
+        this.scheduleFormatReport(failure, {
+          disposition: 'fallback',
+          entry,
         });
       });
 
@@ -2679,50 +2669,24 @@ export class NamedPipeSink implements LogSink {
     }
   }
 
-  /** Deliver one format report now and retain at most one that arrives while it settles. */
-  private scheduleFormatReport(report: (onReported: () => void) => void): void {
-    if (this.formatReportActive) {
-      if (
-        !this.invokingFormatReport &&
-        !this.deliveringDeferredFormatReport &&
-        this.deferredFormatReport === undefined
-      ) {
-        this.deferredFormatReport = report;
-      }
-
-      return;
-    }
-
-    this.startFormatReport(report, false);
-  }
-
-  private startFormatReport(
-    report: (onReported: () => void) => void,
-    isDeferred: boolean,
+  /**
+   * Report a `'format'` failure through {@link formatReports}: to `onError` when the guard
+   * allows, otherwise held or sent to the console. See {@link FormatReportScheduler}.
+   */
+  private scheduleFormatReport(
+    failure: Error,
+    options: {
+      attempt?: number;
+      disposition: SinkFailureDisposition;
+      entry: LogEntry;
+    },
   ): void {
-    this.formatReportActive = true;
-    this.deliveringDeferredFormatReport = isDeferred;
-
-    this.invokingFormatReport = true;
-
-    report(() => {
-      this.formatReportActive = false;
-      this.deliveringDeferredFormatReport = false;
-
-      if (isDeferred) {
-        return;
-      }
-
-      const pending = this.deferredFormatReport;
-
-      this.deferredFormatReport = undefined;
-
-      if (pending !== undefined) {
-        this.startFormatReport(pending, true);
-      }
-    });
-
-    this.invokingFormatReport = false;
+    this.formatReports.schedule(
+      (onReported) => {
+        this.handleError('format', failure, { ...options, onReported });
+      },
+      () => this.describeFailure('format', failure),
+    );
   }
 
   /**
@@ -2776,9 +2740,14 @@ export class NamedPipeSink implements LogSink {
               attempt: options?.attempt,
               disposition: options?.disposition ?? 'no_entry',
             }),
-      () => `NamedPipeSink error (${kind}): ${describeError(failure)}`,
+      () => this.describeFailure(kind, failure),
       { onSettled: options?.onReported, handlerName: 'NamedPipeSink onError' },
     );
+  }
+
+  /** The console line for a failure, the one {@link handleError} falls back to. */
+  private describeFailure(kind: SinkFailureKind, failure: Error): string {
+    return `NamedPipeSink error (${kind}): ${describeError(failure)}`;
   }
 
   /**

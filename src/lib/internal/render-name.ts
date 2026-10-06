@@ -20,3 +20,21 @@ export function renderName(name: unknown, fallback: string): string {
     return fallback;
   }
 }
+
+/**
+ * {@link renderName} for a name that may be supplied as a function building it, so a
+ * caller can leave the work of building a name to the failure path that needs one. A
+ * function is called here, once; one that throws answers `fallback`, as does whatever it
+ * returns that cannot be rendered.
+ */
+export function resolveName(name: unknown, fallback: string): string {
+  if (typeof name !== 'function') {
+    return renderName(name, fallback);
+  }
+
+  try {
+    return renderName((name as () => unknown)(), fallback);
+  } catch {
+    return fallback;
+  }
+}

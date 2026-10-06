@@ -7,6 +7,7 @@ import {
   ComponentStartTimeoutError,
   StartupInterruptedByShutdownError,
 } from './errors';
+import type { LifecycleManager } from './lifecycle-manager';
 import type { LifecycleManagerOptions } from './types';
 import { claimReports, deferred, Plain, setup } from './test-helpers';
 
@@ -530,4 +531,53 @@ test("a pass begun by the start's own starting listener still aborts it", async 
     StartupInterruptedByShutdownError,
   );
   expect(await shutdown).toMatchObject({ success: true });
+});
+
+// The same late cue, for a `start()` that settled synchronously: by the time the cue is
+// delivered it has nothing left to give up, and a settled start is left alone.
+test('a start that settled synchronously is not aborted by a pass its starting listener began', async () => {
+  const { logger, manager } = setup();
+  const worker = new Starts(logger, 'worker');
+  worker.onStart = () => undefined;
+  await manager.registerComponent(worker);
+
+  let shutdown: Promise<unknown> | undefined;
+  manager.once('component:starting', () => {
+    shutdown = manager.stopAllComponents({ abortPendingStarts: true });
+  });
+
+  const result = await manager.startComponent('worker');
+  expect(result.code).toBe('shutdown_in_progress');
+  expect(worker.signals[0]?.aborted).toBe(false);
+  expect(await shutdown).toMatchObject({ success: true });
+  expect(worker.order).toEqual(['stop']);
+});
+
+// Requested through the component's own `lifecycle` handle from its starting listener,
+// the pass counts the start as its requester - as one requested from `start()` - and
+// leaves it alone, cue included.
+test("a pass the start's starting listener requests through its lifecycle handle does not abort it", async () => {
+  const { logger, manager } = setup();
+  const worker = new Starts(logger, 'worker');
+  await manager.registerComponent(worker);
+
+  let shutdown: Promise<unknown> | undefined;
+  manager.once('component:starting', () => {
+    shutdown = (
+      worker as unknown as {
+        lifecycle: LifecycleManager;
+      }
+    ).lifecycle.stopAllComponents({ abortPendingStarts: true });
+  });
+
+  const starting = manager.startComponent('worker');
+  await sleep(10);
+  expect(shutdown).toBeDefined();
+  expect(worker.signals[0]?.aborted).toBe(false);
+
+  worker.gate.resolve();
+  expect((await starting).code).toBe('shutdown_in_progress');
+  await shutdown;
+  expect(worker.signals[0]?.aborted).toBe(false);
+  expect(manager.getRunningComponentNames()).toEqual([]);
 });

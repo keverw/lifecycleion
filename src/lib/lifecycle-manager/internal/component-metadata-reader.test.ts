@@ -228,3 +228,36 @@ test('report marks are set before synchronous error listeners reenter a metadata
     }
   });
 });
+
+test('a dependency report whose name lookup throws is made unlabelled and unmarked, without escaping', () => {
+  collectReports((reports) => {
+    const failure = new Error('dependencies failed');
+    const component = componentWithReads(() => {
+      throw failure;
+    });
+    let canName = false;
+    const reader = new ComponentMetadataReader(() => {
+      if (!canName) {
+        throw new Error('getName failed');
+      }
+      return 'recorded';
+    });
+
+    expect(() =>
+      reader.reportDependencyReadFailureOnce(component, 'shutdown', failure),
+    ).not.toThrow();
+    expect(reports).toHaveLength(1);
+    expect(reports[0].message).toContain(
+      'shutdown dependencies of <unnamed component>',
+    );
+    expect(reports[0].cause).toBe(failure);
+    expect(reader.reportMarks(component).dependencies).toBe(false);
+
+    // Unmarked: a later read that can name the component makes the one labelled report.
+    canName = true;
+    reader.reportDependencyReadFailureOnce(component, 'shutdown', failure);
+    reader.reportDependencyReadFailureOnce(component, 'shutdown', failure);
+    expect(reports).toHaveLength(2);
+    expect(reports[1].message).toContain('shutdown dependencies of recorded');
+  });
+});

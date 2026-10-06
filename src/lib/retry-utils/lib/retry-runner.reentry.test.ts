@@ -187,6 +187,45 @@ test('a terminal attempt listener cannot replace the operation before its result
   });
 });
 
+test('attempt-handled listeners for a forced cancellation cannot replace the operation', async () => {
+  let invoked = 0;
+  const runner = new RetryRunner(policy, () => {
+    invoked++;
+  });
+  runner.overrideGraceCancelPeriodMS(10);
+  expect(await runner.run()).toMatchObject({ status: 'running' });
+
+  let forced: RunResult<unknown> | undefined;
+  let canForceTryDuringHandled: boolean | undefined;
+  let wasRetryPendingDuringHandled: boolean | undefined;
+  runner.on(
+    ATTEMPT_HANDLED,
+    (info: { status: string; wasCanceled: boolean }) => {
+      if (info.status === 'skip' && info.wasCanceled) {
+        canForceTryDuringHandled = runner.canForceTry;
+        wasRetryPendingDuringHandled = runner.isRetryPending;
+        void runner.forceTry().then((result) => {
+          forced = result;
+        });
+      }
+    },
+  );
+
+  expect(await runner.cancel()).toBe('forced');
+  expect(await runner.waitForCompletion()).toMatchObject({
+    status: 'canceled',
+  });
+  await Promise.resolve();
+  expect(forced).toMatchObject({
+    status: 'pre_operation_error',
+    code: 'terminal_dispatch_in_progress',
+  });
+  expect(canForceTryDuringHandled).toBe(false);
+  expect(wasRetryPendingDuringHandled).toBe(false);
+  expect(invoked).toBe(1);
+  expect(runner.runnerState).toBe('stopped');
+});
+
 test('operation-ended listeners see the settled state and can wait for its result', async () => {
   const runner = new RetryRunner(policy, (reportResult) => {
     reportResult('success', 'finished');

@@ -7,7 +7,7 @@ import {
 } from './dependency-policy';
 
 /** The report marks that preceded a provisional registration. */
-export interface MetadataReportMarks {
+interface MetadataReportMarks {
   readonly dependencies: boolean;
   readonly optional: boolean;
 }
@@ -17,9 +17,10 @@ export class ComponentMetadataReader {
   private readonly reportedDependencyReadFailures =
     new WeakSet<BaseComponent>();
   private readonly reportedOptionalReadFailures = new WeakSet<BaseComponent>();
-  // Components whose `isOptional()` failure is being reported without a name - and so
-  // without a mark - right now; see `isComponentOptional()`.
+  // Components whose failure is being reported without a name - and so without a mark -
+  // right now; see `reportOnce()`.
   private readonly unlabelledOptionalReports = new WeakSet<BaseComponent>();
+  private readonly unlabelledDependencyReports = new WeakSet<BaseComponent>();
 
   constructor(private readonly nameOf: (component: BaseComponent) => string) {}
 
@@ -106,43 +107,13 @@ export class ComponentMetadataReader {
     try {
       return component.isOptional() === true;
     } catch (error) {
-      if (
-        !this.reportedOptionalReadFailures.has(component) &&
-        !this.unlabelledOptionalReports.has(component)
-      ) {
-        // Named before the mark, as `reportDependencyReadFailureOnce()` names its
-        // report. The name lookup can run the component's own `getName()`, which may
-        // throw too: that must neither escape this read - it answers, never throws - nor
-        // leave a mark for a report that was never labelled. The failure is still
-        // reported, unlabelled and unmarked, so a later read that can name the
-        // component reports it once more.
-        let label: string | undefined;
-        try {
-          label = this.nameOf(component);
-        } catch {
-          label = undefined;
-        }
-
-        if (label === undefined) {
-          // Unmarked, so held only while it is made: an error listener that reads
-          // the same component again must not report - and recurse - again.
-          this.unlabelledOptionalReports.add(component);
-          try {
-            reportCallbackError(
-              'lifecycle-manager isOptional of <unnamed component>',
-              error,
-            );
-          } finally {
-            this.unlabelledOptionalReports.delete(component);
-          }
-        } else {
-          this.reportedOptionalReadFailures.add(component);
-          reportCallbackError(
-            `lifecycle-manager isOptional of ${label}`,
-            error,
-          );
-        }
-      }
+      this.reportOnce(
+        component,
+        this.reportedOptionalReadFailures,
+        this.unlabelledOptionalReports,
+        (label) => `lifecycle-manager isOptional of ${label}`,
+        error,
+      );
 
       return false;
     }
@@ -161,18 +132,60 @@ export class ComponentMetadataReader {
     // For a registration candidate, not recorded yet: named by what registration read.
     name?: string,
   ): void {
-    if (this.reportedDependencyReadFailures.has(component)) {
+    this.reportOnce(
+      component,
+      this.reportedDependencyReadFailures,
+      this.unlabelledDependencyReports,
+      (label) => `lifecycle-manager ${context} dependencies of ${label}`,
+      failure,
+      name,
+    );
+  }
+
+  /**
+   * Report `failure` once per registration of `component`, marked in `reported`.
+   *
+   * Named before the mark, and only for the report actually made - not for every failing
+   * read of an already-reported component. The name lookup can run the component's own
+   * `getName()`, which may throw too: that must neither escape - these reads answer, never
+   * throw - nor leave a mark for a report that was never labelled. The failure is still
+   * reported, unlabelled and unmarked, so a later read that can name the component
+   * reports it once more. Unmarked, it is held in `unlabelled` only while it is made: an
+   * error listener that reads the same component again must not report - and recurse -
+   * again.
+   */
+  private reportOnce(
+    component: BaseComponent,
+    reported: WeakSet<BaseComponent>,
+    unlabelled: WeakSet<BaseComponent>,
+    describe: (label: string) => string,
+    failure: unknown,
+    name?: string,
+  ): void {
+    if (reported.has(component) || unlabelled.has(component)) {
       return;
     }
 
-    // Looked up only for the report actually made - not as a parameter default, which
-    // ran on every failing read of an already-reported list. Before the mark, so a
-    // lookup that throws leaves the one report still to be made.
-    const label = name ?? this.nameOf(component);
-    this.reportedDependencyReadFailures.add(component);
-    reportCallbackError(
-      `lifecycle-manager ${context} dependencies of ${label}`,
-      failure,
-    );
+    let label = name;
+    if (label === undefined) {
+      try {
+        label = this.nameOf(component);
+      } catch {
+        label = undefined;
+      }
+    }
+
+    if (label === undefined) {
+      unlabelled.add(component);
+      try {
+        reportCallbackError(describe('<unnamed component>'), failure);
+      } finally {
+        unlabelled.delete(component);
+      }
+      return;
+    }
+
+    reported.add(component);
+    reportCallbackError(describe(label), failure);
   }
 }

@@ -136,9 +136,11 @@ export class EventEmitterProtected {
       return;
     }
 
-    // Rendered once per emission, through `renderEventName`: a template literal over a
-    // symbol event would throw here, out of `emit` and before any handler ran.
-    const handlerName = `event handler for ${renderEventName(event)}`;
+    // Built only when a handler fails, through `renderEventName`: a template literal over
+    // a symbol event would throw out of `emit`. An emission whose handlers all succeed
+    // never renders the event name.
+    const handlerName = (): string =>
+      `event handler for ${renderEventName(event)}`;
 
     // Loop-invariant: the reporter depends on the event, not on which handler failed.
     const handleFailure = (error: unknown): void => {
@@ -152,8 +154,8 @@ export class EventEmitterProtected {
     for (const callback of [...callbacks]) {
       // The same invocation helper `safeHandleCallback` uses, with this emitter's
       // overridable reporter in place of the global `'error'` channel. The callback name
-      // matches what `safeHandleCallback` produced before, so the "is not a function"
-      // message is unchanged for consumers matching on it.
+      // is the one `handleEventHandlerFailure` reports with, so a non-function handler's
+      // "is not a function" message names the event the same way.
       runCallbackSafely(handlerName, callback, [data], handleFailure);
     }
   }

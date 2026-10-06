@@ -40,6 +40,9 @@ export async function raceDeadline<T, U>(
           (value) => resolve(boxPromiseValue(value)),
           reject,
         );
+        // The live timer globals, deliberately, unlike the captured promise intrinsics:
+        // a deadline is scheduling, not observation, and tests that substitute
+        // `setTimeout`/`clearTimeout` to drive a deadline must reach this one too.
         timer = setTimeout(() => {
           try {
             resolve(boxPromiseValue(onTimeout()));

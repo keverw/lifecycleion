@@ -48,6 +48,43 @@ export function isOperationOptionRefusal(error: unknown): error is Error {
   return operationOptionRefusals.has(error as Error);
 }
 
+// The members of a public result that hold further results, or entries with an `error`.
+// Only these are walked: everything else a result carries - `data`, `value`, a health
+// check's `details` - is the caller's, and reading into it would run caller code.
+const NESTED_RESULT_KEYS = [
+  'startResult',
+  'shutdownResult',
+  'startupResult',
+  'components',
+  'results',
+  'failedOptionalComponents',
+  'stalledComponents',
+] as const;
+
+/**
+ * Drop the brand from every refusal a public result hands its caller. The brand only
+ * routes a refusal through this manager's own settlement; once the error is the
+ * caller's, it is a value like any other. Rethrown from a getter or hook, it is that
+ * code's failure - reported and answered `operation_crashed` - not this manager's option
+ * refusal. The result keeps the same error instance.
+ */
+function releaseRefusalBrands(result: unknown, depth = 0): void {
+  if (depth > 3 || typeof result !== 'object' || result === null) {
+    return;
+  }
+  if (Array.isArray(result)) {
+    for (const entry of result) {
+      releaseRefusalBrands(entry, depth + 1);
+    }
+    return;
+  }
+  const record = result as Record<string, unknown>;
+  operationOptionRefusals.delete(record.error as Error);
+  for (const key of NESTED_RESULT_KEYS) {
+    releaseRefusalBrands(record[key], depth + 1);
+  }
+}
+
 /** How many `cause` links {@link isLinkedToAbort} follows past the thrown value itself. */
 const ABORT_LINK_MAX_CAUSE_HOPS = 16;
 
@@ -129,19 +166,24 @@ export function toOperationFlag(requested: unknown, label: string): boolean {
 }
 
 /**
- * The refusal `acceptShutdownPass()` returns when it will not run a pass because one
- * is already running - whether the latch was already set on entry or was taken by a
- * nested request while this one was still being set up. Shared so the two refusals
- * cannot drift into reporting different things for the same situation.
+ * The `ShutdownResult` for a stop that stopped nothing at all: no component stopped or
+ * stalled, and a code and reason saying why. By default, the refusal
+ * `acceptShutdownPass()` returns when it will not run a pass because one is already
+ * running - whether the latch was already set on entry or was taken by a nested request
+ * while this one was still being set up. Shared so the refusals cannot drift into
+ * reporting different things for the same situation.
  */
-export function refusedShutdownResult(): ShutdownResult {
+export function refusedShutdownResult(
+  code: NonNullable<ShutdownResult['code']> = 'already_in_progress',
+  reason = 'Shutdown already in progress',
+): ShutdownResult {
   return {
     success: false,
     stoppedComponents: [],
     stalledComponents: [],
     durationMS: 0,
-    reason: 'Shutdown already in progress',
-    code: 'already_in_progress',
+    reason,
+    code,
   };
 }
 
@@ -161,7 +203,8 @@ export function refusedShutdownResult(): ShutdownResult {
  * once it has acted, any failure is reported and answered `operation_crashed`. Ordinary
  * TypeError/RangeError values from caller getters remain unexpected failures:
  * recognizing every error of those types would hide actual bugs behind a configuration
- * refusal.
+ * refusal. A refusal stops being one once it is handed back: the brand is dropped from
+ * the errors the result carries (see {@link releaseRefusalBrands}).
  *
  * `toFailure` runs on the failure path with nothing left above it, so it must build its
  * result fields from manager-owned data, without unguarded caller reads. Guarded
@@ -174,11 +217,14 @@ export async function settleOperation<T>(
   toFailure: (error: Error, reason: string, code: SettledFailureCode) => T,
 ): Promise<T> {
   try {
-    return await run();
+    const result = await run();
+    releaseRefusalBrands(result);
+    return result;
   } catch (error) {
     // Classified once, here, beside the decision not to report: a builder that chose
     // its own code could label an unreported refusal as a crash.
     if (settledFailureCode(error) === 'invalid_options') {
+      operationOptionRefusals.delete(error as Error);
       return toFailure(
         error as Error,
         `${operation}() refused: ${describeError(error)}`,
@@ -196,7 +242,7 @@ export async function settleOperation<T>(
 }
 
 /** The code {@link settleOperation} hands its failure builder. */
-export type SettledFailureCode = 'invalid_options' | 'operation_crashed';
+type SettledFailureCode = 'invalid_options' | 'operation_crashed';
 
 /**
  * The one classification {@link settleOperation} and every failure builder's caller

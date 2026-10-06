@@ -62,6 +62,7 @@ import {
   promiseRejectIntrinsic,
   promiseResolveIntrinsic,
   promiseThenIntrinsic,
+  queueMicrotaskIntrinsic,
   racePromises,
 } from '../internal/intrinsics';
 import { EventEmitterProtected } from '../event-emitter';
@@ -211,6 +212,15 @@ interface StartSettlement {
   readonly finish: () => void;
   didSettle: boolean;
   rawStartPending: boolean;
+  /**
+   * Resolves once `start()` itself has settled, or once the manager released this
+   * settlement (see `releaseStartSettlements()`). `promise` can finish first: a component
+   * that owns its late-start cleanup has nothing left for the manager to own after a
+   * timeout, while its `start()` may still be running.
+   */
+  readonly rawStartDone: Promise<void>;
+  /** Clears `rawStartPending` and resolves `rawStartDone`. */
+  readonly settleRawStart: () => void;
   recovery?: Promise<void>;
   isAwaitingLateStart?: boolean;
   component?: BaseComponent;
@@ -470,9 +480,15 @@ export class LifecycleManager
   // The shutdown pass that most recently began, when it asked to abort pending starts
   // (`abortPendingStarts`), keyed by its `shutdownToken`. A start whose caller code began
   // that pass after the start claimed its component - before it could be interrupted -
-  // delivers the pass's cue to itself (see `startComponentAttempt()`).
+  // delivers the pass's cue to itself (see `startComponentAttempt()`), unless it is one
+  // of the starts that requested the pass. Cleared once that pass ends.
   private pendingStartAbortRequest:
-    { shutdownToken: string; method: ShutdownMethod } | undefined;
+    | {
+        shutdownToken: string;
+        method: ShutdownMethod;
+        requestingStarts: ReadonlySet<StartSettlement>;
+      }
+    | undefined;
   // Use per-stop ULIDs instead of incrementing counters because a stalled
   // component can be unregistered and replaced by a same-name instance before
   // the old floating stop promise settles.
@@ -2146,9 +2162,16 @@ export class LifecycleManager
     request: () => Promise<T>,
   ): Promise<T> {
     const requesting: StartSettlement[] = [];
-    for (const settlement of this.startSettlements.values()) {
+    for (const [claim, settlement] of this.startSettlements) {
+      // An attempt records its instance only once its `component:starting` listeners
+      // have run; from its claim on, the name's registered instance is the one it starts.
+      const startingComponent =
+        settlement.component ??
+        (this.componentClaims.get(settlement.name)?.claim === claim
+          ? this.getComponent(settlement.name)
+          : undefined);
       if (
-        settlement.component === component &&
+        startingComponent === component &&
         isStartUnfinished(settlement) &&
         !this.invokingStarts.has(settlement)
       ) {
@@ -2404,6 +2427,20 @@ export class LifecycleManager
               state: stateAfterStopAttempt,
             },
           });
+
+        // A stop refused for its own configuration never ran: the unregister's own
+        // `invalid_options`, not a failed stop.
+        if (stopResult.code === 'invalid_options') {
+          return {
+            success: false,
+            componentName: name,
+            reason: stopResult.reason ?? 'Failed to stop component',
+            code: 'invalid_options',
+            error: stopResult.error,
+            wasStopped: false,
+            wasRegistered: true,
+          };
+        }
 
         return {
           success: false,
@@ -2991,8 +3028,30 @@ export class LifecycleManager
       // its listeners joins it - and its rollback - rather than escaping both.
       this.activeBulkStartup = bulkStartup;
 
-      // The answer for a startup a shutdown cut short, wherever it notices: what is still
-      // running of what it started, and what it had already given up on. Shutdown
+      // What every answer of this startup reports of its progress, read as it answers:
+      // what is still running of what it started, and what it had already given up on.
+      const startupProgress = (): Pick<
+        StartupResult,
+        | 'startedComponents'
+        | 'failedOptionalComponents'
+        | 'skippedDueToDependency'
+      > => ({
+        startedComponents: this.runningStartupSnapshot(startedComponents),
+        failedOptionalComponents,
+        skippedDueToDependency: Array.from(skippedDueToDependency),
+      });
+      // A startup that failed part-way: its progress, and why it failed.
+      const failedStartup = (
+        failure: Pick<StartupResult, 'reason' | 'code'> &
+          Partial<Pick<StartupResult, 'error' | 'timedOut'>>,
+      ): StartupResult => ({
+        success: false,
+        ...startupProgress(),
+        ...failure,
+        durationMS: Date.now() - startTime,
+      });
+
+      // The answer for a startup a shutdown cut short, wherever it notices. Shutdown
       // retains running-set membership while stop hooks settle; that teardown is
       // no longer available and must not be reported as a successful startup.
       const abortedByShutdown = (
@@ -3001,16 +3060,11 @@ export class LifecycleManager
       ): StartupResult => {
         abandonReason = 'was interrupted by shutdown';
         detachReason = 'interrupted bulk startup';
-        return {
-          success: false,
-          startedComponents: this.runningStartupSnapshot(startedComponents),
-          failedOptionalComponents,
-          skippedDueToDependency: Array.from(skippedDueToDependency),
+        return failedStartup({
           reason,
           code: 'shutdown_in_progress',
           ...(error === undefined ? {} : { error }),
-          durationMS: Date.now() - startTime,
-        };
+        });
       };
 
       // Where the startup itself notices a shutdown begun by caller code it ran. The log
@@ -3026,16 +3080,11 @@ export class LifecycleManager
         if (hasShutdownBegun()) {
           return abortedByShutdown();
         }
-        return {
-          success: false,
-          startedComponents: this.runningStartupSnapshot(startedComponents),
-          failedOptionalComponents,
-          skippedDueToDependency: Array.from(skippedDueToDependency),
+        return failedStartup({
           reason: describeError(error),
           code: 'component_unexpected_stop',
           error,
-          durationMS: Date.now() - startTime,
-        };
+        });
       };
       type ReconciliationOutcome =
         | { kind: 'result'; value: StartupResult }
@@ -3411,18 +3460,12 @@ export class LifecycleManager
                 ? 'was interrupted by timed-out startup cleanup'
                 : `was interrupted by independent component ${operation}`;
               detachReason = 'partial bulk startup';
-              return {
-                success: false,
-                startedComponents:
-                  this.runningStartupSnapshot(startedComponents),
-                failedOptionalComponents,
-                skippedDueToDependency: Array.from(skippedDueToDependency),
+              return failedStartup({
                 code: 'partial_state',
                 reason: isLateTimeoutCleanup
                   ? `Component "${name}": ${LIFECYCLE_MANAGER_MESSAGE_TIMED_OUT_STARTUP_CLEANUP}`
                   : `Component "${name}" has an independent ${operation} in progress`,
-                durationMS: Date.now() - startTime,
-              };
+              });
             } else if (result.code === 'shutdown_in_progress') {
               return abortedByShutdown(
                 result.reason || 'Shutdown triggered during startup',
@@ -3552,19 +3595,13 @@ export class LifecycleManager
                   return abortedByShutdown();
                 }
 
-                return {
-                  success: false,
-                  startedComponents:
-                    this.runningStartupSnapshot(startedComponents),
-                  failedOptionalComponents,
-                  skippedDueToDependency: Array.from(skippedDueToDependency),
+                return failedStartup({
                   reason:
                     result.reason ||
                     `Required component "${name}" failed: ${result.code || 'unknown'}`,
                   code: 'required_component_failed',
                   error: result.error,
-                  durationMS: Date.now() - startTime,
-                };
+                });
               }
             }
 
@@ -3637,18 +3674,11 @@ export class LifecycleManager
 
         // Check if startup timed out during the process
         if (hasTimedOut) {
-          const durationMS = Date.now() - startTime;
-
-          return {
-            success: false,
-            startedComponents: this.runningStartupSnapshot(startedComponents),
-            failedOptionalComponents,
-            skippedDueToDependency: Array.from(skippedDueToDependency),
-            durationMS,
+          return failedStartup({
             timedOut: true,
             reason: `Startup timeout exceeded (${effectiveTimeout}ms)`,
             code: 'startup_timeout',
-          };
+          });
         }
 
         this.updateStartedFlag();
@@ -3696,9 +3726,7 @@ export class LifecycleManager
         detachReason = 'completed bulk startup';
         return {
           success: true,
-          startedComponents: this.runningStartupSnapshot(startedComponents),
-          failedOptionalComponents,
-          skippedDueToDependency: Array.from(skippedDueToDependency),
+          ...startupProgress(),
           durationMS,
           timedOut: false,
         };
@@ -3755,9 +3783,7 @@ export class LifecycleManager
               }
             : {}),
           // Whatever the rollback could not stop, so the result matches the registry.
-          startedComponents: this.runningStartupSnapshot(startedComponents),
-          failedOptionalComponents,
-          skippedDueToDependency: Array.from(skippedDueToDependency),
+          ...startupProgress(),
         };
       } finally {
         // Release the deadline callback when startup settles so it cannot report
@@ -3894,14 +3920,7 @@ export class LifecycleManager
 
     const reason = LIFECYCLE_MANAGER_MESSAGE_BULK_STARTUP_IN_PROGRESS;
     const result: RestartResult = {
-      shutdownResult: {
-        success: false,
-        stoppedComponents: [],
-        stalledComponents: [],
-        durationMS: 0,
-        reason,
-        code: 'partial_state',
-      },
+      shutdownResult: refusedShutdownResult('partial_state', reason),
       startupResult: refusedStartupResult('already_in_progress', reason),
       success: false,
     };
@@ -4104,15 +4123,15 @@ export class LifecycleManager
   ): void {
     for (;;) {
       let didValidate = false;
+      // Read once per round, and again only after a validation: its timeout getters are
+      // caller code, which can start or settle a start.
+      let currentStarts = this.currentStartSettlements();
       for (const component of [...this.components]) {
         const name = this.nameOf(component);
         if (restartSnapshots.get(name)?.component !== component) {
           continue;
         }
-        const stopNeed = this.restartStopNeed(
-          name,
-          this.currentStartSettlements(),
-        );
+        const stopNeed = this.restartStopNeed(name, currentStarts);
         const validated = validatedStops.get(name);
         if (
           stopNeed === undefined ||
@@ -4124,6 +4143,7 @@ export class LifecycleManager
         this.validateRestartStopBudgets(name, component, stopNeed);
         validatedStops.set(name, stopNeed);
         didValidate = true;
+        currentStarts = this.currentStartSettlements();
       }
       if (!didValidate) {
         return;
@@ -4211,14 +4231,7 @@ export class LifecycleManager
         params: { reason },
       });
       return {
-        shutdownResult: {
-          success: false,
-          stoppedComponents: [],
-          stalledComponents: [],
-          durationMS: 0,
-          reason,
-          code: shutdownCode,
-        },
+        shutdownResult: refusedShutdownResult(shutdownCode, reason),
         startupResult: refusedStartupResult('partial_state', reason),
         success: false,
       };
@@ -5459,6 +5472,23 @@ export class LifecycleManager
         // decides whether registration defers, refuses auto-start, or starts work
         // independently after the completion boundary.
         const bulkStartup = this.activeBulkStartup;
+        // Reserve before logging: a sink can synchronously register more components.
+        // The initial order or a follow-up batch owns this start and its outcome.
+        const deferToBulkStartup = (startup: typeof bulkStartup): void => {
+          progress.isAutoStartDeferred = true;
+          // A startup this registration's own log line began has ordered it already.
+          // Queued as well, it would be started twice and, after a rollback, also
+          // reported as an auto-start the startup never attempted. Frozen with the
+          // initial order's deferred names instead, so one the loop never reaches is.
+          if (!startup?.initialOrderNames.has(componentName)) {
+            this.deferredAutoStartNames.add(componentName);
+          } else if (!startup.reachedNames.has(componentName)) {
+            startup.frozenAutoStarts.add(componentName);
+          }
+          this.logger
+            .entity(componentName)
+            .info('AutoStart: left to the bulk startup about to run');
+        };
 
         // Bulk startup first: `isStarted` turns true as soon as its first component is
         // running, and a start without `allowDuringBulkStartup` is refused with
@@ -5484,21 +5514,7 @@ export class LifecycleManager
             status: this.getComponentStatus(componentName),
           };
         } else if (this.isStarting && !bulkStartup?.isCompleting) {
-          // Reserve before logging: a sink can synchronously register more components.
-          // The initial order or a follow-up batch owns this start and its outcome.
-          progress.isAutoStartDeferred = true;
-          // A startup this registration's own log line began has ordered it already.
-          // Queued as well, it was started twice and, after a rollback, also reported
-          // as an auto-start the startup never attempted. Frozen with the initial
-          // order's deferred names instead, so one the loop never reaches is.
-          if (!bulkStartup?.initialOrderNames.has(componentName)) {
-            this.deferredAutoStartNames.add(componentName);
-          } else if (!bulkStartup.reachedNames.has(componentName)) {
-            bulkStartup.frozenAutoStarts.add(componentName);
-          }
-          this.logger
-            .entity(componentName)
-            .info('AutoStart: left to the bulk startup about to run');
+          deferToBulkStartup(bulkStartup);
         } else if (this.isStarting && bulkStartup !== null) {
           // The pass has closed its queue before terminal notifications. A start from
           // those callbacks is independent, while the public bulk latch stays held.
@@ -5530,13 +5546,22 @@ export class LifecycleManager
                 ? 'AutoStart: starting component (manager is running)'
                 : 'AutoStart: starting component (manager not running)',
             );
-          // That log line ran caller code too.
-          if (isStillThisRegistration()) {
+          // That log line ran caller code too. A bulk startup it began owns this start:
+          // started here as well, it would be refused `startup_in_progress` and reported
+          // as a failed auto-start while that startup started the component.
+          const startupBegunByLog = this.activeBulkStartup;
+          if (!isStillThisRegistration()) {
+            skipReplacedAutoStart();
+          } else if (
+            this.isStarting &&
+            !startupBegunByLog?.isCompleting &&
+            !startupBegunByLog?.isRollingBack
+          ) {
+            deferToBulkStartup(startupBegunByLog);
+          } else {
             progress.didAutoStartAttempt = true;
             progress.startResult =
               await this.startComponentInternal(componentName);
-          } else {
-            skipReplacedAutoStart();
           }
         }
       }
@@ -6159,7 +6184,7 @@ export class LifecycleManager
       this.shutdownToken = ulid();
       this.shutdownMethod = method;
       this.pendingStartAbortRequest = shouldAbortPendingStarts
-        ? { shutdownToken: this.shutdownToken, method }
+        ? { shutdownToken: this.shutdownToken, method, requestingStarts }
         : undefined;
       isDuringStartup = this.isStarting;
       if (
@@ -6456,6 +6481,12 @@ export class LifecycleManager
             ) {
               if (shouldWaitForAbandonedStarts) {
                 await settlement.promise;
+                // Settled with `start()` still running: a component that owns its
+                // late-start cleanup leaves the manager nothing to own once it times
+                // out. The option waits for `start()` itself all the same.
+                if (settlement.rawStartPending) {
+                  await settlement.rawStartDone;
+                }
               } else if (
                 !settlement.recovery ||
                 settlement.isAwaitingLateStart
@@ -7011,6 +7042,8 @@ export class LifecycleManager
 
       this.withTransition(() => {
         this.activeShutdownPass = null;
+        // Its cue is this pass's alone, and it holds the pass's requesting starts.
+        this.pendingStartAbortRequest = undefined;
         this.updateStartedFlag();
 
         this.finalizePendingLoggerExit();
@@ -7123,9 +7156,12 @@ export class LifecycleManager
     }
     const { component } = preconditions;
 
+    // The pass asks for a retry only of a stall, but caller code since can have cleared
+    // it - a forced start that is running now. That is an ordinary stop, run under this
+    // net and claim rather than nesting another net inside this one.
     const priorStall = this.stalledComponents.get(name);
     if (!priorStall) {
-      return await this.stopComponentInternal(name);
+      return await this.stopComponentAttempt(name, undefined, claim, undefined);
     }
 
     // A retry continues the stop that stalled: it keeps when that stop began and
@@ -7492,6 +7528,7 @@ export class LifecycleManager
   ): Promise<ComponentOperationResult> {
     const claim = Symbol(name);
     let resolveSettlement!: () => void;
+    let resolveRawStart!: () => void;
     let abandon!: () => void;
     const finishSettlement = (): void => {
       settlement.didSettle = true;
@@ -7507,6 +7544,7 @@ export class LifecycleManager
       finish: () => {
         finishSettlement();
         this.deleteStartSettlement(claim);
+        resolveRawStart();
       },
       abandon: () => abandon(),
       abandoned: new promiseConstructorIntrinsic<void>((resolve) => {
@@ -7514,6 +7552,13 @@ export class LifecycleManager
       }),
       didSettle: false,
       rawStartPending: false,
+      rawStartDone: new promiseConstructorIntrinsic<void>((resolve) => {
+        resolveRawStart = resolve;
+      }),
+      settleRawStart: () => {
+        settlement.rawStartPending = false;
+        resolveRawStart();
+      },
       promise: new promiseConstructorIntrinsic<void>((resolve) => {
         resolveSettlement = resolve;
       }),
@@ -8180,7 +8225,7 @@ export class LifecycleManager
         );
         if (settlement) {
           const markRawStartSettled = (): void => {
-            settlement.rawStartPending = false;
+            settlement.settleRawStart();
             if (settlement.didSettle) {
               this.deleteStartSettlement(claim);
             }
@@ -8195,9 +8240,7 @@ export class LifecycleManager
           ]);
         }
       } catch (error) {
-        if (settlement) {
-          settlement.rawStartPending = false;
-        }
+        settlement?.settleRawStart();
         didStartHookFail = didReadStartHook;
         throw error;
       } finally {
@@ -8209,19 +8252,39 @@ export class LifecycleManager
       // A pass with `abortPendingStarts` that began after the claim - from caller code
       // this attempt ran since: the warnings, the starting log or event, the
       // unexpected-stop handler - found no `interruptStart()` here yet and skipped this
-      // start, then waited on it. Its cue is delivered now that `start()` has the signal.
+      // start, then waited on it. Its cue is delivered now that `start()` has the signal -
+      // unless this start requested that pass itself, which the pass leaves alone too.
+      //
+      // A microtask later, queued after `markRawStartSettled` above: a `start()` that
+      // settled synchronously has cleared `rawStartPending` by then, and a settled start
+      // is not aborted.
       if (
+        settlement !== undefined &&
         startAbortRequest !== undefined &&
         startAbortRequest.shutdownToken === shutdownTokenBeforeStartHook &&
         shutdownTokenAtStart !== shutdownTokenBeforeStartHook &&
-        settlement?.interruptStart?.(
-          new StartupInterruptedByShutdownError({
-            componentName: name,
-            method: startAbortRequest.method,
-          }),
-        ) === true
+        !startAbortRequest.requestingStarts.has(settlement)
       ) {
-        this.logger.entity(name).info('Aborted pending start for shutdown');
+        const deliverShutdownCue = (): void => {
+          try {
+            if (
+              settlement.interruptStart?.(
+                new StartupInterruptedByShutdownError({
+                  componentName: name,
+                  method: startAbortRequest.method,
+                }),
+              ) === true
+            ) {
+              this.logger
+                .entity(name)
+                .info('Aborted pending start for shutdown');
+            }
+          } catch (error) {
+            // Nothing above this microtask would catch it.
+            reportCallbackError('lifecycle-manager start shutdown cue', error);
+          }
+        };
+        queueMicrotaskIntrinsic(deliverShutdownCue);
       }
 
       // Both ways a deadline can win - this attempt's timer, and a bulk deadline found
@@ -8253,6 +8316,10 @@ export class LifecycleManager
               // Settle before notifications: user callbacks cannot swallow the deadline.
               const timeoutError = recordStartupTimeout();
               reject(timeoutError);
+              // Recorded before any caller code below runs: a shutdown a sink starts
+              // with `abortPendingStarts` must find this start already timed out, not
+              // abort it as interrupted. A shutdown that aborted it first keeps its cause.
+              startAbortCause ??= 'timeout';
               // This attempt must settle, but its old deadline must not abort or
               // announce a timeout for a newer run of the same component. Its own
               // signal is still aborted: that is this attempt's alone, and nothing
@@ -8263,7 +8330,6 @@ export class LifecycleManager
                   name,
                   'Superseded start() failed after its deadline',
                 );
-                startAbortCause ??= 'timeout';
                 this.abortHookSignal(startAbort, timeoutError, name, 'start');
                 return;
               }
@@ -8283,7 +8349,6 @@ export class LifecycleManager
               // even when those sinks superseded the attempt: the signal is only this
               // attempt's. A shutdown that already aborted it keeps its reason;
               // aborting again does nothing.
-              startAbortCause ??= 'timeout';
               this.abortHookSignal(startAbort, timeoutError, name, 'start');
 
               this.observeFailureAfterTimeout(
@@ -8576,7 +8641,6 @@ export class LifecycleManager
       //   only used as a state signal and did not explain why startup failed.
       const unexpectedStopError = this.componentErrors.get(name);
       if (
-        this.componentStartAttemptTokens.get(name) === startAttemptToken &&
         this.hasStoppedUnexpectedlyDuringStart(name) &&
         (isStartupTimeout ||
           this.componentUnexpectedStopHadError.get(name) === true)
@@ -12329,8 +12393,8 @@ export class LifecycleManager
    * Calls onReload() on components that implement it.
    * Continues on errors - collects all results.
    */
-  private async broadcastReload(): Promise<SignalBroadcastResult> {
-    return await runSignalBroadcast(this.componentAccess, {
+  private broadcastReload(): Promise<SignalBroadcastResult> {
+    return runSignalBroadcast(this.componentAccess, {
       signal: 'reload',
       pickHandler: (component) => Reflect.get(component, 'onReload'),
       startupLog:
@@ -12350,8 +12414,8 @@ export class LifecycleManager
    * Calls onInfo() on components that implement it.
    * Continues on errors - collects all results.
    */
-  private async broadcastInfo(): Promise<SignalBroadcastResult> {
-    return await runSignalBroadcast(this.componentAccess, {
+  private broadcastInfo(): Promise<SignalBroadcastResult> {
+    return runSignalBroadcast(this.componentAccess, {
       signal: 'info',
       pickHandler: (component) => Reflect.get(component, 'onInfo'),
       startupLog:
@@ -12371,8 +12435,8 @@ export class LifecycleManager
    * Calls onDebug() on components that implement it.
    * Continues on errors - collects all results.
    */
-  private async broadcastDebug(): Promise<SignalBroadcastResult> {
-    return await runSignalBroadcast(this.componentAccess, {
+  private broadcastDebug(): Promise<SignalBroadcastResult> {
+    return runSignalBroadcast(this.componentAccess, {
       signal: 'debug',
       pickHandler: (component) => Reflect.get(component, 'onDebug'),
       startupLog:

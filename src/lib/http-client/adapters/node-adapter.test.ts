@@ -649,6 +649,12 @@ describe('NodeAdapter streamResponse factory failures', () => {
     ['undefined', undefined],
     ['a number', 42],
     ['a string', 'download.bin'],
+    // Objects that are neither a cancel nor a sink. These passed the old primitive-only
+    // check and failed on the first `write` as a `stream_write_error` on a 200.
+    ['an empty object', {}],
+    ['a cancel object with cancel: false', { cancel: false }],
+    ['an object with write but no end', { write: () => true }],
+    ['a function', () => undefined],
   ] as const)(
     'a factory returning %s fails setup without retrying or leaking its connection',
     async (_label, returned) => {

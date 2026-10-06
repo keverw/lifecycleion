@@ -32,3 +32,51 @@ test('a rejecting handler settles once even if its rejection report throws', asy
   expect(settledCount).toBe(1);
   expect(unhandled).toEqual([]);
 });
+
+test('a handlerName builder runs only when the handler return is unreadable', () => {
+  const lines: string[] = [];
+  const rung = spyOn(consoleRung, 'reportToConsole').mockImplementation(
+    (line: unknown) => {
+      lines.push(line as string);
+    },
+  );
+  const unreadable = (): unknown =>
+    Object.defineProperty({}, 'then', {
+      get(): never {
+        throw new Error('then refused');
+      },
+    });
+  let builds = 0;
+  try {
+    reportThroughHandler(
+      () => undefined,
+      () => 'original failure',
+      {
+        handlerName: () => {
+          builds++;
+          return 'quiet handler';
+        },
+      },
+    );
+    expect(builds).toBe(0);
+
+    reportThroughHandler(unreadable, () => 'original failure', {
+      handlerName: () => {
+        builds++;
+        return 'built handler';
+      },
+    });
+    reportThroughHandler(unreadable, () => 'original failure', {
+      handlerName: () => {
+        throw new Error('name builder failed');
+      },
+    });
+  } finally {
+    rung.mockRestore();
+  }
+  expect(builds).toBe(1);
+  expect(lines).toHaveLength(2);
+  expect(lines[0]).toContain('Failure handler (built handler)');
+  expect(lines[1]).toContain('Failure handler (<unnamed callback>)');
+  expect(lines[1]).toContain('original failure');
+});

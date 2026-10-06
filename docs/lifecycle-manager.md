@@ -535,7 +535,11 @@ Catch inside listeners in those two cases. The manager aborts through
 After an abort, prefer rejecting (for example with `signal.throwIfAborted()`) to
 resolving: a timed-out `start()` that resolves is a late success, which the manager
 stops again with `stop()` (see [Late-Start Cleanup](#late-start-cleanup)). Declaring
-`start()` without the parameter remains valid; such a component behaves as before.
+`start()` without the parameter is valid: the component simply never sees the signal,
+and its startup timeout and late-start cleanup apply as described here. A component
+that defines one of the unsupported timeout hooks (`onStartupAborted()`,
+`onGracefulStopTimeout()`, `onShutdownForceAborted()`) is refused at registration
+with `invalid_options` (see [`registerComponent()`](#registercomponentcomponent-options)).
 
 ### Late-Start Cleanup
 
@@ -760,9 +764,11 @@ cleanup already underway is still joined.
 To wait for such a start instead, pass `waitForAbandonedStarts: true` (default:
 `false`; it can also be set in `shutdownOptions`). The pass then waits for a start that
 timed out before it began or while it ran, the same way in both cases, until its
-`start()` settles and its late cleanup stops it, and then stops its dependencies. The
-wait is still bounded by `timeoutMS` (`shutdown_timeout` when it runs out); with
-`timeoutMS: 0` it lasts until `start()` settles. Use it when one shutdown call should
+`start()` settles and its late cleanup stops it, and then stops its dependencies. For a
+component with `ownsLateStartCleanup: true` there is no late cleanup to wait for, but
+the pass still waits for its `start()` to settle. The wait is still bounded by
+`timeoutMS` (`shutdown_timeout` when it runs out); with `timeoutMS: 0` it lasts until
+`start()` settles. Use it when one shutdown call should
 leave as little running as possible, such as a process that exits right after it, and
 a slow start may still finish within the budget. `allowStopWithPendingStarts` takes
 precedence: with it enabled, starts are not waited for at all.
@@ -815,8 +821,8 @@ without the option: `code: 'error'`, the same reason text, and an error log, so 
 option never relabels a real startup failure as an interruption. Either way the start
 still emits `component:start-failed` and returns to the state it had before the
 attempt, which releases its dependencies to the pass. A start that ignores the cue and
-resolves is stopped by the pass as before. `startAllComponents()` already answers
-`shutdown_in_progress` for any startup a shutdown interrupts. With
+resolves is stopped by the pass, as it is without the option. `startAllComponents()`
+already answers `shutdown_in_progress` for any startup a shutdown interrupts. With
 `allowStopWithPendingStarts`, pending starts are aborted too - the pass is about to
 stop the dependencies they use - but not waited for. With `waitForAbandonedStarts`
 there is nothing to reconcile: the starts it waits for timed out, and their signals are
@@ -982,8 +988,9 @@ the start signal, an `'abort'` listener added through the signal's own
 `lifecycle-manager force abort listener for <name>` - instead of becoming an uncaught
 exception, and the listeners after it and the timeout handling still run.
 Listeners on a derived signal, or added through `EventTarget.prototype` directly, are
-not guarded. Declaring `stop()` or `onShutdownForce()` without the parameter remains
-valid; such a component behaves exactly as before.
+not guarded. Declaring `stop()` or `onShutdownForce()` without the parameter is
+valid: the component never sees the signal, and its stop timeouts, escalation and
+late-completion handling apply as described here.
 
 ## API Reference
 
@@ -1068,7 +1075,7 @@ interface RegisterComponentResult {
 
 - **Single Manager Binding**: A component instance can only be registered with one `LifecycleManager` at a time. Attempting to register a component instance that is already registered (either with the same manager under a different name, or with a different manager instance) will fail with `code: 'duplicate_instance'`.
 - **Unique Name Constraint**: The component name must be unique within a manager instance. Registering a component with a name that is already taken will fail with `code: 'duplicate_name'`. That holds even when a component's own code registers the name while the registration is in progress, for example from `getDependencies()`: registration checks again right before it commits.
-- **Unsupported Timeout Hooks**: A component that defines `onStartupAborted()`, `onGracefulStopTimeout()` or `onShutdownForceAborted()` - as its own property or an inherited one, including behind a getter - is refused with `code: 'invalid_options'` and a reason naming each such hook and the abort signal to use instead (see [Abort Signals at a Glance](#abort-signals-at-a-glance)); a component that cleans up its own late start sets [`ownsLateStartCleanup: true`](#late-start-cleanup). It is checked by both `registerComponent()` and `insertComponentAt()`.
+- **Unsupported Timeout Hooks**: A component that defines `onStartupAborted()`, `onGracefulStopTimeout()` or `onShutdownForceAborted()` - as its own property or an inherited one, with any value other than `undefined`, including through a getter that returns one or throws - is refused with `code: 'invalid_options'` and a reason naming each such hook and the abort signal to use instead (see [Abort Signals at a Glance](#abort-signals-at-a-glance)); a component that cleans up its own late start sets [`ownsLateStartCleanup: true`](#late-start-cleanup). It is checked by both `registerComponent()` and `insertComponentAt()`.
 - **Bulk Operation Guard**: Registration/insertion is blocked while the manager is shutting down (`isShuttingDown = true`), failing with `code: 'shutdown_in_progress'`. During startup (`isStarting = true`), registration/insertion is only blocked when the new component is a required dependency of an already-registered component, failing with `code: 'startup_in_progress'`.
 
 **Example:**
@@ -1197,7 +1204,7 @@ interface UnregisterComponentResult {
 
 **Stop failure reasons:**
 
-- `'stalled'` - Component stalled during stop
+- `'stalled'` - Component was already stalled from an earlier stop, so no stop was attempted. A stop this unregister runs that ends in a stall is reported by how it failed (`'timeout'`, `'error'` or `'operation_crashed'`), with the component left `stalled`
 - `'timeout'` - Component stop timed out
 - `'error'` - Component stop threw an error
 - `'operation_crashed'` - The stop itself crashed; the component may be left stalled or still running
@@ -1236,6 +1243,7 @@ interface StartupResult {
   reason?: string; // Reason for failure (when success is false)
   code?:
     | 'already_in_progress'
+    | 'component_unexpected_stop' // A required component reported an unexpected stop before startup completed
     | 'shutdown_in_progress'
     | 'dependency_cycle'
     | 'no_components_registered'
@@ -3410,6 +3418,7 @@ type ComponentOperationFailureCode =
   | 'has_running_dependents'
   | 'startup_in_progress'
   | 'shutdown_in_progress'
+  | 'component_unexpected_stop' // The component reported an unexpected stop during its start
   | 'component_startup_timeout'
   | 'component_shutdown_timeout'
   | 'restart_stop_failed'

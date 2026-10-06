@@ -1408,3 +1408,156 @@ describe('a callback name that is not a string', () => {
     });
   }
 });
+
+describe('callback name builders', () => {
+  const captureGlobalErrors = (run: () => void): ErrorEvent[] => {
+    const events: ErrorEvent[] = [];
+    const onGlobalError = (event: Event): void => {
+      events.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onGlobalError);
+
+    try {
+      run();
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
+
+    return events;
+  };
+
+  it('never calls the builder when the callback succeeds', async () => {
+    let builds = 0;
+    const buildName = (): string => {
+      builds++;
+      return 'built';
+    };
+
+    runCallbackSafely(
+      buildName,
+      () => {},
+      [],
+      () => {},
+    );
+    safeHandleCallback(buildName, () => {});
+    await safeHandleCallbackAndWait(buildName, async () => {});
+    await sleep(1);
+
+    expect(builds).toBe(0);
+  });
+
+  it('never calls the builder when a supplied onError handles the failure', () => {
+    let builds = 0;
+    const failures: unknown[] = [];
+
+    runCallbackSafely(
+      () => {
+        builds++;
+        return 'built';
+      },
+      () => {
+        throw new Error('boom');
+      },
+      [],
+      (error) => failures.push(error),
+    );
+
+    expect(failures).toHaveLength(1);
+    expect(builds).toBe(0);
+  });
+
+  it('builds the name once for a non-function in runCallbackSafely', () => {
+    let builds = 0;
+    const failures: unknown[] = [];
+
+    runCallbackSafely(
+      () => {
+        builds++;
+        return 'built hook';
+      },
+      'not callable',
+      [],
+      (error) => failures.push(error),
+    );
+
+    expect(builds).toBe(1);
+    expect((failures[0] as Error).message).toBe(
+      'Callback provided for built hook is not a function',
+    );
+  });
+
+  it('builds the name once when safeHandleCallback reports a throw or a non-function', () => {
+    let builds = 0;
+    const buildName = (): string => {
+      builds++;
+      return 'built hook';
+    };
+
+    const events = captureGlobalErrors(() => {
+      safeHandleCallback(buildName, () => {
+        throw new Error('boom');
+      });
+      safeHandleCallback(buildName, 'not callable');
+    });
+
+    expect(builds).toBe(2);
+    expect(events.map((event) => (event.error as Error).message)).toEqual([
+      'Error in a callback built hook',
+      'Error in a callback built hook',
+    ]);
+    expect(((events[1]?.error as Error).cause as Error).message).toBe(
+      'Callback provided for built hook is not a function',
+    );
+  });
+
+  it('builds the name once when safeHandleCallbackAndWait reports a non-function', async () => {
+    let builds = 0;
+    const events: ErrorEvent[] = [];
+    const onGlobalError = (event: Event): void => {
+      events.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onGlobalError);
+
+    try {
+      const result = await safeHandleCallbackAndWait(() => {
+        builds++;
+        return 'built hook';
+      }, 'not callable');
+
+      expect(result.success).toBe(false);
+      expect(result.error?.message).toBe(
+        'Callback provided for built hook is not a function',
+      );
+    } finally {
+      globalThis.removeEventListener('error', onGlobalError);
+    }
+
+    expect(builds).toBe(1);
+    expect((events[0]?.error as Error).message).toBe(
+      'Error in a callback built hook',
+    );
+  });
+
+  it('reports under <unnamed callback> when the builder throws', () => {
+    const events = captureGlobalErrors(() => {
+      safeHandleCallback(
+        () => {
+          throw new Error('name failed');
+        },
+        () => {
+          throw new Error('boom');
+        },
+      );
+    });
+
+    expect(events).toHaveLength(1);
+    expect((events[0]?.error as Error).message).toBe(
+      'Error in a callback <unnamed callback>',
+    );
+    expect(((events[0]?.error as Error).cause as Error).message).toBe('boom');
+  });
+});

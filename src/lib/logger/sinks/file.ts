@@ -8,19 +8,23 @@ import { reportToConsole } from '../../internal/report-to-console';
 import { renderJSONLine } from './internal/render-json-line';
 import { renderTextLine } from './internal/render-text-line';
 import {
-  assertNumberOption,
   DEFAULT_CLOSE_TIMEOUT_MS,
   resolveMaxQueueSize,
   resolveMaxRetries,
-  resolveTimeoutMS,
 } from './internal/queue-policy';
+import {
+  assertNumberOption,
+  resolveTimeoutMS,
+} from '../../internal/timer-limits';
 import {
   createDroppedEntryCounts,
   type DroppedEntryCounts,
   type DroppedEntryKind,
   type SinkErrorHandler,
+  type SinkFailureDisposition,
   type SinkFailureKind,
 } from './internal/sink-failure';
+import { FormatReportScheduler } from './internal/format-report-scheduler';
 
 import type { LogEntry, LogSink, LoggerDiagnostic } from '../types';
 import { LogLevel, getLogLevel } from '../types';
@@ -309,6 +313,15 @@ export class FileSink implements LogSink {
    */
   private reportedCloseRefusal = false;
 
+  /** The entry {@link processQueue} is waiting on `writeEntry` for, if any. */
+  private inFlightEntry?: QueuedEntry;
+
+  /**
+   * The in-flight entry `close()` gave up on, which its report already accounts for. See
+   * {@link reportInFlightWriteOnClose}.
+   */
+  private abandonedInFlightEntry?: QueuedEntry;
+
   /**
    * Errors a write callback has already reported, so the stream's `'error'` event does not
    * report them again.
@@ -330,29 +343,18 @@ export class FileSink implements LogSink {
   private closeTimeoutMS: number;
 
   /**
-   * How many `'format'` failures are being reported right now, so an `onError` that logs
-   * through this same sink cannot feed the loop that reported it.
+   * The `'format'` reports in flight, so an `onError` that logs through this same sink
+   * cannot feed the loop that reported it.
    *
    * The shape `NamedPipeSink` guards against in `formatEntry`, reached here by a longer
-   * road. A handler that re-logs the failure it was handed - `logger.error('sink failed',
-   * { failure })` is the natural one - serializes the `entry` the failure carries, and the
-   * `BigInt` or cycle that made *that* entry unrenderable makes the handler's own line
-   * unrenderable too. That line was queued, `processQueue` reached it on its next turn,
-   * reported it, and the handler logged again: a drain loop that never ended, with every
-   * later line stuck behind it. While this is above zero, a line that fails to render is
-   * counted in `droppedEntries` and not reported, which is where the chain stops.
-   *
-   * A count held until the handler *settles*, not a flag cleared on return. An `async`
-   * handler returns at its first `await`, and a flag cleared there was down again by the
-   * time the handler resumed and logged - so the chain ran on, one report per turn of the
-   * event loop. And a count rather than a flag because the drain loop keeps going while
-   * that handler is still pending: a second failure reported meanwhile must not clear the
-   * guard the first one still holds.
+   * road. A handler that re-logs the failure it was handed serializes the `entry` the
+   * failure carries, and the `BigInt` or cycle that made *that* entry unrenderable makes
+   * the handler's own line unrenderable too. Queued, that line reaches `processQueue` on
+   * its next turn and is reported again - a drain loop that never ends, with every later
+   * line stuck behind it. See {@link FormatReportScheduler} for what is delivered to the
+   * handler, what waits, and what goes to the console instead.
    */
-  private formatReportActive = false;
-  private invokingFormatReport = false;
-  private deliveringDeferredFormatReport = false;
-  private deferredFormatReport?: (onReported: () => void) => void;
+  private readonly formatReports = new FormatReportScheduler();
 
   constructor(options: FileSinkOptions) {
     this.closeTimeoutMS = resolveTimeoutMS(
@@ -420,25 +422,12 @@ export class FileSink implements LogSink {
       if (!this.reportedCloseRefusal) {
         this.reportedCloseRefusal = true;
 
-        const failure = new FileSinkError(
-          `Entry logged after close() began; it was not written, and further ones are counted in droppedEntries without being reported`,
-        );
-
-        this.lastError = failure;
-
-        reportThroughHandler(
-          this.onError === undefined
-            ? undefined
-            : () =>
-                this.onError?.({
-                  kind: 'close',
-                  error: failure,
-                  target: this.currentLogFile ?? this.logDir,
-                  entry,
-                  disposition: 'lost',
-                }),
-          () => describeError(failure),
-          FAILURE_REPORT_OPTIONS,
+        this.handleError(
+          'close',
+          new FileSinkError(
+            `Entry logged after close() began; it was not written, and further ones are counted in droppedEntries without being reported`,
+          ),
+          { disposition: 'lost', entry },
         );
       }
 
@@ -450,14 +439,21 @@ export class FileSink implements LogSink {
     // the bag `entry.redactedParams` points at, since redaction no longer copies it.
     const rendered = renderOnce(() => this.formatEntry(entry));
 
-    // The one deferred report is the recursion fuse. If its handler logs another value
-    // that cannot render, count that line but do not enqueue a third generation which
-    // would begin after the guard settled and repeat forever.
-    if (
-      rendered.formatError !== undefined &&
-      (this.invokingFormatReport || this.deliveringDeferredFormatReport)
-    ) {
+    // The recursion fuse. A line that cannot render, logged while the handler is being
+    // called or while the one deferred report is being delivered, is the handler's own
+    // line coming back: queued, it would be reported after the guard came down and start
+    // a generation that repeats forever. Counted, and said on the console rather than to
+    // the handler - see `FormatReportScheduler`.
+    if (rendered.formatError !== undefined && this.formatReports.isFused) {
+      const failure = new FileSinkError(
+        'Failed to format log entry',
+        rendered.formatError,
+      );
+
       this.countDropped('format');
+      this.formatReports.reportToConsole(() =>
+        this.describeWriteFailure(failure),
+      );
 
       return;
     }
@@ -613,6 +609,7 @@ export class FileSink implements LogSink {
     while (this.writeQueue.length > 0 || this.isProcessing) {
       if (Date.now() - startTime > this.closeTimeoutMS) {
         didAbandonInFlightWrite = this.isProcessing;
+        this.abandonedInFlightEntry = this.inFlightEntry;
 
         break;
       }
@@ -658,24 +655,12 @@ export class FileSink implements LogSink {
     // held at the timeout that no report has named. Skipped when the in-flight report
     // fired, since it would describe the same bytes twice.
     if (bytesLeft > 0 && !didAbandonInFlightWrite) {
-      const failure = new FileSinkError(
-        `Closed with ${String(bytesLeft)} bytes still buffered for ${this.currentLogFile ?? this.logDir} (closeTimeoutMS=${String(this.closeTimeoutMS)}); whether they reached the file is unknown`,
-      );
-
-      this.lastError = failure;
-
-      reportThroughHandler(
-        this.onError === undefined
-          ? undefined
-          : () =>
-              this.onError?.({
-                kind: 'close',
-                error: failure,
-                target: this.currentLogFile ?? this.logDir,
-                disposition: 'no_entry',
-              }),
-        () => describeError(failure),
-        FAILURE_REPORT_OPTIONS,
+      this.handleError(
+        'close',
+        new FileSinkError(
+          `Closed with ${String(bytesLeft)} bytes still buffered for ${this.currentLogFile ?? this.logDir} (closeTimeoutMS=${String(this.closeTimeoutMS)}); whether they reached the file is unknown`,
+        ),
+        { disposition: 'no_entry' },
       );
     }
   }
@@ -700,24 +685,12 @@ export class FileSink implements LogSink {
       return;
     }
 
-    const failure = new FileSinkError(
-      `Rotation abandoned ${String(bytesLeft)} bytes still buffered for ${target} (closeTimeoutMS=${String(this.closeTimeoutMS)}); whether they reached the file is unknown`,
-    );
-
-    this.lastError = failure;
-
-    reportThroughHandler(
-      this.onError === undefined
-        ? undefined
-        : () =>
-            this.onError?.({
-              kind: 'close',
-              error: failure,
-              target,
-              disposition: 'no_entry',
-            }),
-      () => describeError(failure),
-      FAILURE_REPORT_OPTIONS,
+    this.handleError(
+      'close',
+      new FileSinkError(
+        `Rotation abandoned ${String(bytesLeft)} bytes still buffered for ${target} (closeTimeoutMS=${String(this.closeTimeoutMS)}); whether they reached the file is unknown`,
+      ),
+      { disposition: 'no_entry', target },
     );
   }
 
@@ -813,30 +786,23 @@ export class FileSink implements LogSink {
    * Not counted in `droppedEntries`, which means "lines this sink did not deliver" - this
    * line may well have been delivered. `'no_entry'` for the same reason: the failure is
    * about the close, and the entry itself is neither lost nor retrying.
+   *
+   * This is the entry's only report. The pass that was writing it may resume after
+   * `close()` resolves and fail - refused by `writeEntry`'s `closed` checks, or failed by
+   * the stream `close()` destroyed - and {@link processQueue} neither reports nor counts
+   * that failure.
    */
   private reportInFlightWriteOnClose(didAbandon: boolean): void {
     if (!didAbandon) {
       return;
     }
 
-    const failure = new FileSinkError(
-      `Closed with a write still in flight (closeTimeoutMS=${String(this.closeTimeoutMS)}); whether it reached the file is unknown`,
-    );
-
-    this.lastError = failure;
-
-    reportThroughHandler(
-      this.onError === undefined
-        ? undefined
-        : () =>
-            this.onError?.({
-              kind: 'close',
-              error: failure,
-              target: this.currentLogFile ?? this.logDir,
-              disposition: 'no_entry',
-            }),
-      () => describeError(failure),
-      FAILURE_REPORT_OPTIONS,
+    this.handleError(
+      'close',
+      new FileSinkError(
+        `Closed with a write still in flight (closeTimeoutMS=${String(this.closeTimeoutMS)}); whether it reached the file is unknown`,
+      ),
+      { disposition: 'no_entry' },
     );
   }
 
@@ -863,28 +829,14 @@ export class FileSink implements LogSink {
     this.writeQueue = [];
     this.countDropped('close', abandoned);
 
-    const failure = new FileSinkError(
-      `Closed with ${String(abandoned)} entr${abandoned === 1 ? 'y' : 'ies'} still queued (closeTimeoutMS=${String(this.closeTimeoutMS)}); they were not written`,
-    );
-
-    this.lastError = failure;
-
-    reportThroughHandler(
-      this.onError === undefined
-        ? undefined
-        : () =>
-            this.onError?.({
-              kind: 'close',
-              error: failure,
-              target: this.currentLogFile ?? this.logDir,
-              // The oldest abandoned entry, as a sample. Every entry in the queue was
-              // lost, so unlike the cap's report there is no surviving line to confuse
-              // this with.
-              entry: firstAbandoned,
-              disposition: 'lost',
-            }),
-      () => describeError(failure),
-      FAILURE_REPORT_OPTIONS,
+    this.handleError(
+      'close',
+      new FileSinkError(
+        `Closed with ${String(abandoned)} entr${abandoned === 1 ? 'y' : 'ies'} still queued (closeTimeoutMS=${String(this.closeTimeoutMS)}); they were not written`,
+      ),
+      // The oldest abandoned entry, as a sample. Every entry in the queue was lost, so
+      // unlike the cap's report there is no surviving line to confuse this with.
+      { disposition: 'lost', entry: firstAbandoned },
     );
   }
 
@@ -935,23 +887,9 @@ export class FileSink implements LogSink {
               toError(error),
             );
 
-      this.lastError = failure;
-
-      reportThroughHandler(
-        this.onError === undefined
-          ? undefined
-          : () =>
-              this.onError?.({
-                kind: 'setup',
-                error: failure,
-                target: this.currentLogFile ?? this.logDir,
-                // Setup belongs to no particular line, and the queue still holds every
-                // entry: a later write retries this, so nothing here is lost.
-                disposition: 'retrying',
-              }),
-        () => describeError(failure),
-        FAILURE_REPORT_OPTIONS,
-      );
+      // Setup belongs to no particular line, and the queue still holds every entry: a
+      // later write retries this, so nothing here is lost.
+      this.handleError('setup', failure, { disposition: 'retrying' });
     }
   }
 
@@ -974,11 +912,23 @@ export class FileSink implements LogSink {
           break;
         }
 
+        this.inFlightEntry = queuedEntry;
+
         try {
           await this.writeEntry(queuedEntry);
           this.consecutiveFailures = 0;
           this.totalEntriesWritten++;
         } catch (error) {
+          // Already answered for. `close()` gave up on this write and reported it as
+          // `'close'` / `'no_entry'`, uncounted, before it resolved - and this pass resuming
+          // afterwards is the only way it reaches here: refused by a `closed` check in
+          // `writeEntry`, or failed by the stream `close()` destroyed. Reporting and
+          // counting it again would give one line two contradictory fates, after the close
+          // had already said its last word.
+          if (queuedEntry === this.abandonedInFlightEntry) {
+            continue;
+          }
+
           // `toError`, not `String(error)`: the coercion runs inside the `catch` that
           // is the entry's only retry and `onError` handling, and `String()` invokes a
           // `toString` this does not own. A value whose `toString` throws made the
@@ -1042,7 +992,7 @@ export class FileSink implements LogSink {
           const reportFailure = (willRetryEntry: boolean) => {
             if (this.onError !== undefined || !willRetryEntry) {
               // Held across the report for a `'format'` failure only, and until the handler
-              // settles rather than returns - see `scheduleFormatReport`. A write failure
+              // settles rather than returns - see `FormatReportScheduler`. A write failure
               // is retried and the handler hears every attempt by contract; the chain this
               // breaks is the one where the handler's own line cannot render either.
               const report = (onReported?: () => void) =>
@@ -1061,8 +1011,7 @@ export class FileSink implements LogSink {
                           attempt: queuedEntry.attempts + 1,
                           disposition: willRetryEntry ? 'retrying' : 'lost',
                         }),
-                  () =>
-                    `FileSink error writing to ${this.currentLogFile ?? this.logDir}: ${describeError(err)}`,
+                  () => this.describeWriteFailure(err),
                   {
                     onSettled: onReported,
                     ...FAILURE_REPORT_OPTIONS,
@@ -1070,7 +1019,9 @@ export class FileSink implements LogSink {
                 );
 
               if (kind === 'format') {
-                this.scheduleFormatReport((onReported) => report(onReported));
+                this.formatReports.schedule(report, () =>
+                  this.describeWriteFailure(err),
+                );
               } else {
                 report();
               }
@@ -1110,6 +1061,8 @@ export class FileSink implements LogSink {
         }
       }
     } finally {
+      this.inFlightEntry = undefined;
+
       // A drained queue closes the reported episode. `didReportDrop` gates the report so
       // an overflowing queue does not fire a callback per dropped line, but nothing else
       // cleared it: a sink that overflowed during one brief outage, recovered, and
@@ -1260,28 +1213,15 @@ export class FileSink implements LogSink {
     // running total stays visible through `getHealth()`.
     this.didReportDrop = true;
 
-    const failure = new FileSinkError(
-      `Log queue is full (maxQueueSize=${limit}); dropping the oldest entries`,
-    );
-
-    this.lastError = failure;
-
-    reportThroughHandler(
-      this.onError === undefined
-        ? undefined
-        : () =>
-            this.onError?.({
-              kind: 'queue_full',
-              error: failure,
-              target: this.currentLogFile ?? this.logDir,
-              // A dropped entry, never a surviving one: `willRetry` is `false` here, and
-              // a handler that reads that as "this line is gone" and writes it elsewhere
-              // would otherwise duplicate an entry still queued for the file.
-              entry: firstDropped,
-              disposition: 'lost',
-            }),
-      () => describeError(failure),
-      FAILURE_REPORT_OPTIONS,
+    this.handleError(
+      'queue_full',
+      new FileSinkError(
+        `Log queue is full (maxQueueSize=${limit}); dropping the oldest entries`,
+      ),
+      // A dropped entry, never a surviving one: a handler that reads `'lost'` as "this
+      // line is gone" and writes it elsewhere would otherwise duplicate an entry still
+      // queued for the file.
+      { disposition: 'lost', entry: firstDropped },
     );
   }
 
@@ -1596,8 +1536,6 @@ export class FileSink implements LogSink {
           toError(streamError),
         );
 
-        this.lastError = failure;
-
         // Only a failure of a stream that had a descriptor says anything about this
         // sink's ability to write; an open that never completed is `isInitialized`'s
         // business, exactly as `NamedPipeSink` treats it.
@@ -1613,22 +1551,10 @@ export class FileSink implements LogSink {
           this.isInitialized = false;
         }
 
-        reportThroughHandler(
-          this.onError === undefined
-            ? undefined
-            : () =>
-                this.onError?.({
-                  kind,
-                  error: failure,
-                  target: this.currentLogFile ?? this.logDir,
-                  // No `entry`: the stream failed on its own, not while carrying a line
-                  // this sink can name. Anything queued is retried on the reopened stream
-                  // and reported on its own terms if that fails.
-                  disposition: 'no_entry',
-                }),
-          () => describeError(failure),
-          FAILURE_REPORT_OPTIONS,
-        );
+        // No `entry`: the stream failed on its own, not while carrying a line this sink
+        // can name. Anything queued is retried on the reopened stream and reported on its
+        // own terms if that fails.
+        this.handleError(kind, failure, { disposition: 'no_entry' });
       });
 
       // Get current file size
@@ -1824,7 +1750,6 @@ export class FileSink implements LogSink {
         `Error rotating log file from ${this.currentLogFile} to ${rotatedFile}`,
         toError(error),
       );
-      this.lastError = failure;
       const shouldReport = this.rotationRetryDelayMS === 0;
       this.rotationRetryDelayMS = Math.min(
         this.rotationRetryDelayMS === 0
@@ -1833,20 +1758,11 @@ export class FileSink implements LogSink {
         ROTATION_RETRY_MAX_MS,
       );
       this.nextRotationAttemptAt = Date.now() + this.rotationRetryDelayMS;
+      // Recorded on every failure, reported on the first of a backoff run.
       if (shouldReport) {
-        reportThroughHandler(
-          this.onError === undefined
-            ? undefined
-            : () =>
-                this.onError?.({
-                  kind: 'setup',
-                  error: failure,
-                  target: this.currentLogFile ?? this.logDir,
-                  disposition: 'no_entry',
-                }),
-          () => describeError(failure),
-          FAILURE_REPORT_OPTIONS,
-        );
+        this.handleError('setup', failure, { disposition: 'no_entry' });
+      } else {
+        this.lastError = failure;
       }
 
       // The current file may still be writable when archiving is not. Reopen it
@@ -1904,24 +1820,12 @@ export class FileSink implements LogSink {
       return candidate;
     }
 
-    const failure = new FileSinkError(
-      `No free archive name after ${String(MAX_ROTATION_NAME_ATTEMPTS + 1)} candidates; rotating over ${candidate}`,
-    );
-
-    this.lastError = failure;
-
-    reportThroughHandler(
-      this.onError === undefined
-        ? undefined
-        : () =>
-            this.onError?.({
-              kind: 'setup',
-              error: failure,
-              target: candidate,
-              disposition: 'no_entry',
-            }),
-      () => describeError(failure),
-      FAILURE_REPORT_OPTIONS,
+    this.handleError(
+      'setup',
+      new FileSinkError(
+        `No free archive name after ${String(MAX_ROTATION_NAME_ATTEMPTS + 1)} candidates; rotating over ${candidate}`,
+      ),
+      { disposition: 'no_entry', target: candidate },
     );
 
     return candidate;
@@ -1931,11 +1835,11 @@ export class FileSink implements LogSink {
    * A value in `entry` would not render and a marker was written in its place.
    *
    * `'fallback'`, because the line goes out: this is advisory, and does not touch
-   * `consecutiveFailures`. Guarded by `scheduleFormatReport` for the same reason the
+   * `consecutiveFailures`. Guarded by `formatReports` for the same reason the
    * lost-line report is - an `onError` that logs the failure back with the same
    * unrenderable value in it would report from inside its own report, without bound.
    * Under the guard the handler's line still renders, marker and all, and is queued;
-   * only the nested report is skipped.
+   * only the nested report leaves the handler, for the console.
    */
   private reportRenderFallback(entry: LogEntry, error: Error): void {
     const failure = new FileSinkError(
@@ -1943,8 +1847,11 @@ export class FileSink implements LogSink {
       error,
     );
 
+    const line = () =>
+      `FileSink error rendering an entry for ${this.currentLogFile ?? this.logDir}: ${describeError(failure)}`;
+
     this.lastError = failure;
-    this.scheduleFormatReport((onReported) => {
+    this.formatReports.schedule((onReported) => {
       reportThroughHandler(
         this.onError === undefined
           ? undefined
@@ -1956,61 +1863,52 @@ export class FileSink implements LogSink {
                 entry,
                 disposition: 'fallback',
               }),
-        () =>
-          `FileSink error rendering an entry for ${this.currentLogFile ?? this.logDir}: ${describeError(failure)}`,
+        line,
         { ...FAILURE_REPORT_OPTIONS, onSettled: onReported },
       );
-    });
+    }, line);
   }
 
-  /** Deliver one format report now and retain at most one that arrives while it settles. */
-  private scheduleFormatReport(report: (onReported: () => void) => void): void {
-    if (this.formatReportActive) {
-      // While delivering the one deferred report, do not let self-logging create another
-      // generation. The lost entry is still reflected in health; only its callback is
-      // coalesced. No async-context machinery is needed, so browser-capable logger code
-      // remains portable.
-      if (
-        !this.invokingFormatReport &&
-        !this.deliveringDeferredFormatReport &&
-        this.deferredFormatReport === undefined
-      ) {
-        this.deferredFormatReport = report;
-      }
-
-      return;
-    }
-
-    this.startFormatReport(report, false);
-  }
-
-  private startFormatReport(
-    report: (onReported: () => void) => void,
-    isDeferred: boolean,
+  /**
+   * Record a failure as `lastError` and report it through `onError`, or the console when
+   * there is none.
+   *
+   * Every report this sink makes goes through here except a failed write's, which also
+   * carries the attempt and is held by `formatReports` when it is a `'format'` failure.
+   * `target` defaults to the file being written, or the directory before there is one.
+   */
+  private handleError(
+    kind: SinkFailureKind,
+    failure: Error,
+    options: {
+      disposition: SinkFailureDisposition;
+      /** The line this failure is about, when the sink still has it. */
+      entry?: LogEntry;
+      target?: string;
+    },
   ): void {
-    this.formatReportActive = true;
-    this.deliveringDeferredFormatReport = isDeferred;
+    this.lastError = failure;
 
-    this.invokingFormatReport = true;
+    reportThroughHandler(
+      this.onError === undefined
+        ? undefined
+        : () =>
+            this.onError?.({
+              kind,
+              error: failure,
+              target: options.target ?? this.currentLogFile ?? this.logDir,
+              // Absent rather than `undefined` when there is no line, as documented.
+              ...(options.entry === undefined ? {} : { entry: options.entry }),
+              disposition: options.disposition,
+            }),
+      () => describeError(failure),
+      FAILURE_REPORT_OPTIONS,
+    );
+  }
 
-    report(() => {
-      this.formatReportActive = false;
-      this.deliveringDeferredFormatReport = false;
-
-      if (isDeferred) {
-        return;
-      }
-
-      const pending = this.deferredFormatReport;
-
-      this.deferredFormatReport = undefined;
-
-      if (pending !== undefined) {
-        this.startFormatReport(pending, true);
-      }
-    });
-
-    this.invokingFormatReport = false;
+  /** The console line for a failed write, the same one {@link processQueue} reports. */
+  private describeWriteFailure(error: Error): string {
+    return `FileSink error writing to ${this.currentLogFile ?? this.logDir}: ${describeError(error)}`;
   }
 
   /**

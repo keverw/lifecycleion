@@ -1,6 +1,6 @@
 import type { RedactValueFunction } from './default-redact-function';
-import { adoptResult, UnreadableReturn } from './adopt-promise';
-import { observeRejection } from './intrinsics';
+import { containDeferredResult, UnreadableReturn } from './adopt-promise';
+import { isObjectLike } from './is-object-like';
 import { capToMaxRenderLength, MAX_RENDER_LENGTH } from './render-budget';
 import {
   defaultRedactValue,
@@ -90,10 +90,7 @@ export function resolveRedaction(
       return maskWithConfig(value, { percent: requested });
     }
 
-    if (
-      requested !== null &&
-      (typeof requested === 'object' || typeof requested === 'function')
-    ) {
+    if (isObjectLike(requested)) {
       refuseDeferredAnswer(requested);
     }
 
@@ -131,27 +128,26 @@ export function resolveRedaction(
  * function that throws - had nothing observing it, which is an unhandled rejection and
  * fatal under Node's default `--unhandled-rejections=throw`.
  *
- * Its rejection is observed and contained here. The throw is the report: it reaches the
- * caller's `catch` exactly as a synchronous throw from the function does, so the entry is
- * marked `***REDACTION FAILED***` and the failure goes to the operation's `'redaction'`
- * channel. That channel reports at most once per operation, and this failure has already
- * spent that report by the time the promise settles, so the rejection reason is not
- * reported separately.
+ * A native promise's rejection is observed and contained here; any other thenable's
+ * `then` is never called, so a lazy one never starts the work it would defer. The throw
+ * is the report: it reaches the caller's `catch` exactly as a synchronous throw from the
+ * function does, so the entry is marked `***REDACTION FAILED***` and the failure goes to
+ * the operation's `'redaction'` channel. That channel reports at most once per
+ * operation, and this failure has already spent that report by the time the promise
+ * settles, so the rejection reason is not reported separately.
  *
  * A returned value whose `then` cannot be read is refused the same way, with the read's
  * own failure: whether it was a thenable is unknowable, and nothing read from it can be
  * trusted as a masking request.
  */
 function refuseDeferredAnswer(requested: object): void {
-  const pending = adoptResult(requested);
+  const deferred = containDeferredResult(requested);
 
-  if (pending instanceof UnreadableReturn) {
-    throw pending;
+  if (deferred instanceof UnreadableReturn) {
+    throw deferred;
   }
 
-  if (pending !== undefined) {
-    observeRejection(pending, () => undefined);
-
+  if (deferred) {
     throw new TypeError(
       'redactFunction returned a promise; it is called synchronously and must return its answer directly',
     );

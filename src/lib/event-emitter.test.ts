@@ -404,8 +404,8 @@ describe('EventEmitterProtected', () => {
 
 describe('event names that are not strings', () => {
   // Typed `string`, but a JavaScript caller can subscribe and emit with any key a `Map`
-  // accepts. The handler name was a template literal over the event, which throws for a
-  // symbol - out of `emit`, before any handler ran.
+  // accepts. A template literal over the event throws for a symbol, so the handler name
+  // goes through `renderEventName` instead of escaping `emit`.
   test('a symbol event dispatches, and its handler failure is reported', () => {
     const reports: Error[] = [];
     const onError = (event: Event): void => {
@@ -443,5 +443,40 @@ describe('event names that are not strings', () => {
     emitter.on(event, callback);
     expect(() => emitter.emit(event, 'x')).not.toThrow();
     expect(callback).toHaveBeenCalledWith('x');
+  });
+
+  test('the event name is rendered only when a handler fails', () => {
+    let renders = 0;
+    const event = {
+      toString(): string {
+        renders++;
+        return 'counted';
+      },
+    } as unknown as string;
+    const emitter = new EventEmitter();
+    emitter.on(event, () => {});
+    emitter.emit(event, 1);
+    emitter.emit(event, 2);
+    expect(renders).toBe(0);
+
+    const reports: Error[] = [];
+    const onError = (errorEvent: Event): void => {
+      reports.push((errorEvent as ErrorEvent).error as Error);
+      errorEvent.preventDefault();
+    };
+    globalThis.addEventListener('error', onError);
+    try {
+      emitter.on(event, () => {
+        throw new Error('handler failed');
+      });
+      emitter.emit(event, 3);
+    } finally {
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(renders).toBeGreaterThan(0);
+    expect(reports.map((report) => report.message)).toEqual([
+      'Error in a callback event handler for counted',
+    ]);
   });
 });

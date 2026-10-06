@@ -534,3 +534,38 @@ test('native consumers of the signal still follow it', () => {
   expect(derived.reason).toBe(reason);
   expect(signal.reason).toBe(reason);
 });
+
+test('a runtime without EventTarget can still import the library, and fails only when a signal is guarded', async () => {
+  // Dynamic imports in a fresh process, so the capture runs after the global is gone.
+  const script = `
+    const controller = new AbortController();
+    delete globalThis.EventTarget;
+    await import(${JSON.stringify(new URL('../retry-utils/index.ts', import.meta.url).href)});
+    const { guardAbortListeners } = await import(${JSON.stringify(new URL('./guarded-abort-signal.ts', import.meta.url).href)});
+    let failure;
+    try {
+      guardAbortListeners(controller.signal, 'test');
+    } catch (error) {
+      failure = { name: error.name, message: error.message };
+    }
+    const isUntouched = !Object.hasOwn(controller.signal, 'addEventListener');
+    process.stdout.write(JSON.stringify({ failure, isUntouched }));
+  `;
+  const child = Bun.spawn([process.execPath, '--eval', script], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect({ code, stderr }).toEqual({ code: 0, stderr: '' });
+  const { failure, isUntouched } = JSON.parse(stdout) as {
+    failure: { name: string; message: string };
+    isUntouched: boolean;
+  };
+  expect(failure.name).toBe('TypeError');
+  expect(failure.message).toContain('EventTarget is not available');
+  expect(isUntouched).toBe(true);
+});

@@ -1,9 +1,13 @@
 import {
   promiseConstructorIntrinsic,
   applyIntrinsic,
+  definePropertyIntrinsic,
   getIntrinsic,
   getPrototypeOfIntrinsic,
+  hasOwnPropertyIntrinsic,
   objectPrototypeIntrinsic,
+  rangeErrorPrototypeIntrinsic,
+  typeErrorPrototypeIntrinsic,
   ordinaryInstanceOf,
   speciesSymbolIntrinsic,
   queueMicrotaskIntrinsic,
@@ -29,12 +33,6 @@ function inheritsFromPromise(value: unknown): boolean {
     return false;
   }
 }
-
-// Captured like the promise intrinsics: a later patch to hasOwnProperty that answered
-// `false` would send a native promise's own no-op `then` down the trusting path.
-// eslint-disable-next-line @typescript-eslint/unbound-method
-const hasOwnPropertyIntrinsic = Object.prototype.hasOwnProperty;
-const definePropertyIntrinsic = Reflect.defineProperty;
 
 /**
  * Whether `value` carries `then` as an own property - the shape of a native promise
@@ -66,14 +64,32 @@ function hasObjectPrototype(value: object): boolean {
   }
 }
 
-const typeErrorPrototype: object = TypeError.prototype;
-
 /** Whether `error` is this realm's `TypeError`, as a failed internal-slot check throws. */
 function isThisRealmTypeError(error: unknown): boolean {
   try {
     return (
       isObjectLike(error) &&
-      getPrototypeOfIntrinsic(error) === typeErrorPrototype
+      getPrototypeOfIntrinsic(error) === typeErrorPrototypeIntrinsic
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether `error` is what the intrinsic `then`'s internal-slot check can throw for a value
+ * that is not a native promise: this realm's `TypeError`, or - with the stack nearly
+ * exhausted, where even that check cannot run - this realm's `RangeError`. Anything else
+ * comes from past the check, so from a native promise of some realm.
+ */
+function isSlotCheckFailure(error: unknown): boolean {
+  if (isThisRealmTypeError(error)) {
+    return true;
+  }
+  try {
+    return (
+      isObjectLike(error) &&
+      getPrototypeOfIntrinsic(error) === rangeErrorPrototypeIntrinsic
     );
   } catch {
     return false;
@@ -262,17 +278,28 @@ export function adoptPromise<T>(
  * the internal promise slot, so this also observes foreign-realm promises that fail
  * instanceof and have a throwing or non-callable own then. Ordinary plain thenables
  * skip the probe. A failed probe on a local promise is an adoption failure (for
- * example a broken constructor/species), as is any failure other than this realm's
- * `TypeError` - only a value that passed the slot check gets far enough to throw one -
- * and a `TypeError` in the species path's own wording, for the same reason. On other
- * objects, normal thenable handling remains the fallback. Do not skip class or null
- * prototypes: real native promises
+ * example a broken constructor/species), as is any failure the slot check cannot
+ * throw - only a value that passed it gets that far - and a `TypeError` in the species
+ * path's own wording, for the same reason. On other objects, normal thenable handling
+ * remains the fallback. Do not skip class or null prototypes: real native promises
  * can acquire either through setPrototypeOf, and foreign promises fail instanceof.
  * The intrinsic slot probe is necessary to keep their own then from hiding failures.
  * This one boundary is shared by both adoption entry points.
+ *
+ * `isPromise` is {@link inheritsFromPromise}'s answer, when the caller already read it:
+ * a proxy's `getPrototypeOf` trap can answer differently each time, so one
+ * classification asks it once. Read here, once, otherwise.
  */
-function adoptOwnPromise<T>(value: T): Promise<Awaited<T>> | undefined {
-  if (!isObjectLike(value) || !hasOwnThen(value) || hasObjectPrototype(value)) {
+function adoptOwnPromise<T>(
+  value: T,
+  isPromise?: boolean,
+): Promise<Awaited<T>> | undefined {
+  if (!isObjectLike(value) || !hasOwnThen(value)) {
+    return undefined;
+  }
+  const isOnPromiseChain = isPromise ?? inheritsFromPromise(value);
+  // Nothing with `Promise.prototype` on its chain has `Object.prototype` directly above it.
+  if (!isOnPromiseChain && hasObjectPrototype(value)) {
     return undefined;
   }
   let didAdopt = false;
@@ -282,15 +309,15 @@ function adoptOwnPromise<T>(value: T): Promise<Awaited<T>> | undefined {
         applyIntrinsic(promiseThenIntrinsic, value, [resolve, reject]);
         didAdopt = true;
       } catch (error) {
-        // A foreign-realm promise fails `inheritsFromPromise`. The slot check rejects a
-        // non-promise with this realm's `TypeError` and nothing else, before reading
-        // `constructor`, so any other failure - from a `constructor` getter, a species
-        // getter or a species constructor - comes from a native promise of some realm,
-        // whose own `then` must not be trusted to settle it. A broken species can fail
-        // with that same `TypeError`, so it is told apart by the engine's wording.
+        // A foreign-realm promise fails `inheritsFromPromise`. The slot check refuses a
+        // non-promise before reading `constructor`, so any failure it cannot throw - from
+        // a `constructor` getter, a species getter or a species constructor - comes from
+        // a native promise of some realm, whose own `then` must not be trusted to settle
+        // it. A broken species can fail with that same `TypeError`, so it is told apart
+        // by the engine's wording.
         if (
-          inheritsFromPromise(value) ||
-          !isThisRealmTypeError(error) ||
+          isOnPromiseChain ||
+          !isSlotCheckFailure(error) ||
           isSpeciesRefusal(error)
         ) {
           didAdopt = true;
@@ -374,15 +401,16 @@ export class UnreadableReturn extends Error {
 export function adoptResult(
   result: unknown,
 ): Promise<unknown> | UnreadableReturn | undefined {
-  const ownPromise = adoptOwnPromise(result);
+  if (!isObjectLike(result)) {
+    return undefined;
+  }
+  const isPromise = inheritsFromPromise(result);
+  const ownPromise = adoptOwnPromise(result, isPromise);
   if (ownPromise !== undefined) {
     return ownPromise;
   }
-  if (inheritsFromPromise(result)) {
+  if (isPromise) {
     return adopt(result);
-  }
-  if (!isObjectLike(result)) {
-    return undefined;
   }
   let then: unknown;
   try {
@@ -394,3 +422,46 @@ export function adoptResult(
     ? adopt(result, then as (...args: unknown[]) => unknown)
     : undefined;
 }
+
+/**
+ * For a caller that refuses a promise or other thenable rather than waiting for it:
+ * whether `result` is one, decided without calling anything `result` supplies. A native
+ * promise of any realm has its rejection observed and contained through the intrinsic
+ * `then`, which reads its `constructor` and species as any reaction would, but never its
+ * own or inherited `then` method. Any other value has its `then` read, once, and never
+ * called - a lazy thenable that starts its work there is not started. A `then` that
+ * cannot be read answers an {@link UnreadableReturn}.
+ *
+ * Known limit: a native promise whose `constructor` misbehaves cannot be observed, as
+ * {@link adoptPromise} documents, and neither can a proxy around a promise, which has
+ * no internal slot; their rejections are left to the host's unhandled-rejection
+ * reporting.
+ */
+export function containDeferredResult(
+  result: object,
+): boolean | UnreadableReturn {
+  // A plain object of this realm is no native promise; spared the probe's throw.
+  if (!hasObjectPrototype(result)) {
+    try {
+      void applyIntrinsic(promiseThenIntrinsic, result, [noop, noop]);
+      return true;
+    } catch (error) {
+      if (
+        inheritsFromPromise(result) ||
+        !isSlotCheckFailure(error) ||
+        isSpeciesRefusal(error)
+      ) {
+        return true;
+      }
+    }
+  }
+  let then: unknown;
+  try {
+    then = getIntrinsic(result, 'then', result);
+  } catch (error) {
+    return new UnreadableReturn(error);
+  }
+  return typeof then === 'function';
+}
+
+function noop(): void {}

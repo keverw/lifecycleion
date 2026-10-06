@@ -33,7 +33,7 @@ const SIGNAL_TRIGGER_OPERATIONS = {
   debug: 'triggerDebug',
 } as const;
 
-export interface SignalBroadcastDescriptor {
+interface SignalBroadcastDescriptor {
   signal: 'reload' | 'info' | 'debug';
   // The handler as read off the component, unbound: it is called with the component
   // as its receiver through the captured `applyIntrinsic`, never through its own `bind`.

@@ -21,7 +21,7 @@ import type { ComponentState } from '../types';
  */
 
 /** What {@link isHookEntryBlocked} reads. */
-export type HookEntryContext = Pick<
+type HookEntryContext = Pick<
   ComponentAccessContext,
   'componentStates' | 'isRawStartPending' | 'isLateStartCleanupPending'
 >;
@@ -86,7 +86,7 @@ export function isComponentEnterable(
 }
 
 /** What {@link readHookThenRecheck} found. */
-export type HookRead<TValue, TRefusal> =
+type HookRead<TValue, TRefusal> =
   /** `value` is what the read returned, or `undefined` when it threw. */
   | { status: 'refused'; refusal: TRefusal; value: TValue | undefined }
   | { status: 'read_failed'; error: unknown }
@@ -128,13 +128,13 @@ export function readHookThenRecheck<TValue, TRefusal>(
 }
 
 /** What {@link dispatchAnnouncedHook} did. */
-export type HookDispatch<TRefusal> =
+type HookDispatch<TRefusal> =
   | { status: 'refused'; refusal: TRefusal }
   | { status: 'settled'; value: unknown }
   | { status: 'timed_out' }
   | { status: 'threw'; error: unknown };
 
-export interface HookDispatchRequest<TRefusal> {
+interface HookDispatchRequest<TRefusal> {
   name: string;
   component: BaseComponent;
   /** The handler as read once by the caller; called with `component` as receiver. */

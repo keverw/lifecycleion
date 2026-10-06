@@ -4,31 +4,24 @@ import { assertNumberOption } from '../../../internal/timer-limits';
 /**
  * What a queueing sink does when it cannot write, in one place.
  *
- * `FileSink` and `NamedPipeSink` both hold entries they could not hand over yet, and they
- * had answered the same three questions differently for no reason anyone chose. A failed
- * write was retried three times by one and not at all by the other; a queue was capped
- * only if the caller thought to ask, so the default on both was *unbounded*, which on the
- * unhealthy path is the one place a logger can least afford to grow without limit; and a
- * pipe whose stream had failed dropped every later entry on the floor while a file whose
- * stream had failed reopened it and carried on.
- *
- * The policy below is the one both now follow. What legitimately differs between them -
- * how a write is attempted, what "reopen" means, what the caller is handed back - stays
- * theirs.
+ * `FileSink` and `NamedPipeSink` both hold entries they could not hand over yet, and both
+ * answer the same three questions here: how often a failed write is retried, how large the
+ * queue may grow, and how long `close()` waits by default. What legitimately differs
+ * between them - how a write is attempted, what "reopen" means, what the caller is handed
+ * back - stays theirs.
  */
 
 /**
  * Entries a sink holds before it starts discarding the oldest.
  *
- * A default, where both sinks previously had none. Unbounded is the wrong default for a
- * queue that only grows when something is already wrong: a full disk or a pipe with no
- * reader turns an ordinary logging loop into unbounded memory growth, and every queued
- * entry holds a rendered line - `FileSink`'s also holds the `LogEntry`, and with it the
- * caller's params graph by reference.
+ * Unbounded is the wrong default for a queue that only grows when something is already
+ * wrong: a full disk or a pipe with no reader turns an ordinary logging loop into
+ * unbounded memory growth, and every queued entry holds a rendered line - `FileSink`'s
+ * also holds the `LogEntry`, and with it the caller's params graph by reference.
  *
  * Ten thousand lines is far more than any outage worth recovering from leaves behind, and
  * small enough to be irrelevant next to the process that produced them. A caller who
- * genuinely wants the old behaviour asks for it by name; see {@link UNLIMITED_QUEUE}.
+ * genuinely wants no cap asks for it by name; see {@link UNLIMITED_QUEUE}.
  */
 export const DEFAULT_MAX_QUEUE_SIZE = 10_000;
 
@@ -47,24 +40,6 @@ export const DEFAULT_MAX_RETRIES = 3;
 
 /** How long `close()` and `flush()` wait before giving up, unless the caller says. */
 export const DEFAULT_CLOSE_TIMEOUT_MS = 30_000;
-
-/**
- * The longest delay a timer can be given and still fire when asked.
- *
- * `setTimeout` reads a delay past `2^31 - 1` milliseconds as `1`, so `Infinity` - the
- * honest spelling of "wait as long as it takes" - fired the deadline *at once* and a
- * `close()` given it gave up on its init before the init could possibly finish.
- */
-export { MAX_TIMER_MS } from '../../../internal/timer-limits';
-
-export { resolveTimeoutMS } from '../../../internal/timer-limits';
-
-/**
- * Count options refuse `NaN` and non-numbers by the same rule, and with the same message,
- * as `closeTimeoutMS` in the same options object. They used to take the default silently
- * for them - two validation rules in one config.
- */
-export { assertNumberOption } from '../../../internal/timer-limits';
 
 /**
  * The cap a sink should enforce, or `undefined` for unlimited.

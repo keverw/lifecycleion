@@ -2,17 +2,25 @@ import {
   reportCallbackError,
   runCallbackSafely,
 } from '../safe-handle-callback';
-import { applyIntrinsic, getIntrinsic } from './intrinsics';
+import {
+  applyIntrinsic,
+  definePropertyIntrinsic,
+  getIntrinsic,
+} from './intrinsics';
+import { isNullish } from './is-nullish';
 import { isObjectLike } from './is-object-like';
 
 // Captured at module initialization, like the rest of the intrinsics: the guard installed
 // below must keep registering with the real `EventTarget` after application code replaces
 // these methods, or a replacement could hand the raw listener to the runtime after all.
+// A runtime without `EventTarget` captures nothing, so importing this module still works
+// there; only guarding a signal fails.
+const eventTargetPrototype: EventTarget | undefined =
+  typeof EventTarget === 'function' ? EventTarget.prototype : undefined;
 // eslint-disable-next-line @typescript-eslint/unbound-method
-const addEventListenerIntrinsic = EventTarget.prototype.addEventListener;
+const addEventListenerIntrinsic = eventTargetPrototype?.addEventListener;
 // eslint-disable-next-line @typescript-eslint/unbound-method
-const removeEventListenerIntrinsic = EventTarget.prototype.removeEventListener;
-const definePropertyIntrinsic = Reflect.defineProperty;
+const removeEventListenerIntrinsic = eventTargetPrototype?.removeEventListener;
 const weakMapIntrinsic = WeakMap;
 // eslint-disable-next-line @typescript-eslint/unbound-method
 const weakMapGetIntrinsic = WeakMap.prototype.get;
@@ -50,9 +58,23 @@ type Wrapper = (this: unknown, event: unknown) => void;
  * on this signal directly registers the raw listener. Consumers that listen internally
  * (`fetch`, `AbortSignal.any`) are unaffected.
  *
- * Must be called on a signal nothing else has seen yet. Never throws.
+ * Must be called on a signal nothing else has seen yet. Throws a `TypeError`, before
+ * touching `signal`, in a runtime that had no `EventTarget` when this module loaded;
+ * never throws otherwise.
  */
 export function guardAbortListeners(signal: AbortSignal, label: string): void {
+  if (
+    addEventListenerIntrinsic === undefined ||
+    removeEventListenerIntrinsic === undefined
+  ) {
+    throw new TypeError(
+      'EventTarget is not available in this runtime; lifecycleion needs it to guard abort listeners',
+    );
+  }
+  const addListener: EventTarget['addEventListener'] =
+    addEventListenerIntrinsic;
+  const removeListener: EventTarget['removeEventListener'] =
+    removeEventListenerIntrinsic;
   const reportListenerError = (error: unknown): void => {
     reportCallbackError(label, error);
   };
@@ -100,7 +122,7 @@ export function guardAbortListeners(signal: AbortSignal, label: string): void {
   function addEventListener(this: unknown, ...args: unknown[]): void {
     // Another receiver, or too few arguments: exactly the native method's behavior.
     if (this !== signal || args.length < 2) {
-      applyIntrinsic(addEventListenerIntrinsic, this, args);
+      applyIntrinsic(addListener, this, args);
       return;
     }
     // Indexed, not destructured: array destructuring reads the live
@@ -112,19 +134,15 @@ export function guardAbortListeners(signal: AbortSignal, label: string): void {
     const typeString = `${type as string}`;
     // The DOM's no-op. Not handed to the native method, which in Bun and Node also
     // prints a warning that the call has no effect.
-    if (listener === null || listener === undefined) {
+    if (isNullish(listener)) {
       return;
     }
     if (typeString !== 'abort' || !isObjectLike(listener)) {
-      applyIntrinsic(addEventListenerIntrinsic, signal, [
-        typeString,
-        listener,
-        options,
-      ]);
+      applyIntrinsic(addListener, signal, [typeString, listener, options]);
       return;
     }
     const { isCapture, nativeOptions } = readAddOptions(options);
-    applyIntrinsic(addEventListenerIntrinsic, signal, [
+    applyIntrinsic(addListener, signal, [
       typeString,
       wrapperFor(listener, isCapture),
       nativeOptions,
@@ -133,7 +151,7 @@ export function guardAbortListeners(signal: AbortSignal, label: string): void {
 
   function removeEventListener(this: unknown, ...args: unknown[]): void {
     if (this !== signal || args.length < 2) {
-      applyIntrinsic(removeEventListenerIntrinsic, this, args);
+      applyIntrinsic(removeListener, this, args);
       return;
     }
     const type = args[0];
@@ -147,7 +165,7 @@ export function guardAbortListeners(signal: AbortSignal, label: string): void {
       (typeString === 'abort' && isObjectLike(listener)
         ? takeWrapper(listener, isCapture)
         : undefined) ?? listener;
-    applyIntrinsic(removeEventListenerIntrinsic, signal, [
+    applyIntrinsic(removeListener, signal, [
       typeString,
       registered,
       // An object, not the boolean: Node's native removal ignores a boolean `true`.
@@ -172,18 +190,10 @@ export function guardAbortListeners(signal: AbortSignal, label: string): void {
     handler = isObjectLike(value) ? value : null;
     if (handler === null && isHandlerRegistered) {
       isHandlerRegistered = false;
-      applyIntrinsic(removeEventListenerIntrinsic, signal, [
-        'abort',
-        handlerWrapper,
-        false,
-      ]);
+      applyIntrinsic(removeListener, signal, ['abort', handlerWrapper, false]);
     } else if (handler !== null && !isHandlerRegistered) {
       isHandlerRegistered = true;
-      applyIntrinsic(addEventListenerIntrinsic, signal, [
-        'abort',
-        handlerWrapper,
-        false,
-      ]);
+      applyIntrinsic(addListener, signal, ['abort', handlerWrapper, false]);
     }
   };
 

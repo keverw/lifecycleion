@@ -11,8 +11,8 @@ import { clamp } from '../clamp';
  * patient becomes a busy loop.
  *
  * Held here rather than in any one module because the retry policy, the HTTP client and
- * the logger sinks all hand numbers to the same timer and had drifted to three copies of
- * the constant, only two of which were applied.
+ * the logger sinks all hand numbers to the same timer, and all of them must apply the
+ * same bound.
  */
 export const MAX_TIMER_MS = 2_147_483_647;
 

@@ -1,3 +1,4 @@
+import { readMember } from './internal/read-member';
 import { reportCallbackError, runCallbackSafely } from './safe-handle-callback';
 
 /**
@@ -86,13 +87,8 @@ export class SingleEventObserverProtected<T> {
  * where a throw would replace the report it was building: `name` is an ordinary
  * property a getter (or a proxy) can throw from, or redefine as a symbol.
  */
-function readSubscriberName(subscriber: unknown): string {
-  let name: unknown;
-  try {
-    name = (subscriber as { name?: unknown }).name;
-  } catch {
-    return 'anonymous';
-  }
+function readSubscriberName(subscriber: object): string {
+  const name = readMember(subscriber, 'name');
   return typeof name === 'string' && name !== '' ? name : 'anonymous';
 }
 

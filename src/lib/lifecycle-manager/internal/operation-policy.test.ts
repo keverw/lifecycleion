@@ -31,7 +31,7 @@ test('operation settlement preserves successful results and accepts a disabled t
   expect(toOperationTimerDelayMS(0)).toBe(0);
 });
 
-test('manager timeout refusals retain provenance across settlement and result factories', async () => {
+test('manager timeout refusals are classified by settlement and result factories, and released once handed back', async () => {
   const { reports, release } = claimReports();
   try {
     const result = await settleOperation(
@@ -46,19 +46,22 @@ test('manager timeout refusals retain provenance across settlement and result fa
     );
     expect(result.code).toBe('invalid_options');
     expect(result.reason).toContain('start() refused:');
-    expect(isOperationOptionRefusal(result.error)).toBe(true);
     expect(reports).toHaveLength(0);
-    if (result.error === undefined) {
-      throw new Error('Expected a timeout error');
-    }
+    // Handed back, the error is the caller's: rethrown, it is not this manager's refusal.
+    expect(result.error).toBeInstanceOf(TypeError);
+    expect(isOperationOptionRefusal(result.error)).toBe(false);
+
     // Builders carry the code they are handed; the shared classifier supplies it.
-    const code = settledFailureCode(result.error);
+    const refusal = invalidOperationOptionError(
+      'test option must be a boolean',
+    );
+    const code = settledFailureCode(refusal);
     expect(code).toBe('invalid_options');
-    expect(crashedShutdownResult(result.error, 'failure', code).code).toBe(
+    expect(crashedShutdownResult(refusal, 'failure', code).code).toBe(
       'invalid_options',
     );
     expect(
-      crashedComponentResult('example', result.error, 'failure', code).code,
+      crashedComponentResult('example', refusal, 'failure', code).code,
     ).toBe('invalid_options');
   } finally {
     release();
@@ -211,4 +214,34 @@ test('isLinkedToAbort reads hostile values defensively and bounds its walk', () 
   };
   expect(isLinkedToAbort(wrap(16), reason)).toBe(true);
   expect(isLinkedToAbort(wrap(17), reason)).toBe(false);
+});
+
+test('settlement releases refusals nested in a result, without reading caller data', async () => {
+  const nested = invalidOperationOptionError('nested refusal');
+  const listed = invalidOperationOptionError('listed refusal');
+  const inData = invalidOperationOptionError('caller data');
+  let dataReads = 0;
+  const data = {
+    get error(): Error {
+      dataReads++;
+      return inData;
+    },
+  };
+  const result = await settleOperation(
+    'example',
+    () =>
+      Promise.resolve({
+        startResult: { error: nested },
+        results: [{ error: listed }],
+        data,
+      }),
+    () => {
+      throw new Error('unexpected failure');
+    },
+  );
+  expect(result.startResult.error).toBe(nested);
+  expect(isOperationOptionRefusal(nested)).toBe(false);
+  expect(isOperationOptionRefusal(listed)).toBe(false);
+  expect(dataReads).toBe(0);
+  expect(isOperationOptionRefusal(inData)).toBe(true);
 });

@@ -36,10 +36,10 @@ export function calculateExponentialDelay({
   // factor ** retryCount` is allowed to reach `Infinity` - by `factor: Infinity`, or
   // simply by enough attempts at an ordinary factor. Jitter then computed
   // `Infinity - Infinity`, which is `NaN`, and `clamp` is `Math.max`/`Math.min`, which
-  // pass `NaN` straight through. The runner asks `delayMS > 0`, `NaN > 0` is `false`, and
-  // a policy that reads as "back off to the maximum" instead retried synchronously on the
-  // same stack until it overflowed - a run that never settles. Bounding the base here
-  // keeps every later arithmetic step finite.
+  // pass `NaN` straight through. A policy that reads as "back off to the maximum" would
+  // then hand the runner a `NaN` delay, which it can only treat as its 1ms minimum - a
+  // near-busy retry loop. Bounding the base here keeps every later arithmetic step
+  // finite.
   if (!(delay <= maxTimeoutMS)) {
     delay = maxTimeoutMS;
   }
@@ -56,8 +56,8 @@ export function calculateExponentialDelay({
   const clamped = clamp(delay, minTimeoutMS, maxTimeoutMS);
 
   // Last line of defence, so this function's contract is "a finite number" with no case
-  // left over. `clamp` cannot restore a `NaN`, and the runner treats a non-positive delay
-  // as "retry now" - the busy-retry this whole guard exists to prevent.
+  // left over. `clamp` cannot restore a `NaN`, and the runner turns a `NaN` delay into a
+  // 1ms timer - the busy-retry this whole guard exists to prevent.
   //
   // The bounds are tried in turn rather than trusting either: `RetryPolicy` refuses a
   // `NaN` timeout and clamps `Infinity` to the timer ceiling, so its bounds are always
@@ -82,9 +82,9 @@ export function calculateExponentialDelay({
  * reached from `RetryPolicy.mostCommonError`, a public getter, holding whatever the
  * retried operation threw. `message` and `error` are ordinary properties a subclass or a
  * `Proxy` can turn into throwing accessors, `in` is a trappable operation, and `String()`
- * invokes a `toString` this module does not own - so an unguarded read here threw out of a
- * property access the caller made in order to *report* a failure, replacing the failure
- * with one of its own.
+ * invokes a `toString` this module does not own - so an unguarded read here would throw out
+ * of a property access the caller made in order to *report* a failure, replacing the
+ * failure with one of its own.
  *
  * The value is only ever a grouping key, so an unreadable member is treated as absent and
  * the value falls through to the next strategy. Two errors that both refuse to be read

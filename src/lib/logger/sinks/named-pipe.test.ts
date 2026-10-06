@@ -2393,11 +2393,12 @@ describe('NamedPipeSink', () => {
   test('a rejecting async formatter plus an onError that logs back is contained', async () => {
     // Each report's line ran the formatter again, and the promise it returned rejected
     // after the guard came down, so every delivery started the next one: one onError call
-    // per microtask, without end. A rejection from a promise born during a report is
-    // dropped, as that nested write's immediate failure already was.
+    // per microtask, without end. A rejection from a promise born during a report goes to
+    // the console, as `ArraySink` sends its transformer's.
     const pipePath = `${tmpDir.path}/formatter-promise-self-log.pipe`;
     await createNamedPipe(pipePath);
 
+    const captured = muteConsoleError();
     const reader = startPipeReader(pipePath);
     const formatFailures: SinkFailure[] = [];
     const self: { sink?: NamedPipeSink } = {};
@@ -2446,9 +2447,18 @@ describe('NamedPipeSink', () => {
         (formatFailures[1]?.error.cause as Error | undefined)?.message,
       ).toBe('formatter rejected');
       expect(reader.data.join('')).toContain('one line');
+
+      // The handler's own lines were not lost in silence: their failures, immediate and
+      // late, went to the console rather than back to the handler.
+      expect(
+        captured.some((line) =>
+          line.includes('formatter returned a promise that rejected'),
+        ),
+      ).toBe(true);
     } finally {
       await sink.close();
       reader.stop();
+      restoreConsoleError();
     }
   }, 15000);
 
@@ -4399,52 +4409,61 @@ describe('NamedPipeSink', () => {
     // is queued, so a `formatter` that throws reported, re-entered `write()` from the
     // handler, threw again, and reported again - without bound.
     const pipePath = `${tmpDir.path}/self-logging-format.pipe`;
+    const captured = muteConsoleError();
+    try {
+      let calls = 0;
+      let depth = 0;
+      let maxDepth = 0;
 
-    let calls = 0;
-    let depth = 0;
-    let maxDepth = 0;
+      const self: { sink?: NamedPipeSink } = {};
 
-    const self: { sink?: NamedPipeSink } = {};
+      const sink = new NamedPipeSink({
+        pipePath,
+        closeTimeoutMS: 500,
+        formatter: () => {
+          throw new Error('Formatter error');
+        },
+        onError: () => {
+          calls++;
+          depth++;
+          maxDepth = Math.max(maxDepth, depth);
 
-    const sink = new NamedPipeSink({
-      pipePath,
-      closeTimeoutMS: 500,
-      formatter: () => {
-        throw new Error('Formatter error');
-      },
-      onError: () => {
-        calls++;
-        depth++;
-        maxDepth = Math.max(maxDepth, depth);
+          self.sink?.write({
+            timestamp: Date.now(),
+            type: 'error',
+            template: 'the log sink failed',
+            message: 'the log sink failed',
+          });
 
-        self.sink?.write({
-          timestamp: Date.now(),
-          type: 'error',
-          template: 'the log sink failed',
-          message: 'the log sink failed',
-        });
+          depth--;
+        },
+      });
 
-        depth--;
-      },
-    });
+      self.sink = sink;
 
-    self.sink = sink;
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'first',
+        message: 'first',
+      });
 
-    sink.write({
-      timestamp: Date.now(),
-      type: 'info',
-      template: 'first',
-      message: 'first',
-    });
+      expect(maxDepth).toBe(1);
+      expect(calls).toBe(1);
 
-    expect(maxDepth).toBe(1);
-    expect(calls).toBe(1);
+      // Not vacuous: the handler's own line still rendered through the default format and
+      // still reached the queue, alongside the one that started this.
+      expect(sink.getHealth().queueSize).toBe(2);
 
-    // Not vacuous: the handler's own line still rendered through the default format and
-    // still reached the queue, alongside the one that started this.
-    expect(sink.getHealth().queueSize).toBe(2);
+      // Its formatter failure is said on the console, not handed back to the handler.
+      expect(
+        captured.filter((line) => line.includes('formatter failed')),
+      ).toHaveLength(1);
 
-    await sink.close();
+      await sink.close();
+    } finally {
+      restoreConsoleError();
+    }
   }, 15000);
 
   test('a self-logging onError cannot recurse through an unrenderable jsonFormat entry', async () => {
@@ -4454,50 +4473,60 @@ describe('NamedPipeSink', () => {
     // unrenderable value - failed the same way and reached the same report: a
     // synchronous recursion that ended in a stack overflow.
     const pipePath = `${tmpDir.path}/self-logging-json.pipe`;
+    const captured = muteConsoleError();
+    try {
+      let calls = 0;
+      let depth = 0;
+      let maxDepth = 0;
 
-    let calls = 0;
-    let depth = 0;
-    let maxDepth = 0;
+      const self: { sink?: NamedPipeSink } = {};
 
-    const self: { sink?: NamedPipeSink } = {};
+      const sink = new NamedPipeSink({
+        pipePath,
+        closeTimeoutMS: 500,
+        jsonFormat: true,
+        onError: (failure) => {
+          calls++;
+          depth++;
+          maxDepth = Math.max(maxDepth, depth);
 
-    const sink = new NamedPipeSink({
-      pipePath,
-      closeTimeoutMS: 500,
-      jsonFormat: true,
-      onError: (failure) => {
-        calls++;
-        depth++;
-        maxDepth = Math.max(maxDepth, depth);
+          self.sink?.write({
+            timestamp: Date.now(),
+            type: 'error',
+            template: 'the log sink failed',
+            message: UNRENDERABLE_MESSAGE,
+            redactedParams: { failure },
+          });
 
-        self.sink?.write({
-          timestamp: Date.now(),
-          type: 'error',
-          template: 'the log sink failed',
-          message: UNRENDERABLE_MESSAGE,
-          redactedParams: { failure },
-        });
+          depth--;
+        },
+      });
 
-        depth--;
-      },
-    });
+      self.sink = sink;
 
-    self.sink = sink;
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'unrenderable',
+        message: UNRENDERABLE_MESSAGE,
+      });
 
-    sink.write({
-      timestamp: Date.now(),
-      type: 'info',
-      template: 'unrenderable',
-      message: UNRENDERABLE_MESSAGE,
-    });
+      expect(maxDepth).toBe(1);
+      expect(calls).toBe(1);
 
-    expect(maxDepth).toBe(1);
-    expect(calls).toBe(1);
+      // Both lines counted: the one that started this and the handler's own - and the
+      // handler's own reported on the console rather than to the handler.
+      expect(sink.getHealth().droppedEntries).toBe(2);
+      expect(
+        captured.filter((line) =>
+          line.includes('Failed to format a log entry'),
+        ),
+      ).toHaveLength(1);
 
-    // Both lines counted: the one that started this and the handler's own.
-    expect(sink.getHealth().droppedEntries).toBe(2);
-
-    await sink.close();
+      await sink.close();
+    } finally {
+      restoreConsoleError();
+    }
   }, 15000);
 
   test('the format guard holds until an async onError settles', async () => {
@@ -4505,59 +4534,69 @@ describe('NamedPipeSink', () => {
     // `async` handler that logged the unrenderable failure back after awaiting found no
     // guard and reported again, once per turn of the event loop.
     const pipePath = `${tmpDir.path}/async-self-logging.pipe`;
+    const captured = muteConsoleError();
+    try {
+      let calls = 0;
 
-    let calls = 0;
+      const self: { sink?: NamedPipeSink } = {};
 
-    const self: { sink?: NamedPipeSink } = {};
+      const sink = new NamedPipeSink({
+        pipePath,
+        closeTimeoutMS: 500,
+        jsonFormat: true,
+        onError: async (failure) => {
+          // Only the reports under test: the missing pipe reports `'not_found'` on its own
+          // schedule, and those are a different subject.
+          if (failure.kind !== 'format') {
+            return;
+          }
 
-    const sink = new NamedPipeSink({
-      pipePath,
-      closeTimeoutMS: 500,
-      jsonFormat: true,
-      onError: async (failure) => {
-        // Only the reports under test: the missing pipe reports `'not_found'` on its own
-        // schedule, and those are a different subject.
-        if (failure.kind !== 'format') {
-          return;
-        }
+          calls++;
 
-        calls++;
+          await new Promise((resolve) => setTimeout(resolve, 5));
 
-        await new Promise((resolve) => setTimeout(resolve, 5));
+          self.sink?.write({
+            timestamp: Date.now(),
+            type: 'error',
+            template: 'the log sink failed',
+            message: UNRENDERABLE_MESSAGE,
+          });
+        },
+      });
 
-        self.sink?.write({
-          timestamp: Date.now(),
-          type: 'error',
-          template: 'the log sink failed',
-          message: UNRENDERABLE_MESSAGE,
-        });
-      },
-    });
+      self.sink = sink;
 
-    self.sink = sink;
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'unrenderable',
+        message: UNRENDERABLE_MESSAGE,
+      });
 
-    sink.write({
-      timestamp: Date.now(),
-      type: 'info',
-      template: 'unrenderable',
-      message: UNRENDERABLE_MESSAGE,
-    });
+      await new Promise((resolve) => setTimeout(resolve, 100));
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+      // One deferred report is allowed after the async handler settles; the line that
+      // handler logs is reported once, and its handler's own line is the recursion fuse:
+      // reported on the console, never to the handler.
+      expect(calls).toBe(2);
+      expect(sink.getHealth().droppedEntries).toBe(3);
+      expect(
+        captured.filter((line) =>
+          line.includes('Failed to format a log entry'),
+        ),
+      ).toHaveLength(1);
+      // All three were format losses, and the breakdown says so.
+      expect(sink.getHealth().droppedByKind).toEqual({
+        queue_full: 0,
+        write: 0,
+        format: 3,
+        close: 0,
+      });
 
-    // One deferred report is allowed after the async handler settles; the line that
-    // handler logs is reported once, and its handler's own line is the recursion fuse.
-    expect(calls).toBe(2);
-    expect(sink.getHealth().droppedEntries).toBe(3);
-    // All three were format losses, and the breakdown says so.
-    expect(sink.getHealth().droppedByKind).toEqual({
-      queue_full: 0,
-      write: 0,
-      format: 3,
-      close: 0,
-    });
-
-    await sink.close();
+      await sink.close();
+    } finally {
+      restoreConsoleError();
+    }
   }, 15000);
 
   test('reports one concurrent format failure after the active handler settles', async () => {

@@ -2,15 +2,15 @@
  * Mask emails, domains and plain strings - a proportion of each hidden behind a mask
  * character, the rest left readable.
  *
- * The successor to the `datamask` npm package, which this library used for its default
- * redaction and which has the same three functions with the same arguments and
- * defaults, including treating null optional settings as omitted. What changed is the unit: `datamask` indexed a string by UTF-16 code unit,
- * so an emoji-heavy value came back cut through a surrogate pair - a lone `\uD83D` at
- * the seam, `isWellFormed()` false - and the same broken text went wherever the mask
- * did. These count in characters (see below), so a cut never lands inside one. A value
+ * The successor to the `datamask` npm package, with the same three functions, arguments
+ * and defaults, including treating null optional settings as omitted. The difference is
+ * the unit: `datamask` indexes a string by UTF-16 code unit, so an emoji-heavy value can
+ * come back cut through a surrogate pair - a lone `\uD83D` at the seam, `isWellFormed()`
+ * false. These count in characters (see below), so a cut never lands inside one. A value
  * whose every code unit is a character of its own - no astral characters, combining
- * marks, joiners or `\r\n` pairs - masks exactly as it did before; one with a multi-unit
- * cluster such as `e` + combining accent counts it once, so its mask is shorter.
+ * marks, joiners or `\r\n` pairs - masks exactly as `datamask` masks it; one with a
+ * multi-unit cluster such as `e` + combining accent counts it once, so its mask is
+ * shorter.
  *
  * A character is a grapheme cluster where the runtime has `Intl.Segmenter` - so a
  * family emoji, a flag, a skin-tone variant or `e` + combining accent is one character,

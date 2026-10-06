@@ -304,7 +304,12 @@ const operation = async (reportResult, signal) => {
 };
 ```
 
-> **Tip:** When `signal.aborted` is true, and acknowledged, use `reportResult('skip')` rather than `'error'`. The operation result resolves with `'canceled'` status regardless of what you report, but `'error'` still records the value into the `errors` array. Using `'skip'` keeps `errors`, `mostCommonError`, and `lastError` clean for actual failures. Note that the `attempt-handled` event still reflects the status you passed to `reportResult` (not `'canceled'`), but includes `wasCanceled: true` so you can detect that cancellation was in progress.
+> **Tip:** When `signal.aborted` is true and you acknowledge it, report `'skip'` rather than `'error'`. What happens to the report depends on what aborted the attempt:
+>
+> - **`cancel()`:** a `'skip'` or `'error'` report ends the operation `'stopped'`: the operation result is `{ status: 'canceled' }` and pending `cancel()` calls resolve `'canceled'`. `'error'` also records its value into `errors`, `mostCommonError`, and `lastError`, while `'skip'` keeps them clean for actual failures. A `'success'` or `'fatal'` report still wins over the pending cancellation: the operation ends `'completed'` (`attempt_success`) or `'fatal-error'` (`attempt_fatal`), and pending `cancel()` calls resolve `'not-running'` (see [`cancel()`](#cancel)). Once the grace period has forced the cancellation, a late report of any status is discarded.
+> - **`forceTry({ shouldAbortRunning: true })`:** a report made after the replacement attempt has started - `'skip'` or any other status - is discarded, without the global `'error'` report a late report from an attempt that was not aborted produces. A report an abort listener makes synchronously, inside the abort, is still the attempt's outcome (see [`forceTry()`](#forcetryoptions)).
+>
+> The `attempt-handled` event for a report made while cancellation is pending reflects the status you passed to `reportResult`, and includes `wasCanceled: true` so you can detect that cancellation was in progress.
 
 ### Properties
 

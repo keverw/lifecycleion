@@ -11,7 +11,7 @@ import { reportToHost } from './internal/report-to-host';
 import { UnreadableReturn, adoptResult } from './internal/adopt-promise';
 import { reportThroughHandler } from './internal/failure-reporter';
 import { isFunction } from './is-function';
-import { renderName } from './internal/render-name';
+import { renderName, resolveName } from './internal/render-name';
 
 // Node.js has a global `ErrorEvent` constructor (Node 25+) but does not make `globalThis`
 // an EventTarget, so the global event methods must be supplied before anything can be
@@ -24,11 +24,31 @@ installGlobalEventTarget();
 export { reportToHost } from './internal/report-to-host';
 
 /**
+ * A callback's name as the helpers that invoke a callback accept it: the name itself, or a
+ * function that builds it. A builder is called only when there is a failure to report, so
+ * a caller whose name costs something to assemble - an emitter naming the event a handler
+ * belongs to - pays nothing on the calls that succeed. {@link reportCallbackError} takes a
+ * plain `string`: it only ever runs with a failure in hand.
+ */
+export type CallbackName = string | (() => string);
+
+const UNNAMED_CALLBACK = '<unnamed callback>';
+
+/**
  * The callback name as a string, never a throw: see `renderName`. A name that cannot be
  * rendered is reported as `<unnamed callback>`.
  */
 function renderCallbackName(callbackName: unknown): string {
-  return renderName(callbackName, '<unnamed callback>');
+  return renderName(callbackName, UNNAMED_CALLBACK);
+}
+
+/**
+ * {@link renderCallbackName} for a {@link CallbackName}: a builder is called here, on the
+ * failure path, and one that throws is reported as `<unnamed callback>` rather than
+ * replacing the failure it was naming.
+ */
+function resolveCallbackName(callbackName: unknown): string {
+  return resolveName(callbackName, UNNAMED_CALLBACK);
 }
 
 /**
@@ -55,7 +75,11 @@ export function reportCallbackError(
   callbackName: string,
   error: unknown,
 ): void {
-  const name = renderCallbackName(callbackName);
+  reportRenderedCallbackError(renderCallbackName(callbackName), error);
+}
+
+/** {@link reportCallbackError} for a name that has already been rendered. */
+function reportRenderedCallbackError(name: string, error: unknown): void {
   const report = new Error(`Error in a callback ${name}`, {
     cause: error,
   });
@@ -101,14 +125,16 @@ export function reportCallbackError(
  * Invokes without a receiver. See {@link runCallbackSafely} for the callback binding
  * contract and how to preserve `this` with a closure, binding, or explicit receiver.
  *
- * @param {string} callbackName - The name of the callback function, used for error reporting.
+ * @param {CallbackName} callbackName - The name of the callback function, used for error
+ *                                      reporting, or a function returning it (see
+ *                                      {@link CallbackName}).
  * @param {unknown} callback - The callback function to be executed. It can be either a
  *                             synchronous function or a function that returns a Promise.
  * @param {...unknown[]} args - Additional arguments to pass to the callback function.
  */
 
 export function safeHandleCallback(
-  callbackName: string,
+  callbackName: CallbackName,
   callback: unknown,
   ...args: unknown[]
 ): void {
@@ -142,7 +168,9 @@ export function safeHandleCallback(
  * `thisArg`, or hand over `() => logger.info(a, b)` or `logger.info.bind(logger)`.
  *
  * @param callbackName Names the callback in the "is not a function" message and in the
- *                     console line for a failing `onError`.
+ *                     console line for a failing `onError`. Either the name or a
+ *                     function returning it (see {@link CallbackName}); either way it is
+ *                     rendered only when there is a failure to report.
  * @param callback The untrusted value to invoke.
  * @param args Arguments to pass to the callback.
  * @param onError Receives the thrown value, the rejection reason, or a synthesized
@@ -154,7 +182,7 @@ export function safeHandleCallback(
  *                closure; supply the owning object when passing an extracted method.
  */
 export function runCallbackSafely(
-  callbackName: string,
+  callbackName: CallbackName,
   callback: unknown,
   args: unknown[],
   onError: (error: unknown) => void,
@@ -169,18 +197,17 @@ export function runCallbackSafely(
  * {@link safeHandleCallback} wants without building a closure for it on every call.
  */
 function invokeCallbackSafely(
-  callbackName: string,
+  callbackName: CallbackName,
   callback: unknown,
   args: unknown[],
   onError: ((error: unknown) => void) | undefined,
   thisArg: unknown,
 ): void {
   if (!isFunction(callback)) {
+    const name = resolveCallbackName(callbackName);
     reportToOnError(
-      callbackName,
-      new Error(
-        `Callback provided for ${renderCallbackName(callbackName)} is not a function`,
-      ),
+      name,
+      new Error(`Callback provided for ${name} is not a function`),
       onError,
     );
 
@@ -224,20 +251,23 @@ function invokeCallbackSafely(
  * - allocates nothing for a failure it never had.
  */
 function reportToOnError(
-  rawCallbackName: string,
+  rawCallbackName: CallbackName,
   error: unknown,
   onError: ((error: unknown) => void) | undefined,
 ): void {
-  // Rendered here, on the failure path, so a callback that succeeds never has its name
-  // stringified.
-  const callbackName = renderCallbackName(rawCallbackName);
   if (onError === undefined) {
     // The standard channel. `reportToHost` never throws - a hostile global it reads
     // included - so this needs no rung beneath it.
-    reportCallbackError(callbackName, error);
+    reportRenderedCallbackError(resolveCallbackName(rawCallbackName), error);
 
     return;
   }
+
+  // With `onError` supplied, the name is read only if `onError` itself fails, and both
+  // the console line and `handlerName` may then need it: render it then, at most once.
+  let renderedName: string | undefined;
+  const callbackName = (): string =>
+    (renderedName ??= resolveCallbackName(rawCallbackName));
 
   reportThroughHandler(
     // Typed `void`, but an `async` handler returns a promise: one that rejects is
@@ -247,9 +277,9 @@ function reportToOnError(
     // `additionalInfo` and `cause` field in the clear, which the masking in
     // `errorToString` - what `reportCallbackError()` renders with - exists to prevent.
     () =>
-      `Error handler for ${callbackName} failed while reporting a failure${DOUBLE_EOL}` +
+      `Error handler for ${callbackName()} failed while reporting a failure${DOUBLE_EOL}` +
       `Original failure:${DOUBLE_EOL}${errorToString(toError(error))}`,
-    { handlerName: `onError for ${callbackName}` },
+    { handlerName: () => `onError for ${callbackName()}` },
   );
 }
 
@@ -289,7 +319,9 @@ export type CallbackResult<T = unknown> =
  * Invokes without a receiver. See {@link runCallbackSafely} for the callback binding
  * contract and how to preserve `this` with a closure, binding, or explicit receiver.
  *
- * @param {string} callbackName - The name of the callback function, used for error reporting.
+ * @param {CallbackName} callbackName - The name of the callback function, used for error
+ *                                      reporting, or a function returning it (see
+ *                                      {@link CallbackName}).
  * @param {unknown} callback - The callback function to be executed. It can be either a
  *                             synchronous function or a function that returns a Promise.
  * @param {...unknown[]} args - Additional arguments to pass to the callback function.
@@ -298,12 +330,15 @@ export type CallbackResult<T = unknown> =
  */
 
 export async function safeHandleCallbackAndWait<T>(
-  callbackName: string,
+  callbackName: CallbackName,
   callback: unknown,
   ...args: unknown[]
 ): Promise<CallbackResult<T>> {
-  const handleError = (error: unknown): CallbackResult<T> => {
-    reportCallbackError(callbackName, error);
+  const handleError = (
+    error: unknown,
+    name: string = resolveCallbackName(callbackName),
+  ): CallbackResult<T> => {
+    reportRenderedCallbackError(name, error);
 
     // Normalized, not cast: `CallbackResult.error` is declared `Error`, but `throw` and
     // promise rejection both accept any value, so a callback that throws `null` would
@@ -338,10 +373,10 @@ export async function safeHandleCallbackAndWait<T>(
       return handleError(error);
     }
   } else {
+    const name = resolveCallbackName(callbackName);
     return handleError(
-      new Error(
-        `Callback provided for ${renderCallbackName(callbackName)} is not a function`,
-      ),
+      new Error(`Callback provided for ${name} is not a function`),
+      name,
     );
   }
 }

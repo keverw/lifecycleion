@@ -2009,6 +2009,82 @@ describe('ProcessSignalManager', () => {
       }
     });
 
+    test('an owner that detaches while another instance remains hands raw mode ownership over', () => {
+      const tty = mockRawTTY(() => {});
+      let second: ProcessSignalManager | undefined;
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+        const owner = readShared()?.rawModeOwner;
+        second = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        second.attach();
+        expect(readShared()?.rawModeOwner).toBe(owner ?? null);
+
+        manager.detach();
+
+        expect(attachedOwner()).not.toBeNull();
+        expect(attachedOwner()).not.toBe(owner ?? null);
+        expect((process.stdin as any).isRaw).toBe(true);
+
+        second.detach();
+
+        expect((process.stdin as any).isRaw).toBe(false);
+        expect(readShared()?.rawModeOwner).toBeNull();
+        expect(readShared()?.rawModeEnabledByManager).toBe(false);
+      } finally {
+        if (second?.isAttached) {
+          second.detach();
+        }
+        tty.restore();
+      }
+    });
+
+    test('a detach re-anchors raw mode ownership left on an instance that is no longer attached', () => {
+      const tty = mockRawTTY(() => {});
+      let second: ProcessSignalManager | undefined;
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+        second = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        second.attach();
+
+        const shared = readShared();
+        if (shared === undefined) {
+          throw new Error('shared state was not created');
+        }
+        shared.rawModeOwner = 'detached-instance';
+
+        second.detach();
+
+        // The one instance left now owns raw mode, so its detach restores the terminal.
+        expect(readShared()?.attachedInstances.size).toBe(1);
+        expect(attachedOwner()).not.toBeNull();
+
+        manager.detach();
+
+        expect((process.stdin as any).isRaw).toBe(false);
+        expect(readShared()?.rawModeOwner).toBeNull();
+        expect(readShared()?.rawModeEnabledByManager).toBe(false);
+      } finally {
+        if (second?.isAttached) {
+          second.detach();
+        }
+        tty.restore();
+      }
+    });
+
     test('a failed attach whose rollback re-enable fails reports it once, as a re-enable', () => {
       // The same re-enable, reached from a failed attach's rollback. `attach()`'s catch
       // does not retry it - ownership went to the instance that attached - so the

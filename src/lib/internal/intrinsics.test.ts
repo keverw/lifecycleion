@@ -7,6 +7,7 @@ import {
   observePromise,
   observeBoxed,
   observeRejection,
+  queueMicrotaskIntrinsic,
   racePromises,
 } from './intrinsics';
 
@@ -321,3 +322,99 @@ for (const mode of ['all', 'allSettled'] as const) {
     expect(setterCalls).toBe(0);
   });
 }
+
+// Application code can break promise species for the whole realm after this module
+// loads, which makes the intrinsic `then` throw for every promise, the module's own
+// included. Observation cannot see the input then, but its reactions still hear why,
+// and a queued task still runs. A `done` callback, not `await`: awaiting a promise reads
+// its `constructor`, which one of these breaks.
+for (const breakage of ['Promise[Symbol.species]', 'constructor'] as const) {
+  test(`observation and queued tasks still deliver with a throwing ${breakage} getter realm-wide`, (done) => {
+    const target: object =
+      breakage === 'constructor' ? Promise.prototype : Promise;
+    const key = breakage === 'constructor' ? 'constructor' : Symbol.species;
+    const original = Object.getOwnPropertyDescriptor(target, key);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    const heard: unknown[] = [];
+    const ran: string[] = [];
+    const taskFailure = new Error('task failed');
+    const restore = (): void => {
+      if (original === undefined) {
+        delete (target as Record<PropertyKey, unknown>)[key];
+      } else {
+        Object.defineProperty(target, key, original);
+      }
+      process.off('unhandledRejection', onUnhandled);
+    };
+    process.on('unhandledRejection', onUnhandled);
+    Object.defineProperty(target, key, {
+      configurable: true,
+      get() {
+        throw new Error('species broken');
+      },
+    });
+    try {
+      // Fulfilled, so the input itself has no rejection left unobserved.
+      observeRejection(Promise.resolve(1), (error) => {
+        heard.push((error as Error).message);
+      });
+      queueMicrotaskIntrinsic(() => {
+        ran.push('task');
+      });
+      queueMicrotaskIntrinsic(
+        () => {
+          throw taskFailure;
+        },
+        (error) => {
+          heard.push(error);
+        },
+      );
+    } catch (error) {
+      restore();
+      throw error;
+    }
+    setTimeout(() => {
+      restore();
+      try {
+        expect(ran).toEqual(['task']);
+        expect(heard).toEqual(['species broken', taskFailure]);
+        expect(unhandled).toEqual([]);
+        done();
+      } catch (error) {
+        done(error);
+      }
+    }, 10);
+  });
+}
+
+test('a runtime without AbortController can still import the library, and fails only when a controller is created', async () => {
+  // Dynamic imports in a fresh process, so the capture runs after the global is gone.
+  const script = `
+    delete globalThis.AbortController;
+    await import(${JSON.stringify(new URL('../safe-handle-callback.ts', import.meta.url).href)});
+    const { createOwnedAbortController } = await import(${JSON.stringify(new URL('./intrinsics.ts', import.meta.url).href)});
+    let failure;
+    try {
+      createOwnedAbortController();
+    } catch (error) {
+      failure = { name: error.name, message: error.message };
+    }
+    process.stdout.write(JSON.stringify(failure));
+  `;
+  const child = Bun.spawn([process.execPath, '--eval', script], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const [stdout, stderr, code] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+  expect({ code, stderr }).toEqual({ code: 0, stderr: '' });
+  const failure = JSON.parse(stdout) as { name: string; message: string };
+  expect(failure.name).toBe('TypeError');
+  expect(failure.message).toContain('AbortController is not available');
+});

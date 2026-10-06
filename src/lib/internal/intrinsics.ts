@@ -1,4 +1,5 @@
 import { defineEntry } from './define-entry';
+import { isObjectLike } from './is-object-like';
 
 /** Preserve invocation semantics if application code later replaces Reflect.apply. */
 export const applyIntrinsic: typeof Reflect.apply = Reflect.apply;
@@ -15,18 +16,39 @@ export const getPrototypeOfIntrinsic: typeof Reflect.getPrototypeOf =
 export const objectPrototypeIntrinsic: object = Object.prototype;
 /** `Symbol.species`, read before application code can rebind the `Symbol` global. */
 export const speciesSymbolIntrinsic: typeof Symbol.species = Symbol.species;
+/**
+ * `Reflect.defineProperty` as it was at module initialization: a definition that must
+ * land on the object it names, however application code later replaces the global.
+ */
+export const definePropertyIntrinsic: typeof Reflect.defineProperty =
+  Reflect.defineProperty;
+/**
+ * `Object.prototype.hasOwnProperty` as it was at module initialization, so a later patch
+ * cannot misreport which properties a value carries itself.
+ */
+// eslint-disable-next-line @typescript-eslint/unbound-method
+export const hasOwnPropertyIntrinsic = Object.prototype.hasOwnProperty;
+/** `TypeError.prototype`, read before application code can rebind the `TypeError` global. */
+export const typeErrorPrototypeIntrinsic: object = TypeError.prototype;
+/** `RangeError.prototype`, read before application code can rebind the `RangeError` global. */
+export const rangeErrorPrototypeIntrinsic: object = RangeError.prototype;
 
 // Captured so an `abort()` or `signal` that application code replaces on the prototype
 // later cannot keep an owned controller from aborting, or hand out a different signal
-// than the one it aborts.
-const abortControllerIntrinsic = AbortController;
+// than the one it aborts. A runtime without `AbortController` captures nothing, so
+// importing this module still works there; only creating an owned controller fails.
+const abortControllerIntrinsic: typeof AbortController | undefined =
+  typeof AbortController === 'function' ? AbortController : undefined;
 // eslint-disable-next-line @typescript-eslint/unbound-method
-const abortMethodIntrinsic = AbortController.prototype.abort;
-// eslint-disable-next-line @typescript-eslint/unbound-method
-const abortControllerSignalGetterIntrinsic = Object.getOwnPropertyDescriptor(
-  AbortController.prototype,
-  'signal',
-)?.get;
+const abortMethodIntrinsic = abortControllerIntrinsic?.prototype.abort;
+const abortControllerSignalGetterIntrinsic =
+  abortControllerIntrinsic === undefined
+    ? undefined
+    : // eslint-disable-next-line @typescript-eslint/unbound-method
+      Object.getOwnPropertyDescriptor(
+        abortControllerIntrinsic.prototype,
+        'signal',
+      )?.get;
 
 /** An `AbortController` whose signal and abort were read through captured intrinsics. */
 export interface OwnedAbortController {
@@ -39,8 +61,19 @@ export interface OwnedAbortController {
   readonly abort: (reason: unknown) => void;
 }
 
-/** Create a controller from the `AbortController` captured at module initialization. */
+/**
+ * Create a controller from the `AbortController` captured at module initialization.
+ * Throws a `TypeError` in a runtime that had no `AbortController` then.
+ */
 export function createOwnedAbortController(): OwnedAbortController {
+  if (
+    abortControllerIntrinsic === undefined ||
+    abortMethodIntrinsic === undefined
+  ) {
+    throw new TypeError(
+      'AbortController is not available in this runtime; lifecycleion needs it to create an abort signal',
+    );
+  }
   const controller = new abortControllerIntrinsic();
   const signal = (
     abortControllerSignalGetterIntrinsic === undefined
@@ -174,23 +207,34 @@ export function observePromise<T, TResult1 = T, TResult2 = never>(
  * promise it owns and never throw. The intrinsic's derived promise is discarded: it is
  * built by the input's live species, so nothing may wait on it. A `then` that refuses
  * the input - a throwing `constructor` getter, an unusable species - hands the reactions
- * a rejection with its error instead.
+ * a rejection with its error instead, on a later microtask as a reaction would run.
  */
 function attachReactions<T>(
   promise: Promise<T>,
   onfulfilled: (value: T) => void,
   onrejected: (reason: unknown) => void,
 ): void {
-  const reactions = [onfulfilled, onrejected];
   try {
-    applyIntrinsic(promiseThenIntrinsic, promise, reactions);
+    applyIntrinsic(promiseThenIntrinsic, promise, [onfulfilled, onrejected]);
   } catch (error) {
-    applyIntrinsic(
-      promiseThenIntrinsic,
-      promiseRejectIntrinsic(error),
-      reactions,
-    );
+    void runOnMicrotask(() => {
+      onrejected(error);
+    });
   }
+}
+
+/**
+ * Run `task` on the next microtask through `await` itself. Awaiting a non-promise builds
+ * an intrinsic promise and attaches to it without reading `constructor`, `then` or a
+ * species, so this works even when application code has broken every one of those for
+ * the realm - a throwing `Promise[Symbol.species]` getter or
+ * `Promise.prototype.constructor` - which also breaks the intrinsic `then`. The returned
+ * promise rejects with whatever `task` throws.
+ */
+async function runOnMicrotask(task: () => void): Promise<void> {
+  // eslint-disable-next-line @typescript-eslint/await-thenable
+  await undefined;
+  task();
 }
 
 /**
@@ -213,18 +257,44 @@ export function observeRejection(
 }
 
 /**
- * Run `task` on a microtask through captured intrinsics, not the replaceable
- * `queueMicrotask` global. A throw from `task` goes to `onError`, or is contained
- * when none is given, so the derived promise never rejects unobserved.
+ * Run `task` on a microtask through `await`, not the replaceable `queueMicrotask`
+ * global, so it runs even if application code breaks promise species realm-wide. A
+ * throw from `task` goes to `onError` on that same microtask, or is contained when none
+ * is given; a throw or rejection from `onError` is contained too, so nothing here
+ * rejects unobserved.
  */
 export function queueMicrotaskIntrinsic(
   task: () => void,
   onError: (error: unknown) => unknown = () => undefined,
 ): void {
-  observeRejection(
-    observePromise(promiseResolveIntrinsic(undefined), task),
-    onError,
-  );
+  void runOnMicrotask(() => {
+    try {
+      task();
+    } catch (error) {
+      reportQueuedTaskError(onError, error);
+    }
+  });
+}
+
+function reportQueuedTaskError(
+  onError: (error: unknown) => unknown,
+  error: unknown,
+): void {
+  let reported: unknown;
+  try {
+    reported = onError(error);
+  } catch {
+    return;
+  }
+  // Only a returned object can be a promise that later rejects. Adopted rather than
+  // observed directly, since it is the reporter's value; a `then` that throws is
+  // contained by the same terminal observer.
+  if (isObjectLike(reported)) {
+    observeRejection(
+      observePromise(promiseResolveIntrinsic(undefined), () => reported),
+      () => undefined,
+    );
+  }
 }
 
 // eslint-disable-next-line @typescript-eslint/unbound-method
@@ -317,7 +387,9 @@ export function allPromises<T extends readonly Promise<unknown>[]>(
   type Results = { -readonly [P in keyof T]: Awaited<T[P]> };
   return new promiseConstructorIntrinsic<PromiseResultBox<Results>>(
     (resolve, reject) => {
-      const values: unknown[] = new Array(promises.length);
+      // A literal, not `new Array()`: the `Array` global is application code's to replace.
+      const values: unknown[] = [];
+      values.length = promises.length;
       const valueEntries = values as unknown as Record<string, unknown>;
       let remaining = promises.length;
       if (remaining === 0) {
@@ -357,9 +429,8 @@ export function allSettledPromises<T extends readonly Promise<unknown>[]>(
   };
   return new promiseConstructorIntrinsic<PromiseResultBox<Results>>(
     (resolve) => {
-      const results: PromiseSettledResult<unknown>[] = new Array<
-        PromiseSettledResult<unknown>
-      >(promises.length);
+      const results: PromiseSettledResult<unknown>[] = [];
+      results.length = promises.length;
       const resultEntries = results as unknown as Record<
         string,
         PromiseSettledResult<unknown>

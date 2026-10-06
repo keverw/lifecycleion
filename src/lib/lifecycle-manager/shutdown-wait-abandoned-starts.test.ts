@@ -170,3 +170,37 @@ test('restartAllComponents does not wait for abandoned starts even when shutdown
     await manager.stopAllComponents();
   }
 });
+
+test('waitForAbandonedStarts waits for start() itself when the component owns its late-start cleanup', async () => {
+  const { logger, manager } = setup();
+  const { order, start, register } = twoComponents(logger, manager);
+  await register();
+  const worker = manager.getComponentInstance('worker');
+  Object.defineProperty(worker, 'ownsLateStartCleanup', { value: true });
+  const starting = manager.startComponent('worker');
+  try {
+    expect((await starting).code).toBe('component_startup_timeout');
+    let didSettle = false;
+    const shutdown = manager
+      .stopAllComponents({ timeoutMS: 1000, waitForAbandonedStarts: true })
+      .finally(() => {
+        didSettle = true;
+      });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // The manager does not clean this start up, but its `start()` is still pending:
+    // the pass keeps waiting rather than end `cleanup_incomplete` straight away.
+    expect(didSettle).toBe(false);
+    expect(manager.getComponentStatus('database')?.state).toBe('running');
+
+    start.resolve();
+    const result = await shutdown;
+    expect(result.code).not.toBe('cleanup_incomplete');
+    // The component undoes its own late start; the manager stops only the dependency.
+    expect(order).toEqual(['database']);
+    expect(manager.getComponentStatus('database')?.state).toBe('stopped');
+  } finally {
+    start.resolve();
+    await starting;
+    await manager.stopAllComponents();
+  }
+});

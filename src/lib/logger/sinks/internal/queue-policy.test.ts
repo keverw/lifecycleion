@@ -1,13 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 
+import { MAX_TIMER_MS, resolveTimeoutMS } from '../../../internal/timer-limits';
 import {
   DEFAULT_MAX_QUEUE_SIZE,
   DEFAULT_MAX_RETRIES,
-  MAX_TIMER_MS,
   UNLIMITED_QUEUE,
   resolveMaxQueueSize,
   resolveMaxRetries,
-  resolveTimeoutMS,
 } from './queue-policy';
 
 describe('resolveTimeoutMS', () => {

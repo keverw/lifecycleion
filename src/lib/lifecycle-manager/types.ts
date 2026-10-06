@@ -278,6 +278,8 @@ export type UnregisterFailureCode =
  * Additional details for why unregister stop failed
  */
 export type UnregisterStopFailureReason =
+  // Already stalled from an earlier stop: no stop was attempted. A stop the unregister
+  // runs that stalls is reported by how it failed.
   | 'stalled'
   | 'timeout'
   | 'error'

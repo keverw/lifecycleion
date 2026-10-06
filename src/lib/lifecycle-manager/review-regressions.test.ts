@@ -5281,3 +5281,145 @@ describe('LifecycleManager - round two review regressions', () => {
     }
   });
 });
+
+describe('lifecycle-manager review findings, round 2', () => {
+  test('a shutdown a timeout sink starts does not re-label the timed-out start as interrupted', async () => {
+    // eslint-disable-next-line prefer-const -- assigned after the sink that reads it
+    let manager!: LifecycleManager;
+    let shutdown: ReturnType<LifecycleManager['stopAllComponents']> | undefined;
+    const logger = new Logger({
+      sinks: [
+        {
+          write: (entry): void => {
+            if (
+              entry.message ===
+              'Startup timed out, stopping component if startup completes later'
+            ) {
+              shutdown ??= manager.stopAllComponents({
+                abortPendingStarts: true,
+                timeoutMS: 1000,
+              });
+            }
+          },
+        },
+      ],
+      callProcessExit: false,
+    });
+    manager = new LifecycleManager({ logger, shutdownWarningTimeoutMS: -1 });
+    const gate = deferred();
+    const a = new Plain(logger, 'a');
+    Object.defineProperty(a, 'startupTimeoutMS', { value: 10 });
+    let signal: AbortSignal | undefined;
+    a.start = (startSignal?: AbortSignal): Promise<void> => {
+      signal = startSignal;
+      return gate.promise;
+    };
+    await manager.registerComponent(a);
+
+    const result = await manager.startComponent('a');
+    expect(result.code).toBe('component_startup_timeout');
+    expect(shutdown).toBeDefined();
+    // The deadline won first: the signal carries the timeout the result reports.
+    expect(signal?.reason).toBe(result.error);
+    gate.resolve();
+    await shutdown;
+    await logger.close();
+  });
+
+  test('unregister answers a stop refused for an invalid timeout with invalid_options', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+    Object.defineProperty(a, 'shutdownGracefulTimeoutMS', {
+      value: Number.NaN,
+      configurable: true,
+    });
+
+    const result = await manager.unregisterComponent('a');
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('invalid_options');
+    expect(result.stopFailureReason).toBeUndefined();
+    expect(result.error).toBeInstanceOf(Error);
+    expect(manager.isComponentRunning('a')).toBe(true);
+
+    Object.defineProperty(a, 'shutdownGracefulTimeoutMS', { value: 1000 });
+    await manager.stopAllComponents();
+    await logger.close();
+  });
+
+  test('an auto-start whose own log line begins a bulk startup is left to that startup', async () => {
+    // eslint-disable-next-line prefer-const -- assigned after the sink that reads it
+    let manager!: LifecycleManager;
+    let startup: ReturnType<LifecycleManager['startAllComponents']> | undefined;
+    const logger = new Logger({
+      sinks: [
+        {
+          write: (entry): void => {
+            if (
+              entry.message ===
+              'AutoStart: starting component (manager not running)'
+            ) {
+              startup ??= manager.startAllComponents();
+            }
+          },
+        },
+      ],
+      callProcessExit: false,
+    });
+    manager = new LifecycleManager({ logger, shutdownWarningTimeoutMS: -1 });
+    let starts = 0;
+    const a = new Plain(logger, 'a');
+    a.start = (): Promise<void> => {
+      starts++;
+      return Promise.resolve();
+    };
+
+    const result = await manager.registerComponent(a, { autoStart: true });
+    expect(startup).toBeDefined();
+    expect(result.autoStartAttempted).toBe(false);
+    expect(result.autoStartDeferred).toBe(true);
+    expect(result.autoStartSucceeded).toBeUndefined();
+
+    const startupResult = await startup;
+    expect(startupResult?.success).toBe(true);
+    expect(startupResult?.startedComponents).toEqual(['a']);
+    expect(starts).toBe(1);
+    expect(manager.isComponentRunning('a')).toBe(true);
+    await manager.stopAllComponents();
+    await logger.close();
+  });
+
+  test('a refusal error handed back in a result and rethrown by caller code is a crash, not a refusal', async () => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    Object.assign(a, { onMessage: () => 'ok', healthCheck: () => true });
+    await manager.registerComponent(a);
+    await manager.startComponent('a');
+
+    const refused = await manager.sendMessageToComponent('a', 'ping', {
+      timeout: Number.NaN,
+    });
+    expect(refused.code).toBe('invalid_options');
+    expect(refused.error).toBeInstanceOf(Error);
+
+    // The caller's own getter now throws that error: its failure, not the manager's
+    // option refusal, so it is reported and answered as a crash.
+    const refusal = refused.error as Error;
+    Object.defineProperty(a, 'healthCheckTimeoutMS', {
+      get: () => {
+        throw refusal;
+      },
+    });
+    const { reports, release } = claimReports();
+    try {
+      const health = await manager.checkComponentHealth('a');
+      expect(health.code).toBe('operation_crashed');
+      expect(reports.length).toBe(1);
+    } finally {
+      release();
+    }
+    await manager.stopAllComponents();
+    await logger.close();
+  });
+});

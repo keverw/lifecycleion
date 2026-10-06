@@ -103,24 +103,39 @@ function transferRawModeOwnership(
     return shared.rawModeOwner;
   }
 
-  // If no instances remain, clear ownership
-  if (shared.attachedInstances.size === 0) {
-    shared.rawModeOwner = null;
-    return null;
-  }
+  return assignRawModeOwnerFromAttached(shared);
+}
 
-  // Find a valid new owner from remaining instances
-  // Re-validate that the chosen instance is still attached (defensive against concurrent modifications)
-  for (const candidateID of shared.attachedInstances) {
-    if (shared.attachedInstances.has(candidateID)) {
-      shared.rawModeOwner = candidateID;
-      return candidateID;
-    }
-  }
+/**
+ * Hand raw mode ownership to the first attached instance, or clear it when none remain.
+ *
+ * @returns The new owner ID, or null if ownership was cleared
+ */
+function assignRawModeOwnerFromAttached(
+  shared: ProcessSignalManagerSharedState,
+): string | null {
+  const next = shared.attachedInstances.values().next();
+  const newOwner = next.done === true ? null : next.value;
+  shared.rawModeOwner = newOwner;
+  return newOwner;
+}
 
-  // Fallback: no valid instances (shouldn't happen, but be safe)
-  shared.rawModeOwner = null;
-  return null;
+/**
+ * Defensive: if manager-held raw mode ownership points to an instance that is no longer
+ * attached while others remain, re-anchor it on an attached one so a later detach can
+ * still restore the terminal.
+ */
+function reanchorDetachedRawModeOwner(
+  shared: ProcessSignalManagerSharedState,
+): void {
+  if (
+    shared.rawModeEnabledByManager &&
+    shared.rawModeOwner !== null &&
+    shared.attachedInstances.size > 0 &&
+    !shared.attachedInstances.has(shared.rawModeOwner)
+  ) {
+    assignRawModeOwnerFromAttached(shared);
+  }
 }
 
 /**
@@ -1057,20 +1072,8 @@ export class ProcessSignalManager {
       shared.attachedInstances.size > 0
     ) {
       transferRawModeOwnership(shared, this.instanceID);
-    } else if (
-      shared.rawModeOwner !== null &&
-      shared.attachedInstances.size > 0 &&
-      shared.rawModeEnabledByManager &&
-      !shared.attachedInstances.has(shared.rawModeOwner)
-    ) {
-      // Defensive: if ownership somehow points to a detached instance, re-anchor it.
-      // Find any valid attached instance to take ownership.
-      for (const candidateID of shared.attachedInstances) {
-        if (shared.attachedInstances.has(candidateID)) {
-          shared.rawModeOwner = candidateID;
-          break;
-        }
-      }
+    } else {
+      reanchorDetachedRawModeOwner(shared);
     }
 
     // Restore raw mode if we're the last instance AND either:
@@ -1156,20 +1159,8 @@ export class ProcessSignalManager {
     // Use centralized helper to ensure atomic ownership transfer.
     if (!isLastInstance && isCurrentOwner && shared.rawModeEnabledByManager) {
       transferRawModeOwnership(shared, this.instanceID);
-    } else if (
-      !isLastInstance &&
-      shared.rawModeOwner !== null &&
-      shared.rawModeEnabledByManager &&
-      !shared.attachedInstances.has(shared.rawModeOwner)
-    ) {
-      // Defensive: if ownership somehow points to a detached instance, re-anchor it.
-      // Find any valid attached instance to take ownership.
-      for (const candidateID of shared.attachedInstances) {
-        if (shared.attachedInstances.has(candidateID)) {
-          shared.rawModeOwner = candidateID;
-          break;
-        }
-      }
+    } else {
+      reanchorDetachedRawModeOwner(shared);
     }
 
     // Restore raw mode when last instance detaches, but only if we are the owner.
