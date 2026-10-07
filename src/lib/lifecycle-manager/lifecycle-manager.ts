@@ -791,7 +791,22 @@ export class LifecycleManager
       options,
     );
 
-    return { ...result, action: 'register' };
+    // Share registration fields without exposing insertion-only metadata.
+    const {
+      action: _action,
+      requestedPosition: _requestedPosition,
+      actualPosition: _actualPosition,
+      manualPositionRespected: isManualPositionRespected,
+      targetFound: wasTargetFound,
+      autoStartDeferred: isAutoStartDeferred,
+      ...registration
+    } = result;
+
+    return {
+      ...registration,
+      action: 'register',
+      ...(isAutoStartDeferred === true ? { autoStartDeferred: true } : {}),
+    };
   }
 
   /**
