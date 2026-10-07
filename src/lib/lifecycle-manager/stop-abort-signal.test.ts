@@ -34,6 +34,9 @@ class Records extends BaseComponent {
     super(logger, {
       name,
       dependencies,
+    });
+    // Apply exact test budgets after the constructor's 1000ms/500ms minimums.
+    Object.assign(this, {
       shutdownGracefulTimeoutMS: timeouts.graceful ?? 30_000,
       shutdownForceTimeoutMS: timeouts.force ?? 30_000,
     });
@@ -67,7 +70,8 @@ class GracefulOnly extends BaseComponent {
   public readonly order: string[] = [];
 
   constructor(logger: Logger, name: string, gracefulTimeoutMS = 30_000) {
-    super(logger, { name, shutdownGracefulTimeoutMS: gracefulTimeoutMS });
+    super(logger, { name });
+    Object.assign(this, { shutdownGracefulTimeoutMS: gracefulTimeoutMS });
   }
 
   public onStop: Hook = () => {};
@@ -92,8 +96,8 @@ class IgnoresSignals extends BaseComponent {
   public forces = 0;
 
   constructor(logger: Logger, name: string) {
-    super(logger, {
-      name,
+    super(logger, { name });
+    Object.assign(this, {
       shutdownGracefulTimeoutMS: 30,
       shutdownForceTimeoutMS: 30,
     });
@@ -282,7 +286,7 @@ test('the force signal is aborted at the force deadline, with the force timeout 
   const forceReason = a.forceSignals[0].reason as ComponentForceTimeoutError;
   expect(forceReason).toBeInstanceOf(ComponentForceTimeoutError);
   expect(forceReason.errCode).toBe(lifecycleManagerErrCodes.ForceTimeout);
-  // The force budget as the component resolved it (its 500ms minimum).
+  // The exact force budget configured for this test.
   expect(forceReason.additionalInfo).toEqual({
     componentName: 'a',
     timeoutMS: a.shutdownForceTimeoutMS,
@@ -474,8 +478,8 @@ class ThrowsOnAbort extends BaseComponent {
     name: string,
     private readonly attach: (signal: AbortSignal, thrown: Error) => void,
   ) {
-    super(logger, {
-      name,
+    super(logger, { name });
+    Object.assign(this, {
       shutdownGracefulTimeoutMS: 20,
       shutdownForceTimeoutMS: 20,
     });

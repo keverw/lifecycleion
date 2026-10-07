@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from 'bun:test';
 import { reportToConsole } from '../../internal/report-to-console';
-import nodeFS, { promises as fs, type WriteStream } from 'node:fs';
+import nodeFS, { promises as fs } from 'node:fs';
+import type { WriteStream } from 'node:fs';
 import { EventEmitter } from 'node:events';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -11,8 +12,8 @@ import type { LogEntry } from '../types';
 import {
   markDiagnosticEntry,
   registerSinkFailureReporter,
-  type SinkFailureReport,
 } from '../internal/sink-failure-routing';
+import type { SinkFailureReport } from '../internal/sink-failure-routing';
 import {
   muteConsoleError,
   restoreConsoleError,

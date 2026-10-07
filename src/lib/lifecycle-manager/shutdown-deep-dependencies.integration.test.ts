@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 test('Node and Bun shut down deep startup and concurrent-stop dependency graphs', async () => {
   const dir = await mkdtemp(join(tmpdir(), 'shutdown-deep-dependencies-'));
@@ -12,10 +13,10 @@ test('Node and Bun shut down deep startup and concurrent-stop dependency graphs'
       fixture,
       `
       import assert from 'node:assert/strict';
-      import { Logger } from ${JSON.stringify(new URL('../logger/index.ts', import.meta.url).pathname)};
-      import { LifecycleManager } from ${JSON.stringify(new URL('./lifecycle-manager.ts', import.meta.url).pathname)};
-      import { BaseComponent } from ${JSON.stringify(new URL('./base-component.ts', import.meta.url).pathname)};
-      import { claimReports, deferred } from ${JSON.stringify(new URL('./test-helpers.ts', import.meta.url).pathname)};
+      import { Logger } from ${JSON.stringify(fileURLToPath(new URL('../logger/index.ts', import.meta.url)))};
+      import { LifecycleManager } from ${JSON.stringify(fileURLToPath(new URL('./lifecycle-manager.ts', import.meta.url)))};
+      import { BaseComponent } from ${JSON.stringify(fileURLToPath(new URL('./base-component.ts', import.meta.url)))};
+      import { claimReports, deferred } from ${JSON.stringify(fileURLToPath(new URL('./test-helpers.ts', import.meta.url)))};
 
       const mode = process.argv[2];
       const logger = new Logger({ sinks: [], callProcessExit: false });

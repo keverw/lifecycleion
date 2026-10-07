@@ -7,8 +7,8 @@ import {
   observeRejection,
   awaitBoxedPromise,
   boxPromiseValue,
-  type PromiseResultBox,
 } from '../../internal/intrinsics';
+import type { PromiseResultBox } from '../../internal/intrinsics';
 import Router from 'find-my-way';
 import { guardProgressCallback } from '../internal/progress';
 import { materializeRequestHeaders } from '../internal/header-utils';

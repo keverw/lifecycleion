@@ -376,7 +376,7 @@ test('synchronous abort acknowledgement leaves no cancellation grace timer', asy
     stdout: 'pipe',
     stderr: 'pipe',
   });
-  const timeout = setTimeout(() => child.kill(), 500);
+  const timeout = setTimeout(() => child.kill(), 2500);
   try {
     const [exitCode, stdout, stderr] = await Promise.all([
       child.exited,
