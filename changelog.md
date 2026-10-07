@@ -211,6 +211,7 @@
 
 ## Unreleased
 
+- Shutdown dependency protection uses iterative walks, so pending starts and concurrent stops with deep dependency chains cannot overflow the call stack before unrelated components stop.
 - `registerComponent()` omits insertion-only metadata from its result and includes `autoStartDeferred` only when true.
 - Startup observation failures abort the hook signal and preserve ownership of the real startup, including when promise adoption itself fails. A late success is automatically cleaned up, and unresolved observation failures refuse restart without claiming a timeout occurred. Unregister cannot remove a fulfilled timed-out startup between its settlement and cleanup. A cleanup stop that stalls and eventually succeeds restores the original startup timeout state and error.
 - Shutdown initiation is a synchronous control checkpoint before dependency reads and pending-start abort callbacks. Shutdown continues when a component stops unexpectedly from a shutdown-option getter, and stop preconditions read internal state rather than overridable public inspection methods. Signal attachment and manual retry escalation options enable only for literal `true`.

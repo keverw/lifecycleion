@@ -6311,10 +6311,21 @@ export class LifecycleManager
         name: string,
         target = protectedDependencies,
       ): void => {
-        for (const dependency of readDependencies(name)) {
+        // Keep depth-first getter order without consuming the call stack for each link.
+        const frames = [{ dependencies: readDependencies(name), index: 0 }];
+        while (frames.length > 0) {
+          const frame = frames[frames.length - 1];
+          if (frame.index === frame.dependencies.length) {
+            frames.pop();
+            continue;
+          }
+          const dependency = frame.dependencies[frame.index++];
           if (!target.has(dependency)) {
             target.add(dependency);
-            protectDependencies(dependency, target);
+            frames.push({
+              dependencies: readDependencies(dependency),
+              index: 0,
+            });
           }
         }
       };
@@ -6348,9 +6359,23 @@ export class LifecycleManager
             return false;
           }
           walked.add(from);
-          for (const dependency of readDependencies(from)) {
-            if (dependency === name || reaches(dependency)) {
+          const frames = [{ dependencies: readDependencies(from), index: 0 }];
+          while (frames.length > 0) {
+            const frame = frames[frames.length - 1];
+            if (frame.index === frame.dependencies.length) {
+              frames.pop();
+              continue;
+            }
+            const dependency = frame.dependencies[frame.index++];
+            if (dependency === name) {
               return true;
+            }
+            if (!walked.has(dependency)) {
+              walked.add(dependency);
+              frames.push({
+                dependencies: readDependencies(dependency),
+                index: 0,
+              });
             }
           }
           return false;
