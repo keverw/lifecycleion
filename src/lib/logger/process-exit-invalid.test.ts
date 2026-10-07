@@ -2,6 +2,7 @@ import { expect, spyOn, test } from 'bun:test';
 import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { ArraySink, Logger, type LogSink } from './index';
 
 // The codes `exit-process` publishes, so a test can check they agree with
@@ -101,7 +102,7 @@ test('a real Node exit listener that throws cannot strand the closed logger', as
   const directory = await mkdtemp(join(tmpdir(), 'logger-exit-listener-'));
   try {
     const bundle = await Bun.build({
-      entrypoints: [new URL('./index.ts', import.meta.url).pathname],
+      entrypoints: [fileURLToPath(new URL('./index.ts', import.meta.url))],
       target: 'node',
       format: 'esm',
       splitting: false,

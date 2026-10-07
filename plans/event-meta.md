@@ -12,7 +12,7 @@ Since PR #30, notifications raised during synchronous state transitions are queu
 
 ## Design
 
-- **Capture point:** capture the metadata in `safeEmit` (`src/lib/lifecycle-manager/lifecycle-manager.ts`), before both the fast path and the queue push. Queued and synchronous events are then stamped the same way.
+- **Capture point:** capture the metadata in the `LifecycleManagerEvents` callback in `LifecycleManager` (`src/lib/lifecycle-manager/lifecycle-manager.ts`), immediately before `this.eventDispatcher.emit(event, data)`. This runs before the dispatcher selects synchronous delivery or queuing.
 - **Delivery:** pass the metadata to listeners as a second argument, `(data, meta)`, with `meta = { timestamp: number; sequence: number }`.
   - Do not add fields to payloads. Some payloads spread in other types, such as `shutdown-completed` spreading `ShutdownResult`, and a new field could collide with them.
   - A second argument is not a breaking change, because existing listeners ignore it.

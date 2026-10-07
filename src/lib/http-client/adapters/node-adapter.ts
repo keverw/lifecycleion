@@ -239,9 +239,8 @@ function reportUnclaimedWritableError(error: unknown): void {
   };
 
   try {
-    const deferred = setImmediate(reportIfUnclaimed);
-
-    deferred.unref?.();
+    // Keep this turn referenced so Node cannot exit before reporting the error.
+    setImmediate(reportIfUnclaimed);
   } catch {
     // No way to schedule it, so the question is answered now. Reporting an error the
     // caller also received is the safe direction; losing one silently is not.
