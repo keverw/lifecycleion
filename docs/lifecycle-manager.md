@@ -365,8 +365,8 @@ A successful forced start retires the old stall: it emits `component:stalled-res
 with `reason: 'forced-start'`, then `component:started`. If shutdown begins while the
 forced start is pending and startup then succeeds before its startup timeout, it
 retires the stall the same way (`component:stalled-resolved` with
-`reason: 'forced-start'`) and goes straight into cleanup, which emits
-`component:stopped` when it succeeds, without a `component:started`. Like
+`reason: 'forced-start'`) and emits `component:started`, then goes straight into
+cleanup, which emits `component:stopped` when it succeeds. Like
 `'late-start-cleanup'`, this reason means the old stop was superseded, not that it
 finished. If instead the old stop finishes while the forced start is still pending,
 its stall ends then: `component:stalled-resolved` without a `reason`, and no
