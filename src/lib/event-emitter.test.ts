@@ -1,5 +1,6 @@
 import { describe, test, expect, mock } from 'bun:test';
 import { EventEmitter, EventEmitterProtected } from './event-emitter';
+import { reportCallbackError } from './safe-handle-callback';
 
 function getFirstReportedError(
   errorHandler: ReturnType<typeof mock>,
@@ -515,4 +516,36 @@ test('emission snapshots listeners without the live Set iterator', () => {
     Object.defineProperty(Set.prototype, Symbol.iterator, descriptor);
   }
   expect(called).toBe(1);
+});
+
+test('async listeners entered by console forwarding do not restart diagnostics', async () => {
+  const emitter = new EventEmitter();
+  let calls = 0;
+  let consoleCalls = 0;
+  emitter.on('forward', async () => {
+    calls++;
+    await Promise.resolve();
+    throw new Error('event forwarding failed');
+  });
+  const originalConsole = console.error;
+  console.error = (): void => {
+    if (++consoleCalls <= 10) {
+      emitter.emit('forward');
+    }
+  };
+  try {
+    reportCallbackError('original failure', new Error('initial'));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(consoleCalls).toBe(1);
+    expect(calls).toBe(1);
+    console.error = (): void => {
+      consoleCalls++;
+    };
+    emitter.emit('forward');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(consoleCalls).toBe(2);
+    expect(calls).toBe(2);
+  } finally {
+    console.error = originalConsole;
+  }
 });

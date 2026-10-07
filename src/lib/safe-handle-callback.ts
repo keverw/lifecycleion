@@ -12,6 +12,7 @@ import { UnreadableReturn, adoptResult } from './internal/adopt-promise';
 import { reportThroughHandler } from './internal/failure-reporter';
 import { isFunction } from './is-function';
 import { renderName, resolveName } from './internal/render-name';
+import { isConsoleReportActive } from './internal/report-to-console';
 
 // Node.js has a global `ErrorEvent` constructor (Node 25+) but does not make `globalThis`
 // an EventTarget, so the global event methods must be supplied before anything can be
@@ -153,6 +154,11 @@ export function safeHandleCallback(
  * that must stay off the global `'error'` channel (`Logger`) does not need a second copy
  * of this body.
  *
+ * A callback entered while terminal console output is active still runs and its
+ * return is observed, but its failures do not invoke `onError` or report again.
+ * This applies after asynchronous settlement too, so a console forwarding failure
+ * cannot start another generation of error handlers.
+ *
  * `onError` should not throw, but a throw from it is contained rather than escaping: it
  * runs on the failure path, where there is nothing above it left to catch. A synchronous
  * throw would otherwise surface at an unrelated call site, and one from the promise rung
@@ -203,12 +209,16 @@ function invokeCallbackSafely(
   onError: ((error: unknown) => void) | undefined,
   thisArg: unknown,
 ): void {
+  // A console shim can enter an async callback. Its rejection arrives after the
+  // terminal reporter returns, so retain the origin instead of checking only then.
+  const shouldSuppressDiagnostics = isConsoleReportActive();
   if (!isFunction(callback)) {
     const name = resolveCallbackName(callbackName);
     reportToOnError(
       name,
       new Error(`Callback provided for ${name} is not a function`),
       onError,
+      shouldSuppressDiagnostics,
     );
 
     return;
@@ -226,18 +236,18 @@ function invokeCallbackSafely(
       args,
     );
   } catch (error) {
-    reportToOnError(callbackName, error, onError);
+    reportToOnError(callbackName, error, onError, shouldSuppressDiagnostics);
     return;
   }
   const pending = adoptResult(result);
   if (pending instanceof UnreadableReturn) {
-    reportToOnError(callbackName, pending, onError);
+    reportToOnError(callbackName, pending, onError, shouldSuppressDiagnostics);
     return;
   }
   if (pending !== undefined) {
     // A `constructor`/species read that throws arrives here as a rejection too.
     observeRejection(pending, (error: unknown) => {
-      reportToOnError(callbackName, error, onError);
+      reportToOnError(callbackName, error, onError, shouldSuppressDiagnostics);
     });
   }
 }
@@ -254,11 +264,14 @@ function reportToOnError(
   rawCallbackName: CallbackName,
   error: unknown,
   onError: ((error: unknown) => void) | undefined,
+  shouldSuppressDiagnostics: boolean,
 ): void {
   if (onError === undefined) {
     // The standard channel. `reportToHost` never throws - a hostile global it reads
     // included - so this needs no rung beneath it.
-    reportRenderedCallbackError(resolveCallbackName(rawCallbackName), error);
+    if (!shouldSuppressDiagnostics) {
+      reportRenderedCallbackError(resolveCallbackName(rawCallbackName), error);
+    }
 
     return;
   }
@@ -279,7 +292,10 @@ function reportToOnError(
     () =>
       `Error handler for ${callbackName()} failed while reporting a failure${DOUBLE_EOL}` +
       `Original failure:${DOUBLE_EOL}${errorToString(toError(error))}`,
-    { handlerName: () => `onError for ${callbackName()}` },
+    {
+      handlerName: () => `onError for ${callbackName()}`,
+      suppressDiagnostics: shouldSuppressDiagnostics,
+    },
   );
 }
 
@@ -334,11 +350,14 @@ export async function safeHandleCallbackAndWait<T>(
   callback: unknown,
   ...args: unknown[]
 ): Promise<CallbackResult<T>> {
+  const shouldSuppressDiagnostics = isConsoleReportActive();
   const handleError = (
     error: unknown,
     name: string = resolveCallbackName(callbackName),
   ): CallbackResult<T> => {
-    reportRenderedCallbackError(name, error);
+    if (!shouldSuppressDiagnostics) {
+      reportRenderedCallbackError(name, error);
+    }
 
     // Normalized, not cast: `CallbackResult.error` is declared `Error`, but `throw` and
     // promise rejection both accept any value, so a callback that throws `null` would

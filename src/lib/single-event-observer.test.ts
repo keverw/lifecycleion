@@ -1,3 +1,4 @@
+import { reportCallbackError } from './safe-handle-callback';
 import {
   SingleEventObserver,
   SingleEventObserverProtected,
@@ -387,4 +388,36 @@ test('notification snapshots subscribers without the live Set iterator', () => {
     Object.defineProperty(Set.prototype, Symbol.iterator, descriptor);
   }
   expect(called).toBe(1);
+});
+
+test('async subscribers entered by console forwarding do not restart diagnostics', async () => {
+  const observer = new SingleEventObserver<string>();
+  let calls = 0;
+  let consoleCalls = 0;
+  observer.subscribe(async () => {
+    calls++;
+    await Promise.resolve();
+    throw new Error('observer forwarding failed');
+  });
+  const originalConsole = console.error;
+  console.error = (): void => {
+    if (++consoleCalls <= 10) {
+      observer.notify('forward');
+    }
+  };
+  try {
+    reportCallbackError('original failure', new Error('initial'));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(consoleCalls).toBe(1);
+    expect(calls).toBe(1);
+    console.error = (): void => {
+      consoleCalls++;
+    };
+    observer.notify('independent failure');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(consoleCalls).toBe(2);
+    expect(calls).toBe(2);
+  } finally {
+    console.error = originalConsole;
+  }
 });

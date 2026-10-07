@@ -6,11 +6,12 @@ import { Writable } from 'stream';
 import type { LogEntry, LogSink, LoggerDiagnostic } from '../types';
 import { LogLevel, getLogLevel } from '../types';
 import { diagnosticEntry } from '../internal/diagnostic-entry';
+import { isDiagnosticEntry } from '../internal/sink-failure-routing';
 import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
 import { renderJSONLine } from './internal/render-json-line';
 import { renderTextLine } from './internal/render-text-line';
-import { reportThroughHandler } from '../../internal/failure-reporter';
+import { isConsoleReportActive } from '../../internal/report-to-console';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { readUnknownMember } from '../../internal/read-member';
 import { sleep } from '../../sleep';
@@ -28,6 +29,7 @@ import {
 import { resolveTimeoutMS } from '../../internal/timer-limits';
 import {
   createDroppedEntryCounts,
+  reportSinkError,
   type DroppedEntryCounts,
   type DroppedEntryKind,
   type SinkErrorHandler,
@@ -67,6 +69,9 @@ export interface NamedPipeSinkOptions {
   closeTimeoutMS?: number | null;
   /**
    * Notified when this sink cannot do its job, in the shape every sink reports.
+   * Explicit handlers take precedence. With no handler, failures go to owning
+   * loggers, or to guarded console output when this sink has no owner. Failures
+   * while writing diagnostic entries go directly to the console.
    *
    * One object rather than three positional arguments, and the same one `FileSink` hands
    * back: `kind` says what failed - `'write'` means a line is at risk, `'format'` means
@@ -180,6 +185,8 @@ interface QueuedPipeEntry extends RenderedLine {
    * usable, up to `maxRetries`, exactly as `FileSink` has always done.
    */
   attempts: number;
+  /** Retained through retries so a forwarded terminal report cannot report itself. */
+  shouldSuppressFailureReport?: boolean;
 }
 
 /**
@@ -481,6 +488,9 @@ export class NamedPipeSink implements LogSink {
    * `reconnect()`, which is an attempt the caller asked for and is owed an answer to.
    */
   private readonly reportedOpenFailures = new Set<string>();
+  // Terminal diagnostic failures cannot spend the ordinary outage report budget.
+  private readonly reportedDiagnosticOpenFailures = new Set<string>();
+  private reportedDiagnosticOpenFailureCap = false;
   /**
    * Whether {@link MAX_REPORTED_OPEN_FAILURES} has been reported, so it is said once.
    *
@@ -545,6 +555,8 @@ export class NamedPipeSink implements LogSink {
    */
   private readonly suppressedWriteErrors = new WeakSet<object>();
   private readonly failedWriteStreams = new WeakSet<object>();
+  private readonly diagnosticFailedStreams = new WeakSet<object>();
+  private readonly consoleFailedStreams = new WeakSet<object>();
   /**
    * When the last automatic reopen was attempted.
    *
@@ -669,6 +681,7 @@ export class NamedPipeSink implements LogSink {
     // Rendered now rather than at flush time, so the line is fixed while `write` still
     // holds the caller's stack.
     const rendered: QueuedPipeEntry = {
+      shouldSuppressFailureReport: isConsoleReportActive(),
       ...this.renderEntry(entry),
       entry,
       attempts: 0,
@@ -898,6 +911,8 @@ export class NamedPipeSink implements LogSink {
       // has nowhere else to read the diagnosis, since `ReconnectStatus.error` is a generic
       // `Failed to initialize pipe connection` rather than the underlying failure.
       this.reportedOpenFailures.clear();
+      this.reportedDiagnosticOpenFailures.clear();
+      this.reportedDiagnosticOpenFailureCap = false;
       this.reportedOpenFailureCap = false;
 
       this.initPromise = this.initializePipe();
@@ -1179,7 +1194,10 @@ export class NamedPipeSink implements LogSink {
 
     // The oldest abandoned entry, as a sample, as `FileSink` reports it. Every entry in
     // the queue was lost, so there is no surviving line to confuse this with.
-    const firstAbandoned = this.writeQueue[0]?.entry;
+    const firstAbandoned = (
+      this.writeQueue.find((queued) => !isDiagnosticEntry(queued.entry)) ??
+      this.writeQueue[0]
+    )?.entry;
 
     this.writeQueue = [];
     this.countDropped('close', abandoned);
@@ -1290,17 +1308,55 @@ export class NamedPipeSink implements LogSink {
     await raceDeadline(this.initPromise, remainingMS, () => undefined);
   }
 
-  private async initializePipe(): Promise<void> {
+  private async initializePipe(
+    isDiagnosticRetry = false,
+    shouldSuppressRetryReport = false,
+  ): Promise<void> {
+    const hasOrdinaryWork = this.writeQueue.some(
+      (queued) =>
+        !isDiagnosticEntry(queued.entry) && !queued.shouldSuppressFailureReport,
+    );
+    const shouldSuppressFailureReport =
+      (shouldSuppressRetryReport || isConsoleReportActive()) &&
+      !hasOrdinaryWork;
+    const isDiagnostic =
+      (isDiagnosticRetry ||
+        isConsoleReportActive() ||
+        (this.writeQueue.length > 0 &&
+          this.writeQueue.every((queued) =>
+            isDiagnosticEntry(queued.entry),
+          ))) &&
+      !hasOrdinaryWork;
     this.isOpening = true;
 
     try {
-      await this.openPipe();
+      await this.openPipe(isDiagnostic, shouldSuppressFailureReport);
     } finally {
       this.isOpening = false;
     }
   }
 
-  private async openPipe(): Promise<void> {
+  private async openPipe(
+    isDiagnostic = false,
+    shouldSuppressFailureReport = false,
+  ): Promise<void> {
+    // These closures retain the attempt's origin through awaits and stream events.
+    const reportOpenFailure = (
+      kind: SinkFailureKind,
+      message: string,
+      cause: unknown,
+    ): void => {
+      this.reportOpenFailure(
+        kind,
+        message,
+        cause,
+        isDiagnostic,
+        shouldSuppressFailureReport,
+      );
+    };
+    const scheduleReopen = (delayMS: number): void => {
+      this.scheduleReopen(delayMS, isDiagnostic, shouldSuppressFailureReport);
+    };
     // Check platform support
     const platform = os.platform();
     if (platform !== 'linux' && platform !== 'darwin') {
@@ -1310,7 +1366,7 @@ export class NamedPipeSink implements LogSink {
       // second called the caller's `onError` once a second, forever - the flood
       // {@link reportedOpenFailures} exists to prevent, on the one failure that is
       // certain never to clear: the platform is what it is for the life of the process.
-      this.reportOpenFailure(
+      reportOpenFailure(
         'unsupported_platform',
         `Named pipes are only supported on Linux and macOS, current platform: ${platform}`,
         undefined,
@@ -1355,13 +1411,13 @@ export class NamedPipeSink implements LogSink {
         // something else, and stops. Measured: `rm pipe; touch pipe; rm pipe; mkfifo pipe`
         // with a live reader on the end of it left the sink uninitialized for good, having
         // stopped looking after the second step.
-        this.reportOpenFailure(
+        reportOpenFailure(
           'not_a_pipe',
           `${this.pipePath} exists but is not a named pipe (FIFO)`,
           undefined,
         );
 
-        this.scheduleReopen(REOPEN_COOLDOWN_MS);
+        scheduleReopen(REOPEN_COOLDOWN_MS);
 
         return;
       }
@@ -1397,7 +1453,7 @@ export class NamedPipeSink implements LogSink {
         // throw for these, it emits. `'write'` is documented as the one kind that means an
         // entry is at risk, and an open that failed before any stream existed is about no
         // entry at all.
-        this.reportOpenFailure(
+        reportOpenFailure(
           'setup',
           `Could not open named pipe at ${this.pipePath}: ${describeError(error)}`,
           error,
@@ -1410,7 +1466,7 @@ export class NamedPipeSink implements LogSink {
         // later `write()` happened along - and a permission fixed, or descriptor pressure
         // relieved, a minute later is exactly the kind of thing a quiet process never
         // notices.
-        this.scheduleReopen(REOPEN_COOLDOWN_MS);
+        scheduleReopen(REOPEN_COOLDOWN_MS);
 
         return;
       }
@@ -1445,7 +1501,7 @@ export class NamedPipeSink implements LogSink {
         // reader. That is a real cost where the blocked open had none, and it is the right
         // side of the trade: the blocked open's price was a libuv threadpool thread and a
         // process that would not exit.
-        this.scheduleReopen(REOPEN_COOLDOWN_MS);
+        scheduleReopen(REOPEN_COOLDOWN_MS);
 
         return;
       }
@@ -1477,12 +1533,12 @@ export class NamedPipeSink implements LogSink {
       }
 
       if (!isProbeFIFO) {
-        this.reportOpenFailure(
+        reportOpenFailure(
           'not_a_pipe',
           `${this.pipePath} was not a named pipe (FIFO) when opened`,
           undefined,
         );
-        this.scheduleReopen(REOPEN_COOLDOWN_MS);
+        scheduleReopen(REOPEN_COOLDOWN_MS);
 
         return;
       }
@@ -1498,6 +1554,14 @@ export class NamedPipeSink implements LogSink {
       this.pendingStreamSince = Date.now();
 
       stream.on('error', (err) => {
+        const isDiagnosticFailure = stream.pending
+          ? isDiagnostic
+          : this.diagnosticFailedStreams.has(stream);
+        const shouldSuppressStreamFailure = stream.pending
+          ? shouldSuppressFailureReport
+          : this.consoleFailedStreams.has(stream);
+        this.diagnosticFailedStreams.delete(stream);
+        this.consoleFailedStreams.delete(stream);
         if (this.closeAbandonedStreams.has(stream)) {
           return;
         }
@@ -1535,7 +1599,7 @@ export class NamedPipeSink implements LogSink {
             // `O_NONBLOCK` probe succeeding and the stream open then failing `EMFILE` under
             // descriptor pressure - called `onError` once per retry, forever, which is the
             // flood the dedupe and the cap exist to stop.
-            this.reportOpenFailure(
+            reportOpenFailure(
               'setup',
               `Could not open named pipe at ${this.pipePath}: ${describeError(err)}`,
               err,
@@ -1543,6 +1607,8 @@ export class NamedPipeSink implements LogSink {
           } else {
             this.handleError('write', err, {
               countsAgainstHealth: isCurrent,
+              isDiagnostic: isDiagnosticFailure,
+              shouldSuppressFailureReport: shouldSuppressStreamFailure,
             });
           }
         }
@@ -1574,7 +1640,7 @@ export class NamedPipeSink implements LogSink {
         // looks connected - and is told there is nothing to do. Without this the requeued
         // entry sat until some unrelated later write happened along, which in a quiet
         // process is never.
-        this.ensureConnection();
+        this.ensureConnection(isDiagnosticFailure, shouldSuppressStreamFailure);
 
         // And a backstop, because the call above is refused for the one failure it matters
         // most for. A stream that errors during promotion can run this while `isOpening` -
@@ -1588,7 +1654,11 @@ export class NamedPipeSink implements LogSink {
         // time and `ensureConnection` still applies its own cooldown when it fires - and a
         // no-op when the call above already did the work, since by then there is either a
         // connection or an open in flight.
-        this.scheduleReopen(REOPEN_COOLDOWN_MS);
+        this.scheduleReopen(
+          REOPEN_COOLDOWN_MS,
+          isDiagnosticFailure,
+          shouldSuppressStreamFailure,
+        );
       });
 
       // Kept for externally substituted WriteStreams and older runtime behavior. The
@@ -1658,13 +1728,13 @@ export class NamedPipeSink implements LogSink {
             // Nothing further to try for a stream this sink refuses to use.
           }
 
-          this.reportOpenFailure(
+          reportOpenFailure(
             'not_a_pipe',
             `${this.pipePath} was not a named pipe (FIFO) when opened`,
             undefined,
           );
 
-          this.scheduleReopen(REOPEN_COOLDOWN_MS);
+          scheduleReopen(REOPEN_COOLDOWN_MS);
 
           return;
         }
@@ -1677,6 +1747,8 @@ export class NamedPipeSink implements LogSink {
         // A later outage is a new fact and is reported as one. See
         // {@link reportedOpenFailures}.
         this.reportedOpenFailures.clear();
+        this.reportedDiagnosticOpenFailures.clear();
+        this.reportedDiagnosticOpenFailureCap = false;
         this.reportedOpenFailureCap = false;
 
         // Process any queued writes
@@ -1702,6 +1774,8 @@ export class NamedPipeSink implements LogSink {
       this.pipeStream = stream;
       this.isInitialized = true;
       this.reportedOpenFailures.clear();
+      this.reportedDiagnosticOpenFailures.clear();
+      this.reportedDiagnosticOpenFailureCap = false;
       this.reportedOpenFailureCap = false;
       this.processQueue();
     } catch (error) {
@@ -1711,7 +1785,7 @@ export class NamedPipeSink implements LogSink {
       // `ENOTDIR` all arrive here too, and a handler switching on `kind` to decide whether
       // to recreate the FIFO acted on a false premise for every one of them. `'setup'` is
       // the kind the probe path above already chose for exactly these.
-      this.reportOpenFailure(
+      reportOpenFailure(
         openFailureKind(error),
         `Could not open named pipe at ${this.pipePath}: ${describeError(error)}`,
         error,
@@ -1727,7 +1801,7 @@ export class NamedPipeSink implements LogSink {
       // costs one `stat` a second and nothing else. Flat rather than backed off, on the
       // same reasoning {@link REOPEN_COOLDOWN_MS} gives: a pipe being recreated is meant to
       // be picked up promptly, and the cost of asking is two syscalls.
-      this.scheduleReopen(REOPEN_COOLDOWN_MS);
+      scheduleReopen(REOPEN_COOLDOWN_MS);
     } finally {
       // Released on every path that did not transfer the numeric descriptor to the active
       // writable.
@@ -1747,8 +1821,15 @@ export class NamedPipeSink implements LogSink {
     kind: SinkFailureKind,
     message: string,
     cause: unknown,
+    isDiagnostic = false,
+    shouldSuppressFailureReport = false,
   ): void {
     if (this.closing || this.closed) {
+      return;
+    }
+
+    if (shouldSuppressFailureReport) {
+      this.lastError = new Error(message, { cause });
       return;
     }
 
@@ -1758,32 +1839,44 @@ export class NamedPipeSink implements LogSink {
     // carrying a *different* kind, which is the one thing a consumer switching on `kind`
     // cannot afford to miss.
     const key = `${kind}\u0000${message}`;
+    const reportedFailures = isDiagnostic
+      ? this.reportedDiagnosticOpenFailures
+      : this.reportedOpenFailures;
 
     // Already said this outage. Not "already said last time": see
     // {@link reportedOpenFailures} for why a path that flaps between two states must not
     // report on every transition.
-    if (this.reportedOpenFailures.has(key)) {
+    if (reportedFailures.has(key)) {
       return;
     }
 
-    if (this.reportedOpenFailures.size >= MAX_REPORTED_OPEN_FAILURES) {
-      if (!this.reportedOpenFailureCap) {
-        this.reportedOpenFailureCap = true;
+    if (reportedFailures.size >= MAX_REPORTED_OPEN_FAILURES) {
+      if (
+        !(isDiagnostic
+          ? this.reportedDiagnosticOpenFailureCap
+          : this.reportedOpenFailureCap)
+      ) {
+        if (isDiagnostic) {
+          this.reportedDiagnosticOpenFailureCap = true;
+        } else {
+          this.reportedOpenFailureCap = true;
+        }
 
         this.handleError(
           'setup',
           new Error(
             `Reported ${String(MAX_REPORTED_OPEN_FAILURES)} distinct failures opening the named pipe at ${this.pipePath}; further ones are not reported until it opens`,
           ),
+          { isDiagnostic },
         );
       }
 
       return;
     }
 
-    this.reportedOpenFailures.add(key);
+    reportedFailures.add(key);
 
-    this.handleError(kind, new Error(message, { cause }));
+    this.handleError(kind, new Error(message, { cause }), { isDiagnostic });
   }
 
   /**
@@ -1938,7 +2031,11 @@ export class NamedPipeSink implements LogSink {
           new Error(
             `Write to ${this.pipePath} failed after the sink was closed; the entry was not written`,
           ),
-          { disposition: 'lost', entry: queued.entry },
+          {
+            disposition: 'lost',
+            entry: queued.entry,
+            shouldSuppressFailureReport: queued.shouldSuppressFailureReport,
+          },
         );
       }
 
@@ -1965,6 +2062,7 @@ export class NamedPipeSink implements LogSink {
             attempt: queued.attempts + 1,
             disposition: 'lost',
             entry: queued.entry,
+            shouldSuppressFailureReport: queued.shouldSuppressFailureReport,
             // The stream this entry could not be written to is already gone - that is why
             // it is here - so this says nothing about whatever replaced it. Same question
             // the write callback asks before counting a failure against health.
@@ -2059,7 +2157,11 @@ export class NamedPipeSink implements LogSink {
    * Failures that are not about opening keep their own shape: a write that failed schedules
    * from its own handler, once, for the thing that actually happened.
    */
-  private scheduleReopen(delayMS: number): void {
+  private scheduleReopen(
+    delayMS: number,
+    isDiagnostic = false,
+    shouldSuppressFailureReport = false,
+  ): void {
     if (this.closed || this.closing) {
       return;
     }
@@ -2083,7 +2185,7 @@ export class NamedPipeSink implements LogSink {
     const timer = setTimeout(() => {
       this.reopenTimer = undefined;
       this.reopenAtMS = undefined;
-      this.ensureConnection();
+      this.ensureConnection(isDiagnostic, shouldSuppressFailureReport);
     }, delayMS);
 
     // So a pending attempt cannot hold the process open.
@@ -2243,7 +2345,10 @@ export class NamedPipeSink implements LogSink {
    * attempts are spaced by {@link REOPEN_COOLDOWN_MS}, because this is called from
    * `write`, which during an outage is called as often as the application logs.
    */
-  private ensureConnection(): void {
+  private ensureConnection(
+    isDiagnostic = false,
+    shouldSuppressFailureReport = false,
+  ): void {
     if (this.closed || this.closing) {
       return;
     }
@@ -2284,7 +2389,11 @@ export class NamedPipeSink implements LogSink {
       // entry requeued by a failed write would otherwise sit until unrelated traffic
       // arrived, and a process that has just lost its log pipe may have nothing else to
       // say.
-      this.scheduleReopen(REOPEN_COOLDOWN_MS - sinceLastAttempt);
+      this.scheduleReopen(
+        REOPEN_COOLDOWN_MS - sinceLastAttempt,
+        isDiagnostic,
+        shouldSuppressFailureReport,
+      );
 
       return;
     }
@@ -2292,7 +2401,10 @@ export class NamedPipeSink implements LogSink {
     this.lastReopenAttempt = now;
     this._isReconnecting = true;
 
-    const attempt = this.initializePipe();
+    const attempt = this.initializePipe(
+      isDiagnostic,
+      shouldSuppressFailureReport,
+    );
     this.initPromise = (async (): Promise<void> => {
       try {
         await attempt;
@@ -2340,7 +2452,13 @@ export class NamedPipeSink implements LogSink {
       // A dropped entry, never a surviving one, as `FileSink`'s cap report: a handler
       // that reads `'lost'` as "this line is gone" and writes it elsewhere would
       // otherwise duplicate an entry still queued for the pipe.
-      firstDropped ??= this.writeQueue[0]?.entry;
+      const dropped = this.writeQueue[0]?.entry;
+      if (
+        firstDropped === undefined ||
+        (isDiagnosticEntry(firstDropped) && !isDiagnosticEntry(dropped))
+      ) {
+        firstDropped = dropped;
+      }
       this.writeQueue.shift();
       this.countDropped('queue_full');
       didEvict = true;
@@ -2462,6 +2580,12 @@ export class NamedPipeSink implements LogSink {
           // A write callback precedes the error event and automatic destruction.
           // Stop all drains now; the error event owns connection teardown/recovery.
           this.failedWriteStreams.add(stream);
+          if (queued.shouldSuppressFailureReport) {
+            this.consoleFailedStreams.add(stream);
+          }
+          if (isDiagnosticEntry(queued.entry)) {
+            this.diagnosticFailedStreams.add(stream);
+          }
           // Reported here, not left to the `'error'` event. Both describe the same
           // failure, but only this one knows *which line* it was and whether it is coming
           // back - the event reported `attempt: undefined` and a disposition of
@@ -2491,6 +2615,7 @@ export class NamedPipeSink implements LogSink {
             queued.attempts < this.maxRetries &&
             this.hasRetryRoom();
           this.handleError('write', error, {
+            shouldSuppressFailureReport: queued.shouldSuppressFailureReport,
             attempt: queued.attempts + 1,
             disposition: willRetry ? 'retrying' : 'lost',
             entry: queued.entry,
@@ -2528,6 +2653,7 @@ export class NamedPipeSink implements LogSink {
         queued.attempts < this.maxRetries &&
         this.hasRetryRoom();
       this.handleError('write', error, {
+        shouldSuppressFailureReport: queued.shouldSuppressFailureReport,
         attempt: queued.attempts + 1,
         disposition: willRetry ? 'retrying' : 'lost',
         entry: queued.entry,
@@ -2663,7 +2789,7 @@ export class NamedPipeSink implements LogSink {
 
     if (pending !== undefined) {
       const wasBornDuringConsoleReport =
-        this.formatReports.isConsoleReportActive;
+        this.formatReports.isConsoleReportActive || isConsoleReportActive();
       const wasBornDuringReport = this.formatReports.isReportActive;
 
       observeRejection(pending, (error: unknown) => {
@@ -2723,6 +2849,8 @@ export class NamedPipeSink implements LogSink {
     kind: SinkFailureKind,
     error: unknown,
     options?: {
+      shouldSuppressFailureReport?: boolean;
+      isDiagnostic?: boolean;
       countsAgainstHealth?: boolean;
       attempt?: number;
       disposition?: SinkFailureDisposition;
@@ -2747,6 +2875,10 @@ export class NamedPipeSink implements LogSink {
       this.consecutiveFailures++;
     }
 
+    if (options?.shouldSuppressFailureReport === true) {
+      return;
+    }
+
     // The shared rung, so this channel cannot drift from the logger's four. Nothing here
     // may escape: `handleError` runs from a Node stream `'error'` handler, where a throw is
     // an uncaught exception that ends the process, and from `initializePipe`, whose promise
@@ -2754,21 +2886,24 @@ export class NamedPipeSink implements LogSink {
     // raised out of a constructor. The console rung is guarded for the same reason -
     // `console.error` can throw synchronously, and a pipe sink fails at exactly the
     // shutdown-time moments a console is most likely to be replaced or torn down.
-    reportThroughHandler(
-      this.onError === undefined
-        ? undefined
-        : // Returned, not dropped, so a promise from an `async` handler can be followed.
-          () =>
-            this.onError?.({
-              kind,
-              error: failure,
-              target: this.pipePath,
-              entry: options?.entry,
-              attempt: options?.attempt,
-              disposition: options?.disposition ?? 'no_entry',
-            }),
+    reportSinkError(
+      this,
+      {
+        kind,
+        error: failure,
+        target: this.pipePath,
+        entry: options?.entry,
+        attempt: options?.attempt,
+        disposition: options?.disposition ?? 'no_entry',
+      },
+      this.onError,
       () => this.describeFailure(kind, failure),
-      { onSettled: options?.onReported, handlerName: 'NamedPipeSink onError' },
+      {
+        label: 'NamedPipeSink',
+        isDiagnostic:
+          options?.isDiagnostic ?? isDiagnosticEntry(options?.entry),
+        onSettled: options?.onReported,
+      },
     );
   }
 

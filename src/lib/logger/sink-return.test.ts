@@ -133,6 +133,14 @@ test('malformed ordinary returns use one bounded diagnostic fallback', async () 
         },
       },
     ],
+    diagnosticSinks: [
+      {
+        write: () => {
+          writes++;
+          return unreadableReturn(new Error('fallback return'));
+        },
+      },
+    ],
   });
   logger.on('diagnostic', () => {
     diagnostics++;
@@ -316,6 +324,9 @@ test('diagnostic fallback identifies the original log sink list', async () => {
         write: () => {
           throw new Error('write failed');
         },
+      },
+      {
+        write: () => {},
         writeDiagnostic: () =>
           ({
             get then(): never {
@@ -329,7 +340,7 @@ test('diagnostic fallback identifies the original log sink list', async () => {
     logger.info('entry');
     await sleep(0);
     expect(output).toHaveBeenCalledTimes(1);
-    expect(String(output.mock.calls[0]?.[0])).toContain('Log sink #1');
+    expect(String(output.mock.calls[0]?.[0])).toContain('Log sink #2');
     expect(String(output.mock.calls[0]?.[0])).not.toContain('Diagnostic sink');
   } finally {
     output.mockRestore();

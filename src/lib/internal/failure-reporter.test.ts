@@ -1,6 +1,61 @@
 import { expect, spyOn, test } from 'bun:test';
 import * as consoleRung from './report-to-console';
 import { reportThroughHandler } from './failure-reporter';
+import { muteConsoleError, restoreConsoleError } from './console-test-utils';
+
+test.each([false, true])(
+  'console-origin reports skip handlers and settle once (queued: %s)',
+  async (isQueued) => {
+    muteConsoleError();
+    let consoleCalls = 0;
+    let handlerCalls = 0;
+    let settlements = 0;
+    const failure = new Error('forwarding failed');
+    const forward = (shouldSuppressDiagnostics: boolean): void => {
+      reportThroughHandler(
+        async () => {
+          handlerCalls++;
+          await Promise.resolve();
+          throw failure;
+        },
+        () => 'original failure',
+        {
+          suppressDiagnostics: shouldSuppressDiagnostics,
+          onSettled: () => {
+            settlements++;
+            throw new Error('settlement failed too');
+          },
+        },
+      );
+    };
+    console.error = () => {
+      if (++consoleCalls >= 20) {
+        return;
+      }
+      if (isQueued) {
+        const wasConsoleOrigin = consoleRung.isConsoleReportActive();
+        queueMicrotask(() => forward(wasConsoleOrigin));
+      } else {
+        forward(false);
+      }
+    };
+    try {
+      consoleRung.reportToConsole('first failure');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(consoleCalls).toBe(1);
+      expect(handlerCalls).toBe(0);
+      expect(settlements).toBe(1);
+
+      consoleRung.reportToConsole('independent failure');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(consoleCalls).toBe(2);
+      expect(handlerCalls).toBe(0);
+      expect(settlements).toBe(2);
+    } finally {
+      restoreConsoleError();
+    }
+  },
+);
 
 test('a rejecting handler settles once even if its rejection report throws', async () => {
   // Stands in for a reaction that throws before its own settle(): the derived promise

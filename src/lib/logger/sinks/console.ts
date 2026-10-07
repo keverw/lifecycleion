@@ -1,6 +1,9 @@
 import { format } from 'date-fns';
 import type { LogEntry, LogSink, LoggerDiagnostic } from '../types';
-import { reportToConsole } from '../../internal/report-to-console';
+import {
+  isConsoleReportActive,
+  reportToConsole,
+} from '../../internal/report-to-console';
 import { LogLevel, getLogLevel } from '../types';
 import { colorize } from '../utils/color';
 
@@ -22,6 +25,7 @@ export class ConsoleSink implements LogSink {
   private closed = false;
   private muted: boolean;
   private minLevel: LogLevel;
+  private isWriting = false;
 
   constructor(options: ConsoleSinkOptions = {}) {
     this.colors = options.colors ?? true;
@@ -32,6 +36,70 @@ export class ConsoleSink implements LogSink {
   }
 
   public write(entry: LogEntry): void {
+    // Console bridges may log back into this sink. Other logger sinks still receive
+    // that entry, but sending it to the console again would recurse indefinitely.
+    if (this.isWriting || isConsoleReportActive()) {
+      return;
+    }
+    this.isWriting = true;
+    try {
+      this.writeEntry(entry);
+    } finally {
+      this.isWriting = false;
+    }
+  }
+
+  public writeDiagnostic(diagnostic: LoggerDiagnostic): void {
+    if (this.closed || this.muted) {
+      return;
+    }
+
+    reportToConsole(diagnostic.message);
+  }
+
+  /**
+   * Set the minimum log level for this sink
+   */
+  public setMinLevel(level: LogLevel): void {
+    this.minLevel = level;
+  }
+
+  /**
+   * Get the current minimum log level
+   */
+  public getMinLevel(): LogLevel {
+    return this.minLevel;
+  }
+
+  /**
+   * Mute the sink to stop writing logs to console
+   */
+  public mute(): void {
+    this.muted = true;
+  }
+
+  /**
+   * Unmute the sink to resume writing logs to console
+   */
+  public unmute(): void {
+    this.muted = false;
+  }
+
+  /**
+   * Check if the sink is currently muted
+   */
+  public isMuted(): boolean {
+    return this.muted;
+  }
+
+  /**
+   * Close the sink and stop accepting new logs
+   */
+  public close(): void {
+    this.closed = true;
+  }
+
+  private writeEntry(entry: LogEntry): void {
     if (this.closed || this.muted) {
       return;
     }
@@ -142,55 +210,5 @@ export class ConsoleSink implements LogSink {
           break;
       }
     }
-  }
-
-  public writeDiagnostic(diagnostic: LoggerDiagnostic): void {
-    if (this.closed || this.muted) {
-      return;
-    }
-
-    reportToConsole(diagnostic.message);
-  }
-
-  /**
-   * Set the minimum log level for this sink
-   */
-  public setMinLevel(level: LogLevel): void {
-    this.minLevel = level;
-  }
-
-  /**
-   * Get the current minimum log level
-   */
-  public getMinLevel(): LogLevel {
-    return this.minLevel;
-  }
-
-  /**
-   * Mute the sink to stop writing logs to console
-   */
-  public mute(): void {
-    this.muted = true;
-  }
-
-  /**
-   * Unmute the sink to resume writing logs to console
-   */
-  public unmute(): void {
-    this.muted = false;
-  }
-
-  /**
-   * Check if the sink is currently muted
-   */
-  public isMuted(): boolean {
-    return this.muted;
-  }
-
-  /**
-   * Close the sink and stop accepting new logs
-   */
-  public close(): void {
-    this.closed = true;
   }
 }

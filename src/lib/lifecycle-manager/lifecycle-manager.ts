@@ -8314,13 +8314,36 @@ export class LifecycleManager
               observeRejection(startPromise, () => {});
               throw adoptionFailure.error;
             }
+            // Observe the caller's promise once, then use our own promise for every
+            // wait and late-cleanup observer. Reattaching to the caller's promise can
+            // fail on a later constructor/species read even after this observer was
+            // accepted; treating that attachment failure as a rejected start would
+            // leave the still-running hook without late cleanup.
+            let resolveObservedStart!: () => void;
+            let rejectObservedStart!: (reason: unknown) => void;
+            const observedStart = new promiseConstructorIntrinsic<void>(
+              (resolve, reject) => {
+                resolveObservedStart = resolve;
+                rejectObservedStart = reject;
+              },
+            );
+            // Later setup can fail before it installs the deadline wait. The raw
+            // rejection was already contained by its marker; contain this copy too.
+            observeRejection(observedStart, () => {});
             // Preserve a synchronous observation failure as this attempt's failure,
             // while containing the intrinsic's unused species result.
             attachIntrinsicReactions(
               startPromise,
-              markRawStartSettled,
-              markRawStartSettled,
+              () => {
+                markRawStartSettled();
+                resolveObservedStart();
+              },
+              (reason) => {
+                markRawStartSettled();
+                rejectObservedStart(reason);
+              },
             );
+            startPromise = observedStart;
           } catch (error) {
             // Failing to observe start() does not mean it settled. Keep ownership of
             // its resources and dependencies, and retry attachment once through a

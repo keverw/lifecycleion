@@ -889,8 +889,8 @@ describe('Logger', () => {
       // The regular sinks are the diagnostic sinks when no separate set was supplied.
       expect(arraySink.logs.at(-1)?.tags).toContain('lifecycleion-diagnostic');
 
-      // The failing sink also refused its diagnostic, so delivery ended at the console.
-      expect(consoleErrorSpy).toHaveBeenCalled();
+      // The source is excluded; the healthy sink received the diagnostic.
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
 
       consoleErrorSpy.mockRestore();
     });
@@ -3150,7 +3150,7 @@ describe('Logger diagnostic channel', () => {
     expect(consoleErrors).toEqual([]);
   });
 
-  test('asynchronously tells every regular sink when no diagnostic sinks are set', async () => {
+  test('asynchronously tells the other regular sinks when no diagnostic sinks are set', async () => {
     const seen: LoggerDiagnostic[][] = [[], []];
     const makeSink = (diagnostics: LoggerDiagnostic[]): LogSink => ({
       write: () => {
@@ -3170,8 +3170,10 @@ describe('Logger diagnostic channel', () => {
 
     await Promise.resolve();
 
-    expect(seen[0]).toHaveLength(2);
-    expect(seen[1]).toHaveLength(2);
+    expect(seen[0]).toHaveLength(1);
+    expect(seen[1]).toHaveLength(1);
+    expect(seen[0][0]?.sink).toBe(logger.getSinks()[1]);
+    expect(seen[1][0]?.sink).toBe(logger.getSinks()[0]);
     expect(seen[0].every(({ kind }) => kind === 'sink')).toBe(true);
   });
 

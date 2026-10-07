@@ -5,6 +5,8 @@ import {
 } from '../../internal/container-entries';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { observeRejection } from '../../internal/intrinsics';
+import { describeError } from '../../to-error';
+import { isConsoleReportActive } from '../../internal/report-to-console';
 import { isPlainContainer } from '../../internal/is-plain-container';
 import { MAX_REDACTION_ENTRIES } from '../../internal/redact-paths';
 import { MAX_RENDER_DEPTH, TRUNCATED } from '../../internal/render-budget';
@@ -22,6 +24,11 @@ import type {
   LoggerDiagnostic,
 } from '../types';
 import { diagnosticEntry } from '../internal/diagnostic-entry';
+import {
+  isDiagnosticEntry,
+  markDiagnosticEntry,
+  reportSinkFailure,
+} from '../internal/sink-failure-routing';
 
 /**
  * Stands in for a value whose read threw, so the snapshot could not copy it.
@@ -346,7 +353,9 @@ export class ArraySink implements LogSink {
      * `<transformer>`; a promise that later rejects is reported again with its reason, unless
      * it was returned while a report was being delivered - see `refuseNonEntryTransform`), so a
      * `<value could not be copied>` marker or a silently passed-through entry leaves a
-     * diagnosis. Defaults to `console.error`. Fires at most once per kind per entry
+     * diagnosis. With no handler, failures go to owning loggers and otherwise to
+     * `console.error`. Failures of diagnostic entries go directly to the console.
+     * Fires at most once per kind per entry
      * written.
      */
     onFormatError?: FormatErrorHandler;
@@ -377,19 +386,29 @@ export class ArraySink implements LogSink {
               // See `createGuardedFormatReporter` for why the handler is never the
               // reporter's own default, and see
               // `formatReportsInFlight` for what the guard stops.
-              this.createGuardedFormatReporter('render'),
+              this.createGuardedFormatReporter('render', {
+                isDiagnostic: isDiagnosticEntry(entry),
+              }),
             ),
           };
+
+    if (isDiagnosticEntry(entry)) {
+      markDiagnosticEntry(stored);
+    }
 
     if (this.transformer) {
       try {
         const transformed = this.transformer(stored);
 
-        this.refuseNonEntryTransform(transformed);
+        this.refuseNonEntryTransform(transformed, entry);
 
         if (transformed !== false) {
           // Store the transformed entry
-          this.logs.push(transformed);
+          this.logs.push(
+            isDiagnosticEntry(entry)
+              ? markDiagnosticEntry(transformed)
+              : transformed,
+          );
           return;
         }
       } catch (error) {
@@ -397,7 +416,9 @@ export class ArraySink implements LogSink {
         // recovery - a broken transformer must not cost you the log - but it was also
         // completely silent, so a transformer that threw on every entry looked exactly
         // like one that had chosen to pass every entry through untouched.
-        this.createGuardedFormatReporter('transform')(error, '<transformer>');
+        this.createGuardedFormatReporter('transform', {
+          isDiagnostic: isDiagnosticEntry(entry),
+        })(error, '<transformer>');
       }
     }
     // Store the original entry
@@ -462,7 +483,7 @@ export class ArraySink implements LogSink {
    * no entry with nothing reported. It is refused the same way. Named by `typeof` alone,
    * as is every value here, since stringifying it would run caller code.
    */
-  private refuseNonEntryTransform(transformed: unknown): void {
+  private refuseNonEntryTransform(transformed: unknown, entry: LogEntry): void {
     const pending = adoptResult(transformed);
 
     if (pending instanceof UnreadableReturn) {
@@ -470,7 +491,8 @@ export class ArraySink implements LogSink {
     }
 
     if (pending !== undefined) {
-      const wasBornDuringConsoleReport = this.consoleFormatReportsInFlight > 0;
+      const wasBornDuringConsoleReport =
+        this.consoleFormatReportsInFlight > 0 || isConsoleReportActive();
       const wasBornDuringReport = this.formatReportsInFlight > 0;
 
       observeRejection(pending, (error: unknown) => {
@@ -483,7 +505,10 @@ export class ArraySink implements LogSink {
           ? createFormatReporter('transform', (failure, kind, path): void => {
               this.reportFormatFailureToConsole(failure, kind, path);
             })
-          : this.createGuardedFormatReporter('transform', { canDefer: true });
+          : this.createGuardedFormatReporter('transform', {
+              canDefer: true,
+              isDiagnostic: isDiagnosticEntry(entry),
+            });
 
         report(error, '<transformer>');
       });
@@ -523,9 +548,31 @@ export class ArraySink implements LogSink {
    */
   private createGuardedFormatReporter(
     kind: FormatFailureKind,
-    options?: { canDefer?: boolean; isDeferred?: boolean },
+    options?: {
+      canDefer?: boolean;
+      isDeferred?: boolean;
+      isDiagnostic?: boolean;
+    },
   ): ReportFormatFailure {
-    const handler = this.onFormatError ?? consoleFormatHandler();
+    const handler =
+      options?.isDiagnostic === true
+        ? consoleFormatHandler()
+        : (this.onFormatError ??
+          ((error, kind, path): void => {
+            if (
+              !reportSinkFailure(this, {
+                kind: 'sink',
+                error,
+                context: 'write',
+                path,
+                message: `ArraySink ${kind} failed`,
+                terminalLine: () =>
+                  `${kind === 'redaction' ? 'Redaction' : kind === 'render' ? 'Render' : 'Transform'} failed for ${path}: ${describeError(error)}`,
+              })
+            ) {
+              consoleFormatHandler()(error, kind, path);
+            }
+          }));
     const isDeferred = options?.isDeferred === true;
     let didEnter = false;
 
@@ -550,6 +597,7 @@ export class ArraySink implements LogSink {
             this.deferredFormatReport = (): void => {
               this.createGuardedFormatReporter(reportKind, {
                 isDeferred: true,
+                isDiagnostic: options?.isDiagnostic,
               })(error, path);
             };
             return;

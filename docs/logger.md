@@ -852,6 +852,17 @@ console.log(
 
 ### Dynamic Sink Management
 
+Attached built-in sinks send internal failures to their owning logger by default. The
+logger emits a `'diagnostic'` event and offers the report to the other configured
+diagnostic sinks, or the other regular sinks when no diagnostic sinks are configured.
+The failed sink is excluded. For example, a FileSink whose disk is full can report
+through a ConsoleSink or a remote sink without retrying that diagnostic in the same file.
+
+An explicit `onError` or `onFormatError` remains the sink's chosen destination and takes
+precedence over automatic owner routing. Standalone sinks keep their console fallback.
+If a diagnostic itself fails, including a queued write that fails later, it terminates
+at guarded console output rather than becoming another logger diagnostic.
+
 You can add, remove, and query sinks at runtime:
 
 ```typescript
@@ -1395,7 +1406,7 @@ const fileSink = new FileSink({
 
 Two things to know about `failure.entry`. It is the full `LogEntry`, so it carries `params` as well as `redactedParams`: a handler that serializes the whole failure for paging or a backup sink is serializing the raw values, including any the log line masked. Forward `redactedParams ?? params`, or only `message`, rather than the entry itself. And a handler that logs the failure back through this sink is safe: the sink refuses, and counts in `droppedEntries`, a line from inside a `'format'` report that cannot render either, and reports its failure on the console rather than to the handler, which is what stops a failure carrying an unrenderable `entry` from reporting itself forever. `'format'` reports reach the handler one at a time: while it is working on one - until it settles, `async` or not - one more is held and delivered after it, and any others go to the console. A `'write'` failure is reported on every attempt, so a handler that logs each one through a sink that is also failing multiplies the queue by `maxRetries + 1` per line. The queue cap bounds it, but log elsewhere.
 
-A close-time `'lost'` or `'no_entry'` is this callback, not the logger's diagnostic channel. With no `onError` the sink already writes it to `console.error`. With one, a `logger.error(...)` inside the handler during `Logger.close()` is dropped (a closed logger's `handleLog` writes nothing) and does not fall through to that console line, because the handler succeeded. The example uses `console.error` for that reason.
+A close-time `'lost'` or `'no_entry'` still reaches an explicit `onError` callback. Without one, an attached sink uses its owner's diagnostic channel; a closing logger offers the report to diagnostic listeners and uses console when none are present, without writing to closing sinks. A standalone sink reports to console. A `logger.error(...)` inside an explicit handler during `Logger.close()` is dropped (a closed logger's `handleLog` writes nothing) and does not fall through to console, because the handler succeeded. The example uses `console.error` for that reason.
 
 In text mode (`jsonFormat: false`), CR, LF, and the Unicode line/paragraph separators in the message are collapsed to spaces so one entry remains one physical line. JSON mode escapes them instead, preserving the characters in the parsed message while still keeping one entry per line.
 
@@ -1858,15 +1869,18 @@ logger.on<LoggerDiagnostic>('diagnostic', (diagnostic) => {
 });
 ```
 
-This covers failures that escape the sink's method. Queueing sinks can also fail later,
-after `write()` has returned. Their own error API remains responsible for that asynchronous
-internal work: `FileSinkOptions.onError`, `NamedPipeSinkOptions.onError`, and
-`ArraySinkOptions.onFormatError` are sink-level callbacks, not logger callbacks.
+Queueing sinks can also fail later, after `write()` has returned. FileSink,
+NamedPipeSink, and ArraySink offer internal failures to their owning logger when no
+explicit sink-level error handler is configured. `FileSinkOptions.onError`,
+`NamedPipeSinkOptions.onError`, and `ArraySinkOptions.onFormatError` remain explicit
+overrides. Removing a sink stops its reports to that logger once its final reference in
+both sink lists is removed. A sink attached to multiple loggers reports to each owner.
 
 ##### Where Errors Go When the Logger Cannot Log Them
 
 Failures raised while logging never go through another normal log call. The logger
-schedules a `'diagnostic'` event and offers the diagnostic to every selected sink using
+schedules a `'diagnostic'` event and offers the diagnostic to every selected sink except
+the sink that raised the failure, using
 `writeDiagnostic()` where available. A diagnostic write that fails goes directly to
 guarded `console.error` and is not reported again.
 
@@ -1890,11 +1904,10 @@ Do not call ordinary logger methods from a `'diagnostic'` listener or
 write cannot be completed, throw or return a rejected promise. The logger will terminate
 it at guarded `console.error`.
 
-That console fallback is the diagnostic _delivery_ failing. It is not the same path as
-`FileSink` / `NamedPipeSink` `onError`. Those callbacks are the sink's own report for a
-lost or abandoned line. The logger never turns them into a diagnostic. With no `onError`,
-the sink already writes the failure to guarded `console.error`. With one, that handler is
-the destination: if it logs through _this_ logger during `Logger.close()`, `handleLog`
+That console fallback is the diagnostic _delivery_ failing. It bypasses owner routing
+and custom error handlers so two failing sinks cannot report each other's diagnostics
+forever. For ordinary sink failures, an explicit `FileSink` / `NamedPipeSink` `onError`
+remains the destination: if it logs through _this_ logger during `Logger.close()`, `handleLog`
 already writes nothing and nothing else runs, because the handler returned successfully. Use
 `console.error` (or a destination this logger is not closing) inside `onError` for
 close-time `'lost'` / `'no_entry'`. See [Where Failures Go](#where-failures-go).
@@ -2052,7 +2065,7 @@ The logger has a separate asynchronous path for things that go wrong while loggi
 
 1. Emit the logger's `'diagnostic'` event.
 2. Offer the diagnostic to every configured `diagnosticSinks` entry. When there are none, offer
-   it to every regular sink instead.
+   it to every regular sink instead. Exclude the sink that failed.
 3. If there is nowhere to send it, or a diagnostic delivery itself fails, use guarded
    `console.error`.
 
@@ -2064,8 +2077,9 @@ asynchronously, so it also cannot grow the stack of the log call that failed.
 A failure raised while `Logger.close()` is closing its sinks skips that second step: none
 of those sinks can honestly accept another write. It is emitted to external diagnostic
 listeners and otherwise ends at guarded `console.error`. That covers a `close()` that
-_throws_. A sink's own close-time `'lost'` / `'no_entry'` report goes to `onError` (or to
-`console.error` when none is set), not through this diagnostic channel.
+_throws_. A sink's own close-time `'lost'` / `'no_entry'` report goes to an explicit
+`onError` handler when supplied, otherwise through this diagnostic channel while the
+logger still owns the sink. A standalone sink uses guarded `console.error`.
 
 `LoggerDiagnostic.error` is the normalized underlying failure. For `'redaction'` and
 `'render'` kinds, `message` is generic and omits both caller-controlled property paths
@@ -2075,7 +2089,8 @@ redaction failure's cause is derived from the value being masked. A getter throw
 `cannot read <secret>` would otherwise route around the masking on the line above it.
 
 Sink and event-handler diagnostic messages can include the underlying error text. They
-are not automatically redacted.
+are not automatically redacted. Default reports originating inside built-in sinks use
+generic messages; their underlying errors remain available on `LoggerDiagnostic.error`.
 
 `LoggerDiagnostic.error` still carries that cause in full, and every `'diagnostic'`
 listener and `writeDiagnostic()` sink receives it. It can contain data that caller-owned

@@ -1,5 +1,6 @@
 import { snapshotSet } from './internal/intrinsics';
 import { readMember } from './internal/read-member';
+import { isConsoleReportActive } from './internal/report-to-console';
 import { reportCallbackError, runCallbackSafely } from './safe-handle-callback';
 
 /**
@@ -61,6 +62,7 @@ export class SingleEventObserverProtected<T> {
    */
 
   protected notify(data: T): void {
+    const shouldSuppressDiagnostics = isConsoleReportActive();
     // Snapshot at the start of this notification, as `EventEmitter.emit` does: a
     // subscriber added (or removed and re-added) midway through runs from the next
     // notification, not this one, so it cannot extend this pass - or loop it forever.
@@ -73,6 +75,9 @@ export class SingleEventObserverProtected<T> {
         subscriber,
         [data],
         (error: unknown) => {
+          if (shouldSuppressDiagnostics) {
+            return;
+          }
           reportCallbackError(
             `SingleEventObserver_${readSubscriberName(subscriber)}`,
             error,

@@ -25,7 +25,10 @@ import { MAX_RENDER_LENGTH } from '../internal/render-budget';
 import { adoptResult, UnreadableReturn } from '../internal/adopt-promise';
 import { describeError, isErrorValue, toError } from '../to-error';
 import { readMember, readUnknownMember } from '../internal/read-member';
-import { reportToConsole } from '../internal/report-to-console';
+import {
+  isConsoleReportActive,
+  reportToConsole,
+} from '../internal/report-to-console';
 import {
   createFormatReporter,
   type FormatFailureKind,
@@ -53,6 +56,7 @@ import { snapshotList } from '../internal/redact-paths';
 import { prepareErrorObjectLog } from './utils/error-object';
 import { LoggerService } from './logger-service';
 import { diagnosticEntry } from './internal/diagnostic-entry';
+import { registerSinkFailureReporter } from './internal/sink-failure-routing';
 import { resolveTimeoutMS } from '../internal/timer-limits';
 import { raceDeadline } from '../internal/race-deadline';
 
@@ -253,6 +257,7 @@ export class Logger extends EventEmitter {
 
   private sinks: LogSink[];
   private diagnosticSinks: LogSink[];
+  private readonly sinkFailureSubscriptions = new Map<LogSink, () => void>();
   private redactFunction?: RedactFunction;
   private callProcessExit: boolean;
   private closeTimeoutMS: number;
@@ -307,6 +312,12 @@ export class Logger extends EventEmitter {
     this.redactFunction = options.redactFunction;
     this.callProcessExit = options.callProcessExit ?? true;
     this.beforeExitCallback = options.beforeExitCallback;
+    for (let index = 0; index < this.sinks.length; index++) {
+      this.ownSinkFailures(this.sinks[index]);
+    }
+    for (let index = 0; index < this.diagnosticSinks.length; index++) {
+      this.ownSinkFailures(this.diagnosticSinks[index]);
+    }
   }
 
   public get didExit(): boolean {
@@ -988,6 +999,7 @@ export class Logger extends EventEmitter {
   public addSink(sink: LogSink): void {
     this.assertCanAddSink();
     this.sinks = [...this.sinks, sink];
+    this.ownSinkFailures(sink);
   }
 
   /**
@@ -998,6 +1010,7 @@ export class Logger extends EventEmitter {
     const index = this.sinks.indexOf(sink);
     if (index !== -1) {
       this.sinks = this.sinks.filter((_, sinkIndex) => sinkIndex !== index);
+      this.releaseSinkFailuresIfUnused(sink);
       return true;
     }
     return false;
@@ -1017,6 +1030,7 @@ export class Logger extends EventEmitter {
   public addDiagnosticSink(sink: LogSink): void {
     this.assertCanAddSink();
     this.diagnosticSinks = [...this.diagnosticSinks, sink];
+    this.ownSinkFailures(sink);
   }
 
   /** Remove a diagnostic sink. */
@@ -1030,6 +1044,7 @@ export class Logger extends EventEmitter {
     this.diagnosticSinks = this.diagnosticSinks.filter(
       (_, sinkIndex) => sinkIndex !== index,
     );
+    this.releaseSinkFailuresIfUnused(sink);
     return true;
   }
 
@@ -1136,6 +1151,10 @@ export class Logger extends EventEmitter {
     logger.sinks = consoleSink
       ? [arraySink, consoleSink, ...logger.sinks]
       : [arraySink, ...logger.sinks];
+    logger.ownSinkFailures(arraySink);
+    if (consoleSink !== undefined) {
+      logger.ownSinkFailures(consoleSink);
+    }
     return { logger, arraySink, consoleSink };
   }
 
@@ -1157,6 +1176,7 @@ export class Logger extends EventEmitter {
       callProcessExit: false,
     });
     logger.sinks = [consoleSink, ...logger.sinks];
+    logger.ownSinkFailures(consoleSink);
     return { logger, consoleSink };
   }
 
@@ -1168,6 +1188,7 @@ export class Logger extends EventEmitter {
     template: string,
     callerOptions?: SnapshotLogOptions,
   ): void {
+    const shouldSuppressFailureReport = isConsoleReportActive();
     // A closed logger writes nothing, but an exit request on the entry still counts.
     // Committing an exit closes the logger synchronously, so returning before the exit
     // dropped every `{ exitCode }` logged from then on without a trace: a failure logged
@@ -1499,24 +1520,30 @@ export class Logger extends EventEmitter {
       try {
         result = sink.write(entry);
       } catch (error) {
-        this.handleSinkError(error, 'write', sink);
+        if (!shouldSuppressFailureReport) {
+          this.handleSinkError(error, 'write', sink);
+        }
         continue;
       }
       const pending = adoptResult(result);
       if (pending instanceof UnreadableReturn) {
-        this.handleSinkError(
-          pending,
-          'write',
-          sink,
-          `Log sink #${sinkIndex + 1}`,
-        );
+        if (!shouldSuppressFailureReport) {
+          this.handleSinkError(
+            pending,
+            'write',
+            sink,
+            `Log sink #${sinkIndex + 1}`,
+          );
+        }
         continue;
       }
       if (pending !== undefined) {
         // Adoption protects the input; attach its observer through the captured
         // intrinsic too, so a later prototype patch cannot drop the rejection.
         observeRejection(pending, (error: unknown) => {
-          this.handleSinkError(error, 'write', sink);
+          if (!shouldSuppressFailureReport) {
+            this.handleSinkError(error, 'write', sink);
+          }
         });
       }
     }
@@ -1552,6 +1579,9 @@ export class Logger extends EventEmitter {
     error: unknown,
     data?: unknown,
   ): void {
+    if (isConsoleReportActive()) {
+      return;
+    }
     // Normalized rather than trusted: a handler is free to `throw null` or reject with a
     // string, and reading `.message` off that directly would throw a `TypeError` out of
     // the log call that emitted the event.
@@ -1808,6 +1838,11 @@ export class Logger extends EventEmitter {
       // but publish finalization on that exit as well as on success or deadline.
       this.sinks = [];
       this.diagnosticSinks = [];
+      // eslint-disable-next-line unicorn/no-array-for-each -- avoid caller-replaced Map iterators
+      this.sinkFailureSubscriptions.forEach((unsubscribe) => {
+        unsubscribe();
+      });
+      this.sinkFailureSubscriptions.clear();
       // The close diagnostics above - a deadline's timeouts are reported just before
       // this - reach 'diagnostic' listeners on a queued microtask, and 'close' is the
       // usual cue for a listener to unsubscribe. Waiting on a task queued through the
@@ -1818,6 +1853,38 @@ export class Logger extends EventEmitter {
       });
       this.emit('logger', { eventType: 'close' });
     }
+  }
+
+  private ownSinkFailures(sink: LogSink): void {
+    if (this.sinkFailureSubscriptions.has(sink)) {
+      return;
+    }
+    // Keep validation of malformed sink values at their existing write boundary.
+    if (
+      sink === null ||
+      (typeof sink !== 'object' && typeof sink !== 'function')
+    ) {
+      return;
+    }
+    this.sinkFailureSubscriptions.set(
+      sink,
+      registerSinkFailureReporter(sink, (report) => {
+        const { terminalLine, ...diagnostic } = report;
+        this.reportDiagnostic(
+          { ...diagnostic, timestamp: ms(), sink },
+          true,
+          terminalLine,
+        );
+      }),
+    );
+  }
+
+  private releaseSinkFailuresIfUnused(sink: LogSink): void {
+    if (this.sinks.includes(sink) || this.diagnosticSinks.includes(sink)) {
+      return;
+    }
+    this.sinkFailureSubscriptions.get(sink)?.();
+    this.sinkFailureSubscriptions.delete(sink);
   }
 
   /**
@@ -1899,13 +1966,30 @@ export class Logger extends EventEmitter {
   private reportDiagnostic(
     diagnostic: LoggerDiagnostic,
     shouldDeliverToSinks = true,
+    terminalLine?: () => string,
   ): void {
+    // A console bridge may log the terminal report successfully. Its failures must
+    // not queue a fresh diagnostic after the synchronous console guard comes down.
+    if (isConsoleReportActive()) {
+      return;
+    }
     const hasDiagnosticSinks = this.diagnosticSinks.length > 0;
-    const destinations = shouldDeliverToSinks
+    const selected = shouldDeliverToSinks
       ? hasDiagnosticSinks
         ? this.diagnosticSinks
         : this.sinks
       : [];
+    const destinations =
+      diagnostic.sink === undefined
+        ? selected
+        : selected.filter((sink) => sink !== diagnostic.sink);
+    const consoleLine = (): string => {
+      try {
+        return terminalLine?.() ?? diagnostic.message;
+      } catch {
+        return diagnostic.message;
+      }
+    };
 
     queueMicrotaskIntrinsic(
       () => {
@@ -1922,7 +2006,7 @@ export class Logger extends EventEmitter {
         // silence.
         if (destinations.length === 0 || this._closed) {
           if (!hasListeners) {
-            reportToConsole(diagnostic.message);
+            reportToConsole(consoleLine());
           }
           return;
         }
@@ -1943,7 +2027,7 @@ export class Logger extends EventEmitter {
               : applyIntrinsic(writeDiagnostic, sink, [diagnostic]);
           } catch (deliveryError) {
             reportToConsole(
-              `${diagnostic.message} (diagnostic sink also threw: ${describeError(deliveryError)})`,
+              `${consoleLine()} (diagnostic sink also threw: ${describeError(deliveryError)})`,
             );
             continue;
           }
@@ -1954,15 +2038,15 @@ export class Logger extends EventEmitter {
           const pending = adoptResult(result);
           if (pending instanceof UnreadableReturn) {
             pending.report(
-              `${hasDiagnosticSinks ? 'Diagnostic' : 'Log'} sink #${sinkIndex + 1}`,
-              diagnostic.message,
+              `${hasDiagnosticSinks ? 'Diagnostic' : 'Log'} sink #${selected.indexOf(sink) + 1}`,
+              consoleLine(),
             );
             continue;
           }
           if (pending !== undefined) {
             observeRejection(pending, (deliveryError: unknown) => {
               reportToConsole(
-                `${diagnostic.message} (diagnostic sink also rejected: ${describeError(deliveryError)})`,
+                `${consoleLine()} (diagnostic sink also rejected: ${describeError(deliveryError)})`,
               );
             });
           }
@@ -1970,7 +2054,7 @@ export class Logger extends EventEmitter {
       },
       (error: unknown) => {
         reportToConsole(
-          `${diagnostic.message} (diagnostic dispatch failed: ${describeError(error)})`,
+          `${consoleLine()} (diagnostic dispatch failed: ${describeError(error)})`,
         );
       },
     );

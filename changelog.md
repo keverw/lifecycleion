@@ -211,6 +211,10 @@
 
 ## Unreleased
 
+- Attached FileSink, NamedPipeSink, and ArraySink failures now use the owning Logger's diagnostic channel when no explicit sink error handler is configured. The failed sink is excluded from diagnostic delivery, and failures of diagnostic writes terminate at console even when they arrive asynchronously. Standalone sink fallbacks and explicit error handlers remain supported.
+- Console fallback reporting now contains reentrant console shims across bundled copies, including failures reported later by queued logs, async callbacks, event listeners, and signal cleanup. Forwarded log entries still reach usable sinks without starting another diagnostic loop.
+- LifecycleManager reuses a manager-owned startup promise after observing the component's return, preventing later constructor/species reads from abandoning active startup work without cleanup.
+
 - Shutdown dependency protection uses iterative walks, so pending starts and concurrent stops with deep dependency chains cannot overflow the call stack before unrelated components stop.
 - `registerComponent()` omits insertion-only metadata from its result and includes `autoStartDeferred` only when true.
 - Startup observation failures abort the hook signal and preserve ownership of the real startup, including when promise adoption itself fails. A late success is automatically cleaned up, and unresolved observation failures refuse restart without claiming a timeout occurred. Unregister cannot remove a fulfilled timed-out startup between its settlement and cleanup. A cleanup stop that stalls and eventually succeeds restores the original startup timeout state and error.

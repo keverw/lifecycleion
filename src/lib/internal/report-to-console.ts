@@ -1,4 +1,58 @@
-import { applyIntrinsic } from './intrinsics';
+import { applyIntrinsic, definePropertyIntrinsic } from './intrinsics';
+
+let isReporting = false;
+const CONSOLE_REPORT_STATE_KEY = Symbol.for('lifecycleion.reportToConsole.v1');
+const setConstructorIntrinsic = Set;
+// eslint-disable-next-line @typescript-eslint/unbound-method
+const setHasIntrinsic = Set.prototype.has;
+// eslint-disable-next-line @typescript-eslint/unbound-method
+const setAddIntrinsic = Set.prototype.add;
+// eslint-disable-next-line @typescript-eslint/unbound-method
+const setDeleteIntrinsic = Set.prototype.delete;
+const getOwnPropertyDescriptorIntrinsic = Object.getOwnPropertyDescriptor;
+
+/**
+ * Share the console origin across bundled copies. Native Set operations avoid running
+ * accessors on a shared state object, and still release the flag if that object is
+ * frozen or its methods are replaced. A hostile global slot is replaced when possible;
+ * otherwise the local guard still contains this copy's synchronous re-entry.
+ */
+function sharedConsoleState(): Set<boolean> | undefined {
+  try {
+    const existing: unknown = getOwnPropertyDescriptorIntrinsic(
+      globalThis,
+      CONSOLE_REPORT_STATE_KEY,
+    )?.value;
+    try {
+      // The native internal-slot check also rejects proxies without invoking traps.
+      applyIntrinsic(setHasIntrinsic, existing, [true]);
+      return existing as Set<boolean>;
+    } catch {
+      // Missing or unusable state. Defining a data property avoids a hostile setter.
+    }
+    const state = new setConstructorIntrinsic<boolean>();
+    return definePropertyIntrinsic(globalThis, CONSOLE_REPORT_STATE_KEY, {
+      value: state,
+      configurable: true,
+      writable: true,
+    })
+      ? state
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Capture this when queuing work so its failures cannot feed a console report back. */
+export function isConsoleReportActive(): boolean {
+  if (isReporting) {
+    return true;
+  }
+  const shared = sharedConsoleState();
+  return (
+    shared !== undefined && applyIntrinsic(setHasIntrinsic, shared, [true])
+  );
+}
 
 /**
  * Write to `console.error` without letting it throw.
@@ -19,6 +73,11 @@ import { applyIntrinsic } from './intrinsics';
  *   whose console writes synchronously to a destination that refuses the write, throws
  *   out of the call. That is most likely when this rung runs in a lifecycle library:
  *   sinks are closing, handlers are being torn down, and the process is on its way out.
+ *
+ * A console shim may also forward the report back into the library. Nested terminal
+ * output is dropped while the shim runs. Reporters that queue work capture
+ * `isConsoleReportActive()` at entry and retain it until that work settles, so a
+ * later failure cannot restart the loop after this synchronous guard clears.
  *
  * Only a synchronous throw is contained here. On Node, a write to a stdout or stderr pipe
  * whose reader has gone - `| head`, a supervisor that exited first - does not throw: the
@@ -49,6 +108,21 @@ import { applyIntrinsic } from './intrinsics';
  *             `Error` inspected rather than stringified can still hand one over.
  */
 export function reportToConsole(...args: unknown[]): void {
+  if (isReporting) {
+    return;
+  }
+  const shared = sharedConsoleState();
+  if (shared !== undefined && applyIntrinsic(setHasIntrinsic, shared, [true])) {
+    return;
+  }
+
+  // Include the property read: a console shim can log from its getter as well as its
+  // function body. Queued reporters must also capture this state when work is created.
+  isReporting = true;
+  if (shared !== undefined) {
+    applyIntrinsic(setAddIntrinsic, shared, [true]);
+  }
+
   try {
     // Applied rather than spread: a spread goes through the live
     // `Array.prototype[Symbol.iterator]`, and a patched iterator would silently turn
@@ -59,5 +133,10 @@ export function reportToConsole(...args: unknown[]): void {
     // Nothing left to try, which is the whole point of this being the last rung. A
     // missing `console`, a replaced `error` that is not a function, and a console that
     // throws on write all land here, and all of them are quieter than the alternative.
+  } finally {
+    if (shared !== undefined) {
+      applyIntrinsic(setDeleteIntrinsic, shared, [true]);
+    }
+    isReporting = false;
   }
 }

@@ -1,4 +1,5 @@
 import { reportThroughHandler } from '../../../internal/failure-reporter';
+import { isConsoleReportActive } from '../../../internal/report-to-console';
 
 /**
  * One `'format'` report, handed the callback that marks it settled. The report calls it
@@ -62,6 +63,10 @@ export class FormatReportScheduler {
    * console - whichever the guard allows. See the class comment.
    */
   public schedule(report: FormatReport, consoleLine: () => string): void {
+    // Includes console fallbacks from rejected handlers, outside our own console call.
+    if (isConsoleReportActive()) {
+      return;
+    }
     if (!this.isActive) {
       this.start(report, false);
 

@@ -20,6 +20,149 @@ function failSecondConstructorRead(
   return promise;
 }
 
+// Adoption and the raw-start observer succeed. No later wait/cleanup should need
+// another observation of this caller-controlled promise.
+function refuseLaterObservations(promise: Promise<void>): Promise<void> {
+  let reads = 0;
+  void Object.defineProperty(promise, 'constructor', {
+    get(): PromiseConstructor {
+      if (++reads > 2) {
+        throw new Error('later start observation refused');
+      }
+      return Promise;
+    },
+  });
+  return promise;
+}
+
+test.each([0, 1000])(
+  'startup with timeout %s owns its resources after later promise observations are refused',
+  async (timeoutMS) => {
+    const { logger, manager } = setup();
+    const gate = deferred();
+    const component = new Plain(logger, 'api');
+    Object.defineProperty(component, 'startupTimeoutMS', { value: timeoutMS });
+    let hasResources = false;
+    let stops = 0;
+    component.start = () =>
+      refuseLaterObservations(
+        gate.promise.then(() => {
+          hasResources = true;
+        }),
+      );
+    component.stop = () => {
+      stops++;
+      hasResources = false;
+      return Promise.resolve();
+    };
+    await manager.registerComponent(component);
+    try {
+      const starting = manager.startComponent('api');
+      gate.resolve();
+      expect((await starting).success).toBe(true);
+      expect(hasResources).toBe(true);
+      expect(manager.isComponentRunning('api')).toBe(true);
+      expect((await manager.stopAllComponents()).success).toBe(true);
+      expect(hasResources).toBe(false);
+      expect(stops).toBe(1);
+    } finally {
+      gate.resolve();
+      await manager.stopAllComponents();
+      await logger.close();
+    }
+  },
+);
+
+test('timeout keeps late cleanup when the raw start refuses later observations', async () => {
+  const { logger, manager } = setup();
+  const gate = deferred();
+  const component = new Plain(logger, 'api', ['db']);
+  Object.defineProperty(component, 'startupTimeoutMS', { value: 5 });
+  let signal: AbortSignal | undefined;
+  let hasResources = false;
+  let stops = 0;
+  component.start = (startSignal) => {
+    signal = startSignal;
+    return refuseLaterObservations(
+      gate.promise.then(() => {
+        hasResources = true;
+      }),
+    );
+  };
+  component.stop = () => {
+    stops++;
+    hasResources = false;
+    return Promise.resolve();
+  };
+  await manager.registerComponent(new Plain(logger, 'db'));
+  await manager.registerComponent(component);
+  await manager.startComponent('db');
+  try {
+    expect((await manager.startComponent('api')).code).toBe(
+      'component_startup_timeout',
+    );
+    expect(signal?.aborted).toBe(true);
+    expect((await manager.stopAllComponents({ timeoutMS: 0 })).code).toBe(
+      'cleanup_incomplete',
+    );
+    expect(manager.isComponentRunning('db')).toBe(true);
+    const shutdown = manager.stopAllComponents({
+      timeoutMS: 0,
+      waitForAbandonedStarts: true,
+    });
+    gate.resolve();
+    expect((await shutdown).success).toBe(true);
+    expect(hasResources).toBe(false);
+    expect(stops).toBe(1);
+    expect(manager.isComponentRunning('db')).toBe(false);
+  } finally {
+    gate.resolve();
+    await manager.stopAllComponents({
+      timeoutMS: 0,
+      waitForAbandonedStarts: true,
+    });
+    await logger.close();
+  }
+});
+
+test('shutdown observes an aborted start rejection after later observations are refused', async () => {
+  const { logger, manager } = setup();
+  const gate = deferred();
+  const component = new Plain(logger, 'api', ['db']);
+  Object.defineProperty(component, 'startupTimeoutMS', { value: 0 });
+  component.start = (signal) => {
+    if (signal === undefined) {
+      throw new Error('Missing startup abort signal');
+    }
+    signal.addEventListener('abort', () => gate.reject(signal.reason));
+    return refuseLaterObservations(gate.promise);
+  };
+  let stops = 0;
+  component.stop = () => {
+    stops++;
+    return Promise.resolve();
+  };
+  await manager.registerComponent(new Plain(logger, 'db'));
+  await manager.registerComponent(component);
+  await manager.startComponent('db');
+  try {
+    const starting = manager.startComponent('api');
+    const shutdown = await manager.stopAllComponents({
+      timeoutMS: 1000,
+      abortPendingStarts: true,
+    });
+    expect((await starting).code).toBe('shutdown_in_progress');
+    expect(shutdown.success).toBe(true);
+    expect(stops).toBe(0);
+    expect(manager.isComponentRunning('db')).toBe(false);
+    expect((await manager.unregisterComponent('api')).success).toBe(true);
+  } finally {
+    gate.resolve();
+    await manager.stopAllComponents();
+    await logger.close();
+  }
+});
+
 test('failed raw-start observation protects dependencies and cleans up resources acquired later', async () => {
   const { logger, manager } = setup();
   const startGate = deferred();

@@ -130,7 +130,8 @@ export interface LogSink {
    * The logger calls this directly, outside its normal formatting and event path. A sink
    * that does not implement it receives an already-rendered diagnostic through `write()`
    * instead. A failure here falls straight to the guarded console rung; it never creates
-   * another diagnostic.
+   * another diagnostic. The sink that raised a diagnostic is excluded from its
+   * destinations, including when it appears in both sink lists.
    */
   writeDiagnostic?(diagnostic: LoggerDiagnostic): void | Promise<void>;
   close?(): void | Promise<void>;
@@ -158,6 +159,7 @@ export interface LoggerDiagnostic {
    */
   message: string;
   context?: 'write' | 'close';
+  /** Source of a sink failure, excluded from that diagnostic's destinations. */
   sink?: LogSink;
   event?: string;
   path?: string;

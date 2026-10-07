@@ -10,6 +10,8 @@ import {
   safeHandleCallbackAndWait,
 } from './safe-handle-callback';
 import { sleep } from './sleep';
+import { stringifyValue } from './stringify-value';
+import { reportToConsole } from './internal/report-to-console';
 
 // These suites deliberately drive the paths that fall through to `console.error` when
 // nothing claims the report. Captured rather than printed so a real failure in the run
@@ -1601,4 +1603,154 @@ it('callback result containers settle despite an inherited then method', async (
   }
   expect(successes).toBe(2);
   expect(failures).toBe(1);
+});
+
+describe('callbacks entered by terminal console output', () => {
+  for (const callbackMode of ['throw', 'reject'] as const) {
+    for (const handlerMode of ['direct', 'guarded'] as const) {
+      it(`contains ${callbackMode} forwarding with a ${handlerMode} console error handler`, async () => {
+        const originalConsole = console.error;
+        const failure = new Error('forwarding failed');
+        let consoleCalls = 0;
+        let callbackCalls = 0;
+        let handlerCalls = 0;
+        const callback = (): Promise<never> => {
+          callbackCalls++;
+          if (callbackMode === 'throw') {
+            throw failure;
+          }
+          return Promise.reject(failure);
+        };
+        const onError = (): void => {
+          handlerCalls++;
+          if (handlerMode === 'direct') {
+            console.error('error handler reporting');
+          } else {
+            reportToConsole('error handler reporting');
+          }
+        };
+        console.error = (): void => {
+          if (++consoleCalls < 20) {
+            runCallbackSafely('forwarding', callback, [], onError);
+          }
+        };
+        try {
+          reportToConsole('original failure');
+          await sleep(0);
+          expect(consoleCalls).toBe(1);
+          expect(callbackCalls).toBe(1);
+          expect(handlerCalls).toBe(0);
+
+          console.error = (): void => {
+            consoleCalls++;
+          };
+          runCallbackSafely('independent callback', callback, [], onError);
+          await sleep(0);
+          expect(callbackCalls).toBe(2);
+          expect(handlerCalls).toBe(1);
+          expect(consoleCalls).toBe(2);
+        } finally {
+          console.error = originalConsole;
+        }
+      });
+    }
+  }
+
+  for (const mode of ['fire-and-forget', 'wait', 'explicit-handler'] as const) {
+    it(`contains delayed ${mode} failures without suppressing later reports`, async () => {
+      const originalConsole = console.error;
+      const failure = new Error('forwarding failed');
+      const handled: unknown[] = [];
+      const results: Array<Promise<unknown>> = [];
+      let consoleCalls = 0;
+      let callbackCalls = 0;
+      const callback = async (): Promise<never> => {
+        callbackCalls++;
+        await Promise.resolve();
+        throw failure;
+      };
+      console.error = (): void => {
+        // Bound a regression so a broken guard fails instead of starving the runner.
+        if (++consoleCalls > 10) {
+          return;
+        }
+        if (mode === 'fire-and-forget') {
+          safeHandleCallback('console forwarding', callback);
+        } else if (mode === 'wait') {
+          results.push(
+            safeHandleCallbackAndWait('console forwarding', callback),
+          );
+        } else {
+          runCallbackSafely(
+            'console forwarding',
+            callback,
+            [],
+            // eslint-disable-next-line @typescript-eslint/no-misused-promises -- verifies async failure-handler observation
+            async (error) => {
+              handled.push(error);
+              await Promise.resolve();
+              throw new Error('explicit handler failed');
+            },
+          );
+        }
+      };
+      try {
+        reportCallbackError('original failure', failure);
+        await sleep(10);
+        expect(consoleCalls).toBe(1);
+        expect(callbackCalls).toBe(1);
+        if (mode === 'wait') {
+          expect(await results[0]).toMatchObject({
+            success: false,
+            error: failure,
+          });
+        }
+        if (mode === 'explicit-handler') {
+          expect(handled).toEqual([]);
+        }
+        // The guard belongs to the originating callback, not unrelated later work.
+        console.error = (): void => {
+          consoleCalls++;
+        };
+        safeHandleCallback('independent failure', callback);
+        await sleep(10);
+        expect(consoleCalls).toBe(2);
+      } finally {
+        console.error = originalConsole;
+      }
+    });
+  }
+});
+
+it('bounds a console shim whose standalone formatter fails', () => {
+  const originalConsole = console.error;
+  let consoleCalls = 0;
+  let formatCalls = 0;
+  console.error = (): void => {
+    if (++consoleCalls > 10) {
+      return;
+    }
+    stringifyValue(
+      { password: 'secret' },
+      {
+        redactedKeys: ['password'],
+        redactFunction: () => {
+          formatCalls++;
+          throw new Error('formatter failed');
+        },
+      },
+    );
+  };
+  try {
+    reportCallbackError('original failure', new Error('initial'));
+    expect(consoleCalls).toBe(1);
+    expect(formatCalls).toBe(1);
+    console.error = (): void => {
+      consoleCalls++;
+    };
+    reportCallbackError('later independent failure', new Error('later'));
+    expect(consoleCalls).toBe(2);
+  } finally {
+    console.error = originalConsole;
+  }
 });

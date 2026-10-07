@@ -3083,3 +3083,57 @@ test('keypress listening status is false when stdin does not expose isTTY', () =
     }
   }
 });
+
+test('console-origin attach retries do not enqueue another cleanup report', async () => {
+  const originalConsole = console.error;
+  const originalOn = process.on.bind(process);
+  const originalOff = process.off.bind(process);
+  const manager = new ProcessSignalManager({ onReloadRequested: () => {} });
+  const attachFailure = new Error('attach failed');
+  let consoleCalls = 0;
+  let attachCalls = 0;
+  let cleanupCalls = 0;
+  const on = spyOn(process, 'on').mockImplementation(
+    function (event, listener) {
+      if (event === 'SIGHUP') {
+        attachCalls++;
+        throw attachFailure;
+      }
+      return Reflect.apply(originalOn, process, [event, listener]);
+    },
+  );
+  const off = spyOn(process, 'off').mockImplementation(
+    function (event, listener) {
+      if (event === 'SIGHUP') {
+        cleanupCalls++;
+        throw new Error('cleanup failed');
+      }
+      return Reflect.apply(originalOff, process, [event, listener]);
+    },
+  );
+  console.error = (): void => {
+    // Cap a regression before it can create an unbounded microtask chain.
+    if (++consoleCalls <= 10) {
+      expect(() => manager.attach()).toThrow(attachFailure);
+    }
+  };
+  try {
+    // This ordinary attach reports its cleanup failure. The console shim retries it.
+    expect(() => manager.attach()).toThrow(attachFailure);
+    await sleep(10);
+    expect(consoleCalls).toBe(1);
+    expect(attachCalls).toBe(2);
+    expect(cleanupCalls).toBe(2);
+    expect(manager.isAttached).toBe(false);
+    console.error = (): void => {
+      consoleCalls++;
+    };
+    expect(() => manager.attach()).toThrow(attachFailure);
+    await sleep(10);
+    expect(consoleCalls).toBe(2);
+  } finally {
+    console.error = originalConsole;
+    on.mockRestore();
+    off.mockRestore();
+  }
+});

@@ -1,4 +1,7 @@
-import type { LogEntry } from '../../types';
+import type { LogEntry, LogSink } from '../../types';
+import { reportThroughHandler } from '../../../internal/failure-reporter';
+import { reportToConsole } from '../../../internal/report-to-console';
+import { reportSinkFailure } from '../../internal/sink-failure-routing';
 
 /**
  * What a sink reports when it cannot do its job, in one shape.
@@ -95,8 +98,9 @@ export interface SinkFailure {
    * The entry that failed, when the sink still has it.
    *
    * Absent for a failure that belongs to no particular entry - a failed rotation, a
-   * reconnect that never came back. A queue that overflowed carries the oldest entry it
-   * dropped as a sample, not every one it lost. Both `FileSink` and `NamedPipeSink` keep
+   * reconnect that never came back. An aggregate queue loss carries an ordinary entry
+   * when one was lost, otherwise the oldest diagnostic entry, as a sample rather than
+   * every lost line. Both `FileSink` and `NamedPipeSink` keep
    * the entry queued alongside its rendered line and hand it over here, so a handler can
    * write a lost line somewhere else.
    */
@@ -150,7 +154,39 @@ export interface SinkFailure {
  * this sink is dropped: `Logger.close()` marks the logger closed first so shutdown cannot
  * re-enter logging, and a successful handler is not a diagnostic delivery failure, so
  * nothing falls through to `console.error`. Report those with `console.error` or a
- * destination that logger is not closing. With no handler, the sink already writes the
- * failure to guarded `console.error`.
+ * destination that logger is not closing. With no handler, the sink offers the
+ * failure to its owning loggers, then uses guarded `console.error` if unowned.
+ * Failures of diagnostic entries always use the terminal console path.
  */
 export type SinkErrorHandler = (failure: SinkFailure) => void | Promise<void>;
+
+/** Preserve explicit handlers, otherwise offer the failure to every owning logger. */
+export function reportSinkError(
+  sink: LogSink,
+  failure: SinkFailure,
+  handler: SinkErrorHandler | undefined,
+  line: () => string,
+  options: { label: string; isDiagnostic?: boolean; onSettled?: () => void },
+): void {
+  reportThroughHandler(
+    options.isDiagnostic === true
+      ? undefined
+      : handler === undefined
+        ? () => {
+            if (
+              !reportSinkFailure(sink, {
+                kind: 'sink',
+                error: failure.error,
+                context: failure.kind === 'close' ? 'close' : 'write',
+                message: `${options.label} ${failure.kind} failed`,
+                terminalLine: line,
+              })
+            ) {
+              reportToConsole(line());
+            }
+          }
+        : () => handler(failure),
+    line,
+    { handlerName: `${options.label} onError`, onSettled: options.onSettled },
+  );
+}

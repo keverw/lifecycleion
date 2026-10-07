@@ -7,7 +7,10 @@ import readline from 'readline';
 import { resolveTimeoutMS } from './internal/timer-limits';
 import { queueMicrotaskIntrinsic } from './internal/intrinsics';
 import { isObjectLike } from './internal/is-object-like';
-import { reportToConsole } from './internal/report-to-console';
+import {
+  isConsoleReportActive,
+  reportToConsole,
+} from './internal/report-to-console';
 import { describeError } from './to-error';
 
 /**
@@ -808,7 +811,9 @@ export class ProcessSignalManager {
   private reportCleanupFailuresLater(
     reports: ReadonlyArray<readonly [string, { error: unknown }]>,
   ): void {
-    if (reports.length === 0) {
+    if (reports.length === 0 || isConsoleReportActive()) {
+      // Cleanup still ran and its primary failure reaches the caller. A retry
+      // entered by terminal console output must not schedule another report.
       return;
     }
 

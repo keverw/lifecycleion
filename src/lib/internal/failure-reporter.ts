@@ -1,6 +1,6 @@
 import { describeError, toError } from '../to-error';
 import { adoptResult, UnreadableReturn } from './adopt-promise';
-import { reportToConsole } from './report-to-console';
+import { isConsoleReportActive, reportToConsole } from './report-to-console';
 import { reportToHost } from './report-to-host';
 import { observePromise, observeRejection } from './intrinsics';
 import { resolveName } from './render-name';
@@ -40,7 +40,8 @@ export type ReportFailure = (error: unknown, subject: string) => void;
  * @param options Optional settlement callback and handler identity.
  * @param options.onSettled Called exactly once when the report is over: after a synchronous
  *               handler returns or throws, after an `async` one resolves or rejects, or
- *               straight away when there is no handler. For a caller holding a re-entry
+ *               straight away when there is no handler or reporting is suppressed.
+ *               For a caller holding a re-entry
  *               guard across the report - the sinks hold one over a `'format'` failure -
  *               a boolean cleared on return was cleared before an `async` handler had
  *               done anything, and the loop it guards against resumed on the far side of
@@ -54,6 +55,8 @@ export type ReportFailure = (error: unknown, subject: string) => void;
  *               function building one, called only on that path - so a handler that
  *               behaves never has its name built. A builder that throws, or a name that
  *               cannot be rendered, is reported as `<unnamed callback>`.
+ * @param options.suppressDiagnostics Retain console origin across queued work. Skip
+ *               both handler delivery and console output, but still settle the report.
  */
 export function reportThroughHandler(
   invoke: (() => unknown) | undefined,
@@ -61,9 +64,12 @@ export function reportThroughHandler(
   options: {
     onSettled?: () => void;
     handlerName?: string | (() => string);
+    suppressDiagnostics?: boolean;
   } = {},
 ): void {
   const { onSettled, handlerName } = options;
+  const shouldSuppressDiagnostics =
+    options.suppressDiagnostics === true || isConsoleReportActive();
   // The line is the caller's to build, and may throw: rendered through this, a report
   // still goes out - and nothing throws, or rejects unhandled, out of the one function
   // whose contract is that reporting a failure may never raise one.
@@ -98,11 +104,20 @@ export function reportThroughHandler(
     try {
       onSettled?.();
     } catch (settleError) {
-      reportToConsole(
-        `A failure report's settle callback threw: ${describeError(settleError)}`,
-      );
+      if (!shouldSuppressDiagnostics) {
+        reportToConsole(
+          `A failure report's settle callback threw: ${describeError(settleError)}`,
+        );
+      }
     }
   };
+
+  // The console is terminal. Calling another error handler here can restart it
+  // directly (including after an await), bypassing our guarded console fallback.
+  if (shouldSuppressDiagnostics) {
+    settle();
+    return;
+  }
 
   if (invoke !== undefined) {
     let result: unknown;
