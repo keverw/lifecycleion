@@ -760,7 +760,7 @@ export interface ComponentValueResult<T = unknown> {
  * Result of requesting a value from a component
  */
 export interface ValueResult<T = unknown> {
-  /** True if getValue returned non-undefined */
+  /** The strict boolean `found` returned by the component's getValue() result. */
   found: boolean;
 
   /** The returned value */
@@ -1383,6 +1383,8 @@ export interface RepeatedShutdownRequestPolicy {
    * Only escalation requests received after shutdown has already started count
    * toward this threshold. The initial request that starts graceful shutdown
    * does not count.
+   * Finite values are clamped to at least 1; non-finite or non-number values use 3.
+   * Fractions are accepted: force runs once the integer count reaches the threshold.
    * @default 3
    */
   forceAfterCount?: number;

@@ -2280,9 +2280,13 @@ describe('LifecycleManager - review regressions', () => {
     cStop.resolve();
     await startup;
     const [registration] = (await Promise.all(registrations)) as Array<{
+      autoStartAttempted?: boolean;
+      autoStartSucceeded?: boolean;
       startResult?: { code?: string };
     }>;
 
+    expect(registration.autoStartAttempted).toBe(true);
+    expect(registration.autoStartSucceeded).toBe(false);
     expect(registration.startResult?.code).toBe('startup_rolled_back');
     expect(lateStarts).toBe(0);
   });

@@ -1,5 +1,6 @@
 import { defineEntry } from './define-entry';
 import { isObjectLike } from './is-object-like';
+import { reportToConsole } from './report-to-console';
 
 /** Preserve invocation semantics if application code later replaces Reflect.apply. */
 export const applyIntrinsic: typeof Reflect.apply = Reflect.apply;
@@ -361,13 +362,13 @@ export function observeRejection(
 /**
  * Run `task` on a microtask through `await`, not the replaceable `queueMicrotask`
  * global, so it runs even if application code breaks promise species realm-wide. A
- * throw from `task` goes to `onError` on that same microtask, or is contained when none
+ * throw from `task` goes to `onError` on that same microtask, or is reported to the console when none
  * is given; a throw or rejection from `onError` is contained too, so nothing here
  * rejects unobserved.
  */
 export function queueMicrotaskIntrinsic(
   task: () => void,
-  onError: (error: unknown) => unknown = () => undefined,
+  onError: (error: unknown) => unknown = reportToConsole,
 ): void {
   void runOnMicrotask(() => {
     try {
@@ -575,4 +576,18 @@ export function allSettledPromises<T extends readonly Promise<unknown>[]>(
       }
     },
   );
+}
+
+// eslint-disable-next-line @typescript-eslint/unbound-method
+const setForEachIntrinsic = Set.prototype.forEach;
+
+/** Snapshot a set without consulting an application-replaced iterator. */
+export function snapshotSet<T>(values: Set<T>): T[] {
+  const snapshot: T[] = [];
+  applyIntrinsic(setForEachIntrinsic, values, [
+    (value: T): void => {
+      snapshot[snapshot.length] = value;
+    },
+  ]);
+  return snapshot;
 }

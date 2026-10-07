@@ -2045,6 +2045,46 @@ describe('ProcessSignalManager', () => {
       }
     });
 
+    test('a failed raw-mode enable adopts a stale owner before restoring stdin', () => {
+      const tty = mockRawTTY(() => {});
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+        manager.detach();
+        const shared = readShared();
+        if (shared === undefined) {
+          throw new Error('shared state was not created');
+        }
+        shared.rawModeOwner = 'detached-instance';
+        shared.rawModeEnabledByManager = true;
+        Object.defineProperty(process.stdin, 'isRaw', {
+          configurable: true,
+          writable: true,
+          value: false,
+        });
+        const disabled: boolean[] = [];
+        process.stdin.setRawMode = mock((isEnabled: boolean) => {
+          process.stdin.isRaw = isEnabled;
+          if (isEnabled) {
+            throw new Error('enable threw after changing raw mode');
+          }
+          disabled.push(isEnabled);
+          return process.stdin;
+        });
+        expect(() => manager.attach()).toThrow('enable threw');
+        expect(manager.isAttached).toBe(false);
+        expect(process.stdin.isRaw).toBe(false);
+        expect(disabled).toEqual([false]);
+        expect(shared.rawModeOwner).toBeNull();
+        expect(shared.rawModeEnabledByManager).toBe(false);
+      } finally {
+        tty.restore();
+      }
+    });
+
     test('a detach re-anchors raw mode ownership left on an instance that is no longer attached', () => {
       const tty = mockRawTTY(() => {});
       let second: ProcessSignalManager | undefined;
@@ -3022,4 +3062,24 @@ describe('keypress events whose key is not a readable object', () => {
       process.stdin.setRawMode = raw;
     }
   });
+});
+
+test('keypress listening status is false when stdin does not expose isTTY', () => {
+  const descriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+  const manager = new ProcessSignalManager({ onReloadRequested() {} });
+  Object.defineProperty(process.stdin, 'isTTY', {
+    configurable: true,
+    value: undefined,
+  });
+  try {
+    manager.attach();
+    expect(manager.getStatus().listeningFor.keypresses).toBe(false);
+  } finally {
+    manager.detach();
+    if (descriptor) {
+      Object.defineProperty(process.stdin, 'isTTY', descriptor);
+    } else {
+      Reflect.deleteProperty(process.stdin, 'isTTY');
+    }
+  }
 });

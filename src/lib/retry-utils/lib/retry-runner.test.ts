@@ -1400,3 +1400,162 @@ test('runner options are each read exactly once', async () => {
     globalThis.removeEventListener('error', onGlobalError);
   }
 });
+
+for (const failingDependency of ['random', 'timer'] as const) {
+  test(`a throwing retry ${failingDependency} settles the operation as fatal`, async () => {
+    const failure = new Error(`broken ${failingDependency}`);
+    const runner = new RetryRunner(
+      {
+        strategy: 'exponential',
+        maxRetryAttempts: 3,
+        minTimeoutMS: 1,
+        maxTimeoutMS: 100,
+        factor: 2,
+        dispersion: 0.2,
+      },
+      (report) => report('error', new Error('attempt failed')),
+    );
+    const random = Math.random;
+    const timer = globalThis.setTimeout;
+    let pending: ReturnType<typeof runner.run>;
+    try {
+      if (failingDependency === 'random') {
+        Math.random = (): never => {
+          throw failure;
+        };
+      } else {
+        globalThis.setTimeout = (() => {
+          throw failure;
+        }) as unknown as typeof setTimeout;
+      }
+      pending = runner.run(true);
+    } finally {
+      Math.random = random;
+      globalThis.setTimeout = timer;
+    }
+    const result = await Promise.race([pending, sleep(100).then(() => 'hung')]);
+    expect(result).toEqual({
+      status: 'attempt_fatal',
+      code: 'unexpected_error',
+      error: failure,
+    });
+    expect(runner.runnerState).toBe('fatal-error');
+    expect(runner.isAttemptRunning).toBe(false);
+    expect(runner.isRetryPending).toBe(false);
+  });
+}
+
+function collectRetryCallbackReports(callbackName: string): {
+  reports: Error[];
+  release: () => void;
+} {
+  const reports: Error[] = [];
+  const onGlobalError = (event: Event): void => {
+    const reported = (event as ErrorEvent).error as Error;
+    if (reported.message === `Error in a callback ${callbackName}`) {
+      reports.push(reported);
+      event.preventDefault();
+    }
+  };
+  globalThis.addEventListener('error', onGlobalError);
+  return {
+    reports,
+    release: () => globalThis.removeEventListener('error', onGlobalError),
+  };
+}
+
+test('a cancellation timer that throws forces cancellation and settles existing waiters', async () => {
+  const { reports, release } = collectRetryCallbackReports(
+    'RetryRunner cancellation timer',
+  );
+  try {
+    const failure = new Error('cancel timer failed');
+    const runner = new RetryRunner(
+      { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 1 },
+      () => {},
+    );
+    const completion = runner.run(true);
+    const timer = globalThis.setTimeout;
+    let cancellation: ReturnType<typeof runner.cancel>;
+    try {
+      globalThis.setTimeout = (() => {
+        throw failure;
+      }) as unknown as typeof setTimeout;
+      cancellation = runner.cancel();
+    } finally {
+      globalThis.setTimeout = timer;
+    }
+    expect(await cancellation).toBe('forced');
+    expect(await completion).toEqual({ status: 'canceled' });
+    expect(runner.runnerState).toBe('stopped');
+    expect(runner.isAttemptRunning).toBe(false);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.cause).toBe(failure);
+  } finally {
+    release();
+  }
+});
+
+for (const replacement of ['forceTry', 'cancel'] as const) {
+  test(`a retry policy throw after ${replacement} preserves the newer outcome`, async () => {
+    const { reports, release } = collectRetryCallbackReports(
+      'RetryRunner retry scheduling',
+    );
+    try {
+      const failure = new Error('policy threw after reentry');
+      let reportFirst: ReportResult<string> | undefined;
+      let attempts = 0;
+      const runner = new RetryRunner<string>(
+        {
+          strategy: 'exponential',
+          maxRetryAttempts: 3,
+          minTimeoutMS: 1,
+          maxTimeoutMS: 100,
+          factor: 2,
+          dispersion: 0.2,
+        },
+        (report) => {
+          attempts++;
+          if (attempts === 1) {
+            reportFirst = report;
+          } else {
+            report('success', 'replacement');
+          }
+        },
+      );
+      const completion = runner.run(true);
+      const random = Math.random;
+      let replacementCall: Promise<unknown> | undefined;
+      try {
+        Math.random = () => {
+          replacementCall =
+            replacement === 'forceTry' ? runner.forceTry() : runner.cancel();
+          throw failure;
+        };
+        if (reportFirst === undefined) {
+          throw new Error('first attempt did not start');
+        }
+        reportFirst('error', new Error('attempt failed'));
+      } finally {
+        Math.random = random;
+      }
+      const outcome = await Promise.race([
+        completion,
+        sleep(100).then(() => 'hung'),
+      ]);
+      expect(outcome).toEqual(
+        replacement === 'forceTry'
+          ? { status: 'attempt_success', data: 'replacement' }
+          : { status: 'canceled' },
+      );
+      await replacementCall;
+      expect(runner.runnerState).toBe(
+        replacement === 'forceTry' ? 'completed' : 'stopped',
+      );
+      expect(reports).toHaveLength(1);
+      expect(reports[0]?.cause).toBe(failure);
+    } finally {
+      release();
+    }
+  });
+}

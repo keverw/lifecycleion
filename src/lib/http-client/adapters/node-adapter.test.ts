@@ -7419,3 +7419,60 @@ describe('NodeAdapter upload finalization', () => {
     },
   );
 });
+
+test.each(['aborted', 'addEventListener', 'setHeader'] as const)(
+  'destroys an allocated request when %s throws during synchronous setup',
+  async (failureAt) => {
+    const failure = new Error(`hostile ${failureAt}`);
+    let destroys = 0;
+    const request = Object.assign(new EventEmitter(), {
+      destroyed: false,
+      setHeader: () => {
+        if (failureAt === 'setHeader') {
+          throw failure;
+        }
+      },
+      end: () => {},
+      destroy() {
+        this.destroyed = true;
+        destroys++;
+        return this;
+      },
+    });
+    const requestSpy = spyOn(http, 'request').mockReturnValue(
+      request as unknown as http.ClientRequest,
+    );
+    const signal = {
+      get aborted() {
+        if (failureAt === 'aborted') {
+          throw failure;
+        }
+        return false;
+      },
+      addEventListener: () => {
+        if (failureAt === 'addEventListener') {
+          throw failure;
+        }
+      },
+      removeEventListener: () => {},
+    } as unknown as AbortSignal;
+    try {
+      let caught: unknown;
+      try {
+        await new NodeAdapter().send(
+          makeAdapterRequest('http://example.test', {
+            body: failureAt === 'setHeader' ? 'body' : null,
+            signal,
+          }),
+        );
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBe(failure);
+      expect(request.destroyed).toBe(true);
+      expect(destroys).toBe(1);
+    } finally {
+      requestSpy.mockRestore();
+    }
+  },
+);

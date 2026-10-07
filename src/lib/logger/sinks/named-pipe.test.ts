@@ -3864,15 +3864,14 @@ describe('NamedPipeSink', () => {
         entry.error.message.includes('still buffered');
 
       expect(failures.filter(isBufferedLoss)).toHaveLength(1);
-      expect(failures.filter((entry) => entry.kind === 'close')).toHaveLength(
-        2,
-      );
+      expect(failures).toHaveLength(2);
+      expect(failures.every((failure) => failure.kind === 'close')).toBe(true);
+      expect(failures.find(isBufferedLoss)?.entry).toBeUndefined();
+      expect(sink.getHealth().consecutiveFailures).toBe(0);
+      expect(sink.getHealth().droppedByKind.write).toBe(0);
 
-      // The in-flight write is blocked in the threadpool behind the full pipe, and
-      // `destroy()` defers until it returns - so until the reader goes away nothing errors
-      // and no callback fires. That is why the report above is the only timely one.
-      // Releasing the reader errors the write and the buffer behind it; those callbacks
-      // land in `requeue` past `closed`, counted, and not reported a second time.
+      // Any destruction callbacks that arrive after close contribute only close-loss
+      // counts. The buffered-byte summary remains their only report.
       const droppedAtResolve = sink.getHealth().droppedEntries;
 
       fs.closeSync(readerFd);
@@ -3880,9 +3879,11 @@ describe('NamedPipeSink', () => {
 
       await new Promise((resolve) => setTimeout(resolve, 100));
 
-      expect(failures.filter((entry) => entry.kind === 'close')).toHaveLength(
-        2,
-      );
+      expect(failures).toHaveLength(2);
+      expect(failures.every((failure) => failure.kind === 'close')).toBe(true);
+      expect(failures.find(isBufferedLoss)?.entry).toBeUndefined();
+      expect(sink.getHealth().consecutiveFailures).toBe(0);
+      expect(sink.getHealth().droppedByKind.write).toBe(0);
       expect(sink.getHealth().droppedEntries).toBeGreaterThanOrEqual(
         droppedAtResolve,
       );
@@ -4589,6 +4590,7 @@ describe('NamedPipeSink', () => {
       expect(sink.getHealth().droppedByKind).toEqual({
         queue_full: 0,
         write: 0,
+        setup: 0,
         format: 3,
         close: 0,
       });
@@ -4742,7 +4744,11 @@ describe('NamedPipeSink', () => {
     expect(byKind.close).toBe(2);
     expect(byKind.write).toBe(0);
     expect(
-      byKind.queue_full + byKind.write + byKind.format + byKind.close,
+      byKind.queue_full +
+        byKind.write +
+        byKind.setup +
+        byKind.format +
+        byKind.close,
     ).toBe(health.droppedEntries);
   }, 15000);
 
@@ -5363,3 +5369,103 @@ test.each(['callback', 'throw', 'reentrant'] as const)(
     }
   },
 );
+
+test('a reentrant pipe write follows already queued entries during a drain', async () => {
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const entry = (message: string): LogEntry => ({
+    timestamp: Date.now(),
+    type: 'info',
+    template: message,
+    message,
+  });
+  const sink = new NamedPipeSink({
+    pipePath: `${directory.path}/missing.pipe`,
+    onError: () => {},
+  });
+  const state = sink as unknown as {
+    initPromise: Promise<void>;
+    pipeStream: unknown;
+    isInitialized: boolean;
+    writeEntry: (queued: { entry: LogEntry }) => void;
+    writeQueue: Array<{
+      entry: LogEntry;
+      formatted: string;
+      attempts: number;
+      sequence: number;
+    }>;
+    processQueue: () => void;
+  };
+  try {
+    await state.initPromise;
+    state.pipeStream = { destroyed: false };
+    state.isInitialized = true;
+    const messages: string[] = [];
+    state.writeEntry = (queued) => {
+      messages.push(queued.entry.message);
+      if (queued.entry.message === 'first') {
+        sink.write(entry('third'));
+      }
+    };
+    state.writeQueue.push(
+      { entry: entry('first'), formatted: 'first', attempts: 0, sequence: 0 },
+      { entry: entry('second'), formatted: 'second', attempts: 0, sequence: 1 },
+    );
+    state.processQueue();
+    expect(messages).toEqual(['first', 'second', 'third']);
+  } finally {
+    state.pipeStream = undefined;
+    state.writeQueue = [];
+    await sink.close();
+    await directory.cleanup();
+  }
+});
+
+test('concurrent and reentrant pipe closes share one teardown and buffered-byte report', async () => {
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const failures: SinkFailure[] = [];
+  let reentrant: Promise<void> | undefined;
+  const sink = new NamedPipeSink({
+    pipePath: `${directory.path}/missing.pipe`,
+    closeTimeoutMS: 20,
+    onError: (failure) => {
+      failures.push(failure);
+      if (failure.kind === 'close') {
+        reentrant = sink.close();
+      }
+    },
+  });
+  const state = sink as unknown as {
+    initPromise: Promise<void>;
+    pipeStream: unknown;
+  };
+  try {
+    await state.initPromise;
+    failures.length = 0;
+    let ends = 0;
+    const stuck = {
+      destroyed: false,
+      writableLength: 10,
+      end: () => {
+        ends++;
+      },
+      destroy() {
+        this.destroyed = true;
+      },
+    };
+    state.pipeStream = stuck;
+    const first = sink.close();
+    const second = sink.close();
+    expect(second).toBe(first);
+    await Promise.all([first, second]);
+    expect(reentrant).toBe(first);
+    expect(sink.close()).toBe(first);
+    expect(ends).toBe(1);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.error.message).toContain('bytes still buffered');
+  } finally {
+    await sink.close();
+    await directory.cleanup();
+  }
+});

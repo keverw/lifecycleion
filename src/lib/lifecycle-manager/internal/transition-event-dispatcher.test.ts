@@ -83,3 +83,34 @@ test('delivery failures are reported without losing the remaining queue or holdi
     release();
   }
 });
+
+test('shutdown initiation interrupts a listener before its shutdown work while state events retain FIFO order', () => {
+  const order: string[] = [];
+  const dispatcher = new TransitionEventDispatcher((event) => {
+    order.push(event);
+    if (event === 'component:unregistered') {
+      dispatcher.withTransition(() => {
+        dispatcher.emit('lifecycle-manager:shutdown-initiated', {
+          method: 'manual',
+          duringStartup: false,
+        });
+        order.push('shutdown-work');
+      });
+      order.push('outer-listener-completed');
+    } else if (event === 'lifecycle-manager:shutdown-initiated') {
+      dispatcher.emit('lifecycle-manager:signals-detached', undefined);
+    }
+  });
+  dispatcher.withTransition(() => {
+    dispatcher.emit('component:unregistered', { name: 'a' });
+    dispatcher.emit('component:start-skipped', { name: 'b', reason: 'test' });
+  });
+  expect(order).toEqual([
+    'component:unregistered',
+    'lifecycle-manager:shutdown-initiated',
+    'shutdown-work',
+    'outer-listener-completed',
+    'component:start-skipped',
+    'lifecycle-manager:signals-detached',
+  ]);
+});

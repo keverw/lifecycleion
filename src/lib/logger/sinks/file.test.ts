@@ -2322,6 +2322,7 @@ describe('FileSink - async self-logging onError', () => {
       expect(sink.getHealth().droppedByKind).toEqual({
         queue_full: 0,
         write: 0,
+        setup: 0,
         format: 3,
         close: 0,
       });
@@ -2506,7 +2507,11 @@ describe('FileSink - async self-logging onError', () => {
     expect(byKind.close).toBe(1);
     expect(byKind.write).toBe(0);
     expect(
-      byKind.queue_full + byKind.write + byKind.format + byKind.close,
+      byKind.queue_full +
+        byKind.write +
+        byKind.setup +
+        byKind.format +
+        byKind.close,
     ).toBe(health.droppedEntries);
   });
 });
@@ -3420,11 +3425,8 @@ describe('FileSink - entries written during close', () => {
   });
 
   test('a write close() gave up on before it reached the stream is not reported again when its pass resumes', async () => {
-    // The pass `close()` abandons need not be in a write callback: it can be suspended in
-    // `rotateIfNeeded`, `setupLogFile` or a rotation's flush. Resumed after the close
-    // resolved, it meets a `closed` check in `writeEntry` and throws - and that throw was
-    // reported as `'close'` / `'lost'` and counted, after the close had already reported
-    // the same entry as `'close'` / `'no_entry'` and promised it was not counted.
+    // An entry waiting on setup or rotation has never reached stream.write(). Close
+    // counts it as queued loss, and the resumed pass must not report it again.
     const failures: SinkFailure[] = [];
     const sink = new FileSink({
       logDir: tmpDir.path,
@@ -3456,8 +3458,9 @@ describe('FileSink - entries written during close', () => {
 
     expect(failures).toHaveLength(1);
     expect(failures[0]?.kind).toBe('close');
-    expect(failures[0]?.disposition).toBe('no_entry');
-    expect(failures[0]?.error.message).toMatch(/write still in flight/i);
+    expect(failures[0]?.disposition).toBe('lost');
+    expect(failures[0]?.entry?.message).toBe('held');
+    expect(failures[0]?.error.message).toContain('still queued');
 
     // The pass resumes into a closed sink.
     held.resolve();
@@ -3465,11 +3468,9 @@ describe('FileSink - entries written during close', () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     expect(failures).toHaveLength(1);
-    expect(sink.getHealth().droppedEntries).toBe(0);
-    expect(sink.getHealth().droppedByKind.close).toBe(0);
-    expect(sink.getHealth().lastError?.message).toMatch(
-      /write still in flight/i,
-    );
+    expect(sink.getHealth().droppedEntries).toBe(1);
+    expect(sink.getHealth().droppedByKind.close).toBe(1);
+    expect(sink.getHealth().lastError?.message).toContain('still queued');
   });
 
   test('close() reports the write it gave up on, and does not call it a clean shutdown', async () => {
@@ -4017,6 +4018,87 @@ test('failed rotation keeps appending and recovers when renaming becomes availab
   } finally {
     clockSpy?.mockRestore();
     renameSpy?.mockRestore();
+    await sink.close();
+    await directory.cleanup();
+  }
+});
+
+test('exhausted setup attempts are counted under setup, matching their failure reports', async () => {
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const failures: SinkFailure[] = [];
+  const sink = new FileSink({
+    logDir: directory.path,
+    basename: 'setup-loss',
+    maxRetries: 0,
+    onError: (failure) => {
+      failures.push(failure);
+    },
+  });
+  try {
+    await sink.flush();
+    const internals = sink as unknown as { writeEntry: () => Promise<void> };
+    internals.writeEntry = () =>
+      Promise.reject(new Error('Failed to setup log file'));
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'setup',
+      message: 'setup',
+    });
+    await sink.flush();
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.kind).toBe('setup');
+    expect(failures[0]?.disposition).toBe('lost');
+    expect(sink.getHealth().droppedByKind.setup).toBe(1);
+    expect(sink.getHealth().droppedByKind.write).toBe(0);
+  } finally {
+    await sink.close();
+    await directory.cleanup();
+  }
+});
+
+test('concurrent and reentrant file closes share one teardown and buffered-byte report', async () => {
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const failures: SinkFailure[] = [];
+  let reentrant: Promise<void> | undefined;
+  const sink = new FileSink({
+    logDir: directory.path,
+    basename: 'shared-close',
+    closeTimeoutMS: 20,
+    onError: (failure) => {
+      failures.push(failure);
+      reentrant = sink.close();
+    },
+  });
+  try {
+    await sink.flush();
+    let ends = 0;
+    const stuck = {
+      destroyed: false,
+      writableLength: 10,
+      end: () => {
+        ends++;
+      },
+      once: () => {},
+      on: () => {},
+      removeListener: () => {},
+      destroy() {
+        this.destroyed = true;
+      },
+    };
+    (sink as unknown as { logFileStream: unknown }).logFileStream = stuck;
+    const first = sink.close();
+    const second = sink.close();
+    expect(second).toBe(first);
+    await Promise.all([first, second]);
+    expect(reentrant).toBe(first);
+    expect(sink.close()).toBe(first);
+    expect(ends).toBe(1);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.error.message).toContain('bytes still buffered');
+  } finally {
     await sink.close();
     await directory.cleanup();
   }

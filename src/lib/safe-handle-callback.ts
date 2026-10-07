@@ -344,7 +344,13 @@ export async function safeHandleCallbackAndWait<T>(
     // promise rejection both accept any value, so a callback that throws `null` would
     // otherwise hand the caller a `null` typed as an `Error` and break
     // `result.error.message`. The original value stays reachable as `cause`.
-    return { success: false, error: toError(error) };
+    const callbackResult = {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      __proto__: null,
+      success: false as const,
+      error: toError(error),
+    };
+    return callbackResult;
   };
 
   if (isFunction(callback)) {
@@ -365,9 +371,21 @@ export async function safeHandleCallbackAndWait<T>(
         // Wait for the async callback to complete
         const { value } = await awaitBoxedPromise(pending as Promise<T>);
 
-        return { success: true, value };
+        const callbackResult = {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          __proto__: null,
+          success: true as const,
+          value,
+        };
+        return callbackResult;
       } else {
-        return { success: true, value: result as T };
+        const callbackResult = {
+          // eslint-disable-next-line @typescript-eslint/naming-convention
+          __proto__: null,
+          success: true as const,
+          value: result as T,
+        };
+        return callbackResult;
       }
     } catch (error) {
       return handleError(error);

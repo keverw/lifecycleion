@@ -252,7 +252,7 @@ test('format failure handlers retain the original alongside an unreadable return
     }));
     reporter(new Error('original delivered failure'), 'params.secret');
     expect(captured).toHaveLength(1);
-    expect(captured[0]).toContain('Failure handler (Render)');
+    expect(captured[0]).toContain('Failure handler (onFormatError)');
     expect(captured[0]).toContain('then could not be read');
     expect(captured[0]).toContain('original delivered failure');
     expect(captured[0]).toContain('params.secret');

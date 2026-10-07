@@ -429,12 +429,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       case 'exhausted':
       case 'fatal-error':
       case 'stopped':
-        // If the operation has already completed, exhausted, encountered a fatal error, or was stopped,
-        // return the last result
-        return await this.currentOperationResolver.promise;
       case 'running':
       case 'stopping':
-        // If the operation is currently running or in the process of stopping, wait for it to complete
+        // Completed operations retain their result; active operations await it.
         return await this.currentOperationResolver.promise;
       case 'not-started':
         // If the operation has not started yet, return an appropriate result
@@ -500,18 +497,18 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           });
         } else {
           // Signal the running attempt to abort.
-          const afterAbort = this.abortAttemptAndReadOwnership(
-            this.currentState.currentAttemptContext,
-          );
+          const context = this.currentState.currentAttemptContext;
+          context.abort();
 
           // Grace period: if operation doesn't acknowledge abort, force it.
           // An abort listener may call reportResult synchronously, settling this
           // cancellation before abort() returns. In that case there is no timer to arm.
           if (
             this.currentState.runnerState === 'stopping' &&
-            afterAbort.isAttemptActive
+            this.currentState.currentAttemptContext === context &&
+            !context.handled
           ) {
-            this.currentState.cancellationTimeoutHandle = setTimeout(() => {
+            const forceCancellation = (): void => {
               if (
                 this.currentState.currentAttemptContext instanceof
                   AttemptContext &&
@@ -559,7 +556,17 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
                   });
                 }
               }
-            }, this._gracePeriodMS);
+            };
+            try {
+              this.currentState.cancellationTimeoutHandle = setTimeout(
+                forceCancellation,
+                this._gracePeriodMS,
+              );
+            } catch (error) {
+              // A missing timer cannot leave cancellation pending indefinitely.
+              forceCancellation();
+              reportCallbackError('RetryRunner cancellation timer', error);
+            }
           }
         }
       }
@@ -1231,6 +1238,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       return; // Ensures we only handle the result once per context
     }
 
+    const operationToken = this.operationToken;
+    const operationResolver = this.currentOperationResolver;
+
     // cleanup the current attempt context
     this.currentState.currentAttemptContext = null;
 
@@ -1254,91 +1264,117 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       resolveInfo: null,
     };
 
-    if (status === 'success') {
-      this.policy.markAsSuccessful();
+    try {
+      if (status === 'success') {
+        this.policy.markAsSuccessful();
 
-      confirmCancellationInfo = {
-        run: true,
-        runnerState: 'completed',
-        resolveInfo: {
-          status: 'attempt_success',
-          data: valueInfo.data,
-        },
-      };
-    } else if (status === 'error') {
-      shouldQueryForRetry = true;
-    } else if (status === 'fatal') {
-      // Fatal errors are recorded, but never retried.
-      this.policy.shouldRetry(valueInfo.error ?? valueInfo.data, false);
-
-      confirmCancellationInfo = {
-        run: true,
-        runnerState: 'fatal-error',
-        resolveInfo: {
-          status: 'attempt_fatal',
-          error: valueInfo.error,
-        },
-      };
-    } else {
-      // Skip is treated like a non-fatal error that doesn't count as a failure.
-      isSkip = true;
-      shouldQueryForRetry = true;
-    }
-
-    // Handle if query for retry
-    if (shouldQueryForRetry) {
-      const shouldRetryQuery = this.policy.shouldRetry(
-        valueInfo.error ?? valueInfo.data,
-        isSkip,
-      );
-
-      const isCanceledOrPendingCancel =
-        this.currentState.runnerState === 'stopping' ||
-        this.currentState.runnerState === 'stopped';
-
-      if (isCanceledOrPendingCancel) {
         confirmCancellationInfo = {
           run: true,
-          runnerState: 'stopped',
+          runnerState: 'completed',
           resolveInfo: {
-            status: 'canceled',
+            status: 'attempt_success',
+            data: valueInfo.data,
+          },
+        };
+      } else if (status === 'error') {
+        shouldQueryForRetry = true;
+      } else if (status === 'fatal') {
+        // Fatal errors are recorded, but never retried.
+        this.policy.shouldRetry(valueInfo.error ?? valueInfo.data, false);
+
+        confirmCancellationInfo = {
+          run: true,
+          runnerState: 'fatal-error',
+          resolveInfo: {
+            status: 'attempt_fatal',
+            error: valueInfo.error,
           },
         };
       } else {
-        if (shouldRetryQuery.shouldRetry) {
-          // Every retry goes through a timer, never a synchronous `attemptOperation`
-          // call: `attempt-handled` for this attempt is emitted below, after this
-          // branch, and the next attempt must not start before it.
-          //
-          // Bounded again here, not only in `RetryPolicy`. `this.policy` is always a
-          // `RetryPolicy` this runner built, whose delays are already finite, capped and at
-          // least 1ms, so this is a backstop: a `setTimeout` past `MAX_TIMER_MS` fires on
-          // the next tick, turning "wait a month" into a busy retry loop.
-          // `clampTimerDelayMS` does not repair `NaN`, so that case takes `RetryPolicy`'s
-          // 1ms minimum. The same value is recorded, so the remaining-time bookkeeping
-          // describes the timer that actually exists.
-          const delayMS = Number.isNaN(shouldRetryQuery.delayMS)
-            ? 1
-            : clampTimerDelayMS(shouldRetryQuery.delayMS);
+        // Skip is treated like a non-fatal error that doesn't count as a failure.
+        isSkip = true;
+        shouldQueryForRetry = true;
+      }
 
-          this.currentState.retryTimeoutStartTime = Date.now();
-          this.currentState.retryTimeoutDelayMS = delayMS;
-          this.currentState.retryTimeoutHandle = setTimeout(() => {
-            this.clearRetryTimer();
-            void this.attemptOperation(false);
-          }, delayMS);
-        } else {
-          // No retry allowed: mark as exhausted.
+      // Handle if query for retry
+      if (shouldQueryForRetry) {
+        const shouldRetryQuery = this.policy.shouldRetry(
+          valueInfo.error ?? valueInfo.data,
+          isSkip,
+        );
+
+        const isCanceledOrPendingCancel =
+          this.currentState.runnerState === 'stopping' ||
+          this.currentState.runnerState === 'stopped';
+
+        if (isCanceledOrPendingCancel) {
           confirmCancellationInfo = {
             run: true,
-            runnerState: 'exhausted',
+            runnerState: 'stopped',
             resolveInfo: {
-              status: 'attempts_exhausted',
-              error: valueInfo.error,
+              status: 'canceled',
             },
           };
+        } else {
+          if (shouldRetryQuery.shouldRetry) {
+            // Every retry goes through a timer, never a synchronous `attemptOperation`
+            // call: `attempt-handled` for this attempt is emitted below, after this
+            // branch, and the next attempt must not start before it.
+            //
+            // Bounded again here, not only in `RetryPolicy`. `this.policy` is always a
+            // `RetryPolicy` this runner built, whose delays are already finite, capped and at
+            // least 1ms, so this is a backstop: a `setTimeout` past `MAX_TIMER_MS` fires on
+            // the next tick, turning "wait a month" into a busy retry loop.
+            // `clampTimerDelayMS` does not repair `NaN`, so that case takes `RetryPolicy`'s
+            // 1ms minimum. The same value is recorded, so the remaining-time bookkeeping
+            // describes the timer that actually exists.
+            const delayMS = Number.isNaN(shouldRetryQuery.delayMS)
+              ? 1
+              : clampTimerDelayMS(shouldRetryQuery.delayMS);
+
+            this.currentState.retryTimeoutStartTime = Date.now();
+            this.currentState.retryTimeoutDelayMS = delayMS;
+            this.currentState.retryTimeoutHandle = setTimeout(() => {
+              this.clearRetryTimer();
+              void this.attemptOperation(false);
+            }, delayMS);
+          } else {
+            // No retry allowed: mark as exhausted.
+            confirmCancellationInfo = {
+              run: true,
+              runnerState: 'exhausted',
+              resolveInfo: {
+                status: 'attempts_exhausted',
+                error: valueInfo.error,
+              },
+            };
+          }
         }
       }
+    } catch (error) {
+      // Live policy/timer functions can replace or complete the operation before
+      // throwing. Their failure belongs to this transition, never to its successor.
+      if (
+        this.operationToken !== operationToken ||
+        this.currentOperationResolver !== operationResolver ||
+        operationResolver.hasResolved ||
+        this.currentState.currentAttemptContext !== null
+      ) {
+        reportCallbackError('RetryRunner retry scheduling', error);
+        return;
+      }
+      // Retry policy evaluation and timer installation belong to this transition.
+      // If either fails, publish an outcome instead of leaving a handled attempt
+      // with no successor and no completion result.
+      this.cleanupTimers();
+      const isCanceling = this.currentState.runnerState === 'stopping';
+      confirmCancellationInfo = {
+        run: true,
+        runnerState: isCanceling ? 'stopped' : 'fatal-error',
+        resolveInfo: isCanceling
+          ? { status: 'canceled' }
+          : { status: 'attempt_fatal', code: 'unexpected_error', error },
+      };
     }
 
     // Cache the attempt duration before emitting

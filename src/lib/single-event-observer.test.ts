@@ -361,3 +361,30 @@ describe('subscriber names and values', () => {
     ).toBe(false);
   });
 });
+
+test('notification snapshots subscribers without the live Set iterator', () => {
+  const observer = new SingleEventObserver<number>();
+  let called = 0;
+  observer.subscribe(() => {
+    called++;
+  });
+  const descriptor = Object.getOwnPropertyDescriptor(
+    Set.prototype,
+    Symbol.iterator,
+  );
+  if (descriptor === undefined) {
+    throw new Error('Set iterator descriptor is missing');
+  }
+  Object.defineProperty(Set.prototype, Symbol.iterator, {
+    configurable: true,
+    value: () => {
+      throw new Error('iterator replaced');
+    },
+  });
+  try {
+    observer.notify(1);
+  } finally {
+    Object.defineProperty(Set.prototype, Symbol.iterator, descriptor);
+  }
+  expect(called).toBe(1);
+});

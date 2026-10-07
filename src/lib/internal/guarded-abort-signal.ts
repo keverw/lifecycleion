@@ -60,7 +60,7 @@ type Wrapper = (this: unknown, event: unknown) => void;
  *
  * Must be called on a signal nothing else has seen yet. Throws a `TypeError`, before
  * touching `signal`, in a runtime that had no `EventTarget` when this module loaded;
- * never throws otherwise.
+ * also throws if a signal refuses installation of a guard.
  */
 export function guardAbortListeners(signal: AbortSignal, label: string): void {
   if (
@@ -198,31 +198,43 @@ export function guardAbortListeners(signal: AbortSignal, label: string): void {
   };
 
   // Descriptors without a prototype, so nothing added to `Object.prototype` (a `get`,
-  // say) is read as part of them. Defining on a fresh extensible signal cannot fail.
-  definePropertyIntrinsic(signal, 'addEventListener', {
-    // eslint-disable-next-line @typescript-eslint/naming-convention
-    __proto__: null,
-    value: addEventListener,
-    writable: false,
-    enumerable: false,
-    configurable: false,
-  } as PropertyDescriptor);
-  definePropertyIntrinsic(signal, 'removeEventListener', {
-    // eslint-disable-next-line @typescript-eslint/naming-convention
-    __proto__: null,
-    value: removeEventListener,
-    writable: false,
-    enumerable: false,
-    configurable: false,
-  } as PropertyDescriptor);
-  definePropertyIntrinsic(signal, 'onabort', {
-    // eslint-disable-next-line @typescript-eslint/naming-convention
-    __proto__: null,
-    get: getOnabort,
-    set: setOnabort,
-    enumerable: false,
-    configurable: false,
-  } as PropertyDescriptor);
+  // say) is read as part of them. Refusal is surfaced rather than leaving a signal apparently guarded.
+  if (
+    !definePropertyIntrinsic(signal, 'addEventListener', {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      __proto__: null,
+      value: addEventListener,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    } as PropertyDescriptor)
+  ) {
+    throw new TypeError('Abort signal refused installation of listener guards');
+  }
+  if (
+    !definePropertyIntrinsic(signal, 'removeEventListener', {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      __proto__: null,
+      value: removeEventListener,
+      writable: false,
+      enumerable: false,
+      configurable: false,
+    } as PropertyDescriptor)
+  ) {
+    throw new TypeError('Abort signal refused installation of listener guards');
+  }
+  if (
+    !definePropertyIntrinsic(signal, 'onabort', {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      __proto__: null,
+      get: getOnabort,
+      set: setOnabort,
+      enumerable: false,
+      configurable: false,
+    } as PropertyDescriptor)
+  ) {
+    throw new TypeError('Abort signal refused installation of listener guards');
+  }
 }
 
 /**

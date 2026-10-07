@@ -1415,7 +1415,8 @@ console.log(health);
 //   droppedEntries: 0,         // Lines this sink did not deliver
 //   droppedByKind: {           // The same lines, by reason - always sums to droppedEntries
 //     queue_full: 0,           //   evicted at maxQueueSize
-//     write: 0,                //   out of retries against a destination that kept failing
+//     write: 0,                //   out of retries writing to a destination
+//     setup: 0,                //   out of retries opening, creating, or rotating a destination
 //     format: 0,               //   could not be rendered at all (a 'fallback' marker is not a drop)
 //     close: 0,                //   refused or abandoned because close() had begun
 //   },
@@ -1496,7 +1497,7 @@ Both queueing sinks, `FileSink` and `NamedPipeSink`, answer a failed write the s
 - `getHealth().droppedEntries` means "lines this sink did not deliver": evicted at the
   cap, out of retries, unrenderable, still queued when `close()` gave up on them, or
   failed by a write still in flight when `close()` finished. `droppedByKind` splits the
-  same total by reason (`queue_full`, `write`, `format`, `close`), named as `onError`
+  same total by reason (`queue_full`, `write`, `setup`, `format`, `close`), named as `onError`
   names them, so health alone says why. A close that abandons a queue
   reports it once as a `'close'` failure with `disposition: 'lost'` rather than once per
   entry
@@ -1601,14 +1602,19 @@ A `close()` that gives up at `closeTimeoutMS` reports differently on the two sin
 because they know different things. `FileSink` waits on one write at a time, so the write
 it abandons may already be on disk: reported as `'close'` / `'no_entry'` and not counted
 in `droppedEntries`. That is its only report: if the write fails after `close()` resolves,
-the failure is neither reported again nor counted. Bytes the stream still held when the
+the failure is neither reported again nor counted. An entry still waiting on setup or
+rotation has never reached the stream, so it is included in the queued-entry loss report
+and counted under `close`. Bytes the stream still held when the
 final flush timed out are reported the same way, before `close()` resolves.
 `NamedPipeSink` hands the stream a burst, so what it abandons is whatever is still
 buffered for a reader that did not take it: reported once as `'close'` / `'lost'` before
 `close()` resolves, with each entry counted as its write callback fails. Neither report
 carries an `entry` - the bytes in the stream's buffer are no longer lines the sink can
 name - so a fallback handler learns that lines were lost, and how many from
-`getHealth().droppedEntries`. Those reports still reach `onError`. That is the sink's
+`getHealth().droppedEntries`. A separate abandoned-queue report carries its oldest entry
+as a sample. Stream destruction after a buffered-byte report does not generate additional
+per-entry reports or count against write health. Concurrent `close()` calls share the same
+drain and teardown. Those reports still reach `onError`. That is the sink's
 callback, not `writeDiagnostic`. If this sink is owned by a `Logger` that is itself
 closing, do not log them through that logger, because a closed logger's `handleLog` writes
 nothing and there is no diagnostic fallback. The examples use `console.error`.

@@ -484,7 +484,7 @@ export class ProcessSignalManager {
         debugSignal: this._isAttached && !!this.debugSignalListener,
         // Keypresses are only available if stdin is a TTY
         keypresses:
-          this._isAttached && process.stdin.isTTY && !!this.keypressHandler,
+          this._isAttached && !!process.stdin.isTTY && !!this.keypressHandler,
       },
     };
   }
@@ -1059,7 +1059,10 @@ export class ProcessSignalManager {
     // This allows future instances to adopt ownership and restore the terminal.
     if (didAttemptRawModeEnable && process.stdin.isTTY && process.stdin.isRaw) {
       shared.rawModeEnabledByManager = true;
-      if (shared.rawModeOwner === null) {
+      if (
+        shared.rawModeOwner === null ||
+        !shared.attachedInstances.has(shared.rawModeOwner)
+      ) {
         shared.rawModeOwner = this.instanceID;
       }
     }

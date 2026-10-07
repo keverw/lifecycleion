@@ -797,7 +797,7 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(manager.isComponentRunning('a')).toBe(true);
   });
 
-  test('a crashed second stop does not stall a stop already in progress', async () => {
+  test('a status override cannot crash a second stop refusal or stall a stop already in progress', async () => {
     const { logger, manager } = setup();
     const component = new Plain(logger, 'a');
     let finishStop = (): void => {};
@@ -834,7 +834,9 @@ describe('LifecycleManager - public methods never reject', () => {
       release();
     }
 
-    expect(second.code).toBe('operation_crashed');
+    expect(second.code).toBe('component_already_stopping');
+    expect(shouldThrow).toBe(true);
+    manager.getComponentStatus = originalGetStatus;
     expect(manager.getComponentStatus('a')?.state).toBe('stopping');
 
     finishStop();

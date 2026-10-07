@@ -1,8 +1,9 @@
 /**
- * Whether `value` is callable: `typeof value === 'function'`.
+ * Whether `value` has the JavaScript function type: `typeof value === 'function'`.
  *
  * True for ordinary functions, arrow functions, classes, async functions, generators,
- * bound functions, and callable proxies - every value that can be called.
+ * bound functions, and callable proxies. Classes require `new`; passing this check
+ * does not guarantee that ordinary invocation succeeds.
  *
  * An object that merely inherits from `Function.prototype` (`Object.create(Function.prototype)`)
  * is not callable and answers `false`, so a value that passes the check never throws

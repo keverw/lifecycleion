@@ -637,6 +637,7 @@ export class NodeAdapter implements HTTPAdapter {
       return error;
     };
 
+    let requestForCleanup: http.ClientRequest | undefined;
     const operation = new NativePromise<AdapterResponse>((resolve, reject) => {
       let activeResponseStream:
         | {
@@ -1190,7 +1191,7 @@ export class NodeAdapter implements HTTPAdapter {
       // The http callback is typed as (res: IncomingMessage) => void, so we
       // cannot make it async directly. We use a void IIFE that routes any
       // unhandled rejections back to the outer promise's reject.
-      const req = httpModule.request(options, (res) => {
+      const req = (requestForCleanup = httpModule.request(options, (res) => {
         didReceiveResponse = true;
 
         // A body write that fails after the response arrived is answered by the response
@@ -1603,7 +1604,7 @@ export class NodeAdapter implements HTTPAdapter {
           abortResponseStream?.();
           destroyRequestQuietly(req);
         });
-      });
+      }));
 
       // Network / transport errors (DNS failure, connection refused, cert errors)
       req.on('error', (error) => {
@@ -1955,6 +1956,14 @@ export class NodeAdapter implements HTTPAdapter {
       // `Buffer.from` and `req.setHeader` can all raise one after the outcome promise has
       // been opened. Re-thrown unchanged apart from the tag, so classification upstream is
       // untouched.
+      if (requestForCleanup !== undefined) {
+        try {
+          destroyRequestQuietly(requestForCleanup);
+        } catch {
+          // Even a teardown-state getter can throw. Preserve the original failure;
+          // asynchronous recovery already reports any undelivered teardown failure.
+        }
+      }
       throw settleRequestBodyForThrow(normalizeError(error));
     });
   }

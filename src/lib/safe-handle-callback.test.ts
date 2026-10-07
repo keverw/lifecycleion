@@ -1561,3 +1561,44 @@ describe('callback name builders', () => {
     expect(((events[0]?.error as Error).cause as Error).message).toBe('boom');
   });
 });
+
+it('callback result containers settle despite an inherited then method', async () => {
+  const descriptor = Object.getOwnPropertyDescriptor(Object.prototype, 'then');
+  Object.defineProperty(Object.prototype, 'then', {
+    configurable: true,
+    value: () => {},
+  });
+  let successes = 0;
+  let failures = 0;
+  try {
+    void safeHandleCallbackAndWait('sync', () => 5).then((result) => {
+      if (result.success && result.value === 5) {
+        successes++;
+      }
+    });
+    void safeHandleCallbackAndWait(
+      'async',
+      async () => await Promise.resolve(5),
+    ).then((result) => {
+      if (result.success && result.value === 5) {
+        successes++;
+      }
+    });
+    void safeHandleCallbackAndWait('throw', () => {
+      throw new Error('broken');
+    }).then((result) => {
+      if (!result.success && result.error instanceof Error) {
+        failures++;
+      }
+    });
+    await sleep(10);
+  } finally {
+    if (descriptor) {
+      Object.defineProperty(Object.prototype, 'then', descriptor);
+    } else {
+      Reflect.deleteProperty(Object.prototype, 'then');
+    }
+  }
+  expect(successes).toBe(2);
+  expect(failures).toBe(1);
+});

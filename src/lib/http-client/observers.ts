@@ -14,6 +14,7 @@ import type {
 } from './types';
 
 type RemoveFn = () => void;
+const EMPTY_OBSERVER_CHAIN = async (): Promise<void> => {};
 const DEFAULT_OBSERVER_PHASES: ResponseObserverFilter['phases'] = ['final'];
 const DEFAULT_ERROR_OBSERVER_PHASES: ErrorObserverFilter['phases'] = ['final'];
 
@@ -42,11 +43,18 @@ export class ResponseObserverManager {
     };
   }
 
+  public hasObservers(): boolean {
+    return this.observers.length > 0;
+  }
+
   /**
    * Copy the current registrations into a chain that later `add()` and removal calls do
    * not reach. See `RequestInterceptorManager.snapshot()`.
    */
   public snapshot(): ResponseObserverChain {
+    if (!this.hasObservers()) {
+      return EMPTY_OBSERVER_CHAIN;
+    }
     const observers = copyRegistrations(this.observers);
 
     return (response, request, phase) =>
@@ -127,11 +135,18 @@ export class ErrorObserverManager {
     };
   }
 
+  public hasObservers(): boolean {
+    return this.observers.length > 0;
+  }
+
   /**
    * Copy the current registrations into a chain that later `add()` and removal calls do
    * not reach. See `RequestInterceptorManager.snapshot()`.
    */
   public snapshot(): ErrorObserverChain {
+    if (!this.hasObservers()) {
+      return EMPTY_OBSERVER_CHAIN;
+    }
     const observers = copyRegistrations(this.observers);
 
     return (error, request, phase) =>

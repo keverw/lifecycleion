@@ -348,8 +348,8 @@ Returns `Promise<RunResult<T>>`:
 - If `shouldWaitForCompletion` is `false` (default): resolves immediately with `{ status: 'running' }`. This reports that the operation was started, not how it ends: an `operation-started` listener that calls `cancel()` or `reset()` still leaves this result `{ status: 'running' }`, and `waitForCompletion()` reports `{ status: 'canceled' }`. The same holds for `resume()` and `forceTry()` (which still includes `reattached: false`).
 - If `shouldWaitForCompletion` is `true`: resolves when the operation finishes with one of:
   - `{ status: 'attempt_success', data?: T }` - succeeded
-  - `{ status: 'attempts_exhausted', error? }` - all retries failed (`error` is from the final attempt)
-  - `{ status: 'attempt_fatal', error? }` - fatal error, no retry
+  - `{ status: 'attempts_exhausted', error? }` - retry budget exhausted (`error` is from the final attempt; a forced attempt that reports `skip` may omit it)
+  - `{ status: 'attempt_fatal', error?, code? }` - fatal error, no retry; `code: 'unexpected_error'` identifies a failure while evaluating the retry policy or installing its timer
   - `{ status: 'canceled' }` - canceled during execution
 - On pre-operation error: `{ status: 'pre_operation_error', code, error }` with codes:
   - `'already_running'` - operation is already in progress
@@ -379,8 +379,8 @@ void runner.run(false);
 Waits for the current operation to complete. Returns `Promise<RunResult<T>>` with one of:
 
 - `{ status: 'attempt_success', data?: T }` - succeeded
-- `{ status: 'attempts_exhausted', error? }` - all retries failed (`error` is from the final attempt)
-- `{ status: 'attempt_fatal', error? }` - fatal error, no retry
+- `{ status: 'attempts_exhausted', error? }` - retry budget exhausted (`error` is from the final attempt; a forced attempt that reports `skip` may omit it)
+- `{ status: 'attempt_fatal', error?, code? }` - fatal error, no retry; `code: 'unexpected_error'` identifies a failure while evaluating the retry policy or installing its timer
 - `{ status: 'canceled' }` - canceled during execution
 - `{ status: 'not_started', code: 'not_running', error }` - runner has not been started
 
@@ -413,6 +413,8 @@ const cancelResult = await runner.cancel();
 ```
 
 **Cancellation grace period:** When canceling, the runner sends an abort signal to the operation and waits up to 1000ms (default) for it to call `reportResult`. If the operation doesn't respond in time, the cancel is forced. Use `overrideGraceCancelPeriodMS(ms)` to change this timeout. Invalid values throw; `0` forces cancellation on the next timer turn, and `Infinity` uses the timer ceiling.
+
+If the cancellation grace timer cannot be installed, cancellation completes immediately as `'forced'` and reports the timer failure on the global error channel.
 
 #### `reset()`
 

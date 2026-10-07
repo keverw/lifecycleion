@@ -9153,3 +9153,46 @@ test('requestBodySettled uses one then read and observes the captured settlement
   expect(await response.requestBodySettled).toBe(failure);
   expect(reads).toBe(1);
 });
+
+test('a wrapped upload failure stays fulfilled when Error.prototype.name is nonwritable', async () => {
+  const original = Object.getOwnPropertyDescriptor(Error.prototype, 'name');
+  if (original === undefined) {
+    throw new Error('Error.prototype.name descriptor missing');
+  }
+  const uploadFailure = new Error('upload failed');
+  Object.defineProperty(uploadFailure, 'then', {
+    get() {
+      throw new Error('refused then lookup');
+    },
+  });
+  Object.defineProperty(uploadFailure, 'name', { value: 'UploadError' });
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () =>
+      Promise.resolve({
+        status: 200,
+        headers: {},
+        body: null,
+        requestBodySettled: Promise.reject(uploadFailure),
+      }),
+  };
+  Object.defineProperty(Error.prototype, 'name', {
+    ...original,
+    writable: false,
+  });
+  try {
+    const response = await new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+    })
+      .post('/upload')
+      .json({ value: 1 })
+      .send();
+    const reported = await response.requestBodySettled;
+    expect(reported?.name).toBe('UploadError');
+    expect(reported?.cause).toBe(uploadFailure);
+    expect(reported?.message).toBe('upload failed');
+  } finally {
+    Object.defineProperty(Error.prototype, 'name', original);
+  }
+});

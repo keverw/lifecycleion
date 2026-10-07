@@ -277,8 +277,11 @@ After an individual component timeout, this state behaves like `registered`: the
 After a bulk startup deadline, restart and unregistration are allowed even if the
 abandoned `start()` never settles. A late successful start is stopped automatically
 only if its attempt still owns the registered component. A retry or replacement makes
-the old completion stale, so it cannot stop the new run. Once automatic late cleanup
-actually starts, restart and unregistration are blocked until that cleanup finishes.
+the old completion stale, so it cannot stop the new run. Once the manager observes a
+late fulfillment that it owns cleanup for, unregistration is blocked through recovery's
+ownership check and until that cleanup finishes. An individual
+restart may claim the cleanup's stop before it begins and then start a new run;
+once the stop is in flight, restart is refused as an already stopping component.
 These cleanup protections also apply to individual component timeouts.
 
 Use `getStartTimedOutComponentNames()` to inspect components currently in this state.
@@ -552,6 +555,15 @@ the cleanup's `component:stopped` event carries (or wherever the timed-out start
 had left it, such as `stopped` after an unexpected stop it reported). Until that
 cleanup settles, it refuses `startComponent()` / `stopComponent()` on the component
 with `component_already_stopping`.
+
+If the manager cannot observe the promise returned by `start()` because its
+constructor or species throws, the start operation returns that error and aborts
+the start signal immediately. The manager retains ownership of the unfinished
+start and attempts to observe it again for automatic late cleanup. Unregistration
+is refused while that work remains unresolved, and a successful cleanup retains
+the original observation error. A promise whose constructor persistently prevents
+observation cannot be monitored without modifying it; its unfinished start stays
+protected rather than being treated as a settled rejection of `start()`.
 
 A component that would rather undo a late start itself sets
 `ownsLateStartCleanup: true` (default `false`) in its constructor options. The manager
@@ -1064,7 +1076,7 @@ interface RegisterComponentResult {
   registrationIndexAfter: number | null;
   startupOrder: string[]; // empty on a refusal made before every dependency list was read, or an unexpected failure
   duringStartup?: boolean; // true if registered during bulk startup
-  autoStartAttempted?: boolean; // true if auto-start was attempted
+  autoStartAttempted?: boolean; // includes an auto-start refused before start() is called
   autoStartDeferred?: boolean; // true if left to the upcoming restart startup or a bulk startup batch
   autoStartSucceeded?: boolean; // true if auto-start succeeded
   startResult?: ComponentOperationResult; // result of auto-start (if attempted)
@@ -2051,8 +2063,8 @@ attachSignals(): void
 
 - **SIGINT, SIGTERM, SIGTRAP** - Trigger `stopAllComponents()`
 - **SIGHUP, R key** - Trigger reload (calls `onReload()` on components or custom callback)
-- **SIGUSR1, I key** - Trigger info (custom callback or warning)
-- **SIGUSR2, D key** - Trigger debug (custom callback or warning)
+- **SIGUSR1, I key** - Trigger info (calls `onInfo()` on running components or custom callback)
+- **SIGUSR2, D key** - Trigger debug (calls `onDebug()` on running components or custom callback)
 
 If `attachSignalsBeforeStartup` is enabled, handlers are auto-attached before
 `startAllComponents()` or `startComponent()` begins work, so the startup window
@@ -2293,6 +2305,7 @@ const lifecycle = new LifecycleManager({
 - Escalation requests are counted inside a `withinMS` window
 - If a new escalation request arrives more than `withinMS` after the first escalation request in the current window, a new escalation window starts
 - `onForceShutdown()` fires once per escalation state when the count reaches `forceAfterCount`
+- Finite `forceAfterCount` values are clamped to at least `1`. Non-finite or non-number values use the default `3`; fractions are accepted, with force firing when the integer request count reaches the threshold
 
 **Important reset behavior:**
 
@@ -3133,10 +3146,12 @@ listener wait behind those already queued and the current event's remaining list
 Listener promises are not awaited. Payloads describe the originating snapshot; use
 status getters for current state, which earlier listeners may have changed.
 
-Three **synchronous control events** can overtake queued notifications:
+Four **synchronous control events** can overtake queued notifications:
 
 - `lifecycle-manager:signals-attached` lets listeners intervene before startup proceeds
   when `attachSignalsBeforeStartup` is enabled.
+- `lifecycle-manager:shutdown-initiated` runs after acquiring the shutdown latch and
+  before dependency getters or pending-start abort listeners run.
 - `signal:shutdown` runs before the request can invoke `onForceShutdown()`.
 - `lifecycle-manager:shutdown-escalation-forced` runs after `onForceShutdown()` returns.
   A synchronous `logger.exit()` from this listener can proceed without waiting for a

@@ -33,6 +33,7 @@ import { sleep } from '../../sleep';
 import {
   observePromise,
   promiseConstructorIntrinsic,
+  queueMicrotaskIntrinsic,
   promiseResolveIntrinsic,
 } from '../../internal/intrinsics';
 
@@ -315,10 +316,12 @@ export class FileSink implements LogSink {
 
   /** The entry {@link processQueue} is waiting on `writeEntry` for, if any. */
   private inFlightEntry?: QueuedEntry;
+  /** The entry actually handed to stream.write(), excluding setup and rotation. */
+  private activeStreamWriteEntry?: QueuedEntry;
 
   /**
-   * The in-flight entry `close()` gave up on, which its report already accounts for. See
-   * {@link reportInFlightWriteOnClose}.
+   * The processing entry close() gave up on, already covered by its queued-loss or
+   * in-flight-write report.
    */
   private abandonedInFlightEntry?: QueuedEntry;
 
@@ -339,6 +342,7 @@ export class FileSink implements LogSink {
   private readonly suppressedWriteErrors = new WeakSet<object>();
 
   private closing = false;
+  private closePromise?: Promise<void>;
   private closed = false;
   private closeTimeoutMS: number;
 
@@ -584,9 +588,21 @@ export class FileSink implements LogSink {
   /**
    * Close the log file and wait for all pending writes
    */
-  public async close(): Promise<void> {
+  public close(): Promise<void> {
     this.closing = true;
+    // Publish ownership before any close-time callback can re-enter close().
+    this.closePromise ??= new promiseConstructorIntrinsic<void>(
+      (resolve, reject) => {
+        queueMicrotaskIntrinsic(() => {
+          // Do not resolve with the promise: native adoption would read its live then.
+          void observePromise(this.closeInternal(), resolve, reject);
+        }, reject);
+      },
+    );
+    return this.closePromise;
+  }
 
+  private async closeInternal(): Promise<void> {
     const startTime = Date.now();
 
     // Wait for initialization with timeout
@@ -608,8 +624,13 @@ export class FileSink implements LogSink {
     // Wait for queue to finish processing with timeout
     while (this.writeQueue.length > 0 || this.isProcessing) {
       if (Date.now() - startTime > this.closeTimeoutMS) {
-        didAbandonInFlightWrite = this.isProcessing;
+        didAbandonInFlightWrite = this.activeStreamWriteEntry !== undefined;
         this.abandonedInFlightEntry = this.inFlightEntry;
+        // An entry parked in setup or rotation has never reached the stream. Include
+        // it in the known queue loss, instead of describing an uncertain write.
+        if (!didAbandonInFlightWrite && this.inFlightEntry !== undefined) {
+          this.writeQueue.unshift(this.inFlightEntry);
+        }
 
         break;
       }
@@ -919,12 +940,12 @@ export class FileSink implements LogSink {
           this.consecutiveFailures = 0;
           this.totalEntriesWritten++;
         } catch (error) {
-          // Already answered for. `close()` gave up on this write and reported it as
-          // `'close'` / `'no_entry'`, uncounted, before it resolved - and this pass resuming
-          // afterwards is the only way it reaches here: refused by a `closed` check in
-          // `writeEntry`, or failed by the stream `close()` destroyed. Reporting and
-          // counting it again would give one line two contradictory fates, after the close
-          // had already said its last word.
+          if (this.activeStreamWriteEntry === queuedEntry) {
+            this.activeStreamWriteEntry = undefined;
+          }
+          // Close already reported this entry: an actual stream write has unknown
+          // delivery, while an entry parked in setup or rotation was counted as queued
+          // loss. Its resumed pass must neither report nor count it again.
           if (queuedEntry === this.abandonedInFlightEntry) {
             continue;
           }
@@ -1051,7 +1072,7 @@ export class FileSink implements LogSink {
             // documented meaning, "lines this sink did not deliver". `flush()` reads the
             // same counter, so the two can no longer disagree about what was lost.
             this.countDropped(
-              kind === 'format' || kind === 'close'
+              kind === 'format' || kind === 'close' || kind === 'setup'
                 ? kind
                 : this.closed
                   ? 'close'
@@ -1349,7 +1370,11 @@ export class FileSink implements LogSink {
 
       const writingTo = this.logFileStream;
 
+      this.activeStreamWriteEntry = queued;
       writingTo.write(messageToWrite, (err) => {
+        if (this.activeStreamWriteEntry === queued) {
+          this.activeStreamWriteEntry = undefined;
+        }
         if (err) {
           // The event is told to keep quiet about this particular error; it still tears
           // the stream down, which is the half it does know about. A non-object is not

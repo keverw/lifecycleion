@@ -20,7 +20,7 @@ import { isFunction } from 'lifecycleion/is-function';
 
 ### isFunction
 
-Returns `true` if the value is callable (`typeof value === 'function'`), `false` otherwise. That covers regular, arrow, async and generator functions, classes, bound functions, and callable proxies. A non-callable object that only inherits from `Function.prototype` returns `false`. The check never throws and never runs proxy traps.
+Returns `true` if the value has the JavaScript function type (`typeof value === 'function'`), `false` otherwise. That covers regular, arrow, async and generator functions, classes, bound functions, and callable proxies. A non-callable object that only inherits from `Function.prototype` returns `false`. The check never throws and never runs proxy traps. Classes pass this check but require `new`; invoking one as an ordinary callback throws, and callback helpers report that failure.
 
 ```typescript
 isFunction(() => {}); // true

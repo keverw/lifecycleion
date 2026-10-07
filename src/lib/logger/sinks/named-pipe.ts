@@ -18,6 +18,7 @@ import {
   observePromise,
   observeRejection,
   promiseConstructorIntrinsic,
+  queueMicrotaskIntrinsic,
 } from '../../internal/intrinsics';
 import {
   DEFAULT_CLOSE_TIMEOUT_MS,
@@ -507,6 +508,8 @@ export class NamedPipeSink implements LogSink {
   private didReportDrop = false;
   /** Whether the one post-close loss report has gone out. See {@link requeue}. */
   private didReportPostCloseLoss = false;
+  /** Streams whose buffered-byte loss close() has already reported. */
+  private readonly closeAbandonedStreams = new WeakSet<fs.WriteStream>();
   private lastError?: Error;
   private consecutiveFailures = 0;
   /**
@@ -595,6 +598,7 @@ export class NamedPipeSink implements LogSink {
 
   private initPromise: Promise<void>;
   private closing = false;
+  private closePromise?: Promise<void>;
   private closed = false;
   private closeTimeoutMS: number;
 
@@ -700,10 +704,13 @@ export class NamedPipeSink implements LogSink {
       this.failedWriteStreams.has(this.pipeStream) ||
       // Under backpressure the stream will take it, into a buffer with no cap. It waits
       // here instead, where `maxQueueSize` applies and `getHealth()` can see it.
-      this.isAwaitingDrain
+      this.isAwaitingDrain ||
+      this.writeQueue.length > 0 ||
+      this.isProcessing
     ) {
       this.writeQueue.push(rendered);
       this.enforceQueueLimit();
+      this.processQueue();
       this.ensureConnection();
 
       return;
@@ -921,9 +928,21 @@ export class NamedPipeSink implements LogSink {
     }
   }
 
-  public async close(): Promise<void> {
+  public close(): Promise<void> {
     this.closing = true;
+    // Publish ownership before any close-time callback can re-enter close().
+    this.closePromise ??= new promiseConstructorIntrinsic<void>(
+      (resolve, reject) => {
+        queueMicrotaskIntrinsic(() => {
+          // Do not resolve with the promise: native adoption would read its live then.
+          void observePromise(this.closeInternal(), resolve, reject);
+        }, reject);
+      },
+    );
+    return this.closePromise;
+  }
 
+  private async closeInternal(): Promise<void> {
     const startTime = Date.now();
 
     // Wait for initialization with timeout
@@ -1095,9 +1114,7 @@ export class NamedPipeSink implements LogSink {
         const timeoutHandle = setTimeout(() => {
           // Report buffered loss before close resolves: the write callbacks errored by
           // destroy() can arrive later, after a shutdown handler has already exited.
-          // This flag suppresses duplicate summaries only. Each later failed callback
-          // still reports its own entry as 'lost' and contributes its per-entry count;
-          // the byte total here cannot identify or count those entries.
+          // Callbacks count the entries, but the byte summary is their only report.
           const bufferedBytes = stream.writableLength;
 
           if (bufferedBytes > 0 && !this.didReportPostCloseLoss) {
@@ -1111,6 +1128,8 @@ export class NamedPipeSink implements LogSink {
               { disposition: 'lost' },
             );
           }
+
+          this.closeAbandonedStreams.add(stream);
 
           // Destroyed rather than left pending, so the descriptor is not held for the life
           // of the process by a flush that is never going to happen.
@@ -1479,6 +1498,9 @@ export class NamedPipeSink implements LogSink {
       this.pendingStreamSince = Date.now();
 
       stream.on('error', (err) => {
+        if (this.closeAbandonedStreams.has(stream)) {
+          return;
+        }
         // A stream this sink has already moved on from - ended by `reconnect()`, replaced
         // after a failure - can still deliver its error afterwards, and that error says
         // nothing about the connection now in hand. Reported, because it did happen, but
@@ -2453,6 +2475,11 @@ export class NamedPipeSink implements LogSink {
           // event then reports it, which is noisier than ideal but never silent.
           if (typeof error === 'object') {
             this.suppressedWriteErrors.add(error);
+          }
+
+          if (this.closeAbandonedStreams.has(stream)) {
+            this.countDropped('close');
+            return;
           }
 
           const wasPartiallyWritten =

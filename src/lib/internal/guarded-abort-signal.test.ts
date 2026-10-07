@@ -569,3 +569,10 @@ test('a runtime without EventTarget can still import the library, and fails only
   expect(failure.message).toContain('EventTarget is not available');
   expect(isUntouched).toBe(true);
 });
+
+test('guard installation explicitly refuses a frozen signal', () => {
+  const signal = Object.freeze(new AbortController().signal);
+  expect(() => guardAbortListeners(signal, LABEL)).toThrow(
+    'refused installation',
+  );
+});

@@ -24,8 +24,9 @@ export class TransitionEventDispatcher {
    * behind unrelated work (or deadlock a hook waiting for an event). Nesting lets a
    * terminal component update detach signals without exposing its unfinished timestamps,
    * and lets shutdown acceptance finish its latch and escalation state before listeners
-   * can request another pass. Three synchronous control checkpoints are deliberately
-   * exempt: signals-attached, signal:shutdown, and shutdown-escalation-forced. Their
+   * can request another pass. Four synchronous control checkpoints are deliberately
+   * exempt: signals-attached, shutdown-initiated, signal:shutdown, and
+   * shutdown-escalation-forced. Their
    * call sites commit the state needed by listeners before dispatch and retain their
    * re-entry checks afterwards; the operation must not proceed past them first.
    *
@@ -60,13 +61,15 @@ export class TransitionEventDispatcher {
     data: LifecycleManagerEventMap[K],
   ): void {
     // These are control checkpoints, not delayed descriptions of completed work:
-    // attach listeners may refuse startup, a shutdown signal must precede a force
+    // attach listeners may refuse startup, shutdown initiation must precede hook
+    // abort listeners and dependency reads, a shutdown signal must precede a force
     // callback that can exit the process, and forced listeners must run while the
     // force/escalation depth guards are still raised. They run even inside another
     // event's listener. Keeping a global non-interleaving FIFO here would require
     // deferring the control operation itself, including an immediate force exit.
     const isControlEvent =
       event === 'lifecycle-manager:signals-attached' ||
+      event === 'lifecycle-manager:shutdown-initiated' ||
       event === 'signal:shutdown' ||
       event === 'lifecycle-manager:shutdown-escalation-forced';
 

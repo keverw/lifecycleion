@@ -16,8 +16,8 @@ import { assertNumberOption } from '../../../internal/timer-limits';
  *
  * Unbounded is the wrong default for a queue that only grows when something is already
  * wrong: a full disk or a pipe with no reader turns an ordinary logging loop into
- * unbounded memory growth, and every queued entry holds a rendered line - `FileSink`'s
- * also holds the `LogEntry`, and with it the caller's params graph by reference.
+ * unbounded memory growth. Every queued entry in both sinks holds a rendered line and
+ * the `LogEntry`, including the caller's params graph by reference.
  *
  * Ten thousand lines is far more than any outage worth recovering from leaves behind, and
  * small enough to be irrelevant next to the process that produced them. A caller who

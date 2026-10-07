@@ -1,3 +1,4 @@
+import { snapshotSet } from './internal/intrinsics';
 import { readMember } from './internal/read-member';
 import { reportCallbackError, runCallbackSafely } from './safe-handle-callback';
 
@@ -63,7 +64,7 @@ export class SingleEventObserverProtected<T> {
     // Snapshot at the start of this notification, as `EventEmitter.emit` does: a
     // subscriber added (or removed and re-added) midway through runs from the next
     // notification, not this one, so it cannot extend this pass - or loop it forever.
-    for (const subscriber of [...this.subscribers]) {
+    for (const subscriber of snapshotSet(this.subscribers)) {
       // The report's name is read only once the subscriber has failed, so a notify that
       // succeeds never reads `name` - which can be a getter - or builds a label for it.
       // `subscribe` admits only functions, so the fixed name below is never reported.

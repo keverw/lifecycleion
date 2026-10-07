@@ -3401,14 +3401,19 @@ export class BaseHTTPClient {
     request: AttemptRequest,
     phase: ResponseObserverPhase,
   ): Promise<void> {
-    const parentChain = this._parentClient?._responseObservers.snapshot();
-    const ownChain = this._responseObservers.snapshot();
+    const parent = this._parentClient?._responseObservers;
+    const parentChain = parent?.hasObservers() ? parent.snapshot() : undefined;
+    const ownChain = this._responseObservers.hasObservers()
+      ? this._responseObservers.snapshot()
+      : undefined;
 
     if (parentChain) {
       await parentChain(response, request, phase);
     }
 
-    await ownChain(response, request, phase);
+    if (ownChain !== undefined) {
+      await ownChain(response, request, phase);
+    }
   }
 
   private async _runErrorObservers(
@@ -3416,14 +3421,19 @@ export class BaseHTTPClient {
     request: AttemptRequest,
     phase: ErrorObserverPhase,
   ): Promise<void> {
-    const parentChain = this._parentClient?._errorObservers.snapshot();
-    const ownChain = this._errorObservers.snapshot();
+    const parent = this._parentClient?._errorObservers;
+    const parentChain = parent?.hasObservers() ? parent.snapshot() : undefined;
+    const ownChain = this._errorObservers.hasObservers()
+      ? this._errorObservers.snapshot()
+      : undefined;
 
     if (parentChain) {
       await parentChain(error, request, phase);
     }
 
-    await ownChain(error, request, phase);
+    if (ownChain !== undefined) {
+      await ownChain(error, request, phase);
+    }
   }
 
   /**
@@ -3912,7 +3922,11 @@ function stableUploadError(error: Error): Error {
   );
   const name = readObjectMember(error, 'name');
   if (typeof name === 'string') {
-    wrapped.name = name;
+    Object.defineProperty(wrapped, 'name', {
+      value: name,
+      writable: true,
+      configurable: true,
+    });
   }
   // Wrapping is required for safe promise resolution, but the upload's diagnostic
   // code and original stack still describe the failure better than this wrapper's

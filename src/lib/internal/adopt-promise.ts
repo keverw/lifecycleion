@@ -270,8 +270,12 @@ function isSpeciesRefusal(error: unknown): boolean {
  */
 export function adoptPromise<T>(
   value: T | PromiseLike<T>,
+  onObservationFailure?: (error: unknown) => void,
 ): Promise<Awaited<T>> {
-  return adoptOwnPromise(value) ?? adopt(value);
+  return (
+    adoptOwnPromise(value, undefined, onObservationFailure) ??
+    adopt(value, undefined, onObservationFailure)
+  );
 }
 
 /**
@@ -294,6 +298,7 @@ export function adoptPromise<T>(
 function adoptOwnPromise<T>(
   value: T,
   isPromise?: boolean,
+  onObservationFailure?: (error: unknown) => void,
 ): Promise<Awaited<T>> | undefined {
   if (!isObjectLike(value) || !hasOwnThen(value)) {
     return undefined;
@@ -322,6 +327,7 @@ function adoptOwnPromise<T>(
           isSpeciesRefusal(error)
         ) {
           didAdopt = true;
+          onObservationFailure?.(error);
           // Preserve the original rejection value, as adoption does.
           // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
           reject(error);
@@ -338,6 +344,7 @@ function adoptOwnPromise<T>(
 function adopt<T>(
   value: T | PromiseLike<T>,
   capturedThen?: (...args: unknown[]) => unknown,
+  onObservationFailure?: (error: unknown) => void,
 ): Promise<Awaited<T>> {
   // Promise.resolve already returns a native promise observed through our captured
   // methods. Wrapping it again would resolve with its raw fulfilled value, reading
@@ -347,6 +354,7 @@ function adopt<T>(
     try {
       return promiseResolveIntrinsic(value);
     } catch (error) {
+      onObservationFailure?.(error);
       return promiseRejectIntrinsic(error);
     }
   }

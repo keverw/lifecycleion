@@ -108,7 +108,7 @@ export function createFormatReporter(
   kind: FormatFailureKind,
   handler?: FormatErrorHandler,
   onHandlerSettled?: () => void,
-  handlerName?: string,
+  handlerName: string = 'onFormatError',
 ): ReportFormatFailure {
   // The shared rungs. What is specific to this channel is its kind, its documentation and
   // the label in the console line; the guarantees beneath are one implementation.

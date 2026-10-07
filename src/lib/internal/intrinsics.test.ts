@@ -519,3 +519,21 @@ test('a runtime without AbortController can still import the library, and fails 
   expect(failure.name).toBe('TypeError');
   expect(failure.message).toContain('AbortController is not available');
 });
+
+test('a queued task failure reaches the console when no reporter is supplied', async () => {
+  const original = console.error;
+  const failure = new Error('queued task failed');
+  const seen: unknown[] = [];
+  console.error = (error: unknown): void => {
+    seen.push(error);
+  };
+  try {
+    queueMicrotaskIntrinsic(() => {
+      throw failure;
+    });
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  } finally {
+    console.error = original;
+  }
+  expect(seen).toEqual([failure]);
+});

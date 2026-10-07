@@ -46,7 +46,7 @@ for (const doesOwnCleanup of [false, true]) {
         durationMS: 0,
       });
       expect(result.shutdownResult.reason).toContain(
-        'Timed-out start still unresolved for: worker',
+        'Abandoned start still unresolved for: worker',
       );
       expect(result.startupResult.code).toBe('partial_state');
       expect(result.startupResult.reason).toContain('startup skipped');

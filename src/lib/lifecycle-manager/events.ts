@@ -21,10 +21,12 @@ import type { ShutdownSignal } from '../process-signal-manager';
  * after all listeners of the current notification. Failed transitions still flush,
  * delivery failures are contained, and listener promises are never awaited.
  *
- * Three control checkpoints are synchronous even during a transition or notification
- * drain: lifecycle-manager:signals-attached, signal:shutdown, and
+ * Four control checkpoints are synchronous even during a transition or notification
+ * drain: lifecycle-manager:signals-attached, lifecycle-manager:shutdown-initiated,
+ * signal:shutdown, and
  * lifecycle-manager:shutdown-escalation-forced. They may interleave with notifications:
- * startup must allow intervention after attachment, signals must precede a force exit,
+ * startup must allow intervention after attachment, shutdown initiation must precede
+ * dependency reads and hook abort listeners, signals must precede a force exit,
  * and forced listeners must retain the active force/escalation guards. Call sites
  * commit the state needed by these listeners before dispatch and recheck afterwards.
  * Payloads describe the originating change; earlier listeners can change live state.
@@ -132,6 +134,7 @@ export interface LifecycleManagerEventMap {
     autoStartDeferred?: boolean;
     autoStartSucceeded?: boolean;
   };
+  /** Synchronous control checkpoint after the shutdown latch is acquired, before hooks. */
   'lifecycle-manager:shutdown-initiated': {
     method: ShutdownMethod;
     duringStartup: boolean;
@@ -185,7 +188,7 @@ export interface LifecycleManagerEventMap {
     name: string;
     // `component_not_found`: unregistered. `component_changed`: another instance now
     // holds the name. `component_not_available`: same instance, no longer in the
-    // state it was selected in.
+    // state it was selected in, or hook entry is blocked by startup cleanup.
     reason:
       'component_not_found' | 'component_changed' | 'component_not_available';
     // The name's current state; absent when nothing is registered under it.
