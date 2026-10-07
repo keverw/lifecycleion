@@ -8,7 +8,7 @@ Give every `LifecycleManager` event a timestamp and a sequence number. Both are 
 
 ## Why
 
-Since PR #30, notifications raised during synchronous state transitions are queued and delivered in FIFO order. Control events (`lifecycle-manager:signals-attached`, `signal:shutdown`, `lifecycle-manager:shutdown-escalation-forced`) are delivered synchronously, so they can overtake notifications that are still queued. A listener that stamps events when it receives them therefore records delivery order, not the order in which things happened. Metadata captured at creation lets monitoring rebuild the true order.
+Since PR #30, notifications raised during synchronous state transitions are queued and delivered in FIFO order. Control events (`lifecycle-manager:signals-attached`, `lifecycle-manager:shutdown-initiated`, `signal:shutdown`, `lifecycle-manager:shutdown-escalation-forced`) are delivered synchronously, so they can overtake notifications that are still queued. A listener that stamps events when it receives them therefore records delivery order, not the order in which things happened. Metadata captured at creation lets monitoring rebuild the true order.
 
 ## Design
 

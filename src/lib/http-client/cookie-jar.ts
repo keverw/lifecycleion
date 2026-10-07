@@ -588,9 +588,10 @@ export class CookieJar {
    * persisted jar that comes back short says so.
    *
    * The payload is read in full before the jar is touched, and each cookie is copied
-   * rather than taken. A payload with no `cookies`, a `null` entry, or a frozen cookie
-   * therefore throws while the jar still holds what it had, rather than after emptying
-   * it, and a caller's own array of cookies never has `Date` objects written into it.
+   * rather than taken. A payload with no `cookies` or a `null` entry therefore throws
+   * while the jar still holds what it had, rather than after emptying it. Frozen entries
+   * are accepted because each entry is copied before modification, and a caller's own
+   * array of cookies never has `Date` objects written into it.
    *
    * A restore *replaces*: once the payload has been read, the jar is emptied and refilled
    * with whatever `setCookie` accepts. A well-formed payload whose cookies are all refused
