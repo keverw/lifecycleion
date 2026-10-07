@@ -11,6 +11,7 @@ import { renderJSONLine } from './internal/render-json-line';
 import { renderTextLine } from './internal/render-text-line';
 import {
   DEFAULT_CLOSE_TIMEOUT_MS,
+  MIN_CLOSE_FLUSH_MS,
   resolveMaxQueueSize,
   resolveMaxRetries,
 } from './internal/queue-policy';
@@ -27,6 +28,7 @@ import {
   type SinkFailureDisposition,
   type SinkFailureKind,
 } from './internal/sink-failure';
+import { evictQueuedEntries } from './internal/queue-accounting';
 import { FormatReportScheduler } from './internal/format-report-scheduler';
 
 import type { LogEntry, LogSink, LoggerDiagnostic } from '../types';
@@ -46,17 +48,6 @@ export type {
   SinkFailure,
   SinkFailureKind,
 } from './internal/sink-failure';
-
-/**
- * The shortest flush `close()` will ask for, however little of its budget is left.
- *
- * The same floor, and for the same reason, as `NamedPipeSink`'s: the drain loop spends the
- * close budget before the flush is reached, and a zero-millisecond timer registered in the
- * same tick as `end()` always wins against a `'finish'` that cannot fire synchronously.
- * Without it the final flush would not merely be short but impossible. A tenth of a second
- * is what a close can overshoot by, against a default of thirty.
- */
-const MIN_CLOSE_FLUSH_MS = 100;
 
 /**
  * How many names one rotation will try before it accepts a collision.
@@ -305,6 +296,7 @@ export class FileSink implements LogSink {
   private pendingFlush: Promise<void> = promiseResolveIntrinsic(undefined);
   private didReportDrop = false;
   private isInitialized = false;
+  private hasFinishedInitialization = false;
   private initPromise?: Promise<void>;
   private isProcessing = false;
   private lastError?: Error;
@@ -389,13 +381,13 @@ export class FileSink implements LogSink {
 
     // Initialize asynchronously.
     //
-    // `initialize` reports its own failures and is built never to reject, but `close()`,
-    // `flush()` and `write()` all wait on this promise, so that is contained here rather
+    // `initialize` reports its own failures and is built never to reject, but `close()`
+    // and `flush()` wait on it and queued writes resume afterwards. Contain it here rather
     // than trusted at each wait - the containment `NamedPipeSink.close()` gives its own
     // init wait. Left raw, a rejection from a future change would reject `close()`, a
     // shutdown step that must not raise, and go unhandled out of the constructor while
     // nothing waits on it. Reported, not swallowed, since it would be a bug.
-    this.initPromise = observePromise(
+    const initialized = observePromise(
       this.initialize(),
       undefined,
       (error: unknown) => {
@@ -404,6 +396,12 @@ export class FileSink implements LogSink {
         );
       },
     );
+    this.initPromise = observePromise(initialized, () => {
+      this.hasFinishedInitialization = true;
+      // One observer drains the startup backlog, including after setup failed.
+      // Later writes retry setup through processQueue without observing init again.
+      void this.processQueue();
+    });
   }
 
   public write(entry: LogEntry): void {
@@ -484,19 +482,8 @@ export class FileSink implements LogSink {
     });
     this.enforceQueueLimit();
 
-    // Process queue if initialized
-    if (this.isInitialized) {
+    if (this.hasFinishedInitialization) {
       void this.processQueue();
-    } else if (this.initPromise) {
-      void observePromise(
-        this.initPromise,
-        () => {
-          void this.processQueue();
-        },
-        () => {
-          // Initialization failure is reported by initialize().
-        },
-      );
     }
   }
 
@@ -776,6 +763,7 @@ export class FileSink implements LogSink {
 
     if (this.logFileStream === stream) {
       this.logFileStream = undefined;
+      this.isInitialized = false;
     }
 
     return bytesLeft;
@@ -807,6 +795,7 @@ export class FileSink implements LogSink {
     // would drop a live stream on the floor.
     if (this.logFileStream === stream) {
       this.logFileStream = undefined;
+      this.isInitialized = false;
     }
   }
 
@@ -901,9 +890,6 @@ export class FileSink implements LogSink {
       // returns without marking the flag - a `close()` that landed mid-open, or a stream a
       // rotation has since replaced - means exactly that, and is left alone.
       await this.setupLogFile();
-
-      // Process any queued writes
-      await this.processQueue();
     } catch (error) {
       // `close()` may stop waiting for initialization before the filesystem operation
       // itself settles. Once closing has begun, do not claim that a failed setup is still
@@ -986,19 +972,9 @@ export class FileSink implements LogSink {
 
           this.lastError = err;
 
-          // A render that failed is not a write-health failure, and is not counted as
-          // one. `consecutiveFailures` / `isHealthy` answer "can this sink reach its
-          // destination" - a full disk, a directory that went away - and a `formatter`
-          // or a `JSON.stringify` that threw says nothing about the file. Counting it
-          // reported a sink writing every other line perfectly as broken, and diverged
-          // from `NamedPipeSink`, which has never counted a `'format'` failure against
-          // the pipe. The line itself is still reported, with `disposition: 'lost'`:
-          // this sink substitutes no default format, so there is nothing to fall back
-          // to and the entry does not arrive.
-          // `'close'` is excluded for a related reason: the destination answered nothing
-          // at all, the sink is on its way out, and `NamedPipeSink` does not hold a
-          // teardown against the connection either.
-          if (kind !== 'format' && kind !== 'close') {
+          // Setup, rendering, and close failures say nothing about writes on an
+          // open destination. Initialization has its own health flag.
+          if (kind === 'write') {
             this.consecutiveFailures++;
           }
 
@@ -1230,25 +1206,8 @@ export class FileSink implements LogSink {
       return;
     }
 
-    // The first entry this call discards, kept for the report below. `writeQueue[0]` is
-    // the oldest *surviving* entry - one that is still going to be written - so naming it
-    // told an `onError` handler that a line it will see again was lost, while the entries
-    // that genuinely were lost went unnamed.
-    let firstDropped: LogEntry | undefined;
-    let didEvict = false;
-
-    while (this.writeQueue.length > limit) {
-      const dropped = this.writeQueue.shift();
-
-      if (
-        firstDropped === undefined ||
-        (isDiagnosticEntry(firstDropped) && !isDiagnosticEntry(dropped?.entry))
-      ) {
-        firstDropped = dropped?.entry;
-      }
-      this.countDropped('queue_full');
-      didEvict = true;
-    }
+    const dropped = evictQueuedEntries(this.writeQueue, limit);
+    this.countDropped('queue_full', dropped.count);
 
     // Gated on an eviction this call made, not on the cumulative count, for the reason
     // `NamedPipeSink.enforceQueueLimit` is: `droppedEntries` now also counts entries
@@ -1257,7 +1216,7 @@ export class FileSink implements LogSink {
     // write behind it re-queued its entry - so a queue holding one line under a cap of
     // 10,000 reported a `'queue_full'`, and set `didReportDrop`, which suppresses every
     // report until the queue next drains.
-    if (!didEvict || this.didReportDrop) {
+    if (dropped.count === 0 || this.didReportDrop) {
       return;
     }
 
@@ -1274,7 +1233,7 @@ export class FileSink implements LogSink {
       // A dropped entry, never a surviving one: a handler that reads `'lost'` as "this
       // line is gone" and writes it elsewhere would otherwise duplicate an entry still
       // queued for the file.
-      { disposition: 'lost', entry: firstDropped },
+      { disposition: 'lost', entry: dropped.entry },
     );
   }
 
@@ -1692,6 +1651,7 @@ export class FileSink implements LogSink {
         // Ignore
       } finally {
         this.logFileStream = undefined;
+        this.isInitialized = false;
       }
     }
   }

@@ -1,4 +1,7 @@
-import { safeHandleCallbackAndWait } from '../safe-handle-callback';
+import {
+  safeHandleCallbackAndWait,
+  reportCallbackError,
+} from '../safe-handle-callback';
 import { matchesFilter, scalarHeader } from './utils';
 import { copyRegistrations } from './interceptors';
 import type {
@@ -82,8 +85,9 @@ async function runResponseObservers(
   for (let index = 0; index < observers.length; index++) {
     const { fn, filter } = observers[index];
 
-    if (
-      !matchesFilter(
+    let doesMatch: boolean;
+    try {
+      doesMatch = matchesFilter(
         filter ?? {},
         {
           status: response.status,
@@ -95,8 +99,12 @@ async function runResponseObservers(
         },
         phase.type,
         'response',
-      )
-    ) {
+      );
+    } catch (error) {
+      reportCallbackError('ResponseObserver filter', error);
+      continue;
+    }
+    if (!doesMatch) {
       continue;
     }
 
@@ -174,8 +182,9 @@ async function runErrorObservers(
   for (let index = 0; index < observers.length; index++) {
     const { fn, filter } = observers[index];
 
-    if (
-      !matchesFilter(
+    let doesMatch: boolean;
+    try {
+      doesMatch = matchesFilter(
         filter ?? {},
         {
           method: request.method,
@@ -183,8 +192,12 @@ async function runErrorObservers(
         },
         phase.type,
         'error',
-      )
-    ) {
+      );
+    } catch (error) {
+      reportCallbackError('ErrorObserver filter', error);
+      continue;
+    }
+    if (!doesMatch) {
       continue;
     }
 

@@ -509,7 +509,9 @@ client.addRequestInterceptor((request) => {
 });
 ```
 
-**On a successful copy, the request an interceptor chain returns is read once.** When
+**After the interceptor chain finishes, its returned request is copied once.** While
+the chain runs, later interceptor filters may read `method`, `requestURL`, and `body`
+from earlier interceptor results, including when those filters do not match. When
 the chain finishes, the client copies `requestURL`, `method`, `headers` and `body` into a
 request object of its own. Header entries are copied at that point: a single
 value is converted to a string, an array stays an array with each element
@@ -517,7 +519,7 @@ converted to a string, and a one-element array becomes that element's string.
 Every later check and use (URL validation, the browser-restricted header check,
 cookie-jar lookup, dispatch) reads that copy. A getter on
 the returned object, on the header record or on one of its entries is therefore consulted
-exactly once when the copy succeeds, and a URL that passed validation is the URL the
+exactly once by that final copy when it succeeds, and a URL that passed validation is the URL the
 request is sent to. If copying fails, the best-effort snapshot for error observers may
 read those values again. Any failure while taking that copy is an `interceptor_error`:
 a `requestURL` that is not a string, `headers` that is not an object, a getter that

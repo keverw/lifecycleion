@@ -1,3 +1,4 @@
+import { markNonRetryableAdapterError } from '../internal/adapter-error';
 import { defineEntry } from '../../internal/define-entry';
 import {
   applyIntrinsic,
@@ -14,10 +15,7 @@ import { materializeRequestHeaders } from '../internal/header-utils';
 import qs from 'qs';
 import { sleep } from '../../sleep';
 import { adoptPromise } from '../../internal/adopt-promise';
-import {
-  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
-  REDIRECT_STATUS_CODES,
-} from '../consts';
+import { REDIRECT_STATUS_CODES } from '../consts';
 import {
   isPlainJSONBodyObject,
   normalizeAdapterResponseHeaders,
@@ -416,9 +414,7 @@ export class MockAdapter implements HTTPAdapter {
       // without repairing the configuration. Only our validation error is terminal;
       // the caller-owned delay getter above keeps its usual adapter-error behavior.
       if (isTimeoutValidationError(error)) {
-        Object.defineProperty(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG, {
-          value: true,
-        });
+        markNonRetryableAdapterError(error);
       }
       throw error;
     }

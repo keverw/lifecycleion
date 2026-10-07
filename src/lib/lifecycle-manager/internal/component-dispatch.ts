@@ -52,6 +52,19 @@ export function isHookEntryBlocked(
   );
 }
 
+/** Select a running member for aggregate operations, excluding late-start cleanup. */
+export function isComponentSelectedRunningMember(
+  context: Pick<
+    ComponentAccessContext,
+    'isComponentRunning' | 'isLateStartCleanupPending'
+  >,
+  name: string,
+): boolean {
+  return (
+    context.isComponentRunning(name) && !context.isLateStartCleanupPending(name)
+  );
+}
+
 /**
  * Whether the component is running, by membership and by state: the half of
  * {@link isComponentEnterable} that is not {@link isHookEntryBlocked}, for a caller that

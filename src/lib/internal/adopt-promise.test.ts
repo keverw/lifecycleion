@@ -769,3 +769,23 @@ for (const entry of ['adoptPromise', 'adoptResult'] as const) {
     expect(isOwnThenCalled).toBe(false);
   });
 }
+
+test('containDeferredResult observes a native rejection reparented to Object.prototype', async () => {
+  const promise = Promise.reject(new Error('reparented native failure'));
+  void Object.setPrototypeOf(promise, Object.prototype);
+  expect(containDeferredResult(promise)).toBe(true);
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+});
+
+test('adoption ignores an own then on a native promise reparented to Object.prototype', async () => {
+  const promise = Promise.reject(new Error('real native failure'));
+  void Object.setPrototypeOf(promise, Object.prototype);
+  let calls = 0;
+  void Object.defineProperty(promise, 'then', {
+    value: () => {
+      calls++;
+    },
+  });
+  expect(await settle(adoptPromise(promise))).toBe('real native failure');
+  expect(calls).toBe(0);
+});

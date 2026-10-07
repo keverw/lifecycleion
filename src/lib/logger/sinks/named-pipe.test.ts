@@ -3404,7 +3404,7 @@ describe('NamedPipeSink', () => {
       expect(internals.abandonedOpens).toBe(1);
       expect(internals.isOpening).toBe(false);
       expect(
-        failures.filter((f) => f.error.message.includes('Gave up reopening')),
+        failures.filter((f) => f.error.message.includes('Cannot reopen')),
       ).toHaveLength(1);
 
       // Under the cap by one with nothing pending, a reconnect is allowed to try.
@@ -3461,7 +3461,7 @@ describe('NamedPipeSink', () => {
       }
 
       expect(captured).toHaveLength(1);
-      expect(captured[0]).toContain('Gave up reopening named pipe');
+      expect(captured[0]).toContain('Cannot reopen named pipe');
       expect(status.success).toBe(false);
       expect(sink.getHealth().isInitialized).toBe(false);
       expect(sink.getHealth().queueSize).toBe(1);

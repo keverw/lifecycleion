@@ -625,16 +625,33 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
    */
   private abortAttemptAndReadOwnership(context: AttemptContext): {
     operationResolver: PromiseProtectedResolver<RunResult<T>>;
-    isAttemptActive: boolean;
     hasNewStopRequest: boolean;
   } {
     const operationResolver = this.currentOperationResolver;
     const stopRequestToken = this.stopRequestToken;
     context.abort();
+    if (
+      this.stopRequestToken === stopRequestToken &&
+      this.currentState.currentAttemptContext === context &&
+      !context.handled
+    ) {
+      // A silent abort still ends an attempt. Publish its accounting before its
+      // replacement, without consulting retry policy or spending the retry budget.
+      context.handled = true;
+      this.currentState.currentAttemptContext = null;
+      this.cleanupTimers();
+      const attemptTimeElapsedMS = Date.now() - context.startTime;
+      this.currentState.lastAttemptTimeTakenMS = attemptTimeElapsedMS;
+      this.emit(ATTEMPT_HANDLED, {
+        attemptID: context.id,
+        status: 'skip',
+        operationTimeElapsedMS: this.timeTakenMS,
+        attemptTimeElapsedMS,
+        wasCanceled: true,
+      } satisfies OnAttemptHandledInfo<T>);
+    }
     return {
       operationResolver,
-      isAttemptActive:
-        this.currentState.currentAttemptContext === context && !context.handled,
       hasNewStopRequest: this.stopRequestToken !== stopRequestToken,
     };
   }
@@ -808,10 +825,17 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   private forceTryOperation(
     options?: ForceTryOptions,
   ): RunResult<T> | Promise<RunResult<T>> {
-    const shouldWaitForCompletion = options?.shouldWaitForCompletion ?? false;
-    const shouldAbortRunning = options?.shouldAbortRunning ?? false;
-
     return this.dispatchUnderLock('forceTry', () => {
+      const shouldWaitForCompletion = options?.shouldWaitForCompletion;
+      const shouldAbortRunning = options?.shouldAbortRunning;
+      if (
+        (shouldWaitForCompletion !== undefined &&
+          typeof shouldWaitForCompletion !== 'boolean') ||
+        (shouldAbortRunning !== undefined &&
+          typeof shouldAbortRunning !== 'boolean')
+      ) {
+        throw new TypeError('forceTry options must be booleans when provided');
+      }
       const refusal = this.checkForDisallowedPerOperationStates('forceTry', [
         'completed',
       ]);
@@ -921,7 +945,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
       return this.startOperation(
         'force',
-        shouldWaitForCompletion,
+        shouldWaitForCompletion ?? false,
         isContinuingOperation,
       );
     });
@@ -1180,9 +1204,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   ): void {
     // Guard against multiple calls to reportResult
     if (
-      // Ensure the context is the current one. A `forceTry` abort replaces it without
-      // handling it, so once its replacement settles the current context is null and
-      // the aborted attempt's late report must still be discarded.
+      // Ensure the context is the current one. Replaced aborted attempts have
+      // already been handled; their late reports must still be discarded.
       this.currentState.currentAttemptContext !== context ||
       // Ensure the result hasn't already been handled
       context.handled
@@ -1238,6 +1261,20 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       return; // Ensures we only handle the result once per context
     }
 
+    if (
+      status !== 'success' &&
+      status !== 'error' &&
+      status !== 'fatal' &&
+      status !== 'skip'
+    ) {
+      status = 'fatal';
+      valueInfo = {
+        error: new TypeError(
+          'RetryRunner reportResult status must be success, error, fatal, or skip',
+        ),
+      };
+    }
+
     const operationToken = this.operationToken;
     const operationResolver = this.currentOperationResolver;
 
@@ -1280,7 +1317,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         shouldQueryForRetry = true;
       } else if (status === 'fatal') {
         // Fatal errors are recorded, but never retried.
-        this.policy.shouldRetry(valueInfo.error ?? valueInfo.data, false);
+        this.policy.reportError(valueInfo.error ?? valueInfo.data);
 
         confirmCancellationInfo = {
           run: true,
@@ -1319,7 +1356,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           if (shouldRetryQuery.shouldRetry) {
             // Every retry goes through a timer, never a synchronous `attemptOperation`
             // call: `attempt-handled` for this attempt is emitted below, after this
-            // branch, and the next attempt must not start before it.
+            // branch. A listener can still force the next attempt synchronously
+            // during that publication; timer-driven retries wait for dispatch to end.
             //
             // Bounded again here, not only in `RetryPolicy`. `this.policy` is always a
             // `RetryPolicy` this runner built, whose delays are already finite, capped and at
@@ -1423,18 +1461,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       try {
         context = new AttemptContext();
       } catch (error) {
-        // A `forceTry` abort leaves the attempt it replaced current and unhandled until
-        // this replacement takes over. The operation ends here instead, so that attempt
-        // ends with it: left current, its late `reportResult('skip', 'aborted')` would be
-        // accepted as the live attempt's outcome and arm a retry in `fatal-error`, and
-        // `isAttemptRunning` would let a later `forceTry` reattach to it.
-        const replacedContext = this.currentState.currentAttemptContext;
-        if (replacedContext instanceof AttemptContext) {
-          replacedContext.handled = true;
-        }
         this.currentState.currentAttemptContext = null;
 
-        this.policy.shouldRetry(error, false);
+        this.policy.reportError(error);
         this.confirmCancellation('fatal-error', {
           status: 'attempt_fatal',
           code: 'unexpected_error',

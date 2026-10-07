@@ -1,3 +1,4 @@
+import { markNonRetryableAdapterError } from '../internal/adapter-error';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import {
   awaitBoxedPromise,
@@ -21,7 +22,6 @@ import type {
   StreamResponseCancel,
 } from '../types';
 import {
-  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   REDIRECT_STATUS_CODES,
   REQUEST_BODY_SETTLED_KEY,
@@ -2842,20 +2842,6 @@ function normalizeCRLEntry(entry: string | Buffer): string | Buffer | string[] {
   // A single block stays a Buffer: it needed no splitting, so hand back what
   // the caller gave rather than a re-encoded copy of it.
   return Array.isArray(split) ? split : entry;
-}
-
-/**
- * Tag a terminal adapter configuration failure so `HTTPClient` reports it as a
- * non-retryable `adapter_error` rather than retrying it as a network error.
- */
-function markNonRetryableAdapterError(error: unknown): void {
-  try {
-    Object.defineProperty(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG, {
-      value: true,
-    });
-  } catch {
-    // Not an object, or one that refuses the property; it is retried as before.
-  }
 }
 
 function splitCRLString(crl: string): string | string[] {

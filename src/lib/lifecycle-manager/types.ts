@@ -799,9 +799,10 @@ export interface ValueResult<T = unknown> {
 /**
  * State notifications are FIFO at the end of synchronous transitions, including failed
  * transitions. Listener re-entry queues notifications behind those pending; promises
- * are observed for failure, not awaited. Three control events instead run synchronously,
+ * are observed for failure, not awaited. Four control events instead run synchronously,
  * even during another event's delivery: lifecycle-manager:signals-attached,
- * signal:shutdown, and lifecycle-manager:shutdown-escalation-forced. This preserves
+ * lifecycle-manager:shutdown-initiated, signal:shutdown, and
+ * lifecycle-manager:shutdown-escalation-forced. This preserves
  * pre-start intervention and immediate force-exit behavior; there is no global FIFO
  * across control events and notifications. Payloads describe their originating change,
  * while live status may reflect changes made by earlier listeners.

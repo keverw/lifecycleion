@@ -868,13 +868,11 @@ describe('FileSink', () => {
     // Get access to private properties
     const privateSink = sink as any;
 
-    // Destroy the stream to cause write failures
-    privateSink.destroyStream();
-
-    // Make sure it stays destroyed by preventing recreation
-    privateSink.setupLogFile = mock(() => {
-      throw new Error('Failed to setup log file');
-    });
+    // Fail writes on the initialized destination. A failed setup belongs to the
+    // separate initialization flag and must not increment consecutiveFailures.
+    privateSink.writeEntry = mock(() =>
+      Promise.reject(new Error('Failed to write to log file')),
+    );
 
     // Write an entry - it should fail and retry
     const entry: LogEntry = {

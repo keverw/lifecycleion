@@ -283,14 +283,16 @@ class RestartPreparationRefusal extends Error {
   }
 
   /**
-   * The refusal `error` carries, if it is one. A private brand check, not `instanceof`:
+   * The refusal `error` carries, or rethrow an unrelated failure for the public net.
+   * A private brand check, not `instanceof`:
    * that walks the thrown value's prototype chain, and a getter's own throw - a proxy
    * with a `getPrototypeOf` trap - would run caller code there that can replace it.
    */
-  public static resultOf(error: unknown): RestartResult | undefined {
-    return typeof error === 'object' && error !== null && #result in error
-      ? error.#result
-      : undefined;
+  public static resultOrRethrow(error: unknown): RestartResult {
+    if (typeof error === 'object' && error !== null && #result in error) {
+      return error.#result;
+    }
+    throw error;
   }
 }
 
@@ -482,8 +484,8 @@ export class LifecycleManager
   // The shutdown pass that most recently began, when it asked to abort pending starts
   // (`abortPendingStarts`), keyed by its `shutdownToken`. A start whose caller code began
   // that pass after the start claimed its component - before it could be interrupted -
-  // delivers the pass's cue to itself (see `startComponentAttempt()`), unless it is one
-  // of the starts that requested the pass. Cleared once that pass ends.
+  // delivers the pass's cue to itself (see `startComponentAttempt()`), unless its
+  // lifecycle handle requested the pass from a starting listener. Cleared once the pass ends.
   private pendingStartAbortRequest:
     | {
         shutdownToken: string;
@@ -796,16 +798,14 @@ export class LifecycleManager
       action: _action,
       requestedPosition: _requestedPosition,
       actualPosition: _actualPosition,
-      manualPositionRespected: isManualPositionRespected,
+      manualPositionRespected: isManualPositionRespectedIgnored,
       targetFound: wasTargetFound,
-      autoStartDeferred: isAutoStartDeferred,
       ...registration
     } = result;
 
     return {
       ...registration,
       action: 'register',
-      ...(isAutoStartDeferred === true ? { autoStartDeferred: true } : {}),
     };
   }
 
@@ -3771,7 +3771,7 @@ export class LifecycleManager
         try {
           await rollBackOnce(startedComponents);
           if (hasShutdownBegun()) {
-            return abortedByShutdown();
+            return abortedByShutdown(undefined, crashError);
           }
         } catch (rollbackError) {
           reportCallbackError(
@@ -4184,11 +4184,7 @@ export class LifecycleManager
     } catch (error) {
       // Only the refusal is answered here. Anything else - a getter's own throw, a
       // rejected budget - still reaches `settleOperation()` to be classified.
-      const refusal = RestartPreparationRefusal.resultOf(error);
-      if (refusal) {
-        return refusal;
-      }
-      throw error;
+      return RestartPreparationRefusal.resultOrRethrow(error);
     }
     const {
       startupOptions,
@@ -4229,11 +4225,7 @@ export class LifecycleManager
     try {
       this.validateLateRestartStopBudgets(restartSnapshots, validatedStops);
     } catch (error) {
-      const refusal = RestartPreparationRefusal.resultOf(error);
-      if (refusal) {
-        return refusal;
-      }
-      throw error;
+      return RestartPreparationRefusal.resultOrRethrow(error);
     }
     // A refusal made before the stop phase: nothing was stopped, and no shutdown pass
     // is announced.
@@ -6332,8 +6324,9 @@ export class LifecycleManager
       // Components a concurrent stop or start owned when the loop reached them, or whose
       // own stop this pass failed and left running. Their dependencies stay protected
       // only while that owner is still running, in flight, or has a start still unfinished:
-      // one whose stop has since stalled releases them, as a component this pass stalls
-      // itself does. A dependency skipped on their account holds its own dependencies the
+      // one whose stop has since stalled releases them when haltOnStall is false;
+      // otherwise that settled failure halts the remaining stops. A dependency skipped
+      // on their account holds its own dependencies the
       // same way: the loop comes back to it only once that owner has settled, so until
       // then it may still be running on them.
       const concurrentOwners = new Set<string>();
@@ -6352,6 +6345,9 @@ export class LifecycleManager
       // check: a component's dependencies are read at most once per check, whether it is
       // reached as an owner, as a skip, or down another owner's chain, and the walk ends
       // as soon as it reaches `name`.
+      // Repeated checks can be quadratic for a long protected chain. Even consecutive
+      // skips run caller-owned dependency getters, so caching across them would change
+      // live dependency semantics; the checks around logging also bracket caller code.
       const isProtectedByConcurrentOwner = (name: string): boolean => {
         const walked = new Set<string>();
         const reaches = (from: string): boolean => {
@@ -6587,7 +6583,17 @@ export class LifecycleManager
         const runStopLoop = async (
           names: readonly string[],
         ): Promise<boolean> => {
+          let sliceStartedAt = Date.now();
           for (const [index, name] of names.entries()) {
+            // Consecutive protected skips otherwise never yield: their fresh graph
+            // walks can starve both the shutdown deadline and the concurrent stop's
+            // timers. Yield between candidates, then recheck all live ownership below.
+            if (Date.now() - sliceStartedAt >= 8) {
+              await new promiseConstructorIntrinsic<void>((resolve) => {
+                setTimeout(resolve, 0);
+              });
+              sliceStartedAt = Date.now();
+            }
             // Automatic cleanup already owns teardown; unrelated stops can proceed
             // before we join it at a dependency boundary or at the end of the pass.
             if (currentStarts.has(name) && !this.isComponentUp(name)) {
@@ -6605,6 +6611,28 @@ export class LifecycleManager
                 {
                   params: { timeoutMS: effectiveTimeout },
                 },
+              );
+              return true;
+            }
+
+            // A stop owned by another caller may have stalled while this pass awaited
+            // an unrelated component. Apply the same halt policy as when that stall
+            // was already visible when the loop first reached its component.
+            const concurrentStall =
+              shouldHaltOnStall && this.stalledComponents.size > 0
+                ? [...concurrentOwners].find(
+                    (owner) =>
+                      this.stalledComponents.has(owner) &&
+                      !isStartStillInProgress(owner),
+                  )
+                : undefined;
+            if (concurrentStall !== undefined) {
+              for (const skipped of names.slice(index)) {
+                haltSkippedNames.add(skipped);
+              }
+              this.logger.warn(
+                'Halting shutdown after component stop failure (haltOnStall=true)',
+                { params: { componentName: concurrentStall } },
               );
               return true;
             }
@@ -7544,8 +7572,12 @@ export class LifecycleManager
   }
 
   private releaseStartSettlements(name: string, exceptClaim?: symbol): void {
-    for (const [claim, settlement] of this.startSettlements) {
-      if (settlement.name === name && claim !== exceptClaim) {
+    const exceptSettlement =
+      exceptClaim === undefined
+        ? undefined
+        : this.startSettlements.get(exceptClaim);
+    for (const settlement of this.startSettlementsByName.get(name) ?? []) {
+      if (settlement !== exceptSettlement) {
         settlement.finish();
       }
     }
@@ -7808,15 +7840,12 @@ export class LifecycleManager
       };
     }
 
-    // The instance the attempt read, when there is one, is checked directly rather than
-    // looked up by name again.
+    // The committed name index also verifies the captured registration's identity.
+    const registered = this.getComponent(name);
     const component =
-      expected === undefined
-        ? this.getComponent(name)
-        : this.registeredNames.get(expected) === name &&
-            this.components.includes(expected)
-          ? expected
-          : undefined;
+      expected === undefined || registered === expected
+        ? registered
+        : undefined;
 
     if (!component) {
       return {
@@ -8410,8 +8439,9 @@ export class LifecycleManager
       // A pass with `abortPendingStarts` that began after the claim - from caller code
       // this attempt ran since: the warnings, the starting log or event, the
       // unexpected-stop handler - found no `interruptStart()` here yet and skipped this
-      // start, then waited on it. Its cue is delivered now that `start()` has the signal -
-      // unless this start requested that pass itself, which the pass leaves alone too.
+      // start, then waited on it. Its cue is delivered now that `start()` has the signal,
+      // unless its own lifecycle handle requested the pass. A starting listener can
+      // use that handle before the hook runs; it still counts as a requesting start.
       //
       // A microtask later, queued after `markRawStartSettled` above: a `start()` that
       // settled synchronously has cleared `rawStartPending` by then, and a settled start
@@ -8735,21 +8765,19 @@ export class LifecycleManager
       // late stop from that stall cannot settle this run before the net stops it.
       const isStartupTimeout =
         startupTimeoutError !== undefined && error === startupTimeoutError;
-      if (
-        didStartResolve &&
-        !isStartupTimeout &&
-        this.componentStates.get(name) === 'starting'
-      ) {
-        try {
-          this.withTransition(() => {
-            this.markStartRunning(name, flags.forceStalled);
-          });
-        } catch {
-          // Left to the failed-start path below.
+      if (didStartResolve && !isStartupTimeout) {
+        if (this.componentStates.get(name) === 'starting') {
+          try {
+            this.withTransition(() => {
+              this.markStartRunning(name, flags.forceStalled);
+            });
+          } catch {
+            // The start net contains the bookkeeping failure as well.
+          }
         }
-        if (this.runningComponents.has(name)) {
-          throw error;
-        }
+        // Cleanup may already have stopped this resolved start. The start net keeps
+        // that state; the failed-hook path below would restore the pre-start state.
+        throw error;
       }
 
       // Contained, as unregister contains it: an override that throws here escaped to the
@@ -9244,11 +9272,7 @@ export class LifecycleManager
           true,
         )
       ) {
-        return {
-          success: true,
-          componentName: name,
-          status: this.getComponentStatus(name),
-        };
+        return this.successfulStopResult(name);
       }
     }
 
@@ -9928,21 +9952,20 @@ export class LifecycleManager
               }),
           abandonedForceMessage,
         );
-        const supersededResult: ComponentOperationResult = {
-          success: true,
-          componentName: name,
-          status: this.getComponentStatus(name),
-        };
-        // Last, once the result is built: the listeners are the component's code.
-        if (supersededReason !== undefined) {
-          this.abortHookSignal(
-            forceAbort,
-            supersededReason,
-            name,
-            'onShutdownForce',
-          );
+        try {
+          return this.successfulStopResult(name);
+        } finally {
+          // Snapshot first because abort listeners run caller code, but always abort
+          // the abandoned force work even if building or reporting that snapshot fails.
+          if (supersededReason !== undefined) {
+            this.abortHookSignal(
+              forceAbort,
+              supersededReason,
+              name,
+              'onShutdownForce',
+            );
+          }
         }
-        return supersededResult;
       }
 
       return this.withTransition(() => {
@@ -9992,11 +10015,7 @@ export class LifecycleManager
         if (forceTimeoutError === undefined || error !== forceTimeoutError) {
           outcomeObserver.reportForeground(error, abandonedForceMessage);
         }
-        return {
-          success: true,
-          componentName: name,
-          status: this.getComponentStatus(name),
-        };
+        return this.successfulStopResult(name);
       }
 
       forceOutcome = 'failed';
@@ -10052,6 +10071,23 @@ export class LifecycleManager
         clearTimeout(timeoutHandle);
       }
     }
+  }
+
+  /**
+   * A confirmed stop remains successful even if its diagnostic status cannot be read.
+   * Late graceful completion and superseded force attempts share this boundary.
+   */
+  private successfulStopResult(name: string): ComponentOperationResult {
+    const result: ComponentOperationResult = {
+      success: true,
+      componentName: name,
+    };
+    try {
+      result.status = this.getComponentStatus(name);
+    } catch (error) {
+      reportCallbackError('lifecycle-manager component stop', error);
+    }
+    return result;
   }
 
   /**

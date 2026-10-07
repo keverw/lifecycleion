@@ -586,7 +586,11 @@ export function snapshotSet<T>(values: Set<T>): T[] {
   const snapshot: T[] = [];
   applyIntrinsic(setForEachIntrinsic, values, [
     (value: T): void => {
-      snapshot[snapshot.length] = value;
+      defineEntry(
+        snapshot as unknown as Record<string, T>,
+        snapshot.length,
+        value,
+      );
     },
   ]);
   return snapshot;

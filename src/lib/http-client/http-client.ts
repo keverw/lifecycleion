@@ -3402,18 +3402,14 @@ export class BaseHTTPClient {
     phase: ResponseObserverPhase,
   ): Promise<void> {
     const parent = this._parentClient?._responseObservers;
-    const parentChain = parent?.hasObservers() ? parent.snapshot() : undefined;
-    const ownChain = this._responseObservers.hasObservers()
-      ? this._responseObservers.snapshot()
-      : undefined;
+    const parentChain = parent?.snapshot();
+    const ownChain = this._responseObservers.snapshot();
 
     if (parentChain) {
       await parentChain(response, request, phase);
     }
 
-    if (ownChain !== undefined) {
-      await ownChain(response, request, phase);
-    }
+    await ownChain(response, request, phase);
   }
 
   private async _runErrorObservers(
@@ -3422,18 +3418,14 @@ export class BaseHTTPClient {
     phase: ErrorObserverPhase,
   ): Promise<void> {
     const parent = this._parentClient?._errorObservers;
-    const parentChain = parent?.hasObservers() ? parent.snapshot() : undefined;
-    const ownChain = this._errorObservers.hasObservers()
-      ? this._errorObservers.snapshot()
-      : undefined;
+    const parentChain = parent?.snapshot();
+    const ownChain = this._errorObservers.snapshot();
 
     if (parentChain) {
       await parentChain(error, request, phase);
     }
 
-    if (ownChain !== undefined) {
-      await ownChain(error, request, phase);
-    }
+    await ownChain(error, request, phase);
   }
 
   /**

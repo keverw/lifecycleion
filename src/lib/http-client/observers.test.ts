@@ -1,3 +1,4 @@
+import { captureErrorReports } from './test-helpers/capture-error-reports';
 import { describe, test, expect } from 'bun:test';
 import { ResponseObserverManager, ErrorObserverManager } from './observers';
 import type { AttemptRequest, HTTPResponse, HTTPClientError } from './types';
@@ -120,29 +121,25 @@ describe('ResponseObserverManager', () => {
     expect(calls).toBe(1);
   });
 
-  test('a snapshot chain rejects rather than throwing synchronously', async () => {
+  test('a throwing filter-context getter is reported without rejecting the chain', async () => {
     const mgr = new ResponseObserverManager();
     const failure = new Error('status read failed');
     mgr.add(() => {});
     const response = makeResponse();
-    void Object.defineProperty(response, 'status', {
+    Object.defineProperty(response, 'status', {
       get() {
         throw failure;
       },
     });
-    const chain = mgr.snapshot();
-
-    let returned: Promise<unknown> | undefined;
-
-    expect(() => {
-      returned = chain(response, makeRequest(), { type: 'final' });
-    }).not.toThrow();
-    expect(
-      await returned?.then(
-        () => 'resolved',
-        (error: unknown) => error,
-      ),
-    ).toBe(failure);
+    const { reports, release } = captureErrorReports();
+    try {
+      expect(
+        await mgr.snapshot()(response, makeRequest(), { type: 'final' }),
+      ).toBeUndefined();
+      expect(reports.length).toBeGreaterThan(0);
+    } finally {
+      release();
+    }
   });
 
   test('calls observers in order', async () => {
@@ -414,29 +411,25 @@ describe('ErrorObserverManager', () => {
     expect(calls).toBe(1);
   });
 
-  test('a snapshot chain rejects rather than throwing synchronously', async () => {
+  test('a throwing filter-context getter is reported without rejecting the chain', async () => {
     const mgr = new ErrorObserverManager();
     const failure = new Error('method read failed');
     mgr.add(() => {});
     const request = makeRequest();
-    void Object.defineProperty(request, 'method', {
+    Object.defineProperty(request, 'method', {
       get() {
         throw failure;
       },
     });
-    const chain = mgr.snapshot();
-
-    let returned: Promise<unknown> | undefined;
-
-    expect(() => {
-      returned = chain(makeError(), request, { type: 'final' });
-    }).not.toThrow();
-    expect(
-      await returned?.then(
-        () => 'resolved',
-        (error: unknown) => error,
-      ),
-    ).toBe(failure);
+    const { reports, release } = captureErrorReports();
+    try {
+      expect(
+        await mgr.snapshot()(makeError(), request, { type: 'final' }),
+      ).toBeUndefined();
+      expect(reports.length).toBeGreaterThan(0);
+    } finally {
+      release();
+    }
   });
 
   test('calls observers in order', async () => {
@@ -571,3 +564,40 @@ describe('ErrorObserverManager', () => {
     expect(phases).toEqual(['final', 'retry', 'final']);
   });
 });
+
+test.each(['final', 'retry'] as const)(
+  'malformed response observer filter cannot block %s delivery',
+  async (phase) => {
+    const manager = new ResponseObserverManager();
+    let calls = 0;
+    manager.add(
+      () => {
+        throw new Error('must not run');
+      },
+      {
+        phases: ['final', 'retry'],
+        statusCodes: {} as number[],
+      },
+    );
+    manager.add(
+      () => {
+        calls++;
+      },
+      { phases: ['final', 'retry'] },
+    );
+    const { reports, release } = captureErrorReports();
+    try {
+      await manager.snapshot()(
+        makeResponse(),
+        makeRequest(),
+        phase === 'final'
+          ? { type: 'final' }
+          : { type: 'retry', attempt: 1, maxAttempts: 2 },
+      );
+      expect(calls).toBe(1);
+      expect(reports.length).toBeGreaterThan(0);
+    } finally {
+      release();
+    }
+  },
+);

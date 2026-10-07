@@ -307,7 +307,9 @@ export function findDependencyCycle(
 }
 
 /**
- * Find circular dependency cycles using Depth-First Search (DFS) with cycle detection.
+ * Find a representative set of circular dependency cycles using Depth-First Search.
+ * This is not an exhaustive enumeration, even for small overlapping cycles: nodes
+ * visited along one path are not revisited along every alternative path.
  *
  * Algorithm: DFS with visited set and path-stack tracking
  * - Uses 'visited' set to ensure each node is processed exactly once (prevents infinite loops)

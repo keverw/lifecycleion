@@ -23,6 +23,7 @@ import {
 } from '../../internal/intrinsics';
 import {
   DEFAULT_CLOSE_TIMEOUT_MS,
+  MIN_CLOSE_FLUSH_MS,
   resolveMaxQueueSize,
   resolveMaxRetries,
 } from './internal/queue-policy';
@@ -36,6 +37,7 @@ import {
   type SinkFailureDisposition,
   type SinkFailureKind,
 } from './internal/sink-failure';
+import { evictQueuedEntries } from './internal/queue-accounting';
 import { FormatReportScheduler } from './internal/format-report-scheduler';
 
 export type {
@@ -190,26 +192,6 @@ interface QueuedPipeEntry extends RenderedLine {
 }
 
 /**
- * How long the sink waits between automatic reopen attempts.
- *
- * A reopen is a `stat` plus an `open`, and a dead pipe is exactly when the application is
- * logging hardest, so one attempt per entry would answer an outage with a syscall storm.
- * A second is short enough that a reader restarting is picked up promptly and long enough
- * that a pipe which is never coming back costs nothing to keep asking about.
- */
-/**
- * The least time `close()`'s final flush is given, however little of `closeTimeoutMS` is
- * left by the time it is reached.
- *
- * The init wait, the drain loop and the flush share one deadline, which is what keeps a
- * documented thirty-second close from taking sixty. Shared exactly, though, the flush can
- * be handed zero - and a zero-millisecond destroy registered before `end()` is called in
- * the same tick beats a `'finish'` that cannot fire synchronously, so the flush would not
- * merely be short but impossible. This is the floor that keeps it a flush.
- */
-const MIN_CLOSE_FLUSH_MS = 100;
-
-/**
  * How long `close()` keeps asking for a reader before giving up on its backlog.
  *
  * A FIFO's consumer is frequently restarted with the process writing to it, so at shutdown
@@ -223,6 +205,14 @@ const CLOSE_REOPEN_GRACE_MS = 500;
 /** How often {@link CLOSE_REOPEN_GRACE_MS} re-asks. Each attempt is one non-blocking probe. */
 const CLOSE_REOPEN_POLL_MS = 50;
 
+/**
+ * How long the sink waits between automatic reopen attempts.
+ *
+ * A reopen is a `stat` plus an `open`, and a dead pipe is exactly when the application is
+ * logging hardest, so one attempt per entry would answer an outage with a syscall storm.
+ * A second is short enough that a reader restarting is picked up promptly and long enough
+ * that a pipe which is never coming back costs nothing to keep asking about.
+ */
 const REOPEN_COOLDOWN_MS = 1000;
 
 /**
@@ -884,13 +874,18 @@ export class NamedPipeSink implements LogSink {
       // nothing about the kernel's count and the open may yet answer.
       const openIfAbandoned = this.pendingStream === undefined ? 0 : 1;
 
-      if (this.isAtAbandonedOpenCapAfter(openIfAbandoned)) {
+      if (this.isAtAbandonedOpenCapAfter(openIfAbandoned, false)) {
+        const error = new Error(
+          `Cannot reopen named pipe at ${this.pipePath}: ${String(MAX_ABANDONED_OPENS)} earlier opens are still blocked`,
+        );
+        // This explicit request reports every time; the automatic cap report
+        // stays deduplicated for the rest of the same outage.
+        this.reportedAbandonedOpenCap = true;
+        this.handleError('setup', error);
         return {
           success: false,
           reason: 'error',
-          error: new Error(
-            `Cannot reopen named pipe at ${this.pipePath}: ${String(MAX_ABANDONED_OPENS)} earlier opens are still blocked`,
-          ),
+          error,
         };
       }
 
@@ -915,7 +910,7 @@ export class NamedPipeSink implements LogSink {
       this.reportedDiagnosticOpenFailureCap = false;
       this.reportedOpenFailureCap = false;
 
-      this.initPromise = this.initializePipe();
+      this.initPromise = this.initializePipe(false, false, true);
       await this.initPromise;
 
       // Check if initialization actually succeeded
@@ -1311,6 +1306,7 @@ export class NamedPipeSink implements LogSink {
   private async initializePipe(
     isDiagnosticRetry = false,
     shouldSuppressRetryReport = false,
+    shouldReportNoReader = false,
   ): Promise<void> {
     const hasOrdinaryWork = this.writeQueue.some(
       (queued) =>
@@ -1330,7 +1326,11 @@ export class NamedPipeSink implements LogSink {
     this.isOpening = true;
 
     try {
-      await this.openPipe(isDiagnostic, shouldSuppressFailureReport);
+      await this.openPipe(
+        isDiagnostic,
+        shouldSuppressFailureReport,
+        shouldReportNoReader,
+      );
     } finally {
       this.isOpening = false;
     }
@@ -1339,6 +1339,7 @@ export class NamedPipeSink implements LogSink {
   private async openPipe(
     isDiagnostic = false,
     shouldSuppressFailureReport = false,
+    shouldReportNoReader = false,
   ): Promise<void> {
     // These closures retain the attempt's origin through awaits and stream events.
     const reportOpenFailure = (
@@ -1472,12 +1473,16 @@ export class NamedPipeSink implements LogSink {
       }
 
       if (probe === undefined) {
-        // Quiet, deliberately. A pipe waiting for its reader is where this sink starts, not
-        // a failure, and it was silent before this too - the blocked open simply sat there
-        // saying nothing. Everything a consumer could observe is unchanged: `isInitialized`
-        // stays false, `lastError` is untouched, `onError` is not called, and `getHealth()`
-        // shows the queue growing behind the outage. Reporting it instead would fire once
-        // per reopen attempt, for the whole time a reader is late.
+        if (shouldReportNoReader) {
+          reportOpenFailure(
+            'setup',
+            `No reader is connected to named pipe at ${this.pipePath}`,
+            undefined,
+          );
+        }
+        // Automatic probes stay quiet: a pipe waiting for its reader is where this
+        // sink starts. Only the explicit reconnect above reports this result;
+        // reporting every timer attempt would fire once a second while a reader is late.
         //
         // The one thing the blocking open did for free was wait: it promoted the stream and
         // flushed the queue the moment a reader arrived, with no timer and no further
@@ -2312,12 +2317,15 @@ export class NamedPipeSink implements LogSink {
    * abandon as though it already had - for `reconnect()`, which gives up the pending open
    * before it starts its own.
    */
-  private isAtAbandonedOpenCapAfter(pendingAbandons: number): boolean {
+  private isAtAbandonedOpenCapAfter(
+    pendingAbandons: number,
+    shouldReport = true,
+  ): boolean {
     if (this.abandonedOpens + pendingAbandons < MAX_ABANDONED_OPENS) {
       return false;
     }
 
-    if (!this.reportedAbandonedOpenCap) {
+    if (shouldReport && !this.reportedAbandonedOpenCap) {
       this.reportedAbandonedOpenCap = true;
 
       this.handleError(
@@ -2445,31 +2453,15 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
-    let didEvict = false;
-    let firstDropped: LogEntry | undefined;
-
-    while (this.writeQueue.length > limit) {
-      // A dropped entry, never a surviving one, as `FileSink`'s cap report: a handler
-      // that reads `'lost'` as "this line is gone" and writes it elsewhere would
-      // otherwise duplicate an entry still queued for the pipe.
-      const dropped = this.writeQueue[0]?.entry;
-      if (
-        firstDropped === undefined ||
-        (isDiagnosticEntry(firstDropped) && !isDiagnosticEntry(dropped))
-      ) {
-        firstDropped = dropped;
-      }
-      this.writeQueue.shift();
-      this.countDropped('queue_full');
-      didEvict = true;
-    }
+    const dropped = evictQueuedEntries(this.writeQueue, limit);
+    this.countDropped('queue_full', dropped.count);
 
     // Gated on an eviction this call made, not on the cumulative count.
     // `droppedEntries` also counts entries given up on by `requeue` after their retries
     // ran out, and those are not an overflow: reading the counter here reported a
     // `'queue_full'` the queue never had, and set `didReportDrop` - so the real overflow
     // that followed was suppressed until the queue next drained.
-    if (!didEvict || this.didReportDrop) {
+    if (dropped.count === 0 || this.didReportDrop) {
       return;
     }
 
@@ -2484,7 +2476,7 @@ export class NamedPipeSink implements LogSink {
       new Error(
         `Pipe queue is full (maxQueueSize=${limit}); dropping the oldest entries`,
       ),
-      { disposition: 'lost', entry: firstDropped },
+      { disposition: 'lost', entry: dropped.entry },
     );
   }
 
@@ -2892,8 +2884,8 @@ export class NamedPipeSink implements LogSink {
         kind,
         error: failure,
         target: this.pipePath,
-        entry: options?.entry,
-        attempt: options?.attempt,
+        ...(options?.entry === undefined ? {} : { entry: options.entry }),
+        ...(options?.attempt === undefined ? {} : { attempt: options.attempt }),
         disposition: options?.disposition ?? 'no_entry',
       },
       this.onError,

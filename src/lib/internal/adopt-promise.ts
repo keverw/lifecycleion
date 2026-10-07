@@ -5,7 +5,6 @@ import {
   getIntrinsic,
   getPrototypeOfIntrinsic,
   hasOwnPropertyIntrinsic,
-  objectPrototypeIntrinsic,
   rangeErrorPrototypeIntrinsic,
   typeErrorPrototypeIntrinsic,
   ordinaryInstanceOf,
@@ -46,22 +45,6 @@ function hasOwnThen(value: object): boolean {
     return applyIntrinsic(hasOwnPropertyIntrinsic, value, ['then']);
   } catch {
     return true;
-  }
-}
-
-/**
- * Whether `value` is a plain object of this realm - `Object.prototype` directly above it -
- * which no native promise is unless someone rebuilt one's prototype chain. Such a value is
- * spared trying the intrinsic `then` on it, which can only throw - and capture a stack - to
- * be caught. A native promise from another realm has that realm's `Promise.prototype`, not
- * this `Object.prototype`, so it still reaches the intrinsic. A `getPrototypeOf` trap
- * that throws answers `false`, so the intrinsic is tried.
- */
-function hasObjectPrototype(value: object): boolean {
-  try {
-    return getPrototypeOfIntrinsic(value) === objectPrototypeIntrinsic;
-  } catch {
-    return false;
   }
 }
 
@@ -245,10 +228,6 @@ function isSpeciesRefusal(error: unknown): boolean {
  * that starts its work in `then` would mean second-guessing the class, which is the
  * value's own behaviour to define.
  *
- * Known limit: a native promise whose prototype was replaced with `Object.prototype`, and
- * which carries its own `then`, is taken for the plain thenable it looks like and adopted
- * as `await` would adopt one: through that `then`.
- *
  * Known limit: protecting a native promise's own then requires forwarding its state
  * into a native promise we own (including for foreign realms). Native resolution of
  * that forwarding promise inspects a fulfilled object's then. A getter that changes
@@ -281,8 +260,8 @@ export function adoptPromise<T>(
 /**
  * Probe an own-then value before reading its override. Promise.prototype.then uses
  * the internal promise slot, so this also observes foreign-realm promises that fail
- * instanceof and have a throwing or non-callable own then. Ordinary plain thenables
- * skip the probe. A failed probe on a local promise is an adoption failure (for
+ * instanceof and have a throwing or non-callable own then. Plain thenables also reach the probe: a native promise may have
+ * been reparented directly to Object.prototype. A failed probe on a local promise is an adoption failure (for
  * example a broken constructor/species), as is any failure the slot check cannot
  * throw - only a value that passed it gets that far - and a `TypeError` in the species
  * path's own wording, for the same reason. On other objects, normal thenable handling
@@ -304,10 +283,6 @@ function adoptOwnPromise<T>(
     return undefined;
   }
   const isOnPromiseChain = isPromise ?? inheritsFromPromise(value);
-  // Nothing with `Promise.prototype` on its chain has `Object.prototype` directly above it.
-  if (!isOnPromiseChain && hasObjectPrototype(value)) {
-    return undefined;
-  }
   let didAdopt = false;
   const pending = new promiseConstructorIntrinsic<Awaited<T>>(
     (resolve, reject) => {
@@ -449,19 +424,17 @@ export function adoptResult(
 export function containDeferredResult(
   result: object,
 ): boolean | UnreadableReturn {
-  // A plain object of this realm is no native promise; spared the probe's throw.
-  if (!hasObjectPrototype(result)) {
-    try {
-      attachIntrinsicReactions(result, noop, noop);
+  // Prototype identity cannot rule out a native promise: callers can reparent it.
+  try {
+    attachIntrinsicReactions(result, noop, noop);
+    return true;
+  } catch (error) {
+    if (
+      inheritsFromPromise(result) ||
+      !isSlotCheckFailure(error) ||
+      isSpeciesRefusal(error)
+    ) {
       return true;
-    } catch (error) {
-      if (
-        inheritsFromPromise(result) ||
-        !isSlotCheckFailure(error) ||
-        isSpeciesRefusal(error)
-      ) {
-        return true;
-      }
     }
   }
   let then: unknown;

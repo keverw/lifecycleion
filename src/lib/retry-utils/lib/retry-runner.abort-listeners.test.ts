@@ -282,7 +282,7 @@ test('an attempt that cannot be set up ends the operation instead of escaping', 
 
 test('a forced replacement that cannot be set up detaches the aborted attempt', async () => {
   // `forceTry({ shouldAbortRunning: true })` aborts the running attempt and moves on
-  // without handling it. If the replacement cannot even be set up, the operation ends
+  // after handling it as skipped. If the replacement cannot even be set up, the operation ends
   // fatally - and the aborted attempt must end with it, not stay current, where its late
   // `reportResult` would be accepted, arm a retry in `fatal-error`, and let a later
   // `forceTry` claim to be running.
@@ -343,7 +343,7 @@ test('a forced replacement that cannot be set up detaches the aborted attempt', 
   await sleep(20);
 
   expect(escaped).toEqual([]);
-  expect(attemptsHandled).toBe(0);
+  expect(attemptsHandled).toBe(1);
   expect(runner.isRetryPending).toBe(false);
   expect(runner.runnerState).toBe('fatal-error');
 

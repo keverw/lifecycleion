@@ -8,7 +8,10 @@ import type {
   SignalBroadcastResult,
   ComponentSignalResult,
 } from '../types';
-import { allPromises } from '../../internal/intrinsics';
+import {
+  allPromises,
+  promiseResolveIntrinsic,
+} from '../../internal/intrinsics';
 import { isObjectLike } from '../../internal/is-object-like';
 import { toError, describeError } from '../../to-error';
 import {
@@ -23,6 +26,7 @@ import {
 import {
   dispatchAnnouncedHook,
   isComponentEnterable,
+  isComponentSelectedRunningMember,
   readHookThenRecheck,
 } from './component-dispatch';
 
@@ -372,16 +376,28 @@ export async function checkAllHealthOperation(
   // `stopped`, as a broadcast reports it.
   const runningComponents = context.components.filter((c) => {
     const name = context.nameOf(c);
-    return (
-      context.isComponentRunning(name) &&
-      !context.isLateStartCleanupPending(name)
-    );
+    return isComponentSelectedRunningMember(context, name);
   });
 
   // Check health of all running components in parallel
-  const healthChecks = runningComponents.map((c) =>
-    context.checkComponentHealth(context.nameOf(c)),
-  );
+  const healthChecks = runningComponents.map((component) => {
+    const name = context.nameOf(component);
+    // Earlier hook getters can replace a later selected instance before this dispatch.
+    // Keep the report about its original selection, never the replacement by name.
+    if (context.getComponent(name) !== component) {
+      return promiseResolveIntrinsic<HealthCheckResult>({
+        name,
+        healthy: false,
+        message: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND,
+        checkedAt: Date.now(),
+        durationMS: 0,
+        error: null,
+        timedOut: false,
+        code: 'not_found',
+      });
+    }
+    return context.checkComponentHealth(name);
+  });
 
   const { value: results } = await allPromises(healthChecks);
 

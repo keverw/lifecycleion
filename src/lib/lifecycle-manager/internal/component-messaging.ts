@@ -8,8 +8,11 @@ import type {
   GetValueOptions,
   ValueResult,
 } from '../types';
-import { applyIntrinsic, observeRejection } from '../../internal/intrinsics';
-import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
+import { applyIntrinsic } from '../../internal/intrinsics';
+import {
+  containDeferredResult,
+  UnreadableReturn,
+} from '../../internal/adopt-promise';
 import { isObjectLike } from '../../internal/is-object-like';
 import { toError } from '../../to-error';
 import { LIFECYCLE_MANAGER_LOG_MESSAGE_HANDLER_FAILED } from '../constants';
@@ -22,6 +25,7 @@ import { copyBoundedArray } from './bounded-array-copy';
 import {
   dispatchAnnouncedHook,
   isComponentRunningMember,
+  isComponentSelectedRunningMember,
   isHookEntryBlocked,
   readHookThenRecheck,
 } from './component-dispatch';
@@ -442,10 +446,7 @@ export async function broadcastMessageInternal(
   // late start's cleanup is excluded here - it marks its component running only to
   // stop it, so it is not a running member the caller asked about.
   const skipCodeFor = (name: string): 'stalled' | 'stopped' | undefined => {
-    if (
-      context.isComponentRunning(name) &&
-      !context.isLateStartCleanupPending(name)
-    ) {
+    if (isComponentSelectedRunningMember(context, name)) {
       return undefined;
     }
     const isStalled = context.stalledComponents.has(name);
@@ -557,11 +558,22 @@ export function getValueInternal<T = unknown>(
 
   context.lifecycleEvents.componentValueRequested(componentName, key, from);
 
+  const finish = (result: ValueResult<T>): ValueResult<T> => {
+    const { error: _error, ...eventResult } = result;
+    context.lifecycleEvents.componentValueReturned(
+      componentName,
+      key,
+      from,
+      eventResult,
+    );
+    return result;
+  };
+
   // Find component
   const component = context.getComponent(componentName);
 
   if (!component) {
-    context.lifecycleEvents.componentValueReturned(componentName, key, from, {
+    return finish({
       found: false,
       value: undefined,
       componentFound: false,
@@ -570,15 +582,6 @@ export function getValueInternal<T = unknown>(
       requestedBy: from,
       code: 'not_found',
     });
-    return {
-      found: false,
-      value: undefined,
-      componentFound: false,
-      componentRunning: false,
-      handlerImplemented: false,
-      requestedBy: from,
-      code: 'not_found',
-    };
   }
 
   const refuseUnavailable = (
@@ -597,13 +600,7 @@ export function getValueInternal<T = unknown>(
       requestedBy: from,
       code: availability.refusalCode,
     };
-    context.lifecycleEvents.componentValueReturned(
-      componentName,
-      key,
-      from,
-      result,
-    );
-    return result;
+    return finish(result);
   };
   // The latest availability read; see `sendMessageInternal()`. The options were read
   // before the lookup above, so nothing has run since it found `component`.
@@ -661,17 +658,7 @@ export function getValueInternal<T = unknown>(
         params: { error: err, key, from },
       });
 
-    context.lifecycleEvents.componentValueReturned(componentName, key, from, {
-      found: false,
-      value: undefined,
-      componentFound: true,
-      componentRunning: isRunning,
-      handlerImplemented: false,
-      requestedBy: from,
-      code: 'operation_crashed',
-    });
-
-    return {
+    return finish({
       found: false,
       value: undefined,
       componentFound: true,
@@ -680,14 +667,14 @@ export function getValueInternal<T = unknown>(
       requestedBy: from,
       code: 'operation_crashed',
       error: err,
-    };
+    });
   }
 
   const getValueHandler = handlerRead.value;
 
   // Check if handler implemented
   if (typeof getValueHandler !== 'function') {
-    context.lifecycleEvents.componentValueReturned(componentName, key, from, {
+    return finish({
       found: false,
       value: undefined,
       componentFound: true,
@@ -696,15 +683,6 @@ export function getValueInternal<T = unknown>(
       requestedBy: from,
       code: 'no_handler',
     });
-    return {
-      found: false,
-      value: undefined,
-      componentFound: true,
-      componentRunning: isRunning,
-      handlerImplemented: false,
-      requestedBy: from,
-      code: 'no_handler',
-    };
   }
 
   // Get value
@@ -714,52 +692,29 @@ export function getValueInternal<T = unknown>(
       from,
     ]);
 
-    // `getValue()` answers synchronously, so a handler that returns a promise - an
-    // `async getValue` - is a contract break, not a value: read as one it came back
-    // `not_found`, and a rejection it carried went unhandled. Its settlement is
-    // observed, so nothing floats, and the call fails with `code: 'error'`.
-    const pending = adoptResult(rawResult);
-    if (pending instanceof UnreadableReturn) {
-      throw pending;
+    if (!isObjectLike(rawResult)) {
+      throw new TypeError('getValue() did not return a ComponentValueResult');
     }
-    if (pending !== undefined) {
-      observeRejection(pending, (error: unknown) => {
-        context.logger
-          .entity(componentName)
-          .warn('Asynchronous getValue handler rejected: {{error.message}}', {
-            params: { error: toError(error), key, from },
-          });
-      });
-
+    // Refuse deferred work without invoking a lazy thenable. Native rejections are
+    // contained, but a refused provider must not start new work after this call returns.
+    const deferred = containDeferredResult(rawResult);
+    if (deferred instanceof UnreadableReturn) {
+      throw deferred;
+    }
+    if (deferred) {
       throw new TypeError(
         'getValue() must answer synchronously; the handler returned a promise',
       );
     }
 
-    // Validated as `healthCheck()` results are: `found` is read once and must be a
-    // boolean. Testing it for truthiness turned `{ found: 'no' }` into `code: 'found'`
-    // - a malformed answer reported as a value. Thrown here, so it is answered as the
-    // handler's own failure (`code: 'error'`), like a handler that threw.
-    if (!isObjectLike(rawResult)) {
-      throw new TypeError('getValue() did not return a ComponentValueResult');
-    }
+    // Read and validate the synchronous answer once.
     const wasFound: unknown = Reflect.get(rawResult, 'found');
     if (typeof wasFound !== 'boolean') {
       throw new TypeError('getValue() result.found must be a boolean');
     }
     const value: unknown = Reflect.get(rawResult, 'value');
 
-    context.lifecycleEvents.componentValueReturned(componentName, key, from, {
-      found: wasFound,
-      value,
-      componentFound: true,
-      componentRunning: isRunning,
-      handlerImplemented: true,
-      requestedBy: from,
-      code: wasFound ? 'found' : 'not_found',
-    });
-
-    return {
+    return finish({
       found: wasFound,
       value: value as T | undefined,
       componentFound: true,
@@ -767,7 +722,7 @@ export function getValueInternal<T = unknown>(
       handlerImplemented: true,
       requestedBy: from,
       code: wasFound ? 'found' : 'not_found',
-    };
+    });
   } catch (error) {
     const err = toError(error);
 
@@ -777,17 +732,7 @@ export function getValueInternal<T = unknown>(
         params: { error: err, key, from },
       });
 
-    context.lifecycleEvents.componentValueReturned(componentName, key, from, {
-      found: false,
-      value: undefined,
-      componentFound: true,
-      componentRunning: isRunning,
-      handlerImplemented: true,
-      requestedBy: from,
-      code: 'error',
-    });
-
-    return {
+    return finish({
       found: false,
       value: undefined,
       componentFound: true,
@@ -796,6 +741,6 @@ export function getValueInternal<T = unknown>(
       requestedBy: from,
       code: 'error',
       error: err,
-    };
+    });
   }
 }

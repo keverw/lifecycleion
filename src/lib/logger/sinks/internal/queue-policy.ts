@@ -42,6 +42,12 @@ export const DEFAULT_MAX_RETRIES = 3;
 export const DEFAULT_CLOSE_TIMEOUT_MS = 30_000;
 
 /**
+ * Allow the final stream flush to finish even after close's drain budget expires.
+ * A zero-ms deadline can beat the asynchronous finish event of a writable stream.
+ */
+export const MIN_CLOSE_FLUSH_MS = 100;
+
+/**
  * The cap a sink should enforce, or `undefined` for unlimited.
  *
  * @param requested What the caller asked for: a positive count, {@link UNLIMITED_QUEUE}

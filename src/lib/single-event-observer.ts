@@ -1,6 +1,5 @@
 import { snapshotSet } from './internal/intrinsics';
 import { readMember } from './internal/read-member';
-import { isConsoleReportActive } from './internal/report-to-console';
 import { reportCallbackError, runCallbackSafely } from './safe-handle-callback';
 
 /**
@@ -20,6 +19,10 @@ export class SingleEventObserverProtected<T> {
    */
 
   private subscribers = new Set<(data: T) => void | Promise<void>>();
+  private readonly failureReporters = new WeakMap<
+    object,
+    (error: unknown) => void
+  >();
 
   /**
    * Subscribes a function to the observer.
@@ -34,6 +37,14 @@ export class SingleEventObserverProtected<T> {
       );
     }
     this.subscribers.add(fn);
+    if (!this.failureReporters.has(fn)) {
+      this.failureReporters.set(fn, (error: unknown) => {
+        reportCallbackError(
+          `SingleEventObserver_${readSubscriberName(fn)}`,
+          error,
+        );
+      });
+    }
   }
 
   /**
@@ -62,11 +73,13 @@ export class SingleEventObserverProtected<T> {
    */
 
   protected notify(data: T): void {
-    const shouldSuppressDiagnostics = isConsoleReportActive();
     // Snapshot at the start of this notification, as `EventEmitter.emit` does: a
     // subscriber added (or removed and re-added) midway through runs from the next
     // notification, not this one, so it cannot extend this pass - or loop it forever.
-    for (const subscriber of snapshotSet(this.subscribers)) {
+    const snapshot = snapshotSet(this.subscribers);
+    // eslint-disable-next-line unicorn/no-for-loop
+    for (let index = 0; index < snapshot.length; index++) {
+      const subscriber = snapshot[index];
       // The report's name is read only once the subscriber has failed, so a notify that
       // succeeds never reads `name` - which can be a getter - or builds a label for it.
       // `subscribe` admits only functions, so the fixed name below is never reported.
@@ -74,15 +87,7 @@ export class SingleEventObserverProtected<T> {
         'SingleEventObserver subscriber',
         subscriber,
         [data],
-        (error: unknown) => {
-          if (shouldSuppressDiagnostics) {
-            return;
-          }
-          reportCallbackError(
-            `SingleEventObserver_${readSubscriberName(subscriber)}`,
-            error,
-          );
-        },
+        this.failureReporters.get(subscriber) as (error: unknown) => void,
       );
     }
   }

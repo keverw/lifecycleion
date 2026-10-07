@@ -1013,3 +1013,31 @@ test('a getValue getter that throws is logged, as a message handler getter is', 
     { params: { error, key: 'key', from: 'caller' } },
   );
 });
+
+test('aggregate health does not check a replacement under a selected component name', async () => {
+  const { context, state, add } = fixture();
+  const first = add('first');
+  add('second');
+  const replacement = add('second');
+  state.components.pop();
+  let replacementCalls = 0;
+  Object.defineProperty(replacement, 'healthCheck', {
+    value: () => {
+      replacementCalls++;
+      return { healthy: true };
+    },
+  });
+  Object.defineProperty(first, 'healthCheck', {
+    get() {
+      state.components[1] = replacement;
+      return () => ({ healthy: true });
+    },
+  });
+  const result = await checkAllHealthOperation(context);
+  expect(result.components[1]).toMatchObject({
+    name: 'second',
+    code: 'not_found',
+    healthy: false,
+  });
+  expect(replacementCalls).toBe(0);
+});

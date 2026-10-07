@@ -286,7 +286,6 @@ export class Logger extends EventEmitter {
   // to that exit and is ignored rather than starting the next one (see
   // `recordExitRequest`), so a simulated exit settles on the code a real one exits with.
   private _isFinishingExit = false;
-  private _isEmittingExitProcess = false;
   private _closed = false;
 
   private _closePromise: Promise<void> | undefined;
@@ -397,16 +396,6 @@ export class Logger extends EventEmitter {
         );
       }
       code = 1;
-    }
-    // An `exit-process` listener of a simulated exit that exits again belongs to that
-    // exit. Running `beforeExit` for it would start another cycle whose emit reaches the
-    // same listener, without bound. Its code is not counted either: the exit has already
-    // published its code, as a real exit has by the time its listeners run. So it is
-    // treated as a real exit treats a request behind its commit: a failure ignored behind
-    // a committed 0 is reported rather than dropped without a trace.
-    if (this._isEmittingExitProcess && !this._hasScheduledProcessExit) {
-      this.reportIgnoredFailureExit(requestedCode, code);
-      return;
     }
     // An `exit-called` listener that exits again is absorbed too: its nested emit
     // reaches the same listener, so an unconditional one recursed until the stack
@@ -2246,12 +2235,7 @@ export class Logger extends EventEmitter {
 
     // Nor are these listeners; see `withoutActiveSinkClose`.
     this.withoutActiveSinkClose(() => {
-      this._isEmittingExitProcess = true;
-      try {
-        this.emit('logger', { eventType: 'exit-process', code: exitCode });
-      } finally {
-        this._isEmittingExitProcess = false;
-      }
+      this.emit('logger', { eventType: 'exit-process', code: exitCode });
     });
 
     // An exit request made by a sink hook must join the already-published cleanup,

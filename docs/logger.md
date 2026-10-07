@@ -1434,8 +1434,10 @@ console.log(health);
 // }
 ```
 
-`consecutiveFailures`, and therefore `isHealthy`, counts write failures only in both
-queueing sinks. A `'format'` failure never reached the destination and says nothing about
+`consecutiveFailures` counts write failures only in both queueing sinks. `isHealthy`
+also requires an initialized sink that is not closing. Setup failures remain visible
+in `lastError` and `droppedByKind.setup` when retries exhaust. A `'format'` failure
+never reached the destination and says nothing about
 whether the sink can write, so it is reported through `onError` (with `disposition`) and
 recorded in `lastError`, but it does not mark the sink unhealthy. Queue overflow
 also leaves destination health unchanged. Monitor `droppedByKind.queue_full`
@@ -1507,7 +1509,10 @@ Both queueing sinks, `FileSink` and `NamedPipeSink`, answer a failed write the s
   `console.error`
 - `getHealth().droppedEntries` means "lines this sink did not deliver": evicted at the
   cap, out of retries, unrenderable, still queued when `close()` gave up on them, or
-  failed by a write still in flight when `close()` finished. `droppedByKind` splits the
+  known to have failed in flight during close. FileSink reports a timed-out stream
+  write with `disposition: 'no_entry'` because delivery is unknown; that uncertain entry
+  is not counted as dropped. NamedPipeSink counts an in-flight record as dropped when
+  its callback confirms failure, including a partial write. `droppedByKind` splits the
   same total by reason (`queue_full`, `write`, `setup`, `format`, `close`), named as `onError`
   names them, so health alone says why. A close that abandons a queue
   reports it once as a `'close'` failure with `disposition: 'lost'` rather than once per
@@ -1672,7 +1677,7 @@ if (pipeSink.getHealth().isReconnecting) {
 
 A reconnect also refuses while the current stream has buffered writes. It leaves that connection intact and reports an error. Retry after the reader drains it. This prevents concurrent writers from interleaving log records.
 
-**Important:** If `reconnect()` fails, the `onError` handler will be called again with the failure details. When implementing retry logic, consider adding delays and retry limits to avoid rapid repeated failures.
+If `reconnect()` returns `reason: 'error'`, the sink reports failure details through `onError` again, including when no reader is connected. The `closed` and `already_reconnecting` results do not report a new failure. Automatic probes for an absent reader stay quiet. When implementing retry logic, add delays and retry limits to avoid rapid repeated failures.
 
 Writes that occur while disconnected are queued and flushed upon successful reconnection.
 

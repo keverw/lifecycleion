@@ -887,7 +887,7 @@ test('a joined start with a newly declared missing dependency never reaches star
   }
 });
 
-test('getValue follows one captured then even though async values are refused', async () => {
+test('getValue reads then once without starting deferred work it refuses', async () => {
   const { logger, manager } = setup();
   const component = new Plain(logger, 'a');
   let reads = 0;
@@ -909,7 +909,7 @@ test('getValue follows one captured then even though async values are refused', 
   await Promise.resolve();
   await Promise.resolve();
   expect(reads).toBe(1);
-  expect(calls).toBe(1);
+  expect(calls).toBe(0);
 });
 
 test('a violated committed-read invariant yields an unavailable registration report', async () => {

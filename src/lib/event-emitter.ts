@@ -158,7 +158,10 @@ export class EventEmitterProtected {
     // nested) emissions, but cannot skip a sibling or add another callback midway
     // through this one. This matches the dispatch semantics consumers expect from
     // Node's EventEmitter.
-    for (const callback of snapshotSet(callbacks)) {
+    const snapshot = snapshotSet(callbacks);
+    // eslint-disable-next-line unicorn/no-for-loop
+    for (let index = 0; index < snapshot.length; index++) {
+      const callback = snapshot[index];
       // The same invocation helper `safeHandleCallback` uses, with this emitter's
       // overridable reporter in place of the global `'error'` channel. The callback name
       // is the one `handleEventHandlerFailure` reports with, so a non-function handler's

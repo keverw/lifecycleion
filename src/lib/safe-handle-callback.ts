@@ -314,6 +314,7 @@ function reportToOnError(
  * the return type - and defaults to `unknown`. Supply it explicitly when you know what the
  * callback returns.
  */
+/** Results are null-prototype records; use Object.hasOwn instead of inherited methods. */
 export type CallbackResult<T = unknown> =
   | { success: true; value: T; error?: undefined }
   | { success: false; error: Error; value?: undefined };

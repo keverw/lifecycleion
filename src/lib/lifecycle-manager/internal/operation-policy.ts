@@ -283,12 +283,7 @@ export function crashedShutdownResult(
   code: SettledFailureCode,
 ): ShutdownResult {
   return {
-    success: false,
-    stoppedComponents: [],
-    stalledComponents: [],
-    durationMS: 0,
-    reason,
-    code,
+    ...refusedShutdownResult(code, reason),
     error,
   };
 }
