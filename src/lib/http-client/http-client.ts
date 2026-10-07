@@ -3869,40 +3869,57 @@ function adoptRequestBodySettled(
   );
 }
 
+// The slot check rejects Proxy-wrapped Errors. Without it, descriptor inspection
+// cannot prove that native promise resolution will use ordinary property lookup.
+const uploadErrorBrandCheck = (
+  Error as unknown as { isError?: (value: unknown) => boolean }
+).isError;
+const uploadErrorOwnDescriptor = Object.getOwnPropertyDescriptor;
+const uploadErrorPrototypeOf = Object.getPrototypeOf;
+const uploadErrorHasOwn = Object.hasOwn;
+const uploadErrorPrototypes = new Set<object>([
+  Error.prototype,
+  EvalError.prototype,
+  RangeError.prototype,
+  ReferenceError.prototype,
+  SyntaxError.prototype,
+  TypeError.prototype,
+  URIError.prototype,
+  AggregateError.prototype,
+  Object.prototype,
+]);
+
 /** Avoid invoking a caller Error's `then` while resolving the public outcome promise. */
 function stableUploadError(error: Error): Error {
   try {
-    let object: object | null = error;
-    let hasNonCallableDataThen = false;
-    // Bounded because a proxy's `getPrototypeOf` trap can answer with a chain that never
-    // reaches `null` - itself, or a fresh proxy each time - and an unbounded walk would
-    // hang the request. A chain deeper than the bound leaves `object` non-null and falls
-    // through to the wrap below: identity is lost, but the wrapper keeps the message,
-    // name, code and stack, and carries the original as `cause`. That is the same
-    // conservative answer as any chain this walk cannot prove safe, and no real error
-    // class hierarchy comes near 32 levels.
-    for (let depth = 0; object !== null && depth < 32; depth++) {
-      const descriptor = Object.getOwnPropertyDescriptor(object, 'then');
-      if (descriptor !== undefined) {
-        // Plain non-callable data cannot start promise assimilation. Preserve the
-        // subclass and custom fields in that case, including an already-safe wrapper.
-        // Accessors still require wrapping: reading one to classify it and then again
-        // during native resolution could produce a different value on the second read.
-        hasNonCallableDataThen =
-          Object.hasOwn(descriptor, 'value') &&
-          typeof descriptor.value !== 'function';
-        break;
-      }
-      object = Object.getPrototypeOf(object) as object | null;
-    }
-    // A proxy can synthesize a property without exposing a descriptor. Check that
-    // ordinary lookup agrees before retaining identity; an unreadable property is
-    // also wrapped. Descriptor-backed getters were already detected without running.
     if (
-      (object === null || hasNonCallableDataThen) &&
-      typeof Reflect.get(error, 'then', error) !== 'function'
+      typeof uploadErrorBrandCheck === 'function' &&
+      uploadErrorBrandCheck(error)
     ) {
-      return error;
+      let object: object | null = error;
+      for (let depth = 0; object !== null && depth < 32; depth++) {
+        const descriptor = uploadErrorOwnDescriptor(object, 'then');
+        if (descriptor !== undefined) {
+          // A genuine Error's own data property is safe even on a subclass. For
+          // inherited properties, inspect only captured ordinary prototypes below.
+          if (
+            uploadErrorHasOwn(descriptor, 'value') &&
+            typeof descriptor.value !== 'function'
+          ) {
+            return error;
+          }
+          break;
+        }
+        object = uploadErrorPrototypeOf(object) as object | null;
+        if (object !== null && !uploadErrorPrototypes.has(object)) {
+          // An unknown prototype may be a Proxy with a synthetic or changing
+          // `then`. Neither a descriptor nor a live probe establishes stability.
+          break;
+        }
+      }
+      if (object === null) {
+        return error;
+      }
     }
   } catch {
     // A proxy may refuse inspection; preserve it as the cause of a safe Error.

@@ -314,10 +314,13 @@ if the adapter finished writing it. It never rejects. For `NodeAdapter`, it is a
 once a supported body has entered the adapter's upload tracking, including when the
 response arrives after the upload has finished. It does not prove that the server
 processed or committed the data. The same outcome is shared by the attempt's retry,
-redirect, and response handling. Ordinary upload Errors retain their identity. If an
-Error's `then` property makes it unsafe to return through a promise, the outcome uses a
-wrapper with the original in `cause` and its readable `message`, `name`, `code`, and
-`stack`. Inspect `cause` for other custom fields.
+redirect, and response handling. Ordinary upload Errors retain their identity on
+runtimes with `Error.isError`. Errors with an unknown prototype (including custom
+subclasses), or an unsafe `then` property, use a wrapper with the original in `cause`
+and its readable `message`, `name`, `code`, and `stack`. A subclass with its own
+non-callable data `then` property can retain identity. Runtimes without `Error.isError`
+wrap every upload Error because they cannot rule out a Proxy intercepting property
+lookup. Inspect `cause` for other custom fields.
 
 Check that the field exists before interpreting its resolution:
 

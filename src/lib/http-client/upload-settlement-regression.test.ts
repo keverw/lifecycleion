@@ -203,6 +203,61 @@ for (const shouldThrow of [false, true]) {
   });
 }
 
+test.each(['noop', 'throw'] as const)(
+  'a synthesized then that changes after its first lookup cannot %s during publication',
+  async (behavior) => {
+    let thenReads = 0;
+    const failure = new Error('upload failed');
+    Object.setPrototypeOf(
+      failure,
+      new Proxy(Error.prototype, {
+        get(target, key, receiver) {
+          if (key === 'then') {
+            if (++thenReads === 1) {
+              return undefined;
+            }
+            if (behavior === 'throw') {
+              throw new Error('second then lookup');
+            }
+            return () => undefined;
+          }
+          return Reflect.get(target, key, receiver);
+        },
+      }),
+    );
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: {},
+          body: null,
+          requestBodySettled: Promise.reject(failure),
+        }),
+    };
+    const response = await new HTTPClient({ adapter })
+      .put('https://example.com/upload')
+      .text('body')
+      .send();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const outcome = await Promise.race([
+        response.requestBodySettled?.then(
+          (error) => ({ message: error?.message, cause: error?.cause }),
+          (error: unknown) => ({ rejected: error }),
+        ),
+        new Promise<string>((resolve) => {
+          timer = setTimeout(() => resolve('stalled'), 100);
+        }),
+      ]);
+      expect(outcome).toEqual({ message: 'upload failed', cause: failure });
+      expect(thenReads).toBe(0);
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+);
+
 for (const shape of ['own', 'inherited', 'proxy'] as const) {
   test(`wrapped upload errors retain code and stack: ${shape}`, async () => {
     const failure = new Error('upload failed');
@@ -301,7 +356,7 @@ test('unreadable upload error code and stack do not reject settlement', async ()
 
 for (const isInherited of [false, true]) {
   for (const thenValue of [undefined, null, 0, 'not callable']) {
-    test(`non-callable data then preserves upload error identity: inherited=${isInherited}, value=${String(thenValue)}`, async () => {
+    test(`non-callable data then ${isInherited ? 'wraps an unknown prototype' : 'preserves upload error identity'}: value=${String(thenValue)}`, async () => {
       class UploadError extends Error {
         public readonly uploadID = 'upload-123';
       }
@@ -329,12 +384,94 @@ for (const isInherited of [false, true]) {
         .get('https://example.com/upload')
         .send();
       const outcome = await response.requestBodySettled;
-      expect(outcome).toBe(failure);
-      expect(outcome).toBeInstanceOf(UploadError);
-      expect(outcome).toHaveProperty('uploadID', 'upload-123');
+      if (isInherited) {
+        expect(outcome).not.toBe(failure);
+        expect(outcome?.cause).toBe(failure);
+        expect(outcome?.message).toBe('upload failed');
+        expect(outcome?.cause).toHaveProperty('uploadID', 'upload-123');
+      } else {
+        expect(outcome).toBe(failure);
+        expect(outcome).toBeInstanceOf(UploadError);
+        expect(outcome).toHaveProperty('uploadID', 'upload-123');
+      }
     });
   }
 }
+
+test.each([
+  Error,
+  EvalError,
+  RangeError,
+  ReferenceError,
+  SyntaxError,
+  TypeError,
+  URIError,
+])('ordinary %p upload errors retain identity', async (ErrorType) => {
+  const failure = new ErrorType('upload failed');
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () =>
+      Promise.resolve({
+        status: 200,
+        headers: {},
+        body: null,
+        requestBodySettled: Promise.reject(failure),
+      }),
+  };
+  const response = await new HTTPClient({ adapter })
+    .get('https://example.com/upload')
+    .send();
+  expect(await response.requestBodySettled).toBe(failure);
+});
+
+test.each(['ordinary', 'proxy'] as const)(
+  'without Error.isError, %s upload errors are conservatively wrapped',
+  async (shape) => {
+    // Isolate the missing runtime API from this suite and import after removing it.
+    const script = `
+    delete Error.isError;
+    const { HTTPClient } = await import(${JSON.stringify(`${import.meta.dir}/http-client.ts`)});
+    const watchdog = setTimeout(() => process.exit(42), 1000);
+    const target = new Error('upload failed');
+    Object.defineProperty(target, 'then', { value: undefined, configurable: true });
+    let reads = 0;
+    const failure = ${JSON.stringify(shape)} === 'ordinary' ? target : new Proxy(target, {
+      get(target, key, receiver) {
+        if (key === 'then') {
+          return ++reads === 1 ? undefined : () => {};
+        }
+        return Reflect.get(target, key, receiver);
+      },
+    });
+    const adapter = {
+      getType: () => 'node',
+      send: () => Promise.resolve({
+        status: 200, headers: {}, body: null,
+        requestBodySettled: Promise.reject(failure),
+      }),
+    };
+    const response = await new HTTPClient({ adapter }).get('https://example.com/upload').send();
+    const error = await response.requestBodySettled;
+    clearTimeout(watchdog);
+    process.stdout.write(JSON.stringify({ message: error?.message, wrapped: error?.cause === failure, reads }));
+  `;
+    const child = Bun.spawn([process.execPath, '--eval', script], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [stdout, stderr, code] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    expect({ code, stderr }).toEqual({ code: 0, stderr: '' });
+    expect(JSON.parse(stdout)).toEqual({
+      message: 'upload failed',
+      wrapped: true,
+      reads: 0,
+    });
+  },
+);
 
 for (const isAccessor of [false, true]) {
   test(`uncertain then still requires upload error wrapper: accessor=${isAccessor}`, async () => {
