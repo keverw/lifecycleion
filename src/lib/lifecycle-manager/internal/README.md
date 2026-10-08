@@ -41,20 +41,22 @@ Configuration that never changes after construction lives in the config instead.
 The manager's operations move out of `lifecycle-manager.ts` into subsystems: classes
 built over one shared core.
 
-| Module                     | Responsibility                                                                                                                                                |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `manager-core.ts`          | `ManagerCore`: the facade, state, config, loggers, event plumbing, registry readers, and every subsystem.                                                     |
-| `logger-exit-hook.ts`      | `LoggerExitHook`: the `beforeExit` callback, settling a pending exit when a pass ends, and the exit-in-progress gate.                                         |
-| `component-claims.ts`      | `ComponentClaims`: taking, checking and releasing the per-component claims start and stop attempts hold.                                                      |
-| `component-stop.ts`        | `ComponentStop`: the per-component stop pipeline - refusals, the stop net, graceful and force phases, stalled retries, and late stop resolution.              |
-| `component-start.ts`       | `ComponentStart`: the per-component start pipeline - the start net, its preconditions, the attempt, start settlements, and marking a component running.       |
-| `late-start-recovery.ts`   | `LateStartRecovery`: stopping a start the manager stopped waiting for if it completes later, and whether such a start is still awaited.                       |
-| `unexpected-stops.ts`      | `UnexpectedStops`: the unexpected-stop handler a running component reports through, clearing it, and draining the stops a bulk startup recorded.              |
-| `shutdown-pass.ts`         | `ShutdownPassRunner`: the shutdown latch, accepting or refusing a pass, and the pass itself - warning phase, stop loop, joined starts, and its result.        |
-| `shutdown-escalation.ts`   | `ShutdownEscalation`: shutdown signal requests, repeated-request counting, the post-failure armed window, and the escalation status.                          |
-| `startup-ordering.ts`      | `StartupOrdering`: the registry's dependency order that startup, shutdown, registration and `getStartupOrder()` share, and answering a failure to compute it. |
-| `startup-orchestration.ts` | `StartupOrchestration`: bulk startup - its refusals, the startup latch, the batch loop and follow-up auto-starts, rollback, and releasing what it held.       |
-| `restart-operations.ts`    | `RestartOperations`: bulk and single restarts - refusals, validating both phases before any stop, and the stale-snapshot check.                               |
+| Module                       | Responsibility                                                                                                                                                                                            |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `manager-core.ts`            | `ManagerCore`: the facade, state, config, loggers, event plumbing, registry readers, and every subsystem.                                                                                                 |
+| `component-registry.ts`      | `ComponentRegistry`: lookups by name, recorded names and statuses, the reservations a registration checks, insertion indexes, publishing the committed subset, and a component's current dependency read. |
+| `logger-exit-hook.ts`        | `LoggerExitHook`: the `beforeExit` callback, settling a pending exit when a pass ends, and the exit-in-progress gate.                                                                                     |
+| `component-claims.ts`        | `ComponentClaims`: taking, checking and releasing the per-component claims start and stop attempts hold.                                                                                                  |
+| `component-stop.ts`          | `ComponentStop`: the per-component stop pipeline - refusals, the stop net, graceful and force phases, stalled retries, and late stop resolution.                                                          |
+| `component-start.ts`         | `ComponentStart`: the per-component start pipeline - the start net, its preconditions, the attempt, start settlements, and marking a component running.                                                   |
+| `late-start-recovery.ts`     | `LateStartRecovery`: stopping a start the manager stopped waiting for if it completes later, and whether such a start is still awaited.                                                                   |
+| `unexpected-stops.ts`        | `UnexpectedStops`: the unexpected-stop handler a running component reports through, clearing it, and draining the stops a bulk startup recorded.                                                          |
+| `shutdown-pass.ts`           | `ShutdownPassRunner`: the shutdown latch, accepting or refusing a pass, and the pass itself - warning phase, stop loop, joined starts, and its result.                                                    |
+| `shutdown-escalation.ts`     | `ShutdownEscalation`: shutdown signal requests, repeated-request counting, the post-failure armed window, and the escalation status.                                                                      |
+| `startup-ordering.ts`        | `StartupOrdering`: the registry's dependency order that startup, shutdown, registration and `getStartupOrder()` share, and answering a failure to compute it.                                             |
+| `startup-orchestration.ts`   | `StartupOrchestration`: bulk startup - its refusals, the startup latch, the batch loop and follow-up auto-starts, rollback, and releasing what it held.                                                   |
+| `restart-operations.ts`      | `RestartOperations`: bulk and single restarts - refusals, validating both phases before any stop, and the stale-snapshot check.                                                                           |
+| `registration-operations.ts` | `RegistrationOperations`: registering and inserting - reads, refusals, the provisional commit and its rollback, auto-start - unregistering, and the callbacks a component's `lifecycle` handle uses.      |
 
 Each subsystem receives the core in its constructor and only stores it there, since
 another subsystem may not exist yet. It calls the manager's public, overridable

@@ -50,7 +50,9 @@ function crashFirstRegisteredEvent(
 function breakCatchAfterAutoStart(manager: LifecycleManager): void {
   manager.once('component:started', () => {
     (
-      manager as unknown as { describeRegistryPosition: () => never }
+      coreOf(manager).registration as unknown as {
+        describeRegistryPosition: () => never;
+      }
     ).describeRegistryPosition = (): never => {
       throw new Error('position exploded');
     };
@@ -1715,16 +1717,17 @@ describe('LifecycleManager - review regressions', () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new Plain(logger, 'a'));
 
-    const internals = manager as unknown as {
-      refuseUnregisterWhileInFlight: () => never;
-      hasComponent: () => never;
-    };
-    internals.refuseUnregisterWhileInFlight = (): never => {
+    (
+      coreOf(manager).registration as unknown as {
+        refuseUnregisterWhileInFlight: () => never;
+      }
+    ).refuseUnregisterWhileInFlight = (): never => {
       throw new Error('crash mid-unregister');
     };
-    internals.hasComponent = (): never => {
-      throw new Error('hasComponent exploded');
-    };
+    (manager as unknown as { hasComponent: () => never }).hasComponent =
+      (): never => {
+        throw new Error('hasComponent exploded');
+      };
 
     const { release } = claimReports();
     let result;
@@ -3875,7 +3878,9 @@ describe('LifecycleManager - review regressions', () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new Plain(logger, 'a'));
     (
-      manager as unknown as { isManualPositionRespected: () => never }
+      coreOf(manager).registration as unknown as {
+        isManualPositionRespected: () => never;
+      }
     ).isManualPositionRespected = (): never => {
       throw new Error('crash after commit');
     };

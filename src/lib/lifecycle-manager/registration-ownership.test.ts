@@ -920,10 +920,7 @@ test('getValue reads then once without starting deferred work it refuses', async
 test('a violated committed-read invariant yields an unavailable registration report', async () => {
   const { logger, manager } = setup();
   await manager.registerComponent(new Plain(logger, 'peer'));
-  const internals = manager as unknown as {
-    currentReadOf: (...args: unknown[]) => unknown;
-  };
-  internals.currentReadOf = (): undefined => undefined;
+  coreOf(manager).registry.currentReadOf = (): undefined => undefined;
   const result = await manager.insertComponentAt(
     new Plain(logger, 'next'),
     'end',

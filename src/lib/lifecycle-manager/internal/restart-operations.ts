@@ -128,7 +128,7 @@ export class RestartOperations {
       // A timeout getter or logger callback can also register a new component.
       // It has no approved startup timeout, so it cannot join this restart.
       for (const component of this.core.state.components) {
-        const name = this.core.internals.nameOf(component);
+        const name = this.core.registry.nameOf(component);
         if (!restartSnapshots.has(name)) {
           return name;
         }
@@ -705,7 +705,7 @@ export class RestartOperations {
     // the same set as it begins.
     const currentStarts = this.core.componentStart.currentStartSettlements();
     for (const component of [...this.core.state.components]) {
-      const name = this.core.internals.nameOf(component);
+      const name = this.core.registry.nameOf(component);
       const generation = this.core.registryReads.currentGeneration(component);
       const componentTimeoutMS = this.readRestartInput(
         () => component.startupTimeoutMS,
@@ -836,7 +836,7 @@ export class RestartOperations {
       // caller code, which can start or settle a start.
       let currentStarts = this.core.componentStart.currentStartSettlements();
       for (const component of [...this.core.state.components]) {
-        const name = this.core.internals.nameOf(component);
+        const name = this.core.registry.nameOf(component);
         if (restartSnapshots.get(name)?.component !== component) {
           continue;
         }
@@ -891,7 +891,7 @@ export class RestartOperations {
   ): boolean {
     return (
       (currentComponents === undefined
-        ? this.core.internals.getComponent(name) === snapshot.component
+        ? this.core.registry.getComponent(name) === snapshot.component
         : currentComponents.has(snapshot.component)) &&
       this.core.registryReads.currentGeneration(snapshot.component) ===
         snapshot.generation

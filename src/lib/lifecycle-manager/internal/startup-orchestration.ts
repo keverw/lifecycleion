@@ -220,10 +220,10 @@ export class StartupOrchestration {
         // Pending follow-ups have no fixed order yet. Their dependencies can still be
         // registered before that batch is frozen; original/planned components cannot.
         !this.core.state.deferredAutoStartNames.has(
-          this.core.internals.nameOf(c),
+          this.core.registry.nameOf(c),
         ) &&
         dependenciesOf(
-          this.core.internals.currentReadOf(
+          this.core.registry.currentReadOf(
             c,
             dependencySnapshot,
             this.core.state.activeBulkStartup?.dependencyReads,
@@ -529,7 +529,7 @@ export class StartupOrchestration {
     // token so an older restart finalizer cannot warn for work already claimed.
     for (const names of this.core.state.pendingRestartAutoStarts) {
       for (const name of names) {
-        if (this.core.internals.getComponent(name) !== undefined) {
+        if (this.core.registry.getComponent(name) !== undefined) {
           this.core.state.deferredAutoStartNames.add(name);
         }
       }
@@ -943,7 +943,7 @@ export class StartupOrchestration {
     }
     run.bulkStartup.reachedNames.add(name);
 
-    const component = this.core.internals.getComponent(name);
+    const component = this.core.registry.getComponent(name);
     if (!component) {
       // Should not happen since unregisterComponent() is blocked during startup.
       // Thrown into the crash path, as a component never read is below: skipped,
@@ -1020,7 +1020,7 @@ export class StartupOrchestration {
     const dependencies = dependenciesOf(dependencyRead);
 
     for (const depName of dependencies) {
-      const depComponent = this.core.internals.getComponent(depName);
+      const depComponent = this.core.registry.getComponent(depName);
       // Read only where it decides something - a dependency that stalled, was
       // skipped or failed - and guarded: a healthy dependency's `isOptional()`
       // that threw used to crash, and roll back, the whole startup.
@@ -1712,7 +1712,7 @@ export class StartupOrchestration {
    */
   private runningStartupSnapshot(
     names: readonly string[] = this.core.state.components.map((component) =>
-      this.core.internals.nameOf(component),
+      this.core.registry.nameOf(component),
     ),
   ): string[] {
     // Unlike running-set membership alone, a startup availability snapshot must
@@ -1775,7 +1775,7 @@ export class StartupOrchestration {
           (nextStartup === null || nextStartup.isOrdering)
         ) {
           for (const name of abandonedAutoStarts) {
-            if (this.core.internals.getComponent(name) !== undefined) {
+            if (this.core.registry.getComponent(name) !== undefined) {
               this.core.state.deferredAutoStartNames.add(name);
             }
           }

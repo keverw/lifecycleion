@@ -323,7 +323,7 @@ export class ShutdownPassRunner {
   public unresolvedTimedOutStartNames(): string[] {
     const currentStarts = this.core.componentStart.currentStartSettlements();
     return this.core.state.components
-      .map((component) => this.core.internals.nameOf(component))
+      .map((component) => this.core.registry.nameOf(component))
       .filter((name) =>
         this.isUnresolvedTimedOutStart(currentStarts.get(name)),
       );
@@ -520,7 +520,7 @@ export class ShutdownPassRunner {
         );
 
         shutdownOrder = this.core.state.components
-          .map((c) => this.core.internals.nameOf(c))
+          .map((c) => this.core.registry.nameOf(c))
           .reverse();
       }
 
@@ -591,7 +591,7 @@ export class ShutdownPassRunner {
       // `getDependencies()` that throws must not end the pass. Its dependencies are then
       // unknown and go unprotected - the same as a component that declares none.
       const readDependencies = (name: string): string[] => {
-        const component = this.core.internals.getComponent(name);
+        const component = this.core.registry.getComponent(name);
 
         return component === undefined
           ? []

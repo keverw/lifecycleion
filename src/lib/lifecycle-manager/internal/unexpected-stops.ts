@@ -141,7 +141,7 @@ export class UnexpectedStops {
         if (
           !this.noteUnexpectedStopDuringStartup(
             name,
-            this.core.internals.getComponent(name),
+            this.core.registry.getComponent(name),
             error,
             failedOptionalComponents,
           )

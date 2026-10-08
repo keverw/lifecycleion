@@ -241,7 +241,7 @@ export class ComponentStop {
     const readActiveWork = (): Map<BaseComponent, DependentWork> => {
       const activity = new Map<BaseComponent, DependentWork>();
       for (const component of this.core.state.components) {
-        const dependent = this.core.internals.nameOf(component);
+        const dependent = this.core.registry.nameOf(component);
         // The component being stopped is active itself, but it is not its own
         // dependent: registration refuses a self-dependency as a cycle. Left in, its
         // dependency getter would run every round for nothing.
@@ -297,7 +297,7 @@ export class ComponentStop {
       // Always set: `dependents` holds only components with active work.
       const work = activeWork.get(component);
       if (work !== undefined) {
-        byWork[work].push(this.core.internals.nameOf(component));
+        byWork[work].push(this.core.registry.nameOf(component));
       }
     }
     const activity = (Object.keys(DEPENDENT_WORK_LABELS) as DependentWork[])
@@ -370,7 +370,7 @@ export class ComponentStop {
     expected?: BaseComponent,
     force?: { claim: symbol; isStalledRetry: boolean },
   ): ComponentOperationResult | { component: BaseComponent } {
-    const component = this.core.internals.getComponent(name);
+    const component = this.core.registry.getComponent(name);
 
     if (!component || (expected !== undefined && component !== expected)) {
       return {
@@ -403,7 +403,7 @@ export class ComponentStop {
         code: isStarting
           ? 'component_already_starting'
           : 'component_already_stopping',
-        status: this.core.internals.statusOf(name),
+        status: this.core.registry.statusOf(name),
       };
     }
     if (force?.isStalledRetry && this.core.state.stalledComponents.has(name)) {
@@ -417,7 +417,7 @@ export class ComponentStop {
         componentName: name,
         reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
         code: 'component_stalled',
-        status: this.core.internals.statusOf(name),
+        status: this.core.registry.statusOf(name),
       };
     }
 
@@ -428,7 +428,7 @@ export class ComponentStop {
         componentName: name,
         reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_RUNNING,
         code: 'component_not_running',
-        status: this.core.internals.statusOf(name),
+        status: this.core.registry.statusOf(name),
       };
     }
 
@@ -440,7 +440,7 @@ export class ComponentStop {
         componentName: name,
         reason: `Component is already ${currentState}`,
         code: 'component_already_stopping',
-        status: this.core.internals.statusOf(name),
+        status: this.core.registry.statusOf(name),
       };
     }
 
@@ -600,7 +600,7 @@ export class ComponentStop {
     // its former not-running result; only an actual stalled retry reports the
     // more specific in-flight refusal from the force preconditions below.
     if (
-      this.core.internals.getComponent(name) !== undefined &&
+      this.core.registry.getComponent(name) !== undefined &&
       !this.core.state.stalledComponents.has(name) &&
       !this.core.manager.isComponentRunning(name)
     ) {
@@ -747,7 +747,7 @@ export class ComponentStop {
       gracefulPreparation.lateResolution !== undefined &&
       this.core.state.componentStopAttemptTokens.get(name) ===
         gracefulPreparation.lateResolution &&
-      this.core.internals.getComponent(name) === component &&
+      this.core.registry.getComponent(name) === component &&
       this.core.state.componentStates.get(name) === 'stopping'
     ) {
       if (
@@ -1563,7 +1563,7 @@ export class ComponentStop {
   ): boolean {
     return (
       !this.core.claims.owns(name, claim) ||
-      this.core.internals.getComponent(name) !== component
+      this.core.registry.getComponent(name) !== component
     );
   }
 

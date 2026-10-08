@@ -252,7 +252,7 @@ export class ComponentStart {
       if (
         this.core.state.componentClaims.get(settlement.name)?.claim === claim ||
         (settlement.component !== undefined &&
-          this.core.internals.getComponent(settlement.name) ===
+          this.core.registry.getComponent(settlement.name) ===
             settlement.component &&
           this.core.state.componentStartAttemptTokens.get(settlement.name) ===
             settlement.token)
@@ -286,7 +286,7 @@ export class ComponentStart {
     if (settlements === undefined) {
       return false;
     }
-    const component = this.core.internals.getComponent(name);
+    const component = this.core.registry.getComponent(name);
     for (const settlement of settlements) {
       if (
         settlement.rawStartPending &&
@@ -410,7 +410,7 @@ export class ComponentStart {
     }
 
     // The committed name index also verifies the captured registration's identity.
-    const registered = this.core.internals.getComponent(name);
+    const registered = this.core.registry.getComponent(name);
     const component =
       expected === undefined || registered === expected
         ? registered
@@ -583,7 +583,7 @@ export class ComponentStart {
 
     if (!flags.allowNonRunningDependencies) {
       for (const dependencyName of ownDependencies.dependencies) {
-        const dependency = this.core.internals.getComponent(dependencyName);
+        const dependency = this.core.registry.getComponent(dependencyName);
 
         if (
           dependency !== undefined &&
@@ -654,7 +654,7 @@ export class ComponentStart {
     const skippedDependencyWarnings: string[] = [];
 
     for (const dependencyName of ownDependencies.dependencies) {
-      const dependency = this.core.internals.getComponent(dependencyName);
+      const dependency = this.core.registry.getComponent(dependencyName);
 
       if (dependency === undefined) {
         return {
@@ -817,13 +817,13 @@ export class ComponentStart {
     // unexpected stop and a listener started it again, or it was replaced or
     // unregistered after stopping. Asked at each boundary caller code may have crossed.
     const isSuperseded = (): boolean =>
-      this.core.internals.getComponent(name) !== component ||
+      this.core.registry.getComponent(name) !== component ||
       this.core.state.componentStartAttemptTokens.get(name) !==
         startAttemptToken;
     // Names what superseded the attempt rather than always claiming a restart: a
     // replacement or an unregistration is not one.
     const supersededReason = (): string => {
-      const current = this.core.internals.getComponent(name);
+      const current = this.core.registry.getComponent(name);
       return current === undefined
         ? 'Component stopped unexpectedly during startup and was unregistered'
         : current !== component

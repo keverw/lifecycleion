@@ -1,19 +1,27 @@
 import type { Logger } from '../../logger';
 import type { LoggerService } from '../../logger/logger-service';
-import type { BaseComponent } from '../base-component';
 import type { LifecycleManagerEvents } from '../events';
 import type { LifecycleManager } from '../lifecycle-manager';
-import type { ComponentOperationResult, ComponentStatus } from '../types';
+import type {
+  BroadcastOptions,
+  BroadcastResult,
+  ComponentOperationResult,
+  GetValueOptions,
+  MessageResult,
+  SendMessageOptions,
+  ValueResult,
+} from '../types';
 import type { ComponentAccessContext } from './component-access-context';
 import { ComponentClaims } from './component-claims';
 import type { ComponentMetadataReader } from './component-metadata-reader';
+import { ComponentRegistry } from './component-registry';
 import { ComponentStart } from './component-start';
 import { ComponentStop } from './component-stop';
-import type { DependencyRead } from './dependency-policy';
 import { LateStartRecovery } from './late-start-recovery';
 import { LoggerExitHook } from './logger-exit-hook';
 import type { ManagerConfig } from './manager-config';
 import type { LifecycleManagerState } from './manager-state';
+import { RegistrationOperations } from './registration-operations';
 import type { RegistrationReadTracker } from './registration-read-tracker';
 import { RestartOperations } from './restart-operations';
 import { ShutdownEscalation } from './shutdown-escalation';
@@ -30,27 +38,32 @@ import { UnexpectedStops } from './unexpected-stops';
  * runs. An extraction that takes one of these over moves it onto its subsystem.
  */
 export interface ManagerInternals {
-  /** The committed component registered under `name`. */
-  getComponent(name: string): BaseComponent | undefined;
-  /** A registered component's name, as recorded when it was committed. */
-  nameOf(component: BaseComponent): string;
-  /**
-   * `component`'s dependency read for its current registration, from `preferred` or
-   * `snapshot`, else the committed one - without running caller code.
-   */
-  currentReadOf(
-    component: BaseComponent,
-    snapshot: ReadonlyMap<BaseComponent, DependencyRead>,
-    preferred?: ReadonlyMap<BaseComponent, DependencyRead>,
-  ): DependencyRead | undefined;
-  /** The status of the component registered under `name`; the caller has checked it is. */
-  statusOf(name: string): ComponentStatus;
+  /** `sendMessageToComponent()` under its safety net, as a component's handle sends it. */
+  sendMessageSettled(
+    componentName: string,
+    payload: unknown,
+    from: string | null,
+    options?: SendMessageOptions,
+  ): Promise<MessageResult>;
+  /** `broadcastMessage()` under its safety net, as a component's handle sends it. */
+  broadcastMessageSettled(
+    payload: unknown,
+    from: string | null,
+    options?: BroadcastOptions,
+  ): Promise<BroadcastResult[]>;
+  /** `getValue()` under its safety net, as a component's handle asks it. */
+  getValueSettled<T = unknown>(
+    componentName: string,
+    key: string,
+    from: string | null,
+    options?: GetValueOptions,
+  ): ValueResult<T>;
   /** Recompute `isStarted` from the running and stalled sets. */
   updateStartedFlag(): void;
   /** Record now as a component's `startedAt` or `stoppedAt`. */
   stampTimestamp(name: string, field: 'startedAt' | 'stoppedAt'): void;
-  /** The `detachSignalsOnStop` check a stop runs once it has settled. */
-  detachSignalsAfterLastStop(): void;
+  /** The `detachSignalsOnStop` check a stop or unregister runs once it has settled. */
+  detachSignalsAfterLastStop(trigger?: string, logMessage?: string): void;
   /** Whether a component is up: running, and not on its way down. */
   isComponentUp(name: string): boolean;
   /** Attach signals on the manager's own initiative, ahead of a start; never throws. */
@@ -118,6 +131,7 @@ export class ManagerCore implements ManagerCoreParts {
   public readonly internals: ManagerInternals;
 
   // Subsystems
+  public readonly registry: ComponentRegistry;
   public readonly startupOrdering: StartupOrdering;
   public readonly loggerExit: LoggerExitHook;
   public readonly claims: ComponentClaims;
@@ -129,6 +143,7 @@ export class ManagerCore implements ManagerCoreParts {
   public readonly shutdownEscalation: ShutdownEscalation;
   public readonly startup: StartupOrchestration;
   public readonly restart: RestartOperations;
+  public readonly registration: RegistrationOperations;
 
   constructor(parts: ManagerCoreParts) {
     this.manager = parts.manager;
@@ -143,6 +158,7 @@ export class ManagerCore implements ManagerCoreParts {
     this.componentAccess = parts.componentAccess;
     this.internals = parts.internals;
 
+    this.registry = new ComponentRegistry(this);
     this.startupOrdering = new StartupOrdering(this);
     this.loggerExit = new LoggerExitHook(this);
     this.claims = new ComponentClaims(this);
@@ -154,5 +170,6 @@ export class ManagerCore implements ManagerCoreParts {
     this.shutdownEscalation = new ShutdownEscalation(this);
     this.startup = new StartupOrchestration(this);
     this.restart = new RestartOperations(this);
+    this.registration = new RegistrationOperations(this);
   }
 }

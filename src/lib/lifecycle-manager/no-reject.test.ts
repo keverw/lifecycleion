@@ -1209,11 +1209,7 @@ describe('LifecycleManager - public methods never reject', () => {
     };
 
     // Work still in flight from the first registration names it without asking.
-    const nameOf = (
-      manager as unknown as { nameOf: (component: BaseComponent) => string }
-    ).nameOf.bind(manager);
-
-    expect(nameOf(component)).toBe('a');
+    expect(coreOf(manager).registry.nameOf(component)).toBe('a');
   });
 
   test('an unregister does not remove a replacement registered while it was stopping', async () => {
@@ -1236,11 +1232,7 @@ describe('LifecycleManager - public methods never reject', () => {
 
     expect(result.success).toBe(false);
     expect(result.code).toBe('component_not_found');
-    expect(
-      (
-        manager as unknown as { getComponent: (name: string) => unknown }
-      ).getComponent('a'),
-    ).toBe(replacement);
+    expect(coreOf(manager).registry.getComponent('a')).toBe(replacement);
     expect(manager.getComponentStatus('a')?.state).toBe('registered');
   });
 

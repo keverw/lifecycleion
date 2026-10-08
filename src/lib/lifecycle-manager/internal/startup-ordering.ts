@@ -50,7 +50,7 @@ export class StartupOrdering {
       (component) =>
         component === candidate?.component
           ? candidate.name
-          : this.core.internals.nameOf(component),
+          : this.core.registry.nameOf(component),
       (component) =>
         component === candidate?.component
           ? candidate.dependencies
