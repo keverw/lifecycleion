@@ -3,11 +3,8 @@ import type { ComponentAccessContext } from './component-access-context';
 import { adoptPromise } from '../../internal/adopt-promise';
 import {
   allSettledPromises,
-  applyIntrinsic,
   awaitBoxedPromise,
-  getIntrinsic,
   observePromise,
-  promiseResolveIntrinsic,
 } from '../../internal/intrinsics';
 import { raceDeadline } from '../../internal/race-deadline';
 import { reportCallbackError } from '../../safe-handle-callback';
@@ -71,7 +68,7 @@ export async function runShutdownWarningPhase(
     let warningHook: unknown;
 
     try {
-      warningHook = getIntrinsic(component, 'onShutdownWarning');
+      warningHook = Reflect.get(component, 'onShutdownWarning');
     } catch (error) {
       reportCallbackError(
         `lifecycle-manager shutdown warning for ${name}`,
@@ -130,7 +127,7 @@ export async function runShutdownWarningPhase(
     context.lifecycleEvents.componentShutdownWarning(name);
     return (async () => {
       try {
-        await promiseResolveIntrinsic(undefined);
+        await Promise.resolve(undefined);
         // Target selection and notifications preceded this microtask. Automatic
         // cleanup of a failed start can begin meanwhile even though public stops
         // are refused during shutdown. Require the selected state too: a running
@@ -161,13 +158,13 @@ export async function runShutdownWarningPhase(
           return;
         }
         await awaitBoxedPromise(
-          adoptPromise(applyIntrinsic(hook, component, [])),
+          adoptPromise(Reflect.apply(hook, component, [])),
         );
         if (settle(name, 'completed')) {
           context.lifecycleEvents.componentShutdownWarningCompleted(name);
         }
       } catch (error) {
-        // A synchronous throw from the hook lands here too, through `applyIntrinsic`.
+        // A synchronous throw from the hook lands here too, through `Reflect.apply`.
         // After the timeout was announced the failure is only logged: the component
         // already has its terminal event.
         const isFirstOutcome = settle(name, 'failed');
@@ -201,7 +198,7 @@ export async function runShutdownWarningPhase(
       void startWarning(target);
     }
     // Start warning callbacks before publishing the fire-and-forget broadcast.
-    await promiseResolveIntrinsic(undefined);
+    await Promise.resolve(undefined);
     context.lifecycleEvents.lifecycleManagerShutdownWarningCompleted(timeoutMS);
     return;
   }

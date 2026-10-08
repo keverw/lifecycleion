@@ -178,6 +178,17 @@ Each library has reference documentation in the [docs](./docs) folder. Click a l
 | [to-error](./docs/to-error.md)                                     | `lifecycleion/to-error`                                 | Coerce any thrown or rejected value into an `Error` (`toError`), or describe it as a string that is always safe to read (`describeError`)     |
 | [unix-time-helpers](./docs/unix-time-helpers.md)                   | `lifecycleion/unix-time-helpers`                        | Unix timestamp utilities for seconds, milliseconds, high-resolution timing, and unit conversion                                               |
 
+## Security and threat model
+
+Lifecycleion calls code it does not control, and defends against that code misbehaving:
+
+- **Component instances and option objects.** Getters may throw, or answer differently on each read. Members are read once where the answer matters, and a throw is reported as a failure of that operation rather than escaping it.
+- **Promises and thenables returned by hooks and callbacks.** An own `then`, an own or changing `constructor`, a species that builds something else, or a Proxy cannot hang an operation or leave a rejection unhandled. A promise with its own `then` is observed through `Promise.prototype.then` rather than that `then`.
+- **Loggers, sinks, adapters, interceptors, and listeners.** What they throw or reject with is contained and reported on the documented channel, and the work around them still completes.
+- **Caller data with a polluted prototype.** Rendering, redaction, and record rebuilding read a value's own properties, so a property inherited from a polluted `Object.prototype` does not appear in the output, and a `__proto__` key is kept as an ordinary entry rather than reparenting the rebuilt record.
+
+The library reads built-ins - `Promise`, `Reflect`, `Object`, `Array`, `Set`, `Map`, `WeakMap`, `WeakSet`, `Math`, `Number`, `Symbol`, `EventTarget`, `AbortController`, and their prototypes - live, when it uses them, and does not defend against them being replaced or modified. Tampering with built-ins is unsupported.
+
 ## Change Log
 
 See [changelog.md](./changelog.md) for version history and release notes.

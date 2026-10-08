@@ -1,5 +1,4 @@
 import { defineEntry } from '../../internal/define-entry';
-import { promiseConstructorIntrinsic } from '../../internal/intrinsics';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 import { guardProgressCallback } from '../internal/progress';
 import type {
@@ -52,7 +51,7 @@ export class XHRAdapter implements HTTPAdapter {
       request.initialURL,
     );
 
-    return new promiseConstructorIntrinsic((resolve, reject) => {
+    return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
 
       // responseType 'arraybuffer' gives us a raw ArrayBuffer on load,

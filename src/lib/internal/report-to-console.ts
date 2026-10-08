@@ -1,48 +1,26 @@
-import {
-  applyIntrinsic,
-  definePropertyIntrinsic,
-  getOwnPropertyDescriptorIntrinsic,
-} from './intrinsics';
-
 let isReporting = false;
 const CONSOLE_REPORT_STATE_KEY = Symbol.for('lifecycleion.reportToConsole.v1');
-const setConstructorIntrinsic = Set;
-// eslint-disable-next-line @typescript-eslint/unbound-method
-const setHasIntrinsic = Set.prototype.has;
-// eslint-disable-next-line @typescript-eslint/unbound-method
-const setAddIntrinsic = Set.prototype.add;
-// eslint-disable-next-line @typescript-eslint/unbound-method
-const setDeleteIntrinsic = Set.prototype.delete;
 
 /**
- * Share the console origin across bundled copies. Native Set operations avoid running
- * accessors on a shared state object, and still release the flag if that object is
- * frozen or its methods are replaced. A hostile global slot is replaced when possible;
- * otherwise the local guard still contains this copy's synchronous re-entry.
+ * Share the console origin across bundled copies. A slot holding something other than a
+ * `Set` is replaced when possible; otherwise the local guard still contains this copy's
+ * synchronous re-entry.
  */
 function sharedConsoleState(): Set<boolean> | undefined {
   try {
-    const existing: unknown = getOwnPropertyDescriptorIntrinsic(
+    const existing: unknown = Object.getOwnPropertyDescriptor(
       globalThis,
       CONSOLE_REPORT_STATE_KEY,
     )?.value;
-    try {
-      // The native internal-slot check also rejects proxies without invoking traps.
-      applyIntrinsic(setHasIntrinsic, existing, [true]);
+    if (existing instanceof Set) {
       return existing as Set<boolean>;
-    } catch {
-      // Missing or unusable state. Defining a data property avoids a hostile setter.
     }
-    const state = new setConstructorIntrinsic<boolean>();
-    // A descriptor without a prototype, so a `get` added to `Object.prototype` cannot
-    // make it invalid and leave every copy without the shared guard.
-    return definePropertyIntrinsic(globalThis, CONSOLE_REPORT_STATE_KEY, {
-      // eslint-disable-next-line @typescript-eslint/naming-convention
-      __proto__: null,
+    const state = new Set<boolean>();
+    return Reflect.defineProperty(globalThis, CONSOLE_REPORT_STATE_KEY, {
       value: state,
       configurable: true,
       writable: true,
-    } as PropertyDescriptor)
+    })
       ? state
       : undefined;
   } catch {
@@ -56,9 +34,7 @@ export function isConsoleReportActive(): boolean {
     return true;
   }
   const shared = sharedConsoleState();
-  return (
-    shared !== undefined && applyIntrinsic(setHasIntrinsic, shared, [true])
-  );
+  return shared !== undefined && shared.has(true);
 }
 
 /**
@@ -119,7 +95,7 @@ export function reportToConsole(...args: unknown[]): void {
     return;
   }
   const shared = sharedConsoleState();
-  if (shared !== undefined && applyIntrinsic(setHasIntrinsic, shared, [true])) {
+  if (shared !== undefined && shared.has(true)) {
     return;
   }
 
@@ -127,22 +103,19 @@ export function reportToConsole(...args: unknown[]): void {
   // function body. Queued reporters must also capture this state when work is created.
   isReporting = true;
   if (shared !== undefined) {
-    applyIntrinsic(setAddIntrinsic, shared, [true]);
+    shared.add(true);
   }
 
   try {
-    // Applied rather than spread: a spread goes through the live
-    // `Array.prototype[Symbol.iterator]`, and a patched iterator would silently turn
-    // off the one reporter that nothing else backs up.
     // eslint-disable-next-line no-console -- this function is the console rung itself
-    applyIntrinsic(console.error, console, args);
+    console.error(...args);
   } catch {
     // Nothing left to try, which is the whole point of this being the last rung. A
     // missing `console`, a replaced `error` that is not a function, and a console that
     // throws on write all land here, and all of them are quieter than the alternative.
   } finally {
     if (shared !== undefined) {
-      applyIntrinsic(setDeleteIntrinsic, shared, [true]);
+      shared.delete(true);
     }
     isReporting = false;
   }

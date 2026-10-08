@@ -8,11 +8,7 @@ import type {
   SignalBroadcastResult,
   ComponentSignalResult,
 } from '../types';
-import {
-  allPromises,
-  getIntrinsic,
-  promiseResolveIntrinsic,
-} from '../../internal/intrinsics';
+import { allPromises } from '../../internal/intrinsics';
 import { isObjectLike } from '../../internal/is-object-like';
 import { toError, describeError } from '../../to-error';
 import {
@@ -44,7 +40,7 @@ const SIGNAL_TRIGGER_OPERATIONS = {
 interface SignalBroadcastDescriptor {
   signal: 'reload' | 'info' | 'debug';
   // The handler as read off the component, unbound: it is called with the component
-  // as its receiver through the captured `applyIntrinsic`, never through its own `bind`.
+  // as its receiver through `Reflect.apply`, never through its own `bind`.
   pickHandler: (component: BaseComponent) => unknown;
   startupLog: string;
   timeoutLog: string;
@@ -137,7 +133,7 @@ export async function checkComponentHealthOperation(
   let readFailureMessage = 'Health check could not be read';
   const handlerRead = readHookThenRecheck(
     () => {
-      const handler: unknown = getIntrinsic(component, 'healthCheck');
+      const handler: unknown = Reflect.get(component, 'healthCheck');
       // Configuration getters are caller code too. Capture the timeout before
       // announcing the check, and distinguish its failure from the handler itself.
       // A component without a health handler does not need timeout configuration.
@@ -390,7 +386,7 @@ export async function checkAllHealthOperation(
     // Earlier hook getters can replace a later selected instance before this dispatch.
     // Keep the report about its original selection, never the replacement by name.
     if (context.getComponent(name) !== component) {
-      return promiseResolveIntrinsic<HealthCheckResult>({
+      return Promise.resolve<HealthCheckResult>({
         name,
         healthy: false,
         message: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND,

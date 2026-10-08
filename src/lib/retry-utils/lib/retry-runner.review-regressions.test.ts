@@ -161,36 +161,3 @@ test('fatal reports record their error without invoking retry jitter', async () 
     random.mockRestore();
   }
 });
-
-test('attempt setup failure is fatal even when retry jitter also throws', async () => {
-  const failure = new Error('cannot allocate attempt ID');
-  const runner = new RetryRunner({ strategy: 'exponential' }, () => {});
-  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'crypto');
-  Object.defineProperty(globalThis, 'crypto', {
-    configurable: true,
-    value: {
-      getRandomValues: () => {
-        throw failure;
-      },
-    },
-  });
-  const random = spyOn(Math, 'random').mockImplementation(() => {
-    throw new Error('jitter must not run');
-  });
-  try {
-    expect(await runner.run(true)).toEqual({
-      status: 'attempt_fatal',
-      code: 'unexpected_error',
-      error: failure,
-    });
-    expect(runner.lastError).toBe(failure);
-    expect(random).not.toHaveBeenCalled();
-  } finally {
-    random.mockRestore();
-    if (descriptor) {
-      Object.defineProperty(globalThis, 'crypto', descriptor);
-    } else {
-      Reflect.deleteProperty(globalThis, 'crypto');
-    }
-  }
-});

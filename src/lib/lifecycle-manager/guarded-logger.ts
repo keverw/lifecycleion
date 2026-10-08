@@ -1,12 +1,7 @@
 import { isObjectLike } from '../internal/is-object-like';
 import { LoggerService } from '../logger/logger-service';
 import { adoptResult, UnreadableReturn } from '../internal/adopt-promise';
-import {
-  applyIntrinsic,
-  getIntrinsic,
-  observePromise,
-  observeRejection,
-} from '../internal/intrinsics';
+import { observePromise, observeRejection } from '../internal/intrinsics';
 import {
   reportCallbackError,
   runCallbackSafely,
@@ -201,7 +196,7 @@ export function createGuardedLoggerService(
       ) {
         return {
           ...descriptor,
-          value: getIntrinsic(guarded, property) as unknown,
+          value: Reflect.get(guarded, property) as unknown,
           configurable: true,
         };
       }
@@ -228,7 +223,7 @@ export function createGuardedLoggerService(
         // `JSON.stringify` reading `toJSON` - would otherwise throw at its call site
         // for a service whose accessor throws. Answered as absent.
         try {
-          const passthrough: unknown = getIntrinsic(target, property, target);
+          const passthrough: unknown = Reflect.get(target, property, target);
 
           return passthrough;
         } catch (error) {
@@ -258,7 +253,7 @@ export function createGuardedLoggerService(
       let method: unknown;
 
       try {
-        method = getIntrinsic(target, property, target);
+        method = Reflect.get(target, property, target);
       } catch (error) {
         reportCallbackError(`${GUARDED_LOGGER_LABEL}.${property}`, error);
 
@@ -386,10 +381,10 @@ function guardEntity(
   let child: unknown;
 
   try {
-    // Use `applyIntrinsic`, not `method.call(...)`: that reads `call` off the untrusted
+    // Use `Reflect.apply`, not `method.call(...)`: that reads `call` off the untrusted
     // method, so one carrying its own `call` property would run that instead. A `method`
     // that is not a function throws here too, and is reported the same way.
-    child = applyIntrinsic(method as (name: string) => unknown, target, [
+    child = Reflect.apply(method as (name: string) => unknown, target, [
       entityName,
     ]);
   } catch (error) {

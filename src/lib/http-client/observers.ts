@@ -3,7 +3,6 @@ import {
   reportCallbackError,
 } from '../safe-handle-callback';
 import { matchesFilter, scalarHeader } from './utils';
-import { copyRegistrations } from './internal/copy-registrations';
 import type {
   ResponseObserverFilter,
   ErrorObserverFilter,
@@ -58,7 +57,7 @@ export class ResponseObserverManager {
     if (!this.hasObservers()) {
       return EMPTY_OBSERVER_CHAIN;
     }
-    const observers = copyRegistrations(this.observers);
+    const observers = this.observers.slice();
 
     return (response, request, phase) =>
       runResponseObservers(observers, response, request, phase);
@@ -80,11 +79,7 @@ async function runResponseObservers(
   request: AttemptRequest,
   phase: ResponseObserverPhase,
 ): Promise<void> {
-  // Indexed for the reason `copyRegistrations()` gives.
-  // eslint-disable-next-line unicorn/no-for-loop
-  for (let index = 0; index < observers.length; index++) {
-    const { fn, filter } = observers[index];
-
+  for (const { fn, filter } of observers) {
     let doesMatch: boolean;
     try {
       doesMatch = matchesFilter(
@@ -155,7 +150,7 @@ export class ErrorObserverManager {
     if (!this.hasObservers()) {
       return EMPTY_OBSERVER_CHAIN;
     }
-    const observers = copyRegistrations(this.observers);
+    const observers = this.observers.slice();
 
     return (error, request, phase) =>
       runErrorObservers(observers, error, request, phase);
@@ -177,11 +172,7 @@ async function runErrorObservers(
   request: AttemptRequest,
   phase: ErrorObserverPhase,
 ): Promise<void> {
-  // Indexed for the reason `copyRegistrations()` gives.
-  // eslint-disable-next-line unicorn/no-for-loop
-  for (let index = 0; index < observers.length; index++) {
-    const { fn, filter } = observers[index];
-
+  for (const { fn, filter } of observers) {
     let doesMatch: boolean;
     try {
       doesMatch = matchesFilter(

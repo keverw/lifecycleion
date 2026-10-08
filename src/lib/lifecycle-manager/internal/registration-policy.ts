@@ -1,4 +1,3 @@
-import { getIntrinsic } from '../../internal/intrinsics';
 import type { BaseComponent } from '../base-component';
 import type {
   ComponentOperationResult,
@@ -197,7 +196,7 @@ const REMOVED_TIMEOUT_HOOKS: readonly (readonly [string, string])[] = [
 /**
  * Why `component` cannot be registered because it still defines a removed timeout hook,
  * as an own or inherited property, or `undefined` when it defines none. Each property is
- * read once, through the `Reflect.get` captured at load: a value other than `undefined`
+ * read once, through `Reflect.get`: a value other than `undefined`
  * defines the hook, and so does a getter that throws - an accessor there is a definition
  * the component made. Never throws for the component's own code.
  */
@@ -209,7 +208,7 @@ export function removedTimeoutHooksReason(
   for (const [hook, reason] of REMOVED_TIMEOUT_HOOKS) {
     let isDefined: boolean;
     try {
-      isDefined = getIntrinsic(component, hook) !== undefined;
+      isDefined = Reflect.get(component, hook) !== undefined;
     } catch {
       isDefined = true;
     }

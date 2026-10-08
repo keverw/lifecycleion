@@ -1082,9 +1082,8 @@ channel like any other callback failure (see
 `cause`. The listeners after it still run, and the request settles as it otherwise would.
 
 The guard is the signal's own `addEventListener`, `removeEventListener` and `onabort`,
-defined on that instance (non-writable, non-configurable) and backed by the `EventTarget`
-methods captured when the library loads, so replacing the prototype methods later does not
-bypass it. They otherwise behave as natively: a duplicate listener with the same capture
+defined on that instance and backed by the `EventTarget` methods. They otherwise behave
+as natively: a duplicate listener with the same capture
 flag is still ignored, `removeEventListener()` with the original listener removes it,
 `once`, `passive` and `signal` options apply, a `null` listener is ignored, `onabort` runs
 at the position where it was first set, and other event types are not wrapped. Native

@@ -89,44 +89,9 @@ test('finite durations retain their value under both policies', () => {
   expect(optionalValidatedTimerDelayMS(12.5)).toBe(12.5);
 });
 
-test('validation and clamping ignore later patches to WeakSet, Number and Math', () => {
-  /* eslint-disable @typescript-eslint/unbound-method */
-  const originalHas = WeakSet.prototype.has;
-  const originalAdd = WeakSet.prototype.add;
-  const originalIsNaN = Number.isNaN;
-  const originalMax = Math.max;
-  const originalMin = Math.min;
-  /* eslint-enable @typescript-eslint/unbound-method */
-  const fail = (): never => {
-    throw new Error('live global used');
-  };
-  WeakSet.prototype.has = () => false;
-  WeakSet.prototype.add = fail;
-  Number.isNaN = () => false;
-  Math.max = fail;
-  Math.min = fail;
-  let failure: unknown;
-  try {
-    try {
-      toTimerDelayMS(NaN, 'Patched timeout');
-    } catch (error) {
-      failure = error;
-    }
-    expect(clampTimerDelayMS(MAX_TIMER_MS + 1)).toBe(MAX_TIMER_MS);
-    expect(Object.is(clampTimerDelayMS(-0), 0)).toBe(true);
-    expect(clampTimerDelayMS(-5)).toBe(0);
-    expect(clampTimerDelayMS(NaN)).toBeNaN();
-    expect(toTimerDelayMS(12.5)).toBe(12.5);
-    expect(isTimeoutValidationError(failure)).toBe(true);
-  } finally {
-    WeakSet.prototype.has = originalHas;
-    WeakSet.prototype.add = originalAdd;
-    Number.isNaN = originalIsNaN;
-    Math.max = originalMax;
-    Math.min = originalMin;
-  }
-  expect(failure).toBeInstanceOf(TypeError);
-  expect((failure as Error).message).toBe(
-    'Patched timeout must be a number other than NaN',
-  );
+test('clamping bounds oversized delays, normalizes non-positive ones and passes NaN through', () => {
+  expect(clampTimerDelayMS(MAX_TIMER_MS + 1)).toBe(MAX_TIMER_MS);
+  expect(Object.is(clampTimerDelayMS(-0), 0)).toBe(true);
+  expect(clampTimerDelayMS(-5)).toBe(0);
+  expect(clampTimerDelayMS(NaN)).toBeNaN();
 });

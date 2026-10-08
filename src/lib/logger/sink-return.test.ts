@@ -657,40 +657,6 @@ for (const mode of ['throw', 'reject'] as const) {
   });
 }
 
-test('diagnostic invocation retains the captured apply after a global patch', async () => {
-  let delivered = 0;
-  const original = Reflect.apply;
-  const logger = new Logger({
-    callProcessExit: false,
-    sinks: [
-      {
-        write() {
-          throw new Error('original');
-        },
-      },
-    ],
-    diagnosticSinks: [
-      {
-        write: () => {},
-        writeDiagnostic: () => {
-          delivered++;
-        },
-      },
-    ],
-  });
-  const output = spyOn(console, 'error').mockImplementation(() => {});
-  try {
-    Reflect.apply = () => undefined;
-    logger.info('trigger');
-    await sleep(0);
-  } finally {
-    Reflect.apply = original;
-    output.mockRestore();
-    await logger.close();
-  }
-  expect(delivered).toBe(1);
-});
-
 test('re-entrant close returns a rejected promise instead of throwing', async () => {
   let didReturnPromise = false;
   let didCatch = false;
@@ -883,63 +849,6 @@ test('an ignored re-entrant close uses the normal console fallback without liste
     output.mockRestore();
   }
 });
-
-for (const method of ['then', 'catch'] as const) {
-  for (const context of ['write', 'diagnostic'] as const) {
-    test(`${context} rejection reporting survives a later Promise.prototype.${method} replacement`, async () => {
-      // Isolate the global patch so the runner and unrelated tests keep their own
-      // promise machinery. A dropped rejection handler must also fail this child
-      // through its unhandled-rejection policy, not merely miss an assertion here.
-      const script = `
-        import { Logger } from ${JSON.stringify(`${import.meta.dir}/index.ts`)};
-        const reports = [];
-        console.error = (line) => reports.push(String(line));
-        const logger = new Logger({
-          callProcessExit: false,
-          sinks: [{ write() { throw new Error('original write failure'); } }],
-          diagnosticSinks: [{
-            write() {},
-            writeDiagnostic() { return Promise.reject(new Error('diagnostic rejection')); }
-          }]
-        });
-        if (${JSON.stringify(context)} === 'write') {
-          logger.removeSink(logger.getSinks()[0]);
-          logger.addSink({ write() { return Promise.reject(new Error('write rejection')); } });
-          logger.on('diagnostic', (event) => reports.push(event.message));
-        }
-        const original = Promise.prototype[${JSON.stringify(method)}];
-        let patchedCalls = 0;
-        Promise.prototype[${JSON.stringify(method)}] = function () {
-          patchedCalls++;
-          return this;
-        };
-        logger.info('entry');
-        await new Promise(resolve => setTimeout(resolve, 10));
-        Promise.prototype[${JSON.stringify(method)}] = original;
-        await logger.close();
-        process.stdout.write(JSON.stringify({ reports, patchedCalls }));
-      `;
-      const child = Bun.spawn([process.execPath, '--eval', script], {
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
-      const [stdout, stderr, exitCode] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ]);
-      expect({ exitCode, stderr }).toEqual({ exitCode: 0, stderr: '' });
-      const result = JSON.parse(stdout) as {
-        reports: string[];
-        patchedCalls: number;
-      };
-      expect(result.patchedCalls).toBe(0);
-      expect(
-        result.reports.some((line) => line.includes(`${context} rejection`)),
-      ).toBe(true);
-    });
-  }
-}
 
 for (const factory of ['test', 'frontend'] as const) {
   test(`${factory} logger factory copies numeric sink membership without caller iteration`, async () => {

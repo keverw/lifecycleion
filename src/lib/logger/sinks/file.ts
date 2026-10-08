@@ -38,9 +38,7 @@ import { isDiagnosticEntry } from '../internal/sink-failure-routing';
 import { sleep } from '../../sleep';
 import {
   observePromise,
-  promiseConstructorIntrinsic,
-  queueMicrotaskIntrinsic,
-  promiseResolveIntrinsic,
+  queueMicrotaskSafely,
 } from '../../internal/intrinsics';
 
 export type {
@@ -293,7 +291,7 @@ export class FileSink implements LogSink {
   private flushBaselineWritten = 0;
   private flushBaselineDropped = 0;
   /** The flush in flight, if any; see {@link flush}. Never rejects. */
-  private pendingFlush: Promise<void> = promiseResolveIntrinsic(undefined);
+  private pendingFlush: Promise<void> = Promise.resolve(undefined);
   private didReportDrop = false;
   /** {@link didReportDrop} for drops reported for a diagnostic entry. */
   private didReportDiagnosticDrop = false;
@@ -613,14 +611,12 @@ export class FileSink implements LogSink {
   public close(): Promise<void> {
     this.closing = true;
     // Publish ownership before any close-time callback can re-enter close().
-    this.closePromise ??= new promiseConstructorIntrinsic<void>(
-      (resolve, reject) => {
-        queueMicrotaskIntrinsic(() => {
-          // Do not resolve with the promise: native adoption would read its live then.
-          void observePromise(this.closeInternal(), resolve, reject);
-        }, reject);
-      },
-    );
+    this.closePromise ??= new Promise<void>((resolve, reject) => {
+      queueMicrotaskSafely(() => {
+        // Do not resolve with the promise: native adoption would read its live then.
+        void observePromise(this.closeInternal(), resolve, reject);
+      }, reject);
+    });
     return this.closePromise;
   }
 
@@ -801,7 +797,7 @@ export class FileSink implements LogSink {
       return;
     }
 
-    await new promiseConstructorIntrinsic<void>((resolve) => {
+    await new Promise<void>((resolve) => {
       stream.end(() => {
         resolve();
       });
@@ -1373,7 +1369,7 @@ export class FileSink implements LogSink {
     }
 
     // Write to file
-    return await new promiseConstructorIntrinsic<void>((resolve, reject) => {
+    return await new Promise<void>((resolve, reject) => {
       // Rejected, not resolved. The stream can disappear *after* the check above: its
       // `'error'` handler calls `destroyStream` on a `nextTick`, which lands while this
       // method is suspended in `rotateIfNeeded` or `rotateFile` - both awaited after that

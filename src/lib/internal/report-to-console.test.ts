@@ -52,40 +52,6 @@ describe('reportToConsole', () => {
     expect(calls).toBe(2);
   });
 
-  test('shared console origin releases despite frozen state and replaced methods', async () => {
-    const copy = await importConsoleReportCopy('frozen-state');
-    const key = Symbol.for('lifecycleion.reportToConsole.v1');
-    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
-    const hostileMethod = (): never => {
-      throw new Error('shared method must not run');
-    };
-    const state = Object.freeze(
-      Object.assign(new Set<boolean>(), {
-        has: hostileMethod,
-        add: hostileMethod,
-        delete: hostileMethod,
-      }),
-    );
-    Object.defineProperty(globalThis, key, {
-      value: state,
-      configurable: true,
-      writable: true,
-    });
-    const captured = muteConsoleError();
-    try {
-      reportToConsole('first failure');
-      expect(copy.isConsoleReportActive()).toBe(false);
-      copy.reportToConsole('later failure');
-      expect(captured).toEqual(['first failure', 'later failure']);
-    } finally {
-      if (descriptor === undefined) {
-        Reflect.deleteProperty(globalThis, key);
-      } else {
-        Object.defineProperty(globalThis, key, descriptor);
-      }
-    }
-  });
-
   test('a hostile shared-state accessor is repaired without invoking it', () => {
     const key = Symbol.for('lifecycleion.reportToConsole.v1');
     const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
@@ -111,38 +77,6 @@ describe('reportToConsole', () => {
         Object.defineProperty(globalThis, key, descriptor);
       }
     }
-  });
-
-  test('creates shared console state despite a get added to Object.prototype', () => {
-    const key = Symbol.for('lifecycleion.reportToConsole.v1');
-    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
-    Reflect.deleteProperty(globalThis, key);
-    let isSharedActive = false;
-    muteConsoleError();
-    console.error = () => {
-      const shared: unknown = Object.getOwnPropertyDescriptor(
-        globalThis,
-        key,
-      )?.value;
-      isSharedActive = shared instanceof Set && shared.has(true);
-    };
-    Object.defineProperty(Object.prototype, 'get', {
-      configurable: true,
-      writable: true,
-      value: () => undefined,
-    });
-    try {
-      reportToConsole('failure');
-    } finally {
-      Reflect.deleteProperty(Object.prototype, 'get');
-      if (descriptor === undefined) {
-        Reflect.deleteProperty(globalThis, key);
-      } else {
-        Object.defineProperty(globalThis, key, descriptor);
-      }
-    }
-    // Other bundled copies read this slot; without it only the local guard held.
-    expect(isSharedActive).toBe(true);
   });
 
   test('bounds a console shim that reports another failure and releases the guard', () => {
@@ -221,23 +155,6 @@ describe('reportToConsole', () => {
 
     // The rung was genuinely reached rather than skipped by some earlier guard.
     expect(calls.attempts).toBe(1);
-  });
-
-  test('still writes when the array iterator is patched to throw', () => {
-    const captured = muteConsoleError();
-    const iterator = Array.prototype[Symbol.iterator];
-
-    Array.prototype[Symbol.iterator] = function () {
-      throw new Error('iterator patched');
-    };
-
-    try {
-      reportToConsole('context:', 'still reported');
-    } finally {
-      Array.prototype[Symbol.iterator] = iterator;
-    }
-
-    expect(captured).toEqual(['context: still reported']);
   });
 
   test('does not throw when console.error is missing', () => {

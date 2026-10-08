@@ -97,60 +97,6 @@ describe('FileSink', () => {
     }
   });
 
-  test('flush and close settle after global Promise and its methods are replaced', async () => {
-    const sink = new FileSink({
-      logDir: tmpDir.path,
-      basename: 'patched-promises',
-      jsonFormat: false,
-    });
-    expect((await sink.flush()).success).toBe(true);
-    const originalPromise = Promise;
-    // eslint-disable-next-line @typescript-eslint/unbound-method
-    const originalThen = Promise.prototype.then;
-    // eslint-disable-next-line @typescript-eslint/unbound-method
-    const originalRace = Promise.race;
-    // eslint-disable-next-line @typescript-eslint/unbound-method
-    const originalResolve = Promise.resolve;
-    let flushed: Awaited<ReturnType<typeof sink.flush>> | undefined;
-    let didClose = false;
-    try {
-      originalPromise.prototype.then = function () {
-        return new originalPromise(() => {});
-      };
-      originalPromise.race = function () {
-        return new originalPromise(() => {});
-      };
-      originalPromise.resolve = (() =>
-        new originalPromise(() => {})) as typeof Promise.resolve;
-      globalThis.Promise = (() => {
-        throw new Error('live Promise constructor used');
-      }) as unknown as PromiseConstructor;
-      const flush = sink.flush(40);
-      void Reflect.apply(originalThen, flush, [
-        (value: Awaited<typeof flush>) => {
-          flushed = value;
-        },
-        () => {},
-      ]);
-      await new originalPromise((resolve) => setTimeout(resolve, 80));
-      expect(flushed?.success).toBe(true);
-      const close = sink.close();
-      void Reflect.apply(originalThen, close, [
-        () => {
-          didClose = true;
-        },
-        () => {},
-      ]);
-      await new originalPromise((resolve) => setTimeout(resolve, 80));
-      expect(didClose).toBe(true);
-    } finally {
-      globalThis.Promise = originalPromise;
-      originalPromise.prototype.then = originalThen;
-      originalPromise.race = originalRace;
-      originalPromise.resolve = originalResolve;
-    }
-  });
-
   test('should create log directory if it does not exist', async () => {
     const nonExistentDir = `${tmpDir.path}/does-not-exist`;
 

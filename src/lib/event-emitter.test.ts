@@ -491,33 +491,6 @@ test('clear accepts an empty event name without removing other events', () => {
   expect(emitter.hasListeners('other')).toBe(true);
 });
 
-test('emission snapshots listeners without the live Set iterator', () => {
-  const emitter = new EventEmitter();
-  let called = 0;
-  emitter.on('test', () => {
-    called++;
-  });
-  const descriptor = Object.getOwnPropertyDescriptor(
-    Set.prototype,
-    Symbol.iterator,
-  );
-  if (descriptor === undefined) {
-    throw new Error('Set iterator descriptor is missing');
-  }
-  Object.defineProperty(Set.prototype, Symbol.iterator, {
-    configurable: true,
-    value: () => {
-      throw new Error('iterator replaced');
-    },
-  });
-  try {
-    emitter.emit('test');
-  } finally {
-    Object.defineProperty(Set.prototype, Symbol.iterator, descriptor);
-  }
-  expect(called).toBe(1);
-});
-
 test('async listeners entered by console forwarding do not restart diagnostics', async () => {
   const emitter = new EventEmitter();
   let calls = 0;

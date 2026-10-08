@@ -1,8 +1,4 @@
-import {
-  observeRejection,
-  applyIntrinsic,
-  awaitBoxedPromise,
-} from './internal/intrinsics';
+import { observeRejection, awaitBoxedPromise } from './internal/intrinsics';
 import { errorToString } from './error-to-string';
 import { toError } from './to-error';
 import { DOUBLE_EOL } from './constants';
@@ -226,11 +222,11 @@ function invokeCallbackSafely(
 
   let result: unknown;
   try {
-    // Use the captured `applyIntrinsic` so an extracted method keeps its receiver, not
+    // Use `Reflect.apply` so an extracted method keeps its receiver, not
     // `callback.apply(...)`, which reads `apply` off the untrusted callback itself: one
     // with its own `apply` property would run that instead. With `thisArg` omitted this
     // is the same bare call as before.
-    result = applyIntrinsic(
+    result = Reflect.apply(
       callback as (...args: unknown[]) => unknown,
       thisArg,
       args,
@@ -365,8 +361,6 @@ export async function safeHandleCallbackAndWait<T>(
     // otherwise hand the caller a `null` typed as an `Error` and break
     // `result.error.message`. The original value stays reachable as `cause`.
     const callbackResult = {
-      // eslint-disable-next-line @typescript-eslint/naming-convention
-      __proto__: null,
       success: false as const,
       error: toError(error),
     };
@@ -375,9 +369,9 @@ export async function safeHandleCallbackAndWait<T>(
 
   if (isFunction(callback)) {
     try {
-      // Use `applyIntrinsic` and `adoptResult()`, as `runCallbackSafely()` does:
+      // Use `Reflect.apply` and `adoptResult()`, as `runCallbackSafely()` does:
       // one path for how an untrusted callback is invoked and how its promise is read.
-      const result: unknown = applyIntrinsic(
+      const result: unknown = Reflect.apply(
         callback as (...args: unknown[]) => unknown,
         undefined,
         args,
@@ -392,16 +386,12 @@ export async function safeHandleCallbackAndWait<T>(
         const { value } = await awaitBoxedPromise(pending as Promise<T>);
 
         const callbackResult = {
-          // eslint-disable-next-line @typescript-eslint/naming-convention
-          __proto__: null,
           success: true as const,
           value,
         };
         return callbackResult;
       } else {
         const callbackResult = {
-          // eslint-disable-next-line @typescript-eslint/naming-convention
-          __proto__: null,
           success: true as const,
           value: result as T,
         };

@@ -2,32 +2,8 @@ import {
   reportCallbackError,
   runCallbackSafely,
 } from '../safe-handle-callback';
-import {
-  applyIntrinsic,
-  definePropertyIntrinsic,
-  getIntrinsic,
-} from './intrinsics';
 import { isNullish } from './is-nullish';
 import { isObjectLike } from './is-object-like';
-
-// Captured at module initialization, like the rest of the intrinsics: the guard installed
-// below must keep registering with the real `EventTarget` after application code replaces
-// these methods, or a replacement could hand the raw listener to the runtime after all.
-// A runtime without `EventTarget` captures nothing, so importing this module still works
-// there; only guarding a signal fails.
-const eventTargetPrototype: EventTarget | undefined =
-  typeof EventTarget === 'function' ? EventTarget.prototype : undefined;
-// eslint-disable-next-line @typescript-eslint/unbound-method
-const addEventListenerIntrinsic = eventTargetPrototype?.addEventListener;
-// eslint-disable-next-line @typescript-eslint/unbound-method
-const removeEventListenerIntrinsic = eventTargetPrototype?.removeEventListener;
-const weakMapIntrinsic = WeakMap;
-// eslint-disable-next-line @typescript-eslint/unbound-method
-const weakMapGetIntrinsic = WeakMap.prototype.get;
-// eslint-disable-next-line @typescript-eslint/unbound-method
-const weakMapSetIntrinsic = WeakMap.prototype.set;
-// eslint-disable-next-line @typescript-eslint/unbound-method
-const weakMapDeleteIntrinsic = WeakMap.prototype.delete;
 
 type Wrapper = (this: unknown, event: unknown) => void;
 
@@ -38,9 +14,9 @@ type Wrapper = (this: unknown, event: unknown) => void;
  *
  * An `EventTarget` runs its listeners itself, so an error one throws never reaches the
  * code that dispatched the event - `abort()`'s caller. Node and Bun report it as an
- * uncaught exception instead, fatal to a process with no handler. This defines own,
- * non-writable, non-configurable `addEventListener`, `removeEventListener` and `onabort`
- * on the instance, so later changes to the prototypes cannot route around it:
+ * uncaught exception instead, fatal to a process with no handler. This defines own
+ * `addEventListener`, `removeEventListener` and `onabort` on the instance, which forward
+ * to the native `EventTarget` methods:
  *
  * - An `'abort'` listener - a function, or an object whose `handleEvent` is read at
  *   dispatch - is registered as a wrapper that calls it with the receiver it would have
@@ -58,23 +34,18 @@ type Wrapper = (this: unknown, event: unknown) => void;
  * on this signal directly registers the raw listener. Consumers that listen internally
  * (`fetch`, `AbortSignal.any`) are unaffected.
  *
- * Must be called on a signal nothing else has seen yet. Throws a `TypeError`, before
- * touching `signal`, in a runtime that had no `EventTarget` when this module loaded;
- * also throws if a signal refuses installation of a guard.
+ * Must be called on a signal nothing else has seen yet. Throws a `TypeError` if the
+ * signal refuses installation of the guard.
  */
 export function guardAbortListeners(signal: AbortSignal, label: string): void {
-  if (
-    addEventListenerIntrinsic === undefined ||
-    removeEventListenerIntrinsic === undefined
-  ) {
-    throw new TypeError(
-      'EventTarget is not available in this runtime; lifecycleion needs it to guard abort listeners',
-    );
-  }
-  const addListener: EventTarget['addEventListener'] =
-    addEventListenerIntrinsic;
-  const removeListener: EventTarget['removeEventListener'] =
-    removeEventListenerIntrinsic;
+  const addListener = (target: unknown, args: unknown[]): void => {
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    Reflect.apply(EventTarget.prototype.addEventListener, target, args);
+  };
+  const removeListener = (target: unknown, args: unknown[]): void => {
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    Reflect.apply(EventTarget.prototype.removeEventListener, target, args);
+  };
   const reportListenerError = (error: unknown): void => {
     reportCallbackError(label, error);
   };
@@ -86,21 +57,19 @@ export function guardAbortListeners(signal: AbortSignal, label: string): void {
   const wrapperFor = (listener: object, isCapture: boolean): Wrapper => {
     let wrappers = isCapture ? captureWrappers : bubbleWrappers;
     if (wrappers === undefined) {
-      wrappers = new weakMapIntrinsic<object, Wrapper>();
+      wrappers = new WeakMap<object, Wrapper>();
       if (isCapture) {
         captureWrappers = wrappers;
       } else {
         bubbleWrappers = wrappers;
       }
     }
-    const existing = applyIntrinsic(weakMapGetIntrinsic, wrappers, [
-      listener,
-    ]) as Wrapper | undefined;
+    const existing = wrappers.get(listener);
     if (existing !== undefined) {
       return existing;
     }
     const wrapper = wrapListener(listener, label, reportListenerError);
-    applyIntrinsic(weakMapSetIntrinsic, wrappers, [listener, wrapper]);
+    wrappers.set(listener, wrapper);
     return wrapper;
   };
 
@@ -112,24 +81,18 @@ export function guardAbortListeners(signal: AbortSignal, label: string): void {
     if (wrappers === undefined) {
       return undefined;
     }
-    const wrapper = applyIntrinsic(weakMapGetIntrinsic, wrappers, [
-      listener,
-    ]) as Wrapper | undefined;
-    applyIntrinsic(weakMapDeleteIntrinsic, wrappers, [listener]);
+    const wrapper = wrappers.get(listener);
+    wrappers.delete(listener);
     return wrapper;
   };
 
   function addEventListener(this: unknown, ...args: unknown[]): void {
     // Another receiver, or too few arguments: exactly the native method's behavior.
     if (this !== signal || args.length < 2) {
-      applyIntrinsic(addListener, this, args);
+      addListener(this, args);
       return;
     }
-    // Indexed, not destructured: array destructuring reads the live
-    // `Array.prototype[Symbol.iterator]`, which caller code can replace.
-    const type = args[0];
-    const listener = args[1];
-    const options = args[2];
+    const [type, listener, options] = args;
     // `ToString`, once, as the native method would - a symbol throws here as it would there.
     const typeString = `${type as string}`;
     // The DOM's no-op. Not handed to the native method, which in Bun and Node also
@@ -138,11 +101,11 @@ export function guardAbortListeners(signal: AbortSignal, label: string): void {
       return;
     }
     if (typeString !== 'abort' || !isObjectLike(listener)) {
-      applyIntrinsic(addListener, signal, [typeString, listener, options]);
+      addListener(signal, [typeString, listener, options]);
       return;
     }
     const { isCapture, nativeOptions } = readAddOptions(options);
-    applyIntrinsic(addListener, signal, [
+    addListener(signal, [
       typeString,
       wrapperFor(listener, isCapture),
       nativeOptions,
@@ -151,12 +114,10 @@ export function guardAbortListeners(signal: AbortSignal, label: string): void {
 
   function removeEventListener(this: unknown, ...args: unknown[]): void {
     if (this !== signal || args.length < 2) {
-      applyIntrinsic(removeListener, this, args);
+      removeListener(this, args);
       return;
     }
-    const type = args[0];
-    const listener = args[1];
-    const options = args[2];
+    const [type, listener, options] = args;
     const typeString = `${type as string}`;
     const isCapture = readCapture(options);
     // A listener this guard never wrapped may still have been added through the
@@ -165,12 +126,11 @@ export function guardAbortListeners(signal: AbortSignal, label: string): void {
       (typeString === 'abort' && isObjectLike(listener)
         ? takeWrapper(listener, isCapture)
         : undefined) ?? listener;
-    applyIntrinsic(removeListener, signal, [
+    removeListener(signal, [
       typeString,
       registered,
       // An object, not the boolean: Node's native removal ignores a boolean `true`.
-      // eslint-disable-next-line @typescript-eslint/naming-convention
-      { __proto__: null, capture: isCapture },
+      { capture: isCapture },
     ]);
   }
 
@@ -190,48 +150,33 @@ export function guardAbortListeners(signal: AbortSignal, label: string): void {
     handler = isObjectLike(value) ? value : null;
     if (handler === null && isHandlerRegistered) {
       isHandlerRegistered = false;
-      applyIntrinsic(removeListener, signal, ['abort', handlerWrapper, false]);
+      removeListener(signal, ['abort', handlerWrapper, false]);
     } else if (handler !== null && !isHandlerRegistered) {
       isHandlerRegistered = true;
-      applyIntrinsic(addListener, signal, ['abort', handlerWrapper, false]);
+      addListener(signal, ['abort', handlerWrapper, false]);
     }
   };
 
-  // Descriptors without a prototype, so nothing added to `Object.prototype` (a `get`,
-  // say) is read as part of them. Refusal is surfaced rather than leaving a signal apparently guarded.
+  // Refusal is surfaced rather than leaving a signal apparently guarded.
   if (
-    !definePropertyIntrinsic(signal, 'addEventListener', {
-      // eslint-disable-next-line @typescript-eslint/naming-convention
-      __proto__: null,
+    !Reflect.defineProperty(signal, 'addEventListener', {
       value: addEventListener,
-      writable: false,
+      writable: true,
       enumerable: false,
-      configurable: false,
-    } as PropertyDescriptor)
-  ) {
-    throw new TypeError('Abort signal refused installation of listener guards');
-  }
-  if (
-    !definePropertyIntrinsic(signal, 'removeEventListener', {
-      // eslint-disable-next-line @typescript-eslint/naming-convention
-      __proto__: null,
+      configurable: true,
+    }) ||
+    !Reflect.defineProperty(signal, 'removeEventListener', {
       value: removeEventListener,
-      writable: false,
+      writable: true,
       enumerable: false,
-      configurable: false,
-    } as PropertyDescriptor)
-  ) {
-    throw new TypeError('Abort signal refused installation of listener guards');
-  }
-  if (
-    !definePropertyIntrinsic(signal, 'onabort', {
-      // eslint-disable-next-line @typescript-eslint/naming-convention
-      __proto__: null,
+      configurable: true,
+    }) ||
+    !Reflect.defineProperty(signal, 'onabort', {
       get: getOnabort,
       set: setOnabort,
       enumerable: false,
-      configurable: false,
-    } as PropertyDescriptor)
+      configurable: true,
+    })
   ) {
     throw new TypeError('Abort signal refused installation of listener guards');
   }
@@ -255,7 +200,7 @@ function wrapListener(
   return function (event: unknown): void {
     let handleEvent: unknown;
     try {
-      handleEvent = getIntrinsic(listener, 'handleEvent', listener);
+      handleEvent = Reflect.get(listener, 'handleEvent', listener);
     } catch (error) {
       report(error);
       return;
@@ -268,7 +213,7 @@ function wrapListener(
 /** `capture` as the native methods flatten their options: from an object, or the value. */
 function readCapture(options: unknown): boolean {
   return isObjectLike(options)
-    ? Boolean(getIntrinsic(options, 'capture', options))
+    ? Boolean(Reflect.get(options, 'capture', options))
     : Boolean(options);
 }
 
@@ -286,10 +231,10 @@ function readAddOptions(options: unknown): {
   if (!isObjectLike(options)) {
     return { isCapture: Boolean(options), nativeOptions: options };
   }
-  const isCapture = Boolean(getIntrinsic(options, 'capture', options));
-  const once: unknown = getIntrinsic(options, 'once', options);
-  const passive: unknown = getIntrinsic(options, 'passive', options);
-  const signal: unknown = getIntrinsic(options, 'signal', options);
+  const isCapture = Boolean(Reflect.get(options, 'capture', options));
+  const once: unknown = Reflect.get(options, 'once', options);
+  const passive: unknown = Reflect.get(options, 'passive', options);
+  const signal: unknown = Reflect.get(options, 'signal', options);
   return {
     isCapture,
     nativeOptions: {

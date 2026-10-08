@@ -2,12 +2,10 @@ import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
 import { clampTimerDelayMS } from '../internal/timer-limits';
 import {
-  promiseConstructorIntrinsic,
   observePromise,
   observeBoxed,
   awaitBoxedPromise,
   racePromises,
-  promiseResolveIntrinsic,
 } from '../internal/intrinsics';
 import { generateID } from '../id-helpers';
 import { safeHandleCallback } from '../safe-handle-callback';
@@ -2833,10 +2831,10 @@ export class BaseHTTPClient {
    */
   private _cancellableDelay(ms: number, signal: AbortSignal): Promise<void> {
     if (signal.aborted) {
-      return promiseResolveIntrinsic(undefined);
+      return Promise.resolve(undefined);
     }
 
-    return new promiseConstructorIntrinsic<void>((resolve) => {
+    return new Promise<void>((resolve) => {
       const onAbort = () => {
         clearTimeout(id);
         resolve();
@@ -3991,45 +3989,41 @@ async function settleUploadBeforeNextDispatch(
   let onAbort: (() => void) | undefined;
   let deadlineID: ReturnType<typeof setTimeout> | undefined;
 
-  const cancelled = new promiseConstructorIntrinsic<UploadSettleWait>(
-    (resolve) => {
-      onAbort = () => resolve('cancelled');
-      cancelSignal.addEventListener('abort', onAbort, { once: true });
-    },
-  );
+  const cancelled = new Promise<UploadSettleWait>((resolve) => {
+    onAbort = () => resolve('cancelled');
+    cancelSignal.addEventListener('abort', onAbort, { once: true });
+  });
 
-  const expired = new promiseConstructorIntrinsic<UploadSettleWait>(
-    (resolve) => {
-      if (stallMS <= 0) {
-        return;
-      }
+  const expired = new Promise<UploadSettleWait>((resolve) => {
+    if (stallMS <= 0) {
+      return;
+    }
 
-      // Re-armed rather than reset on every report: a timer touched from inside a progress
-      // callback would run on the adapter's cadence. When it fires, the question is only
-      // whether anything moved since the wait was last armed - if so, the stall is
-      // measured from that report, and the timer sleeps for the remainder.
-      const arm = (sinceMS: number): void => {
-        deadlineID = setTimeout(() => {
-          const quietForMS = Date.now() - lastActivityAt();
+    // Re-armed rather than reset on every report: a timer touched from inside a progress
+    // callback would run on the adapter's cadence. When it fires, the question is only
+    // whether anything moved since the wait was last armed - if so, the stall is
+    // measured from that report, and the timer sleeps for the remainder.
+    const arm = (sinceMS: number): void => {
+      deadlineID = setTimeout(() => {
+        const quietForMS = Date.now() - lastActivityAt();
 
-          if (quietForMS >= stallMS) {
-            resolve('deadline');
+        if (quietForMS >= stallMS) {
+          resolve('deadline');
 
-            return;
-          }
+          return;
+        }
 
-          arm(stallMS - quietForMS);
-        }, clampTimerDelayMS(sinceMS));
-      };
+        arm(stallMS - quietForMS);
+      }, clampTimerDelayMS(sinceMS));
+    };
 
-      // Count silence before this wait, including retry backoff. Even an overdue check
-      // runs through the timer: an already-completed upload must get its promise callbacks
-      // processed before we declare it stalled. A pending upload is checked next tick,
-      // without granting it another full stall window.
-      const quietOnEntryMS = Date.now() - lastActivityAt();
-      arm(stallMS - Math.max(0, quietOnEntryMS));
-    },
-  );
+    // Count silence before this wait, including retry backoff. Even an overdue check
+    // runs through the timer: an already-completed upload must get its promise callbacks
+    // processed before we declare it stalled. A pending upload is checked next tick,
+    // without granting it another full stall window.
+    const quietOnEntryMS = Date.now() - lastActivityAt();
+    arm(stallMS - Math.max(0, quietOnEntryMS));
+  });
 
   // Settlement, not outcome: a rejection counts as settled too. Every caller passes the
   // attempt runner's already-adopted outcome, which cannot reject, but the "never rejects"

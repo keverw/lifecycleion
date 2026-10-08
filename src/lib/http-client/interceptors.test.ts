@@ -30,55 +30,6 @@ function makeContext(
 }
 
 describe('RequestInterceptorManager', () => {
-  test('snapshot does not consult the registration array iterator', async () => {
-    const mgr = new RequestInterceptorManager();
-    mgr.add((request) => ({ ...request, headers: { 'x-ran': 'yes' } }));
-    // The registration list is the manager's own, but a spread or `for...of` over it goes
-    // through an iterator application code can replace.
-    void Object.defineProperty(
-      (mgr as unknown as { interceptors: unknown[] }).interceptors,
-      Symbol.iterator,
-      {
-        value() {
-          throw new Error('iterator used');
-        },
-      },
-    );
-
-    const result = await mgr.snapshot()(
-      makeRequest(),
-      { type: 'initial' },
-      makeContext(),
-    );
-
-    expect(result).toMatchObject({ headers: { 'x-ran': 'yes' } });
-  });
-
-  test('snapshot copies registrations past an Array.prototype index setter', async () => {
-    const mgr = new RequestInterceptorManager();
-    mgr.add((request) => ({ ...request, headers: { 'x-ran': 'yes' } }));
-    let setterCalls = 0;
-    void Object.defineProperty(Array.prototype, '0', {
-      configurable: true,
-      set() {
-        setterCalls++;
-      },
-    });
-
-    try {
-      const result = await mgr.snapshot()(
-        makeRequest(),
-        { type: 'initial' },
-        makeContext(),
-      );
-
-      expect(result).toMatchObject({ headers: { 'x-ran': 'yes' } });
-      expect(setterCalls).toBe(0);
-    } finally {
-      Reflect.deleteProperty(Array.prototype, '0');
-    }
-  });
-
   test('a snapshot chain rejects rather than throwing synchronously', async () => {
     const mgr = new RequestInterceptorManager();
     const failure = new Error('interceptor failed');

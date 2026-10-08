@@ -21,8 +21,7 @@ import { sleep } from '../../sleep';
 import {
   observePromise,
   observeRejection,
-  promiseConstructorIntrinsic,
-  queueMicrotaskIntrinsic,
+  queueMicrotaskSafely,
 } from '../../internal/intrinsics';
 import {
   DEFAULT_CLOSE_TIMEOUT_MS,
@@ -975,14 +974,12 @@ export class NamedPipeSink implements LogSink {
   public close(): Promise<void> {
     this.closing = true;
     // Publish ownership before any close-time callback can re-enter close().
-    this.closePromise ??= new promiseConstructorIntrinsic<void>(
-      (resolve, reject) => {
-        queueMicrotaskIntrinsic(() => {
-          // Do not resolve with the promise: native adoption would read its live then.
-          void observePromise(this.closeInternal(), resolve, reject);
-        }, reject);
-      },
-    );
+    this.closePromise ??= new Promise<void>((resolve, reject) => {
+      queueMicrotaskSafely(() => {
+        // Do not resolve with the promise: native adoption would read its live then.
+        void observePromise(this.closeInternal(), resolve, reject);
+      }, reject);
+    });
     return this.closePromise;
   }
 
@@ -1135,7 +1132,7 @@ export class NamedPipeSink implements LogSink {
         this.closeTimeoutMS - (Date.now() - startTime),
       );
 
-      return await new promiseConstructorIntrinsic<void>((resolve) => {
+      return await new Promise<void>((resolve) => {
         // Bounded, by `remainingCloseMS` above. Until this existed the close itself had no
         // timeout at all - `closeTimeoutMS` covered only the wait for *initialization*. `end()` flushes before it calls back,
         // and a FIFO with no reader cannot flush - so on the sink's most ordinary failure
@@ -1429,7 +1426,7 @@ export class NamedPipeSink implements LogSink {
 
       probe = undefined;
 
-      await new promiseConstructorIntrinsic<void>((resolve) => {
+      await new Promise<void>((resolve) => {
         fs.close(descriptor, () => resolve());
       });
     };
@@ -1929,29 +1926,27 @@ export class NamedPipeSink implements LogSink {
    *          reading the pipe. Reusing it means there is no second pathname open.
    */
   private async openWriteProbe(): Promise<number | null> {
-    return await new promiseConstructorIntrinsic<number | null>(
-      (resolve, reject) => {
-        fs.open(
-          this.pipePath,
-          fs.constants.O_WRONLY | fs.constants.O_NONBLOCK,
-          (error, descriptor) => {
-            if (error === null) {
-              resolve(descriptor);
+    return await new Promise<number | null>((resolve, reject) => {
+      fs.open(
+        this.pipePath,
+        fs.constants.O_WRONLY | fs.constants.O_NONBLOCK,
+        (error, descriptor) => {
+          if (error === null) {
+            resolve(descriptor);
 
-              return;
-            }
+            return;
+          }
 
-            if (readUnknownMember(error, 'code') === NO_READER_ERRNO) {
-              resolve(null);
+          if (readUnknownMember(error, 'code') === NO_READER_ERRNO) {
+            resolve(null);
 
-              return;
-            }
+            return;
+          }
 
-            reject(error);
-          },
-        );
-      },
-    );
+          reject(error);
+        },
+      );
+    });
   }
 
   /**

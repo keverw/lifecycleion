@@ -87,8 +87,6 @@ type CallbackResult<T = unknown> =
 - `success: true` - callback completed without throwing, and `value` holds the return value
 - `success: false` - callback threw or was not a function, and `error` holds the failure
 
-`safeHandleCallbackAndWait()` returns a null-prototype record. Read `success`, `value`, and `error` directly, and use `Object.hasOwn(result, "value")` for own-property checks. Inherited methods such as `result.hasOwnProperty()` and implicit conversion with `String(result)` are unavailable; `JSON.stringify(result)` works normally. The null prototype prevents inherited `then` properties from turning a completed result into more asynchronous work.
-
 Checking `result.success` narrows the type, so neither field needs a non-null assertion afterwards. `T` cannot be inferred from the callback (it is typed `unknown`) and defaults to `unknown`; supply it explicitly when you know what the callback returns.
 
 `error` is always a real `Error`, even when the callback did something like `throw null`: the value is normalized with [`toError`](./to-error.md), which keeps whatever was actually thrown on `error.cause`. Reading `result.error.message` is therefore safe against a non-`Error` throw - though see the note below about errors whose `message` accessor itself throws.

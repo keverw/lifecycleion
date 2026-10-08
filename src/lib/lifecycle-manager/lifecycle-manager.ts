@@ -55,15 +55,8 @@ import {
   observeRejection,
   observePromise,
   awaitBoxedPromise,
-  promiseConstructorIntrinsic,
-  applyIntrinsic,
-  getIntrinsic,
-  createOwnedAbortController,
-  type OwnedAbortController,
-  promiseRejectIntrinsic,
-  promiseResolveIntrinsic,
   attachIntrinsicReactions,
-  queueMicrotaskIntrinsic,
+  queueMicrotaskSafely,
   racePromises,
 } from '../internal/intrinsics';
 import { EventEmitterProtected } from '../event-emitter';
@@ -1790,14 +1783,12 @@ export class LifecycleManager
 
         // Only the leading exit gets here, and it holds `isHandlingLoggerExit` until this
         // is resolved, so no other deferred exit can be pending.
-        return await new promiseConstructorIntrinsic<BeforeExitResult>(
-          (resolve) => {
-            this.pendingLoggerExitResolve = (result) => {
-              releaseExit();
-              resolve(result);
-            };
-          },
-        );
+        return await new Promise<BeforeExitResult>((resolve) => {
+          this.pendingLoggerExitResolve = (result) => {
+            releaseExit();
+            resolve(result);
+          };
+        });
       };
 
       this.isHandlingLoggerExit = true;
@@ -4173,7 +4164,7 @@ export class LifecycleManager
     }
 
     const onShutdownForce: unknown = this.readRestartInput(() =>
-      getIntrinsic(component, 'onShutdownForce'),
+      Reflect.get(component, 'onShutdownForce'),
     );
     if (typeof onShutdownForce === 'function') {
       toOperationTimerDelayMS(
@@ -6493,7 +6484,7 @@ export class LifecycleManager
       // Start global timeout clock (halts further stop attempts after it fires)
       const timeoutPromise =
         effectiveTimeout > 0
-          ? new promiseConstructorIntrinsic<'timeout'>((resolve) => {
+          ? new Promise<'timeout'>((resolve) => {
               timeoutHandle = setTimeout(() => {
                 hasTimedOut = true;
 
@@ -6594,7 +6585,7 @@ export class LifecycleManager
           // A synchronous requester may reject immediately after asking to exit.
           // Let that settlement drain without joining a hook awaiting this pass.
           if ([...requestingStarts].some((start) => !start.didSettle)) {
-            await new promiseConstructorIntrinsic<void>((resolve) => {
+            await new Promise<void>((resolve) => {
               setTimeout(resolve, 0);
             });
             if (hasTimedOut) {
@@ -6713,7 +6704,7 @@ export class LifecycleManager
             // walks can starve both the shutdown deadline and the concurrent stop's
             // timers. Yield between candidates, then recheck all live ownership below.
             if (Date.now() - sliceStartedAt >= 8) {
-              await new promiseConstructorIntrinsic<void>((resolve) => {
+              await new Promise<void>((resolve) => {
                 setTimeout(resolve, 0);
               });
               sliceStartedAt = Date.now();
@@ -7531,7 +7522,7 @@ export class LifecycleManager
    * an error escape: reported, so it cannot unwind the timer and skip what follows.
    */
   private abortHookSignal(
-    hookAbort: OwnedAbortController,
+    hookAbort: AbortController,
     reason: Error,
     name: string,
     hookName: 'start' | 'stop' | 'onShutdownForce',
@@ -7550,8 +7541,8 @@ export class LifecycleManager
   private createHookAbortController(
     name: string,
     phase: 'start' | 'stop' | 'force',
-  ): OwnedAbortController {
-    const hookAbort = createOwnedAbortController();
+  ): AbortController {
+    const hookAbort = new AbortController();
     guardAbortListeners(
       hookAbort.signal,
       `lifecycle-manager ${phase} abort listener for ${name}`,
@@ -7815,19 +7806,19 @@ export class LifecycleManager
         resolveRawStart();
       },
       abandon: () => abandon(),
-      abandoned: new promiseConstructorIntrinsic<void>((resolve) => {
+      abandoned: new Promise<void>((resolve) => {
         abandon = resolve;
       }),
       didSettle: false,
       rawStartPending: false,
-      rawStartDone: new promiseConstructorIntrinsic<void>((resolve) => {
+      rawStartDone: new Promise<void>((resolve) => {
         resolveRawStart = resolve;
       }),
       settleRawStart: () => {
         settlement.rawStartPending = false;
         resolveRawStart();
       },
-      promise: new promiseConstructorIntrinsic<void>((resolve) => {
+      promise: new Promise<void>((resolve) => {
         resolveSettlement = resolve;
       }),
     };
@@ -8509,9 +8500,9 @@ export class LifecycleManager
         if (settlement) {
           settlement.rawStartPending = true;
         }
-        const startHook: unknown = getIntrinsic(component, 'start');
+        const startHook: unknown = Reflect.get(component, 'start');
         didReadStartHook = true;
-        const rawStart = applyIntrinsic(
+        const rawStart = Reflect.apply(
           startHook as (signal: AbortSignal) => void | Promise<void>,
           component,
           [startAbort.signal],
@@ -8539,17 +8530,15 @@ export class LifecycleManager
             // leave the still-running hook without late cleanup.
             let resolveObservedStart!: () => void;
             let rejectObservedStart!: (reason: unknown) => void;
-            const observedStart = new promiseConstructorIntrinsic<void>(
-              (resolve, reject) => {
-                resolveObservedStart = resolve;
-                rejectObservedStart = reject;
-              },
-            );
+            const observedStart = new Promise<void>((resolve, reject) => {
+              resolveObservedStart = resolve;
+              rejectObservedStart = reject;
+            });
             // Later setup can fail before it installs the deadline wait. The raw
             // rejection was already contained by its marker; contain this copy too.
             observeRejection(observedStart, () => {});
             // Preserve a synchronous observation failure as this attempt's failure,
-            // while containing the intrinsic's unused species result.
+            // while containing the native `then`'s unused species result.
             attachIntrinsicReactions(
               startPromise,
               () => {
@@ -8571,27 +8560,25 @@ export class LifecycleManager
             didRawStartObservationFail = true;
             settlement.didFailRawStartObservation = true;
             const unobservedStart = adoptionFailure ? rawStart : startPromise;
-            const recoveryStart = new promiseConstructorIntrinsic<void>(
-              (resolve, reject) => {
-                try {
-                  attachIntrinsicReactions(
-                    unobservedStart as object,
-                    () => {
-                      markRawStartSettled();
-                      resolve();
-                    },
-                    (reason) => {
-                      markRawStartSettled();
-                      // Preserve the raw hook's arbitrary rejection value.
-                      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
-                      reject(reason);
-                    },
-                  );
-                } catch {
-                  // The public result carries the original observation failure.
-                }
-              },
-            );
+            const recoveryStart = new Promise<void>((resolve, reject) => {
+              try {
+                attachIntrinsicReactions(
+                  unobservedStart as object,
+                  () => {
+                    markRawStartSettled();
+                    resolve();
+                  },
+                  (reason) => {
+                    markRawStartSettled();
+                    // Preserve the raw hook's arbitrary rejection value.
+                    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+                    reject(reason);
+                  },
+                );
+              } catch {
+                // The public result carries the original observation failure.
+              }
+            });
             this.monitorLateStartupCompletion(
               name,
               recoveryStart,
@@ -8661,7 +8648,7 @@ export class LifecycleManager
             reportCallbackError('lifecycle-manager start shutdown cue', error);
           }
         };
-        queueMicrotaskIntrinsic(deliverShutdownCue);
+        queueMicrotaskSafely(deliverShutdownCue);
       }
 
       // Both ways a deadline can win - this attempt's timer, and a bulk deadline found
@@ -8687,55 +8674,53 @@ export class LifecycleManager
 
       const delayMS = optionalValidatedTimerDelayMS(timeoutMS);
       if (delayMS !== undefined) {
-        const timeoutPromise = new promiseConstructorIntrinsic<never>(
-          (_, reject) => {
-            timeoutHandle = setTimeout(() => {
-              // Settle before notifications: user callbacks cannot swallow the deadline.
-              const timeoutError = recordStartupTimeout();
-              reject(timeoutError);
-              // Recorded before any caller code below runs: a shutdown a sink starts
-              // with `abortPendingStarts` must find this start already timed out, not
-              // abort it as interrupted. A shutdown that aborted it first keeps its cause.
-              startAbortCause ??= 'timeout';
-              // This attempt must settle, but its old deadline must not abort or
-              // announce a timeout for a newer run of the same component. Its own
-              // signal is still aborted: that is this attempt's alone, and nothing
-              // waits on this `start()` any more.
-              if (isSuperseded()) {
-                this.observeFailureAfterTimeout(
-                  startPromise,
-                  name,
-                  'Superseded start() failed after its deadline',
-                );
-                this.abortHookSignal(startAbort, timeoutError, name, 'start');
-                return;
-              }
-              if (useBulkDeadline) {
-                bulkStartup?.onTimeout();
-              }
-              // A component that owns its late-start cleanup undoes a late success of
-              // its own timed-out start itself; a bulk deadline cleans up regardless.
-              if (useBulkDeadline || !doesOwnLateStartCleanup) {
-                monitorLateStart();
-                // Only this timer path abandons an unresolved start. The other
-                // monitor call handles an already fulfilled start and must join cleanup.
-                settlement?.abandon();
-              }
-              // After the bookkeeping above, so abort listeners (the component's code)
-              // find the abandonment and any late cleanup already arranged. Aborted
-              // even when those sinks superseded the attempt: the signal is only this
-              // attempt's. A shutdown that already aborted it keeps its reason;
-              // aborting again does nothing.
-              this.abortHookSignal(startAbort, timeoutError, name, 'start');
-
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutHandle = setTimeout(() => {
+            // Settle before notifications: user callbacks cannot swallow the deadline.
+            const timeoutError = recordStartupTimeout();
+            reject(timeoutError);
+            // Recorded before any caller code below runs: a shutdown a sink starts
+            // with `abortPendingStarts` must find this start already timed out, not
+            // abort it as interrupted. A shutdown that aborted it first keeps its cause.
+            startAbortCause ??= 'timeout';
+            // This attempt must settle, but its old deadline must not abort or
+            // announce a timeout for a newer run of the same component. Its own
+            // signal is still aborted: that is this attempt's alone, and nothing
+            // waits on this `start()` any more.
+            if (isSuperseded()) {
               this.observeFailureAfterTimeout(
                 startPromise,
                 name,
-                'start() failed after it had already timed out',
+                'Superseded start() failed after its deadline',
               );
-            }, delayMS);
-          },
-        );
+              this.abortHookSignal(startAbort, timeoutError, name, 'start');
+              return;
+            }
+            if (useBulkDeadline) {
+              bulkStartup?.onTimeout();
+            }
+            // A component that owns its late-start cleanup undoes a late success of
+            // its own timed-out start itself; a bulk deadline cleans up regardless.
+            if (useBulkDeadline || !doesOwnLateStartCleanup) {
+              monitorLateStart();
+              // Only this timer path abandons an unresolved start. The other
+              // monitor call handles an already fulfilled start and must join cleanup.
+              settlement?.abandon();
+            }
+            // After the bookkeeping above, so abort listeners (the component's code)
+            // find the abandonment and any late cleanup already arranged. Aborted
+            // even when those sinks superseded the attempt: the signal is only this
+            // attempt's. A shutdown that already aborted it keeps its reason;
+            // aborting again does nothing.
+            this.abortHookSignal(startAbort, timeoutError, name, 'start');
+
+            this.observeFailureAfterTimeout(
+              startPromise,
+              name,
+              'start() failed after it had already timed out',
+            );
+          }, delayMS);
+        });
 
         try {
           await racePromises([startPromise, timeoutPromise]);
@@ -9615,7 +9600,7 @@ export class LifecycleManager
     // Read apart from the call, after the claim: a `stop` getter that throws has not
     // run `stop()`, so it reaches the stop net as a crash (`operation_crashed`,
     // reported) rather than a failed graceful phase (`error`).
-    const stopHook: unknown = getIntrinsic(component, 'stop');
+    const stopHook: unknown = Reflect.get(component, 'stop');
     // One controller per graceful attempt, its signal handed to `stop()`. Aborted only
     // at this attempt's graceful deadline - the timer below - never because `stop()`
     // settled, either way, and never by the force phase that may follow.
@@ -9625,73 +9610,64 @@ export class LifecycleManager
       // Race against graceful timeout
       // Adopted, for the reason `startComponentAttempt()` adopts `start()`'s.
       const stopPromise = adoptPromise(
-        applyIntrinsic(
-          stopHook as (signal: AbortSignal) => unknown,
-          component,
-          [stopAbort.signal],
-        ),
+        Reflect.apply(stopHook as (signal: AbortSignal) => unknown, component, [
+          stopAbort.signal,
+        ]),
       );
 
       const delayMS = optionalValidatedTimerDelayMS(timeoutMS);
       if (delayMS !== undefined) {
-        const timeoutPromise = new promiseConstructorIntrinsic<never>(
-          (_, reject) => {
-            timeoutHandle = setTimeout(() => {
-              gracefulTimeoutError = new ComponentStopTimeoutError({
-                componentName: name,
-                timeoutMS,
-              });
-              // Listeners that release `stop()` win the race below: the timeout's
-              // rejection waits a macrotask (see `rejectAfterAbort()`).
-              this.abortHookSignal(
-                stopAbort,
-                gracefulTimeoutError,
-                name,
-                'stop',
-              );
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutHandle = setTimeout(() => {
+            gracefulTimeoutError = new ComponentStopTimeoutError({
+              componentName: name,
+              timeoutMS,
+            });
+            // Listeners that release `stop()` win the race below: the timeout's
+            // rejection waits a macrotask (see `rejectAfterAbort()`).
+            this.abortHookSignal(stopAbort, gracefulTimeoutError, name, 'stop');
 
-              // Attached ahead of both the observer below and the `catch`, so each
-              // reads the link as decided once: the error's members are the caller's.
-              const deadlineReason = gracefulTimeoutError;
-              observeRejection(stopPromise, (error: unknown) => {
-                didRejectForDeadline = isLinkedToAbort(error, deadlineReason);
-              });
+            // Attached ahead of both the observer below and the `catch`, so each
+            // reads the link as decided once: the error's members are the caller's.
+            const deadlineReason = gracefulTimeoutError;
+            observeRejection(stopPromise, (error: unknown) => {
+              didRejectForDeadline = isLinkedToAbort(error, deadlineReason);
+            });
 
-              // Detect if stop() eventually resolves after the timeout so the stall
-              // can be cleared automatically without a manual retry. From here on
-              // this observer owns rejection reporting, even if an abort listener makes
-              // stop() reject before the deferred deadline wins the foreground race.
-              outcomeObserver.observe(
-                stopPromise,
-                'Component stop failed after deadline fired',
-                {
-                  // Labelled as the result records it: a rejection unrelated to the
-                  // abort that beat the deferred deadline is the graceful phase's own
-                  // failure (`error`), not one after a timeout.
-                  getReport: () => ({
-                    message:
-                      didDeadlineReject || didRejectForDeadline
-                        ? 'Component stop failed after deadline fired'
-                        : 'Graceful shutdown threw error: {{error.message}}',
-                    level: 'warn',
-                  }),
-                  onResolved: () => {
-                    preparation.lateResolution = stopAttemptToken;
-                    this.handleLateStopResolution(
-                      name,
-                      stopAttemptToken,
-                      'graceful',
-                    );
-                  },
+            // Detect if stop() eventually resolves after the timeout so the stall
+            // can be cleared automatically without a manual retry. From here on
+            // this observer owns rejection reporting, even if an abort listener makes
+            // stop() reject before the deferred deadline wins the foreground race.
+            outcomeObserver.observe(
+              stopPromise,
+              'Component stop failed after deadline fired',
+              {
+                // Labelled as the result records it: a rejection unrelated to the
+                // abort that beat the deferred deadline is the graceful phase's own
+                // failure (`error`), not one after a timeout.
+                getReport: () => ({
+                  message:
+                    didDeadlineReject || didRejectForDeadline
+                      ? 'Component stop failed after deadline fired'
+                      : 'Graceful shutdown threw error: {{error.message}}',
+                  level: 'warn',
+                }),
+                onResolved: () => {
+                  preparation.lateResolution = stopAttemptToken;
+                  this.handleLateStopResolution(
+                    name,
+                    stopAttemptToken,
+                    'graceful',
+                  );
                 },
-              );
-              timeoutHandle = this.rejectAfterAbort((timeoutError) => {
-                didDeadlineReject = true;
-                reject(timeoutError);
-              }, gracefulTimeoutError);
-            }, delayMS);
-          },
-        );
+              },
+            );
+            timeoutHandle = this.rejectAfterAbort((timeoutError) => {
+              didDeadlineReject = true;
+              reject(timeoutError);
+            }, gracefulTimeoutError);
+          }, delayMS);
+        });
 
         await racePromises([stopPromise, timeoutPromise]);
       } else {
@@ -9804,7 +9780,7 @@ export class LifecycleManager
     onShutdownForce: unknown;
     timeoutMS: number;
   } {
-    const onShutdownForce: unknown = getIntrinsic(component, 'onShutdownForce');
+    const onShutdownForce: unknown = Reflect.get(component, 'onShutdownForce');
     const hasForceHandler = typeof onShutdownForce === 'function';
     const timeoutMS = hasForceHandler
       ? toOperationTimerDelayMS(
@@ -10025,13 +10001,14 @@ export class LifecycleManager
       // a graceful completion it caused exactly as the same rejection returned would.
       let forceReturn: unknown;
       try {
-        forceReturn = applyIntrinsic(
+        forceReturn = Reflect.apply(
           onShutdownForce as (signal: AbortSignal) => unknown,
           component,
           [forceAbort.signal],
         );
       } catch (hookError) {
-        forceReturn = promiseRejectIntrinsic(hookError);
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+        forceReturn = Promise.reject(hookError);
       }
       // Adopted, for the reason `startComponentAttempt()` adopts `start()`'s.
       const forcePromise = adoptPromise(forceReturn);
@@ -10050,61 +10027,59 @@ export class LifecycleManager
       // is needed; the outcome observer below adds the abandoned hook's report.
       const delayMS = optionalValidatedTimerDelayMS(timeoutMS);
       if (delayMS !== undefined) {
-        const timeoutPromise = new promiseConstructorIntrinsic<never>(
-          (_, reject) => {
-            timeoutHandle = setTimeout(() => {
-              forceTimeoutError = new ComponentForceTimeoutError({
-                componentName: name,
-                timeoutMS,
-              });
-              this.abortHookSignal(
-                forceAbort,
-                forceTimeoutError,
-                name,
-                'onShutdownForce',
-              );
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutHandle = setTimeout(() => {
+            forceTimeoutError = new ComponentForceTimeoutError({
+              componentName: name,
+              timeoutMS,
+            });
+            this.abortHookSignal(
+              forceAbort,
+              forceTimeoutError,
+              name,
+              'onShutdownForce',
+            );
 
-              // Ahead of the observer below and the `catch`, as in the graceful phase.
-              const deadlineReason = forceTimeoutError;
-              observeRejection(forcePromise, (error: unknown) => {
-                didRejectForDeadline = isLinkedToAbort(error, deadlineReason);
-              });
+            // Ahead of the observer below and the `catch`, as in the graceful phase.
+            const deadlineReason = forceTimeoutError;
+            observeRejection(forcePromise, (error: unknown) => {
+              didRejectForDeadline = isLinkedToAbort(error, deadlineReason);
+            });
 
-              // Detect if onShutdownForce() eventually resolves after the timeout
-              // so the stall can be cleared automatically, same as stop().
-              outcomeObserver.observe(
-                forcePromise,
-                'Force shutdown failed after deadline fired',
-                {
-                  getReport: () =>
-                    forceOutcome === 'abandoned' ||
-                    (forceOutcome === 'pending' && isSuperseded())
-                      ? { message: abandonedForceMessage, level: 'warn' }
-                      : {
-                          // Labelled as the result records it: a rejection unrelated
-                          // to the abort that beat the deferred deadline is the stall's
-                          // own failure, not one after a timeout.
-                          message:
-                            didDeadlineReject || didRejectForDeadline
-                              ? 'Force shutdown failed after deadline fired'
-                              : 'Force shutdown failed - stalled: {{error.message}}',
-                          level: 'error',
-                        },
-                  onResolved: () =>
-                    this.handleLateStopResolution(
-                      name,
-                      forceAttemptToken as string,
-                      'force',
-                    ),
-                },
-              );
-              timeoutHandle = this.rejectAfterAbort((timeoutError) => {
-                didDeadlineReject = true;
-                reject(timeoutError);
-              }, forceTimeoutError);
-            }, delayMS);
-          },
-        );
+            // Detect if onShutdownForce() eventually resolves after the timeout
+            // so the stall can be cleared automatically, same as stop().
+            outcomeObserver.observe(
+              forcePromise,
+              'Force shutdown failed after deadline fired',
+              {
+                getReport: () =>
+                  forceOutcome === 'abandoned' ||
+                  (forceOutcome === 'pending' && isSuperseded())
+                    ? { message: abandonedForceMessage, level: 'warn' }
+                    : {
+                        // Labelled as the result records it: a rejection unrelated
+                        // to the abort that beat the deferred deadline is the stall's
+                        // own failure, not one after a timeout.
+                        message:
+                          didDeadlineReject || didRejectForDeadline
+                            ? 'Force shutdown failed after deadline fired'
+                            : 'Force shutdown failed - stalled: {{error.message}}',
+                        level: 'error',
+                      },
+                onResolved: () =>
+                  this.handleLateStopResolution(
+                    name,
+                    forceAttemptToken as string,
+                    'force',
+                  ),
+              },
+            );
+            timeoutHandle = this.rejectAfterAbort((timeoutError) => {
+              didDeadlineReject = true;
+              reject(timeoutError);
+            }, forceTimeoutError);
+          }, delayMS);
+        });
 
         await racePromises([
           forcePromise,
@@ -10848,7 +10823,7 @@ export class LifecycleManager
         }
         // An abort listener can settle start() inside the timeout callback. Let the
         // timed-out start's catch record its state before beginning late cleanup.
-        await promiseResolveIntrinsic(undefined);
+        await Promise.resolve(undefined);
         const timeoutState = this.componentStates.get(name);
         const timeoutError = this.componentErrors.get(name) ?? null;
         // A start - forced or not - that reported an unexpected stop before its deadline
@@ -11332,7 +11307,7 @@ export class LifecycleManager
     }
 
     let resolveWaiter!: () => void;
-    const promise = new promiseConstructorIntrinsic<void>((resolve) => {
+    const promise = new Promise<void>((resolve) => {
       resolveWaiter = () => {
         if (isResolved) {
           return;
@@ -12824,7 +12799,7 @@ export class LifecycleManager
   private broadcastReload(): Promise<SignalBroadcastResult> {
     return runSignalBroadcast(this.componentAccess, {
       signal: 'reload',
-      pickHandler: (component) => getIntrinsic(component, 'onReload'),
+      pickHandler: (component) => Reflect.get(component, 'onReload'),
       startupLog:
         'Reload during startup: only reloading already-started components',
       timeoutLog: 'Reload handler timed out',
@@ -12845,7 +12820,7 @@ export class LifecycleManager
   private broadcastInfo(): Promise<SignalBroadcastResult> {
     return runSignalBroadcast(this.componentAccess, {
       signal: 'info',
-      pickHandler: (component) => getIntrinsic(component, 'onInfo'),
+      pickHandler: (component) => Reflect.get(component, 'onInfo'),
       startupLog:
         'Info during startup: only notifying already-started components',
       timeoutLog: 'Info handler timed out',
@@ -12866,7 +12841,7 @@ export class LifecycleManager
   private broadcastDebug(): Promise<SignalBroadcastResult> {
     return runSignalBroadcast(this.componentAccess, {
       signal: 'debug',
-      pickHandler: (component) => getIntrinsic(component, 'onDebug'),
+      pickHandler: (component) => Reflect.get(component, 'onDebug'),
       startupLog:
         'Debug during startup: only notifying already-started components',
       timeoutLog: 'Debug handler timed out',

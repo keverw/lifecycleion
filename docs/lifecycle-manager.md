@@ -516,9 +516,8 @@ thrown value as `cause`. The listeners after it still run, and the manager's tim
 result and late-start cleanup are unaffected.
 
 The guard is the signal's own `addEventListener`, `removeEventListener` and `onabort`,
-defined on that instance (non-writable, non-configurable) and backed by the
-`EventTarget` methods captured when the library loads, so replacing the prototype
-methods later does not bypass it. They otherwise behave as natively: a duplicate
+defined on that instance and backed by the `EventTarget` methods. They otherwise
+behave as natively: a duplicate
 listener with the same capture flag is still ignored, `removeEventListener()` with the
 original listener removes it, `once`, `passive` and `signal` options apply, a `null`
 listener is ignored, `onabort` runs at the position where it was first set, and other
@@ -531,9 +530,7 @@ event types are not wrapped. Native consumers such as `fetch(url, { signal })` a
   prototype's `onabort` setter) registers the raw listener, deliberately bypassing
   the guard.
 
-Catch inside listeners in those two cases. The manager aborts through
-`AbortController` methods captured when the library loads, so a later replacement of
-`AbortController.prototype.abort` does not stop it.
+Catch inside listeners in those two cases.
 
 After an abort, prefer rejecting (for example with `signal.throwIfAborted()`) to
 resolving: a timed-out `start()` that resolves is a late success, which the manager

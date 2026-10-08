@@ -2,12 +2,8 @@ import { isNullish } from '../internal/is-nullish';
 import {
   observeRejection,
   awaitBoxedPromise,
-  promiseConstructorIntrinsic,
-  applyIntrinsic,
-  promiseRejectIntrinsic,
-  promiseResolveIntrinsic,
   observePromise,
-  queueMicrotaskIntrinsic,
+  queueMicrotaskSafely,
   allPromises,
 } from '../internal/intrinsics';
 import { EventEmitter } from '../event-emitter';
@@ -1089,7 +1085,7 @@ export class Logger extends EventEmitter {
       // same close failure again. Ordinary failures are not deduplicated.
       this.handleSinkError(error, 'close', this._activeSinkClose);
       this._reportedCloseReentryErrors.add(error);
-      const rejected = promiseRejectIntrinsic<void>(error);
+      const rejected = Promise.reject<void>(error);
       // Mark it handled without changing the rejection seen by awaiting callers.
       observeRejection(rejected, () => {});
       return rejected;
@@ -1108,12 +1104,10 @@ export class Logger extends EventEmitter {
     // after invoking it would allow synchronous hooks to start a second cleanup.
     let resolveClose!: () => void;
     let rejectClose!: (error: unknown) => void;
-    this._closePromise = new promiseConstructorIntrinsic<void>(
-      (resolve, reject) => {
-        resolveClose = resolve;
-        rejectClose = reject;
-      },
-    );
+    this._closePromise = new Promise<void>((resolve, reject) => {
+      resolveClose = resolve;
+      rejectClose = reject;
+    });
     // Marked handled, as the re-entry rejection above is: `void logger.close()` is an
     // ordinary call, and an unexpected internal cleanup failure must not become an
     // unhandled rejection that kills the process. Awaiting callers still see it.
@@ -1537,8 +1531,7 @@ export class Logger extends EventEmitter {
         continue;
       }
       if (pending !== undefined) {
-        // Adoption protects the input; attach its observer through the captured
-        // intrinsic too, so a later prototype patch cannot drop the rejection.
+        // Adoption protects the input; observe it through the native `then` too.
         observeRejection(pending, (error: unknown) => {
           if (!shouldSuppressFailureReport) {
             this.handleSinkError(error, 'write', sink);
@@ -1698,10 +1691,6 @@ export class Logger extends EventEmitter {
       // Capture owned lists, which add/remove replaces rather than mutates.
       // This preserves identities and positions across re-entrant close hooks.
       // A later malformed return must still name the destination we actually closed.
-      //
-      // Index loops throughout, like `handleLog` and `copySinkList`: spread, `Set`, and
-      // `map` consult replaceable iterator hooks, and this is the shutdown path that
-      // must reach completion whatever the application has patched.
       const logSinks = this.sinks;
       const diagnosticSinks = this.diagnosticSinks;
       // Each sink closes once, labelled by its first position in the configured lists
@@ -1731,11 +1720,11 @@ export class Logger extends EventEmitter {
             this._activeSinkClose = sink;
             // Read once, preserving the receiver, and contain property-access failures
             // separately from classifying the return of a successful close call.
-            // The captured apply restores the original receiver.
+            // `Reflect.apply` restores the original receiver.
             // eslint-disable-next-line @typescript-eslint/unbound-method
             const close = sink.close;
             if (close) {
-              result = applyIntrinsic(close, sink, []);
+              result = Reflect.apply(close, sink, []);
             }
             // Return inspection also runs caller code, including then/constructor
             // getters. Keep it guarded so these cannot join their own completion.
@@ -1757,9 +1746,7 @@ export class Logger extends EventEmitter {
             return;
           }
           try {
-            await awaitBoxedPromise(
-              pending ?? promiseResolveIntrinsic(undefined),
-            );
+            await awaitBoxedPromise(pending ?? Promise.resolve(undefined));
           } catch (error) {
             // A deadline reports uncertainty, not the eventual cause. Preserve a
             // later failure on the terminal channel without re-entering closed sinks
@@ -1801,8 +1788,8 @@ export class Logger extends EventEmitter {
       // Zero still lets this turn's promise reactions run before the timer's next
       // task. The timer stays referenced: explicit cleanup must reach completion or
       // report its deadline even if a pending sink promise is the only other work
-      // remaining. `allPromises` observes owned native promises through the captured
-      // method; a native combinator would consult the inputs' replaceable then.
+      // remaining. `allPromises` observes owned native promises through the native
+      // `then`; a native combinator would consult the inputs' own then.
       const { value: expiredIndexes } = await raceDeadline(
         observePromise(allPromises(closeOperations), () => undefined),
         this.closeTimeoutMS,
@@ -1847,8 +1834,8 @@ export class Logger extends EventEmitter {
       // usual cue for a listener to unsubscribe. Waiting on a task queued through the
       // same queue lets every report already queued run first, so such a listener
       // still hears why cleanup was unconfirmed.
-      await new promiseConstructorIntrinsic<void>((resolve) => {
-        queueMicrotaskIntrinsic(resolve);
+      await new Promise<void>((resolve) => {
+        queueMicrotaskSafely(resolve);
       });
       this.emit('logger', { eventType: 'close' });
     }
@@ -1990,7 +1977,7 @@ export class Logger extends EventEmitter {
       }
     };
 
-    queueMicrotaskIntrinsic(
+    queueMicrotaskSafely(
       () => {
         const hasListeners = this.hasListeners('diagnostic');
 
@@ -2023,7 +2010,7 @@ export class Logger extends EventEmitter {
             const writeDiagnostic = sink.writeDiagnostic;
             result = isNullish(writeDiagnostic)
               ? sink.write(entry)
-              : applyIntrinsic(writeDiagnostic, sink, [diagnostic]);
+              : Reflect.apply(writeDiagnostic, sink, [diagnostic]);
           } catch (deliveryError) {
             reportToConsole(
               `${consoleLine()} (diagnostic sink also threw: ${describeError(deliveryError)})`,

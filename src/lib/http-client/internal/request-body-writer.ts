@@ -1,4 +1,3 @@
-import { promiseConstructorIntrinsic } from '../../internal/intrinsics';
 import type { AdapterProgressEvent } from '../types';
 import type { RequestBodyWritable } from './request-body-writable';
 
@@ -76,7 +75,7 @@ function writeChunkWithBackpressure(
   chunk: Buffer,
   onAccepted?: () => void,
 ): Promise<void> {
-  return new promiseConstructorIntrinsic<void>((resolve, reject) => {
+  return new Promise<void>((resolve, reject) => {
     let hasWriteReturned = false;
     let isWriteCallbackDone = false;
     let isDrainDone = true;

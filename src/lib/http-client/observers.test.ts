@@ -99,28 +99,6 @@ test.each(['response', 'error'] as const)(
 );
 
 describe('ResponseObserverManager', () => {
-  test('snapshot does not consult the registration array iterator', async () => {
-    const mgr = new ResponseObserverManager();
-    let calls = 0;
-    mgr.add(() => {
-      calls++;
-    });
-    // See the same test in interceptors.test.ts.
-    void Object.defineProperty(
-      (mgr as unknown as { observers: unknown[] }).observers,
-      Symbol.iterator,
-      {
-        value() {
-          throw new Error('iterator used');
-        },
-      },
-    );
-
-    await mgr.snapshot()(makeResponse(), makeRequest(), { type: 'final' });
-
-    expect(calls).toBe(1);
-  });
-
   test('a throwing filter-context getter is reported without rejecting the chain', async () => {
     const mgr = new ResponseObserverManager();
     const failure = new Error('status read failed');
@@ -389,28 +367,6 @@ describe('ResponseObserverManager', () => {
 });
 
 describe('ErrorObserverManager', () => {
-  test('snapshot does not consult the registration array iterator', async () => {
-    const mgr = new ErrorObserverManager();
-    let calls = 0;
-    mgr.add(() => {
-      calls++;
-    });
-    // See the same test in interceptors.test.ts.
-    void Object.defineProperty(
-      (mgr as unknown as { observers: unknown[] }).observers,
-      Symbol.iterator,
-      {
-        value() {
-          throw new Error('iterator used');
-        },
-      },
-    );
-
-    await mgr.snapshot()(makeError(), makeRequest(), { type: 'final' });
-
-    expect(calls).toBe(1);
-  });
-
   test('a throwing filter-context getter is reported without rejecting the chain', async () => {
     const mgr = new ErrorObserverManager();
     const failure = new Error('method read failed');

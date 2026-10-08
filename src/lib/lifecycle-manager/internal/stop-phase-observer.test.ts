@@ -66,7 +66,7 @@ test('late rejection selects reporting details at settlement time', async () => 
   expect(reports).toEqual([{ error, ...currentReport }]);
 });
 
-test('intrinsic observation ignores promise methods and reconciles successful work once', async () => {
+test('observation ignores own promise methods and reconciles successful work once', async () => {
   const { observer, reports } = setup();
   const pending = Promise.resolve();
   let methodReads = 0;

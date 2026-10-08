@@ -352,52 +352,6 @@ test('timeout identifies a diagnostic-only sink by its original list position', 
   expect(diagnostics[0].message).toContain('Diagnostic sink #2');
 });
 
-for (const method of ['then', 'catch'] as const) {
-  for (const mode of ['close', 'exit', 'exit hook', 'timeout'] as const) {
-    test(`${mode} completes after Promise.prototype.${method} is replaced`, async () => {
-      const script = `
-        import { Logger } from ${JSON.stringify(`${import.meta.dir}/index.ts`)};
-        const nativeExit = process.exit.bind(process);
-        const watchdog = setTimeout(() => nativeExit(42), 500);
-        const exits = [];
-        process.exit = code => exits.push(code);
-        let diagnostics = 0;
-        const logger = new Logger({
-          callProcessExit: true, closeTimeoutMS: 5,
-          beforeExitCallback: ${JSON.stringify(mode)} === 'exit hook' ? async () => ({ action: 'proceed' }) : undefined,
-          sinks: [{ write() {}, close() {
-            return ${JSON.stringify(mode)} === 'timeout'
-              ? new Promise(() => {}) : Promise.resolve();
-          } }]
-        });
-        logger.on('diagnostic', () => { diagnostics++; });
-        const original = Promise.prototype[${JSON.stringify(method)}];
-        Promise.prototype[${JSON.stringify(method)}] = function () { return this; };
-        if (${JSON.stringify(mode)}.startsWith('exit')) logger.exit(1);
-        await logger.close();
-        await new Promise(resolve => setTimeout(resolve, 0));
-        Promise.prototype[${JSON.stringify(method)}] = original;
-        clearTimeout(watchdog);
-        process.stdout.write(JSON.stringify({ exits, diagnostics }));
-      `;
-      const child = Bun.spawn([process.execPath, '--eval', script], {
-        stdout: 'pipe',
-        stderr: 'pipe',
-      });
-      const [stdout, stderr, code] = await Promise.all([
-        new Response(child.stdout).text(),
-        new Response(child.stderr).text(),
-        child.exited,
-      ]);
-      expect({ code, stderr }).toEqual({ code: 0, stderr: '' });
-      expect(JSON.parse(stdout)).toEqual({
-        exits: mode.startsWith('exit') ? [1] : [],
-        diagnostics: mode === 'timeout' ? 1 : 0,
-      });
-    });
-  }
-}
-
 test('a rejection after the close deadline reports its cause to the terminal console', async () => {
   const pending = Promise.withResolvers<void>();
   const output = spyOn(console, 'error').mockImplementation(() => {});
@@ -511,7 +465,7 @@ test('a failed exit attempt after beforeExit is reported without invoking it twi
   }
 });
 
-test('close re-entry returns a handled native rejection after Promise.reject is replaced', async () => {
+test('close re-entry returns a handled native rejection', async () => {
   const diagnostics: LoggerDiagnostic[] = [];
   let nested: Promise<void> | undefined;
   const logger: Logger = new Logger({
@@ -529,18 +483,7 @@ test('close re-entry returns a handled native rejection after Promise.reject is 
   logger.on<LoggerDiagnostic>('diagnostic', (event) => {
     diagnostics.push(event);
   });
-  // Patch only during the synchronous sink invocation; unrelated asynchronous work
-  // keeps the real factory. Returning a fake exposes the old intrinsic receiver error.
-  // eslint-disable-next-line @typescript-eslint/unbound-method
-  const originalReject = Promise.reject;
-  let closing: Promise<void>;
-  try {
-    Promise.reject = (() => ({})) as typeof Promise.reject;
-    closing = logger.close();
-  } finally {
-    Promise.reject = originalReject;
-  }
-  await closing;
+  await logger.close();
   expect(nested).toBeInstanceOf(Promise);
   expect(await Promise.allSettled([nested])).toEqual([
     {
@@ -697,58 +640,6 @@ test('an unexpected close failure is not an unhandled rejection for a fire-and-f
     fault.mockRestore();
     process.off('unhandledRejection', onUnhandled);
   }
-});
-
-test('close consults no iterator hooks while starting sink cleanup', async () => {
-  const closed: string[] = [];
-  const sink = (name: string): LogSink => ({
-    write: () => {},
-    close: () => {
-      closed.push(name);
-    },
-  });
-  const shared = sink('shared');
-  const logger = new Logger({
-    sinks: [sink('log'), shared],
-    diagnosticSinks: [shared, sink('diagnostic')],
-    callProcessExit: false,
-  });
-  const diagnostics: LoggerDiagnostic[] = [];
-  logger.on<LoggerDiagnostic>('diagnostic', (event) => {
-    diagnostics.push(event);
-  });
-  const arrayIterator = Object.getOwnPropertyDescriptor(
-    Array.prototype,
-    Symbol.iterator,
-  ) as PropertyDescriptor;
-  const setIterator = Object.getOwnPropertyDescriptor(
-    Set.prototype,
-    Symbol.iterator,
-  ) as PropertyDescriptor;
-  const refuse = (): never => {
-    throw new Error('iterator hook consulted');
-  };
-  let closing: Promise<void>;
-  // Patched only across the synchronous part of close(), which collects, dedupes and
-  // invokes every sink hook; the runner itself needs the real iterators afterwards.
-  Object.defineProperty(Array.prototype, Symbol.iterator, {
-    ...arrayIterator,
-    value: refuse,
-  });
-  Object.defineProperty(Set.prototype, Symbol.iterator, {
-    ...setIterator,
-    value: refuse,
-  });
-  try {
-    closing = logger.close();
-  } finally {
-    Object.defineProperty(Array.prototype, Symbol.iterator, arrayIterator);
-    Object.defineProperty(Set.prototype, Symbol.iterator, setIterator);
-  }
-  await closing;
-  await sleep(0);
-  expect(closed).toEqual(['log', 'shared', 'diagnostic']);
-  expect(diagnostics).toEqual([]);
 });
 
 test('synchronous time in one close hook is not charged to a later sink', async () => {

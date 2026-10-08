@@ -68,15 +68,15 @@ New `lifecycle-manager/internal/operation-options.ts`: one typed snapshot per op
 each field read once in today's order, throws propagate, frozen branded `XxxSnapshot` types
 that internal signatures require. Snapshot after state-only refusals, then one re-entry check.
 
-| Operation | Change |
-|---|---|
-| `stopAllComponents` | snapshot before `acceptShutdownPass` instead of inside its transition |
-| `restartAllComponents` | one snapshot + one refusal instead of four reads/refusals |
-| `stopComponent` | `allowStopWithRunningDependents`, `forceImmediate`, `timeout` read at entry |
-| `restartComponent` | one nested snapshot + one check |
-| `unregisterComponent` | `stopIfRunning`/`forceStop` before the first replacement check |
-| `sendMessageToComponent` | `timeout` with the other fields at entry |
-| others | move into the helper, no behavior change |
+| Operation                | Change                                                                      |
+| ------------------------ | --------------------------------------------------------------------------- |
+| `stopAllComponents`      | snapshot before `acceptShutdownPass` instead of inside its transition       |
+| `restartAllComponents`   | one snapshot + one refusal instead of four reads/refusals                   |
+| `stopComponent`          | `allowStopWithRunningDependents`, `forceImmediate`, `timeout` read at entry |
+| `restartComponent`       | one nested snapshot + one check                                             |
+| `unregisterComponent`    | `stopIfRunning`/`forceStop` before the first replacement check              |
+| `sendMessageToComponent` | `timeout` with the other fields at entry                                    |
+| others                   | move into the helper, no behavior change                                    |
 
 Behavior changes: restart runs all its option getters before refusing; `stopComponent`
 getters run before the dependents refusal, and a throwing `timeout` getter fails before the
@@ -106,7 +106,8 @@ after D, site by site, or skip.
 
 ## Decisions
 
-Decided: owner accepted the recommended defaults below, except 4 (keep).
+Decided: owner accepted the recommended defaults below, except 1 (use the global `Promise`,
+no load-time capture at all) and 4 (keep).
 
 1. Native Promise: derive once from `(async () => {})()` (keeps polyfilled-`Promise` own-`then`
    classification correct) vs. the global `Promise`.

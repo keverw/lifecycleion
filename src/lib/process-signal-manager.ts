@@ -5,7 +5,7 @@ import {
 import { ulid } from 'ulid';
 import readline from 'readline';
 import { resolveTimeoutMS } from './internal/timer-limits';
-import { queueMicrotaskIntrinsic } from './internal/intrinsics';
+import { queueMicrotaskSafely } from './internal/intrinsics';
 import { isObjectLike } from './internal/is-object-like';
 import {
   isConsoleReportActive,
@@ -826,7 +826,7 @@ export class ProcessSignalManager {
       return;
     }
 
-    queueMicrotaskIntrinsic(
+    queueMicrotaskSafely(
       () => {
         reportCleanupFailures(reports);
       },

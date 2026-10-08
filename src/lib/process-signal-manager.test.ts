@@ -2563,63 +2563,6 @@ describe('ProcessSignalManager', () => {
       );
     });
 
-    test('a cleanup report that fails to deliver reaches the console', async () => {
-      manager = new ProcessSignalManager({
-        onShutdownRequested: shutdownCallback,
-        onReloadRequested: reloadCallback,
-      });
-      const registrationError = new Error('on failed');
-      const onSpy = spyOn(process, 'on').mockImplementation(((
-        event: string,
-      ) => {
-        if (event === 'SIGHUP') {
-          throw registrationError;
-        }
-        return process;
-      }) as typeof process.on);
-      const offSpy = spyOn(process, 'off').mockImplementation((() => {
-        throw new Error('off failed');
-      }) as typeof process.off);
-
-      try {
-        expect(() => manager.attach()).toThrow(registrationError);
-      } finally {
-        onSpy.mockRestore();
-        offSpy.mockRestore();
-      }
-
-      // Reading the queued reports goes through the array iterator; one that throws
-      // fails the deferred report, which was contained without a word. It throws once
-      // and restores itself, leaving the reporting that follows an ordinary iterator.
-      const captured = muteConsoleError();
-      const iterator = Object.getOwnPropertyDescriptor(
-        Array.prototype,
-        Symbol.iterator,
-      );
-      if (iterator === undefined) {
-        throw new Error('Array iterator is missing');
-      }
-      Object.defineProperty(Array.prototype, Symbol.iterator, {
-        ...iterator,
-        value: () => {
-          Object.defineProperty(Array.prototype, Symbol.iterator, iterator);
-          throw new Error('iterator failed');
-        },
-      });
-      try {
-        // The report, then the observer that hears it fail: a few turns, not a timer.
-        for (let turn = 0; turn < 5; turn++) {
-          await Promise.resolve();
-        }
-      } finally {
-        Object.defineProperty(Array.prototype, Symbol.iterator, iterator);
-      }
-
-      expect(captured).toEqual([
-        'ProcessSignalManager could not report its cleanup failures: iterator failed',
-      ]);
-    });
-
     test('an attach from an attach cleanup report is not thrown over', async () => {
       manager = new ProcessSignalManager({
         onShutdownRequested: shutdownCallback,

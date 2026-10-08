@@ -1,5 +1,3 @@
-import { applyIntrinsic } from './internal/intrinsics';
-
 /**
  * Is this value an error, including one built in another realm?
  *
@@ -108,7 +106,7 @@ function isDOMExceptionInstance(value: unknown): boolean {
   }
 
   try {
-    applyIntrinsic(domExceptionCodeGetter, value, []);
+    Reflect.apply(domExceptionCodeGetter, value, []);
 
     return true;
   } catch {

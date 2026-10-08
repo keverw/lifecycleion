@@ -8,7 +8,6 @@ import type {
   GetValueOptions,
   ValueResult,
 } from '../types';
-import { applyIntrinsic, getIntrinsic } from '../../internal/intrinsics';
 import {
   containDeferredResult,
   UnreadableReturn,
@@ -141,7 +140,7 @@ export async function sendMessageInternal(
   // reads its handler. Unguarded, a getter that threw escaped to the generic safety
   // net, and one that answered differently the second time failed as a handler error.
   const handlerRead = readHookThenRecheck(
-    () => getIntrinsic(component, 'onMessage') as unknown,
+    () => Reflect.get(component, 'onMessage') as unknown,
     (error) => {
       reportCallbackError('lifecycle-manager sendMessageToComponent', error);
     },
@@ -686,7 +685,7 @@ function answerValueRequest<T>(
   // is never invoked after it removed/replaced the registration or handed the
   // component to teardown.
   const handlerRead = readHookThenRecheck(
-    () => getIntrinsic(component, 'getValue') as unknown,
+    () => Reflect.get(component, 'getValue') as unknown,
     (error) => {
       reportCallbackError('lifecycle-manager getValue', error);
     },
@@ -749,7 +748,7 @@ function answerValueRequest<T>(
 
   // Get value
   try {
-    const rawResult: unknown = applyIntrinsic(getValueHandler, component, [
+    const rawResult: unknown = Reflect.apply(getValueHandler, component, [
       key,
       from,
     ]);
@@ -770,11 +769,11 @@ function answerValueRequest<T>(
     }
 
     // Read and validate the synchronous answer once.
-    const wasFound: unknown = getIntrinsic(rawResult, 'found');
+    const wasFound: unknown = Reflect.get(rawResult, 'found');
     if (typeof wasFound !== 'boolean') {
       throw new TypeError('getValue() result.found must be a boolean');
     }
-    const value: unknown = getIntrinsic(rawResult, 'value');
+    const value: unknown = Reflect.get(rawResult, 'value');
 
     return {
       found: wasFound,

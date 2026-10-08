@@ -521,51 +521,6 @@ describe('NamedPipeSink', () => {
     await tmpDir.cleanup();
   }, hookTimeoutMS);
 
-  test('close settles after global Promise and its methods are replaced', async () => {
-    const pipePath = `${tmpDir.path}/patched-promises.pipe`;
-    await createNamedPipe(pipePath);
-    const reader = startPipeReader(pipePath);
-    const sink = new NamedPipeSink({ pipePath, closeTimeoutMS: 50 });
-    expect(await waitForOpenPipe(sink)).toBe(true);
-    const originalPromise = Promise;
-    // eslint-disable-next-line @typescript-eslint/unbound-method
-    const originalThen = Promise.prototype.then;
-    // eslint-disable-next-line @typescript-eslint/unbound-method
-    const originalRace = Promise.race;
-    // eslint-disable-next-line @typescript-eslint/unbound-method
-    const originalResolve = Promise.resolve;
-    let didClose = false;
-    try {
-      originalPromise.prototype.then = function () {
-        return new originalPromise(() => {});
-      };
-      originalPromise.race = function () {
-        return new originalPromise(() => {});
-      };
-      originalPromise.resolve = (() =>
-        new originalPromise(() => {})) as typeof Promise.resolve;
-      globalThis.Promise = (() => {
-        throw new Error('live Promise constructor used');
-      }) as unknown as PromiseConstructor;
-      const closing = sink.close();
-      void Reflect.apply(originalThen, closing, [
-        () => {
-          didClose = true;
-        },
-        () => {},
-      ]);
-      await new originalPromise((resolve) => setTimeout(resolve, 150));
-      expect(didClose).toBe(true);
-    } finally {
-      globalThis.Promise = originalPromise;
-      originalPromise.prototype.then = originalThen;
-      originalPromise.race = originalRace;
-      originalPromise.resolve = originalResolve;
-      await sink.close();
-      reader.stop();
-    }
-  });
-
   test('should write log entry to named pipe', async () => {
     const pipePath = `${tmpDir.path}/test.pipe`;
     await createNamedPipe(pipePath);

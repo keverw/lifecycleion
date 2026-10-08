@@ -4,52 +4,13 @@ import { safeHandleCallbackAndWait } from '../safe-handle-callback';
 import {
   allPromises,
   allSettledPromises,
-  attachIntrinsicReactions,
   awaitBoxedPromise,
   observePromise,
   observeBoxed,
   observeRejection,
-  queueMicrotaskIntrinsic,
+  queueMicrotaskSafely,
   racePromises,
 } from './intrinsics';
-
-for (const mode of ['race', 'all'] as const) {
-  test(`${mode} observes native inputs despite replaced then and combinators`, async () => {
-    const first = Promise.withResolvers<number>();
-    const second = Promise.withResolvers<number>();
-    // eslint-disable-next-line @typescript-eslint/unbound-method
-    const originalThen = Promise.prototype.then;
-    // eslint-disable-next-line @typescript-eslint/unbound-method
-    const originalRace = Promise.race;
-    // eslint-disable-next-line @typescript-eslint/unbound-method
-    const originalAll = Promise.all;
-    let joined: Promise<unknown>;
-    try {
-      Promise.prototype.then = (() => {
-        throw new Error('live then used');
-      }) as typeof originalThen;
-      Promise.race = (() => {
-        throw new Error('live race used');
-      }) as typeof originalRace;
-      Promise.all = (() => {
-        throw new Error('live all used');
-      }) as typeof originalAll;
-      joined =
-        mode === 'race'
-          ? racePromises([first.promise, second.promise])
-          : allPromises([first.promise, second.promise]);
-    } finally {
-      Promise.prototype.then = originalThen;
-      Promise.race = originalRace;
-      Promise.all = originalAll;
-    }
-    second.resolve(2);
-    first.resolve(1);
-    expect(await joined).toEqual(
-      mode === 'race' ? { value: 2 } : { value: [1, 2] },
-    );
-  });
-}
 
 test('racing observes a losing rejection and joining rejects on the first failure', async () => {
   const first = Promise.withResolvers<number>();
@@ -184,7 +145,6 @@ for (const shouldReject of [false, true]) {
     );
     expect(result.value).toBe(mapped);
     expect(reads).toBe(0);
-    expect(Object.getPrototypeOf(result)).toBeNull();
   });
 }
 
@@ -286,48 +246,6 @@ for (const speciesKind of [
   });
 }
 
-test('a realm-wide rejecting species cannot recurse through the terminal observer', async () => {
-  const original = Object.getOwnPropertyDescriptor(Promise, Symbol.species);
-  const orphan = new Error('realm species rejected');
-  const unhandled: unknown[] = [];
-  const onUnhandled = (reason: unknown): void => {
-    unhandled.push(reason);
-  };
-  class RejectingSpecies extends Promise<unknown> {
-    constructor(
-      executor: (
-        resolve: (value: unknown) => void,
-        reject: (reason?: unknown) => void,
-      ) => void,
-    ) {
-      super((resolve, reject) => {
-        executor(resolve, reject);
-        reject(orphan);
-      });
-    }
-  }
-
-  process.on('unhandledRejection', onUnhandled);
-  Object.defineProperty(Promise, Symbol.species, {
-    configurable: true,
-    get: () => RejectingSpecies,
-  });
-  try {
-    expect(await observePromise(Promise.resolve(7), (value) => value)).toBe(7);
-    await new Promise((resolve) => setTimeout(resolve, 0));
-  } finally {
-    if (original === undefined) {
-      delete (Promise as unknown as Record<PropertyKey, unknown>)[
-        Symbol.species
-      ];
-    } else {
-      Object.defineProperty(Promise, Symbol.species, original);
-    }
-    process.off('unhandledRejection', onUnhandled);
-  }
-  expect(unhandled).toEqual([]);
-});
-
 function watchdog(ms = 100): Promise<'hung'> {
   return new Promise((resolve) => setTimeout(() => resolve('hung'), ms));
 }
@@ -400,127 +318,6 @@ test('observePromise reports a constructor getter that starts throwing as a reje
   );
 });
 
-for (const mode of ['all', 'allSettled'] as const) {
-  test(`${mode} defines results past an index setter on Array.prototype`, async () => {
-    let setterCalls = 0;
-    Object.defineProperty(Array.prototype, '0', {
-      configurable: true,
-      set() {
-        setterCalls++;
-      },
-    });
-    try {
-      const joined =
-        mode === 'all'
-          ? allPromises([Promise.resolve(1)])
-          : allSettledPromises([Promise.resolve(1)]);
-      const { value } = await joined;
-      expect(Object.getOwnPropertyDescriptor(value, '0')?.value).toEqual(
-        mode === 'all' ? 1 : { status: 'fulfilled', value: 1 },
-      );
-    } finally {
-      delete (Array.prototype as unknown as Record<string, unknown>)['0'];
-    }
-    expect(setterCalls).toBe(0);
-  });
-}
-
-// Application code can break promise species for the whole realm after this module
-// loads, which makes the intrinsic `then` throw for every promise, the module's own
-// included. Observation cannot see the input then, but its reactions still hear why,
-// and a queued task still runs. A `done` callback, not `await`: awaiting a promise reads
-// its `constructor`, which one of these breaks.
-for (const breakage of ['Promise[Symbol.species]', 'constructor'] as const) {
-  test(`observation and queued tasks still deliver with a throwing ${breakage} getter realm-wide`, (done) => {
-    const target: object =
-      breakage === 'constructor' ? Promise.prototype : Promise;
-    const key = breakage === 'constructor' ? 'constructor' : Symbol.species;
-    const original = Object.getOwnPropertyDescriptor(target, key);
-    const unhandled: unknown[] = [];
-    const onUnhandled = (reason: unknown): void => {
-      unhandled.push(reason);
-    };
-    const heard: unknown[] = [];
-    const ran: string[] = [];
-    const taskFailure = new Error('task failed');
-    const restore = (): void => {
-      if (original === undefined) {
-        delete (target as Record<PropertyKey, unknown>)[key];
-      } else {
-        Object.defineProperty(target, key, original);
-      }
-      process.off('unhandledRejection', onUnhandled);
-    };
-    process.on('unhandledRejection', onUnhandled);
-    Object.defineProperty(target, key, {
-      configurable: true,
-      get() {
-        throw new Error('species broken');
-      },
-    });
-    try {
-      // Fulfilled, so the input itself has no rejection left unobserved.
-      observeRejection(Promise.resolve(1), (error) => {
-        heard.push((error as Error).message);
-      });
-      queueMicrotaskIntrinsic(() => {
-        ran.push('task');
-      });
-      queueMicrotaskIntrinsic(
-        () => {
-          throw taskFailure;
-        },
-        (error) => {
-          heard.push(error);
-        },
-      );
-    } catch (error) {
-      restore();
-      throw error;
-    }
-    setTimeout(() => {
-      restore();
-      try {
-        expect(ran).toEqual(['task']);
-        expect(heard).toEqual(['species broken', taskFailure]);
-        expect(unhandled).toEqual([]);
-        done();
-      } catch (error) {
-        done(error);
-      }
-    }, 10);
-  });
-}
-
-test('a runtime without AbortController can still import the library, and fails only when a controller is created', async () => {
-  // Dynamic imports in a fresh process, so the capture runs after the global is gone.
-  const script = `
-    delete globalThis.AbortController;
-    await import(${JSON.stringify(new URL('../safe-handle-callback.ts', import.meta.url).href)});
-    const { createOwnedAbortController } = await import(${JSON.stringify(new URL('./intrinsics.ts', import.meta.url).href)});
-    let failure;
-    try {
-      createOwnedAbortController();
-    } catch (error) {
-      failure = { name: error.name, message: error.message };
-    }
-    process.stdout.write(JSON.stringify(failure));
-  `;
-  const child = Bun.spawn([process.execPath, '--eval', script], {
-    stdout: 'pipe',
-    stderr: 'pipe',
-  });
-  const [stdout, stderr, code] = await Promise.all([
-    new Response(child.stdout).text(),
-    new Response(child.stderr).text(),
-    child.exited,
-  ]);
-  expect({ code, stderr }).toEqual({ code: 0, stderr: '' });
-  const failure = JSON.parse(stdout) as { name: string; message: string };
-  expect(failure.name).toBe('TypeError');
-  expect(failure.message).toContain('AbortController is not available');
-});
-
 test('a queued task failure reaches the console when no reporter is supplied', async () => {
   const original = console.error;
   const failure = new Error('queued task failed');
@@ -529,7 +326,7 @@ test('a queued task failure reaches the console when no reporter is supplied', a
     seen.push(error);
   };
   try {
-    queueMicrotaskIntrinsic(() => {
+    queueMicrotaskSafely(() => {
       throw failure;
     });
     await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -537,46 +334,4 @@ test('a queued task failure reaches the console when no reporter is supplied', a
     console.error = original;
   }
   expect(seen).toEqual([failure]);
-});
-
-test('a derived promise gets its own constructor back despite a get on Object.prototype', () => {
-  let derived: Promise<unknown> | undefined;
-  class OwnConstructorSpecies {
-    constructor(
-      executor: (resolve: (value: unknown) => void, reject: () => void) => void,
-    ) {
-      const promise = new Promise(executor);
-      void Object.defineProperty(promise, 'constructor', {
-        // eslint-disable-next-line @typescript-eslint/naming-convention
-        __proto__: null,
-        value: Promise,
-        configurable: true,
-        writable: true,
-      } as PropertyDescriptor);
-      derived = promise;
-      return promise;
-    }
-  }
-  const source = Promise.resolve(1);
-  void Object.defineProperty(source, 'constructor', {
-    value: { [Symbol.species]: OwnConstructorSpecies },
-  });
-  Object.defineProperty(Object.prototype, 'get', {
-    configurable: true,
-    writable: true,
-    value: () => undefined,
-  });
-  try {
-    attachIntrinsicReactions(
-      source,
-      () => {},
-      () => {},
-    );
-  } finally {
-    Reflect.deleteProperty(Object.prototype, 'get');
-  }
-  expect(derived).toBeDefined();
-  expect(
-    Object.getOwnPropertyDescriptor(derived as object, 'constructor')?.value,
-  ).toBe(Promise);
 });

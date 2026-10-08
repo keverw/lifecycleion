@@ -2,11 +2,7 @@ import type { BaseComponent } from '../base-component';
 import type { ComponentAccessContext } from './component-access-context';
 import { raceDeadline } from '../../internal/race-deadline';
 import { optionalValidatedTimerDelayMS } from '../../internal/timer-limits';
-import {
-  applyIntrinsic,
-  observeRejection,
-  promiseResolveIntrinsic,
-} from '../../internal/intrinsics';
+import { observeRejection } from '../../internal/intrinsics';
 import { adoptPromise } from '../../internal/adopt-promise';
 import { reportCallbackError } from '../../safe-handle-callback';
 import type { ComponentState } from '../types';
@@ -172,7 +168,7 @@ interface HookDispatchRequest<TRefusal> {
   name: string;
   component: BaseComponent;
   /** The handler as read once by the caller; called with `component` as receiver. */
-  handler: Parameters<typeof applyIntrinsic>[0];
+  handler: Parameters<typeof Reflect.apply>[0];
   args: readonly unknown[];
   timeoutMS: number;
   /** Emits the operation's `*-started` / `message-sent` event. */
@@ -212,7 +208,7 @@ export async function dispatchAnnouncedHook<TRefusal>(
   const { name } = request;
 
   request.announce();
-  await promiseResolveIntrinsic(undefined);
+  await Promise.resolve(undefined);
 
   const refusal = request.recheck();
   if (refusal !== undefined) {
@@ -223,7 +219,7 @@ export async function dispatchAnnouncedHook<TRefusal>(
 
   try {
     const handlerPromise = adoptPromise<unknown>(
-      applyIntrinsic(request.handler, request.component, request.args),
+      Reflect.apply(request.handler, request.component, request.args),
     );
     // Zero means no timer, as for startup and signals: racing `setTimeout(..., 0)` made
     // the outcome depend on whether a handler settled before its first asynchronous turn.

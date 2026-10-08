@@ -3,7 +3,6 @@ import {
   isGlobalEventTargetAvailable,
 } from '../global-event-target';
 import { reportToConsole } from './report-to-console';
-import { applyIntrinsic } from './intrinsics';
 import { isFunction } from '../is-function';
 
 /**
@@ -262,7 +261,7 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
 
   try {
     // Preserve the host receiver without reading a caller-owned call property.
-    return applyIntrinsic(
+    return Reflect.apply(
       dispatchEvent as (event: Event) => boolean,
       globalThis,
       [event],
@@ -358,7 +357,7 @@ export function reportToHost(
 
       if (isFunction(reportError)) {
         try {
-          applyIntrinsic(reportError as (error: unknown) => void, globalThis, [
+          Reflect.apply(reportError as (error: unknown) => void, globalThis, [
             // Rendered, like the console rung below it, and for the same reason: this rung
             // is only reached when dispatch is unavailable, so there is no listener to hand
             // the structured failure to - only a host that will print it. Handing over the

@@ -326,32 +326,3 @@ for (const method of ['dispatchEvent', 'reportError'] as const) {
     });
   });
 }
-
-for (const method of ['dispatchEvent', 'reportError'] as const) {
-  test(`host ${method} uses the captured apply after a global patch`, async () => {
-    const { reportToHost } = await importReportToHostCopy(
-      `captured-apply-${method}`,
-    );
-    const originalApply = Reflect.apply;
-    let calls = 0;
-    let hasGlobalReceiver = false;
-    withHostMethodOverride(
-      method,
-      function (this: unknown) {
-        calls++;
-        hasGlobalReceiver = this === globalThis;
-        return false;
-      },
-      () => {
-        try {
-          Reflect.apply = () => false;
-          reportToHost(new Error('original failure'));
-        } finally {
-          Reflect.apply = originalApply;
-        }
-      },
-    );
-    expect(calls).toBe(1);
-    expect(hasGlobalReceiver).toBe(true);
-  });
-}

@@ -8,7 +8,6 @@
 
 import { reportCallbackError, runCallbackSafely } from './safe-handle-callback';
 import { renderName } from './internal/render-name';
-import { snapshotSet } from './internal/intrinsics';
 import { isConsoleReportActive } from './internal/report-to-console';
 
 type EventCallback<T = unknown> = (data: T) => void | Promise<void>;
@@ -158,10 +157,7 @@ export class EventEmitterProtected {
     // nested) emissions, but cannot skip a sibling or add another callback midway
     // through this one. This matches the dispatch semantics consumers expect from
     // Node's EventEmitter.
-    const snapshot = snapshotSet(callbacks);
-    // eslint-disable-next-line unicorn/no-for-loop
-    for (let index = 0; index < snapshot.length; index++) {
-      const callback = snapshot[index];
+    for (const callback of Array.from(callbacks)) {
       // The same invocation helper `safeHandleCallback` uses, with this emitter's
       // overridable reporter in place of the global `'error'` channel. The callback name
       // is the one `handleEventHandlerFailure` reports with, so a non-function handler's

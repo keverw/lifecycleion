@@ -33,6 +33,10 @@ The stateful helpers have deliberately smaller scopes:
 
 ## Boundaries to preserve
 
+- The threat model is the one in the package
+  [README](../../../../README.md#security-and-threat-model): defend against hostile
+  caller-supplied values (components, options, returned promises, loggers, listeners),
+  and read built-ins live. Do not add defenses against tampered built-ins.
 - The access context is created once, but its state getters stay live. Registry
   publication replaces arrays, and hook/event/log callbacks can change availability
   during an operation. Do not replace the getters with construction-time snapshots.

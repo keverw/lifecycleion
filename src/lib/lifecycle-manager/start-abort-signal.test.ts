@@ -226,40 +226,6 @@ test('a superseded start has its signal aborted at its deadline, and the newer r
   await manager.stopAllComponents();
 });
 
-test('aborting does not consult an AbortController.prototype.abort replaced after import', async () => {
-  const { logger, manager } = setup();
-  const a = new Records(logger, 'a', 30);
-  const gate = deferred();
-  a.onStart = () => gate.promise;
-  await manager.registerComponent(a);
-
-  const descriptor = Object.getOwnPropertyDescriptor(
-    AbortController.prototype,
-    'abort',
-  );
-  if (descriptor === undefined) {
-    throw new Error('AbortController.prototype.abort is missing');
-  }
-  Object.defineProperty(AbortController.prototype, 'abort', {
-    ...descriptor,
-    value: () => {
-      throw new Error('replaced abort');
-    },
-  });
-  try {
-    expect((await manager.startComponent('a')).code).toBe(
-      'component_startup_timeout',
-    );
-  } finally {
-    Object.defineProperty(AbortController.prototype, 'abort', descriptor);
-  }
-
-  expect(a.signals[0].aborted).toBe(true);
-  expect(a.order).toEqual(['abort']);
-  gate.resolve();
-  await sleep(10);
-});
-
 // How a component's throwing abort listener is attached to its start signal.
 const THROWING_LISTENERS: [
   string,
@@ -391,50 +357,3 @@ test.each(THROWING_LISTENERS)(
     }
   },
 );
-
-test('the start signal guards its listeners even after EventTarget.prototype.addEventListener is replaced', async () => {
-  const { reports, release } = claimReports();
-  const descriptor = Object.getOwnPropertyDescriptor(
-    EventTarget.prototype,
-    'addEventListener',
-  );
-  if (descriptor === undefined) {
-    throw new Error('EventTarget.prototype.addEventListener is missing');
-  }
-  try {
-    const { logger, manager } = setup();
-    const a = new ThrowsOnAbort(logger, 'a', (signal, thrown) => {
-      signal.addEventListener('abort', () => {
-        throw thrown;
-      });
-    });
-    await manager.registerComponent(a);
-
-    Object.defineProperty(EventTarget.prototype, 'addEventListener', {
-      ...descriptor,
-      value: () => {
-        throw new Error('replaced addEventListener');
-      },
-    });
-    let result;
-    try {
-      result = await manager.startComponent('a');
-    } finally {
-      Object.defineProperty(
-        EventTarget.prototype,
-        'addEventListener',
-        descriptor,
-      );
-    }
-
-    expect(result.code).toBe('component_startup_timeout');
-    expect(a.order).toEqual(['before', 'after']);
-    expect(reports.map((report) => (report as Error).cause)).toEqual([
-      a.thrown,
-    ]);
-    a.late.resolve();
-    await sleep(10);
-  } finally {
-    release();
-  }
-});

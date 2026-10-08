@@ -1,7 +1,6 @@
 import { awaitBoxedPromise } from '../internal/intrinsics';
 import { matchesFilter } from './utils';
 import { adoptPromise } from '../internal/adopt-promise';
-import { copyRegistrations } from './internal/copy-registrations';
 import type {
   RequestInterceptorFilter,
   RequestInterceptor,
@@ -58,7 +57,7 @@ export class RequestInterceptorManager {
    * applies to the next dispatch, not this one.
    */
   public snapshot(): InterceptorChain {
-    const interceptors = copyRegistrations(this.interceptors);
+    const interceptors = this.interceptors.slice();
 
     return (request, phase, context) =>
       runInterceptors(interceptors, request, phase, context);
@@ -79,11 +78,7 @@ async function runInterceptors(
 ): Promise<InterceptedRequest | InterceptorCancel> {
   let current = request;
 
-  // Indexed rather than `for...of`, for the reason `copyRegistrations()` gives.
-  // eslint-disable-next-line unicorn/no-for-loop
-  for (let index = 0; index < interceptors.length; index++) {
-    const { fn, filter } = interceptors[index];
-
+  for (const { fn, filter } of interceptors) {
     if (
       !matchesFilter(
         filter ?? {},

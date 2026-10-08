@@ -1,8 +1,4 @@
-import {
-  awaitBoxedPromise,
-  createOwnedAbortController,
-  type OwnedAbortController,
-} from '../../internal/intrinsics';
+import { awaitBoxedPromise } from '../../internal/intrinsics';
 import { guardAbortListeners } from '../../internal/guarded-abort-signal';
 import { PromiseProtectedResolver } from '../../promise-protected-resolver';
 import { reportCallbackError } from '../../safe-handle-callback';
@@ -76,14 +72,11 @@ class AttemptContext {
   public startTime: number;
   /** Set before the abort is dispatched, so the operation's listeners already see it. */
   public isAborted = false;
-  private readonly abortController: OwnedAbortController;
+  private readonly abortController: AbortController;
 
   constructor() {
     this.id = generateID('ulid');
-    // From the `AbortController` captured at module initialization, never the live
-    // global: an attempt is started from a floating promise, where a replaced global
-    // that throws would be an unhandled rejection that leaves the runner `running`.
-    this.abortController = createOwnedAbortController();
+    this.abortController = new AbortController();
     // An operation's abort listener runs inside `abort()`, where what it throws is the
     // runtime's to report - as an uncaught exception, fatal to a process with no handler.
     guardAbortListeners(
@@ -97,11 +90,7 @@ class AttemptContext {
     return this.abortController.signal;
   }
 
-  /**
-   * Abort this attempt's signal. Tracked here rather than read back from
-   * `signal.aborted`, a getter application code can replace on `AbortSignal.prototype`;
-   * the runner is the only code holding this controller.
-   */
+  /** Abort this attempt's signal, once; the runner is the only code holding this controller. */
   public abort(): void {
     if (this.isAborted) {
       return;
@@ -1462,24 +1451,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     if (this.currentState.runnerState === 'running') {
       this.currentState.lastAttemptWasForceTry = wasForced;
 
-      // Create a new context for this attempt. This runs from a floating promise, so a
-      // throw here would be an unhandled rejection that leaves the runner `running`: the
-      // id generator reads the live `crypto` global, which application code can replace.
-      // An attempt that cannot even be set up ends the operation, like a fatal attempt.
-      let context: AttemptContext;
-      try {
-        context = new AttemptContext();
-      } catch (error) {
-        this.currentState.currentAttemptContext = null;
-
-        this.policy.reportError(error);
-        this.confirmCancellation('fatal-error', {
-          status: 'attempt_fatal',
-          code: 'unexpected_error',
-          error,
-        });
-        return;
-      }
+      // Create a new context for this attempt.
+      const context = new AttemptContext();
       this.currentState.currentAttemptContext = context;
 
       // emit the attempt started event
@@ -1547,7 +1520,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         // Adopted, not awaited as it is: a native promise whose own `then` is not a
         // function fails `isPromise()`, so its rejection would never be awaited and would
         // go unhandled, and `await` calls an own `then` on one carrying its own
-        // `constructor`. Classification and adoption share one captured then read.
+        // `constructor`. Classification and adoption share one then read.
         const pending = adoptResult(result);
         if (pending instanceof UnreadableReturn) {
           unreadableReturn = pending;

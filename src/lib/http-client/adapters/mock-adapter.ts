@@ -1,8 +1,6 @@
 import { markNonRetryableAdapterError } from '../internal/adapter-error';
 import { defineEntry } from '../../internal/define-entry';
 import {
-  applyIntrinsic,
-  promiseConstructorIntrinsic,
   observePromise,
   observeRejection,
   awaitBoxedPromise,
@@ -358,7 +356,7 @@ export class MockAdapter implements HTTPAdapter {
           try {
             mockResponse = (
               await awaitAbortable(
-                applyIntrinsic(onHandlerError, this.config, [
+                Reflect.apply(onHandlerError, this.config, [
                   mockRequest,
                   handlerError,
                 ]),
@@ -848,69 +846,67 @@ function awaitAbortable<T>(
     return awaitBoxedPromise(adopted);
   }
 
-  return new promiseConstructorIntrinsic<PromiseResultBox<T>>(
-    (resolve, reject) => {
-      // Guarded: a signal that is not a native `AbortSignal` may refuse the removal, and
-      // a throw from the reactions below would reject their derived promise - unhandled
-      // - and leave this wait settled by nothing.
-      const detach = (): void => {
-        try {
-          signal.removeEventListener('abort', onAbort);
-        } catch {
-          // The listener stays, and is inert: the wait it ends has already settled.
-        }
-      };
-
-      // Cancellation should reject immediately with AbortError, even if the
-      // wrapped handler/onHandlerError promise is still pending.
-      const onAbort = () => {
-        detach();
-        reject(new InternalMockAbortError());
-      };
-
-      // Observed before anything else here can throw. A signal whose
-      // `addEventListener` throws rejects this wait from the executor, and the
-      // handler's promise, not yet observed, was then an unhandled rejection.
-      observeRejection(
-        observePromise(
-          adopted,
-          (result) => {
-            detach();
-            // Cancellation changes the wait, not adoption of the handler's data.
-            // Keep the raw response inside a box so this extra boundary cannot read
-            // its then property again only when an AbortSignal happens to be present.
-            resolve(boxPromiseValue(result));
-          },
-          (error) => {
-            detach();
-            // onHandlerError receives the original reason with or without a signal.
-            // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
-            reject(error);
-          },
-        ),
-        () => undefined,
-      );
-
-      signal.addEventListener('abort', onAbort, { once: true });
-
-      // A handler can abort synchronously before returning its promise. Observe
-      // that promise before ending the wait so its rejection is still consumed.
-      let isAborted: boolean;
-
+  return new Promise<PromiseResultBox<T>>((resolve, reject) => {
+    // Guarded: a signal that is not a native `AbortSignal` may refuse the removal, and
+    // a throw from the reactions below would reject their derived promise - unhandled
+    // - and leave this wait settled by nothing.
+    const detach = (): void => {
       try {
-        isAborted = signal.aborted;
-      } catch (error) {
-        // The executor rejects with this, and nothing will settle the wait again, so the
-        // listener just attached is removed rather than left on the signal for good.
-        detach();
-        throw error;
+        signal.removeEventListener('abort', onAbort);
+      } catch {
+        // The listener stays, and is inert: the wait it ends has already settled.
       }
+    };
 
-      if (isAborted) {
-        onAbort();
-      }
-    },
-  );
+    // Cancellation should reject immediately with AbortError, even if the
+    // wrapped handler/onHandlerError promise is still pending.
+    const onAbort = () => {
+      detach();
+      reject(new InternalMockAbortError());
+    };
+
+    // Observed before anything else here can throw. A signal whose
+    // `addEventListener` throws rejects this wait from the executor, and the
+    // handler's promise, not yet observed, was then an unhandled rejection.
+    observeRejection(
+      observePromise(
+        adopted,
+        (result) => {
+          detach();
+          // Cancellation changes the wait, not adoption of the handler's data.
+          // Keep the raw response inside a box so this extra boundary cannot read
+          // its then property again only when an AbortSignal happens to be present.
+          resolve(boxPromiseValue(result));
+        },
+        (error) => {
+          detach();
+          // onHandlerError receives the original reason with or without a signal.
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+          reject(error);
+        },
+      ),
+      () => undefined,
+    );
+
+    signal.addEventListener('abort', onAbort, { once: true });
+
+    // A handler can abort synchronously before returning its promise. Observe
+    // that promise before ending the wait so its rejection is still consumed.
+    let isAborted: boolean;
+
+    try {
+      isAborted = signal.aborted;
+    } catch (error) {
+      // The executor rejects with this, and nothing will settle the wait again, so the
+      // listener just attached is removed rather than left on the signal for good.
+      detach();
+      throw error;
+    }
+
+    if (isAborted) {
+      onAbort();
+    }
+  });
 }
 
 /**
@@ -923,7 +919,7 @@ function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
     throw new InternalMockAbortError();
   }
 
-  return new promiseConstructorIntrinsic<void>((resolve, reject) => {
+  return new Promise<void>((resolve, reject) => {
     const onAbort = () => {
       clearTimeout(id);
       reject(new InternalMockAbortError());

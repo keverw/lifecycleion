@@ -1,13 +1,9 @@
 import { markNonRetryableAdapterError } from '../internal/adapter-error';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import {
-  applyIntrinsic,
   awaitBoxedPromise,
-  createOwnedAbortController,
-  promiseResolveIntrinsic,
   observePromise,
   observeRejection,
-  promiseConstructorIntrinsic as NativePromise,
 } from '../../internal/intrinsics';
 import * as http from 'node:http';
 import { guardProgressCallback } from '../internal/progress';
@@ -638,7 +634,7 @@ export class NodeAdapter implements HTTPAdapter {
     };
 
     let requestForCleanup: http.ClientRequest | undefined;
-    const operation = new NativePromise<AdapterResponse>((resolve, reject) => {
+    const operation = new Promise<AdapterResponse>((resolve, reject) => {
       let activeResponseStream:
         | {
             status: number;
@@ -886,7 +882,7 @@ export class NodeAdapter implements HTTPAdapter {
           return;
         }
 
-        upload.outcome = new NativePromise<Error | undefined>((settle) => {
+        upload.outcome = new Promise<Error | undefined>((settle) => {
           upload.settle = settle;
         });
       };
@@ -1271,7 +1267,7 @@ export class NodeAdapter implements HTTPAdapter {
             // inside `abortStream()`, and on an ordinary signal one that throws is an
             // uncaught exception rather than an error this adapter can catch. The guard
             // reports it on the host `'error'` channel and runs the listeners after it.
-            const streamAbort = createOwnedAbortController();
+            const streamAbort = new AbortController();
 
             guardAbortListeners(
               streamAbort.signal,
@@ -1371,7 +1367,7 @@ export class NodeAdapter implements HTTPAdapter {
               } else {
                 // Preserve the one-turn sync-factory handoff without adopting its
                 // writable again or adding extra microtasks before stream listeners.
-                await promiseResolveIntrinsic(undefined);
+                await Promise.resolve(undefined);
                 writable = returned as
                   WritableLike | null | StreamResponseCancel;
               }
@@ -2075,7 +2071,7 @@ async function streamResponseBody(
   totalBytes: number,
   onProgress?: (e: AdapterProgressEvent) => void,
 ): Promise<StreamResponseBodyResult> {
-  return await new NativePromise((resolve) => {
+  return await new Promise((resolve) => {
     let loadedBytes = 0;
 
     // Deduplication guard — same as buffered download: when Content-Length is
@@ -2746,7 +2742,7 @@ function snapshotAdapterRequest(request: AdapterRequest): AdapterRequest {
     streamResponse:
       typeof streamResponse === 'function'
         ? (info, context) =>
-            applyIntrinsic(streamResponse, request, [info, context])
+            Reflect.apply(streamResponse, request, [info, context])
         : streamResponse,
     attemptNumber,
     requestID,

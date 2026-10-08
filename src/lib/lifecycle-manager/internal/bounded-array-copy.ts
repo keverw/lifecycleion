@@ -1,5 +1,3 @@
-import { getIntrinsic } from '../../internal/intrinsics';
-
 /**
  * Copy a caller's array by index, reading its `length` once and bounding it before the
  * loop.
@@ -22,7 +20,7 @@ export function copyBoundedArray(
   maxLength: number,
   refuse: (length: string) => Error,
 ): unknown[] {
-  const length: unknown = getIntrinsic(array, 'length');
+  const length: unknown = Reflect.get(array, 'length');
 
   if (
     typeof length !== 'number' ||
@@ -35,7 +33,7 @@ export function copyBoundedArray(
 
   const copy: unknown[] = [];
   for (let index = 0; index < length; index++) {
-    copy[index] = getIntrinsic(array, index);
+    copy[index] = Reflect.get(array, index);
   }
   return copy;
 }
