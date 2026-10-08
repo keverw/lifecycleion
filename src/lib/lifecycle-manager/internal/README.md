@@ -208,7 +208,10 @@ suites remain the integration tests for ownership, re-entry, and operation timin
 
 Event dispatch owns its transition depth and FIFO, while the manager decides where
 transitions begin and delivers events through its existing emitter boundary. Control
-events remain synchronous; extracting the queue adds no scheduling.
+events remain synchronous; extracting the queue adds no scheduling. Log calls are not
+queued: the guarded logger delivers to its sinks synchronously at the call site, even
+inside a transition, by design. A sink is caller code, so a site that logs and then
+acts rechecks whatever that sink may have changed.
 
 Registry reads own registration generations and read stamps, not the registry itself.
 Their source stays live, provisional registration advances the generation before hooks
