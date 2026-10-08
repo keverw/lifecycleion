@@ -63,7 +63,10 @@ the core. Manager members that no subsystem owns yet are reached through
 that takes one over moves it onto its subsystem. Bookkeeping that only one subsystem
 touches is that subsystem's own private state rather than a state field: the logger
 exit's flags live on `LoggerExitHook`, the stall details beside each stall record on
-`ComponentStop`, and the armed window's expiry timer on `ShutdownEscalation`.
+`ComponentStop`, and the armed window's expiry timer on `ShutdownEscalation`. State
+that lives only as long as one operation is an explicit record that operation hands
+to each of its phases: a bulk startup's progress, deadline and release reasons are the
+`StartupRun` every phase of `StartupOrchestration` takes.
 
 The stateful helpers have deliberately smaller scopes:
 
