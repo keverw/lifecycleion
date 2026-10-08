@@ -5,7 +5,7 @@ import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
 import type { RestartResult, ShutdownResult } from './types';
 import { sleep } from '../sleep';
-import { deferred } from './test-helpers';
+import { coreOf, deferred } from './test-helpers';
 
 function setup(shutdownTimeoutMS?: number) {
   const logger = new Logger({
@@ -37,7 +37,7 @@ function shutdownCompleted(manager: LifecycleManager): Promise<void> {
 // Sends a signal down the same private entry point the OS handlers use.
 function sendSignal(manager: LifecycleManager, method: string): void {
   (
-    manager as unknown as {
+    coreOf(manager).shutdownEscalation as unknown as {
       handleShutdownRequest: (method: string) => void;
     }
   ).handleShutdownRequest(method);
@@ -606,10 +606,9 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     // is a manager bug, and it reaches the caller as one - an `operation_crashed` result
     // carrying the thrown value - rather than as a pass that started or a refusal that
     // did not happen.
-    const internals = manager as unknown as {
+    const core = coreOf(manager);
+    const internals = core.shutdownEscalation as unknown as {
       normalizeRepeatedShutdownRequestStateArmedStatus: () => boolean;
-      isShuttingDown: boolean;
-      state: { activeShutdownPass: unknown };
     };
     const original = internals.normalizeRepeatedShutdownRequestStateArmedStatus;
 
@@ -649,8 +648,8 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     // No pass was accepted, so there is nothing to announce, nothing that owes a result,
     // and nothing latched.
     expect(events).toEqual([]);
-    expect(internals.isShuttingDown).toBe(false);
-    expect(internals.state.activeShutdownPass).toBeNull();
+    expect(core.shutdownPass.isShuttingDown).toBe(false);
+    expect(core.state.activeShutdownPass).toBeNull();
     expect(manager.getSystemState()).not.toBe('shutting-down');
 
     component.releaseStop();
@@ -779,9 +778,8 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     // never reaches the point where it reads its pass's flag.
     const internals = manager as unknown as {
       isComponentRunning: (name: string) => boolean;
-      isShuttingDown: boolean;
-      state: { activeShutdownPass: unknown };
     };
+    const core = coreOf(manager);
     const original = internals.isComponentRunning;
 
     internals.isComponentRunning = (): never => {
@@ -814,8 +812,8 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
 
     // The pass's `finally` dropped it along with the latch, so the next restart runs a
     // pass of its own rather than being refused by a leaked one.
-    expect(internals.isShuttingDown).toBe(false);
-    expect(internals.state.activeShutdownPass).toBeNull();
+    expect(core.shutdownPass.isShuttingDown).toBe(false);
+    expect(core.state.activeShutdownPass).toBeNull();
 
     // The throw landed before stop() was ever called, so open the gate for the pass that
     // does reach it.

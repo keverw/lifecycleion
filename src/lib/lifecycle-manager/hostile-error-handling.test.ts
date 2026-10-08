@@ -214,11 +214,7 @@ describe('LifecycleManager - hostile thrown values', () => {
 
     try {
       // The signal handler's own entry point, without raising a real signal.
-      (
-        lifecycle as unknown as {
-          handleShutdownRequest: (method: 'SIGTERM') => void;
-        }
-      ).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
 
       await new Promise((resolve) => setTimeout(resolve, 100));
 

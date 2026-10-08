@@ -21,7 +21,8 @@ package's lifecycle-manager entry.
 | `hook-abort.ts`               | The guarded abort controller each call of a component hook gets, and aborting it contained.                                                                        |
 
 `shutdown-warning.ts` owns warning-hook dispatch, its shared deadline, and warning
-notifications. The manager chooses when this phase runs and retains shutdown ownership.
+notifications. The shutdown pass (`shutdown-pass.ts`) chooses when this phase runs and
+retains shutdown ownership.
 
 `component-metadata-reader.ts` owns guarded metadata reads and the report-once marks
 described below. Its naming callback stays live; it does not own registration state.
@@ -49,6 +50,8 @@ built over one shared core.
 | `component-start.ts`     | `ComponentStart`: the per-component start pipeline - the start net, its preconditions, the attempt, start settlements, and marking a component running. |
 | `late-start-recovery.ts` | `LateStartRecovery`: stopping a start the manager stopped waiting for if it completes later, and whether such a start is still awaited.                 |
 | `unexpected-stops.ts`    | `UnexpectedStops`: the unexpected-stop handler a running component reports through, clearing it, and draining the stops a bulk startup recorded.        |
+| `shutdown-pass.ts`       | `ShutdownPassRunner`: the shutdown latch, accepting or refusing a pass, and the pass itself - warning phase, stop loop, joined starts, and its result.  |
+| `shutdown-escalation.ts` | `ShutdownEscalation`: shutdown signal requests, repeated-request counting, the post-failure armed window, and the escalation status.                    |
 
 Each subsystem receives the core in its constructor and only stores it there, since
 another subsystem may not exist yet. It calls the manager's public, overridable
@@ -57,8 +60,8 @@ the core. Manager members that no subsystem owns yet are reached through
 `core.internals`, callbacks that forward to the manager at call time; an extraction
 that takes one over moves it onto its subsystem. Bookkeeping that only one subsystem
 touches is that subsystem's own private state rather than a state field: the logger
-exit's flags live on `LoggerExitHook`, and the stall details beside each stall record
-on `ComponentStop`.
+exit's flags live on `LoggerExitHook`, the stall details beside each stall record on
+`ComponentStop`, and the armed window's expiry timer on `ShutdownEscalation`.
 
 The stateful helpers have deliberately smaller scopes:
 

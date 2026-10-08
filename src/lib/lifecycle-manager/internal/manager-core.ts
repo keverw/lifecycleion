@@ -4,6 +4,7 @@ import type { BaseComponent } from '../base-component';
 import type { LifecycleManagerEvents } from '../events';
 import type { LifecycleManager } from '../lifecycle-manager';
 import type { ComponentOperationResult, ComponentStatus } from '../types';
+import type { ComponentAccessContext } from './component-access-context';
 import { ComponentClaims } from './component-claims';
 import type { ComponentMetadataReader } from './component-metadata-reader';
 import { ComponentStart, type RestartStartSnapshot } from './component-start';
@@ -13,6 +14,8 @@ import { LoggerExitHook } from './logger-exit-hook';
 import type { ManagerConfig } from './manager-config';
 import type { LifecycleManagerState } from './manager-state';
 import type { RegistrationReadTracker } from './registration-read-tracker';
+import { ShutdownEscalation } from './shutdown-escalation';
+import { ShutdownPassRunner } from './shutdown-pass';
 import type { TransitionEventDispatcher } from './transition-event-dispatcher';
 import { UnexpectedStops } from './unexpected-stops';
 
@@ -23,14 +26,12 @@ import { UnexpectedStops } from './unexpected-stops';
  * runs. An extraction that takes one of these over moves it onto its subsystem.
  */
 export interface ManagerInternals {
-  /** The shutdown latch: set exactly while a shutdown pass is running. */
-  readonly isShuttingDown: boolean;
-  /** Record a shutdown request that landed while a shutdown pass was already running. */
-  noteShutdownRequestDuringActivePass(): void;
   /** The committed component registered under `name`. */
   getComponent(name: string): BaseComponent | undefined;
   /** A registered component's name, as recorded when it was committed. */
   nameOf(component: BaseComponent): string;
+  /** Dependency-aware order of the registered components; throws on a cycle. */
+  getStartupOrderInternal(): string[];
   /** The status of the component registered under `name`; the caller has checked it is. */
   statusOf(name: string): ComponentStatus;
   /** Recompute `isStarted` from the running and stalled sets. */
@@ -82,13 +83,16 @@ export interface ManagerCoreParts {
   readonly dispatcher: TransitionEventDispatcher;
   readonly registryReads: RegistrationReadTracker;
   readonly componentMetadata: ComponentMetadataReader;
+  /** The live view and dispatch callbacks the component-facing operations use. */
+  readonly componentAccess: ComponentAccessContext;
   readonly internals: ManagerInternals;
 }
 
 /**
  * The shared core every manager subsystem is built over: the manager's state, config,
- * loggers, event plumbing and registry readers, plus each subsystem, so subsystems
- * reach one another through it rather than through the manager.
+ * loggers, event plumbing, registry readers and component access context, plus each
+ * subsystem, so subsystems reach one another through it rather than through the
+ * manager.
  *
  * Subsystems are created here, after the shared parts, and receive this core in their
  * constructor. A constructor only stores the core: another subsystem may not exist
@@ -104,6 +108,7 @@ export class ManagerCore implements ManagerCoreParts {
   public readonly dispatcher: TransitionEventDispatcher;
   public readonly registryReads: RegistrationReadTracker;
   public readonly componentMetadata: ComponentMetadataReader;
+  public readonly componentAccess: ComponentAccessContext;
   public readonly internals: ManagerInternals;
 
   // Subsystems
@@ -113,6 +118,8 @@ export class ManagerCore implements ManagerCoreParts {
   public readonly componentStart: ComponentStart;
   public readonly lateStartRecovery: LateStartRecovery;
   public readonly unexpectedStops: UnexpectedStops;
+  public readonly shutdownPass: ShutdownPassRunner;
+  public readonly shutdownEscalation: ShutdownEscalation;
 
   constructor(parts: ManagerCoreParts) {
     this.manager = parts.manager;
@@ -124,6 +131,7 @@ export class ManagerCore implements ManagerCoreParts {
     this.dispatcher = parts.dispatcher;
     this.registryReads = parts.registryReads;
     this.componentMetadata = parts.componentMetadata;
+    this.componentAccess = parts.componentAccess;
     this.internals = parts.internals;
 
     this.loggerExit = new LoggerExitHook(this);
@@ -132,5 +140,7 @@ export class ManagerCore implements ManagerCoreParts {
     this.componentStart = new ComponentStart(this);
     this.lateStartRecovery = new LateStartRecovery(this);
     this.unexpectedStops = new UnexpectedStops(this);
+    this.shutdownPass = new ShutdownPassRunner(this);
+    this.shutdownEscalation = new ShutdownEscalation(this);
   }
 }

@@ -223,7 +223,7 @@ describe('LifecycleManager - stopAllComponents() in the background', () => {
 
     try {
       (
-        manager as unknown as {
+        coreOf(manager).shutdownEscalation as unknown as {
           handleShutdownRequest: (method: string) => void;
         }
       ).handleShutdownRequest('SIGTERM');
@@ -473,15 +473,14 @@ describe('LifecycleManager - manual shutdown escalation', () => {
     expect(initiatedCount).toBe(1);
 
     // Still held by the pass the force handler started, not released by the refusal.
-    const internals = manager as unknown as { isShuttingDown: boolean };
-    expect(internals.isShuttingDown).toBe(true);
+    expect(coreOf(manager).shutdownPass.isShuttingDown).toBe(true);
     expect(completedCount).toBe(0);
 
     await done;
 
     expect(completedCount).toBe(1);
     expect(initiatedCount).toBe(1);
-    expect(internals.isShuttingDown).toBe(false);
+    expect(coreOf(manager).shutdownPass.isShuttingDown).toBe(false);
     expect((await nestedStops[0])?.code).not.toBe('already_in_progress');
   });
 
@@ -781,7 +780,7 @@ describe('LifecycleManager - shutdown hardening', () => {
     // Escalation seeding is the earliest thing in the pass that could plausibly throw:
     // it runs after the pass has announced itself to the requester but before the
     // `shutdown-initiated` emit.
-    const internals = manager as unknown as {
+    const internals = coreOf(manager).shutdownEscalation as unknown as {
       seedRepeatedShutdownRequestState: (method: string) => void;
     };
     const original = internals.seedRepeatedShutdownRequestState;
@@ -1049,7 +1048,7 @@ describe('LifecycleManager - shutdown hardening', () => {
 
     // Every pass from here on dies inside the stop loop, so the component never stops
     // and each press has something left to ask for.
-    const internals = manager as unknown as {
+    const internals = coreOf(manager).shutdownEscalation as unknown as {
       handleShutdownRequest: (method: string) => void;
     };
     const componentStop = coreOf(manager).componentStop as unknown as {
@@ -1309,7 +1308,9 @@ describe('LifecycleManager - shutdown started from the signal log line', () => {
     };
 
     (
-      manager as unknown as { handleShutdownRequest: (method: string) => void }
+      coreOf(manager).shutdownEscalation as unknown as {
+        handleShutdownRequest: (method: string) => void;
+      }
     ).handleShutdownRequest('SIGINT');
     onMessage = undefined;
 

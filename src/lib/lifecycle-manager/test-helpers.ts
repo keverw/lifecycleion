@@ -134,7 +134,7 @@ export class Plain extends BaseComponent {
 // Sends a signal down the same private entry point the OS handlers use.
 export function sendSignal(manager: LifecycleManager, method: string): void {
   (
-    manager as unknown as {
+    coreOf(manager).shutdownEscalation as unknown as {
       handleShutdownRequest: (method: string) => void;
     }
   ).handleShutdownRequest(method);

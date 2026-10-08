@@ -150,7 +150,7 @@ export class ComponentStop {
     operation: 'stop' | 'restart',
   ): ComponentOperationResult | undefined {
     const isStarting = this.core.state.isStarting;
-    const isShuttingDown = this.core.internals.isShuttingDown;
+    const isShuttingDown = this.core.shutdownPass.isShuttingDown;
     if (!isStarting && !isShuttingDown) {
       // A late start's cleanup marks its component running only to stop it, and
       // restores the timed-out state afterwards. A plain stop that claimed it first

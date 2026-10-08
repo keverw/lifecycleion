@@ -299,7 +299,6 @@ export class LifecycleManagerState {
   public readonly componentClaims = new Map<string, ComponentClaim>();
   public shutdownMethod: ShutdownMethod | null = null;
   public lastShutdownResult: ShutdownResult | null = null;
-  public repeatedShutdownExpiryTimer: NodeJS.Timeout | null = null;
   public repeatedShutdownRequestState: RepeatedShutdownRequestState = {
     requestCount: 0,
     firstMethod: null,

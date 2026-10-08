@@ -61,8 +61,8 @@ export class LoggerExitHook {
       // (its whole timeout, for the stall that prompted the force) or, from the armed
       // window, started and waited out a new one.
       if (this.core.state.forceHandlingDepth > 0) {
-        if (this.core.internals.isShuttingDown) {
-          this.core.internals.noteShutdownRequestDuringActivePass();
+        if (this.core.shutdownPass.isShuttingDown) {
+          this.core.shutdownPass.noteShutdownRequestDuringActivePass();
         }
 
         // Committed before the log line, so a sink behind it cannot start anything.
@@ -147,7 +147,7 @@ export class LoggerExitHook {
         // again, which only an individual restart that began between the two notes
         // sees - one that began after this exit was requested, so skipping its start
         // is still right.
-        this.core.internals.noteShutdownRequestDuringActivePass();
+        this.core.shutdownPass.noteShutdownRequestDuringActivePass();
 
         this.core.logger.debug(
           LIFECYCLE_MANAGER_LOG_LOGGER_EXIT_DURING_SHUTDOWN,
@@ -169,7 +169,7 @@ export class LoggerExitHook {
       this.isHandlingLoggerExit = true;
 
       try {
-        if (this.core.internals.isShuttingDown) {
+        if (this.core.shutdownPass.isShuttingDown) {
           return await waitForRunningShutdown();
         }
 
@@ -192,7 +192,7 @@ export class LoggerExitHook {
         // was then refused, and the exit waits for the running pass like any other.
         if (
           shutdownResult.code === 'already_in_progress' &&
-          this.core.internals.isShuttingDown
+          this.core.shutdownPass.isShuttingDown
         ) {
           return await waitForRunningShutdown();
         }
@@ -225,7 +225,7 @@ export class LoggerExitHook {
    * it was waiting for this one.
    */
   public finalizePendingLoggerExit(): void {
-    if (this.core.internals.isShuttingDown || !this.isHandlingLoggerExit) {
+    if (this.core.shutdownPass.isShuttingDown || !this.isHandlingLoggerExit) {
       return;
     }
 

@@ -363,11 +363,11 @@ export class ComponentStart {
       };
     }
     // ALWAYS reject during shutdown (never bypass this check)
-    if (this.core.internals.isShuttingDown) {
+    if (this.core.shutdownPass.isShuttingDown) {
       this.core.logger
         .entity(name)
         .warn('Cannot start component during shutdown', {
-          params: { isShuttingDown: this.core.internals.isShuttingDown },
+          params: { isShuttingDown: this.core.shutdownPass.isShuttingDown },
         });
 
       return {
@@ -749,7 +749,7 @@ export class ComponentStart {
     // arrives during a shutdown is, rather than adopting that pass's token as this
     // start's baseline and starting the component underneath it.
     if (
-      this.core.internals.isShuttingDown ||
+      this.core.shutdownPass.isShuttingDown ||
       this.core.state.shutdownToken !== shutdownTokenBeforeAttach
     ) {
       restoreStateBeforeStart();
@@ -1165,7 +1165,7 @@ export class ComponentStart {
       // If shutdown began while start() was in flight, treat the component as
       // running long enough to send it through the normal stop pipeline.
       if (
-        this.core.internals.isShuttingDown ||
+        this.core.shutdownPass.isShuttingDown ||
         shutdownTokenAtStart !== this.core.state.shutdownToken
       ) {
         this.core.dispatcher.withTransition(() => {

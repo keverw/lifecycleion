@@ -8218,11 +8218,11 @@ describe('LifecycleManager - Signal Integration', () => {
         });
       });
 
-      (lifecycle as any).handleShutdownRequest('SIGINT');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGINT');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
 
       await shutdownCompleted;
 
@@ -8265,9 +8265,9 @@ describe('LifecycleManager - Signal Integration', () => {
 
       const failedShutdown = await lifecycle.stopAllComponents();
       expect(failedShutdown.success).toBe(false);
-      expect((lifecycle as any).isShuttingDown).toBe(false);
+      expect(coreOf(lifecycle).shutdownPass.isShuttingDown).toBe(false);
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
 
       expect(shutdownSignals.at(-1)).toEqual({
         method: 'SIGTERM',
@@ -8348,7 +8348,7 @@ describe('LifecycleManager - Signal Integration', () => {
           resolve();
         });
       });
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await shutdownCompleted;
       expect(lifecycle.getSignalStatus().shutdownMethod).toBe('SIGTERM');
       expect(shutdownCompletedPayload?.method).toBe('SIGTERM');
@@ -8436,7 +8436,7 @@ describe('LifecycleManager - Signal Integration', () => {
       );
       await lifecycle.startAllComponents();
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
 
       expect(lifecycle.getShutdownEscalationStatus()).toEqual({
@@ -8533,14 +8533,15 @@ describe('LifecycleManager - Signal Integration', () => {
         expect(status.armedUntil).toBeGreaterThanOrEqual(before + maxTimerMS);
         expect(status.armedUntil).toBeLessThanOrEqual(after + maxTimerMS);
         // Inspect and clear the long-lived timer without waiting 24 days.
-        const internals = lifecycle as unknown as {
-          state: {
-            repeatedShutdownExpiryTimer: ReturnType<typeof setTimeout>;
-          };
-          resetRepeatedShutdownRequestState(): void;
-        };
-        expect(internals.state.repeatedShutdownExpiryTimer).toBeDefined();
-        internals.resetRepeatedShutdownRequestState();
+        const escalation = coreOf(lifecycle).shutdownEscalation;
+        expect(
+          (
+            escalation as unknown as {
+              repeatedShutdownExpiryTimer: ReturnType<typeof setTimeout>;
+            }
+          ).repeatedShutdownExpiryTimer,
+        ).toBeDefined();
+        escalation.resetRepeatedShutdownRequestState();
       },
     );
 
@@ -8671,13 +8672,13 @@ describe('LifecycleManager - Signal Integration', () => {
         });
       });
 
-      (lifecycle as any).handleShutdownRequest('SIGINT');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGINT');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(5);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(5);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
 
       await shutdownCompleted;
 
@@ -8761,7 +8762,7 @@ describe('LifecycleManager - Signal Integration', () => {
           resolve();
         });
       });
-      (lifecycle as any).handleShutdownRequest('SIGINT');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGINT');
       await stopEntered.promise;
 
       // Do not install a global clock mock until stop() has actually begun.
@@ -8769,15 +8770,15 @@ describe('LifecycleManager - Signal Integration', () => {
       const clock = spyOn(Date, 'now').mockImplementation(() => currentTime);
       try {
         currentTime += 10;
-        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
         expect(forceShutdownCalls).toEqual([]);
 
         currentTime += 10;
-        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
         expect(forceShutdownCalls).toEqual([]);
 
         currentTime += 10;
-        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
         expect(forceShutdownCalls).toEqual([
           {
             requestCount: 3,
@@ -8827,15 +8828,15 @@ describe('LifecycleManager - Signal Integration', () => {
         });
       });
 
-      (lifecycle as any).handleShutdownRequest('SIGINT');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGINT');
       await sleep(400);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(400);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(50);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(50);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
 
       await shutdownCompleted;
 
@@ -8885,15 +8886,15 @@ describe('LifecycleManager - Signal Integration', () => {
           });
         });
 
-        (lifecycle as any).handleShutdownRequest('SIGINT');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGINT');
         await sleep(10);
 
         currentTime = 1100;
-        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
         await sleep(10);
 
         currentTime = 1200;
-        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
 
         await shutdownCompleted;
 
@@ -8947,22 +8948,22 @@ describe('LifecycleManager - Signal Integration', () => {
           });
         });
 
-        (lifecycle as any).handleShutdownRequest('SIGINT');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGINT');
         await sleep(10);
 
         currentTime = 2100;
-        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
         await sleep(10);
 
         currentTime = 2101;
-        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
         await sleep(10);
         expect(forceShutdownCalls).toEqual([]);
 
         currentTime = 2200;
-        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
         currentTime = 2200;
-        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
 
         await shutdownCompleted;
 
@@ -9011,9 +9012,9 @@ describe('LifecycleManager - Signal Integration', () => {
         });
       });
 
-      (lifecycle as any).handleShutdownRequest('SIGINT');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGINT');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
 
       await shutdownCompleted;
 
@@ -9066,13 +9067,13 @@ describe('LifecycleManager - Signal Integration', () => {
           });
         });
 
-        (lifecycle as any).handleShutdownRequest('SIGINT');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGINT');
         currentTime += 10;
-        (lifecycle as any).handleShutdownRequest('SIGINT');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGINT');
         currentTime += 10;
-        (lifecycle as any).handleShutdownRequest('SIGINT');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGINT');
         currentTime += 10;
-        (lifecycle as any).handleShutdownRequest('SIGINT');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGINT');
         await shutdownCompleted;
 
         await lifecycle.startAllComponents();
@@ -9083,13 +9084,13 @@ describe('LifecycleManager - Signal Integration', () => {
           });
         });
 
-        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
         currentTime += 10;
-        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
         currentTime += 10;
-        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
         currentTime += 10;
-        (lifecycle as any).handleShutdownRequest('SIGTERM');
+        coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
         await shutdownCompleted;
 
         expect(forceShutdownCalls).toEqual([
@@ -9141,16 +9142,16 @@ describe('LifecycleManager - Signal Integration', () => {
         });
       });
 
-      (lifecycle as any).handleShutdownRequest('SIGINT');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGINT');
       await shutdownCompleted;
 
       expect(lifecycle.getRunningComponentCount()).toBe(0);
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
 
       expect(forceShutdownCalls).toEqual([]);
     });
@@ -9196,7 +9197,7 @@ describe('LifecycleManager - Signal Integration', () => {
         });
       });
 
-      (lifecycle as any).handleShutdownRequest('SIGINT');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGINT');
       await shutdownCompleted;
 
       expect(shutdownResult?.success).toBe(false);
@@ -9206,11 +9207,11 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(armedEvent.requestCount).toBe(0);
       expect(typeof armedEvent.armedUntil).toBe('number');
 
-      (lifecycle as any).handleShutdownRequest('SIGINT');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGINT');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
 
       expect(forceShutdownCalls).toEqual([
         {
@@ -9259,13 +9260,13 @@ describe('LifecycleManager - Signal Integration', () => {
       const failedShutdown = await lifecycle.stopAllComponents();
       expect(failedShutdown.success).toBe(false);
       expect(lifecycle.getShutdownEscalationStatus().isArmed).toBe(true);
-      expect((lifecycle as any).isShuttingDown).toBe(false);
+      expect(coreOf(lifecycle).shutdownPass.isShuttingDown).toBe(false);
 
-      (lifecycle as any).handleShutdownRequest('SIGINT');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGINT');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
 
       expect(forceShutdownCalls).toEqual([
         {
@@ -9328,11 +9329,11 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(lifecycle.getShutdownEscalationStatus().isArmed).toBe(false);
       expect(armedEvents).toEqual([]);
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
 
       expect(forceShutdownCalls).toEqual([]);
       expect(lifecycle.getShutdownEscalationStatus()).toMatchObject({
@@ -9376,7 +9377,7 @@ describe('LifecycleManager - Signal Integration', () => {
       await sleep(120);
       expect(lifecycle.getShutdownEscalationStatus().isArmed).toBe(true);
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
       const refreshedStatus = lifecycle.getShutdownEscalationStatus();
 
@@ -9441,7 +9442,7 @@ describe('LifecycleManager - Signal Integration', () => {
         lifecycle.once('lifecycle-manager:shutdown-completed', resolve);
       });
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
 
       const retryResult = await retriedShutdown;
       expect(retryResult.success).toBe(true);
@@ -9489,7 +9490,7 @@ describe('LifecycleManager - Signal Integration', () => {
       );
       await lifecycle.startAllComponents();
 
-      (lifecycle as any).handleShutdownRequest('SIGINT');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGINT');
       await sleep(10);
       expect(lifecycle.getShutdownEscalationStatus()).toMatchObject({
         isShuttingDown: false,
@@ -9499,7 +9500,7 @@ describe('LifecycleManager - Signal Integration', () => {
         latestMethod: 'SIGINT',
       });
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
       expect(lifecycle.getShutdownEscalationStatus()).toMatchObject({
         isShuttingDown: false,
@@ -9509,9 +9510,9 @@ describe('LifecycleManager - Signal Integration', () => {
         latestMethod: 'SIGTERM',
       });
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
 
       expect(forceShutdownCalls).toEqual([
@@ -9557,11 +9558,11 @@ describe('LifecycleManager - Signal Integration', () => {
       const shutdownResult = await lifecycle.stopAllComponents();
       expect(shutdownResult.success).toBe(false);
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
 
       expect(forceShutdownCalls).toEqual([
         {
@@ -9595,7 +9596,7 @@ describe('LifecycleManager - Signal Integration', () => {
       const firstShutdown = await lifecycle.stopAllComponents();
       expect(firstShutdown.success).toBe(false);
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
       const statusAfterSignal = lifecycle.getShutdownEscalationStatus();
       expect(statusAfterSignal.requestCount).toBe(1);
@@ -9649,7 +9650,7 @@ describe('LifecycleManager - Signal Integration', () => {
       const firstShutdown = await lifecycle.stopAllComponents();
       expect(firstShutdown.success).toBe(false);
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
       const statusAfterSignal = lifecycle.getShutdownEscalationStatus();
       expect(statusAfterSignal.requestCount).toBe(1);
@@ -9856,16 +9857,16 @@ describe('LifecycleManager - Signal Integration', () => {
       });
 
       await sleep(100);
-      expect((lifecycle as any).isShuttingDown).toBe(true);
+      expect(coreOf(lifecycle).shutdownPass.isShuttingDown).toBe(true);
       expect(lifecycle.getShutdownEscalationStatus().firstMethod).toBe(
         'manual',
       );
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
 
       const secondShutdown = await retryPromise;
       expect(secondShutdown.success).toBe(false);
@@ -9926,11 +9927,11 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(successfulShutdown.success).toBe(true);
       expect(lifecycle.getRunningComponentCount()).toBe(0);
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
 
       expect(forceShutdownCalls).toEqual([]);
     });
@@ -9973,7 +9974,7 @@ describe('LifecycleManager - Signal Integration', () => {
 
       await sleep(80);
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
 
       expect(expiredEventPayload).not.toBeNull();
@@ -10032,7 +10033,7 @@ describe('LifecycleManager - Signal Integration', () => {
         .repeatedShutdownRequestState;
       repeatedState.remainsArmedUntil = Date.now() - 1;
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
 
       expect(expiredEventPayload).not.toBeNull();
@@ -10087,7 +10088,7 @@ describe('LifecycleManager - Signal Integration', () => {
         .repeatedShutdownRequestState;
       repeatedState.remainsArmedUntil = Date.now() - 1;
 
-      (lifecycle as any).handleShutdownRequest('SIGTERM');
+      coreOf(lifecycle).shutdownEscalation.handleShutdownRequest('SIGTERM');
       await sleep(10);
 
       expect(shutdownSignals).toEqual([

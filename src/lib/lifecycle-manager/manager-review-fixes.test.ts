@@ -212,20 +212,20 @@ describe('a shutdown signal counted against a running pass with an armed window'
     const shutdown = manager.stopAllComponents();
     try {
       // As a failed pass leaves it just before its latch comes down.
-      const internals = (
-        manager as unknown as {
-          state: {
-            repeatedShutdownRequestState: { remainsArmedUntil: number | null };
-            repeatedShutdownExpiryTimer: unknown;
-          };
-        }
-      ).state;
+      const core = coreOf(manager);
+      const internals = core.state;
       const armedUntil = Date.now() + 60_000;
       internals.repeatedShutdownRequestState.remainsArmedUntil = armedUntil;
 
       sendSignal(manager, 'SIGINT');
 
-      expect(internals.repeatedShutdownExpiryTimer).toBeNull();
+      expect(
+        (
+          core.shutdownEscalation as unknown as {
+            repeatedShutdownExpiryTimer: unknown;
+          }
+        ).repeatedShutdownExpiryTimer,
+      ).toBeNull();
       expect(internals.repeatedShutdownRequestState.remainsArmedUntil).toBe(
         armedUntil,
       );

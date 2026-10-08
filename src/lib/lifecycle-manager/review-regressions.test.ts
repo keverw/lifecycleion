@@ -573,7 +573,9 @@ describe('LifecycleManager - review regressions', () => {
     await manager.startAllComponents();
 
     (
-      manager as unknown as { runShutdownWarningPhase: () => Promise<never> }
+      coreOf(manager).shutdownPass as unknown as {
+        runShutdownWarningPhase: () => Promise<never>;
+      }
     ).runShutdownWarningPhase = (): Promise<never> =>
       Promise.reject(new Error('warning phase exploded'));
 

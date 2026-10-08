@@ -747,12 +747,7 @@ describe('LifecycleManager - public methods never reject', () => {
     await manager.registerComponent(component);
     await manager.startAllComponents();
 
-    const internals = manager as unknown as {
-      handleShutdownRequest: (method: string) => void;
-      state: {
-        repeatedShutdownRequestState: { remainsArmedUntil: number | null };
-      };
-    };
+    const core = coreOf(manager);
     const signals: unknown[] = [];
     manager.on('signal:shutdown', (payload) => {
       signals.push(payload);
@@ -761,9 +756,9 @@ describe('LifecycleManager - public methods never reject', () => {
     // Armed by the failing pass while its latch is still held; lapse the window and
     // send a signal from right there.
     manager.once('lifecycle-manager:shutdown-escalation-armed', () => {
-      internals.state.repeatedShutdownRequestState.remainsArmedUntil =
+      core.state.repeatedShutdownRequestState.remainsArmedUntil =
         Date.now() - 1;
-      internals.handleShutdownRequest('SIGTERM');
+      core.shutdownEscalation.handleShutdownRequest('SIGTERM');
     });
 
     await manager.stopAllComponents();
@@ -1373,7 +1368,9 @@ describe('LifecycleManager - public methods never reject', () => {
     });
 
     (
-      manager as unknown as { handleShutdownRequest: (method: string) => void }
+      coreOf(manager).shutdownEscalation as unknown as {
+        handleShutdownRequest: (method: string) => void;
+      }
     ).handleShutdownRequest('SIGTERM');
 
     expect(signals).toEqual([
@@ -1469,7 +1466,9 @@ describe('LifecycleManager - public methods never reject', () => {
     });
 
     (
-      manager as unknown as { handleShutdownRequest: (method: string) => void }
+      coreOf(manager).shutdownEscalation as unknown as {
+        handleShutdownRequest: (method: string) => void;
+      }
     ).handleShutdownRequest('SIGINT');
 
     expect(manager.getShutdownEscalationStatus().firstMethod).toBe('SIGINT');
