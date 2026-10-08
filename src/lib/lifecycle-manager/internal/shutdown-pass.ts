@@ -1336,7 +1336,7 @@ export class ShutdownPassRunner {
         // Only after a clean pass: a failed one keeps them, so the operator's next Ctrl+C
         // still reaches escalation.
         if (isSuccess) {
-          this.core.internals.detachSignalsIfIdle('shutdown', {
+          this.core.signals.detachSignalsIfIdle('shutdown', {
             isEndingShutdownPass: true,
           });
         }

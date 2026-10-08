@@ -855,7 +855,9 @@ describe('LifecycleManager - public methods never reject', () => {
     });
 
     (
-      manager as unknown as { broadcastReload: () => Promise<never> }
+      coreOf(manager).signals as unknown as {
+        broadcastReload: () => Promise<never>;
+      }
     ).broadcastReload = (): Promise<never> =>
       Promise.reject(new Error('broadcast exploded'));
 
@@ -1561,9 +1563,7 @@ describe('LifecycleManager - public methods never reject', () => {
     await manager.registerComponent(new Plain(logger, 'a'));
     await manager.startComponent('a');
 
-    (
-      manager as unknown as { detachSignalsAfterLastStop: () => void }
-    ).detachSignalsAfterLastStop = (): never => {
+    coreOf(manager).signals.detachSignalsAfterLastStop = (): never => {
       throw new Error('cleanup exploded');
     };
 

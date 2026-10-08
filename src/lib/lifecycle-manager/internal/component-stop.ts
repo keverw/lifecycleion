@@ -1761,7 +1761,7 @@ export class ComponentStop {
           stallInfo,
           Date.now() - stallInfo.stalledAt,
         );
-        this.core.internals.detachSignalsAfterLastStop();
+        this.core.signals.detachSignalsAfterLastStop();
         return false;
       }
 
@@ -1848,7 +1848,7 @@ export class ComponentStop {
       this.core.internals.updateStartedFlag();
       this.resolvePendingForceStopWaiters(name);
 
-      this.core.internals.detachSignalsAfterLastStop();
+      this.core.signals.detachSignalsAfterLastStop();
 
       this.core.internals.stampTimestamp(name, 'stoppedAt');
     });

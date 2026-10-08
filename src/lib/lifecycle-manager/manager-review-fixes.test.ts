@@ -283,9 +283,7 @@ describe('a shutdown pass whose bookkeeping throws before its completed event', 
       },
     );
     // The clean pass's own detach runs ahead of its completed event.
-    (
-      manager as unknown as { detachSignalsIfIdle: (trigger: string) => void }
-    ).detachSignalsIfIdle = (trigger: string): void => {
+    coreOf(manager).signals.detachSignalsIfIdle = (trigger: string): void => {
       if (trigger === 'shutdown') {
         throw new Error('detach bookkeeping exploded');
       }

@@ -66,8 +66,8 @@ type StartOptionsInput = StartOptionsSnapshot | (() => StartOptionsSnapshot);
  * policy and pass it in; claims are taken through `core.claims`, and a start that must
  * be undone again is stopped through `core.componentStop`. A start the manager stops
  * waiting for is handed to `core.lateStartRecovery`, and a running component's
- * unexpected-stop handler comes from `core.unexpectedStops`. Signal attachment is still
- * the manager's, reached through `core.internals`.
+ * unexpected-stop handler comes from `core.unexpectedStops`. Signals attached ahead of
+ * a start, and rolled back when that attach fails, go through `core.signals`.
  */
 export class ComponentStart {
   constructor(private readonly core: ManagerCore) {}
@@ -214,7 +214,7 @@ export class ComponentStart {
 
           // The attempt's own `finally` ran while it still held `starting`, so a detach
           // it would have run is still waiting.
-          this.core.internals.runDeferredSignalDetach('component startup');
+          this.core.signals.runDeferredSignalDetach('component startup');
         }
 
         reportCallbackError('lifecycle-manager component start', error);
@@ -712,7 +712,7 @@ export class ComponentStart {
       // The claim held `starting`, so a detach requested by caller code that ran under
       // it - the warnings, the attach's own log and listeners, removing the last running
       // or stalled component - waited on this attempt, as the crash path's does.
-      this.core.internals.runDeferredSignalDetach('component startup');
+      this.core.signals.runDeferredSignalDetach('component startup');
     };
 
     this.core.claims.take(name, 'starting', claim);
@@ -727,7 +727,7 @@ export class ComponentStart {
 
     const shutdownTokenBeforeAttach = this.core.state.shutdownToken;
     const componentSignalAttach = this.core.config.attachSignalsBeforeStartup
-      ? this.core.internals.autoAttachSignals('component startup')
+      ? this.core.signals.autoAttachSignals('component startup')
       : null;
 
     if (componentSignalAttach?.outcome === 'failed') {
@@ -755,7 +755,7 @@ export class ComponentStart {
       restoreStateBeforeStart();
 
       if (didAutoAttachSignalsForComponentStartup) {
-        this.core.internals.detachSignalsIfIdle('refused component startup');
+        this.core.signals.detachSignalsIfIdle('refused component startup');
       }
 
       return {
@@ -1270,12 +1270,12 @@ export class ComponentStart {
           (other) => other !== name && this.core.internals.isComponentUp(other),
         )
       ) {
-        const signalAttach = this.core.internals.autoAttachSignals(
+        const signalAttach = this.core.signals.autoAttachSignals(
           'first component start',
         );
 
         if (signalAttach.outcome === 'failed') {
-          return await this.core.internals.rollBackStartForSignalAttach(
+          return await this.core.signals.rollBackStartForSignalAttach(
             name,
             signalAttach.error,
           );
@@ -1510,9 +1510,9 @@ export class ComponentStart {
       }
 
       if (didAutoAttachSignalsForComponentStartup) {
-        this.core.internals.detachSignalsIfIdle(detachTrigger);
+        this.core.signals.detachSignalsIfIdle(detachTrigger);
       } else {
-        this.core.internals.runDeferredSignalDetach('component startup');
+        this.core.signals.runDeferredSignalDetach('component startup');
       }
     }
   }

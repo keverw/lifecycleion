@@ -187,7 +187,7 @@ export class LateStartRecovery {
         // pending start held a detach back (`hasAbandonedStartAwaitingCleanup()`), so the
         // deferred one runs now. It does nothing unless one was deferred.
         try {
-          this.core.internals.runDeferredSignalDetach('late startup cleanup');
+          this.core.signals.runDeferredSignalDetach('late startup cleanup');
         } catch (error) {
           reportCallbackError(
             'lifecycle-manager late startup cleanup finalization',

@@ -619,11 +619,9 @@ describe('LifecycleManager - hostile thrown values', () => {
       }
       public stop(): void {}
     }
-    const internals = lifecycle as unknown as {
-      runDeferredSignalDetach: (trigger: string) => void;
-    };
-    const original = internals.runDeferredSignalDetach.bind(lifecycle);
-    internals.runDeferredSignalDetach = (trigger): void => {
+    const signals = coreOf(lifecycle).signals;
+    const original = signals.runDeferredSignalDetach.bind(signals);
+    signals.runDeferredSignalDetach = (trigger): void => {
       if (trigger === 'late startup cleanup') {
         throw new Error('late detach failed');
       }

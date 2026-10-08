@@ -530,7 +530,7 @@ export class RegistrationOperations {
 
       this.markComponentUnregistered(component, 'lifecycle-manager unregister');
 
-      this.core.internals.detachSignalsAfterLastStop(
+      this.core.signals.detachSignalsAfterLastStop(
         'last component unregistered',
         'Auto-detached process signals on last component unregistered',
       );

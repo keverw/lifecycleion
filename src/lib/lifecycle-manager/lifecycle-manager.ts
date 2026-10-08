@@ -16,7 +16,6 @@ import {
 import {
   checkComponentHealthOperation,
   checkAllHealthOperation,
-  runSignalBroadcast,
 } from './internal/component-inspection';
 import {
   dependenciesOf,
@@ -27,7 +26,6 @@ import {
   crashedStartupResult,
   crashedShutdownResult,
   crashedSignalBroadcastResult,
-  failedSignalCallbackResult,
   crashedHealthCheckResult,
   crashedHealthReport,
   crashedComponentResult,
@@ -83,17 +81,10 @@ import {
   type LifecycleManagerEventMap,
   type LifecycleManagerEventName,
 } from './events';
-import { LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP } from './constants';
-import {
-  ProcessSignalManager,
-  type ShutdownSignal,
-} from '../process-signal-manager';
-import {
-  reportCallbackError,
-  safeHandleCallbackAndWait,
-} from '../safe-handle-callback';
+import { ProcessSignalManager } from '../process-signal-manager';
+import { reportCallbackError } from '../safe-handle-callback';
 import { createGuardedLoggerService } from './guarded-logger';
-import { describeError, toError } from '../to-error';
+import { toError } from '../to-error';
 
 /**
  * LifecycleManager - Comprehensive lifecycle orchestration system
@@ -172,6 +163,8 @@ export class LifecycleManager
       componentMetadata: this.componentMetadata,
       componentAccess: this.componentAccess,
       internals: LifecycleManager.createManagerInternals(this),
+      createProcessSignalManager: (signalOptions) =>
+        new ProcessSignalManager(signalOptions),
     });
 
     // Enable logger exit hook if requested
@@ -901,56 +894,7 @@ export class LifecycleManager
    * Idempotent - calling multiple times has no effect.
    */
   public attachSignals(): void {
-    return this.withTransition(() => {
-      // A new attach supersedes a detach that was still waiting to run.
-      this.state.isSignalDetachDeferred = false;
-
-      // Check if already attached (not just if instance exists)
-      if (this.state.processSignalManager?.getStatus().isAttached) {
-        return; // Already attached
-      }
-
-      // Create instance if it doesn't exist
-      if (!this.state.processSignalManager) {
-        this.state.processSignalManager = new ProcessSignalManager({
-          onShutdownRequested: (method: ShutdownSignal) => {
-            this.core.shutdownEscalation.handleShutdownRequest(method);
-          },
-          // Note: Signal-triggered handlers are fire-and-forget by design.
-          // Node.js signal handlers (process.on) cannot return values, so these
-          // async handlers execute but their return values are not accessible.
-          // Use triggerReload(), triggerInfo(), triggerDebug() for programmatic
-          // access to results.
-          // Settled like `triggerReload()` and friends, so a signal-driven broadcast
-          // resolves under this manager's own label rather than relying on
-          // `ProcessSignalManager` to catch its rejection.
-          onReloadRequested: () =>
-            settleOperation(
-              'reload signal',
-              () => this.handleReloadRequest('signal'),
-              (error, _reason, code) =>
-                crashedSignalBroadcastResult('reload', error, code),
-            ),
-          onInfoRequested: () =>
-            settleOperation(
-              'info signal',
-              () => this.handleInfoRequest('signal'),
-              (error, _reason, code) =>
-                crashedSignalBroadcastResult('info', error, code),
-            ),
-          onDebugRequested: () =>
-            settleOperation(
-              'debug signal',
-              () => this.handleDebugRequest('signal'),
-              (error, _reason, code) =>
-                crashedSignalBroadcastResult('debug', error, code),
-            ),
-        });
-      }
-
-      this.state.processSignalManager.attach();
-      this.lifecycleEvents.lifecycleManagerSignalsAttached();
-    });
+    this.core.signals.attach();
   }
 
   /**
@@ -958,52 +902,14 @@ export class LifecycleManager
    * Idempotent - calling multiple times has no effect.
    */
   public detachSignals(): void {
-    return this.withTransition(() => {
-      if (!this.state.processSignalManager?.getStatus().isAttached) {
-        return; // Not attached
-      }
-
-      const signalManager = this.state.processSignalManager;
-      try {
-        signalManager.detach();
-      } finally {
-        // detach() marks itself detached even when a listener removal throws, so
-        // announce it whenever the handlers are no longer attached.
-        if (!signalManager.getStatus().isAttached) {
-          this.lifecycleEvents.lifecycleManagerSignalsDetached();
-        }
-      }
-    });
+    this.core.signals.detach();
   }
 
   /**
    * Get status information about signal handling.
    */
   public getSignalStatus(): LifecycleSignalStatus {
-    if (!this.state.processSignalManager) {
-      return {
-        isAttached: false,
-        handlers: {
-          shutdown: false,
-          reload: false,
-          info: false,
-          debug: false,
-        },
-        listeningFor: {
-          shutdownSignals: false,
-          reloadSignal: false,
-          infoSignal: false,
-          debugSignal: false,
-          keypresses: false,
-        },
-        shutdownMethod: this.state.shutdownMethod,
-      };
-    }
-
-    return {
-      ...this.state.processSignalManager.getStatus(),
-      shutdownMethod: this.state.shutdownMethod,
-    };
+    return this.core.signals.status();
   }
 
   /**
@@ -1060,7 +966,7 @@ export class LifecycleManager
   public triggerReload(): Promise<SignalBroadcastResult> {
     return settleOperation(
       'triggerReload',
-      () => this.handleReloadRequest(),
+      () => this.core.signals.handleReloadRequest(),
       (error, _reason, code) =>
         crashedSignalBroadcastResult('reload', error, code),
     );
@@ -1073,7 +979,7 @@ export class LifecycleManager
   public triggerInfo(): Promise<SignalBroadcastResult> {
     return settleOperation(
       'triggerInfo',
-      () => this.handleInfoRequest(),
+      () => this.core.signals.handleInfoRequest(),
       (error, _reason, code) =>
         crashedSignalBroadcastResult('info', error, code),
     );
@@ -1086,7 +992,7 @@ export class LifecycleManager
   public triggerDebug(): Promise<SignalBroadcastResult> {
     return settleOperation(
       'triggerDebug',
-      () => this.handleDebugRequest(),
+      () => this.core.signals.handleDebugRequest(),
       (error, _reason, code) =>
         crashedSignalBroadcastResult('debug', error, code),
     );
@@ -1212,16 +1118,7 @@ export class LifecycleManager
       ) => manager.getValueSettled<T>(name, key, from, options),
       updateStartedFlag: () => manager.updateStartedFlag(),
       stampTimestamp: (name, field) => manager.stampTimestamp(name, field),
-      detachSignalsAfterLastStop: (trigger, logMessage) =>
-        manager.detachSignalsAfterLastStop(trigger, logMessage),
       isComponentUp: (name) => manager.isComponentUp(name),
-      autoAttachSignals: (trigger) => manager.autoAttachSignals(trigger),
-      rollBackStartForSignalAttach: (name, error) =>
-        manager.rollBackStartForSignalAttach(name, error),
-      detachSignalsIfIdle: (trigger, options) =>
-        manager.detachSignalsIfIdle(trigger, options),
-      runDeferredSignalDetach: (trigger) =>
-        manager.runDeferredSignalDetach(trigger),
     };
   }
 
@@ -1446,214 +1343,6 @@ export class LifecycleManager
   // Private Helper Methods
   // ============================================================================
 
-  /**
-   * Attach signals on the manager's own initiative, ahead of a start.
-   *
-   * A failure here fails the start: on Node and Bun an attach only throws when something
-   * is really wrong - a `process.on` or raw-mode stdin failure - and a process that was
-   * configured to handle `SIGTERM` must not come up without doing so. Every caller takes
-   * its start state first (`isStarting`, or a component's `starting`) so that a
-   * `signals-attached` listener re-entering the manager finds the work already claimed,
-   * and releases that state if this fails. Caught rather than thrown so each caller can
-   * answer with its own result; an explicit `attachSignals()` call still throws to its
-   * caller.
-   *
-   * @returns `attached` when this call attached them, `failed` with the error when it
-   * could not, and `unchanged` when they were already attached
-   */
-  private autoAttachSignals(
-    trigger: string,
-  ):
-    | { outcome: 'attached' | 'unchanged' }
-    | { outcome: 'failed'; error: Error } {
-    if (this.state.processSignalManager?.getStatus().isAttached) {
-      return { outcome: 'unchanged' };
-    }
-
-    this.logger.info(`Auto-attaching process signals on ${trigger}`);
-
-    try {
-      this.attachSignals();
-    } catch (error) {
-      const err = toError(error);
-
-      this.logger.error(
-        'Could not attach process signals on {{trigger}}: {{error.message}}',
-        { params: { trigger, error: err } },
-      );
-
-      return { outcome: 'failed', error: err };
-    }
-
-    if (this.state.isStarting) {
-      this.state.autoAttachedSignalsDuringStartup = true;
-    }
-
-    return { outcome: 'attached' };
-  }
-
-  /**
-   * Stop a component that started but could not be left running because
-   * `attachSignalsOnStart` failed to attach process signals, and answer its start with
-   * `signal_attach_failed`. The stop is the normal graceful-then-force one; if it does not
-   * complete, the reason says so and the component is left as that stop left it.
-   */
-  private async rollBackStartForSignalAttach(
-    name: string,
-    error: Error,
-  ): Promise<ComponentOperationResult> {
-    this.logger
-      .entity(name)
-      .warn('Stopping component: process signals could not be attached');
-
-    // `stopComponentInternal()` answers every failure it can foresee with a result and
-    // turns anything else into a stall, so the component's state is settled either way;
-    // this result only has to describe it. No `status`: this runs inside the start's
-    // `try`, and a throw from building one would land in the start's `catch`, which
-    // would mark a component this stop may not have stopped as `registered`.
-    const stopResult =
-      await this.core.componentStop.stopComponentInternal(name);
-    const attachReason = `Could not attach process signals: ${describeError(error)}`;
-
-    return {
-      success: false,
-      componentName: name,
-      reason: stopResult.success
-        ? `${attachReason}; component stopped again`
-        : `${attachReason}; stopping it again also failed: ${stopResult.reason ?? 'unknown reason'}`,
-      code: 'signal_attach_failed',
-      error,
-    };
-  }
-
-  /**
-   * The `detachSignalsOnStop` check every stop and unregister path runs once it has
-   * settled: detach when nothing is left running. `detachSignals()` is idempotent, so a
-   * path that reaches this twice for one stop is harmless.
-   */
-  private detachSignalsAfterLastStop(
-    trigger = 'last component stop',
-    logMessage: string = LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP,
-  ): void {
-    this.detachSignalsIfIdle(trigger, { logMessage });
-  }
-
-  /**
-   * The one `detachSignalsOnStop` check: detach once the manager is idle.
-   *
-   * Not while anything is running or stalled. A stalled component is not counted as
-   * running, but Ctrl+C is how the operator retries or forces it; the stop or
-   * unregister that clears the last stall runs this again.
-   *
-   * Nor while anything transient is in flight - a startup or shutdown latch, a
-   * component starting or stopping, a late-startup cleanup or the timed-out start it
-   * waits on - since each of those can
-   * still leave something running or stalled. A shutdown pass in particular still needs
-   * SIGINT/SIGTERM for escalation, and decides once it ends, detaching only after a
-   * clean pass. The detach is deferred rather than dropped, and whichever of those ends
-   * runs it again through {@link runDeferredSignalDetach}.
-   */
-  private detachSignalsIfIdle(
-    trigger: string,
-    options: { logMessage?: string; isEndingShutdownPass?: boolean } = {},
-  ): void {
-    return this.withTransition(() => {
-      if (
-        !this.config.detachSignalsOnStop ||
-        !this.state.processSignalManager?.getStatus().isAttached ||
-        this.state.runningComponents.size > 0 ||
-        this.state.stalledComponents.size > 0
-      ) {
-        return;
-      }
-
-      if (this.isSignalDetachWaitingOnTransient(options.isEndingShutdownPass)) {
-        this.state.isSignalDetachDeferred = true;
-        return;
-      }
-
-      this.state.isSignalDetachDeferred = false;
-      // Detached before the line is logged, not after: logging runs the caller's sinks,
-      // and one that starts a startup from here attached nothing - the handlers were still
-      // up - so detaching after it pulled them out from under that startup. Worded in the
-      // past, and only on success: a failed detach has already said so. Nor once a
-      // `signals-detached` listener has attached them again - a startup it began with
-      // `attachSignalsBeforeStartup` - where the line would contradict the state.
-      if (this.autoDetachSignals(trigger)) {
-        this.eventDispatcher.afterNotifications(() => {
-          if (
-            this.state.processSignalManager?.getStatus().isAttached !== true
-          ) {
-            this.logger.info(
-              options.logMessage ??
-                `Auto-detached process signals after ${trigger}`,
-            );
-          }
-        });
-      }
-    });
-  }
-
-  /**
-   * Run a detach {@link detachSignalsIfIdle} deferred, once one of the transient
-   * operations that held it has ended.
-   */
-  private runDeferredSignalDetach(trigger: string): void {
-    if (this.state.isSignalDetachDeferred) {
-      this.detachSignalsIfIdle(trigger);
-    }
-  }
-
-  private isSignalDetachWaitingOnTransient(
-    isEndingShutdownPass = false,
-  ): boolean {
-    if (
-      this.state.isStarting ||
-      (this.core.shutdownPass.isShuttingDown && !isEndingShutdownPass) ||
-      this.state.pendingBulkStartupCleanup.size > 0 ||
-      this.core.lateStartRecovery.hasAbandonedStartAwaitingCleanup()
-    ) {
-      return true;
-    }
-
-    for (const name of this.state.componentStates.keys()) {
-      if (this.core.claims.isInFlight(name)) {
-        return true;
-      }
-    }
-
-    return false;
-  }
-
-  /**
-   * Detach signals on the manager's own initiative, once nothing is left running.
-   *
-   * Contained for the reason {@link autoAttachSignals} is: every caller is partway through
-   * settling a stop, an unregister, or a failed start, and a detach that throws there
-   * derailed the rest - a clean graceful stop was sent on to the force phase, and an
-   * unregister rejected after it had already removed the component.
-   * `ProcessSignalManager.detach()` marks itself detached even when it throws, so there
-   * is nothing to retry.
-   */
-  private autoDetachSignals(trigger: string): boolean {
-    try {
-      this.detachSignals();
-
-      return true;
-    } catch (error) {
-      this.logger.error(
-        'Could not detach process signals after {{trigger}}: {{error.message}}',
-        { params: { trigger, error: toError(error) } },
-      );
-      reportCallbackError(
-        `lifecycle-manager signal detach after ${trigger}`,
-        error,
-      );
-
-      return false;
-    }
-  }
-
   /** Record now as `field`, keeping the other timestamp from the component's last run. */
   private stampTimestamp(name: string, field: 'startedAt' | 'stoppedAt'): void {
     const timestamps = this.state.componentTimestamps.get(name) ?? {
@@ -1662,10 +1351,6 @@ export class LifecycleManager
     };
     timestamps[field] = Date.now();
     this.state.componentTimestamps.set(name, timestamps);
-  }
-
-  private withTransition<T>(operation: () => T): T {
-    return this.eventDispatcher.withTransition(operation);
   }
 
   /** Safe delivery also contains an overridden emitter that throws. */
@@ -1682,174 +1367,5 @@ export class LifecycleManager
         params: { event, error: err },
       });
     }
-  }
-
-  /**
-   * Shared dispatch path for reload/info/debug requests. Logs the dispatch,
-   * emits the signal event, then either invokes the user-supplied callback
-   * (passing the broadcast function so the user controls when/whether to
-   * broadcast) or broadcasts directly when no callback is configured.
-   *
-   * When called from signal handlers (source='signal'), the Promise is started
-   * but not awaited — Node.js signal handlers cannot return values, so results
-   * are not accessible. Components are still notified and the work completes.
-   * When called from manual triggers (source='trigger'), the Promise is awaited
-   * and results are returned for programmatic use.
-   */
-  private async handleSignalRequest(
-    descriptor: {
-      signal: 'reload' | 'info' | 'debug';
-      dispatchedLogLabel: string;
-      emitSignal: () => void;
-      customCallback?: (
-        broadcastFn: () => Promise<SignalBroadcastResult>,
-      ) => void | Promise<void>;
-      broadcast: () => Promise<SignalBroadcastResult>;
-    },
-    source: 'signal' | 'trigger',
-  ): Promise<SignalBroadcastResult> {
-    this.logger.info(descriptor.dispatchedLogLabel, { params: { source } });
-    descriptor.emitSignal();
-
-    if (descriptor.customCallback) {
-      // Guarded: the callback is the caller's, and a throw or rejection from it rejected
-      // `triggerReload()` and friends. It is reported, and the result says `error`.
-      // The broadcast handed to the callback is settled as well, so a callback that
-      // fires it without awaiting - `void broadcast()` - can never be left holding an
-      // unhandled rejection.
-      const outcome = await safeHandleCallbackAndWait(
-        `lifecycle-manager ${descriptor.signal} request callback`,
-        descriptor.customCallback,
-        (): Promise<SignalBroadcastResult> =>
-          settleOperation(
-            `${descriptor.signal} broadcast`,
-            descriptor.broadcast,
-            (error, _reason, code) =>
-              crashedSignalBroadcastResult(descriptor.signal, error, code),
-          ),
-      );
-
-      if (!outcome.success) {
-        return failedSignalCallbackResult(descriptor.signal, outcome.error);
-      }
-
-      // Return empty result (custom callback handled it)
-      return {
-        signal: descriptor.signal,
-        results: [],
-        timedOut: false,
-        code: 'ok',
-      };
-    }
-
-    return await descriptor.broadcast();
-  }
-
-  private async handleReloadRequest(
-    source: 'signal' | 'trigger' = 'trigger',
-  ): Promise<SignalBroadcastResult> {
-    return await this.handleSignalRequest(
-      {
-        signal: 'reload',
-        dispatchedLogLabel: 'Reload dispatched',
-        emitSignal: () => this.lifecycleEvents.signalReload(),
-        customCallback: this.config.onReloadRequested,
-        broadcast: () => this.broadcastReload(),
-      },
-      source,
-    );
-  }
-
-  private async handleInfoRequest(
-    source: 'signal' | 'trigger' = 'trigger',
-  ): Promise<SignalBroadcastResult> {
-    return await this.handleSignalRequest(
-      {
-        signal: 'info',
-        dispatchedLogLabel: 'Info dispatched',
-        emitSignal: () => this.lifecycleEvents.signalInfo(),
-        customCallback: this.config.onInfoRequested,
-        broadcast: () => this.broadcastInfo(),
-      },
-      source,
-    );
-  }
-
-  private async handleDebugRequest(
-    source: 'signal' | 'trigger' = 'trigger',
-  ): Promise<SignalBroadcastResult> {
-    return await this.handleSignalRequest(
-      {
-        signal: 'debug',
-        dispatchedLogLabel: 'Debug dispatched',
-        emitSignal: () => this.lifecycleEvents.signalDebug(),
-        customCallback: this.config.onDebugRequested,
-        broadcast: () => this.broadcastDebug(),
-      },
-      source,
-    );
-  }
-
-  /**
-   * Broadcast reload signal to all running components.
-   * Calls onReload() on components that implement it.
-   * Continues on errors - collects all results.
-   */
-  private broadcastReload(): Promise<SignalBroadcastResult> {
-    return runSignalBroadcast(this.componentAccess, {
-      signal: 'reload',
-      pickHandler: (component) => Reflect.get(component, 'onReload'),
-      startupLog:
-        'Reload during startup: only reloading already-started components',
-      timeoutLog: 'Reload handler timed out',
-      errorLog: 'Reload failed: {{error.message}}',
-      emitStarted: (name) => this.lifecycleEvents.componentReloadStarted(name),
-      emitCompleted: (name) =>
-        this.lifecycleEvents.componentReloadCompleted(name),
-      emitFailed: (name, error) =>
-        this.lifecycleEvents.componentReloadFailed(name, error),
-    });
-  }
-
-  /**
-   * Broadcast info signal to all running components.
-   * Calls onInfo() on components that implement it.
-   * Continues on errors - collects all results.
-   */
-  private broadcastInfo(): Promise<SignalBroadcastResult> {
-    return runSignalBroadcast(this.componentAccess, {
-      signal: 'info',
-      pickHandler: (component) => Reflect.get(component, 'onInfo'),
-      startupLog:
-        'Info during startup: only notifying already-started components',
-      timeoutLog: 'Info handler timed out',
-      errorLog: 'Info handler failed: {{error.message}}',
-      emitStarted: (name) => this.lifecycleEvents.componentInfoStarted(name),
-      emitCompleted: (name) =>
-        this.lifecycleEvents.componentInfoCompleted(name),
-      emitFailed: (name, error) =>
-        this.lifecycleEvents.componentInfoFailed(name, error),
-    });
-  }
-
-  /**
-   * Broadcast debug signal to all running components.
-   * Calls onDebug() on components that implement it.
-   * Continues on errors - collects all results.
-   */
-  private broadcastDebug(): Promise<SignalBroadcastResult> {
-    return runSignalBroadcast(this.componentAccess, {
-      signal: 'debug',
-      pickHandler: (component) => Reflect.get(component, 'onDebug'),
-      startupLog:
-        'Debug during startup: only notifying already-started components',
-      timeoutLog: 'Debug handler timed out',
-      errorLog: 'Debug handler failed: {{error.message}}',
-      emitStarted: (name) => this.lifecycleEvents.componentDebugStarted(name),
-      emitCompleted: (name) =>
-        this.lifecycleEvents.componentDebugCompleted(name),
-      emitFailed: (name, error) =>
-        this.lifecycleEvents.componentDebugFailed(name, error),
-    });
   }
 }

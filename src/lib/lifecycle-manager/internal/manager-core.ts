@@ -1,11 +1,14 @@
 import type { Logger } from '../../logger';
 import type { LoggerService } from '../../logger/logger-service';
+import type {
+  ProcessSignalManager,
+  ProcessSignalManagerOptions,
+} from '../../process-signal-manager';
 import type { LifecycleManagerEvents } from '../events';
 import type { LifecycleManager } from '../lifecycle-manager';
 import type {
   BroadcastOptions,
   BroadcastResult,
-  ComponentOperationResult,
   GetValueOptions,
   MessageResult,
   SendMessageOptions,
@@ -26,6 +29,7 @@ import type { RegistrationReadTracker } from './registration-read-tracker';
 import { RestartOperations } from './restart-operations';
 import { ShutdownEscalation } from './shutdown-escalation';
 import { ShutdownPassRunner } from './shutdown-pass';
+import { SignalIntegration } from './signal-integration';
 import { StartupOrchestration } from './startup-orchestration';
 import { StartupOrdering } from './startup-ordering';
 import type { TransitionEventDispatcher } from './transition-event-dispatcher';
@@ -62,27 +66,8 @@ export interface ManagerInternals {
   updateStartedFlag(): void;
   /** Record now as a component's `startedAt` or `stoppedAt`. */
   stampTimestamp(name: string, field: 'startedAt' | 'stoppedAt'): void;
-  /** The `detachSignalsOnStop` check a stop or unregister runs once it has settled. */
-  detachSignalsAfterLastStop(trigger?: string, logMessage?: string): void;
   /** Whether a component is up: running, and not on its way down. */
   isComponentUp(name: string): boolean;
-  /** Attach signals on the manager's own initiative, ahead of a start; never throws. */
-  autoAttachSignals(
-    trigger: string,
-  ):
-    { outcome: 'attached' | 'unchanged' } | { outcome: 'failed'; error: Error };
-  /** Stop a started component whose `attachSignalsOnStart` attach failed. */
-  rollBackStartForSignalAttach(
-    name: string,
-    error: Error,
-  ): Promise<ComponentOperationResult>;
-  /** The `detachSignalsOnStop` check: detach once the manager is idle. */
-  detachSignalsIfIdle(
-    trigger: string,
-    options?: { logMessage?: string; isEndingShutdownPass?: boolean },
-  ): void;
-  /** Run a detach `detachSignalsIfIdle()` deferred, once what held it has ended. */
-  runDeferredSignalDetach(trigger: string): void;
 }
 
 /** What the manager hands its core: everything a subsystem shares, built once. */
@@ -105,6 +90,13 @@ export interface ManagerCoreParts {
   /** The live view and dispatch callbacks the component-facing operations use. */
   readonly componentAccess: ComponentAccessContext;
   readonly internals: ManagerInternals;
+  /**
+   * Creates the `ProcessSignalManager` signals attach through. Supplied by the manager
+   * so these modules never import the Node-only signal manager themselves.
+   */
+  readonly createProcessSignalManager: (
+    options: ProcessSignalManagerOptions,
+  ) => ProcessSignalManager;
 }
 
 /**
@@ -129,6 +121,9 @@ export class ManagerCore implements ManagerCoreParts {
   public readonly componentMetadata: ComponentMetadataReader;
   public readonly componentAccess: ComponentAccessContext;
   public readonly internals: ManagerInternals;
+  public readonly createProcessSignalManager: (
+    options: ProcessSignalManagerOptions,
+  ) => ProcessSignalManager;
 
   // Subsystems
   public readonly registry: ComponentRegistry;
@@ -144,6 +139,7 @@ export class ManagerCore implements ManagerCoreParts {
   public readonly startup: StartupOrchestration;
   public readonly restart: RestartOperations;
   public readonly registration: RegistrationOperations;
+  public readonly signals: SignalIntegration;
 
   constructor(parts: ManagerCoreParts) {
     this.manager = parts.manager;
@@ -157,6 +153,7 @@ export class ManagerCore implements ManagerCoreParts {
     this.componentMetadata = parts.componentMetadata;
     this.componentAccess = parts.componentAccess;
     this.internals = parts.internals;
+    this.createProcessSignalManager = parts.createProcessSignalManager;
 
     this.registry = new ComponentRegistry(this);
     this.startupOrdering = new StartupOrdering(this);
@@ -171,5 +168,6 @@ export class ManagerCore implements ManagerCoreParts {
     this.startup = new StartupOrchestration(this);
     this.restart = new RestartOperations(this);
     this.registration = new RegistrationOperations(this);
+    this.signals = new SignalIntegration(this);
   }
 }

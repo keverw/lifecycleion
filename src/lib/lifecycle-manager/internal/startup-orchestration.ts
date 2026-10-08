@@ -548,7 +548,7 @@ export class StartupOrchestration {
     // Tracked so failure cleanup does not detach handlers that were attached earlier by
     // some other path.
     const bulkSignalAttach = this.core.config.attachSignalsBeforeStartup
-      ? this.core.internals.autoAttachSignals('bulk startup')
+      ? this.core.signals.autoAttachSignals('bulk startup')
       : null;
 
     if (bulkSignalAttach?.outcome === 'failed') {
@@ -1759,9 +1759,9 @@ export class StartupOrchestration {
       this.core.state.unexpectedStopsDuringStartup.clear();
 
       if (shouldDetach) {
-        this.core.internals.detachSignalsIfIdle(input.detachReason);
+        this.core.signals.detachSignalsIfIdle(input.detachReason);
       } else {
-        this.core.internals.runDeferredSignalDetach('bulk startup');
+        this.core.signals.runDeferredSignalDetach('bulk startup');
       }
 
       // A startup begun from the detach (or a listener before this drains) reads the

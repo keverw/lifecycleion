@@ -230,7 +230,7 @@ export class UnexpectedStops {
       // manager should release process signal handlers instead of staying attached
       // to an otherwise idle application. During a bulk startup the check defers to the
       // startup's end.
-      this.core.internals.detachSignalsAfterLastStop();
+      this.core.signals.detachSignalsAfterLastStop();
 
       this.core.internals.stampTimestamp(name, 'stoppedAt');
 

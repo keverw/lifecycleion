@@ -57,6 +57,7 @@ built over one shared core.
 | `startup-orchestration.ts`   | `StartupOrchestration`: bulk startup - its refusals, the startup latch, the batch loop and follow-up auto-starts, rollback, and releasing what it held.                                                   |
 | `restart-operations.ts`      | `RestartOperations`: bulk and single restarts - refusals, validating both phases before any stop, and the stale-snapshot check.                                                                           |
 | `registration-operations.ts` | `RegistrationOperations`: registering and inserting - reads, refusals, the provisional commit and its rollback, auto-start - unregistering, and the callbacks a component's `lifecycle` handle uses.      |
+| `signal-integration.ts`      | `SignalIntegration`: attaching and detaching process signals, the automatic attach before a start and detach once idle, and the reload, info and debug requests with their broadcasts.                    |
 
 Each subsystem receives the core in its constructor and only stores it there, since
 another subsystem may not exist yet. It calls the manager's public, overridable
