@@ -31,6 +31,7 @@ import type { StartSettlement } from './manager-state';
 import {
   crashedComponentResult,
   isLinkedToAbort,
+  observeFailureAfterTimeout,
   takeSettledFailureCode,
   toOperationFlag,
   toOperationTimerDelayMS,
@@ -63,9 +64,10 @@ type StartOptionsInput = StartOptionsSnapshot | (() => StartOptionsSnapshot);
  * Every per-component start runs through here: `startComponent()`, a bulk startup's
  * loop, a registration's auto-start, and a restart's start. Those callers own their bulk
  * policy and pass it in; claims are taken through `core.claims`, and a start that must
- * be undone again is stopped through `core.componentStop`. Late-start recovery, signal
- * attachment and the unexpected-stop handler are still the manager's, reached through
- * `core.internals`.
+ * be undone again is stopped through `core.componentStop`. A start the manager stops
+ * waiting for is handed to `core.lateStartRecovery`, and a running component's
+ * unexpected-stop handler comes from `core.unexpectedStops`. Signal attachment is still
+ * the manager's, reached through `core.internals`.
  */
 export class ComponentStart {
   constructor(private readonly core: ManagerCore) {}
@@ -717,7 +719,7 @@ export class ComponentStart {
     // The previous run's handler is still keyed to its token, which this attempt only
     // replaces after the logs and listeners below run caller code. A reporter kept from
     // that run and called there would otherwise end this start as its unexpected stop.
-    this.core.internals.clearUnexpectedStopHandler(component, 'start');
+    this.core.unexpectedStops.clearUnexpectedStopHandler(component, 'start');
 
     for (const warning of skippedDependencyWarnings) {
       this.core.logger.entity(name).warn(warning);
@@ -833,7 +835,7 @@ export class ComponentStart {
       // Inside the `try`, so a failure here is a failed start like any other - reported
       // with `component:start-failed`, and its auto-attached signals detached.
       component._setUnexpectedStopHandler(
-        this.core.internals.createUnexpectedStopHandler(
+        this.core.unexpectedStops.createUnexpectedStopHandler(
           name,
           startAttemptToken,
         ),
@@ -942,7 +944,7 @@ export class ComponentStart {
                 // The public result carries the original observation failure.
               }
             });
-            this.core.internals.monitorLateStartupCompletion(
+            this.core.lateStartRecovery.monitorLateStartupCompletion(
               name,
               recoveryStart,
               startAttemptToken,
@@ -960,7 +962,8 @@ export class ComponentStart {
               name,
               'start',
             );
-            this.core.internals.observeFailureAfterTimeout(
+            observeFailureAfterTimeout(
+              this.core.logger,
               recoveryStart,
               name,
               'start() failed after its observation failed',
@@ -1032,7 +1035,7 @@ export class ComponentStart {
         return startupTimeoutError;
       };
       const monitorLateStart = (): void => {
-        this.core.internals.monitorLateStartupCompletion(
+        this.core.lateStartRecovery.monitorLateStartupCompletion(
           name,
           startPromise,
           startAttemptToken,
@@ -1058,7 +1061,8 @@ export class ComponentStart {
             // signal is still aborted: that is this attempt's alone, and nothing
             // waits on this `start()` any more.
             if (isSuperseded()) {
-              this.core.internals.observeFailureAfterTimeout(
+              observeFailureAfterTimeout(
+                this.core.logger,
                 startPromise,
                 name,
                 'Superseded start() failed after its deadline',
@@ -1084,7 +1088,8 @@ export class ComponentStart {
             // aborting again does nothing.
             abortHookSignal(startAbort, timeoutError, name, 'start');
 
-            this.core.internals.observeFailureAfterTimeout(
+            observeFailureAfterTimeout(
+              this.core.logger,
               startPromise,
               name,
               'start() failed after it had already timed out',
@@ -1134,7 +1139,10 @@ export class ComponentStart {
       // not fall through into the normal success path and resurrect it. Still this
       // attempt's: the check above returned otherwise, and no caller code ran since.
       if (this.hasStoppedUnexpectedlyDuringStart(name)) {
-        this.core.internals.clearUnexpectedStopHandler(component, 'start');
+        this.core.unexpectedStops.clearUnexpectedStopHandler(
+          component,
+          'start',
+        );
         const error =
           this.core.state.componentErrors.get(name) ??
           new Error(`Component "${name}" stopped unexpectedly during startup`);
@@ -1333,7 +1341,7 @@ export class ComponentStart {
       // start net, which restored the state from before the start - `registered`, not
       // `starting-timed-out` - lost the timeout result and its event, and left a late
       // `start()` that nothing would stop.
-      this.core.internals.clearUnexpectedStopHandler(component, 'start');
+      this.core.unexpectedStops.clearUnexpectedStopHandler(component, 'start');
 
       const err = toError(error);
       // Guarded for the same reason as the `component_unexpected_stop` branch below:
@@ -1512,7 +1520,7 @@ export class ComponentStart {
   /**
    * Whether the start attempt that owns `name` ended in an unexpected stop reported
    * while `start()` was still in flight: `stopped`, or `stalled` for a forced start whose
-   * old stop is still unfinished (see the manager's `handleComponentUnexpectedStop()`).
+   * old stop is still unfinished (see `UnexpectedStops.handleComponentUnexpectedStop()`).
    * Asked only by an attempt that has already checked it is not superseded, so the state
    * is its own.
    */

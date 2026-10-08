@@ -310,14 +310,11 @@ describe('an option refusal thrown after an attempt claimed its component', () =
   test('is a crash even once another claim superseded it', async () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new Plain(logger, 'a'));
-    const internals = manager as unknown as {
-      state: { componentClaims: Map<string, unknown> };
-      clearUnexpectedStopHandler: (component: unknown, context: string) => void;
-    };
+    const core = coreOf(manager);
     // Runs right after the start claims `a`: hands the claim to someone else, then
     // throws a branded option refusal.
-    internals.clearUnexpectedStopHandler = (): void => {
-      internals.state.componentClaims.set('a', {
+    core.unexpectedStops.clearUnexpectedStopHandler = (): void => {
+      core.state.componentClaims.set('a', {
         claim: Symbol('other'),
         previousState: 'registered',
       });

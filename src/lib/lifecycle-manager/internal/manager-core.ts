@@ -8,11 +8,13 @@ import { ComponentClaims } from './component-claims';
 import type { ComponentMetadataReader } from './component-metadata-reader';
 import { ComponentStart, type RestartStartSnapshot } from './component-start';
 import { ComponentStop } from './component-stop';
+import { LateStartRecovery } from './late-start-recovery';
 import { LoggerExitHook } from './logger-exit-hook';
 import type { ManagerConfig } from './manager-config';
 import type { LifecycleManagerState } from './manager-state';
 import type { RegistrationReadTracker } from './registration-read-tracker';
 import type { TransitionEventDispatcher } from './transition-event-dispatcher';
+import { UnexpectedStops } from './unexpected-stops';
 
 /**
  * Manager operations a subsystem calls that still live on the manager itself, because
@@ -37,37 +39,13 @@ export interface ManagerInternals {
   stampTimestamp(name: string, field: 'startedAt' | 'stoppedAt'): void;
   /** The `detachSignalsOnStop` check a stop runs once it has settled. */
   detachSignalsAfterLastStop(): void;
-  /** Clear a component's unexpected-stop handler, contained. */
-  clearUnexpectedStopHandler(component: BaseComponent, context: string): void;
-  /** The handler a running component reports an unexpected stop through. */
-  createUnexpectedStopHandler(
-    name: string,
-    token: string,
-  ): (error?: Error) => boolean;
   /** Whether a component is up: running, and not on its way down. */
   isComponentUp(name: string): boolean;
-  /** Log the eventual rejection of a component promise the manager stopped waiting on. */
-  observeFailureAfterTimeout(
-    promise: Promise<unknown>,
-    name: string,
-    message: string,
-    params?: Record<string, unknown>,
-  ): void;
   /** A restart's start refused because its registration changed since restart approved it. */
   refuseStaleRestartSnapshot(
     name: string,
     snapshot: RestartStartSnapshot | undefined,
   ): ComponentOperationResult | undefined;
-  /** Late-start cleanup: stop a start the manager stopped waiting on if it comes up anyway. */
-  monitorLateStartupCompletion(
-    name: string,
-    startPromise: Promise<unknown>,
-    startAttemptToken: string,
-    claim: symbol,
-    wasForcedFromStall: boolean,
-    isSuperseded: () => boolean,
-    failureKind?: 'timeout' | 'observation-failed',
-  ): void;
   /** Attach signals on the manager's own initiative, ahead of a start; never throws. */
   autoAttachSignals(
     trigger: string,
@@ -133,6 +111,8 @@ export class ManagerCore implements ManagerCoreParts {
   public readonly claims: ComponentClaims;
   public readonly componentStop: ComponentStop;
   public readonly componentStart: ComponentStart;
+  public readonly lateStartRecovery: LateStartRecovery;
+  public readonly unexpectedStops: UnexpectedStops;
 
   constructor(parts: ManagerCoreParts) {
     this.manager = parts.manager;
@@ -150,5 +130,7 @@ export class ManagerCore implements ManagerCoreParts {
     this.claims = new ComponentClaims(this);
     this.componentStop = new ComponentStop(this);
     this.componentStart = new ComponentStart(this);
+    this.lateStartRecovery = new LateStartRecovery(this);
+    this.unexpectedStops = new UnexpectedStops(this);
   }
 }

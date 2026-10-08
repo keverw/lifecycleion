@@ -279,11 +279,10 @@ describe('LifecycleManager - public methods never reject', () => {
     // A step the startup runs after starting both - once `first` and `second` are
     // running - throws.
     void second;
-    (
-      manager as unknown as { consumeUnexpectedStopsDuringStartup: () => never }
-    ).consumeUnexpectedStopsDuringStartup = (): never => {
-      throw new Error('getter exploded');
-    };
+    coreOf(manager).unexpectedStops.consumeUnexpectedStopsDuringStartup =
+      (): never => {
+        throw new Error('getter exploded');
+      };
 
     const { reports, release } = claimReports();
     let result;

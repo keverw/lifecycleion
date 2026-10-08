@@ -1,6 +1,8 @@
 import { describeError, toError } from '../../to-error';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { readMember } from '../../internal/read-member';
+import { observeRejection } from '../../internal/intrinsics';
+import type { LoggerService } from '../../logger/logger-service';
 import {
   isTimeoutValidationError,
   resolveTimeoutMS,
@@ -132,6 +134,32 @@ export function isLinkedToAbort(thrown: unknown, reason: unknown): boolean {
     }
     current = readMember(current, 'cause');
   }
+}
+
+/**
+ * Watch a component's promise that the manager already stopped waiting for - it timed
+ * out - so its eventual rejection is logged rather than left unhandled.
+ *
+ * The `catch` is what prevents the unhandled rejection, fatal under Node's default
+ * `--unhandled-rejections=throw`; logging the reason, rather than discarding it, is the
+ * second half of the timeout warning the caller has already logged. The chain ends in a
+ * terminal `catch` because nothing retains it: logging is guarded, but a floating chain
+ * should not have to rely on that.
+ */
+export function observeFailureAfterTimeout(
+  // The manager's guarded logger.
+  logger: LoggerService,
+  // Already adopted by every caller - see `adoptPromise()` - so chained on directly.
+  promise: Promise<unknown>,
+  name: string,
+  message: string,
+  params: Record<string, unknown> = {},
+): void {
+  observeRejection(promise, (error: unknown) => {
+    logger.entity(name).debug(message, {
+      params: { error: toError(error), ...params },
+    });
+  });
 }
 
 export function resolveOperationTimeoutMS(

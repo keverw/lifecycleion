@@ -869,7 +869,7 @@ export class ComponentStop {
     if (stopContext) {
       stopContext.claimed = true;
     }
-    this.core.internals.clearUnexpectedStopHandler(component, 'stop');
+    this.core.unexpectedStops.clearUnexpectedStopHandler(component, 'stop');
     this.core.logger.entity(name).info('Graceful shutdown started');
     this.core.lifecycleEvents.componentStopping(name);
 
@@ -1186,7 +1186,10 @@ export class ComponentStop {
 
     // Claim before calling this overridable hook, just as in the graceful phase.
     // Property-read failures above still leave the unexpected-stop handler intact.
-    this.core.internals.clearUnexpectedStopHandler(component, 'force stop');
+    this.core.unexpectedStops.clearUnexpectedStopHandler(
+      component,
+      'force stop',
+    );
     // Describes this attempt: a stalled retry runs no graceful phase, so none timed out
     // here, even when the stop it continues timed out gracefully.
     const forceStartContext = {
