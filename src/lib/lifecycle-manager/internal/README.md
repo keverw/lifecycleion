@@ -40,12 +40,13 @@ Configuration that never changes after construction lives in the config instead.
 The manager's operations move out of `lifecycle-manager.ts` into subsystems: classes
 built over one shared core.
 
-| Module                | Responsibility                                                                                                                                   |
-| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `manager-core.ts`     | `ManagerCore`: the facade, state, config, loggers, event plumbing, registry readers, and every subsystem.                                        |
-| `logger-exit-hook.ts` | `LoggerExitHook`: the `beforeExit` callback, settling a pending exit when a pass ends, and the exit-in-progress gate.                            |
-| `component-claims.ts` | `ComponentClaims`: taking, checking and releasing the per-component claims start and stop attempts hold.                                         |
-| `component-stop.ts`   | `ComponentStop`: the per-component stop pipeline - refusals, the stop net, graceful and force phases, stalled retries, and late stop resolution. |
+| Module                | Responsibility                                                                                                                                          |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `manager-core.ts`     | `ManagerCore`: the facade, state, config, loggers, event plumbing, registry readers, and every subsystem.                                               |
+| `logger-exit-hook.ts` | `LoggerExitHook`: the `beforeExit` callback, settling a pending exit when a pass ends, and the exit-in-progress gate.                                   |
+| `component-claims.ts` | `ComponentClaims`: taking, checking and releasing the per-component claims start and stop attempts hold.                                                |
+| `component-stop.ts`   | `ComponentStop`: the per-component stop pipeline - refusals, the stop net, graceful and force phases, stalled retries, and late stop resolution.        |
+| `component-start.ts`  | `ComponentStart`: the per-component start pipeline - the start net, its preconditions, the attempt, start settlements, and marking a component running. |
 
 Each subsystem receives the core in its constructor and only stores it there, since
 another subsystem may not exist yet. It calls the manager's public, overridable

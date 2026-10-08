@@ -221,7 +221,7 @@ describe('LifecycleManager - public methods never reject', () => {
 
   test('a registration that fails after the commit reports the component as registered', async () => {
     const { logger, manager } = setup();
-    const internals = manager as unknown as {
+    const internals = coreOf(manager).componentStart as unknown as {
       startComponentInternal: () => Promise<unknown>;
     };
 
@@ -244,7 +244,7 @@ describe('LifecycleManager - public methods never reject', () => {
 
   test('a registration that fails after the commit emits registered, not rejected', async () => {
     const { logger, manager } = setup();
-    const internals = manager as unknown as {
+    const internals = coreOf(manager).componentStart as unknown as {
       startComponentInternal: () => Promise<unknown>;
     };
 

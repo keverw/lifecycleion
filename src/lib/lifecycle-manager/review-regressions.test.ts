@@ -1055,10 +1055,10 @@ describe('LifecycleManager - review regressions', () => {
       return Promise.resolve();
     };
     await manager.registerComponent(a);
-    const internals = manager as unknown as {
+    const internals = coreOf(manager).componentStart as unknown as {
       markComponentRunning: (name: string) => void;
     };
-    const original = internals.markComponentRunning.bind(manager);
+    const original = internals.markComponentRunning.bind(internals);
     let hasCrashed = false;
     internals.markComponentRunning = (name: string): void => {
       if (!hasCrashed) {

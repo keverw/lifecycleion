@@ -3,9 +3,10 @@ import type { LoggerService } from '../../logger/logger-service';
 import type { BaseComponent } from '../base-component';
 import type { LifecycleManagerEvents } from '../events';
 import type { LifecycleManager } from '../lifecycle-manager';
-import type { ComponentStatus } from '../types';
+import type { ComponentOperationResult, ComponentStatus } from '../types';
 import { ComponentClaims } from './component-claims';
 import type { ComponentMetadataReader } from './component-metadata-reader';
+import { ComponentStart, type RestartStartSnapshot } from './component-start';
 import { ComponentStop } from './component-stop';
 import { LoggerExitHook } from './logger-exit-hook';
 import type { ManagerConfig } from './manager-config';
@@ -38,6 +39,52 @@ export interface ManagerInternals {
   detachSignalsAfterLastStop(): void;
   /** Clear a component's unexpected-stop handler, contained. */
   clearUnexpectedStopHandler(component: BaseComponent, context: string): void;
+  /** The handler a running component reports an unexpected stop through. */
+  createUnexpectedStopHandler(
+    name: string,
+    token: string,
+  ): (error?: Error) => boolean;
+  /** Whether a component is up: running, and not on its way down. */
+  isComponentUp(name: string): boolean;
+  /** Log the eventual rejection of a component promise the manager stopped waiting on. */
+  observeFailureAfterTimeout(
+    promise: Promise<unknown>,
+    name: string,
+    message: string,
+    params?: Record<string, unknown>,
+  ): void;
+  /** A restart's start refused because its registration changed since restart approved it. */
+  refuseStaleRestartSnapshot(
+    name: string,
+    snapshot: RestartStartSnapshot | undefined,
+  ): ComponentOperationResult | undefined;
+  /** Late-start cleanup: stop a start the manager stopped waiting on if it comes up anyway. */
+  monitorLateStartupCompletion(
+    name: string,
+    startPromise: Promise<unknown>,
+    startAttemptToken: string,
+    claim: symbol,
+    wasForcedFromStall: boolean,
+    isSuperseded: () => boolean,
+    failureKind?: 'timeout' | 'observation-failed',
+  ): void;
+  /** Attach signals on the manager's own initiative, ahead of a start; never throws. */
+  autoAttachSignals(
+    trigger: string,
+  ):
+    { outcome: 'attached' | 'unchanged' } | { outcome: 'failed'; error: Error };
+  /** Stop a started component whose `attachSignalsOnStart` attach failed. */
+  rollBackStartForSignalAttach(
+    name: string,
+    error: Error,
+  ): Promise<ComponentOperationResult>;
+  /** The `detachSignalsOnStop` check: detach once the manager is idle. */
+  detachSignalsIfIdle(
+    trigger: string,
+    options?: { logMessage?: string; isEndingShutdownPass?: boolean },
+  ): void;
+  /** Run a detach `detachSignalsIfIdle()` deferred, once what held it has ended. */
+  runDeferredSignalDetach(trigger: string): void;
 }
 
 /** What the manager hands its core: everything a subsystem shares, built once. */
@@ -85,6 +132,7 @@ export class ManagerCore implements ManagerCoreParts {
   public readonly loggerExit: LoggerExitHook;
   public readonly claims: ComponentClaims;
   public readonly componentStop: ComponentStop;
+  public readonly componentStart: ComponentStart;
 
   constructor(parts: ManagerCoreParts) {
     this.manager = parts.manager;
@@ -101,5 +149,6 @@ export class ManagerCore implements ManagerCoreParts {
     this.loggerExit = new LoggerExitHook(this);
     this.claims = new ComponentClaims(this);
     this.componentStop = new ComponentStop(this);
+    this.componentStart = new ComponentStart(this);
   }
 }

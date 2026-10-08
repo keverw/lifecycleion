@@ -6,6 +6,7 @@ import { invalidOperationOptionError } from './internal/operation-policy';
 import type { ForceShutdownContext } from './types';
 import {
   claimReports,
+  coreOf,
   deferred,
   fakeSignals,
   Plain,
@@ -344,7 +345,7 @@ describe('an optional component whose failed start carries no error', () => {
     await manager.registerComponent(component);
     // A refusal that answers without an `error`, as `dependency_not_running` does.
     (
-      manager as unknown as {
+      coreOf(manager).componentStart as unknown as {
         startComponentInternal: (name: string) => Promise<unknown>;
       }
     ).startComponentInternal = (name: string) =>

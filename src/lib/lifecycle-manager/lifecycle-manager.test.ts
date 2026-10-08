@@ -22,6 +22,7 @@ import {
 } from './errors';
 import type { LifecycleManagerEventMap } from './events';
 import { sleep } from '../sleep';
+import { coreOf } from './test-helpers';
 import {
   TestComponent,
   SlowStartComponent,
@@ -13087,13 +13088,13 @@ test('completed shutdown between bulk starts prevents remaining components from 
   });
   await manager.registerComponent(new TestComponent(logger, { name: 'first' }));
   await manager.registerComponent(new TestComponent(logger, { name: 'later' }));
-  const internals = manager as unknown as {
+  const internals = coreOf(manager).componentStart as unknown as {
     startComponentInternal: (
       name: string,
       ...args: unknown[]
     ) => Promise<{ success: boolean }>;
   };
-  const start = internals.startComponentInternal.bind(manager);
+  const start = internals.startComponentInternal.bind(internals);
   const calls: string[] = [];
   const spy = spyOn(internals, 'startComponentInternal').mockImplementation(
     async (name, ...args) => {
@@ -13185,13 +13186,13 @@ test('shutdown during startup reports survivors without bypassing haltOnStall', 
   await manager.registerComponent(
     new TestComponent(logger, { name: 'later', dependencies: ['second'] }),
   );
-  const internals = manager as unknown as {
+  const internals = coreOf(manager).componentStart as unknown as {
     startComponentInternal: (
       name: string,
       ...args: unknown[]
     ) => Promise<{ success: boolean }>;
   };
-  const start = internals.startComponentInternal.bind(manager);
+  const start = internals.startComponentInternal.bind(internals);
   const spy = spyOn(internals, 'startComponentInternal').mockImplementation(
     async (name, ...args) => {
       const result = await start(name, ...args);
@@ -13278,12 +13279,12 @@ test('an already-running result past the deadline remains in the startup snapsho
   );
   let now = Date.now();
   const clock = spyOn(Date, 'now').mockImplementation(() => now);
-  const internals = manager as unknown as {
+  const internals = coreOf(manager).componentStart as unknown as {
     startComponentInternal: (
       ...args: unknown[]
     ) => Promise<{ success: boolean; code?: string }>;
   };
-  const start = internals.startComponentInternal.bind(manager);
+  const start = internals.startComponentInternal.bind(internals);
   const spy = spyOn(internals, 'startComponentInternal').mockImplementation(
     async (...args) => {
       // Simulate a concurrent permitted start before the bulk call observes it.
