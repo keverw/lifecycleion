@@ -7,12 +7,33 @@ import {
 } from '../constants';
 import type {
   ComponentLifecycleRef,
+  ComponentOperationResult,
   UnregisterComponentResult,
   UnregisterOptions,
 } from '../types';
 import type { ManagerCore } from './manager-core';
 import { isStartUnfinished } from './manager-state';
-import { snapshotUnregisterOptions } from './operation-options';
+import {
+  snapshotUnregisterOptions,
+  type UnregisterOptionsSnapshot,
+} from './operation-options';
+
+/**
+ * One unregister call: the name it was asked to remove, the instance registered under
+ * that name when it began and that registration's generation, the options it read, and
+ * what it has done so far - `progress`, shared with the safety net that wraps it, so a
+ * crash still reports a stop that happened. Created once the options are read, and
+ * handed to every phase of `unregisterComponentOperation()`. It runs no code of its own.
+ */
+class UnregisterAttempt {
+  constructor(
+    public readonly name: string,
+    public readonly component: BaseComponent,
+    public readonly registrationGeneration: number | undefined,
+    public readonly options: UnregisterOptionsSnapshot,
+    public readonly progress: { wasStopped: boolean },
+  ) {}
+}
 
 /**
  * Unregistration: `unregisterComponent()`'s body.
@@ -27,6 +48,15 @@ import { snapshotUnregisterOptions } from './operation-options';
 export class UnregistrationOperations {
   constructor(private readonly core: ManagerCore) {}
 
+  /**
+   * `unregisterComponent()`'s body. Refuses up front for a bulk operation or a name
+   * nothing holds, then runs the phases in order over one `UnregisterAttempt`: the
+   * refusals before any stop (`refuseBeforeStop()`), the stop of a running component -
+   * `refuseBeforeStopping()`, the stop itself, and `answerStop()` - the refusals the
+   * stop's caller code can still cause (`refuseAfterStop()`), and the removal
+   * (`removeComponent()`). Every phase is synchronous; the stop is the one thing
+   * awaited, here, directly.
+   */
   public async unregisterComponentOperation(
     name: string,
     options: UnregisterOptions | undefined,
@@ -72,67 +102,28 @@ export class UnregistrationOperations {
     // removal this call was never asked to make.
     const registrationGeneration =
       this.core.registryReads.currentGeneration(component);
-    const refuseIfReplaced = (): UnregisterComponentResult | undefined => {
-      if (
-        this.core.registry.getComponent(name) === component &&
-        this.core.registryReads.currentGeneration(component) ===
-          registrationGeneration
-      ) {
-        return undefined;
-      }
-
-      return {
-        success: false,
-        componentName: name,
-        reason: progress.wasStopped
-          ? 'Component was unregistered while it was being stopped'
-          : 'Component was unregistered while this unregister was in progress',
-        code: 'component_not_found',
-        wasStopped: progress.wasStopped,
-        // Registered when this call started, which is what this field reports - the
-        // name may belong to a replacement by now, which is not this call's component.
-        wasRegistered: true,
-      };
-    };
 
     // Both options, read once, here (`stopIfRunning` defaults to true). Their getters
     // are caller code, so the replacement check follows.
     const unregisterOptions = snapshotUnregisterOptions(options);
-    const shouldStopIfRunning = unregisterOptions.stopIfRunning;
+    const attempt = new UnregisterAttempt(
+      name,
+      component,
+      registrationGeneration,
+      unregisterOptions,
+      progress,
+    );
 
-    const replacedAfterOptions = refuseIfReplaced();
+    const refusedBeforeStop = this.refuseBeforeStop(attempt);
 
-    if (replacedAfterOptions !== undefined) {
-      return replacedAfterOptions;
-    }
-
-    const inFlightRefusal = this.refuseUnregisterWhileInFlight(name, false);
-
-    if (inFlightRefusal !== null) {
-      return inFlightRefusal;
-    }
-
-    const isStalled = this.core.state.stalledComponents.has(name);
-
-    if (isStalled && shouldStopIfRunning) {
-      this.core.logger
-        .entity(name)
-        .warn('Cannot unregister stalled component when stopIfRunning is set');
-      return {
-        success: false,
-        componentName: name,
-        reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
-        code: 'stop_failed',
-        stopFailureReason: 'stalled',
-        wasStopped: false,
-        wasRegistered: true,
-      };
+    if (refusedBeforeStop !== undefined) {
+      return refusedBeforeStop;
     }
 
     const isRunning = this.core.manager.isComponentRunning(name);
 
     // If running and stopIfRunning explicitly set to false, reject
-    if (isRunning && !shouldStopIfRunning) {
+    if (isRunning && !attempt.options.stopIfRunning) {
       this.core.logger
         .entity(name)
         .warn(
@@ -151,106 +142,233 @@ export class UnregistrationOperations {
     }
 
     // If running and stopIfRunning is true (default), stop first
-    if (isRunning && shouldStopIfRunning) {
-      this.core.logger
-        .entity(name)
-        .info('Stopping component before unregistering');
+    if (isRunning && attempt.options.stopIfRunning) {
+      const refusedBeforeStopping = this.refuseBeforeStopping(attempt);
 
-      const replacedBeforeStop = refuseIfReplaced();
-
-      if (replacedBeforeStop !== undefined) {
-        return replacedBeforeStop;
-      }
-
-      // The log line above ran caller code, which may have begun a stop or a bulk
-      // operation of its own. Answer for that one, rather than reporting the refusal it
-      // causes below as this unregister's failed stop.
-      const inFlightBeforeStop = this.refuseUnregisterWhileInFlight(
-        name,
-        false,
-      );
-
-      if (inFlightBeforeStop !== null) {
-        return inFlightBeforeStop;
-      }
-
-      if (this.isBulkOperationBlockingUnregister(name)) {
-        return this.refuseUnregisterForBulkOperation(name, false, true);
+      if (refusedBeforeStopping !== undefined) {
+        return refusedBeforeStopping;
       }
 
       const stopResult = await this.core.manager.stopComponent(name, {
-        allowStopWithRunningDependents: unregisterOptions.forceStop,
+        allowStopWithRunningDependents: attempt.options.forceStop,
       });
 
-      // Before reading any state by name: the stop's `await` ran caller code, and a
-      // replacement registered under the name would answer for this component - a
-      // stopped replacement made a failed stop report `wasStopped: true`. Only the
-      // stop's own answer is about this component then.
-      progress.wasStopped = stopResult.success;
-      const replacedDuringStop = refuseIfReplaced();
+      const failedStop = this.answerStop(attempt, stopResult);
 
-      if (replacedDuringStop !== undefined) {
-        return replacedDuringStop;
+      if (failedStop !== undefined) {
+        return failedStop;
       }
+    }
 
-      // If stop fails and leaves the component stalled, do NOT unregister.
-      // Caller expectation: success with stopIfRunning implies the component is stopped and unregistered.
-      const stateAfterStopAttempt = this.core.state.componentStates.get(name);
-      const isRunningAfterStopAttempt =
-        this.core.manager.isComponentRunning(name);
+    const refusedAfterStop = this.refuseAfterStop(attempt);
 
-      const isSafelyStopped =
-        stopResult.success ||
-        (!isRunningAfterStopAttempt && stateAfterStopAttempt === 'stopped');
+    if (refusedAfterStop !== undefined) {
+      return refusedAfterStop;
+    }
 
-      if (!isSafelyStopped) {
-        this.core.logger
-          .entity(name)
-          .warn('Failed to stop component before unregistering', {
-            params: {
-              reason: stopResult.reason,
-              code: stopResult.code,
-              state: stateAfterStopAttempt,
-            },
-          });
+    return this.removeComponent(attempt);
+  }
 
-        // A stop refused for its own configuration never ran: the unregister's own
-        // `invalid_options`, not a failed stop.
-        if (stopResult.code === 'invalid_options') {
-          return {
-            success: false,
-            componentName: name,
-            reason: stopResult.reason ?? 'Failed to stop component',
-            code: 'invalid_options',
-            error: stopResult.error,
-            wasStopped: false,
-            wasRegistered: true,
-          };
-        }
+  /**
+   * The refusal for a name that no longer belongs to the registration this call began
+   * with, or `undefined` while it still does. Asked after every step that runs caller
+   * code, for the reasons `unregisterComponentOperation()` gives.
+   */
+  private refuseIfReplaced(
+    attempt: UnregisterAttempt,
+  ): UnregisterComponentResult | undefined {
+    const { name, component, progress } = attempt;
 
+    if (
+      this.core.registry.getComponent(name) === component &&
+      this.core.registryReads.currentGeneration(component) ===
+        attempt.registrationGeneration
+    ) {
+      return undefined;
+    }
+
+    return {
+      success: false,
+      componentName: name,
+      reason: progress.wasStopped
+        ? 'Component was unregistered while it was being stopped'
+        : 'Component was unregistered while this unregister was in progress',
+      code: 'component_not_found',
+      wasStopped: progress.wasStopped,
+      // Registered when this call started, which is what this field reports - the
+      // name may belong to a replacement by now, which is not this call's component.
+      wasRegistered: true,
+    };
+  }
+
+  /**
+   * The refusals once the options are read, before the component's running state is:
+   * a replacement registered by an option getter, a start or stop in flight, or a
+   * stalled component this call was asked to stop.
+   */
+  private refuseBeforeStop(
+    attempt: UnregisterAttempt,
+  ): UnregisterComponentResult | undefined {
+    const { name } = attempt;
+    const replacedAfterOptions = this.refuseIfReplaced(attempt);
+
+    if (replacedAfterOptions !== undefined) {
+      return replacedAfterOptions;
+    }
+
+    const inFlightRefusal = this.refuseUnregisterWhileInFlight(name, false);
+
+    if (inFlightRefusal !== null) {
+      return inFlightRefusal;
+    }
+
+    const isStalled = this.core.state.stalledComponents.has(name);
+
+    if (isStalled && attempt.options.stopIfRunning) {
+      this.core.logger
+        .entity(name)
+        .warn('Cannot unregister stalled component when stopIfRunning is set');
+      return {
+        success: false,
+        componentName: name,
+        reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
+        code: 'stop_failed',
+        stopFailureReason: 'stalled',
+        wasStopped: false,
+        wasRegistered: true,
+      };
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Announce the stop a running component needs first, then refuse if that log line's
+   * caller code replaced the component or began an operation of its own.
+   */
+  private refuseBeforeStopping(
+    attempt: UnregisterAttempt,
+  ): UnregisterComponentResult | undefined {
+    const { name } = attempt;
+
+    this.core.logger
+      .entity(name)
+      .info('Stopping component before unregistering');
+
+    const replacedBeforeStop = this.refuseIfReplaced(attempt);
+
+    if (replacedBeforeStop !== undefined) {
+      return replacedBeforeStop;
+    }
+
+    // The log line above ran caller code, which may have begun a stop or a bulk
+    // operation of its own. Answer for that one, rather than reporting the refusal it
+    // causes below as this unregister's failed stop.
+    const inFlightBeforeStop = this.refuseUnregisterWhileInFlight(name, false);
+
+    if (inFlightBeforeStop !== null) {
+      return inFlightBeforeStop;
+    }
+
+    if (this.isBulkOperationBlockingUnregister(name)) {
+      return this.refuseUnregisterForBulkOperation(name, false, true);
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Answer the stop this unregister ran: the refusal when the name was replaced across
+   * it or the component is not safely stopped, or `undefined` once it is, with
+   * `progress.wasStopped` set.
+   */
+  private answerStop(
+    attempt: UnregisterAttempt,
+    stopResult: ComponentOperationResult,
+  ): UnregisterComponentResult | undefined {
+    const { name, progress } = attempt;
+
+    // Before reading any state by name: the stop's `await` ran caller code, and a
+    // replacement registered under the name would answer for this component - a
+    // stopped replacement made a failed stop report `wasStopped: true`. Only the
+    // stop's own answer is about this component then.
+    progress.wasStopped = stopResult.success;
+    const replacedDuringStop = this.refuseIfReplaced(attempt);
+
+    if (replacedDuringStop !== undefined) {
+      return replacedDuringStop;
+    }
+
+    // If stop fails and leaves the component stalled, do NOT unregister.
+    // Caller expectation: success with stopIfRunning implies the component is stopped and unregistered.
+    const stateAfterStopAttempt = this.core.state.componentStates.get(name);
+    const isRunningAfterStopAttempt =
+      this.core.manager.isComponentRunning(name);
+
+    const isSafelyStopped =
+      stopResult.success ||
+      (!isRunningAfterStopAttempt && stateAfterStopAttempt === 'stopped');
+
+    if (!isSafelyStopped) {
+      this.core.logger
+        .entity(name)
+        .warn('Failed to stop component before unregistering', {
+          params: {
+            reason: stopResult.reason,
+            code: stopResult.code,
+            state: stateAfterStopAttempt,
+          },
+        });
+
+      // A stop refused for its own configuration never ran: the unregister's own
+      // `invalid_options`, not a failed stop.
+      if (stopResult.code === 'invalid_options') {
         return {
           success: false,
           componentName: name,
           reason: stopResult.reason ?? 'Failed to stop component',
-          code: 'stop_failed',
-          stopFailureReason:
-            stopResult.code === 'component_shutdown_timeout'
-              ? 'timeout'
-              : stopResult.code === 'operation_crashed'
-                ? 'operation_crashed'
-                : 'error',
+          code: 'invalid_options',
           error: stopResult.error,
           wasStopped: false,
           wasRegistered: true,
         };
       }
 
-      progress.wasStopped = true;
+      return {
+        success: false,
+        componentName: name,
+        reason: stopResult.reason ?? 'Failed to stop component',
+        code: 'stop_failed',
+        stopFailureReason:
+          stopResult.code === 'component_shutdown_timeout'
+            ? 'timeout'
+            : stopResult.code === 'operation_crashed'
+              ? 'operation_crashed'
+              : 'error',
+        error: stopResult.error,
+        wasStopped: false,
+        wasRegistered: true,
+      };
     }
+
+    progress.wasStopped = true;
+
+    return undefined;
+  }
+
+  /**
+   * The refusals between the stop, or the decision that there was nothing to stop, and
+   * the removal: a replacement, a start or stop a `component:stopped` listener began,
+   * and a bulk operation that took the registry meanwhile.
+   */
+  private refuseAfterStop(
+    attempt: UnregisterAttempt,
+  ): UnregisterComponentResult | undefined {
+    const { name, progress } = attempt;
 
     // After the stop's `await` - a `component:stopped` listener can do the same - and
     // before the post-stop checks below, which would otherwise answer for a replacement.
-    const replacedAfterStop = refuseIfReplaced();
+    const replacedAfterStop = this.refuseIfReplaced(attempt);
 
     if (replacedAfterStop !== undefined) {
       return replacedAfterStop;
@@ -296,6 +414,18 @@ export class UnregistrationOperations {
         true,
       );
     }
+
+    return undefined;
+  }
+
+  /**
+   * Remove the component, in one transition: from the registry, then from every state
+   * map, then the component's own side and the auto-detach, then the announcement.
+   */
+  private removeComponent(
+    attempt: UnregisterAttempt,
+  ): UnregisterComponentResult {
+    const { name, component, progress } = attempt;
 
     return this.core.dispatcher.withTransition(() => {
       // Remove from registry
