@@ -703,7 +703,7 @@ export class RestartOperations {
     const validatedStops = new Map<string, RestartStopNeed>();
     // Read once: no caller code runs between here and the loop, and the stop pass reads
     // the same set as it begins.
-    const currentStarts = this.core.componentStart.currentStartSettlements();
+    const currentStarts = this.core.startSettlements.currentStartSettlements();
     for (const component of [...this.core.state.components]) {
       const name = this.core.registry.nameOf(component);
       const generation = this.core.registryReads.currentGeneration(component);
@@ -834,7 +834,7 @@ export class RestartOperations {
       let didValidate = false;
       // Read once per round, and again only after a validation: its timeout getters are
       // caller code, which can start or settle a start.
-      let currentStarts = this.core.componentStart.currentStartSettlements();
+      let currentStarts = this.core.startSettlements.currentStartSettlements();
       for (const component of [...this.core.state.components]) {
         const name = this.core.registry.nameOf(component);
         if (restartSnapshots.get(name)?.component !== component) {
@@ -852,7 +852,7 @@ export class RestartOperations {
         this.validateRestartStopBudgets(name, component, stopNeed);
         validatedStops.set(name, stopNeed);
         didValidate = true;
-        currentStarts = this.core.componentStart.currentStartSettlements();
+        currentStarts = this.core.startSettlements.currentStartSettlements();
       }
       if (!didValidate) {
         return;

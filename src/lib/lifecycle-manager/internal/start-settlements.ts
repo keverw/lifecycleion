@@ -1,0 +1,181 @@
+import type { BaseComponent } from '../base-component';
+import type { ManagerCore } from './manager-core';
+import type { StartSettlement } from './manager-state';
+
+/**
+ * The start settlements: the record each start attempt publishes of its start, keyed by
+ * its claim and by its component's name - whether `start()` itself has settled, whether
+ * the attempt has, and the late-start cleanup it owns - and the reads made of them.
+ *
+ * `ComponentStart` publishes an attempt's settlement, records its instance and attempt
+ * token on it, and marks its raw start settled here. The shutdown pass and restart's
+ * preflight ask which starts are current, unregistering releases a name's settlements,
+ * and hook entry asks whether a raw start is still pending.
+ */
+export class StartSettlements {
+  constructor(private readonly core: ManagerCore) {}
+
+  /**
+   * Create a start's settlement and publish it by its claim and its component's name,
+   * with the `finishSettlement()` the start net runs once the attempt has settled.
+   */
+  public publishStartSettlement(
+    name: string,
+    claim: symbol,
+  ): { settlement: StartSettlement; finishSettlement: () => void } {
+    let resolveSettlement!: () => void;
+    let resolveRawStart!: () => void;
+    let abandon!: () => void;
+    const finishSettlement = (): void => {
+      settlement.didSettle = true;
+      // An aborted start may not have actually settled raw startup. Keep its
+      // dependency protection until that work finishes or ownership is released.
+      if (!settlement.rawStartPending) {
+        this.deleteStartSettlement(claim);
+      }
+      resolveSettlement();
+    };
+    const settlement: StartSettlement = {
+      name,
+      finish: () => {
+        // Released ownership ends the raw start for every holder of this settlement,
+        // not only the registry: a pass that captured it must stop protecting for it.
+        settlement.rawStartPending = false;
+        finishSettlement();
+        this.deleteStartSettlement(claim);
+        resolveRawStart();
+      },
+      abandon: () => abandon(),
+      abandoned: new Promise<void>((resolve) => {
+        abandon = resolve;
+      }),
+      didSettle: false,
+      rawStartPending: false,
+      rawStartDone: new Promise<void>((resolve) => {
+        resolveRawStart = resolve;
+      }),
+      settleRawStart: () => {
+        settlement.rawStartPending = false;
+        resolveRawStart();
+      },
+      promise: new Promise<void>((resolve) => {
+        resolveSettlement = resolve;
+      }),
+    };
+    this.addStartSettlement(claim, settlement);
+
+    return { settlement, finishSettlement };
+  }
+
+  /**
+   * An attempt that has issued its token: every other settlement of `name` released, and
+   * the attempt's instance and token recorded on its own - unless a release before this
+   * already withdrew it, when there is none to answer.
+   */
+  public recordStartAttempt(
+    name: string,
+    claim: symbol,
+    component: BaseComponent,
+    startAttemptToken: string,
+  ): StartSettlement | undefined {
+    this.releaseStartSettlements(name, claim);
+    const settlement = this.core.state.startSettlements.get(claim);
+    if (settlement) {
+      settlement.component = component;
+      settlement.token = startAttemptToken;
+    }
+    return settlement;
+  }
+
+  /** A raw start has settled: its settlement withdrawn if the attempt has too. */
+  public markRawStartSettled(settlement: StartSettlement, claim: symbol): void {
+    settlement.settleRawStart();
+    if (settlement.didSettle) {
+      this.deleteStartSettlement(claim);
+    }
+  }
+
+  /**
+   * The start settlements that still describe each component's current start: the
+   * attempt holding its claim, or the registration and attempt token it last ran under.
+   * Keyed by name. Shared by the shutdown pass and restart's preflight so the two agree
+   * on which starts are current.
+   */
+  public currentStartSettlements(): Map<string, StartSettlement> {
+    const currentStarts = new Map<string, StartSettlement>();
+    for (const [claim, settlement] of this.core.state.startSettlements) {
+      if (
+        this.core.state.componentClaims.get(settlement.name)?.claim === claim ||
+        (settlement.component !== undefined &&
+          this.core.registry.getComponent(settlement.name) ===
+            settlement.component &&
+          this.core.state.componentStartAttemptTokens.get(settlement.name) ===
+            settlement.token)
+      ) {
+        currentStarts.set(settlement.name, settlement);
+      }
+    }
+    return currentStarts;
+  }
+
+  /**
+   * Release every start settlement of `name` but the one `exceptClaim` holds: each ends
+   * the raw start it tracks for whoever captured it, not only in the registry.
+   */
+  public releaseStartSettlements(name: string, exceptClaim?: symbol): void {
+    const exceptSettlement =
+      exceptClaim === undefined
+        ? undefined
+        : this.core.state.startSettlements.get(exceptClaim);
+    for (const settlement of this.core.state.startSettlementsByName.get(name) ??
+      []) {
+      if (settlement !== exceptSettlement) {
+        settlement.finish();
+      }
+    }
+  }
+
+  /** Whether a `start()` of the current registration of `name` has not settled yet. */
+  public isRawStartPending(name: string): boolean {
+    const settlements = this.core.state.startSettlementsByName.get(name);
+    if (settlements === undefined) {
+      return false;
+    }
+    const component = this.core.registry.getComponent(name);
+    for (const settlement of settlements) {
+      if (
+        settlement.rawStartPending &&
+        (settlement.component === undefined ||
+          settlement.component === component)
+      ) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Publish a start's settlement, by its claim and by its component's name. */
+  private addStartSettlement(claim: symbol, settlement: StartSettlement): void {
+    this.core.state.startSettlements.set(claim, settlement);
+    let byName = this.core.state.startSettlementsByName.get(settlement.name);
+    if (byName === undefined) {
+      byName = new Set();
+      this.core.state.startSettlementsByName.set(settlement.name, byName);
+    }
+    byName.add(settlement);
+  }
+
+  /** Withdraw the settlement `claim` published, from both of its indexes. */
+  private deleteStartSettlement(claim: symbol): void {
+    const settlement = this.core.state.startSettlements.get(claim);
+    if (settlement === undefined) {
+      return;
+    }
+    this.core.state.startSettlements.delete(claim);
+    const byName = this.core.state.startSettlementsByName.get(settlement.name);
+    byName?.delete(settlement);
+    if (byName?.size === 0) {
+      this.core.state.startSettlementsByName.delete(settlement.name);
+    }
+  }
+}

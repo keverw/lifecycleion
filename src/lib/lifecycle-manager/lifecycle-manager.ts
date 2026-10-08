@@ -964,7 +964,7 @@ export class LifecycleManager
       isComponentRunning: (name) => manager.isComponentRunning(name),
       getComponent: (name) => manager.core.registry.getComponent(name),
       isRawStartPending: (name) =>
-        manager.core.componentStart.isRawStartPending(name),
+        manager.core.startSettlements.isRawStartPending(name),
       // A late start's cleanup marks its component running only to stop it: messaging,
       // value reads, health checks, signals and shutdown warnings must not enter it as
       // if it were up.

@@ -321,7 +321,7 @@ export class ShutdownPassRunner {
 
   /** Names whose current start is {@link isUnresolvedTimedOutStart}, in registry order. */
   public unresolvedTimedOutStartNames(): string[] {
-    const currentStarts = this.core.componentStart.currentStartSettlements();
+    const currentStarts = this.core.startSettlements.currentStartSettlements();
     return this.core.state.components
       .map((component) => this.core.registry.nameOf(component))
       .filter((name) =>
@@ -542,7 +542,8 @@ export class ShutdownPassRunner {
       // each through the stop pipeline once `start()` settles - but they are part of what
       // it reports: one that came up during the pass and is still stopping, or stalled
       // stopping, when the pass ends leaves the pass short of its goal, not successful.
-      const currentStarts = this.core.componentStart.currentStartSettlements();
+      const currentStarts =
+        this.core.startSettlements.currentStartSettlements();
       startingAtPassStart = shutdownOrder.filter(
         (name) =>
           this.core.state.componentStates.get(name) === 'starting' ||

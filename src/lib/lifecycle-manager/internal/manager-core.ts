@@ -23,6 +23,7 @@ import { RestartOperations } from './restart-operations';
 import { ShutdownEscalation } from './shutdown-escalation';
 import { ShutdownPassRunner } from './shutdown-pass';
 import { SignalIntegration } from './signal-integration';
+import { StartSettlements } from './start-settlements';
 import { StartupOrchestration } from './startup-orchestration';
 import { StartupOrdering } from './startup-ordering';
 import { StopOutcomes } from './stop-outcomes';
@@ -93,6 +94,7 @@ export class ManagerCore implements ManagerCoreParts {
   // One component's start and stop, and the claims they hold.
   public readonly claims: ComponentClaims;
   public readonly componentStart: ComponentStart;
+  public readonly startSettlements: StartSettlements;
   public readonly componentStop: ComponentStop;
   public readonly stopOutcomes: StopOutcomes;
   public readonly lateStartRecovery: LateStartRecovery;
@@ -126,6 +128,7 @@ export class ManagerCore implements ManagerCoreParts {
     this.startupOrdering = new StartupOrdering(this);
     this.claims = new ComponentClaims(this);
     this.componentStart = new ComponentStart(this);
+    this.startSettlements = new StartSettlements(this);
     this.componentStop = new ComponentStop(this);
     this.stopOutcomes = new StopOutcomes(this);
     this.lateStartRecovery = new LateStartRecovery(this);

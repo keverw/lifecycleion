@@ -459,7 +459,7 @@ export class UnregistrationOperations {
       this.core.state.stalledComponents.delete(name);
       this.core.state.runningComponents.delete(name);
       this.core.state.componentClaims.delete(name);
-      this.core.componentStart.releaseStartSettlements(name);
+      this.core.startSettlements.releaseStartSettlements(name);
       // `registeredNames` keeps this entry: work still in flight - a broadcast that
       // captured the instance, a late-stop monitor - can still name it without asking the
       // component. A later registration of the same instance reads its name fresh and

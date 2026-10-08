@@ -147,8 +147,8 @@ class StartRun {
 /**
  * The per-component start pipeline: the net under every start, the checks a start makes
  * before it may claim its component, the attempt itself - `start()` raced against its
- * deadline - and the bookkeeping it leaves: the start settlements that track a start
- * and the cleanup it owns, and the component marked running.
+ * deadline - and the state it leaves: the component marked running, or put back to the
+ * state it had before the attempt claimed it.
  *
  * Every per-component start runs through here: `startComponent()`, a bulk startup's
  * loop, a registration's auto-start, and a restart's start. Those callers own their bulk
@@ -156,7 +156,9 @@ class StartRun {
  * be undone again is stopped through `core.componentStop`. A start the manager stops
  * waiting for is handed to `core.lateStartRecovery`, and a running component's
  * unexpected-stop handler comes from `core.unexpectedStops`. Signals attached ahead of
- * a start, and rolled back when that attach fails, go through `core.signals`.
+ * a start, and rolled back when that attach fails, go through `core.signals`. Each
+ * attempt publishes its start settlement, and marks its raw start settled, through
+ * `core.startSettlements`.
  */
 export class ComponentStart {
   constructor(private readonly core: ManagerCore) {}
@@ -183,10 +185,8 @@ export class ComponentStart {
     restartSnapshot?: RestartStartSnapshot,
   ): Promise<ComponentOperationResult> {
     const claim = Symbol(name);
-    const { settlement, finishSettlement } = this.publishStartSettlement(
-      name,
-      claim,
-    );
+    const { settlement, finishSettlement } =
+      this.core.startSettlements.publishStartSettlement(name, claim);
 
     // Released once this attempt settles, however it settled: a claim outlived the attempt
     // that took it, keeping a stale `previousState` until the next attempt overwrote it.
@@ -236,65 +236,6 @@ export class ComponentStart {
   }
 
   /**
-   * The start settlements that still describe each component's current start: the
-   * attempt holding its claim, or the registration and attempt token it last ran under.
-   * Keyed by name. Shared by the shutdown pass and restart's preflight so the two agree
-   * on which starts are current.
-   */
-  public currentStartSettlements(): Map<string, StartSettlement> {
-    const currentStarts = new Map<string, StartSettlement>();
-    for (const [claim, settlement] of this.core.state.startSettlements) {
-      if (
-        this.core.state.componentClaims.get(settlement.name)?.claim === claim ||
-        (settlement.component !== undefined &&
-          this.core.registry.getComponent(settlement.name) ===
-            settlement.component &&
-          this.core.state.componentStartAttemptTokens.get(settlement.name) ===
-            settlement.token)
-      ) {
-        currentStarts.set(settlement.name, settlement);
-      }
-    }
-    return currentStarts;
-  }
-
-  /**
-   * Release every start settlement of `name` but the one `exceptClaim` holds: each ends
-   * the raw start it tracks for whoever captured it, not only in the registry.
-   */
-  public releaseStartSettlements(name: string, exceptClaim?: symbol): void {
-    const exceptSettlement =
-      exceptClaim === undefined
-        ? undefined
-        : this.core.state.startSettlements.get(exceptClaim);
-    for (const settlement of this.core.state.startSettlementsByName.get(name) ??
-      []) {
-      if (settlement !== exceptSettlement) {
-        settlement.finish();
-      }
-    }
-  }
-
-  /** Whether a `start()` of the current registration of `name` has not settled yet. */
-  public isRawStartPending(name: string): boolean {
-    const settlements = this.core.state.startSettlementsByName.get(name);
-    if (settlements === undefined) {
-      return false;
-    }
-    const component = this.core.registry.getComponent(name);
-    for (const settlement of settlements) {
-      if (
-        settlement.rawStartPending &&
-        (settlement.component === undefined ||
-          settlement.component === component)
-      ) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  /**
    * Mark a component running whose start may have been forced past a stall: the new run
    * supersedes the old stop, so its stall record goes, and with it that stop's token -
    * a late settlement of the old stop must not own this run's state. The retirement is
@@ -324,58 +265,6 @@ export class ComponentStart {
         retirementReason,
       );
     }
-  }
-
-  /**
-   * Create a start's settlement and publish it by its claim and its component's name,
-   * with the `finishSettlement()` the start net runs once the attempt has settled.
-   */
-  private publishStartSettlement(
-    name: string,
-    claim: symbol,
-  ): { settlement: StartSettlement; finishSettlement: () => void } {
-    let resolveSettlement!: () => void;
-    let resolveRawStart!: () => void;
-    let abandon!: () => void;
-    const finishSettlement = (): void => {
-      settlement.didSettle = true;
-      // An aborted start may not have actually settled raw startup. Keep its
-      // dependency protection until that work finishes or ownership is released.
-      if (!settlement.rawStartPending) {
-        this.deleteStartSettlement(claim);
-      }
-      resolveSettlement();
-    };
-    const settlement: StartSettlement = {
-      name,
-      finish: () => {
-        // Released ownership ends the raw start for every holder of this settlement,
-        // not only the registry: a pass that captured it must stop protecting for it.
-        settlement.rawStartPending = false;
-        finishSettlement();
-        this.deleteStartSettlement(claim);
-        resolveRawStart();
-      },
-      abandon: () => abandon(),
-      abandoned: new Promise<void>((resolve) => {
-        abandon = resolve;
-      }),
-      didSettle: false,
-      rawStartPending: false,
-      rawStartDone: new Promise<void>((resolve) => {
-        resolveRawStart = resolve;
-      }),
-      settleRawStart: () => {
-        settlement.rawStartPending = false;
-        resolveRawStart();
-      },
-      promise: new Promise<void>((resolve) => {
-        resolveSettlement = resolve;
-      }),
-    };
-    this.addStartSettlement(claim, settlement);
-
-    return { settlement, finishSettlement };
   }
 
   /**
@@ -1032,12 +921,12 @@ export class ComponentStart {
     const timeoutMS = useBulkDeadline ? remainingBudget : componentTimeout;
     const startAttemptToken = ulid();
     this.core.state.componentStartAttemptTokens.set(name, startAttemptToken);
-    this.releaseStartSettlements(name, claim);
-    const settlement = this.core.state.startSettlements.get(claim);
-    if (settlement) {
-      settlement.component = component;
-      settlement.token = startAttemptToken;
-    }
+    const settlement = this.core.startSettlements.recordStartAttempt(
+      name,
+      claim,
+      component,
+      startAttemptToken,
+    );
 
     return new StartRun(
       name,
@@ -1192,7 +1081,7 @@ export class ComponentStart {
     run: StartRun,
     startAbort: AbortController,
   ): Promise<unknown> {
-    const { settlement } = run;
+    const { claim, settlement } = run;
     const { component } = run.preparation;
 
     // Race against timeout
@@ -1229,7 +1118,8 @@ export class ComponentStart {
           adoptionFailure = { error };
         },
         onSettled: settlement
-          ? (): void => this.markRawStartSettled(run)
+          ? (): void =>
+              this.core.startSettlements.markRawStartSettled(settlement, claim)
           : undefined,
       });
       if (settlement) {
@@ -1269,17 +1159,6 @@ export class ComponentStart {
     return startPromise;
   }
 
-  /** The run's raw start has settled: its settlement withdrawn if the attempt has too. */
-  private markRawStartSettled(run: StartRun): void {
-    const { settlement } = run;
-    if (settlement) {
-      settlement.settleRawStart();
-      if (settlement.didSettle) {
-        this.deleteStartSettlement(run.claim);
-      }
-    }
-  }
-
   /**
    * A `start()` whose promise could not be observed: handed to late-start recovery through
    * a manager-owned promise, the wait on it abandoned and its signal aborted. The caller
@@ -1305,11 +1184,17 @@ export class ComponentStart {
         attachIntrinsicReactions(
           rawStart as object,
           () => {
-            this.markRawStartSettled(run);
+            this.core.startSettlements.markRawStartSettled(
+              settlement,
+              run.claim,
+            );
             resolve();
           },
           (reason) => {
-            this.markRawStartSettled(run);
+            this.core.startSettlements.markRawStartSettled(
+              settlement,
+              run.claim,
+            );
             // Preserve the raw hook's arbitrary rejection value.
             // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
             reject(reason);
@@ -1989,31 +1874,6 @@ export class ComponentStart {
       this.core.state.componentStates.set(name, 'stopped');
     } else {
       this.restoreComponentState(name, previousState);
-    }
-  }
-
-  /** Publish a start's settlement, by its claim and by its component's name. */
-  private addStartSettlement(claim: symbol, settlement: StartSettlement): void {
-    this.core.state.startSettlements.set(claim, settlement);
-    let byName = this.core.state.startSettlementsByName.get(settlement.name);
-    if (byName === undefined) {
-      byName = new Set();
-      this.core.state.startSettlementsByName.set(settlement.name, byName);
-    }
-    byName.add(settlement);
-  }
-
-  /** Withdraw the settlement `claim` published, from both of its indexes. */
-  private deleteStartSettlement(claim: symbol): void {
-    const settlement = this.core.state.startSettlements.get(claim);
-    if (settlement === undefined) {
-      return;
-    }
-    this.core.state.startSettlements.delete(claim);
-    const byName = this.core.state.startSettlementsByName.get(settlement.name);
-    byName?.delete(settlement);
-    if (byName?.size === 0) {
-      this.core.state.startSettlementsByName.delete(settlement.name);
     }
   }
 
