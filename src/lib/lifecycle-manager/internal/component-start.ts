@@ -584,9 +584,10 @@ export class ComponentStart {
         // A stop that fails here - an invalid shutdown timeout, say - leaves the
         // component up with no start owning it, so the result says so rather than
         // answer only that shutdown began. Not when the `started` listeners or the log
-        // above already took it down - an unexpected stop it reported there - or began
-        // stopping it: there is nothing left to stop, or that stop owns it, and stopping
-        // it again only failed as not running or already stopping.
+        // in `markStartedUnderShutdown()` already took it down - an unexpected stop it
+        // reported there - or began stopping it: there is nothing left to stop, or that
+        // stop owns it, and stopping it again only failed as not running or already
+        // stopping.
         const stopResult = this.core.registry.isComponentUp(name)
           ? await this.core.componentStop.stopComponentInternal(name)
           : undefined;
@@ -605,11 +606,11 @@ export class ComponentStart {
         throw this.recordStartupTimeout(run);
       }
 
-      const signalAttachError = this.completeStart(run);
-      if (signalAttachError !== undefined) {
+      const signalAttachFailure = this.completeStart(run);
+      if (signalAttachFailure !== undefined) {
         return await this.core.signals.rollBackStartForSignalAttach(
           name,
-          signalAttachError,
+          signalAttachFailure.attachError,
         );
       }
 
@@ -724,10 +725,10 @@ export class ComponentStart {
 
     // Read only where it decides something: a dependency that is not up, and only
     // without the override, which ignores the answer. One that stops after this read
-    // has no answer and is held to required below - the conservative reading. Kept by
-    // registration: the same instance can be unregistered and registered again while
-    // its optionality is read, so instance identity alone does not keep the answer
-    // current.
+    // has no answer, and `approveDependencies()` holds it to required - the
+    // conservative reading. Kept by registration: the same instance can be unregistered
+    // and registered again while its optionality is read, so instance identity alone
+    // does not keep the answer current.
     const optionalDependencies = new Map<
       string,
       { component: BaseComponent; generation: number | undefined }
@@ -754,9 +755,9 @@ export class ComponentStart {
     }
 
     // Read before the component is claimed: it is the component's own property, and a
-    // getter that threw between the claim and the `try` below skipped that `try`'s
-    // cleanup, leaving auto-attached signals attached behind a `component:starting`
-    // with no terminal event.
+    // getter that threw between the claim and `startComponentAttempt()`'s `try` skipped
+    // that `try`'s cleanup, leaving auto-attached signals attached behind a
+    // `component:starting` with no terminal event.
     const componentTimeout =
       restartSnapshot?.timeoutMS ??
       toOperationTimerDelayMS(
@@ -817,8 +818,8 @@ export class ComponentStart {
       return staleBeforeClaim;
     }
     // The same instance may have been unregistered and registered again by one of the
-    // component-owned reads above. Its old dependency list and optionality answers no
-    // longer describe the registration this start would claim.
+    // component-owned reads in `prepareStart()`. Its old dependency list and optionality
+    // answers no longer describe the registration this start would claim.
     if (
       this.core.registryReads.currentGeneration(component) !==
       dependencyGeneration
@@ -1027,8 +1028,9 @@ export class ComponentStart {
     const { name, preparation, settlement } = run;
     const { component, startupDependencyReads } = preparation;
 
-    // Inside the `try`, so a failure here is a failed start like any other - reported
-    // with `component:start-failed`, and its auto-attached signals detached.
+    // Called inside `startComponentAttempt()`'s `try`, so a failure here is a failed
+    // start like any other - reported with `component:start-failed`, and its
+    // auto-attached signals detached.
     component._setUnexpectedStopHandler(
       this.core.unexpectedStops.createUnexpectedStopHandler(
         name,
@@ -1053,8 +1055,9 @@ export class ComponentStart {
     }
     // One controller per attempt, its signal handed to `start()`. Aborted only where
     // the manager stops waiting on this attempt's still-pending `start()` - the timer
-    // below - never because `start()` settled, either way. Guarded before `start()`
-    // sees it, so a listener the component adds cannot throw out of that abort.
+    // `armStartDeadline()` arms - never because `start()` settled, either way. Guarded
+    // before `start()` sees it, so a listener the component adds cannot throw out of
+    // that abort.
     const startAbort = createHookAbortController(name, 'start');
     if (settlement) {
       settlement.interruptStart = (reason): boolean => {
@@ -1084,12 +1087,12 @@ export class ComponentStart {
     const { claim, settlement } = run;
     const { component } = run.preparation;
 
-    // Race against timeout
     // Adopted, not raced as it is: a native promise carrying its own no-op `then`
     // never settled the race, and its rejection went unhandled. See `adoptPromise()`.
     let startPromise: Promise<unknown>;
     // Read before `start()` runs: a shutdown it requests itself is left to it (see
-    // `interruptPendingStarts()`), so only a pass already running by then counts below.
+    // `interruptPendingStarts()`), so only a pass already running by then counts in
+    // `queueMissedShutdownCue()`.
     const startAbortRequest = this.core.state.pendingStartAbortRequest;
     const shutdownTokenBeforeStartHook = this.core.state.shutdownToken;
     if (settlement) {
@@ -1111,8 +1114,8 @@ export class ComponentStart {
         [startAbort.signal],
       );
       let adoptionFailure: { error: unknown } | undefined;
-      // Marked settled by the reaction that settles the adopted promise, before the
-      // race below or any late-cleanup observer hears of it.
+      // Marked settled by the reaction that settles the adopted promise, before
+      // `startComponentAttempt()`'s race or any late-cleanup observer hears of it.
       startPromise = adoptPromise(rawStart, {
         onObservationFailure: (error) => {
           adoptionFailure = { error };
@@ -1243,9 +1246,9 @@ export class ComponentStart {
     // unless its own lifecycle handle requested the pass. A starting listener can
     // use that handle before the hook runs; it still counts as a requesting start.
     //
-    // A microtask later, queued after `markRawStartSettled` above: a `start()` that
-    // settled synchronously has cleared `rawStartPending` by then, and a settled start
-    // is not aborted.
+    // A microtask later, queued after the `markRawStartSettled` reaction
+    // `invokeStartHook()` attached: a `start()` that settled synchronously has cleared
+    // `rawStartPending` by then, and a settled start is not aborted.
     if (
       settlement !== undefined &&
       startAbortRequest !== undefined &&
@@ -1352,7 +1355,10 @@ export class ComponentStart {
     return run.startupTimeoutError;
   }
 
-  /** Hand the run's start to late cleanup, for a deadline that won (see above). */
+  /**
+   * Hand the run's start to late cleanup, for a deadline that won (see
+   * `recordStartupTimeout()`).
+   */
   private monitorLateStart(
     run: StartRun,
     startPromise: Promise<unknown>,
@@ -1435,9 +1441,10 @@ export class ComponentStart {
         componentName: name,
         // Guarded: `error` came from the component's own `reportUnexpectedStop`, and
         // `toError` returns an `Error` unchanged, so `message` is whatever accessor the
-        // component put there. An unguarded read threw out of the `try` and then again
-        // out of the `catch` below, so `startComponent` rejected instead of returning
-        // this `component_unexpected_stop` result.
+        // component put there. An unguarded read threw out of the `try` of
+        // `startComponentAttempt()` and then again out of its `catch`, so
+        // `startComponent` rejected instead of returning this
+        // `component_unexpected_stop` result.
         reason: describeError(error),
         code: 'component_unexpected_stop',
         error,
@@ -1458,11 +1465,11 @@ export class ComponentStart {
 
     this.core.dispatcher.withTransition(() => {
       this.core.state.componentErrors.set(name, null);
-      // A new run, as on the success path below: a forced start retires the old
-      // stall and its stop token before this stop takes the component over.
+      // A new run, as on the success path (`completeStart()`): a forced start retires
+      // the old stall and its stop token before this stop takes the component over.
       this.markStartRunning(name, run.preparation.flags.forceStalled);
-      // Announced as started, as the signal-attach rollback below announces its
-      // component before stopping it: observers see an ordinary start followed by
+      // Announced as started, as `completeStart()` announces a component before a
+      // failed signal attach rolls it back: observers see an ordinary start followed by
       // a stop. Without it, `component:stopping` / `component:stopped` arrived for
       // a component whose `component:starting` never ended in `started`.
       this.core.lifecycleEvents.componentStarted(
@@ -1516,10 +1523,10 @@ export class ComponentStart {
 
   /**
    * Mark a resolved start running and announce it, then attach signals for the first
-   * component up where configured. Answers the attach's error when it failed, which the
-   * attempt rolls back.
+   * component up where configured. Answers `{ attachError }` when that attach failed,
+   * which the attempt rolls back, and `undefined` when the start is complete.
    */
-  private completeStart(run: StartRun): Error | undefined {
+  private completeStart(run: StartRun): { attachError: Error } | undefined {
     const { name } = run;
 
     this.core.dispatcher.withTransition(() => {
@@ -1562,7 +1569,7 @@ export class ComponentStart {
       );
 
       if (signalAttach.outcome === 'failed') {
-        return signalAttach.error;
+        return { attachError: signalAttach.error };
       }
     }
 
@@ -1678,9 +1685,9 @@ export class ComponentStart {
       return {
         success: false,
         componentName: name,
-        // Guarded for the same reason as the `try` path above, and it matters more
-        // here: this runs inside the `catch`, so a `message` that throws has nothing
-        // left above it to catch and escapes as a rejection.
+        // Guarded for the same reason as in `answerStartEndedDuringHook()`, and it
+        // matters more here: this runs inside the attempt's `catch`, so a `message` that
+        // throws has nothing left above it to catch and escapes as a rejection.
         //
         // Both empty cases, not just `undefined`: `componentErrors` holds
         // `Error | null`, and `null` is how `reportUnexpectedStop()` records a stop
@@ -1780,8 +1787,8 @@ export class ComponentStart {
         // Back to the state the component had before this attempt claimed it, as the
         // start net restores it: a failed restart of a stopped component was answered
         // `registered` - never started - beside the `startedAt` / `stoppedAt` of the
-        // run it had. The claim is still this attempt's: the supersession check above
-        // returned otherwise.
+        // run it had. The claim is still this attempt's: the supersession check in
+        // `startFailureResult()` returned otherwise.
         this.restoreStateAfterFailedStart(
           name,
           this.core.claims.owns(name, claim)

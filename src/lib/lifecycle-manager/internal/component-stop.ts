@@ -89,7 +89,7 @@ interface ForceStopContext {
   readonly gracefulError?: Error;
   readonly startedAt: number;
   // A stalled component's force-phase retry: a new stop attempt, which issues its
-  // own token - see below.
+  // own token - see `ComponentStop.claimForceStop()`.
   readonly isStalledRetry?: boolean;
 }
 
@@ -679,11 +679,14 @@ export class ComponentStop {
       stall = { gracefulTimedOut: stop.gracefulTimedOut };
       // Signals stay attached, as they do for every other stall: a stalled component
       // was not confirmed stopped, and during a shutdown the operator's next Ctrl+C
-      // still has to reach escalation. No force-stop waiter is left to release here:
-      // the only one this claim could hold is its own force attempt's, which that
-      // attempt's `finally` removed before the crash reached this net, and a waiter
-      // of an attempt superseded earlier was released when the component was marked
-      // stopped.
+      // still has to reach escalation. No force-stop waiter is released here. The only
+      // one this claim could hold is its own force attempt's, which that attempt's
+      // `finally` removes once the attempt has entered its `try`. The waiter is made
+      // just before that `try`, though, so a throw in between - in practice only from
+      // `createStopPhaseObserver()`, through a test seam - leaves it registered until
+      // the component is next marked stopped or is unregistered, either of which drops
+      // it. A waiter of an attempt superseded earlier was released when the component
+      // was marked stopped.
       this.core.lifecycleEvents.componentStalled(name, stallInfo, {
         reason: stallInfo.reason,
         // Paired with the reason as every other stall is: a crash still in the graceful
@@ -970,8 +973,9 @@ export class ComponentStop {
     // reported) rather than a failed graceful phase (`error`).
     const stopHook: unknown = Reflect.get(component, 'stop');
     // One controller per graceful attempt, its signal handed to `stop()`. Aborted only
-    // at this attempt's graceful deadline - the timer below - never because `stop()`
-    // settled, either way, and never by the force phase that may follow.
+    // at this attempt's graceful deadline - the timer `armGracefulDeadline()` arms -
+    // never because `stop()` settled, either way, and never by the force phase that
+    // may follow.
     const stopAbort = createHookAbortController(name, 'stop');
     const run = new GracefulStopRun(
       name,
@@ -993,8 +997,8 @@ export class ComponentStop {
           // A stop that succeeds once its deadline has fired - a bare promise the
           // timeout notification itself resolved - is recorded by the reaction that
           // settles adoption, where the stop settled, so the graceful result's caller
-          // finds it before escalating. The deadline observer below records it too,
-          // a reaction later, and reconciles it.
+          // finds it before escalating. The deadline observer `armGracefulDeadline()`
+          // installs records it too, a reaction later, and reconciles it.
           onSettled: (didFulfill) => {
             if (didFulfill && run.gracefulTimeoutError !== undefined) {
               preparation.lateResolution = stopAttemptToken;
@@ -1068,7 +1072,8 @@ export class ComponentStop {
     // to re-enter. It must find this stop already in progress. Both happen before
     // any async work, so reports of an unexpected stop are ignored from here on.
     // The stop is recorded with the claim, so a crash anywhere in this phase reaches
-    // the stop net with the time this stop began; its timeout updates it below.
+    // the stop net with the time this stop began; a timeout updates it in
+    // `gracefulFailureResult()`.
     this.core.claims.take(name, 'stopping', claim, {
       startedAt: preparation.startedAt,
       gracefulTimedOut: false,
@@ -1103,12 +1108,14 @@ export class ComponentStop {
           componentName: name,
           timeoutMS,
         });
-        // Listeners that release `stop()` win the race below: the timeout's
-        // rejection waits a macrotask (see `rejectAfterAbort()`).
+        // Listeners that release `stop()` win the race in
+        // `shutdownComponentGraceful()`: the timeout's rejection waits a macrotask
+        // (see `rejectAfterAbort()`).
         abortHookSignal(stopAbort, run.gracefulTimeoutError, name, 'stop');
 
-        // Attached ahead of both the observer below and the `catch`, so each
-        // reads the link as decided once: the error's members are the caller's.
+        // Attached ahead of both the observer below and the `catch` in
+        // `shutdownComponentGraceful()`, so each reads the link as decided once: the
+        // error's members are the caller's.
         const deadlineReason = run.gracefulTimeoutError;
         observeRejection(stopPromise, (error: unknown) => {
           run.didRejectForDeadline = isLinkedToAbort(error, deadlineReason);
@@ -1232,9 +1239,9 @@ export class ComponentStop {
       return {
         success: false,
         componentName: name,
-        // Guarded: this runs inside the `catch`, and `toError` returns a
-        // brand-claiming value unchanged, so a `message` accessor that throws
-        // here escapes as a rejection instead of this failure result.
+        // Guarded: this runs inside `shutdownComponentGraceful()`'s `catch`, and
+        // `toError` returns a brand-claiming value unchanged, so a `message` accessor
+        // that throws here escapes as a rejection instead of this failure result.
         reason: describeError(err),
         code: 'error',
         error: err,
@@ -1308,8 +1315,9 @@ export class ComponentStop {
     // One controller per force attempt - an escalation, a `forceImmediate` stop, or a
     // stalled retry - its signal handed to `onShutdownForce()`. Aborted where the manager
     // no longer needs that still-pending call: at this attempt's force deadline - the
-    // timer below - or when another path stopped the component first and ended the phase
-    // (see the superseded return below). Never because the hook itself settled.
+    // timer `armForceDeadline()` arms - or when another path stopped the component first
+    // and ended the phase (`answerSupersededForce()`). Never because the hook itself
+    // settled.
     const forceAbort = createHookAbortController(name, 'force');
     const run = new ForceStopRun(
       name,
@@ -1478,7 +1486,8 @@ export class ComponentStop {
     }
 
     // Claim before calling this overridable hook, just as in the graceful phase.
-    // Property-read failures above still leave the unexpected-stop handler intact.
+    // Property-read failures in `prepareForceShutdown()` still leave the
+    // unexpected-stop handler intact.
     this.core.unexpectedStops.clearUnexpectedStopHandler(
       component,
       'force stop',
@@ -1508,8 +1517,9 @@ export class ComponentStop {
   ): ComponentOperationResult {
     // After a graceful phase, that phase is what failed: there was nothing to escalate
     // to. A direct `forceImmediate` stop ran no graceful phase - a stalled retry without
-    // a handler returned above - so what failed is the force phase it asked for, which
-    // had no handler to run; the stall says so rather than blame a graceful phase.
+    // a handler returned in `claimForceStop()` - so what failed is the force phase it
+    // asked for, which had no handler to run; the stall says so rather than blame a
+    // graceful phase.
     const isForceImmediate = !context.gracefulPhaseRan;
     const stallInfo = isForceImmediate
       ? this.core.stopOutcomes.stopStallInfo(
@@ -1582,7 +1592,8 @@ export class ComponentStop {
           'onShutdownForce',
         );
 
-        // Ahead of the observer below and the `catch`, as in the graceful phase.
+        // Ahead of the observer below and `shutdownComponentForce()`'s `catch`, as in
+        // the graceful phase.
         const deadlineReason = run.forceTimeoutError;
         observeRejection(forcePromise, (error: unknown) => {
           run.didRejectForDeadline = isLinkedToAbort(error, deadlineReason);
@@ -1768,13 +1779,16 @@ export class ComponentStop {
   }
 
   /**
-   * Whether a force attempt resuming after its `await` no longer owns the component.
+   * Whether a force attempt resuming after its `await` no longer owns the component, or
+   * another path already marked it stopped.
    *
-   * The graceful stop it was escalating from finished late, and something claimed the
-   * component since - a `component:stopped` listener that started it again, say - or it
-   * is no longer the registered instance. The stop did happen, so the attempt answers
-   * as one whose graceful completion won, without writing its outcome over that newer
-   * state: marking a running component stopped, or a replacement stalled.
+   * No longer owned: the graceful stop it was escalating from finished late, and
+   * something claimed the component since - a `component:stopped` listener that started
+   * it again, say - or it is no longer the registered instance. Already stopped: the
+   * attempt's waiter has resolved, or the state is `stopped` while the component is not
+   * running. Either way the stop did happen, so the attempt answers as one whose
+   * graceful completion won, without writing its outcome over that state: marking a
+   * running component stopped, or a replacement stalled.
    */
   private isForceAttemptSuperseded(run: ForceStopRun): boolean {
     const { name, component, claim } = run;

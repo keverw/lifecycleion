@@ -106,10 +106,11 @@ export class StartupPreflight {
     }
 
     // A component still stopping is counted as running, but it is on its way down: the
-    // shortcut below would report it "already running" - listing it as started though
-    // its `start()` never ran - and a start of it now would only be refused. Refused
-    // until the stop settles, as a partial state is. A late start's cleanup marks its
-    // component running only so it can be stopped, so it is on its way down too.
+    // all-running shortcut in `answerRunningComponents()` would report it "already
+    // running" - listing it as started though its `start()` never ran - and a start of
+    // it now would only be refused. Refused until the stop settles, as a partial state
+    // is. A late start's cleanup marks its component running only so it can be stopped,
+    // so it is on its way down too.
     const stillStartingNames: string[] = [];
     const stillStoppingNames = this.core.manager
       .getComponentNames()
@@ -156,8 +157,9 @@ export class StartupPreflight {
           `Components are still starting: ${stillStartingNames.join(', ')}`,
           Date.now() - startTime,
         ),
-        // Match the already-running partial-state result below: pending starts
-        // are excluded, but completed components remain visible to the caller.
+        // Match the already-running partial-state result of
+        // `answerRunningComponents()`: pending starts are excluded, but completed
+        // components remain visible to the caller.
         startedComponents: this.core.startup.runningStartupSnapshot(),
       };
     }
@@ -191,7 +193,7 @@ export class StartupPreflight {
         : [];
 
     // All running - nothing to do. At least one: an empty registry was refused earlier,
-    // and one whose components are all stalled is left to the startup below to skip.
+    // and one whose components are all stalled is left to the startup itself to skip.
     if (
       runningCount > 0 &&
       runningCount === totalCount - stalledToSkip().length
@@ -218,7 +220,7 @@ export class StartupPreflight {
             }),
         failedOptionalComponents: [],
         skippedDueToDependency: [],
-        // As the startup below reports the stalled components it skipped.
+        // As the startup itself reports the stalled components it skipped.
         ...(skippedDueToStall.length > 0 ? { skippedDueToStall } : {}),
         durationMS: Date.now() - startTime,
       };

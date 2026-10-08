@@ -308,7 +308,7 @@ export class StartupOrchestration {
     this.core.state.pendingRestartAutoStarts.clear();
     this.core.state.autoAttachedSignalsDuringStartup = false;
 
-    // This startup's baseline for every "did a shutdown start meanwhile" check below,
+    // This startup's baseline for every "did a shutdown start meanwhile" check it makes,
     // including the one right after the attach.
     const shutdownTokenAtBulkStart = this.core.state.shutdownToken;
     const hasShutdownBegun = (): boolean =>
@@ -346,8 +346,8 @@ export class StartupOrchestration {
     // The other thing a `signals-attached` listener can do: start a shutdown. That pass
     // is running now, with its own token, method, and escalation state - adopting the
     // new token as this startup's baseline, and resetting that state under it, would
-    // have hidden it from every check below. Refuse as a startup arriving during a
-    // shutdown is refused.
+    // have hidden it from every such check this startup makes. Refuse as a startup
+    // arriving during a shutdown is refused.
     if (hasShutdownBegun()) {
       this.releaseStartupLatch({
         didAutoAttachSignals: didAutoAttachSignalsForBulkStartup,
@@ -741,9 +741,9 @@ export class StartupOrchestration {
     }
 
     // Check if any required dependency failed or was skipped
-    // The list the order was computed from, handed to the component's own start
-    // below too: the order, the skip check and that start all act on one read.
-    // Tolerant here - its valid entries still decide the skip - and the start
+    // The list the order was computed from, handed to the component's own start in
+    // `runStartup()` too: the order, the skip check and that start all act on one
+    // read. Tolerant here - its valid entries still decide the skip - and the start
     // fails it on a broken list; reported when read, in case it is skipped.
     const dependencyRead = run.bulkStartup.dependencyReads.get(component);
 
@@ -902,8 +902,8 @@ export class StartupOrchestration {
     } else if (result.code === 'component_unexpected_stop') {
       // This branch is for components that reported an unexpected stop
       // before startComponentInternal() returned. That is distinct from the
-      // post-success reconciliation below, which handles components that
-      // had already been counted as started during this bulk pass.
+      // post-success reconciliation in `reconcileOrFail()`, which handles
+      // components that had already been counted as started during this bulk pass.
       this.core.state.unexpectedStopsDuringStartup.delete(name);
 
       const error =

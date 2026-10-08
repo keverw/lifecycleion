@@ -784,9 +784,10 @@ export class RegistrationOperations {
     candidateRead: Extract<DependencyRead, { dependencies: string[] }>,
   ): void {
     const { component, componentName } = attempt;
-    // Only now: a registration refused above - a dependency cycle, a failed hook - used
-    // to have spent this component's one report, leaving the registration that
-    // followed silent about the same broken list.
+    // Only now: a registration refused before reaching here - a dependency cycle in
+    // `placeRegistration()`, a failed hook in `commitRegistration()` - used to have spent
+    // this component's one report, leaving the registration that followed silent about
+    // the same broken list.
     if (candidateRead.invalidEntry !== undefined) {
       this.core.componentMetadata.reportDependencyReadFailureOnce(
         component,

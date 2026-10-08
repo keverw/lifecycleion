@@ -263,7 +263,8 @@ export class UnregistrationOperations {
 
     // The log line above ran caller code, which may have begun a stop or a bulk
     // operation of its own. Answer for that one, rather than reporting the refusal it
-    // causes below as this unregister's failed stop.
+    // causes in the stop `unregisterComponentOperation()` runs next as this
+    // unregister's failed stop.
     const inFlightBeforeStop = this.refuseUnregisterWhileInFlight(name, false);
 
     if (inFlightBeforeStop !== null) {
@@ -402,11 +403,12 @@ export class UnregistrationOperations {
       }
     }
 
-    // Checked again here rather than only at the top: a bulk startup or shutdown that
-    // began while this component was stopping - or inside that same option getter - now
-    // owns the registry, and removing a component from under it is what the guard at the
-    // top exists to prevent. The component stays registered, in whatever state it
-    // reached: stopped on the stop path, untouched on the one that had nothing to stop.
+    // Checked again here rather than only at the top of `unregisterComponentOperation()`:
+    // a bulk startup or shutdown that began while this component was stopping - or
+    // inside one of this call's option getters - now owns the registry, and removing a
+    // component from under it is what that first guard exists to prevent. The component
+    // stays registered, in whatever state it reached: stopped on the stop path,
+    // untouched on the one that had nothing to stop.
     if (this.isBulkOperationBlockingUnregister(name)) {
       return this.refuseUnregisterForBulkOperation(
         name,
@@ -441,7 +443,8 @@ export class UnregistrationOperations {
       // A removed registration must not survive as deferred work in a restart
       // handoff. A later registration of the name decides its own auto-start policy.
       // `deferredAutoStartNames` needs no such step: it holds names only while a
-      // startup holds the latch, and the bulk-operation check above refuses then.
+      // startup holds the latch, and the bulk-operation check in `refuseAfterStop()`
+      // refuses then.
       for (const pending of this.core.state.pendingRestartAutoStarts) {
         pending.delete(name);
       }
