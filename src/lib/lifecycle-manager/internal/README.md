@@ -39,12 +39,14 @@ and every subsystem, a class built over the core:
 | `unregistration`     | `unregistration-operations.ts` | `UnregistrationOperations`: unregistering - its refusals, stopping a running component first, the replacement checks after caller code, and the removal.                     |
 | `startupOrdering`    | `startup-ordering.ts`          | `StartupOrdering`: the dependency order startup, shutdown and registration share, answering a failure to compute it, and `getStartupOrder()` / `validateDependencies()`.     |
 | `claims`             | `component-claims.ts`          | `ComponentClaims`: taking, checking and releasing the per-component claims start and stop attempts hold.                                                                     |
-| `componentStart`     | `component-start.ts`           | `ComponentStart`: the per-component start pipeline - the start net, its preconditions, the attempt, start settlements, and marking a component running.                      |
+| `componentStart`     | `component-start.ts`           | `ComponentStart`: the per-component start pipeline - the start net, its preconditions, the attempt, and marking a component running or restoring its state.                  |
+| `startSettlements`   | `start-settlements.ts`         | `StartSettlements`: the settlement each start attempt publishes - its raw start and owned cleanup - and which starts are current or still pending.                           |
 | `componentStop`      | `component-stop.ts`            | `ComponentStop`: the per-component stop pipeline - refusals, the stop net, graceful and force phases, stalled retries, and stop attempt tokens.                              |
 | `stopOutcomes`       | `stop-outcomes.ts`             | `StopOutcomes`: what a stop leaves - marking a component stopped or stalled, force-stop waiters, late stop resolution - and the results it answers with.                     |
 | `lateStartRecovery`  | `late-start-recovery.ts`       | `LateStartRecovery`: stopping a start the manager stopped waiting for if it completes later, and whether such a start is still awaited.                                      |
 | `unexpectedStops`    | `unexpected-stops.ts`          | `UnexpectedStops`: the unexpected-stop handler a running component reports through, clearing it, and draining the stops a bulk startup recorded.                             |
-| `startup`            | `startup-orchestration.ts`     | `StartupOrchestration`: bulk startup - its refusals, the startup latch, the batch loop and follow-up auto-starts, rollback, and releasing what it held.                      |
+| `startup`            | `startup-orchestration.ts`     | `StartupOrchestration`: bulk startup - the startup latch, the batch loop and follow-up auto-starts, rollback, and releasing what it held.                                    |
+| `startupPreflight`   | `startup-preflight.ts`         | `StartupPreflight`: a bulk startup's answers before the latch - an operation already active, and the registry preflight.                                                     |
 | `shutdownPass`       | `shutdown-pass.ts`             | `ShutdownPassRunner`: the shutdown latch, accepting or refusing a pass, and the pass itself - warning phase, stop loop, joined starts, and its result.                       |
 | `shutdownEscalation` | `shutdown-escalation.ts`       | `ShutdownEscalation`: shutdown signal requests, repeated-request counting, the post-failure armed window, and the escalation status.                                         |
 | `restart`            | `restart-operations.ts`        | `RestartOperations`: bulk and single restarts - refusals, validating both phases before any stop, and the stale-snapshot check.                                              |
@@ -71,10 +73,13 @@ and every subsystem, a class built over the core:
   are the `StartupRun` every phase of `StartupOrchestration` takes, a registration's
   reads and index the `RegistrationAttempt` every phase of `registerComponentInternal()`
   takes, an unregister's instance, generation and options the `UnregisterAttempt`
-  every phase of `unregisterComponentOperation()` takes, and a stop phase's deadline,
-  observer, abort controller and race flags the `GracefulStopRun` or `ForceStopRun`
-  every step of that phase takes. Phases stay synchronous; an asynchronous step hands
-  its promise back to be awaited directly, so a split adds no await point.
+  every phase of `unregisterComponentOperation()` takes, a start's reads the
+  `StartPreparation` its claim checks and its claimed state, token, deadline and race
+  flags the `StartRun` every step of `startComponentAttempt()` takes, and a stop
+  phase's deadline, observer, abort controller and race flags the `GracefulStopRun` or
+  `ForceStopRun` every step of that phase takes. Phases stay synchronous; an
+  asynchronous step hands its promise back to be awaited directly, so a split adds no
+  await point.
 - Tests reach subsystems through `coreOf(manager)` (`test-helpers.ts`). A few members
   are kept as methods only as test seams, and say so:
   `RegistrationOperations.isManualPositionRespected()` and
@@ -88,9 +93,11 @@ and every subsystem, a class built over the core:
 | `registerComponent()`, `insertComponentAt()` / `unregisterComponent()`   | `RegistrationOperations` / `UnregistrationOperations`                                     |
 | `getStartupOrder()`, `validateDependencies()`, the order startup follows | `StartupOrdering`; the graph itself in `dependency-policy.ts`                             |
 | `startComponent()` / `stopComponent()`                                   | `ComponentStart` / `ComponentStop`, holding claims through `ComponentClaims`              |
+| Whether a start is current, or its `start()` still pending               | `StartSettlements`                                                                        |
 | A timed-out start that completes later; a running component's crash      | `LateStartRecovery`; `UnexpectedStops`                                                    |
 | A stop that settles after its deadline; a stall's record and result      | `StopOutcomes`                                                                            |
 | `startAllComponents()` / `stopAllComponents()`                           | `StartupOrchestration` / `ShutdownPassRunner`; warnings in `shutdown-warning.ts`          |
+| A bulk startup's refusals before it takes its latch                      | `StartupPreflight`                                                                        |
 | SIGINT/SIGTERM and repeated shutdown requests                            | `ShutdownEscalation`                                                                      |
 | `restartAllComponents()` / `restartComponent()`                          | `RestartOperations`                                                                       |
 | `attachSignals()`, `detachSignals()`, `trigger*()`, auto attach/detach   | `SignalIntegration`; per-component broadcasts in `component-inspection.ts`                |
