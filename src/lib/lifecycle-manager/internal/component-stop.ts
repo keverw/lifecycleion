@@ -34,6 +34,7 @@ import {
   snapshotStopOptions,
   type StopOptionsSnapshot,
 } from './operation-options';
+import { takeRestartStopDispatch } from './restart-dispatch';
 import type { PendingForceStopWaiter } from './stop-outcomes';
 import { createStopPhaseObserver } from './stop-phase-observer';
 
@@ -200,50 +201,19 @@ export class ComponentStop {
   constructor(private readonly core: ManagerCore) {}
 
   /**
-   * The body of the manager's public `stopComponent()`: refused during bulk work and
-   * with active dependents, then run through `stopComponentInternal()`.
+   * The body of the manager's public `stopComponent()`: a restart's stop when `options`
+   * is the object `restartComponent()` handed it (`restart-dispatch.ts`), otherwise an
+   * individual stop. Looked up before anything else, since the two refuse bulk work
+   * differently; the lookup runs no caller code.
    */
-  public async stopComponentOperation(
+  public stopComponentOperation(
     name: string,
     options: StopComponentOptions | undefined,
   ): Promise<ComponentOperationResult> {
-    const bulkRefusal = this.checkIndividualBulkPreconditions(name, 'stop');
-    if (bulkRefusal) {
-      return bulkRefusal;
-    }
-
-    // Every option is read here, once, before the dependents refusal and the claim, and
-    // the getters are caller code: the bulk check is made again after them.
-    const stopOptions = snapshotStopOptions(options);
-    const afterOptionsRefusal = this.checkIndividualBulkPreconditions(
-      name,
-      'stop',
-    );
-    if (afterOptionsRefusal) {
-      return afterOptionsRefusal;
-    }
-    const stopContext: IndividualStopContext = {
-      operation: 'stop',
-      claimed: false,
-      allowStopWithRunningDependents:
-        stopOptions.allowStopWithRunningDependents,
-    };
-
-    // Checked here as well as by `checkIndividualStopClaim()` right before the claim,
-    // not instead of it. This one gives the refusal precedence: a stop - or restart -
-    // refused for its running dependents answers so without reading the component's
-    // timeouts and force handler, whose getters would otherwise run - and an invalid
-    // value there answer `invalid_options` - for a stop that was never going to happen.
-    // The second catches a dependent those getters started.
-    const dependentRefusal = this.checkIndividualStopDependents(
-      name,
-      stopContext,
-    );
-    if (dependentRefusal) {
-      return dependentRefusal;
-    }
-
-    return await this.stopComponentInternal(name, stopOptions, stopContext);
+    const restart = takeRestartStopDispatch(name, options);
+    return restart === undefined
+      ? this.individualStopOperation(name, options)
+      : this.core.restart.restartStopOperation(name, restart);
   }
 
   /** Snapshot the refusal before a guarded logger can re-enter either operation. */
@@ -525,6 +495,53 @@ export class ComponentStop {
     const next = ulid();
     this.core.state.componentStopAttemptTokens.set(name, next);
     return next;
+  }
+
+  /**
+   * An individual stop: refused during bulk work and with active dependents, then run
+   * through `stopComponentInternal()`.
+   */
+  private async individualStopOperation(
+    name: string,
+    options: StopComponentOptions | undefined,
+  ): Promise<ComponentOperationResult> {
+    const bulkRefusal = this.checkIndividualBulkPreconditions(name, 'stop');
+    if (bulkRefusal) {
+      return bulkRefusal;
+    }
+
+    // Every option is read here, once, before the dependents refusal and the claim, and
+    // the getters are caller code: the bulk check is made again after them.
+    const stopOptions = snapshotStopOptions(options);
+    const afterOptionsRefusal = this.checkIndividualBulkPreconditions(
+      name,
+      'stop',
+    );
+    if (afterOptionsRefusal) {
+      return afterOptionsRefusal;
+    }
+    const stopContext: IndividualStopContext = {
+      operation: 'stop',
+      claimed: false,
+      allowStopWithRunningDependents:
+        stopOptions.allowStopWithRunningDependents,
+    };
+
+    // Checked here as well as by `checkIndividualStopClaim()` right before the claim,
+    // not instead of it. This one gives the refusal precedence: a stop - or restart -
+    // refused for its running dependents answers so without reading the component's
+    // timeouts and force handler, whose getters would otherwise run - and an invalid
+    // value there answer `invalid_options` - for a stop that was never going to happen.
+    // The second catches a dependent those getters started.
+    const dependentRefusal = this.checkIndividualStopDependents(
+      name,
+      stopContext,
+    );
+    if (dependentRefusal) {
+      return dependentRefusal;
+    }
+
+    return await this.stopComponentInternal(name, stopOptions, stopContext);
   }
 
   /**

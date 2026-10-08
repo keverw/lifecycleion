@@ -22,10 +22,6 @@ import {
   crashedComponentResult,
   observeFailureAfterTimeout,
 } from './internal/operation-policy';
-import {
-  snapshotStartOptions,
-  snapshotStartupOptions,
-} from './internal/operation-options';
 import { EventEmitterProtected } from '../event-emitter';
 import type { Logger } from '../logger';
 import type { LoggerService } from '../logger/logger-service';
@@ -557,10 +553,7 @@ export class LifecycleManager
   public startAllComponents(options?: StartupOptions): Promise<StartupResult> {
     return settleOperation(
       'startAllComponents',
-      () =>
-        this.core.startup.startAllComponentsOperation(() =>
-          snapshotStartupOptions(options),
-        ),
+      () => this.core.startup.startAllComponentsOperation(options),
       (error, reason, code) => crashedStartupResult(error, reason, code),
     );
   }
@@ -656,10 +649,7 @@ export class LifecycleManager
     return settleOperation(
       'startComponent',
       // Read by the start itself, under its own net, as the first thing it does.
-      () =>
-        this.core.componentStart.startComponentInternal(name, () =>
-          snapshotStartOptions(options),
-        ),
+      () => this.core.componentStart.startComponentOperation(name, options),
       (error, reason, code) =>
         crashedComponentResult(name, error, reason, code),
     );

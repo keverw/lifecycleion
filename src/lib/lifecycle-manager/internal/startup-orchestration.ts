@@ -7,20 +7,25 @@ import {
   LIFECYCLE_MANAGER_MESSAGE_UNKNOWN_ERROR,
 } from '../constants';
 import { DependencyCycleError } from '../errors';
-import type { ComponentOperationResult, StartupResult } from '../types';
+import type {
+  ComponentOperationResult,
+  StartupOptions,
+  StartupResult,
+} from '../types';
 import type { RestartStartSnapshot } from './component-start';
 import { type DependencyRead, dependenciesOf } from './dependency-policy';
 import type { ManagerCore } from './manager-core';
 import type { ActiveBulkStartup } from './manager-state';
 import {
   snapshotStartOptions,
-  type StartupOptionsSnapshot,
+  snapshotStartupOptions,
 } from './operation-options';
 import {
   crashedStartupResult,
   refusedStartupResult,
   resolveOperationTimeoutMS,
 } from './operation-policy';
+import { takeRestartStartupDispatch } from './restart-dispatch';
 
 /**
  * One bulk startup that has taken the latch and begun: what it has started, skipped and
@@ -123,18 +128,21 @@ export class StartupOrchestration {
   constructor(private readonly core: ManagerCore) {}
 
   /**
-   * `readOptions` takes the options snapshot: the caller's object for a public startup,
-   * or the one a restart already took. Called once, after the refusals that need no
-   * options.
+   * The body of the manager's public `startAllComponents()`. `options` is the caller's
+   * object, read once, after the refusals that need no options - or the object
+   * `restartAllComponents()` handed the public method for its startup phase
+   * (`restart-dispatch.ts`), which carries the options that restart already read and
+   * validated and the snapshots of the registrations it approved. That lookup runs no
+   * caller code.
    *
    * The phases, in order: refusals before the options are read and after, the registry
    * preflight (both `StartupPreflight`'s), taking the latch (`beginStartup()`), and the run
    * itself (`runStartup()`) - ordering, the batch loop, reconciliation, and finishing.
    */
   public async startAllComponentsOperation(
-    readOptions: () => StartupOptionsSnapshot,
-    restartSnapshots?: Map<string, RestartStartSnapshot>,
+    options: StartupOptions | undefined,
   ): Promise<StartupResult> {
+    const restart = takeRestartStartupDispatch(options);
     const startTime = Date.now();
     const alreadyActive =
       this.core.startupPreflight.refuseActiveBulkStartup(startTime);
@@ -146,7 +154,8 @@ export class StartupOrchestration {
     // for good. The timeout is only validated once the availability refusals below are
     // past - still before the latch: a startup that refuses never uses it, and an
     // availability refusal takes precedence over an option that would not be used.
-    const startupOptions = readOptions();
+    const startupOptions =
+      restart?.startupOptions ?? snapshotStartupOptions(options);
     const shouldIgnoreStalledComponents =
       startupOptions.ignoreStalledComponents;
     const requestedTimeoutMS = startupOptions.timeoutMS;
@@ -176,7 +185,7 @@ export class StartupOrchestration {
     const run = this.beginStartup(
       startTime,
       effectiveTimeout,
-      restartSnapshots,
+      restart?.restartSnapshots,
     );
     if (!(run instanceof StartupRun)) {
       return run;

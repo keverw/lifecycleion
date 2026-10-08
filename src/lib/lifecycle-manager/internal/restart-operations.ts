@@ -20,18 +20,20 @@ import {
   snapshotStartupOptions,
   snapshotStopAllOptions,
   type StartupOptionsSnapshot,
-  type StopOptionsSnapshot,
 } from './operation-options';
 import {
-  crashedComponentResult,
   crashedStartupResult,
   refusedShutdownResult,
   refusedStartupResult,
   resolveOperationTimeoutMS,
-  settleOperation,
   toOperationFlag,
   toOperationTimerDelayMS,
 } from './operation-policy';
+import {
+  restartDispatchOptions,
+  type RestartStartDispatch,
+  type RestartStopDispatch,
+} from './restart-dispatch';
 
 /** Everything restart preparation reads from the caller, validated before any stop. */
 interface RestartPreparation {
@@ -82,8 +84,11 @@ class RestartPreparationRefusal extends Error {
  * Restarts: `restartAllComponents()`'s body - refusing one that meets another bulk
  * operation, preparing it by reading and validating everything both phases will need
  * before stopping anything, then a stop phase through `core.shutdownPass` and a
- * startup phase through `core.startup` - and `restartComponent()`'s body, a stop and a
- * start of one component.
+ * startup phase through the manager's public `startAllComponents()` - and
+ * `restartComponent()`'s body, a stop and a start of one component through its public
+ * `stopComponent()` and `startComponent()`. Those three are called through
+ * `core.manager`, so an override or instance patch of one runs for a restart too; the
+ * options each is handed carry the restart's context (`restart-dispatch.ts`).
  *
  * A restart's start runs only for the registration the restart approved: the snapshots
  * it took carry each component's generation, and `refuseStaleRestartSnapshot()` is
@@ -360,14 +365,16 @@ export class RestartOperations {
       for (const name of this.staleRestartSnapshotNames(restartSnapshots)) {
         restartSnapshots.delete(name);
       }
-      const startupResult = await settleOperation(
-        'startAllComponents',
-        () =>
-          this.core.startup.startAllComponentsOperation(
-            () => startupOptions,
-            restartSnapshots,
-          ),
-        (error, reason, code) => crashedStartupResult(error, reason, code),
+      // Through the public method, so an override or instance patch of it runs. The
+      // options it is handed carry this restart's validated options and snapshots: see
+      // `restart-dispatch.ts`.
+      const startupResult = await this.core.manager.startAllComponents(
+        restartDispatchOptions({
+          kind: 'startup',
+          startupOptions,
+          restartSnapshots,
+          taken: false,
+        }),
       );
 
       const isSuccess = shutdownResult.success && startupResult.success;
@@ -493,17 +500,28 @@ export class RestartOperations {
     // refused by a concurrent restart's stop phase asks the same, and leaves no pass
     // running either once that restart skips its startup.
     const stayDownRequestCountAtStop = this.core.state.stayDownRequestCount;
-    const stopResult = await settleOperation(
-      'stopComponent',
-      () => this.restartStopOperation(name, stopOptions, stopContext),
-      (error, reason, code) =>
-        crashedComponentResult(name, error, reason, code),
+    // Stopped and started through the public methods, so an override or instance patch
+    // of either runs. The options each is handed carry this restart's context - its
+    // option snapshots, this stop's claim, the registration it approved - to
+    // `restartStopOperation()` and the start: see `restart-dispatch.ts`.
+    const stopDispatch: RestartStopDispatch = {
+      kind: 'stop',
+      name,
+      stopOptions,
+      stopContext,
+      taken: false,
+    };
+    const stopResult = await this.core.manager.stopComponent(
+      name,
+      restartDispatchOptions(stopDispatch),
     );
 
     if (!stopResult.success) {
       // Once this restart took a stop claim, even a later refusal or validation
-      // error describes an attempted stop. Only pre-claim failures pass through.
-      if (!stopContext.claimed) {
+      // error describes an attempted stop. Only pre-claim failures pass through. A stop
+      // an override ran without this restart's options cannot say whether it claimed,
+      // so its failure is answered as an attempted stop.
+      if (stopDispatch.taken && !stopContext.claimed) {
         return stopResult;
       }
       return {
@@ -550,19 +568,16 @@ export class RestartOperations {
       };
     }
 
-    const startResult = await settleOperation(
-      'startComponent',
-      () =>
-        this.core.componentStart.startComponentInternal(
-          name,
-          startOptions,
-          undefined,
-          undefined,
-          undefined,
-          startSnapshot,
-        ),
-      (error, reason, code) =>
-        crashedComponentResult(name, error, reason, code),
+    const startDispatch: RestartStartDispatch = {
+      kind: 'start',
+      name,
+      startOptions,
+      startSnapshot,
+      taken: false,
+    };
+    const startResult = await this.core.manager.startComponent(
+      name,
+      restartDispatchOptions(startDispatch),
     );
 
     if (!startResult.success) {
@@ -604,6 +619,28 @@ export class RestartOperations {
       reason: 'Component registration changed while restart was starting it',
       code: 'component_not_found',
     };
+  }
+
+  /**
+   * A restart's stop, the body `stopComponent()` runs for the options
+   * `restartComponentOperation()` handed it: those options were read, and its dependents
+   * checked, by the restart.
+   */
+  public async restartStopOperation(
+    name: string,
+    dispatch: RestartStopDispatch,
+  ): Promise<ComponentOperationResult> {
+    const bulkRefusal =
+      this.core.componentStop.checkIndividualBulkPreconditions(name, 'restart');
+    if (bulkRefusal) {
+      return bulkRefusal;
+    }
+
+    return await this.core.componentStop.stopComponentInternal(
+      name,
+      dispatch.stopOptions,
+      dispatch.stopContext,
+    );
   }
 
   /** Either active-operation refusal, the shutdown one first. */
@@ -895,28 +932,6 @@ export class RestartOperations {
         : currentComponents.has(snapshot.component)) &&
       this.core.registryReads.currentGeneration(snapshot.component) ===
         snapshot.generation
-    );
-  }
-
-  /**
-   * A restart's stop: its options were read, and its dependents checked, by
-   * `restartComponentOperation()`.
-   */
-  private async restartStopOperation(
-    name: string,
-    stopOptions: StopOptionsSnapshot,
-    stopContext: IndividualStopContext,
-  ): Promise<ComponentOperationResult> {
-    const bulkRefusal =
-      this.core.componentStop.checkIndividualBulkPreconditions(name, 'restart');
-    if (bulkRefusal) {
-      return bulkRefusal;
-    }
-
-    return await this.core.componentStop.stopComponentInternal(
-      name,
-      stopOptions,
-      stopContext,
     );
   }
 }

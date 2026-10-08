@@ -23,7 +23,11 @@ import {
   ComponentStartTimeoutError,
   StartupInterruptedByShutdownError,
 } from '../errors';
-import type { ComponentOperationResult, ComponentState } from '../types';
+import type {
+  ComponentOperationResult,
+  ComponentState,
+  StartComponentOptions,
+} from '../types';
 import type { DependencyRead } from './dependency-policy';
 import { abortHookSignal, createHookAbortController } from './hook-abort';
 import type { ManagerCore } from './manager-core';
@@ -42,8 +46,10 @@ import {
 } from './operation-policy';
 import {
   DEFAULT_START_OPTIONS,
+  snapshotStartOptions,
   type StartOptionsSnapshot,
 } from './operation-options';
+import { takeRestartStartDispatch } from './restart-dispatch';
 
 /** The running registration and start options approved before restart stops it. */
 export interface RestartStartSnapshot {
@@ -162,6 +168,29 @@ class StartRun {
  */
 export class ComponentStart {
   constructor(private readonly core: ManagerCore) {}
+
+  /**
+   * The body of the manager's public `startComponent()`: a restart's start when `options`
+   * is the object `restartComponent()` handed it (`restart-dispatch.ts`) - its options
+   * snapshot and the registration it approved - otherwise a start that reads `options`
+   * itself, under its own net, as the first thing it does. The lookup runs no caller code.
+   */
+  public startComponentOperation(
+    name: string,
+    options: StartComponentOptions | undefined,
+  ): Promise<ComponentOperationResult> {
+    const restart = takeRestartStartDispatch(name, options);
+    return restart === undefined
+      ? this.startComponentInternal(name, () => snapshotStartOptions(options))
+      : this.startComponentInternal(
+          name,
+          restart.startOptions,
+          undefined,
+          undefined,
+          undefined,
+          restart.startSnapshot,
+        );
+  }
 
   /**
    * `startComponentAttempt()` with a net under it that settles the component's state.

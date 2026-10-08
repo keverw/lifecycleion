@@ -1731,6 +1731,35 @@ calling listeners. If it was replaced or another operation took ownership, the o
 returns the applicable refusal code without acting on the replacement. Individual
 stops also protect dependents that are still starting.
 
+**Restarts go through the public methods.** `restartComponent()` stops and starts the
+component through `stopComponent()` and `startComponent()`, and `restartAllComponents()`
+runs its startup phase through `startAllComponents()` - each looked up on the manager
+when the restart calls it, so a subclass override or an instance patch of one runs for
+restarts too. The stop phase of `restartAllComponents()` is its own shutdown pass, not a
+`stopAllComponents()` call. The options a restart hands these methods are a frozen copy
+of its own, with every field present, and they carry the restart's context: the options
+it already read and validated, the registration it approved before stopping, and whether
+its stop took the component. An override that passes that same object on - to `super`,
+or to the method it patched - keeps the restart's behavior. One that passes any other
+object, a spread copy included, gets a plain start or stop of the name: the start acts
+on whatever is registered under the name by then rather than only the registration the
+restart approved, a startup timeout is read again rather than taken from the restart's
+check, the startup phase validates every registration as `startAllComponents()` does,
+and any failed stop is answered `restart_stop_failed`. An override that throws or
+rejects is a crash of the restart, answered `operation_crashed`.
+
+```typescript
+class AuditedManager extends LifecycleManager {
+  public override startComponent(
+    name: string,
+    options?: StartComponentOptions,
+  ) {
+    audit.record('start', name); // runs for restartComponent() too
+    return super.startComponent(name, options); // pass `options` on unchanged
+  }
+}
+```
+
 ```typescript
 // Start a single component
 startComponent(name: string, options?: StartComponentOptions): Promise<ComponentOperationResult>

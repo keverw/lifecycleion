@@ -60,7 +60,11 @@ and every subsystem, a class built over the core:
   another subsystem may not exist yet.
 - It reaches other subsystems through the core (`core.registry.getComponent()`), and
   calls the manager's public, overridable methods through `core.manager` at call time,
-  so a subclass override or an instance patch of one is the one that runs.
+  so a subclass override or an instance patch of one is the one that runs. That holds
+  for an operation's context the public signature does not carry: a restart's stop and
+  start, and its startup phase, go through `stopComponent()`, `startComponent()` and
+  `startAllComponents()`, and the options object it hands each one carries its context
+  by identity (`restart-dispatch.ts`) for the method's body to take.
 - There is no bridge back to private manager members: every member a subsystem calls
   has an owning subsystem. A new operation goes onto the subsystem that owns its state,
   or into a new one - not onto the facade, and not behind a forwarding callback.
@@ -123,6 +127,7 @@ bookkeeping. They do not own lifecycle claims or orchestrate bulk operations.
 | `dependency-policy.ts`        | Bounded dependency reads, stable dependency ordering, and cycle discovery.                                                                                         |
 | `operation-policy.ts`         | Lifecycle-specific timeout error provenance, abort-linked failure detection, async failure containment and late-rejection logging, and common result construction. |
 | `operation-options.ts`        | Caller options read once, each field in a fixed order, into frozen snapshots of branded types internal code requires.                                              |
+| `restart-dispatch.ts`         | The restart context a restart's options object carries through the public start, stop and startup methods, looked up by the object's identity and taken once.      |
 | `registration-policy.ts`      | Registration progress reports, placement predicates, and the removed-timeout-hook refusal reason.                                                                  |
 | `hook-abort.ts`               | The guarded abort controller each call of a component hook gets, and aborting it contained.                                                                        |
 
