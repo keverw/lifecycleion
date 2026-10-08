@@ -69,10 +69,11 @@ and every subsystem, a class built over the core:
   hands to each of its phases: a bulk startup's progress, deadline and release reasons
   are the `StartupRun` every phase of `StartupOrchestration` takes, a registration's
   reads and index the `RegistrationAttempt` every phase of `registerComponentInternal()`
-  takes, and an unregister's instance, generation and options the `UnregisterAttempt`
-  every phase of `unregisterComponentOperation()` takes. Phases stay synchronous; an
-  asynchronous step hands its promise back to be awaited directly, so a split adds no
-  await point.
+  takes, an unregister's instance, generation and options the `UnregisterAttempt`
+  every phase of `unregisterComponentOperation()` takes, and a stop phase's deadline,
+  observer, abort controller and race flags the `GracefulStopRun` or `ForceStopRun`
+  every step of that phase takes. Phases stay synchronous; an asynchronous step hands
+  its promise back to be awaited directly, so a split adds no await point.
 - Tests reach subsystems through `coreOf(manager)` (`test-helpers.ts`). A few members
   are kept as methods only as test seams, and say so:
   `RegistrationOperations.isManualPositionRespected()` and
