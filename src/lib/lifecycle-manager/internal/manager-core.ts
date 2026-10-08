@@ -26,6 +26,7 @@ import { SignalIntegration } from './signal-integration';
 import { StartSettlements } from './start-settlements';
 import { StartupOrchestration } from './startup-orchestration';
 import { StartupOrdering } from './startup-ordering';
+import { StartupPreflight } from './startup-preflight';
 import { StopOutcomes } from './stop-outcomes';
 import type { TransitionEventDispatcher } from './transition-event-dispatcher';
 import { UnexpectedStops } from './unexpected-stops';
@@ -101,6 +102,7 @@ export class ManagerCore implements ManagerCoreParts {
   public readonly unexpectedStops: UnexpectedStops;
   // Bulk operations.
   public readonly startup: StartupOrchestration;
+  public readonly startupPreflight: StartupPreflight;
   public readonly shutdownPass: ShutdownPassRunner;
   public readonly shutdownEscalation: ShutdownEscalation;
   public readonly restart: RestartOperations;
@@ -134,6 +136,7 @@ export class ManagerCore implements ManagerCoreParts {
     this.lateStartRecovery = new LateStartRecovery(this);
     this.unexpectedStops = new UnexpectedStops(this);
     this.startup = new StartupOrchestration(this);
+    this.startupPreflight = new StartupPreflight(this);
     this.shutdownPass = new ShutdownPassRunner(this);
     this.shutdownEscalation = new ShutdownEscalation(this);
     this.restart = new RestartOperations(this);
