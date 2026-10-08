@@ -268,6 +268,12 @@ export interface LoggerEventMap {
   'exit-completed': {
     eventType: 'exit-completed';
     code: number;
+    /**
+     * `true` when `process.exit(code)` is about to be called, right after this event's
+     * listeners return - unless one of them removes `process.exit`, which skips the call
+     * (reported to the console) and leaves the process running. `false` for a simulated
+     * exit, or a real one that found `process.exit` gone before this event.
+     */
     endedProcess: boolean;
   };
   uncaughtException: {

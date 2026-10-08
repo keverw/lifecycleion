@@ -8,6 +8,7 @@ import {
   setup,
 } from './test-helpers';
 import type { ComponentOperationResult } from './types';
+import { BaseComponent } from './base-component';
 
 describe('LifecycleManager uncommitted registration', () => {
   for (const hook of ['_markRegistered', 'lifecycle'] as const) {
@@ -916,6 +917,60 @@ test('getValue reads then once without starting deferred work it refuses', async
   expect(reads).toBe(1);
   expect(calls).toBe(0);
 });
+
+for (const mode of ['message', 'health', 'reload'] as const) {
+  test(`${mode} does not re-adopt the winning hook value past its deadline`, async () => {
+    const { logger, manager } = setup();
+    let reads = 0;
+    // Adoption completes. Reading then once more from the fulfilled value would turn it
+    // into pending work after the race had already consumed its deadline.
+    const value = {
+      healthy: true,
+      get then(): unknown {
+        return ++reads <= 1 ? undefined : (): void => {};
+      },
+    };
+    class Component extends BaseComponent {
+      public start(): void {}
+      public stop(): void {}
+      // Returned as the hooks' declared types, which a thenable is not.
+      public onMessage(): never {
+        return value as never;
+      }
+      public healthCheck(): never {
+        return value as never;
+      }
+      public onReload(): never {
+        return value as never;
+      }
+    }
+    await manager.registerComponent(
+      new Component(logger, {
+        name: 'a',
+        healthCheckTimeoutMS: 5,
+        signalTimeoutMS: 5,
+      }),
+    );
+    await manager.startComponent('a');
+
+    const operation =
+      mode === 'message'
+        ? manager.sendMessageToComponent('a', {}, { timeout: 5 })
+        : mode === 'health'
+          ? manager.checkComponentHealth('a')
+          : manager.triggerReload();
+    const hung = new Promise<'hung'>((resolve) => {
+      setTimeout(() => resolve('hung'), 500);
+    });
+    const result = await Promise.race([operation, hung]);
+
+    expect(result === 'hung' ? result : result.code).toBe(
+      mode === 'message' ? 'sent' : 'ok',
+    );
+    expect(reads).toBe(1);
+    await manager.stopAllComponents();
+  });
+}
 
 test('a violated committed-read invariant yields an unavailable registration report', async () => {
   const { logger, manager } = setup();

@@ -159,6 +159,46 @@ describe('Logger', () => {
       }
     });
 
+    test('redaction survives a polluted Object.prototype.get', () => {
+      const params = { user: { name: 'alice', password: 'hunter2secret' } };
+      const expected = JSON.stringify(
+        (() => {
+          logger.info('name={{user.name}} password={{user.password}}', {
+            params,
+            redactedKeys: ['user.password'],
+          });
+          return arraySink.logs[0];
+        })(),
+      );
+      arraySink.logs.length = 0;
+      // As JSON-merge pollution of caller data leaves it: a plain enumerable value.
+      (Object.prototype as Record<string, unknown>)['get'] = 'x';
+
+      try {
+        logger.info('name={{user.name}} password={{user.password}}', {
+          params,
+          redactedKeys: ['user.password'],
+        });
+      } finally {
+        delete (Object.prototype as Record<string, unknown>)['get'];
+      }
+
+      expect(arraySink.logs[0]?.message).toContain('name=alice');
+      expect(arraySink.logs[0]?.message).not.toContain('hunter2secret');
+      expect(JSON.stringify(arraySink.logs[0]?.redactedParams)).not.toContain(
+        'hunter2secret',
+      );
+      // Redacted exactly as without the pollution - not failed closed.
+      expect(
+        JSON.stringify({ ...arraySink.logs[0], timestamp: undefined }),
+      ).toBe(
+        JSON.stringify({
+          ...(JSON.parse(expected) as object),
+          timestamp: undefined,
+        }),
+      );
+    });
+
     test('should log error message', () => {
       logger.error('Test error message');
 

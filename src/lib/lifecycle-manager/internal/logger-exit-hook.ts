@@ -30,8 +30,11 @@ export class LoggerExitHook {
   private isProcessExitCommitted = false;
   // Set once a simulated logger exit (`callProcessExit: false`) has been told to proceed,
   // covering the window before the logger publishes `exit-process` - from then on its
-  // `isFinishingExit` answers until `exit-completed`. Cleared by the first read that
-  // finds the logger neither pending nor finishing an exit. See `isLoggerExitInProgress()`.
+  // `isFinishingExit` answers until `exit-completed`. Cleared when that `exit-process` is
+  // published, so it cannot outlive its exit and refuse starts while a later one is
+  // pending; failing that (a logger that cannot be subscribed to, or whose `emit` is
+  // overridden), by the first read that finds the logger neither pending nor finishing an
+  // exit. See `markSimulatedExitProceeding()` and `isLoggerExitInProgress()`.
   private isSimulatedLoggerExitProceeding = false;
   // Held while a forced logger exit logs that it is exiting, so a sink that exits from
   // that line waits instead of re-entering the forced branch without bound.
@@ -304,10 +307,37 @@ export class LoggerExitHook {
     if (doesEndProcess) {
       this.isProcessExitCommitted = true;
     } else {
-      this.isSimulatedLoggerExitProceeding = true;
+      this.markSimulatedExitProceeding();
     }
 
     return { action: 'proceed' };
+  }
+
+  /**
+   * Refuse starts until the proceeding simulated exit publishes `exit-process`, and no
+   * longer. A request that proceeds after its exit was already published - one folded
+   * into it - finds nothing pending, and has no `exit-process` of its own to wait for.
+   */
+  private markSimulatedExitProceeding(): void {
+    if (!this.readLoggerExitFlag('isPendingExit')) {
+      return;
+    }
+
+    this.isSimulatedLoggerExitProceeding = true;
+
+    try {
+      const unsubscribe = this.core.rootLogger.on<{ eventType?: unknown }>(
+        'logger',
+        (event) => {
+          if (event?.eventType === 'exit-process') {
+            this.isSimulatedLoggerExitProceeding = false;
+            unsubscribe();
+          }
+        },
+      );
+    } catch {
+      // Not subscribable: `isLoggerExitInProgress()` clears the flag lazily instead.
+    }
   }
 
   /** A guarded read of one of the root logger's exit getters; anything but `true` is false. */

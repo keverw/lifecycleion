@@ -489,6 +489,54 @@ for (const prototype of [null, new (class Deferred {})()]) {
   });
 }
 
+for (const ownThen of ['non-function', 'no-op'] as const) {
+  test(`a foreign rejected promise with a species that never builds a promise and an own ${ownThen} then rejects`, async () => {
+    const { runInNewContext } = await import('node:vm');
+    const promise = runInNewContext(
+      'Promise.reject(new Error("foreign rejection"))',
+    ) as object;
+    // Keep the broken baseline safe for the test runner.
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    void Reflect.apply(Promise.prototype.then, promise, [undefined, () => {}]);
+    let isOwnThenCalled = false;
+    Object.defineProperty(promise, 'then', {
+      value:
+        ownThen === 'non-function'
+          ? 1
+          : (): void => {
+              isOwnThenCalled = true;
+            },
+    });
+    Object.defineProperty(promise, 'constructor', {
+      value: {
+        [Symbol.species]: class {
+          constructor() {}
+        },
+      },
+    });
+
+    // The species refusal is what rejects: the rejection itself cannot be reached
+    // without a working species, as for a local broken promise.
+    for (const pending of [adoptResult(promise), adoptPromise(promise)]) {
+      expect(pending).toBeInstanceOf(Promise);
+      const hung = new Promise<string>((resolve) => {
+        setTimeout(() => resolve('hung'), 100);
+      });
+      expect(
+        await Promise.race([
+          (pending as Promise<unknown>).then(
+            () => 'resolved',
+            (error: unknown) => error,
+          ),
+          hung,
+        ]),
+      ).toBeInstanceOf(TypeError);
+    }
+    expect(containDeferredResult(promise)).toBe(true);
+    expect(isOwnThenCalled).toBe(false);
+  });
+}
+
 for (const base of [Array, Map] as const) {
   test(`an own-then ${base.name} subclass is adopted through its then without building its species`, async () => {
     let constructed = 0;
@@ -563,6 +611,92 @@ for (const entry of ['adoptPromise', 'adoptResult'] as const) {
         ? adoptPromise<unknown>(thenable)
         : (adoptResult(thenable) as Promise<{ value: unknown }>);
     expect((await pending).value).toBe('adopted');
+  });
+}
+
+// Settle with a TypeError, or `'resolved'` / `'hung'`, within `ms`.
+async function settleWithin(
+  pending: Promise<unknown>,
+  ms: number,
+): Promise<unknown> {
+  const hung = new Promise<string>((resolve) => {
+    setTimeout(() => resolve('hung'), ms);
+  });
+  return await Promise.race([
+    pending.then(
+      () => 'resolved',
+      (error: unknown) => error,
+    ),
+    hung,
+  ]);
+}
+
+for (const entry of ['adoptPromise', 'adoptResult'] as const) {
+  // Resolved, so the limit - a rejection left unhandled - does not fire here.
+  test(`${entry} rejects a re-prototyped promise with a broken constructor and no tag rather than trusting its own then`, async () => {
+    const promise: object = Promise.resolve(1);
+    void Object.setPrototypeOf(promise, { constructor: 5 });
+    let isOwnThenCalled = false;
+    void Object.defineProperty(promise, 'then', {
+      value: (): void => {
+        isOwnThenCalled = true;
+      },
+    });
+    expect(Object.prototype.toString.call(promise)).toBe('[object Object]');
+
+    const pending =
+      entry === 'adoptPromise'
+        ? adoptPromise(promise)
+        : (adoptResult(promise) as Promise<unknown>);
+    expect(await settleWithin(pending, 100)).toBeInstanceOf(TypeError);
+    expect(isOwnThenCalled).toBe(false);
+  });
+
+  test(`${entry} rejects, not fulfills, a re-prototyped rejected promise with a broken constructor and a non-function own then`, async () => {
+    const source = Promise.reject(new Error('real failure'));
+    // Observed before the constructor breaks, so the runner sees it handled; the
+    // broken constructor would leave it unhandled otherwise, as documented.
+    source.catch(() => {});
+    const promise: object = source;
+    void Object.setPrototypeOf(promise, { constructor: 5 });
+    void Object.defineProperty(promise, 'then', { value: 1 });
+
+    const pending =
+      entry === 'adoptPromise'
+        ? adoptPromise(promise)
+        : (adoptResult(promise) as Promise<unknown>);
+    expect(await settleWithin(pending, 100)).toBeInstanceOf(TypeError);
+    expect(containDeferredResult(promise)).toBe(true);
+  });
+
+  // Each engine words a species executor called twice by whichever function it already
+  // holds, so a resolve left `undefined` the first time is refused in words of its own.
+  test(`${entry} rejects a re-prototyped promise whose species executor is called twice after an undefined resolve`, async () => {
+    const noop = (): void => {};
+    const promise: object = Promise.resolve(1);
+    void Object.setPrototypeOf(promise, {
+      constructor: {
+        [Symbol.species]: class {
+          constructor(executor: (...args: unknown[]) => void) {
+            executor(undefined, noop);
+            executor(noop, noop);
+          }
+        },
+      },
+    });
+    let isOwnThenCalled = false;
+    void Object.defineProperty(promise, 'then', {
+      value: (): void => {
+        isOwnThenCalled = true;
+      },
+    });
+
+    const pending =
+      entry === 'adoptPromise'
+        ? adoptPromise(promise)
+        : (adoptResult(promise) as Promise<unknown>);
+    expect(await settleWithin(pending, 100)).toBeInstanceOf(TypeError);
+    expect(isOwnThenCalled).toBe(false);
   });
 }
 

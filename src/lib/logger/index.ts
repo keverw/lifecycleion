@@ -2226,15 +2226,32 @@ export class Logger extends EventEmitter {
     this._didExit = true;
     this._exitCode = exitCode;
 
-    // Nor are these listeners; see `withoutActiveSinkClose`.
-    this.withoutActiveSinkClose(() => {
-      this.emit('logger', { eventType: 'exit-process', code: exitCode });
-    });
+    // Nor are these listeners; see `withoutActiveSinkClose`. From here the exit is
+    // committed, so nothing may throw past `finishExit` below: a throw would leave
+    // `isFinishingExit` set for good - no `exit-completed`, every later `exit()` ignored.
+    // `emit` contains a listener's throw; an overridden `emit` that throws is reported.
+    try {
+      this.withoutActiveSinkClose(() => {
+        this.emit('logger', { eventType: 'exit-process', code: exitCode });
+      });
+    } catch (error) {
+      reportToConsole(
+        `Logger exit-process event failed: ${describeError(error)}`,
+      );
+    }
 
     // An exit request made by a sink hook must join the already-published cleanup,
     // not call the public self-await guard. Its exit continuation does not become a
-    // dependency of the sink's return, and therefore runs once cleanup settles.
-    const closing = this._closePromise ?? this.close();
+    // dependency of the sink's return, and therefore runs once cleanup settles. An
+    // overridden `close()` that throws synchronously fails cleanup as a rejection would.
+    let closing: Promise<void>;
+    try {
+      closing = this._closePromise ?? this.close();
+    } catch (error) {
+      // Preserve the original failure for the report below.
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      closing = Promise.reject(error);
+    }
     // The decision `endsProcessOnExit` made above, re-checked live: listeners and sink
     // close ran since, and may have removed a stubbed `process.exit`. No exit happened,
     // so say so, and release the latch: the process is still running, so this exit

@@ -34,6 +34,18 @@ function hasOwnThen(value: object): boolean {
   }
 }
 
+/** Whether `error` is this realm's `TypeError`, as a failed internal-slot check throws. */
+function isThisRealmTypeError(error: unknown): boolean {
+  try {
+    return (
+      isObjectLike(error) &&
+      Reflect.getPrototypeOf(error) === TypeError.prototype
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Whether `error` is what the native `then`'s internal-slot check can throw for a value
  * that is not a native promise: this realm's `TypeError`, or - with the stack nearly
@@ -41,17 +53,106 @@ function hasOwnThen(value: object): boolean {
  * comes from past the check, so from a native promise of some realm.
  */
 function isSlotCheckFailure(error: unknown): boolean {
+  if (isThisRealmTypeError(error)) {
+    return true;
+  }
   try {
-    if (!isObjectLike(error)) {
-      return false;
-    }
-    const prototype: unknown = Reflect.getPrototypeOf(error);
     return (
-      prototype === TypeError.prototype || prototype === RangeError.prototype
+      isObjectLike(error) &&
+      Reflect.getPrototypeOf(error) === RangeError.prototype
     );
   } catch {
     return false;
   }
+}
+
+// A `constructor` value whose species builds, then misuses the executor it is handed.
+function speciesThat(build: (executor: (...args: unknown[]) => void) => void) {
+  return {
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    __proto__: null,
+    [Symbol.species]: class {
+      constructor(executor: (...args: unknown[]) => void) {
+        build(executor);
+      }
+    },
+  };
+}
+
+/**
+ * The refusals the native `then` raises on its species path, in this engine's own
+ * wording: a `constructor` that is not an object, a species that is not a constructor, and
+ * a species that hands its executor no callable resolve or reject function, or calls it
+ * twice. Recorded once, at load, from probe promises this module creates, so no engine's
+ * wording is written down here.
+ */
+function recordSpeciesRefusals(): readonly string[] {
+  const constructors: unknown[] = [
+    0,
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    { __proto__: null, [Symbol.species]: 0 },
+    speciesThat(noop),
+    speciesThat((executor) => executor(noop, 0)),
+    speciesThat((executor) => {
+      executor(noop, noop);
+      executor(noop, noop);
+    }),
+    // Some engines word a second call by the first function already set: here, reject.
+    speciesThat((executor) => {
+      executor(undefined, noop);
+      executor(noop, noop);
+    }),
+  ];
+  const messages: string[] = [];
+  for (const constructor of constructors) {
+    const probe = Promise.resolve();
+    void Object.defineProperty(probe, 'constructor', {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      __proto__: null,
+      value: constructor,
+    } as PropertyDescriptor);
+    try {
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      void Reflect.apply(Promise.prototype.then, probe, []);
+    } catch (error) {
+      if (isThisRealmTypeError(error)) {
+        messages.push((error as TypeError).message);
+      }
+    }
+  }
+  return messages;
+}
+
+const speciesRefusalMessages = recordSpeciesRefusals();
+
+/**
+ * Whether the native `then` threw `error` from its species path - the brand check a
+ * value that failed the slot check cannot fake. The internal-slot check refuses a
+ * non-promise first, with a refusal of its own wording, before `constructor` is read; only
+ * a native promise of some realm gets as far as these. Nothing the value inherits or
+ * carries - a `Symbol.toStringTag`, a prototype - reaches the engine's message, so a
+ * re-prototyped or foreign promise is caught and a thenable dressed as a promise is not.
+ *
+ * Known limit: a species path that throws this realm's `TypeError` in words of its own - a
+ * `constructor` or species getter, a species constructor - is not recognized, and such a
+ * value is taken for the thenable its own `then` claims it is. So is a refusal an engine
+ * words with the offending value in it, for a value other than the probe's, and every
+ * refusal if the probes record nothing: the failure mode is the own-`then` fallback,
+ * never a thenable refused.
+ */
+function isSpeciesRefusal(error: unknown): boolean {
+  if (!isThisRealmTypeError(error)) {
+    return false;
+  }
+  let message: unknown;
+  try {
+    message = Reflect.get(error as object, 'message', error);
+  } catch {
+    return false;
+  }
+  return (
+    typeof message === 'string' && speciesRefusalMessages.includes(message)
+  );
 }
 
 /**
@@ -63,6 +164,13 @@ function isSlotCheckFailure(error: unknown): boolean {
  * native combinator over them, carry it without reading the caller's value again.
  * Unwrap it synchronously, after the wait; the raw value must not settle another
  * promise.
+ *
+ * Boxing covers what happens after adoption. Adoption itself carries the fulfilled
+ * value into the box without reading its `then` again only for this realm's native
+ * promises, values with an own `then`, and plain thenables. A `Promise` subclass
+ * instance or a proxy around a promise is followed through its `then`, as `await`
+ * follows it, and the resolve function that `then` calls reads the fulfilled value's
+ * `then` again.
  */
 export interface PromiseResultBox<T> {
   value: T;
@@ -95,7 +203,9 @@ function boxPromiseValue<T>(value: T): PromiseResultBox<T> {
  * starts its work there, say - and skipping it skipped the work and reported success. A
  * proxy around a promise has no internal slot for the native `then` to read, but it can
  * have a `then` that works - one its `get` trap binds to the promise - and succeeds or
- * fails as `await` would when that `then` is inherited. A proxy on this realm's
+ * fails as `await` would when that `then` is inherited. Either way the value it fulfills
+ * with is resolved, not boxed directly, so its `then` is read again - as `await` reads
+ * it. A proxy on this realm's
  * `Promise.prototype` chain that exposes `then` as an own property is rejected after
  * the native `then` fails: it cannot be distinguished portably from the promise-prototype
  * fake or a native promise with broken constructor/species handling described below
@@ -181,12 +291,12 @@ export interface AdoptionCallbacks {
  * probe is necessary to keep their own then from hiding failures. This one boundary is
  * shared by both adoption entry points.
  *
- * Known limit: the native `then` refuses a broken species - a `constructor` that is not
- * an object, a species that is not a constructor or misuses its executor - with this
- * realm's `TypeError`, the same error its slot check throws for a non-promise. For a
- * native promise off this realm's `Promise.prototype` chain (another realm's, or one
- * reparented) that refusal cannot be told apart from a plain thenable, so the value is
- * taken for the thenable its own `then` claims it is and followed through that `then`.
+ * The native `then` refuses a broken species - a `constructor` that is not an object, a
+ * species that is not a constructor or misuses its executor - with this realm's
+ * `TypeError`, the same error its slot check throws for a non-promise. For a native
+ * promise off this realm's `Promise.prototype` chain (another realm's, or one
+ * reparented) that refusal is told apart by its message ({@link isSpeciesRefusal}), so
+ * the value is rejected rather than followed through its own `then`.
  *
  * `isPromise` is {@link inheritsFromPromise}'s answer, when the caller already read it:
  * a proxy's `getPrototypeOf` trap can answer differently each time, so one
@@ -212,8 +322,12 @@ function adoptOwnPromise<T>(
         // non-promise before reading `constructor`, so any failure it cannot throw - from
         // a `constructor` getter, a species getter or a species constructor - comes from
         // a native promise of some realm, whose own `then` must not be trusted to settle
-        // it.
-        if (isOnPromiseChain || !isSlotCheckFailure(error)) {
+        // it. So does a species refusal, which the slot check's `TypeError` resembles.
+        if (
+          isOnPromiseChain ||
+          !isSlotCheckFailure(error) ||
+          isSpeciesRefusal(error)
+        ) {
           didAdopt = true;
           notifyObservationFailure(callbacks, error);
           // Preserve the original rejection value, as adoption does.
@@ -409,7 +523,11 @@ export function containDeferredResult(
     attachIntrinsicReactions(result, noop, noop);
     return true;
   } catch (error) {
-    if (inheritsFromPromise(result) || !isSlotCheckFailure(error)) {
+    if (
+      inheritsFromPromise(result) ||
+      !isSlotCheckFailure(error) ||
+      isSpeciesRefusal(error)
+    ) {
       return true;
     }
   }

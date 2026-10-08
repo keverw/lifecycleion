@@ -39,7 +39,7 @@ export class SignalIntegration {
    * when attached already; supersedes a detach still waiting to run.
    */
   public attach(): void {
-    return this.core.dispatcher.withTransition(() => {
+    this.core.dispatcher.withTransition(() => {
       // A new attach supersedes a detach that was still waiting to run.
       this.core.state.isSignalDetachDeferred = false;
 
@@ -93,7 +93,7 @@ export class SignalIntegration {
   }
   /** `detachSignals()`'s body: detach, if attached, and announce it. */
   public detach(): void {
-    return this.core.dispatcher.withTransition(() => {
+    this.core.dispatcher.withTransition(() => {
       if (!this.core.state.processSignalManager?.getStatus().isAttached) {
         return; // Not attached
       }
@@ -249,7 +249,7 @@ export class SignalIntegration {
     trigger: string,
     options: { logMessage?: string; isEndingShutdownPass?: boolean } = {},
   ): void {
-    return this.core.dispatcher.withTransition(() => {
+    this.core.dispatcher.withTransition(() => {
       if (
         !this.core.config.detachSignalsOnStop ||
         !this.core.state.processSignalManager?.getStatus().isAttached ||

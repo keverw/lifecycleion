@@ -22,10 +22,15 @@ export function defineEntry<V>(
 ): void {
   // `Object.defineProperty` rather than `Reflect.defineProperty`: a target that refuses
   // the entry - frozen, or holding a non-configurable key - throws instead of dropping it.
+  // A descriptor without a prototype, so nothing added to `Object.prototype` - a `get`
+  // left by polluted caller data, say - is read as part of it and turns every write into
+  // a throw.
   Object.defineProperty(target, key, {
+    // eslint-disable-next-line @typescript-eslint/naming-convention
+    __proto__: null,
     value,
     enumerable: true,
     writable: true,
     configurable: true,
-  });
+  } as PropertyDescriptor);
 }

@@ -579,4 +579,32 @@ describe('LifecycleManager - logger exit commits the process to ending', () => {
     expect((await manager.startAllComponents()).success).toBe(true);
     await manager.stopAllComponents();
   });
+
+  test('a finished simulated exit does not refuse a start while a later exit is pending', async () => {
+    const { logger, manager } = simulatedExitManager();
+    const completed = recordExitCompleted(logger);
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startAllComponents();
+
+    // Told to proceed, then finished, with no start checked in between.
+    logger.exit(0);
+    await waitFor(() => completed.length === 1);
+
+    // A later exit, held pending by a callback of the app's own that has not answered.
+    const gate = deferred();
+    logger.setBeforeExitCallback(async () => {
+      await gate.promise;
+      return { action: 'proceed' };
+    });
+    logger.exit(0);
+    expect(logger.isPendingExit).toBe(true);
+
+    try {
+      const result = await manager.startComponent('a');
+      expect(result.success).toBe(true);
+    } finally {
+      gate.resolve();
+      await waitFor(() => completed.length === 2);
+    }
+  });
 });

@@ -285,3 +285,61 @@ test('an emit override that throws on exit-completed still lets a real exit call
     output.mockRestore();
   }
 });
+
+test('an emit override that throws on exit-process still completes the exit', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  const logger = new Logger({
+    sinks: [new ArraySink()],
+    callProcessExit: false,
+  });
+  const events = recordExitEvents(logger);
+  const originalEmit = logger.emit.bind(logger);
+  const emit = spyOn(logger, 'emit').mockImplementation((event, data) => {
+    if ((data as ExitEvent | undefined)?.eventType === 'exit-process') {
+      throw new Error('process event unavailable');
+    }
+    originalEmit(event, data);
+  });
+
+  try {
+    expect(() => logger.exit(3)).not.toThrow();
+    await waitFor(() => completions(events).length > 0);
+
+    expect(completions(events)).toEqual([{ code: 3, endedProcess: false }]);
+    expect(logger.isFinishingExit).toBe(false);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit-process event failed: process event unavailable',
+    ]);
+
+    // The exit is over, so the next one is processed rather than ignored.
+    logger.exit(4);
+    await waitFor(() => completions(events).length > 1);
+    expect(logger.exitCode).toBe(4);
+  } finally {
+    emit.mockRestore();
+    output.mockRestore();
+  }
+});
+
+test('a close override that throws synchronously still completes the exit', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  const logger = new Logger({ sinks: [], callProcessExit: false });
+  const events = recordExitEvents(logger);
+  const close = spyOn(logger, 'close').mockImplementation(() => {
+    throw new Error('cleanup refused');
+  });
+
+  try {
+    expect(() => logger.exit(5)).not.toThrow();
+    await waitFor(() => completions(events).length > 0);
+
+    expect(completions(events)).toEqual([{ code: 5, endedProcess: false }]);
+    expect(logger.isFinishingExit).toBe(false);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger cleanup failed before exit: cleanup refused',
+    ]);
+  } finally {
+    close.mockRestore();
+    output.mockRestore();
+  }
+});
