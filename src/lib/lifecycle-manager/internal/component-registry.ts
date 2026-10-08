@@ -14,8 +14,8 @@ import type { ManagerCore } from './manager-core';
  *
  * The registry itself is state: `componentEntries` holds every reserved entry,
  * provisional ones included, and `components` with `componentsByName` the committed
- * subset `publishRegistry()` publishes. Registration and unregistration
- * (`RegistrationOperations`) are what change it.
+ * subset `publishRegistry()` publishes. Registration (`RegistrationOperations`) and
+ * unregistration (`UnregistrationOperations`) are what change it.
  */
 export class ComponentRegistry {
   constructor(private readonly core: ManagerCore) {}

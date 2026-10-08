@@ -263,7 +263,7 @@ export class LifecycleManager
     return settleOperation(
       'unregisterComponent',
       () =>
-        this.core.registration.unregisterComponentOperation(
+        this.core.unregistration.unregisterComponentOperation(
           name,
           options,
           progress,

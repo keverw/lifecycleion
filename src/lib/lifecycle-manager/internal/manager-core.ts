@@ -27,6 +27,7 @@ import { StartupOrchestration } from './startup-orchestration';
 import { StartupOrdering } from './startup-ordering';
 import type { TransitionEventDispatcher } from './transition-event-dispatcher';
 import { UnexpectedStops } from './unexpected-stops';
+import { UnregistrationOperations } from './unregistration-operations';
 
 /** What the manager hands its core: everything a subsystem shares, built once. */
 export interface ManagerCoreParts {
@@ -86,6 +87,7 @@ export class ManagerCore implements ManagerCoreParts {
   // The registry, and what changes it.
   public readonly registry: ComponentRegistry;
   public readonly registration: RegistrationOperations;
+  public readonly unregistration: UnregistrationOperations;
   public readonly startupOrdering: StartupOrdering;
   // One component's start and stop, and the claims they hold.
   public readonly claims: ComponentClaims;
@@ -118,6 +120,7 @@ export class ManagerCore implements ManagerCoreParts {
 
     this.registry = new ComponentRegistry(this);
     this.registration = new RegistrationOperations(this);
+    this.unregistration = new UnregistrationOperations(this);
     this.startupOrdering = new StartupOrdering(this);
     this.claims = new ComponentClaims(this);
     this.componentStart = new ComponentStart(this);

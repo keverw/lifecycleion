@@ -32,23 +32,24 @@ the facade:
 
 and every subsystem, a class built over the core:
 
-| Field                | Module                       | Responsibility                                                                                                                                                                      |
-| -------------------- | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `registry`           | `component-registry.ts`      | `ComponentRegistry`: lookups by name, recorded names, statuses and timestamps, the `isStarted` flag, the reservations a registration checks, insertion indexes, publication.        |
-| `registration`       | `registration-operations.ts` | `RegistrationOperations`: registering and inserting - reads, refusals, the provisional commit and its rollback, auto-start - unregistering, and the `lifecycle` handle's callbacks. |
-| `startupOrdering`    | `startup-ordering.ts`        | `StartupOrdering`: the dependency order startup, shutdown and registration share, answering a failure to compute it, and `getStartupOrder()` / `validateDependencies()`.            |
-| `claims`             | `component-claims.ts`        | `ComponentClaims`: taking, checking and releasing the per-component claims start and stop attempts hold.                                                                            |
-| `componentStart`     | `component-start.ts`         | `ComponentStart`: the per-component start pipeline - the start net, its preconditions, the attempt, start settlements, and marking a component running.                             |
-| `componentStop`      | `component-stop.ts`          | `ComponentStop`: the per-component stop pipeline - refusals, the stop net, graceful and force phases, stalled retries, and late stop resolution.                                    |
-| `lateStartRecovery`  | `late-start-recovery.ts`     | `LateStartRecovery`: stopping a start the manager stopped waiting for if it completes later, and whether such a start is still awaited.                                             |
-| `unexpectedStops`    | `unexpected-stops.ts`        | `UnexpectedStops`: the unexpected-stop handler a running component reports through, clearing it, and draining the stops a bulk startup recorded.                                    |
-| `startup`            | `startup-orchestration.ts`   | `StartupOrchestration`: bulk startup - its refusals, the startup latch, the batch loop and follow-up auto-starts, rollback, and releasing what it held.                             |
-| `shutdownPass`       | `shutdown-pass.ts`           | `ShutdownPassRunner`: the shutdown latch, accepting or refusing a pass, and the pass itself - warning phase, stop loop, joined starts, and its result.                              |
-| `shutdownEscalation` | `shutdown-escalation.ts`     | `ShutdownEscalation`: shutdown signal requests, repeated-request counting, the post-failure armed window, and the escalation status.                                                |
-| `restart`            | `restart-operations.ts`      | `RestartOperations`: bulk and single restarts - refusals, validating both phases before any stop, and the stale-snapshot check.                                                     |
-| `signals`            | `signal-integration.ts`      | `SignalIntegration`: attaching and detaching process signals, the automatic attach before a start and detach once idle, and the reload, info and debug requests.                    |
-| `loggerExit`         | `logger-exit-hook.ts`        | `LoggerExitHook`: the `beforeExit` callback, settling a pending exit when a pass ends, and the exit-in-progress gate.                                                               |
-| `messaging`          | `messaging-operations.ts`    | `MessagingOperations`: messages, broadcasts and value reads under the public-method safety net, shared by the public methods and the `lifecycle` handle.                            |
+| Field                | Module                         | Responsibility                                                                                                                                                               |
+| -------------------- | ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `registry`           | `component-registry.ts`        | `ComponentRegistry`: lookups by name, recorded names, statuses and timestamps, the `isStarted` flag, the reservations a registration checks, insertion indexes, publication. |
+| `registration`       | `registration-operations.ts`   | `RegistrationOperations`: registering and inserting - reads, refusals, the provisional commit and its rollback, auto-start - and the `lifecycle` handle's callbacks.         |
+| `unregistration`     | `unregistration-operations.ts` | `UnregistrationOperations`: unregistering - its refusals, stopping a running component first, the replacement checks after caller code, and the removal.                     |
+| `startupOrdering`    | `startup-ordering.ts`          | `StartupOrdering`: the dependency order startup, shutdown and registration share, answering a failure to compute it, and `getStartupOrder()` / `validateDependencies()`.     |
+| `claims`             | `component-claims.ts`          | `ComponentClaims`: taking, checking and releasing the per-component claims start and stop attempts hold.                                                                     |
+| `componentStart`     | `component-start.ts`           | `ComponentStart`: the per-component start pipeline - the start net, its preconditions, the attempt, start settlements, and marking a component running.                      |
+| `componentStop`      | `component-stop.ts`            | `ComponentStop`: the per-component stop pipeline - refusals, the stop net, graceful and force phases, stalled retries, and late stop resolution.                             |
+| `lateStartRecovery`  | `late-start-recovery.ts`       | `LateStartRecovery`: stopping a start the manager stopped waiting for if it completes later, and whether such a start is still awaited.                                      |
+| `unexpectedStops`    | `unexpected-stops.ts`          | `UnexpectedStops`: the unexpected-stop handler a running component reports through, clearing it, and draining the stops a bulk startup recorded.                             |
+| `startup`            | `startup-orchestration.ts`     | `StartupOrchestration`: bulk startup - its refusals, the startup latch, the batch loop and follow-up auto-starts, rollback, and releasing what it held.                      |
+| `shutdownPass`       | `shutdown-pass.ts`             | `ShutdownPassRunner`: the shutdown latch, accepting or refusing a pass, and the pass itself - warning phase, stop loop, joined starts, and its result.                       |
+| `shutdownEscalation` | `shutdown-escalation.ts`       | `ShutdownEscalation`: shutdown signal requests, repeated-request counting, the post-failure armed window, and the escalation status.                                         |
+| `restart`            | `restart-operations.ts`        | `RestartOperations`: bulk and single restarts - refusals, validating both phases before any stop, and the stale-snapshot check.                                              |
+| `signals`            | `signal-integration.ts`        | `SignalIntegration`: attaching and detaching process signals, the automatic attach before a start and detach once idle, and the reload, info and debug requests.             |
+| `loggerExit`         | `logger-exit-hook.ts`          | `LoggerExitHook`: the `beforeExit` callback, settling a pending exit when a pass ends, and the exit-in-progress gate.                                                        |
+| `messaging`          | `messaging-operations.ts`      | `MessagingOperations`: messages, broadcasts and value reads under the public-method safety net, shared by the public methods and the `lifecycle` handle.                     |
 
 ### How subsystems reach each other
 
@@ -80,7 +81,7 @@ and every subsystem, a class built over the core:
 | Looking for                                                              | Where                                                                                     |
 | ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------- |
 | A component by name, its recorded name or status, `isStarted`            | `ComponentRegistry`                                                                       |
-| `registerComponent()`, `insertComponentAt()`, `unregisterComponent()`    | `RegistrationOperations`                                                                  |
+| `registerComponent()`, `insertComponentAt()` / `unregisterComponent()`   | `RegistrationOperations` / `UnregistrationOperations`                                     |
 | `getStartupOrder()`, `validateDependencies()`, the order startup follows | `StartupOrdering`; the graph itself in `dependency-policy.ts`                             |
 | `startComponent()` / `stopComponent()`                                   | `ComponentStart` / `ComponentStop`, holding claims through `ComponentClaims`              |
 | A timed-out start that completes later; a running component's crash      | `LateStartRecovery`; `UnexpectedStops`                                                    |

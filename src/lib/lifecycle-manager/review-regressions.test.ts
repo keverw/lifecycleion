@@ -1718,7 +1718,7 @@ describe('LifecycleManager - review regressions', () => {
     await manager.registerComponent(new Plain(logger, 'a'));
 
     (
-      coreOf(manager).registration as unknown as {
+      coreOf(manager).unregistration as unknown as {
         refuseUnregisterWhileInFlight: () => never;
       }
     ).refuseUnregisterWhileInFlight = (): never => {
