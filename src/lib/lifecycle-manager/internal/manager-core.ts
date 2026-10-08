@@ -7,6 +7,7 @@ import type { ComponentOperationResult, ComponentStatus } from '../types';
 import type { ComponentAccessContext } from './component-access-context';
 import { ComponentClaims } from './component-claims';
 import type { ComponentMetadataReader } from './component-metadata-reader';
+import type { DependencyRead } from './dependency-policy';
 import { ComponentStart, type RestartStartSnapshot } from './component-start';
 import { ComponentStop } from './component-stop';
 import { LateStartRecovery } from './late-start-recovery';
@@ -16,6 +17,8 @@ import type { LifecycleManagerState } from './manager-state';
 import type { RegistrationReadTracker } from './registration-read-tracker';
 import { ShutdownEscalation } from './shutdown-escalation';
 import { ShutdownPassRunner } from './shutdown-pass';
+import { StartupOrchestration } from './startup-orchestration';
+import { StartupOrdering } from './startup-ordering';
 import type { TransitionEventDispatcher } from './transition-event-dispatcher';
 import { UnexpectedStops } from './unexpected-stops';
 
@@ -30,8 +33,15 @@ export interface ManagerInternals {
   getComponent(name: string): BaseComponent | undefined;
   /** A registered component's name, as recorded when it was committed. */
   nameOf(component: BaseComponent): string;
-  /** Dependency-aware order of the registered components; throws on a cycle. */
-  getStartupOrderInternal(): string[];
+  /**
+   * `component`'s dependency read for its current registration, from `preferred` or
+   * `snapshot`, else the committed one - without running caller code.
+   */
+  currentReadOf(
+    component: BaseComponent,
+    snapshot: ReadonlyMap<BaseComponent, DependencyRead>,
+    preferred?: ReadonlyMap<BaseComponent, DependencyRead>,
+  ): DependencyRead | undefined;
   /** The status of the component registered under `name`; the caller has checked it is. */
   statusOf(name: string): ComponentStatus;
   /** Recompute `isStarted` from the running and stalled sets. */
@@ -112,6 +122,7 @@ export class ManagerCore implements ManagerCoreParts {
   public readonly internals: ManagerInternals;
 
   // Subsystems
+  public readonly startupOrdering: StartupOrdering;
   public readonly loggerExit: LoggerExitHook;
   public readonly claims: ComponentClaims;
   public readonly componentStop: ComponentStop;
@@ -120,6 +131,7 @@ export class ManagerCore implements ManagerCoreParts {
   public readonly unexpectedStops: UnexpectedStops;
   public readonly shutdownPass: ShutdownPassRunner;
   public readonly shutdownEscalation: ShutdownEscalation;
+  public readonly startup: StartupOrchestration;
 
   constructor(parts: ManagerCoreParts) {
     this.manager = parts.manager;
@@ -134,6 +146,7 @@ export class ManagerCore implements ManagerCoreParts {
     this.componentAccess = parts.componentAccess;
     this.internals = parts.internals;
 
+    this.startupOrdering = new StartupOrdering(this);
     this.loggerExit = new LoggerExitHook(this);
     this.claims = new ComponentClaims(this);
     this.componentStop = new ComponentStop(this);
@@ -142,5 +155,6 @@ export class ManagerCore implements ManagerCoreParts {
     this.unexpectedStops = new UnexpectedStops(this);
     this.shutdownPass = new ShutdownPassRunner(this);
     this.shutdownEscalation = new ShutdownEscalation(this);
+    this.startup = new StartupOrchestration(this);
   }
 }

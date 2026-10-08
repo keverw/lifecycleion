@@ -3,7 +3,7 @@ import { Logger } from '../logger';
 import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
-import { claimReports } from './test-helpers';
+import { claimReports, coreOf } from './test-helpers';
 
 class Component extends BaseComponent {
   public starts = 0;
@@ -119,10 +119,8 @@ test('a registration from a follow-up ordering crash report cannot escape rollba
   };
   await manager.registerComponent(root);
   // Inject an internal failure after the ordinary registration checks have completed.
-  const internal = manager as unknown as {
-    getStartupOrderInternal: (...args: unknown[]) => string[];
-  };
-  const order = internal.getStartupOrderInternal.bind(manager);
+  const internal = coreOf(manager).startupOrdering;
+  const order = internal.getStartupOrderInternal.bind(internal);
   internal.getStartupOrderInternal = (...args) => {
     if (isFollowupReady) {
       isFollowupReady = false;

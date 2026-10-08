@@ -739,12 +739,10 @@ test('registration hooks have no provisional lifecycle state map entries', async
 
 test('registration recomputes committed order from validated reads', async () => {
   const { logger, manager } = setup();
-  const internals = manager as unknown as {
-    getStartupOrderInternal: (...args: unknown[]) => string[];
-  };
-  const order = internals.getStartupOrderInternal.bind(manager);
+  const ordering = coreOf(manager).startupOrdering;
+  const order = ordering.getStartupOrderInternal.bind(ordering);
   let calls = 0;
-  internals.getStartupOrderInternal = (...args): string[] => {
+  ordering.getStartupOrderInternal = (...args): string[] => {
     calls++;
     return order(...args);
   };

@@ -3,7 +3,7 @@ import { Logger } from '../logger';
 import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
-import { claimReports } from './test-helpers';
+import { claimReports, coreOf } from './test-helpers';
 
 class Component extends BaseComponent {
   public starts = 0;
@@ -129,10 +129,8 @@ test('an empty follow-up order violates the progress invariant and rolls back im
   await manager.registerComponent(root);
   // Fault injection only: public registration cannot currently lose a queued name.
   // The second follow-up call throws to bound the unfixed loop without a deadline.
-  const internal = manager as unknown as {
-    getStartupOrderInternal: (...args: unknown[]) => string[];
-  };
-  const order = internal.getStartupOrderInternal.bind(manager);
+  const internal = coreOf(manager).startupOrdering;
+  const order = internal.getStartupOrderInternal.bind(internal);
   let calls = 0;
   internal.getStartupOrderInternal = (...args) => {
     if (!isFollowupReady) {

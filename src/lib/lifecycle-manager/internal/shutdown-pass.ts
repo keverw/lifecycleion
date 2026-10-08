@@ -507,7 +507,8 @@ export class ShutdownPassRunner {
       let shutdownOrder: string[];
 
       try {
-        const startupOrder = this.core.internals.getStartupOrderInternal();
+        const startupOrder =
+          this.core.startupOrdering.getStartupOrderInternal();
         shutdownOrder = [...startupOrder].reverse();
       } catch (error) {
         // If we can't resolve order due to cycle, fall back to reverse registration order
