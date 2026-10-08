@@ -8,7 +8,6 @@ import type {
   SignalBroadcastResult,
   ComponentSignalResult,
 } from '../types';
-import { allPromises } from '../../internal/intrinsics';
 import { isObjectLike } from '../../internal/is-object-like';
 import { toError, describeError } from '../../to-error';
 import {
@@ -400,7 +399,7 @@ export async function checkAllHealthOperation(
     return context.checkComponentHealth(name);
   });
 
-  const { value: results } = await allPromises(healthChecks);
+  const results = await Promise.all(healthChecks);
 
   // Overall healthy only if all components are healthy. "no_handler" is healthy by
   // design (implicit OK); every refusal - not_found, stopped, stalled - is not.

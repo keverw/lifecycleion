@@ -1,4 +1,4 @@
-import { observeRejection, awaitBoxedPromise } from './internal/intrinsics';
+import { observeRejection } from './internal/intrinsics';
 import { errorToString } from './error-to-string';
 import { toError } from './to-error';
 import { DOUBLE_EOL } from './constants';
@@ -383,11 +383,11 @@ export async function safeHandleCallbackAndWait<T>(
       }
       if (pending !== undefined) {
         // Wait for the async callback to complete
-        const { value } = await awaitBoxedPromise(pending as Promise<T>);
+        const { value } = await pending;
 
         const callbackResult = {
           success: true as const,
-          value,
+          value: value as T,
         };
         return callbackResult;
       } else {

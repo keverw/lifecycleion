@@ -1,4 +1,3 @@
-import { awaitBoxedPromise } from '../../internal/intrinsics';
 import { guardAbortListeners } from '../../internal/guarded-abort-signal';
 import { PromiseProtectedResolver } from '../../promise-protected-resolver';
 import { reportCallbackError } from '../../safe-handle-callback';
@@ -1525,7 +1524,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         if (pending instanceof UnreadableReturn) {
           unreadableReturn = pending;
         } else if (pending !== undefined) {
-          await awaitBoxedPromise(pending);
+          await pending;
         }
       } catch (error) {
         // A rethrow of what was already reported is not a second outcome, and reporting it

@@ -1,12 +1,6 @@
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
 import { clampTimerDelayMS } from '../internal/timer-limits';
-import {
-  observePromise,
-  observeBoxed,
-  awaitBoxedPromise,
-  racePromises,
-} from '../internal/intrinsics';
 import { generateID } from '../id-helpers';
 import { safeHandleCallback } from '../safe-handle-callback';
 import { reportToHost } from '../internal/report-to-host';
@@ -2025,8 +2019,7 @@ export class BaseHTTPClient {
               : undefined,
           }),
         );
-        const { value: rawAdapterResponse } =
-          await awaitBoxedPromise(adapterPromise);
+        const { value: rawAdapterResponse } = await adapterPromise;
 
         // Observe the upload before any other response getter or normalization can
         // throw. Keep it outside this try so failures still expose the upload outcome.
@@ -3871,17 +3864,11 @@ function adoptRequestBodySettled(
   if (pending === undefined || pending instanceof UnreadableReturn) {
     return undefined;
   }
-  const boxed = observeBoxed(
-    pending,
-    (value) => value,
-    (error: unknown) => error,
-  );
-  // Stabilize immediately before publishing the Error at this public API boundary, not
-  // one promise reaction earlier while the boxed data can still change. Internal mapping
-  // itself never re-adopts the adapter's value.
-  return observePromise(boxed, (result) =>
-    result.value === undefined ? undefined : stableUploadError(result.value),
-  );
+  // Stabilized in the reaction that publishes the Error at this public API boundary,
+  // so the adapter's value never settles a promise itself.
+  const publish = (value: unknown): Error | undefined =>
+    value === undefined ? undefined : stableUploadError(value);
+  return pending.then(({ value }) => publish(value), publish);
 }
 
 /**
@@ -4028,13 +4015,12 @@ async function settleUploadBeforeNextDispatch(
   // Settlement, not outcome: a rejection counts as settled too. Every caller passes the
   // attempt runner's already-adopted outcome, which cannot reject, but the "never rejects"
   // guarantee above is this function's own and must not rest on that precondition.
-  const uploadSettled = observePromise(
-    settled,
+  const uploadSettled = settled.then(
     (): UploadSettleWait => 'settled',
     (): UploadSettleWait => 'settled',
   );
   try {
-    return (await racePromises([uploadSettled, cancelled, expired])).value;
+    return await Promise.race([uploadSettled, cancelled, expired]);
   } finally {
     if (onAbort !== undefined) {
       cancelSignal.removeEventListener('abort', onAbort);

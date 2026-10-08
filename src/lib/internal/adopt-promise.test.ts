@@ -88,7 +88,7 @@ for (const entry of [
                 failure,
               );
             } else {
-              expect(await pending).toBe(7);
+              expect((await pending).value).toBe(7);
             }
           }
           expect(ownThenCalls).toBe(0);
@@ -107,12 +107,67 @@ for (const entry of [
 
 describe('adoptPromise', () => {
   test('settles as a plain value or native promise does', async () => {
-    expect(await adoptPromise(1)).toBe(1);
-    expect(await adoptPromise(Promise.resolve(2))).toBe(2);
+    expect(await adoptPromise(1)).toEqual({ value: 1 });
+    expect(await adoptPromise(Promise.resolve(2))).toEqual({ value: 2 });
     expect(await settle(adoptPromise(Promise.reject(new Error('no'))))).toBe(
       'no',
     );
   });
+
+  test('returns a fresh promise of its own, never the input', () => {
+    const native = Promise.resolve(1);
+    const ownThen = Promise.resolve(2);
+    void Object.defineProperty(ownThen, 'then', {
+      value: Promise.prototype.then.bind(ownThen),
+    });
+    for (const input of [native, ownThen]) {
+      const adopted = adoptPromise(input);
+      expect(adopted).not.toBe(input);
+      expect(Object.getPrototypeOf(adopted)).toBe(Promise.prototype);
+      expect(Object.hasOwn(adopted, 'then')).toBe(false);
+    }
+  });
+
+  for (const hasOwnThen of [false, true]) {
+    test(`boxes a fulfilled value without reading its then again (own then: ${String(hasOwnThen)})`, async () => {
+      let reads = 0;
+      const value = {
+        get then(): undefined {
+          if (++reads > 1) {
+            throw new Error('fulfilled value was adopted twice');
+          }
+          return undefined;
+        },
+      };
+      const source = Promise.resolve(value);
+      expect(reads).toBe(1);
+      if (hasOwnThen) {
+        void Object.defineProperty(source, 'then', { value: () => undefined });
+      }
+      const box = await Promise.race([adoptPromise(source)]);
+      expect(box.value).toBe(value);
+      expect(reads).toBe(1);
+    });
+  }
+
+  for (const isRejected of [false, true]) {
+    test(`onSettled runs before any reaction to the result (rejected: ${String(isRejected)})`, async () => {
+      const order: string[] = [];
+      const source = isRejected
+        ? Promise.reject(new Error('failed'))
+        : Promise.resolve(1);
+      const adopted = adoptPromise(source, {
+        onSettled: (didFulfill) => {
+          order.push(`settled:${String(didFulfill)}`);
+        },
+      });
+      await adopted.then(
+        () => order.push('reaction'),
+        () => order.push('reaction'),
+      );
+      expect(order).toEqual([`settled:${String(!isRejected)}`, 'reaction']);
+    });
+  }
 
   test("ignores a native promise's own no-op then", async () => {
     const promise: object = Promise.reject(new Error('real rejection'));
@@ -241,7 +296,7 @@ describe('adoptPromise', () => {
       }, 5);
     });
 
-    expect(await adoptPromise(lazy)).toBe('value');
+    expect((await adoptPromise(lazy)).value).toBe('value');
   });
 
   test('follows a proxy around a promise through its then', async () => {
@@ -255,7 +310,7 @@ describe('adoptPromise', () => {
       },
     });
 
-    expect(await adoptPromise(proxy)).toBe(42);
+    expect((await adoptPromise(proxy)).value).toBe(42);
   });
 
   test('rejects a proxy with an own bound then rather than trusting its override', async () => {
@@ -279,7 +334,7 @@ describe('adoptPromise', () => {
       },
     };
 
-    expect(await adoptPromise<unknown>(thenable)).toBe(3);
+    expect((await adoptPromise<unknown>(thenable)).value).toBe(3);
   });
 
   test('ignores an own constructor paired with an own no-op then', async () => {
@@ -310,7 +365,7 @@ test('adoptResult reads a thenable accessor once and invokes it asynchronously w
   expect(pending).not.toBeInstanceOf(UnreadableReturn);
   expect(reads).toBe(1);
   expect(calls).toBe(0);
-  expect(await pending).toBe(42);
+  expect(((await pending) as { value: unknown }).value).toBe(42);
   expect(reads).toBe(1);
   expect(calls).toBe(1);
 });
@@ -385,8 +440,8 @@ test('a foreign promise proxy with an own bound then follows the thenable fallba
   const proxy = new Proxy(target, {});
   expect(proxy instanceof Promise).toBe(false);
 
-  expect(await adoptPromise(proxy)).toBe(42);
-  expect(await adoptResult(proxy)).toBe(42);
+  expect((await adoptPromise(proxy)).value).toBe(42);
+  expect(await adoptResult(proxy)).toEqual({ value: 42 });
 });
 
 for (const mode of ['throwing getter', 'non-function'] as const) {
@@ -450,7 +505,7 @@ for (const base of [Array, Map] as const) {
     const thenable: object = new Thenable();
     constructed = 0;
 
-    expect(await adoptPromise<unknown>(thenable)).toBe('adopted');
+    expect((await adoptPromise<unknown>(thenable)).value).toBe('adopted');
     expect(constructed).toBe(0);
   });
 }
@@ -506,8 +561,8 @@ for (const entry of ['adoptPromise', 'adoptResult'] as const) {
     const pending =
       entry === 'adoptPromise'
         ? adoptPromise<unknown>(thenable)
-        : (adoptResult(thenable) as Promise<unknown>);
-    expect(await pending).toBe('adopted');
+        : (adoptResult(thenable) as Promise<{ value: unknown }>);
+    expect((await pending).value).toBe('adopted');
   });
 }
 
@@ -546,8 +601,10 @@ for (const hasOwnThen of [false, true]) {
     try {
       let adopted: Promise<unknown> | undefined;
       expect(() => {
-        adopted = adoptPromise(source, () => {
-          throw new Error('callback failed');
+        adopted = adoptPromise(source, {
+          onObservationFailure: () => {
+            throw new Error('callback failed');
+          },
         });
       }).not.toThrow();
       expect(await settle(adopted as Promise<unknown>)).toBe(

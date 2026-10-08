@@ -1,10 +1,6 @@
 import { markNonRetryableAdapterError } from '../internal/adapter-error';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
-import {
-  awaitBoxedPromise,
-  observePromise,
-  observeRejection,
-} from '../../internal/intrinsics';
+import { observeRejection } from '../../internal/intrinsics';
 import * as http from 'node:http';
 import { guardProgressCallback } from '../internal/progress';
 import * as https from 'node:https';
@@ -1362,7 +1358,7 @@ export class NodeAdapter implements HTTPAdapter {
                 throw pending.cause;
               }
               if (pending !== undefined) {
-                writable = (await awaitBoxedPromise(pending)).value as
+                writable = (await pending).value as
                   WritableLike | null | StreamResponseCancel;
               } else {
                 // Preserve the one-turn sync-factory handoff without adopting its
@@ -1957,7 +1953,7 @@ export class NodeAdapter implements HTTPAdapter {
         req.end();
       }
     });
-    return await observePromise(operation, undefined, (error: unknown) => {
+    return await operation.catch((error: unknown) => {
       // The one rejection path the executor's own handlers cannot see: a `Promise`
       // executor rejects on a synchronous throw too, and `httpModule.request`,
       // `Buffer.from` and `req.setHeader` can all raise one after the outcome promise has

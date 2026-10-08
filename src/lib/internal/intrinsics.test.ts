@@ -1,75 +1,9 @@
 import { expect, test } from 'bun:test';
 import { adoptPromise } from './adopt-promise';
 import { safeHandleCallbackAndWait } from '../safe-handle-callback';
-import {
-  allPromises,
-  allSettledPromises,
-  awaitBoxedPromise,
-  observePromise,
-  observeBoxed,
-  observeRejection,
-  queueMicrotaskSafely,
-  racePromises,
-} from './intrinsics';
+import { observeRejection, queueMicrotaskSafely } from './intrinsics';
 
-test('racing observes a losing rejection and joining rejects on the first failure', async () => {
-  const first = Promise.withResolvers<number>();
-  const second = Promise.withResolvers<number>();
-  const raced = racePromises([first.promise, second.promise]);
-  const joined = allPromises([first.promise, second.promise]);
-  const cause = new Error('second failed');
-  const observed = observePromise(joined, undefined, (error) => error);
-  first.resolve(1);
-  expect(await raced).toEqual({ value: 1 });
-  second.reject(cause);
-  expect(await observed).toBe(cause);
-  expect((await allPromises([])).value).toEqual([]);
-});
-
-for (const mode of ['race', 'all'] as const) {
-  test(`${mode} does not consult caller array iteration hooks`, async () => {
-    const inputs = [Promise.resolve(1), Promise.resolve(2)];
-    void Object.defineProperty(inputs, Symbol.iterator, {
-      value() {
-        throw new Error('iterator used');
-      },
-    });
-    void Object.defineProperty(inputs, 'entries', {
-      value() {
-        throw new Error('entries used');
-      },
-    });
-    expect(
-      await (mode === 'race' ? racePromises(inputs) : allPromises(inputs)),
-    ).toEqual(mode === 'race' ? { value: 1 } : { value: [1, 2] });
-  });
-}
-
-test('allSettledPromises waits for every outcome and ignores iterator hooks', async () => {
-  const slow = Promise.withResolvers<number>();
-  const failure = new Error('failed first');
-  const inputs = [Promise.reject(failure), slow.promise];
-  void Object.defineProperty(inputs, Symbol.iterator, {
-    value() {
-      throw new Error('iterator used');
-    },
-  });
-  let didComplete = false;
-  const joined = allSettledPromises(inputs);
-  void observePromise(joined, () => {
-    didComplete = true;
-  });
-  await Promise.resolve();
-  expect(didComplete).toBe(false);
-  slow.resolve(2);
-  expect((await joined).value).toEqual([
-    { status: 'rejected', reason: failure },
-    { status: 'fulfilled', value: 2 },
-  ]);
-  expect((await allSettledPromises([])).value).toEqual([]);
-});
-
-test('a race preserves a fulfilled value without reading its then again', async () => {
+test('a native race over an adopted promise preserves a fulfilled value without reading its then again', async () => {
   let reads = 0;
   const value = {
     get then(): unknown {
@@ -78,7 +12,7 @@ test('a race preserves a fulfilled value without reading its then again', async 
     },
   };
   const fulfilled = Promise.resolve(value);
-  const raced = racePromises([fulfilled]);
+  const raced = Promise.race([adoptPromise(fulfilled)]);
   const winner = await Promise.race([
     raced,
     new Promise<'watchdog'>((resolve) =>
@@ -125,50 +59,20 @@ for (const isAsynchronous of [false, true]) {
   });
 }
 
-for (const shouldReject of [false, true]) {
-  test(`boxed mapping does not adopt mapped data on rejection=${String(shouldReject)}`, async () => {
-    const mapped = new Error('mapped metadata');
-    let reads = 0;
-    Object.defineProperty(mapped, 'then', {
-      get() {
-        reads++;
-        throw new Error('mapped data must not be adopted');
-      },
-    });
-    const source = shouldReject
-      ? Promise.reject(new Error('source'))
-      : Promise.resolve();
-    const result = await observeBoxed(
-      source,
-      () => mapped,
-      () => mapped,
-    );
-    expect(result.value).toBe(mapped);
-    expect(reads).toBe(0);
-  });
-}
-
-test('boxed mapping preserves a mapper throw as rejection', async () => {
-  const failure = new Error('mapper failed');
-  const result = observeBoxed(Promise.resolve(), () => {
-    throw failure;
-  });
-  expect(await result.catch((error: unknown) => error)).toBe(failure);
-});
-
 // A caller's own native promise whose `constructor` reads as `Promise` once - enough for
-// adoption to hand it back unchanged - and as `next` from then on. Returned adopted, as
-// every caller of these observers receives it.
+// `Promise.resolve()` to hand it back unchanged - and as `next` from then on. Returned
+// adopted: a fresh promise of our own, never the input.
 function withShiftingConstructor(
   promise: Promise<unknown>,
   next: () => unknown,
-): Promise<unknown> {
+): Promise<{ value: unknown }> {
   let reads = 0;
   void Object.defineProperty(promise, 'constructor', {
     get: () => (++reads === 1 ? Promise : next()),
   });
   const adopted = adoptPromise(promise);
-  expect(adopted).toBe(promise);
+  expect(adopted).not.toBe(promise);
+  expect(Object.getPrototypeOf(adopted)).toBe(Promise.prototype);
   return adopted;
 }
 
@@ -250,68 +154,46 @@ function watchdog(ms = 100): Promise<'hung'> {
   return new Promise((resolve) => setTimeout(() => resolve('hung'), ms));
 }
 
-for (const entry of [
-  'observePromise',
-  'awaitBoxedPromise',
-  'observeBoxed',
-] as const) {
-  test(`${entry} settles its own promise when the input's species turns into a class that never settles`, async () => {
-    const source = withShiftingConstructor(
-      Promise.resolve(7),
-      neverSettlesConstructor,
-    );
-    const observed: Promise<unknown> =
-      entry === 'observePromise'
-        ? observePromise(source, (value) => value)
-        : entry === 'awaitBoxedPromise'
-          ? awaitBoxedPromise(source).then((box) => box.value)
-          : observeBoxed(source, (value) => value).then((box) => box.value);
-    expect(Object.getPrototypeOf(observed)).toBe(Promise.prototype);
-    expect(await Promise.race([observed, watchdog()])).toBe(7);
-  });
+test("adoption settles its own promise when the input's species turns into a class that never settles", async () => {
+  const adopted = withShiftingConstructor(
+    Promise.resolve(7),
+    neverSettlesConstructor,
+  );
+  const observed = adopted.then((box) => box.value);
+  expect(await Promise.race([observed, watchdog()])).toBe(7);
+});
 
-  test(`${entry} hears a rejection whose species turns into a class that never settles`, async () => {
-    const failure = new Error('real rejection');
-    const source = withShiftingConstructor(
+test('adoption hears a rejection whose species turns into a class that never settles', async () => {
+  const failure = new Error('real rejection');
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const adopted = withShiftingConstructor(
       Promise.reject(failure),
       neverSettlesConstructor,
     );
-    const unhandled: unknown[] = [];
-    const onUnhandled = (reason: unknown): void => {
-      unhandled.push(reason);
-    };
-    process.on('unhandledRejection', onUnhandled);
-    try {
-      const observed: Promise<unknown> =
-        entry === 'observePromise'
-          ? observePromise(source, undefined, (error) => error)
-          : entry === 'awaitBoxedPromise'
-            ? awaitBoxedPromise(source).catch((error: unknown) => error)
-            : observeBoxed(
-                source,
-                () => 'fulfilled',
-                (error) => error,
-              ).then((box) => box.value);
-      expect(await Promise.race([observed, watchdog()])).toBe(failure);
-      await new Promise((resolve) => setTimeout(resolve, 0));
-    } finally {
-      process.off('unhandledRejection', onUnhandled);
-    }
-    expect(unhandled).toEqual([]);
-  });
-}
+    const observed = adopted.catch((error: unknown) => error);
+    expect(await Promise.race([observed, watchdog()])).toBe(failure);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
+  expect(unhandled).toEqual([]);
+});
 
 // Pins the documented limit: once the `constructor` read throws, nothing can attach to
-// the input. The reactions hear the getter's error instead of hanging. Resolved here,
+// the input. Adoption rejects with the getter's error instead of hanging. Resolved here,
 // since a rejected one would be left unhandled - which is the limit.
-test('observePromise reports a constructor getter that starts throwing as a rejection', async () => {
-  const source = withShiftingConstructor(Promise.resolve(1), () => {
+test('adoption reports a constructor getter that starts throwing as a rejection', async () => {
+  const adopted = withShiftingConstructor(Promise.resolve(1), () => {
     throw new Error('constructor exploded');
   });
-  const observed = observePromise(
-    source,
+  const observed = adopted.then(
     () => 'fulfilled',
-    (error) => (error as Error).message,
+    (error: unknown) => (error as Error).message,
   );
   expect(await Promise.race([observed, watchdog()])).toBe(
     'constructor exploded',

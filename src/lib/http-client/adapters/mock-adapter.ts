@@ -1,18 +1,15 @@
 import { markNonRetryableAdapterError } from '../internal/adapter-error';
 import { defineEntry } from '../../internal/define-entry';
-import {
-  observePromise,
-  observeRejection,
-  awaitBoxedPromise,
-  boxPromiseValue,
-} from '../../internal/intrinsics';
-import type { PromiseResultBox } from '../../internal/intrinsics';
+import { observeRejection } from '../../internal/intrinsics';
 import Router from 'find-my-way';
 import { guardProgressCallback } from '../internal/progress';
 import { materializeRequestHeaders } from '../internal/header-utils';
 import qs from 'qs';
 import { sleep } from '../../sleep';
-import { adoptPromise } from '../../internal/adopt-promise';
+import {
+  adoptPromise,
+  type PromiseResultBox,
+} from '../../internal/adopt-promise';
 import { REDIRECT_STATUS_CODES } from '../consts';
 import {
   isPlainJSONBodyObject,
@@ -837,16 +834,16 @@ function shouldOmitResponseBody(method: string, status: number): boolean {
 function awaitAbortable<T>(
   value: T | Promise<T>,
   signal: AbortSignal | undefined,
-): Promise<PromiseResultBox<T>> {
+): Promise<PromiseResultBox<Awaited<T>>> {
   // `adoptPromise()`, not `Promise.resolve()`, for a handler's promise here and below:
   // `Promise.resolve()` hands a native promise back with its own `then`, and a no-op one
   // hung the request.
   const adopted = adoptPromise(value);
   if (!signal) {
-    return awaitBoxedPromise(adopted);
+    return adopted;
   }
 
-  return new Promise<PromiseResultBox<T>>((resolve, reject) => {
+  return new Promise<PromiseResultBox<Awaited<T>>>((resolve, reject) => {
     // Guarded: a signal that is not a native `AbortSignal` may refuse the removal, and
     // a throw from the reactions below would reject their derived promise - unhandled
     // - and leave this wait settled by nothing.
@@ -869,16 +866,14 @@ function awaitAbortable<T>(
     // `addEventListener` throws rejects this wait from the executor, and the
     // handler's promise, not yet observed, was then an unhandled rejection.
     observeRejection(
-      observePromise(
-        adopted,
+      adopted.then(
         (result) => {
           detach();
-          // Cancellation changes the wait, not adoption of the handler's data.
-          // Keep the raw response inside a box so this extra boundary cannot read
-          // its then property again only when an AbortSignal happens to be present.
-          resolve(boxPromiseValue(result));
+          // Cancellation changes the wait, not adoption of the handler's data, which
+          // stays boxed.
+          resolve(result);
         },
-        (error) => {
+        (error: unknown) => {
           detach();
           // onHandlerError receives the original reason with or without a signal.
           // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors

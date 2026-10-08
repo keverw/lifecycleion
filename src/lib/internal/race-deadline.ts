@@ -1,17 +1,11 @@
-import {
-  observePromise,
-  awaitBoxedPromise,
-  boxPromiseValue,
-  type PromiseResultBox,
-} from './intrinsics';
-
 /**
- * Race an adopted handler against an already-normalized deadline. Undefined disables the
- * timer, but still boxes the outcome: forwarding a raw result through a new promise
- * would inspect its then property again. The caller unwraps only after awaiting.
+ * Race an owned promise - one adoption returned, or the library's own - against an
+ * already-normalized deadline. Undefined disables the timer. The race settles a promise
+ * with the winning value, which reads its `then`: a caller's value must arrive boxed, as
+ * adoption delivers it, never raw.
  *
  * The timer belongs to this wait and is cleared on every exit. Losing work remains
- * observed by the native observer; deciding whether/how to report it remains the
+ * observed by the race's reaction; deciding whether/how to report it remains the
  * caller's responsibility. Abort hooks and multi-phase shutdown ownership do not
  * belong here. A background wait can opt out of keeping the host alive; browser
  * numeric timer handles have no reference state, so that option is a no-op there.
@@ -21,26 +15,20 @@ export async function raceDeadline<T, U>(
   delayMS: number | undefined,
   onTimeout: () => U,
   options?: { shouldUnref?: boolean },
-): Promise<PromiseResultBox<T | U>> {
+): Promise<T | U> {
   if (delayMS === undefined) {
-    return await awaitBoxedPromise(pending);
+    return await pending;
   }
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
-    return await new Promise<PromiseResultBox<T | U>>((resolve, reject) => {
+    return await new Promise<T | U>((resolve, reject) => {
       // Observed before the timer is armed: if arming throws, this executor rejects
       // the race, and `pending`'s own later rejection must already have a reaction.
-      // Do not construct a second promise that resolves with a raw timeout value:
-      // its inherited then could stall before the result ever reached the race.
-      void observePromise(
-        pending,
-        (value) => resolve(boxPromiseValue(value)),
-        reject,
-      );
+      pending.then(resolve, reject);
       timer = setTimeout(() => {
         try {
-          resolve(boxPromiseValue(onTimeout()));
+          resolve(onTimeout());
         } catch (error) {
           // Preserve the timeout callback's original failure.
           // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors

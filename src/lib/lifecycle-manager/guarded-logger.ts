@@ -1,7 +1,7 @@
 import { isObjectLike } from '../internal/is-object-like';
 import { LoggerService } from '../logger/logger-service';
 import { adoptResult, UnreadableReturn } from '../internal/adopt-promise';
-import { observePromise, observeRejection } from '../internal/intrinsics';
+import { observeRejection } from '../internal/intrinsics';
 import {
   reportCallbackError,
   runCallbackSafely,
@@ -406,8 +406,7 @@ function guardEntity(
     return parent;
   }
   if (pending !== undefined) {
-    const reported = observePromise(
-      pending,
+    const reported = pending.then(
       () => {
         reportCallbackError(
           label,

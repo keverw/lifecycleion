@@ -1,6 +1,5 @@
 import { expect, spyOn, test } from 'bun:test';
 import { raceDeadline } from './race-deadline';
-import { observePromise } from './intrinsics';
 import { adoptPromise } from './adopt-promise';
 
 test('zero expires next turn while undefined disables the timer', async () => {
@@ -10,28 +9,24 @@ test('zero expires next turn while undefined disables the timer', async () => {
     didTimeout = true;
     return -1;
   });
-  expect((await raceDeadline(pending.promise, 0, () => -1)).value).toBe(-1);
+  expect(await raceDeadline(pending.promise, 0, () => -1)).toBe(-1);
   expect(didTimeout).toBe(false);
   pending.resolve(2);
-  expect((await unlimited).value).toBe(2);
+  expect(await unlimited).toBe(2);
 });
 
 test('settlement clears the deadline on fulfillment and rejection', async () => {
   let timeouts = 0;
   const fail = new Error('input failed');
   expect(
-    (
-      await raceDeadline(Promise.resolve(3), 1, () => {
-        timeouts++;
-      })
-    ).value,
+    await raceDeadline(Promise.resolve(3), 1, () => {
+      timeouts++;
+    }),
   ).toBe(3);
   const rejected = raceDeadline(Promise.reject(fail), 1, () => {
     timeouts++;
   });
-  expect(await observePromise(rejected, undefined, (error) => error)).toBe(
-    fail,
-  );
+  expect(await rejected.catch((error: unknown) => error)).toBe(fail);
   await new Promise((resolve) => setTimeout(resolve, 10));
   expect(timeouts).toBe(0);
 });
@@ -42,7 +37,7 @@ test('a throwing timeout callback rejects and late input rejection remains obser
   const timed = raceDeadline(pending.promise, 0, () => {
     throw fail;
   });
-  expect(await observePromise(timed, undefined, (error) => error)).toBe(fail);
+  expect(await timed.catch((error: unknown) => error)).toBe(fail);
   pending.reject(new Error('late rejection'));
   await new Promise((resolve) => setTimeout(resolve, 0));
 });
@@ -66,7 +61,7 @@ for (const shouldUnref of [false, true]) {
         shouldUnref ? { shouldUnref: true } : undefined,
       );
       expect(timer?.hasRef()).toBe(!shouldUnref);
-      expect((await pending).value).toBe(1);
+      expect(await pending).toBe(1);
     } finally {
       if (timer !== undefined) {
         clearTimeout(timer);
@@ -93,7 +88,7 @@ test('an unlimited wait settles when the adopted input species turns into a clas
     get: () => (++reads === 1 ? Promise : { [Symbol.species]: NeverSettles }),
   });
   const adopted = adoptPromise(source);
-  expect(adopted).toBe(source);
+  expect(adopted).not.toBe(source);
   const outcome = await Promise.race([
     raceDeadline(adopted, undefined, () => -1),
     new Promise<'hung'>((resolve) => setTimeout(() => resolve('hung'), 100)),
@@ -114,11 +109,7 @@ test('a timer that cannot be armed rejects the race and leaves the input observe
   try {
     const raced = raceDeadline(pending.promise, 1000, () => undefined);
     expect(
-      await observePromise(
-        raced,
-        undefined,
-        (error) => (error as Error).message,
-      ),
+      await raced.catch((error: unknown) => (error as Error).message),
     ).toBe('timer refused');
   } finally {
     hook.mockRestore();

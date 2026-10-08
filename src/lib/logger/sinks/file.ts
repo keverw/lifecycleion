@@ -36,10 +36,7 @@ import { LogLevel, getLogLevel } from '../types';
 import { diagnosticEntry } from '../internal/diagnostic-entry';
 import { isDiagnosticEntry } from '../internal/sink-failure-routing';
 import { sleep } from '../../sleep';
-import {
-  observePromise,
-  queueMicrotaskSafely,
-} from '../../internal/intrinsics';
+import { queueMicrotaskSafely } from '../../internal/intrinsics';
 
 export type {
   SinkErrorHandler,
@@ -393,16 +390,12 @@ export class FileSink implements LogSink {
     // init wait. Left raw, a rejection from a future change would reject `close()`, a
     // shutdown step that must not raise, and go unhandled out of the constructor while
     // nothing waits on it. Reported, not swallowed, since it would be a bug.
-    const initialized = observePromise(
-      this.initialize(),
-      undefined,
-      (error: unknown) => {
-        reportToConsole(
-          `FileSink initialization failed unexpectedly: ${describeError(error)}`,
-        );
-      },
-    );
-    this.initPromise = observePromise(initialized, () => {
+    const initialized = this.initialize().catch((error: unknown) => {
+      reportToConsole(
+        `FileSink initialization failed unexpectedly: ${describeError(error)}`,
+      );
+    });
+    this.initPromise = initialized.then(() => {
       this.hasFinishedInitialization = true;
       // One observer drains the startup backlog, including after setup failed.
       // Later writes retry setup through processQueue without observing init again.
@@ -574,8 +567,8 @@ export class FileSink implements LogSink {
     // flush that waited behind another still answers within its own timeout.
     const previous = this.pendingFlush;
     const run = (async (): Promise<FlushResult> => {
-      const { value: isReady } = await raceDeadline(
-        observePromise(previous, () => true),
+      const isReady = await raceDeadline(
+        previous.then(() => true),
         timeoutMS,
         () => false,
       );
@@ -613,8 +606,7 @@ export class FileSink implements LogSink {
     // Publish ownership before any close-time callback can re-enter close().
     this.closePromise ??= new Promise<void>((resolve, reject) => {
       queueMicrotaskSafely(() => {
-        // Do not resolve with the promise: native adoption would read its live then.
-        void observePromise(this.closeInternal(), resolve, reject);
+        void this.closeInternal().then(resolve, reject);
       }, reject);
     });
     return this.closePromise;
@@ -750,7 +742,7 @@ export class FileSink implements LogSink {
 
     // Rotations run outside close too: a stalled mount must not keep the process
     // alive just for this deadline. Retain the flush floor, while sharing timer
-    // cleanup and boxed outcomes with the other bounded sink waits.
+    // cleanup with the other bounded sink waits.
     await raceDeadline(
       this.endStream(),
       Math.max(MIN_CLOSE_FLUSH_MS, timeoutMS),
@@ -1148,7 +1140,7 @@ export class FileSink implements LogSink {
     if (this.initPromise) {
       const initPromise = this.initPromise;
       const timeoutSentinel = { timedOut: true } as const;
-      const { value: result } = await raceDeadline(
+      const result = await raceDeadline(
         initPromise,
         // This call's budget includes time spent waiting behind another flush.
         Math.max(0, timeoutMS - (Date.now() - startTime)),

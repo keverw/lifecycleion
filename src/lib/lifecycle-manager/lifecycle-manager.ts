@@ -52,12 +52,10 @@ import {
   removedTimeoutHooksReason,
 } from './internal/registration-policy';
 import {
+  noop,
   observeRejection,
-  observePromise,
-  awaitBoxedPromise,
   attachIntrinsicReactions,
   queueMicrotaskSafely,
-  racePromises,
 } from '../internal/intrinsics';
 import { EventEmitterProtected } from '../event-emitter';
 import { ulid } from 'ulid';
@@ -6622,7 +6620,7 @@ export class LifecycleManager
                 !settlement.recovery ||
                 settlement.isAwaitingLateStart
               ) {
-                await racePromises([settlement.promise, settlement.abandoned]);
+                await Promise.race([settlement.promise, settlement.abandoned]);
                 // Abandonment does not release cleanup already underway. The raw
                 // start may have settled while the timeout notification was delivered.
                 if (settlement.recovery && !settlement.isAwaitingLateStart) {
@@ -6911,7 +6909,7 @@ export class LifecycleManager
       pendingShutdownOperation = shutdownOperation();
 
       if (timeoutPromise) {
-        await racePromises([pendingShutdownOperation, timeoutPromise]);
+        await Promise.race([pendingShutdownOperation, timeoutPromise]);
       } else {
         await pendingShutdownOperation;
       }
@@ -7916,11 +7914,7 @@ export class LifecycleManager
         this.releaseClaim(name, claim);
       } finally {
         if (settlement.recovery) {
-          void observePromise(
-            settlement.recovery,
-            finishSettlement,
-            finishSettlement,
-          );
+          void settlement.recovery.then(finishSettlement, finishSettlement);
         } else {
           finishSettlement();
         }
@@ -8484,7 +8478,7 @@ export class LifecycleManager
       // Race against timeout
       // Adopted, not raced as it is: a native promise carrying its own no-op `then`
       // never settled the race, and its rejection went unhandled. See `adoptPromise()`.
-      let startPromise: Promise<void>;
+      let startPromise: Promise<unknown>;
       // Read before `start()` runs: a shutdown it requests itself is left to it (see
       // `interruptPendingStarts()`), so only a pass already running by then counts below.
       const startAbortRequest = this.pendingStartAbortRequest;
@@ -8507,51 +8501,26 @@ export class LifecycleManager
           component,
           [startAbort.signal],
         );
-        let adoptionFailure: { error: unknown } | undefined;
-        startPromise = adoptPromise(rawStart, (error) => {
-          adoptionFailure = { error };
-        });
-        if (settlement) {
-          const markRawStartSettled = (): void => {
+        const markRawStartSettled = (): void => {
+          if (settlement) {
             settlement.settleRawStart();
             if (settlement.didSettle) {
               this.deleteStartSettlement(claim);
             }
-          };
-          try {
-            if (adoptionFailure) {
-              observeRejection(startPromise, () => {});
-              throw adoptionFailure.error;
-            }
-            // Observe the caller's promise once, then use our own promise for every
-            // wait and late-cleanup observer. Reattaching to the caller's promise can
-            // fail on a later constructor/species read even after this observer was
-            // accepted; treating that attachment failure as a rejected start would
-            // leave the still-running hook without late cleanup.
-            let resolveObservedStart!: () => void;
-            let rejectObservedStart!: (reason: unknown) => void;
-            const observedStart = new Promise<void>((resolve, reject) => {
-              resolveObservedStart = resolve;
-              rejectObservedStart = reject;
-            });
-            // Later setup can fail before it installs the deadline wait. The raw
-            // rejection was already contained by its marker; contain this copy too.
-            observeRejection(observedStart, () => {});
-            // Preserve a synchronous observation failure as this attempt's failure,
-            // while containing the native `then`'s unused species result.
-            attachIntrinsicReactions(
-              startPromise,
-              () => {
-                markRawStartSettled();
-                resolveObservedStart();
-              },
-              (reason) => {
-                markRawStartSettled();
-                rejectObservedStart(reason);
-              },
-            );
-            startPromise = observedStart;
-          } catch (error) {
+          }
+        };
+        let adoptionFailure: { error: unknown } | undefined;
+        // Marked settled by the reaction that settles the adopted promise, before the
+        // race below or any late-cleanup observer hears of it.
+        startPromise = adoptPromise(rawStart, {
+          onObservationFailure: (error) => {
+            adoptionFailure = { error };
+          },
+          onSettled: settlement ? markRawStartSettled : undefined,
+        });
+        if (settlement) {
+          if (adoptionFailure) {
+            observeRejection(startPromise, noop);
             // Failing to observe start() does not mean it settled. Keep ownership of
             // its resources and dependencies, and retry attachment once through a
             // manager-owned promise. A permanently broken constructor/species may
@@ -8559,11 +8528,10 @@ export class LifecycleManager
             // announcing that the still-running hook finished.
             didRawStartObservationFail = true;
             settlement.didFailRawStartObservation = true;
-            const unobservedStart = adoptionFailure ? rawStart : startPromise;
             const recoveryStart = new Promise<void>((resolve, reject) => {
               try {
                 attachIntrinsicReactions(
-                  unobservedStart as object,
+                  rawStart as object,
                   () => {
                     markRawStartSettled();
                     resolve();
@@ -8591,14 +8559,21 @@ export class LifecycleManager
             settlement.abandon();
             // The manager has stopped waiting, just as on timeout. Notify the hook
             // even when a broken constructor prevented arming the startup race.
-            this.abortHookSignal(startAbort, toError(error), name, 'start');
+            this.abortHookSignal(
+              startAbort,
+              toError(adoptionFailure.error),
+              name,
+              'start',
+            );
             this.observeFailureAfterTimeout(
               recoveryStart,
               name,
               'start() failed after its observation failed',
             );
-            throw error;
+            throw adoptionFailure.error;
           }
+          // Later setup can fail before it installs the deadline wait.
+          observeRejection(startPromise, noop);
         }
       } catch (error) {
         if (!didRawStartObservationFail) {
@@ -8723,7 +8698,7 @@ export class LifecycleManager
         });
 
         try {
-          await racePromises([startPromise, timeoutPromise]);
+          await Promise.race([startPromise, timeoutPromise]);
         } catch (error) {
           // Before the timer fires its error is `undefined`, which a start() may
           // reject with too.
@@ -8733,7 +8708,7 @@ export class LifecycleManager
         }
       } else {
         try {
-          await awaitBoxedPromise(startPromise);
+          await startPromise;
         } catch (error) {
           didStartHookFail = true;
           throw error;
@@ -9613,6 +9588,18 @@ export class LifecycleManager
         Reflect.apply(stopHook as (signal: AbortSignal) => unknown, component, [
           stopAbort.signal,
         ]),
+        {
+          // A stop that succeeds once its deadline has fired - a bare promise the
+          // timeout notification itself resolved - is recorded by the reaction that
+          // settles adoption, where the stop settled, so the graceful result's caller
+          // finds it before escalating. The deadline observer below records it too,
+          // a reaction later, and reconciles it.
+          onSettled: (didFulfill) => {
+            if (didFulfill && gracefulTimeoutError !== undefined) {
+              preparation.lateResolution = stopAttemptToken;
+            }
+          },
+        },
       );
 
       const delayMS = optionalValidatedTimerDelayMS(timeoutMS);
@@ -9669,9 +9656,9 @@ export class LifecycleManager
           }, delayMS);
         });
 
-        await racePromises([stopPromise, timeoutPromise]);
+        await Promise.race([stopPromise, timeoutPromise]);
       } else {
-        await awaitBoxedPromise(stopPromise);
+        await stopPromise;
       }
       didStopResolve = true;
 
@@ -10016,11 +10003,7 @@ export class LifecycleManager
       const markForceHookSettled = (): void => {
         didForceHookSettle = true;
       };
-      void observePromise(
-        forcePromise,
-        markForceHookSettled,
-        markForceHookSettled,
-      );
+      void forcePromise.then(markForceHookSettled, markForceHookSettled);
 
       // Both races attach rejection handlers in this turn, including when the
       // timeout is disabled or graceful completion wins. No separate no-op catch
@@ -10081,13 +10064,13 @@ export class LifecycleManager
           }, delayMS);
         });
 
-        await racePromises([
+        await Promise.race([
           forcePromise,
           timeoutPromise,
           stoppedDuringForcePromise,
         ]);
       } else {
-        await racePromises([forcePromise, stoppedDuringForcePromise]);
+        await Promise.race([forcePromise, stoppedDuringForcePromise]);
       }
       didForceResolve = true;
 
@@ -10109,7 +10092,7 @@ export class LifecycleManager
         outcomeObserver.observe(
           supersededReason === undefined
             ? forcePromise
-            : observePromise(forcePromise, undefined, (error: unknown) => {
+            : forcePromise.catch((error: unknown) => {
                 if (!isLinkedToAbort(error, supersededReason)) {
                   throw error;
                 }
@@ -10791,7 +10774,7 @@ export class LifecycleManager
 
   private monitorLateStartupCompletion(
     name: string,
-    startPromise: Promise<void>,
+    startPromise: Promise<unknown>,
     startAttemptToken: string,
     claim: symbol,
     wasForcedFromStall: boolean,
@@ -10816,7 +10799,7 @@ export class LifecycleManager
     const recovery = (async (): Promise<void> => {
       try {
         try {
-          await awaitBoxedPromise(startPromise);
+          await startPromise;
         } catch {
           // observeFailureAfterTimeout() reports a late start() rejection.
           return;

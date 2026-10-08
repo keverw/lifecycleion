@@ -1,11 +1,6 @@
 import type { BaseComponent } from '../base-component';
 import type { ComponentAccessContext } from './component-access-context';
 import { adoptPromise } from '../../internal/adopt-promise';
-import {
-  allSettledPromises,
-  awaitBoxedPromise,
-  observePromise,
-} from '../../internal/intrinsics';
 import { raceDeadline } from '../../internal/race-deadline';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { toError } from '../../to-error';
@@ -157,9 +152,7 @@ export async function runShutdownWarningPhase(
           }
           return;
         }
-        await awaitBoxedPromise(
-          adoptPromise(Reflect.apply(hook, component, [])),
-        );
+        await adoptPromise(Reflect.apply(hook, component, []));
         if (settle(name, 'completed')) {
           context.lifecycleEvents.componentShutdownWarningCompleted(name);
         }
@@ -209,11 +202,8 @@ export async function runShutdownWarningPhase(
   }
 
   // The warning phase uses an ordinary deadline; shutdown abort hooks stay local.
-  const { value: result } = await raceDeadline(
-    observePromise(
-      allSettledPromises(warningPromises),
-      () => 'completed' as const,
-    ),
+  const result = await raceDeadline(
+    Promise.allSettled(warningPromises).then(() => 'completed' as const),
     timeoutMS,
     () => 'timeout' as const,
   );

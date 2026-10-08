@@ -1,10 +1,8 @@
 import { isNullish } from '../internal/is-nullish';
 import {
+  noop,
   observeRejection,
-  awaitBoxedPromise,
-  observePromise,
   queueMicrotaskSafely,
-  allPromises,
 } from '../internal/intrinsics';
 import { EventEmitter } from '../event-emitter';
 import { ms } from '../unix-time-helpers';
@@ -451,7 +449,7 @@ export class Logger extends EventEmitter {
 
     if (beforeExit) {
       let hasStartedProcessExit = false;
-      const continuation = observePromise(beforeExit, (result) => {
+      const continuation = beforeExit.then((result) => {
         // Check if callback returned a result indicating we should wait
         if (result.success && result.value?.action === 'wait') {
           // Shutdown is already in progress, don't proceed with exit
@@ -1112,7 +1110,7 @@ export class Logger extends EventEmitter {
     // ordinary call, and an unexpected internal cleanup failure must not become an
     // unhandled rejection that kills the process. Awaiting callers still see it.
     observeRejection(this._closePromise, () => {});
-    void observePromise(this.closeOwnedSinks(), resolveClose, rejectClose);
+    void this.closeOwnedSinks().then(resolveClose, rejectClose);
     return this._closePromise;
   }
 
@@ -1531,7 +1529,6 @@ export class Logger extends EventEmitter {
         continue;
       }
       if (pending !== undefined) {
-        // Adoption protects the input; observe it through the native `then` too.
         observeRejection(pending, (error: unknown) => {
           if (!shouldSuppressFailureReport) {
             this.handleSinkError(error, 'write', sink);
@@ -1746,7 +1743,7 @@ export class Logger extends EventEmitter {
             return;
           }
           try {
-            await awaitBoxedPromise(pending ?? Promise.resolve(undefined));
+            await pending;
           } catch (error) {
             // A deadline reports uncertainty, not the eventual cause. Preserve a
             // later failure on the terminal channel without re-entering closed sinks
@@ -1788,10 +1785,9 @@ export class Logger extends EventEmitter {
       // Zero still lets this turn's promise reactions run before the timer's next
       // task. The timer stays referenced: explicit cleanup must reach completion or
       // report its deadline even if a pending sink promise is the only other work
-      // remaining. `allPromises` observes owned native promises through the native
-      // `then`; a native combinator would consult the inputs' own then.
-      const { value: expiredIndexes } = await raceDeadline(
-        observePromise(allPromises(closeOperations), () => undefined),
+      // remaining.
+      const expiredIndexes = await raceDeadline(
+        Promise.all(closeOperations).then(noop),
         this.closeTimeoutMS,
         () => {
           didReachDeadline = true;
@@ -2301,7 +2297,7 @@ export class Logger extends EventEmitter {
         }
       }
     };
-    const exiting = observePromise(closing, finishExit, (error: unknown) => {
+    const exiting = closing.then(finishExit, (error: unknown) => {
       reportToConsole(
         `Logger cleanup failed before exit: ${describeError(error)}`,
       );

@@ -19,7 +19,6 @@ import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { readUnknownMember } from '../../internal/read-member';
 import { sleep } from '../../sleep';
 import {
-  observePromise,
   observeRejection,
   queueMicrotaskSafely,
 } from '../../internal/intrinsics';
@@ -641,15 +640,11 @@ export class NamedPipeSink implements LogSink {
     // wait: a rejection from a future change would otherwise go unhandled out of the
     // constructor and reject `reconnect()`, which answers with a status instead. Reported,
     // not swallowed, since it would be a bug.
-    this.initPromise = observePromise(
-      this.initializePipe(),
-      undefined,
-      (error: unknown) => {
-        reportToConsole(
-          `NamedPipeSink initialization failed unexpectedly: ${describeError(error)}`,
-        );
-      },
-    );
+    this.initPromise = this.initializePipe().catch((error: unknown) => {
+      reportToConsole(
+        `NamedPipeSink initialization failed unexpectedly: ${describeError(error)}`,
+      );
+    });
   }
 
   public write(entry: LogEntry): void {
@@ -976,8 +971,7 @@ export class NamedPipeSink implements LogSink {
     // Publish ownership before any close-time callback can re-enter close().
     this.closePromise ??= new Promise<void>((resolve, reject) => {
       queueMicrotaskSafely(() => {
-        // Do not resolve with the promise: native adoption would read its live then.
-        void observePromise(this.closeInternal(), resolve, reject);
+        void this.closeInternal().then(resolve, reject);
       }, reject);
     });
     return this.closePromise;
@@ -1327,7 +1321,7 @@ export class NamedPipeSink implements LogSink {
     // Held so a failure after the race is not an unhandled rejection, the way `close()`
     // holds the init promise it may stop waiting on. Observed, the promise cannot reject,
     // and neither can the race over it, so nothing here needs a `catch`.
-    this.initPromise = observePromise(attempt, undefined, () => {
+    this.initPromise = attempt.catch(() => {
       // Reported by `openPipe` itself; nothing further to do here.
     });
 

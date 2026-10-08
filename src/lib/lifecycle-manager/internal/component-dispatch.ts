@@ -215,21 +215,20 @@ export async function dispatchAnnouncedHook<TRefusal>(
     return { status: 'refused', refusal };
   }
 
-  const timeoutResult = { timedOut: true } as const;
-
   try {
     const handlerPromise = adoptPromise<unknown>(
       Reflect.apply(request.handler, request.component, request.args),
     );
     // Zero means no timer, as for startup and signals: racing `setTimeout(..., 0)` made
     // the outcome depend on whether a handler settled before its first asynchronous turn.
-    const { value } = await raceDeadline(
+    const outcome = await raceDeadline(
       handlerPromise,
       optionalValidatedTimerDelayMS(request.timeoutMS),
-      () => timeoutResult,
+      // A settled handler always arrives boxed, so only the deadline answers undefined.
+      () => undefined,
     );
 
-    if (value === timeoutResult) {
+    if (outcome === undefined) {
       context.logger.entity(name).warn(request.timeoutLog, {
         params: request.timeoutLogParams,
       });
@@ -253,7 +252,7 @@ export async function dispatchAnnouncedHook<TRefusal>(
       return { status: 'timed_out' };
     }
 
-    return { status: 'settled', value };
+    return { status: 'settled', value: outcome.value };
   } catch (error) {
     return { status: 'threw', error };
   }

@@ -55,13 +55,30 @@ function isSlotCheckFailure(error: unknown): boolean {
 }
 
 /**
+ * A caller's settled value, boxed. Native resolution reads a fulfilled object's `then`
+ * again whenever it settles another promise with it - an `async` function returning it,
+ * `Promise.race()`, a `then` reaction's result - and a getter that changed after the
+ * value's own resolution could start an adoption there that never settles. The box is
+ * the library's own object, so the promises adoption returns, and every `await` and
+ * native combinator over them, carry it without reading the caller's value again.
+ * Unwrap it synchronously, after the wait; the raw value must not settle another
+ * promise.
+ */
+export interface PromiseResultBox<T> {
+  value: T;
+}
+
+function boxPromiseValue<T>(value: T): PromiseResultBox<T> {
+  return { value };
+}
+
+/**
  * Adopt a value from untrusted code - a component hook's return, a callback's result - as
- * a native promise that settles as it does, safe for observation through the native
- * `then`. A native input need not be wrapped again: that would re-adopt its fulfilled
- * value. Adoption does not promise a fresh identity. Consumers that await rather than
- * attach an observer use awaitBoxedPromise and unwrap afterward, so a changing input
- * constructor cannot redirect await through a live then. Constructor/species failures
- * during that observation remain subject to the native limits below.
+ * a fresh native promise the library owns, fulfilled with the value boxed
+ * ({@link PromiseResultBox}) or rejected as the value is. It is never the caller's own
+ * promise, so `await`, `then` and the native combinators can be used on it directly: its
+ * `constructor` and `then` are the built-ins, whatever the caller's promise does with
+ * its own.
  *
  * It follows the value as `await` would, with one exception: a `then` attached to the
  * value itself, as an own property, is not trusted. `await` ignores one on a plain native
@@ -87,6 +104,12 @@ function isSlotCheckFailure(error: unknown): boolean {
  * can do anything about. A `then` - or a `constructor` getter - that throws rejects the
  * result rather than throwing.
  *
+ * A native promise `Promise.resolve()` hands back as it is - its `constructor` read as
+ * `Promise` - is observed through the native `then` too, so its fulfilled value reaches
+ * the box without its `then` being read again. That reaction reads `constructor` a second
+ * time, for its species; a getter that throws there, or a species that cannot build a
+ * promise, rejects the result as an observation failure.
+ *
  * Something on the `Promise.prototype` chain with an own `then` that the native `then`
  * refuses is rejected, never followed through that `then`: a local own-then proxy around
  * a promise, a native promise whose `constructor` misbehaves - a getter that throws, a
@@ -108,12 +131,6 @@ function isSlotCheckFailure(error: unknown): boolean {
  * that starts its work in `then` would mean second-guessing the class, which is the
  * value's own behaviour to define.
  *
- * Known limit: protecting a native promise's own then requires forwarding its state
- * into a native promise we own (including for foreign realms). Native resolution of
- * that forwarding promise inspects a fulfilled object's then. A getter that changes
- * after the source fulfilled can therefore fail or stall this exceptional path. The
- * ordinary Promise.resolve path below does not add that extra forwarding step.
- *
  * Known limit: a broken native promise - one whose `constructor` misbehaves - cannot be
  * adopted without modifying it.
  * Every way the language offers to attach a reaction to one - `then`, `await`,
@@ -129,12 +146,26 @@ function isSlotCheckFailure(error: unknown): boolean {
  */
 export function adoptPromise<T>(
   value: T | PromiseLike<T>,
-  onObservationFailure?: (error: unknown) => void,
-): Promise<Awaited<T>> {
+  callbacks?: AdoptionCallbacks,
+): Promise<PromiseResultBox<Awaited<T>>> {
   return (
-    adoptOwnPromise(value, undefined, onObservationFailure) ??
-    adopt(value, undefined, onObservationFailure)
+    adoptOwnPromise(value, undefined, callbacks) ??
+    adopt(value, undefined, callbacks)
   );
+}
+
+/** Hooks into one adoption, for a caller that must act at its exact moments. */
+export interface AdoptionCallbacks {
+  /**
+   * The value could not be observed at all. Called synchronously, before the result
+   * rejects with `error`; the value's own outcome is never seen.
+   */
+  onObservationFailure?: (error: unknown) => void;
+  /**
+   * The value settled - fulfilled when `didFulfill`. Called by the reaction that
+   * settles the result, so before any reaction to the result runs.
+   */
+  onSettled?: (didFulfill: boolean) => void;
 }
 
 /**
@@ -164,32 +195,34 @@ export function adoptPromise<T>(
 function adoptOwnPromise<T>(
   value: T,
   isPromise?: boolean,
-  onObservationFailure?: (error: unknown) => void,
-): Promise<Awaited<T>> | undefined {
+  callbacks?: AdoptionCallbacks,
+): Promise<PromiseResultBox<Awaited<T>>> | undefined {
   if (!isObjectLike(value) || !hasOwnThen(value)) {
     return undefined;
   }
   const isOnPromiseChain = isPromise ?? inheritsFromPromise(value);
   let didAdopt = false;
-  const pending = new Promise<Awaited<T>>((resolve, reject) => {
-    try {
-      attachIntrinsicReactions<Awaited<T>>(value, resolve, reject);
-      didAdopt = true;
-    } catch (error) {
-      // A foreign-realm promise fails `inheritsFromPromise`. The slot check refuses a
-      // non-promise before reading `constructor`, so any failure it cannot throw - from
-      // a `constructor` getter, a species getter or a species constructor - comes from
-      // a native promise of some realm, whose own `then` must not be trusted to settle
-      // it.
-      if (isOnPromiseChain || !isSlotCheckFailure(error)) {
+  const pending = new Promise<PromiseResultBox<Awaited<T>>>(
+    (resolve, reject) => {
+      try {
+        attachBoxingReactions<Awaited<T>>(value, resolve, reject, callbacks);
         didAdopt = true;
-        notifyObservationFailure(onObservationFailure, error);
-        // Preserve the original rejection value, as adoption does.
-        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
-        reject(error);
+      } catch (error) {
+        // A foreign-realm promise fails `inheritsFromPromise`. The slot check refuses a
+        // non-promise before reading `constructor`, so any failure it cannot throw - from
+        // a `constructor` getter, a species getter or a species constructor - comes from
+        // a native promise of some realm, whose own `then` must not be trusted to settle
+        // it.
+        if (isOnPromiseChain || !isSlotCheckFailure(error)) {
+          didAdopt = true;
+          notifyObservationFailure(callbacks, error);
+          // Preserve the original rejection value, as adoption does.
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+          reject(error);
+        }
       }
-    }
-  });
+    },
+  );
   return didAdopt ? pending : undefined;
 }
 
@@ -199,36 +232,100 @@ function adoptOwnPromise<T>(
 function adopt<T>(
   value: T | PromiseLike<T>,
   capturedThen?: (...args: unknown[]) => unknown,
-  onObservationFailure?: (error: unknown) => void,
-): Promise<Awaited<T>> {
-  // Promise.resolve already returns a native promise observed through the native
-  // `then`. Wrapping it again would resolve with its raw fulfilled value, reading
-  // then a second time and turning an already successful result into another adoption.
-  // Keep invocation errors asynchronous, as this function's contract requires.
-  if (capturedThen === undefined) {
-    try {
-      return Promise.resolve(value);
-    } catch (error) {
-      notifyObservationFailure(onObservationFailure, error);
-      // Preserve the original failure, as adoption does.
-      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
-      return Promise.reject(error);
-    }
+  callbacks?: AdoptionCallbacks,
+): Promise<PromiseResultBox<Awaited<T>>> {
+  if (capturedThen !== undefined) {
+    const followed = new Promise<Awaited<T>>((resolve, reject) => {
+      // Thenable invocation is a microtask, just like Promise.resolve assimilation.
+      // Ignore its return: only the supplied resolve/reject callbacks settle adoption.
+      queueMicrotaskSafely(() => {
+        try {
+          Reflect.apply(capturedThen, value, [resolve, reject]);
+        } catch (error) {
+          // Preserve arbitrary rejection reasons exactly as Promise assimilation does.
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+          reject(error);
+        }
+      });
+    });
+    return boxSettlement(followed, callbacks);
   }
 
-  return new Promise<Awaited<T>>((resolve, reject) => {
-    // Thenable invocation is a microtask, just like Promise.resolve assimilation.
-    // Ignore its return: only the supplied resolve/reject callbacks settle adoption.
-    queueMicrotaskSafely(() => {
-      try {
-        Reflect.apply(capturedThen, value, [resolve, reject]);
-      } catch (error) {
-        // Preserve arbitrary rejection reasons exactly as Promise assimilation does.
-        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
-        reject(error);
-      }
-    });
+  // A primitive has no `then` of its own to read, and is already settled.
+  if (!isObjectLike(value) && callbacks?.onSettled === undefined) {
+    return Promise.resolve(boxPromiseValue(value as Awaited<T>));
+  }
+
+  // Keep invocation errors asynchronous, as this function's contract requires.
+  let resolved: Promise<Awaited<T>>;
+  try {
+    resolved = Promise.resolve(value);
+  } catch (error) {
+    notifyObservationFailure(callbacks, error);
+    // Preserve the original failure, as adoption does.
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+    return Promise.reject(error);
+  }
+  if (resolved !== value) {
+    // Already a promise of our own, which native resolution settles as `await` would.
+    return boxSettlement(resolved, callbacks);
+  }
+  // The caller's own native promise, handed back as it is. Observed through the native
+  // `then` rather than resolved into a new promise, which would read its fulfilled
+  // value's `then` a second time.
+  return new Promise<PromiseResultBox<Awaited<T>>>((resolve, reject) => {
+    try {
+      attachBoxingReactions<Awaited<T>>(resolved, resolve, reject, callbacks);
+    } catch (error) {
+      notifyObservationFailure(callbacks, error);
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+      reject(error);
+    }
   });
+}
+
+/**
+ * Settle an adoption from a native promise's own state, read through the native `then`,
+ * its fulfilled value boxed rather than resolved. Throws when that `then` refuses
+ * `source`.
+ */
+function attachBoxingReactions<T>(
+  source: object,
+  resolve: (box: PromiseResultBox<T>) => void,
+  reject: (reason: unknown) => void,
+  callbacks: AdoptionCallbacks | undefined,
+): void {
+  attachIntrinsicReactions<T>(
+    source,
+    (value) => {
+      resolve(boxPromiseValue(value));
+      notifySettled(callbacks, true);
+    },
+    (reason) => {
+      reject(reason);
+      notifySettled(callbacks, false);
+    },
+  );
+}
+
+/** Box the outcome of a promise of our own. */
+function boxSettlement<T>(
+  source: Promise<T>,
+  callbacks: AdoptionCallbacks | undefined,
+): Promise<PromiseResultBox<T>> {
+  if (callbacks?.onSettled === undefined) {
+    return source.then(boxPromiseValue);
+  }
+  return source.then(
+    (value) => {
+      notifySettled(callbacks, true);
+      return boxPromiseValue(value);
+    },
+    (error: unknown) => {
+      notifySettled(callbacks, false);
+      throw error;
+    },
+  );
 }
 
 /** A malformed return is distinct from a throw during the callback invocation. */
@@ -259,14 +356,15 @@ export class UnreadableReturn extends Error {
  * Classify a completed callback's return separately from invoking it. Synchronous
  * success creates no reporting closure or wrapper. Only a malformed return allocates
  * a failure, which callers route through their configured channel or terminal console.
- * A promise is native and safe to observe; undefined means no async work.
+ * A promise is a fresh one of our own, as {@link adoptPromise} returns; undefined means
+ * no async work.
  * Native promises are detected before reading then so hostile own properties cannot
  * hide a rejection. Other thenables are classified and adopted from a single read;
  * do not reintroduce a separate predicate followed by adoption.
  */
 export function adoptResult(
   result: unknown,
-): Promise<unknown> | UnreadableReturn | undefined {
+): Promise<PromiseResultBox<unknown>> | UnreadableReturn | undefined {
   if (!isObjectLike(result)) {
     return undefined;
   }
@@ -331,9 +429,10 @@ export function containDeferredResult(
  * console instead, since the adoption itself still reports the original.
  */
 function notifyObservationFailure(
-  onObservationFailure: ((error: unknown) => void) | undefined,
+  callbacks: AdoptionCallbacks | undefined,
   error: unknown,
 ): void {
+  const onObservationFailure = callbacks?.onObservationFailure;
   if (onObservationFailure === undefined) {
     return;
   }
@@ -342,6 +441,24 @@ function notifyObservationFailure(
   } catch (callbackError) {
     reportToConsole(
       `An adoption failure callback threw: ${describeError(callbackError)}`,
+    );
+  }
+}
+
+/** Tell the caller the value settled; a throw cannot keep the result from settling. */
+function notifySettled(
+  callbacks: AdoptionCallbacks | undefined,
+  didFulfill: boolean,
+): void {
+  const onSettled = callbacks?.onSettled;
+  if (onSettled === undefined) {
+    return;
+  }
+  try {
+    onSettled(didFulfill);
+  } catch (callbackError) {
+    reportToConsole(
+      `An adoption settlement callback threw: ${describeError(callbackError)}`,
     );
   }
 }

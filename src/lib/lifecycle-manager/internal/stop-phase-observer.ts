@@ -1,4 +1,4 @@
-import { observePromise, observeRejection } from '../../internal/intrinsics';
+import { observeRejection } from '../../internal/intrinsics';
 
 /**
  * Reporting belongs to one observer per phase; state ownership is separate.
@@ -71,8 +71,7 @@ export function createStopPhaseObserver(
       let deferredSelectionFailure: { error: unknown } | undefined;
       // Already-adopted hook promises only. One chain owns both late success
       // reconciliation and rejection reporting, even when force is abandoned.
-      const observed = observePromise(
-        promise,
+      const observed = promise.then(
         () => {
           options?.onResolved?.();
         },

@@ -2,7 +2,7 @@ import { describeError, toError } from '../to-error';
 import { adoptResult, UnreadableReturn } from './adopt-promise';
 import { isConsoleReportActive, reportToConsole } from './report-to-console';
 import { reportToHost } from './report-to-host';
-import { observePromise, observeRejection } from './intrinsics';
+import { observeRejection } from './intrinsics';
 import { resolveName } from './render-name';
 
 /**
@@ -160,7 +160,7 @@ export function reportThroughHandler(
       // reject unhandled. `settle` is idempotent, so it doubles as that last observer
       // and still lowers the caller's guard if the rejection report failed before it.
       observeRejection(
-        observePromise(pending, settle, (handlerError: unknown) => {
+        pending.then(settle, (handlerError: unknown) => {
           reportToConsole(withHandlerFailure('rejected', handlerError));
           settle();
         }),
