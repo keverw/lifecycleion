@@ -616,6 +616,11 @@ export class LifecycleManager
   // this is set and the logger ends the exit as simulated: the app asked to exit, so
   // staying down is the safer failure than restarting. See `proceedWithLoggerExit()`.
   private isProcessExitCommitted = false;
+  // Set once a simulated logger exit (`callProcessExit: false`) has been told to proceed,
+  // covering the window before the logger publishes `exit-process` - from then on its
+  // `isFinishingExit` answers until `exit-completed`. Cleared by the first read that
+  // finds the logger neither pending nor finishing an exit. See `isLoggerExitInProgress()`.
+  private isSimulatedLoggerExitProceeding = false;
   // Held while a forced logger exit logs that it is exiting, so a sink that exits from
   // that line waits instead of re-entering the forced branch without bound.
   private isProceedingForcedExit = false;
@@ -2739,8 +2744,9 @@ export class LifecycleManager
       );
     }
 
-    // Reject once a logger exit has committed the process to ending
-    if (this.isProcessExitCommitted) {
+    // Reject once a logger exit has committed the process to ending, or while a simulated
+    // one is still closing the sinks
+    if (this.isLoggerExitInProgress()) {
       this.logger.warn('Cannot start all components: process is exiting');
 
       return refusedStartupResult(
@@ -7302,7 +7308,8 @@ export class LifecycleManager
   /**
    * The answer for a logger exit allowed to proceed. When that exit ends the process,
    * every start from here on is refused (see `isProcessExitCommitted`). A simulated exit
-   * (`callProcessExit: false`) leaves the process running, so later starts stay allowed.
+   * (`callProcessExit: false`) leaves the process running, so starts are refused only
+   * until its sink cleanup settles (see `isLoggerExitInProgress()`).
    */
   private proceedWithLoggerExit(): BeforeExitResult {
     let doesEndProcess = true;
@@ -7317,9 +7324,54 @@ export class LifecycleManager
 
     if (doesEndProcess) {
       this.isProcessExitCommitted = true;
+    } else {
+      this.isSimulatedLoggerExitProceeding = true;
     }
 
     return { action: 'proceed' };
+  }
+
+  /**
+   * Whether a logger exit keeps starts refused: one that ends the process has proceeded,
+   * or a simulated one has proceeded and not yet finished closing the sinks. The logger
+   * publishes `exit-process` only after this manager answers 'proceed', so a flag covers
+   * that gap; `isFinishingExit` covers the rest, until `exit-completed`.
+   *
+   * The root logger may be a caller-supplied copy without these getters, or one whose
+   * reads throw; either counts as no exit in progress.
+   */
+  private isLoggerExitInProgress(): boolean {
+    if (this.isProcessExitCommitted) {
+      return true;
+    }
+
+    if (this.readLoggerExitFlag('isFinishingExit')) {
+      return true;
+    }
+
+    if (!this.isSimulatedLoggerExitProceeding) {
+      return false;
+    }
+
+    // Still between 'proceed' and `exit-process`: the exit is pending until it commits.
+    if (this.readLoggerExitFlag('isPendingExit')) {
+      return true;
+    }
+
+    this.isSimulatedLoggerExitProceeding = false;
+    return false;
+  }
+
+  /** A guarded read of one of the root logger's exit getters; anything but `true` is false. */
+  private readLoggerExitFlag(
+    name: 'isFinishingExit' | 'isPendingExit',
+  ): boolean {
+    try {
+      const value: unknown = this.rootLogger[name];
+      return value === true;
+    } catch {
+      return false;
+    }
   }
 
   /**
@@ -7946,8 +7998,9 @@ export class LifecycleManager
       };
     }
 
-    // ALWAYS reject once a logger exit has committed the process to ending
-    if (this.isProcessExitCommitted) {
+    // ALWAYS reject once a logger exit has committed the process to ending, or while a
+    // simulated one is still closing the sinks
+    if (this.isLoggerExitInProgress()) {
       this.logger
         .entity(name)
         .warn('Cannot start component: process is exiting');

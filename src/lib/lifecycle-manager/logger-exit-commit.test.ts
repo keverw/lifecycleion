@@ -87,6 +87,37 @@ function recordExitProcess(logger: Logger): number[] {
   return processed;
 }
 
+// The codes of the logger's `exit-completed` events: an exit's sink cleanup has settled.
+function recordExitCompleted(logger: Logger): number[] {
+  const completed: number[] = [];
+  logger.on<{ eventType: string; code: number }>(
+    'logger',
+    ({ eventType, code }) => {
+      if (eventType === 'exit-completed') {
+        completed.push(code);
+      }
+    },
+  );
+
+  return completed;
+}
+
+function simulatedExitManager(sinks: LogSink[] = [new ArraySink()]): {
+  logger: Logger;
+  manager: LifecycleManager;
+} {
+  const logger = new Logger({ sinks, callProcessExit: false });
+
+  return {
+    logger,
+    manager: new LifecycleManager({
+      logger,
+      enableLoggerExitHook: true,
+      shutdownWarningTimeoutMS: -1,
+    }),
+  };
+}
+
 function realExitManager(sink: LogSink): {
   logger: Logger;
   manager: LifecycleManager;
@@ -439,6 +470,7 @@ describe('LifecycleManager - logger exit commits the process to ending', () => {
         shutdownWarningTimeoutMS: -1,
       });
       const processed = recordExitProcess(logger);
+      const completed = recordExitCompleted(logger);
       let shouldFail = true;
       const a = new Plain(logger, 'a');
       a.stop = (): Promise<void> => {
@@ -451,13 +483,13 @@ describe('LifecycleManager - logger exit commits the process to ending', () => {
       await manager.startAllComponents();
 
       logger.exit(0);
-      await waitFor(() => processed.length === 1);
+      await waitFor(() => completed.length === 1);
       expect(logger.exitCode).toBe(1);
 
       // The process kept running, so the next exit stops the components again and
       // starts from its own code rather than the failure the last one settled on.
       shouldFail = false;
-      await manager.startAllComponents();
+      expect((await manager.startAllComponents()).success).toBe(true);
       logger.exit(0);
       await waitFor(() => processed.length === 2);
 
@@ -472,27 +504,79 @@ describe('LifecycleManager - logger exit commits the process to ending', () => {
     }
   });
 
-  test('a simulated exit leaves later starts allowed', async () => {
-    const logger = new Logger({
-      sinks: [new ArraySink()],
-      callProcessExit: false,
-    });
-    const manager = new LifecycleManager({
-      logger,
-      enableLoggerExitHook: true,
-      shutdownWarningTimeoutMS: -1,
-    });
+  test('a simulated exit refuses starts until its sink cleanup settles, then allows them', async () => {
+    const { sink, release } = gatedSink();
+
+    try {
+      const { logger, manager } = simulatedExitManager([new ArraySink(), sink]);
+      const completed = recordExitCompleted(logger);
+      await manager.registerComponent(new Plain(logger, 'a'));
+      await manager.startAllComponents();
+
+      logger.exit(0);
+      await waitFor(() => logger.didExit);
+      expect(manager.isComponentRunning('a')).toBe(false);
+
+      // `exit-process` has fired and the logger is closing its sinks.
+      expect(logger.isFinishingExit).toBe(true);
+      expect(completed).toEqual([]);
+
+      const bulk = await manager.startAllComponents();
+      expect(bulk.success).toBe(false);
+      expect(bulk.code).toBe('shutdown_in_progress');
+      expect(bulk.reason).toBe(LIFECYCLE_MANAGER_MESSAGE_PROCESS_EXITING);
+
+      const single = await manager.startComponent('a');
+      expect(single.success).toBe(false);
+      expect(single.code).toBe('shutdown_in_progress');
+      expect(single.reason).toBe(LIFECYCLE_MANAGER_MESSAGE_PROCESS_EXITING);
+      expect(manager.isComponentRunning('a')).toBe(false);
+
+      release();
+      await waitFor(() => completed.length === 1);
+      expect(logger.isFinishingExit).toBe(false);
+
+      // The process kept running, so the app may start again.
+      const result = await manager.startAllComponents();
+      expect(result.success).toBe(true);
+      expect(manager.isComponentRunning('a')).toBe(true);
+
+      await manager.stopAllComponents();
+    } finally {
+      release();
+    }
+  });
+
+  test('a simulated exit refuses a start made after it is told to proceed, before exit-process', async () => {
+    const { logger, manager } = simulatedExitManager();
+    const completed = recordExitCompleted(logger);
     await manager.registerComponent(new Plain(logger, 'a'));
     await manager.startAllComponents();
 
+    // Queued out of `shutdown-completed`: the pass has released its latch and told the
+    // exit to proceed, but the logger has not yet published `exit-process`.
+    let queuedStart:
+      Promise<{ success: boolean; code?: string; reason?: string }> | undefined;
+    let didExitAtStart: boolean | undefined;
+    manager.on('lifecycle-manager:shutdown-completed', () => {
+      queueMicrotask(() => {
+        didExitAtStart = logger.didExit;
+        queuedStart = manager.startAllComponents();
+      });
+    });
+
     logger.exit(0);
-    await waitFor(() => logger.didExit);
+    await waitFor(() => completed.length === 1);
+
+    expect(didExitAtStart).toBe(false);
+    const queued = await queuedStart;
+    expect(queued?.success).toBe(false);
+    expect(queued?.code).toBe('shutdown_in_progress');
+    expect(queued?.reason).toBe(LIFECYCLE_MANAGER_MESSAGE_PROCESS_EXITING);
     expect(manager.isComponentRunning('a')).toBe(false);
 
-    const result = await manager.startAllComponents();
-    expect(result.success).toBe(true);
-    expect(manager.isComponentRunning('a')).toBe(true);
-
+    // Allowed again once the exit has finished.
+    expect((await manager.startAllComponents()).success).toBe(true);
     await manager.stopAllComponents();
   });
 });

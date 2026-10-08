@@ -344,6 +344,16 @@ export class Logger extends EventEmitter {
   }
 
   /**
+   * Whether a committed exit is still closing the sinks - true from `exit-process` until
+   * `exit-completed`, real or simulated. A request made then belongs to that exit and is
+   * ignored. Once a simulated exit's `exit-completed` fires, the next request starts the
+   * next exit.
+   */
+  public get isFinishingExit(): boolean {
+    return this._isFinishingExit;
+  }
+
+  /**
    * The code the pending exit will commit, while {@link isPendingExit} is true; otherwise
    * `undefined`. Every request made for that exit settles it - the last non-zero code
    * wins - so it can differ from the code of the request that started the exit, and from
@@ -2242,27 +2252,51 @@ export class Logger extends EventEmitter {
     // not call the public self-await guard. Its exit continuation does not become a
     // dependency of the sink's return, and therefore runs once cleanup settles.
     const closing = this._closePromise ?? this.close();
+    // The decision `endsProcessOnExit` made above, re-checked live: listeners and sink
+    // close ran since, and may have removed a stubbed `process.exit`. No exit happened,
+    // so say so, and release the latch: the process is still running, so this exit
+    // ends as a simulated one does. Left set, every later `exit()` was ignored as if
+    // `process.exit()` were already on its way - a failure behind a skipped 0 was even
+    // reported as "an exit with code 0 is already processing" - and nothing would ever
+    // end the process. A later request starts the next exit, which re-decides whether
+    // it is real. Requests refused while this exit's cleanup ran are not replayed:
+    // each was judged, and a dropped failure reported, when it was made.
+    const isProcessExitCallable = (): boolean => {
+      if (typeof globalThis.process?.exit === 'function') {
+        return true;
+      }
+      this._hasScheduledProcessExit = false;
+      reportToConsole(
+        'Logger process exit skipped: process.exit is no longer callable',
+      );
+      return false;
+    };
     const finishExit = (): void => {
       // Cleanup has settled, so a simulated exit is complete and the next request starts
       // the next exit. A real one stays latched by `_hasScheduledProcessExit`.
       this._isFinishingExit = false;
-      if (!this._hasScheduledProcessExit) {
-        return;
-      }
-      // The decision `endsProcessOnExit` made above, re-checked live: listeners and sink
-      // close ran since, and may have removed a stubbed `process.exit`. No exit happened,
-      // so say so, and release the latch: the process is still running, so this exit
-      // ends as a simulated one does. Left set, every later `exit()` was ignored as if
-      // `process.exit()` were already on its way - a failure behind a skipped 0 was even
-      // reported as "an exit with code 0 is already processing" - and nothing would ever
-      // end the process. A later request starts the next exit, which re-decides whether
-      // it is real. Requests refused while this exit's cleanup ran are not replayed:
-      // each was judged, and a dropped failure reported, when it was made.
-      if (typeof globalThis.process?.exit !== 'function') {
-        this._hasScheduledProcessExit = false;
+      const doesEndProcess =
+        this._hasScheduledProcessExit && isProcessExitCallable();
+      // Once per exit, on the close-failure path too. A listener that exits from here
+      // starts the next exit when this one is simulated - it has settled - and is ignored
+      // behind a real one, already scheduled. `emit` contains a listener's throw; an
+      // overridden `emit` that throws is reported here, so it cannot keep a real exit
+      // from reaching `process.exit()`.
+      try {
+        this.withoutActiveSinkClose(() => {
+          this.emit('logger', {
+            eventType: 'exit-completed',
+            code: exitCode,
+            endedProcess: doesEndProcess,
+          });
+        });
+      } catch (error) {
         reportToConsole(
-          'Logger process exit skipped: process.exit is no longer callable',
+          `Logger exit-completed event failed: ${describeError(error)}`,
         );
+      }
+      // Re-checked after the listeners, which may have removed a stubbed `process.exit`.
+      if (!doesEndProcess || !isProcessExitCallable()) {
         return;
       }
       try {

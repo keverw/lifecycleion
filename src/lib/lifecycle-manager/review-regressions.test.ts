@@ -5235,6 +5235,13 @@ describe('LifecycleManager - round two review regressions', () => {
         const result = await refused;
         firstStopGate.resolve();
         expect((await firstPass).success).toBe(true);
+        // The first pass ending finalized the exit, which refuses starts until the
+        // logger finishes it - as a real exit refuses them for good. Cleared here so a
+        // restart pass can run before the exit hook reads its refusal; the hook's
+        // handling of that pass is what this test covers.
+        (
+          manager as unknown as { isSimulatedLoggerExitProceeding: boolean }
+        ).isSimulatedLoggerExitProceeding = false;
         expect((await manager.startAllComponents()).success).toBe(true);
         stopGate = restartStopGate;
         restart = manager.restartAllComponents();

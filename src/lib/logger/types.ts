@@ -265,6 +265,11 @@ export interface LoggerEventMap {
     eventType: 'exit-process';
     code: number;
   };
+  'exit-completed': {
+    eventType: 'exit-completed';
+    code: number;
+    endedProcess: boolean;
+  };
   uncaughtException: {
     eventType: 'uncaughtException';
     error: Error;
