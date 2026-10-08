@@ -928,7 +928,7 @@ export class ShutdownPassRunner {
             // before we join it at a dependency boundary or at the end of the pass.
             if (
               currentStarts.has(name) &&
-              !this.core.internals.isComponentUp(name) &&
+              !this.core.registry.isComponentUp(name) &&
               !isRetryingStall
             ) {
               continue;
@@ -938,7 +938,7 @@ export class ShutdownPassRunner {
             }
             if (
               currentStarts.has(name) &&
-              !this.core.internals.isComponentUp(name) &&
+              !this.core.registry.isComponentUp(name) &&
               !(isRetryingStall && !isStartStillInProgress(name))
             ) {
               continue;
@@ -1461,7 +1461,7 @@ export class ShutdownPassRunner {
         this.core.state.activeShutdownPass = null;
         // Its cue is this pass's alone, and it holds the pass's requesting starts.
         this.core.state.pendingStartAbortRequest = undefined;
-        this.core.internals.updateStartedFlag();
+        this.core.registry.updateStartedFlag();
 
         this.core.loggerExit.finalizePendingLoggerExit();
       });

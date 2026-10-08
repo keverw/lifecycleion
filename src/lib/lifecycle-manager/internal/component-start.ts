@@ -587,7 +587,7 @@ export class ComponentStart {
 
         if (
           dependency !== undefined &&
-          !this.core.internals.isComponentUp(dependencyName)
+          !this.core.registry.isComponentUp(dependencyName)
         ) {
           const generation =
             this.core.registryReads.currentGeneration(dependency);
@@ -666,7 +666,7 @@ export class ComponentStart {
         };
       }
 
-      if (this.core.internals.isComponentUp(dependencyName)) {
+      if (this.core.registry.isComponentUp(dependencyName)) {
         continue;
       }
 
@@ -1197,7 +1197,7 @@ export class ComponentStart {
         // above already took it down - an unexpected stop it reported there - or began
         // stopping it: there is nothing left to stop, or that stop owns it, and stopping
         // it again only failed as not running or already stopping.
-        const stopResult = this.core.internals.isComponentUp(name)
+        const stopResult = this.core.registry.isComponentUp(name)
           ? await this.core.componentStop.stopComponentInternal(name)
           : undefined;
         // A refusal is the pass's to report, as one its own stop met would be: the
@@ -1265,9 +1265,9 @@ export class ComponentStart {
       // now would leave handlers on an idle manager, or roll back a stop already owned.
       if (
         this.core.config.attachSignalsOnStart &&
-        this.core.internals.isComponentUp(name) &&
+        this.core.registry.isComponentUp(name) &&
         ![...this.core.state.runningComponents].some(
-          (other) => other !== name && this.core.internals.isComponentUp(other),
+          (other) => other !== name && this.core.registry.isComponentUp(other),
         )
       ) {
         const signalAttach = this.core.signals.autoAttachSignals(
@@ -1605,8 +1605,8 @@ export class ComponentStart {
     this.core.state.componentStates.set(name, 'running');
     this.core.state.runningComponents.add(name);
     this.core.state.stalledComponents.delete(name);
-    this.core.internals.updateStartedFlag();
-    this.core.internals.stampTimestamp(name, 'startedAt');
+    this.core.registry.updateStartedFlag();
+    this.core.registry.stampTimestamp(name, 'startedAt');
     this.core.state.activeShutdownPass?.cameUp.add(name);
   }
 }

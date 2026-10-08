@@ -151,7 +151,7 @@ export class UnexpectedStops {
         // Up again by now - a listener on its stop started it again before this report
         // was consumed - it is still this startup's to report and to roll back. Asked
         // after the callbacks above, which can report it stopped again.
-        if (this.core.internals.isComponentUp(name)) {
+        if (this.core.registry.isComponentUp(name)) {
           remainingStartedComponents.push(name);
         }
       }
@@ -224,7 +224,7 @@ export class UnexpectedStops {
       if (this.core.state.isStarting) {
         this.core.state.unexpectedStopsDuringStartup.set(name, failure);
       }
-      this.core.internals.updateStartedFlag();
+      this.core.registry.updateStartedFlag();
 
       // Mirror the normal stop path: if this was the last running component, the
       // manager should release process signal handlers instead of staying attached
@@ -232,7 +232,7 @@ export class UnexpectedStops {
       // startup's end.
       this.core.signals.detachSignalsAfterLastStop();
 
-      this.core.internals.stampTimestamp(name, 'stoppedAt');
+      this.core.registry.stampTimestamp(name, 'stoppedAt');
 
       this.core.logger.entity(name).warn(
         // A placeholder, never the message concatenated in. The component's own text

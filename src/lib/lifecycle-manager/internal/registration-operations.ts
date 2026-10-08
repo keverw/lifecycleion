@@ -521,7 +521,7 @@ export class RegistrationOperations {
       // captured the instance, a late-stop monitor - can still name it without asking the
       // component. A later registration of the same instance reads its name fresh and
       // overwrites the entry when it commits.
-      this.core.internals.updateStartedFlag();
+      this.core.registry.updateStartedFlag();
 
       this.core.unexpectedStops.clearUnexpectedStopHandler(
         component,
@@ -1807,7 +1807,7 @@ export class RegistrationOperations {
         from: string | null,
         options?: SendMessageOptions,
       ) =>
-        this.core.internals.sendMessageSettled(
+        this.core.messaging.sendMessageSettled(
           compName,
           payload,
           from,
@@ -1817,13 +1817,13 @@ export class RegistrationOperations {
         payload: unknown,
         from: string | null,
         opts?: BroadcastOptions,
-      ) => this.core.internals.broadcastMessageSettled(payload, from, opts),
+      ) => this.core.messaging.broadcastMessageSettled(payload, from, opts),
       getValueInternal: <T = unknown>(
         compName: string,
         key: string,
         from: string | null,
         options?: GetValueOptions,
-      ) => this.core.internals.getValueSettled<T>(compName, key, from, options),
+      ) => this.core.messaging.getValueSettled<T>(compName, key, from, options),
       stopAllComponentsInternal: (options?: StopAllOptions) =>
         this.requestedBy(component, () =>
           this.core.manager.stopAllComponents(options),

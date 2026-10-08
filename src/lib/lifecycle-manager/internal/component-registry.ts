@@ -4,12 +4,13 @@ import type { DependencyRead } from './dependency-policy';
 import type { ManagerCore } from './manager-core';
 
 /**
- * The registry's readers: looking a committed component up by name, the name each
- * instance was registered under, a component's status, the reservations a registration
- * checks before it commits, where an insertion lands, publishing the committed subset,
- * and the dependency read that is current for a component. They run no caller code -
- * except `nameOf()` for an instance that was never registered - and change nothing but
- * the published registry.
+ * The registry and the per-component records it keys: looking a committed component up
+ * by name, the name each instance was registered under, a component's status and
+ * whether it is up, the timestamps and `isStarted` flag a start or stop records, the
+ * reservations a registration checks before it commits, where an insertion lands,
+ * publishing the committed subset, and the dependency read that is current for a
+ * component. They run no caller code - except `nameOf()` for an instance that was never
+ * registered.
  *
  * The registry itself is state: `componentEntries` holds every reserved entry,
  * provisional ones included, and `components` with `componentsByName` the committed
@@ -87,6 +88,39 @@ export class ComponentRegistry {
       lastError,
       stallInfo,
     };
+  }
+
+  /**
+   * Whether a component is up: running, and not on its way down. A stopping component
+   * stays in `runningComponents` until its stop settles. A dependent must not start on
+   * one - that stop already checked for running dependents, so the dependent ran on a
+   * stopped dependency - and a health check must not call into one mid-stop.
+   */
+  public isComponentUp(name: string): boolean {
+    const state = this.core.state.componentStates.get(name);
+
+    return (
+      this.core.state.runningComponents.has(name) &&
+      state !== 'stopping' &&
+      state !== 'force-stopping'
+    );
+  }
+
+  /** Recompute `isStarted`: whether any component is running or stalled. */
+  public updateStartedFlag(): void {
+    this.core.state.isStarted =
+      this.core.state.runningComponents.size > 0 ||
+      this.core.state.stalledComponents.size > 0;
+  }
+
+  /** Record now as `field`, keeping the other timestamp from the component's last run. */
+  public stampTimestamp(name: string, field: 'startedAt' | 'stoppedAt'): void {
+    const timestamps = this.core.state.componentTimestamps.get(name) ?? {
+      startedAt: null,
+      stoppedAt: null,
+    };
+    timestamps[field] = Date.now();
+    this.core.state.componentTimestamps.set(name, timestamps);
   }
 
   /** Whether `component` holds a registry entry, provisional or committed, or a rollback reservation. */

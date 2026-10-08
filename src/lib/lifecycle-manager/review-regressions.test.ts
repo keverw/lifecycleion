@@ -996,10 +996,10 @@ describe('LifecycleManager - review regressions', () => {
     }
     await manager.startAllComponents();
 
-    const internals = manager as unknown as {
+    const internals = coreOf(manager).messaging as unknown as {
       sendMessageSettled: (...args: unknown[]) => Promise<unknown>;
     };
-    const original = internals.sendMessageSettled.bind(manager);
+    const original = internals.sendMessageSettled.bind(internals);
     let calls = 0;
     internals.sendMessageSettled = (...args: unknown[]): Promise<unknown> => {
       calls++;
@@ -5226,17 +5226,17 @@ describe('LifecycleManager - round two review regressions', () => {
       shutdownWarningTimeoutMS: -1,
       enableLoggerExitHook: true,
     });
-    const a = new Plain(logger, 'a');
-    const firstStopGate = deferred();
-    const restartStopGate = deferred();
-    let stopGate = firstStopGate;
-    a.stop = (): Promise<void> => stopGate.promise;
+    // Every stop of it fails until its force handler is replaced below.
+    const a = new Stalls(logger, 'a');
     await manager.registerComponent(a);
     await manager.startAllComponents();
+    const restartForceStarted = deferred();
+    const restartForceGate = deferred();
 
     // The exit's own `stopAllComponents()` is refused by a pass that is already running.
-    // That pass then ends and a restart's stop phase starts before the exit hook reads
-    // the refusal, so the exit waits for the restart's pass instead.
+    // That pass leaves `a` stalled, and a restart's stop phase - which retries a stalled
+    // component, here with a force handler held on a gate - starts before the exit hook
+    // reads the refusal, so the exit waits for the restart's pass instead.
     const stopAllComponents = manager.stopAllComponents.bind(manager);
     let restart:
       ReturnType<LifecycleManager['restartAllComponents']> | undefined;
@@ -5247,21 +5247,16 @@ describe('LifecycleManager - round two review regressions', () => {
 
       return (async () => {
         const result = await refused;
-        firstStopGate.resolve();
-        expect((await firstPass).success).toBe(true);
-        // The first pass ending finalized the exit, which refuses starts until the
-        // logger finishes it - as a real exit refuses them for good. Cleared here so a
-        // restart pass can run before the exit hook reads its refusal; the hook's
-        // handling of that pass is what this test covers.
+        expect((await firstPass).success).toBe(false);
+        expect(manager.getStalledComponentNames()).toEqual(['a']);
         (
-          manager as unknown as {
-            core: { loggerExit: { isSimulatedLoggerExitProceeding: boolean } };
-          }
-        ).core.loggerExit.isSimulatedLoggerExitProceeding = false;
-        expect((await manager.startAllComponents()).success).toBe(true);
-        stopGate = restartStopGate;
+          a as unknown as { onShutdownForce: () => Promise<void> }
+        ).onShutdownForce = (): Promise<void> => {
+          restartForceStarted.resolve();
+          return restartForceGate.promise;
+        };
         restart = manager.restartAllComponents();
-        await sleep(10);
+        await restartForceStarted.promise;
         expect(manager.getSystemState()).toBe('shutting-down');
 
         return result;
@@ -5269,11 +5264,12 @@ describe('LifecycleManager - round two review regressions', () => {
     };
 
     logger.exit(2);
+    await restartForceStarted.promise;
     await sleep(30);
     expect(restart).toBeDefined();
     expect(logger.didExit).toBe(false);
 
-    restartStopGate.resolve();
+    restartForceGate.resolve();
     const restartResult = await restart;
     expect(restartResult?.shutdownResult.success).toBe(true);
     expect(restartResult?.startupSkippedByShutdownRequest).toBe(true);

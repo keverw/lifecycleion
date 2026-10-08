@@ -1755,7 +1755,7 @@ export class ComponentStop {
         !isCompletedDuringStallRetry
       ) {
         this.core.state.stalledComponents.delete(name);
-        this.core.internals.updateStartedFlag();
+        this.core.registry.updateStartedFlag();
         this.core.lifecycleEvents.componentStalledResolved(
           name,
           stallInfo,
@@ -1845,12 +1845,12 @@ export class ComponentStop {
       );
       this.core.state.lateStartCleanupOutcomes.delete(name);
       this.core.state.componentUnexpectedStopHadError.delete(name);
-      this.core.internals.updateStartedFlag();
+      this.core.registry.updateStartedFlag();
       this.resolvePendingForceStopWaiters(name);
 
       this.core.signals.detachSignalsAfterLastStop();
 
-      this.core.internals.stampTimestamp(name, 'stoppedAt');
+      this.core.registry.stampTimestamp(name, 'stoppedAt');
     });
   }
 
@@ -1882,7 +1882,7 @@ export class ComponentStop {
         this.core.state.componentErrors.set(name, error);
       }
 
-      this.core.internals.updateStartedFlag();
+      this.core.registry.updateStartedFlag();
     });
   }
 

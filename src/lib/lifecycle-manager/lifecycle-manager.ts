@@ -6,21 +6,12 @@ import {
   type ManagerConfig,
   resolveManagerConfig,
 } from './internal/manager-config';
-import { ManagerCore, type ManagerInternals } from './internal/manager-core';
+import { ManagerCore } from './internal/manager-core';
 import type { ComponentAccessContext } from './internal/component-access-context';
-import {
-  sendMessageInternal,
-  broadcastMessageInternal,
-  getValueInternal,
-} from './internal/component-messaging';
 import {
   checkComponentHealthOperation,
   checkAllHealthOperation,
 } from './internal/component-inspection';
-import {
-  dependenciesOf,
-  findAllCircularCycles,
-} from './internal/dependency-policy';
 import {
   settleOperation,
   crashedStartupResult,
@@ -82,7 +73,6 @@ import {
   type LifecycleManagerEventName,
 } from './events';
 import { ProcessSignalManager } from '../process-signal-manager';
-import { reportCallbackError } from '../safe-handle-callback';
 import { createGuardedLoggerService } from './guarded-logger';
 import { toError } from '../to-error';
 
@@ -97,6 +87,13 @@ import { toError } from '../to-error';
  * - Component messaging and value sharing
  * - Health checks and monitoring
  * - Event-driven architecture
+ *
+ * This class is the public facade. It builds the manager's state, config, loggers and
+ * event plumbing once, in its constructor, and hands them to a `ManagerCore` whose
+ * subsystems do the work; each public method answers from that state or delegates to
+ * its subsystem, under the public-method safety net where it has one. Subsystems call
+ * the public methods back through the core at call time, so a subclass override or an
+ * instance patch of one is the one that runs. See `internal/README.md`.
  */
 export class LifecycleManager
   extends EventEmitterProtected
@@ -107,8 +104,8 @@ export class LifecycleManager
   /** The constructor's options, validated and frozen. */
   private readonly config: ManagerConfig;
   /**
-   * The manager's own logging surface: guarded, so no line in this file can throw or
-   * reject at its call site. See {@link createGuardedLoggerService}.
+   * The manager's own logging surface, shared with every subsystem: guarded, so no log
+   * call can throw or reject at its call site. See {@link createGuardedLoggerService}.
    */
   private readonly logger: LoggerService;
   /**
@@ -118,17 +115,21 @@ export class LifecycleManager
    * caller's.
    */
   private readonly rootLogger: Logger;
+  /** Registration generations and bounded reads of the live registry. */
   private readonly registrationReads = new RegistrationReadTracker(
     () => this.state.components,
   );
+  /** Guarded dependency and optional-status reads, named by the registry. */
   private readonly componentMetadata = new ComponentMetadataReader(
     (component) => this.core.registry.nameOf(component),
   );
+  /** Typed event emitters, queued through the dispatcher. */
   private readonly lifecycleEvents: LifecycleManagerEvents;
+  /** Transition depth and the notification queue, delivered through `deliverEvent()`. */
   private readonly eventDispatcher = new TransitionEventDispatcher(
     (event, data) => this.deliverEvent(event, data),
   );
-
+  /** The live view and dispatch callbacks the component-facing operations use. */
   private readonly componentAccess: ComponentAccessContext;
   /** The shared core the manager's subsystems are built over, with those subsystems. */
   private readonly core: ManagerCore;
@@ -162,7 +163,6 @@ export class LifecycleManager
       registryReads: this.registrationReads,
       componentMetadata: this.componentMetadata,
       componentAccess: this.componentAccess,
-      internals: LifecycleManager.createManagerInternals(this),
       createProcessSignalManager: (signalOptions) =>
         new ProcessSignalManager(signalOptions),
     });
@@ -496,46 +496,27 @@ export class LifecycleManager
   }
 
   /**
+   * Get the result of the last shutdown operation.
+   * Useful for debugging stalled components or tracking shutdown metrics.
+   * Returns null if no shutdown has occurred yet, or once a later bulk startup
+   * (including a restart's startup phase) has taken the startup latch and passed its
+   * signal-attach and shutdown checks - cleared then, whatever that startup's outcome.
+   *
+   * @returns The last shutdown result or null
+   */
+  public getLastShutdownResult(): ShutdownResult | null {
+    return this.state.lastShutdownResult;
+  }
+
+  // ============================================================================
+  // Dependencies
+  // ============================================================================
+
+  /**
    * Get resolved startup order after applying dependency constraints.
    */
   public getStartupOrder(): StartupOrderResult {
-    try {
-      // Read until the reads stop changing the registry, as `validateDependencies()`
-      // and a bulk startup read it: a `getDependencies()` that registers or unregisters
-      // a component re-entrantly left an order over the registry as it was when the
-      // reads began - naming a component that was gone. Ordered over the live registry
-      // once they settle, from the lists already read, so ordering runs no caller code.
-      const { reads, isSettled } = this.registrationReads.readRegistry(
-        (component) =>
-          this.componentMetadata.readDependenciesReported(
-            component,
-            'ordering',
-          ),
-      );
-      if (!isSettled) {
-        throw new Error(
-          'The registry kept changing while the startup order was being read',
-        );
-      }
-
-      return {
-        success: true,
-        startupOrder: this.core.startupOrdering.getStartupOrderInternal(
-          this.state.components,
-          undefined,
-          reads,
-        ),
-      };
-    } catch (error) {
-      return {
-        success: false,
-        startupOrder: [],
-        ...this.core.startupOrdering.answerStartupOrderFailure(
-          error,
-          'lifecycle-manager getStartupOrder',
-        ),
-      };
-    }
+    return this.core.startupOrdering.getStartupOrderOperation();
   }
 
   /**
@@ -552,177 +533,7 @@ export class LifecycleManager
    * This is useful for pre-flight checks before starting components.
    */
   public validateDependencies(): DependencyValidationResult {
-    const missingDependencies: Array<{
-      componentName: string;
-      componentIsOptional: boolean;
-      missingDependency: string;
-    }> = [];
-
-    // Each component read once, guarded: the reads run its own code, and one whose
-    // `getDependencies()` or `isOptional()` threw made this - documented as not
-    // throwing - throw to its caller. A component whose dependencies cannot be read is
-    // reported, listed in `invalidDependencyLists`, and makes the result invalid: its own
-    // start fails on the same list, so "valid" would be a promise it cannot keep. An
-    // `isOptional()` that throws does not: startup reads it as required and starts the
-    // component normally, so validation answers the same.
-    const invalidDependencyLists: Array<{
-      componentName: string;
-      error: Error;
-    }> = [];
-    const graph: Array<{
-      name: string;
-      isOptional: boolean;
-      dependencies: string[];
-    }> = [];
-
-    // Read until the reads stop changing the registry, as registration reads it: they
-    // run components' code, which can register or unregister re-entrantly, and a check
-    // over the registry as it was when the loop began listed components that were gone
-    // and missed ones that had arrived - `valid: true` for a registry whose startup then
-    // failed. The graph is the live registry once the reads settle.
-    const { reads } = this.registrationReads.readRegistry((component) => ({
-      // The one rule startup applies, through the one helper: a throw is reported once
-      // and read as required.
-      isOptional: this.componentMetadata.isComponentOptional(component),
-      // Reported once per registration, like every other read of it: the failure is in
-      // the result already, and a caller polling this would flood the channel.
-      read: this.componentMetadata.readDependenciesReported(
-        component,
-        'validateDependencies',
-      ),
-    }));
-
-    for (const component of this.state.components) {
-      const name = this.core.registry.nameOf(component);
-      // A registry the reads kept changing can leave a component with a list read for a
-      // registration that has since been replaced, or with none at all. Only that
-      // component is reported as unread: one holding its current registration's answer
-      // is part of an exact snapshot of the live registry, since nothing runs between
-      // the last read and this answer.
-      const isUnread = !this.registrationReads.isReadCurrent(reads, component);
-      const current = isUnread ? undefined : reads.get(component);
-      const { isOptional, read } = current ?? {
-        isOptional: false,
-        read: {
-          error: new Error(
-            'The registry kept changing while dependencies were being validated',
-          ),
-        },
-      };
-
-      if (!('dependencies' in read) || read.invalidEntry !== undefined) {
-        invalidDependencyLists.push({
-          componentName: name,
-          error: toError(
-            'dependencies' in read ? read.invalidEntry : read.error,
-          ),
-        });
-      }
-
-      graph.push({
-        name,
-        isOptional,
-        dependencies: dependenciesOf(read),
-      });
-    }
-
-    // Looked up here rather than through the registry per dependency, which rescanned
-    // every component for each one.
-    const registeredNames = new Set(graph.map(({ name }) => name));
-
-    // Check for missing dependencies
-    for (const {
-      name: componentName,
-      isOptional: isComponentOptional,
-      dependencies,
-    } of graph) {
-      for (const dep of dependencies) {
-        if (!registeredNames.has(dep)) {
-          missingDependencies.push({
-            componentName,
-            componentIsOptional: isComponentOptional,
-            missingDependency: dep,
-          });
-        }
-      }
-    }
-
-    // Build adjacency graph for cycle detection
-    const adjacency = new Map<string, Set<string>>();
-
-    for (const { name } of graph) {
-      adjacency.set(name, new Set());
-    }
-
-    // Build edges: dependency -> dependent (only when dependency is registered)
-    for (const { name: dependent, dependencies } of graph) {
-      for (const dep of dependencies) {
-        if (adjacency.has(dep)) {
-          adjacency.get(dep)?.add(dependent);
-        }
-      }
-    }
-
-    // Find circular dependency cycles. Guarded, as `getStartupOrder()` guards its sort:
-    // this method is documented as not throwing, and the walk is iterative so chain
-    // depth cannot exhaust the stack, but any other failure inside it must not escape
-    // either. A graph that could not be checked is no basis for "valid": answered
-    // invalid, with the failure on the result and reported as any crash is.
-    let circularCycles: string[][] = [];
-    let cycleCheckError: Error | undefined;
-    try {
-      circularCycles = findAllCircularCycles(adjacency);
-    } catch (error) {
-      cycleCheckError = toError(error);
-      reportCallbackError('lifecycle-manager validateDependencies', error);
-      this.logger.error(
-        'Failed to check dependencies for cycles: {{error.message}}',
-        { params: { error: cycleCheckError } },
-      );
-    }
-
-    const isValid =
-      missingDependencies.length === 0 &&
-      circularCycles.length === 0 &&
-      invalidDependencyLists.length === 0 &&
-      cycleCheckError === undefined;
-
-    // Calculate summary counts
-    const totalMissingDependencies = missingDependencies.length;
-    const requiredMissingDependencies = missingDependencies.filter(
-      (md) => !md.componentIsOptional,
-    ).length;
-    const optionalMissingDependencies = missingDependencies.filter(
-      (md) => md.componentIsOptional,
-    ).length;
-
-    return {
-      valid: isValid,
-      missingDependencies,
-      circularCycles,
-      invalidDependencyLists,
-      ...(cycleCheckError === undefined ? {} : { cycleCheckError }),
-      summary: {
-        totalMissingDependencies,
-        requiredMissingDependencies,
-        optionalMissingDependencies,
-        totalCircularCycles: circularCycles.length,
-        totalInvalidDependencyLists: invalidDependencyLists.length,
-      },
-    };
-  }
-
-  /**
-   * Get the result of the last shutdown operation.
-   * Useful for debugging stalled components or tracking shutdown metrics.
-   * Returns null if no shutdown has occurred yet, or once a later bulk startup
-   * (including a restart's startup phase) has taken the startup latch and passed its
-   * signal-attach and shutdown checks - cleared then, whatever that startup's outcome.
-   *
-   * @returns The last shutdown result or null
-   */
-  public getLastShutdownResult(): ShutdownResult | null {
-    return this.state.lastShutdownResult;
+    return this.core.startupOrdering.validateDependenciesOperation();
   }
 
   // ============================================================================
@@ -920,46 +731,6 @@ export class LifecycleManager
   }
 
   /**
-   * Enable Logger exit hook integration
-   *
-   * Sets up the logger's beforeExit callback to trigger graceful component shutdown.
-   * When `logger.exit(code)` is called (or `logger.error('msg', { exitCode: 1 })`),
-   * the LifecycleManager will stop all components before the process exits.
-   *
-   * The shutdown is subject to the configured `shutdownOptions.timeoutMS` (default:
-   * 30000ms). If shutdown exceeds this timeout, the exit proceeds anyway to prevent
-   * hanging. With `timeoutMS: 0` - no deadline - the exit waits for the pass however long
-   * it takes: each component's stop is still bounded by its own graceful and force
-   * timeouts, but an in-flight `start()` without a startup timeout is waited for
-   * indefinitely. Keep a non-zero timeout when an exit must never hang.
-   *
-   * This method is idempotent and can be called multiple times safely.
-   *
-   * **Note:** This overwrites any existing beforeExit callback on the logger.
-   * If you need custom exit logic, set it up manually with `logger.setBeforeExitCallback()`.
-   *
-   * @example
-   * ```typescript
-   * const logger = new Logger();
-   * const lifecycle = new LifecycleManager({
-   *   logger,
-   *   enableLoggerExitHook: true, // Auto-enable
-   *   shutdownOptions: { timeoutMS: 30000 },   // Max 30s for shutdown
-   * });
-   *
-   * // Or enable manually later
-   * lifecycle.enableLoggerExitHook();
-   *
-   * // Now logger.exit() will trigger graceful shutdown
-   * logger.error('Fatal error', { exitCode: 1 });
-   * // Components stop gracefully (up to shutdown timeout) before process exits
-   * ```
-   */
-  public enableLoggerExitHook(): void {
-    this.core.loggerExit.enable();
-  }
-
-  /**
    * Manually trigger a reload event.
    * @returns Result of broadcasting reload to components
    */
@@ -999,6 +770,50 @@ export class LifecycleManager
   }
 
   // ============================================================================
+  // Logger Exit Hook
+  // ============================================================================
+
+  /**
+   * Enable Logger exit hook integration
+   *
+   * Sets up the logger's beforeExit callback to trigger graceful component shutdown.
+   * When `logger.exit(code)` is called (or `logger.error('msg', { exitCode: 1 })`),
+   * the LifecycleManager will stop all components before the process exits.
+   *
+   * The shutdown is subject to the configured `shutdownOptions.timeoutMS` (default:
+   * 30000ms). If shutdown exceeds this timeout, the exit proceeds anyway to prevent
+   * hanging. With `timeoutMS: 0` - no deadline - the exit waits for the pass however long
+   * it takes: each component's stop is still bounded by its own graceful and force
+   * timeouts, but an in-flight `start()` without a startup timeout is waited for
+   * indefinitely. Keep a non-zero timeout when an exit must never hang.
+   *
+   * This method is idempotent and can be called multiple times safely.
+   *
+   * **Note:** This overwrites any existing beforeExit callback on the logger.
+   * If you need custom exit logic, set it up manually with `logger.setBeforeExitCallback()`.
+   *
+   * @example
+   * ```typescript
+   * const logger = new Logger();
+   * const lifecycle = new LifecycleManager({
+   *   logger,
+   *   enableLoggerExitHook: true, // Auto-enable
+   *   shutdownOptions: { timeoutMS: 30000 },   // Max 30s for shutdown
+   * });
+   *
+   * // Or enable manually later
+   * lifecycle.enableLoggerExitHook();
+   *
+   * // Now logger.exit() will trigger graceful shutdown
+   * logger.error('Fatal error', { exitCode: 1 });
+   * // Components stop gracefully (up to shutdown timeout) before process exits
+   * ```
+   */
+  public enableLoggerExitHook(): void {
+    this.core.loggerExit.enable();
+  }
+
+  // ============================================================================
   // Component Messaging
   // ============================================================================
 
@@ -1018,7 +833,12 @@ export class LifecycleManager
     payload: unknown,
     options?: SendMessageOptions,
   ): Promise<MessageResult> {
-    return this.sendMessageSettled(componentName, payload, null, options);
+    return this.core.messaging.sendMessageSettled(
+      componentName,
+      payload,
+      null,
+      options,
+    );
   }
 
   /**
@@ -1035,7 +855,7 @@ export class LifecycleManager
     payload: unknown,
     options?: BroadcastOptions,
   ): Promise<BroadcastResult[]> {
-    return this.broadcastMessageSettled(payload, null, options);
+    return this.core.messaging.broadcastMessageSettled(payload, null, options);
   }
 
   // ============================================================================
@@ -1094,36 +914,22 @@ export class LifecycleManager
     key: string,
     options?: GetValueOptions,
   ): ValueResult<T> {
-    return this.getValueSettled<T>(componentName, key, null, options);
+    return this.core.messaging.getValueSettled<T>(
+      componentName,
+      key,
+      null,
+      options,
+    );
   }
 
-  /**
-   * The manager members its subsystems still call on it (see `ManagerInternals`),
-   * forwarded at call time like the access context's callbacks, so a patched or
-   * overridden member is the one that runs.
-   */
-  private static createManagerInternals(
-    manager: LifecycleManager,
-  ): ManagerInternals {
-    return {
-      sendMessageSettled: (name, payload, from, options) =>
-        manager.sendMessageSettled(name, payload, from, options),
-      broadcastMessageSettled: (payload, from, options) =>
-        manager.broadcastMessageSettled(payload, from, options),
-      getValueSettled: <T = unknown>(
-        name: string,
-        key: string,
-        from: string | null,
-        options?: GetValueOptions,
-      ) => manager.getValueSettled<T>(name, key, from, options),
-      updateStartedFlag: () => manager.updateStartedFlag(),
-      stampTimestamp: (name, field) => manager.stampTimestamp(name, field),
-      isComponentUp: (name) => manager.isComponentUp(name),
-    };
-  }
+  // ============================================================================
+  // Wiring
+  // ============================================================================
 
   /**
-   * These modules can inspect live state and dispatch hooks, but cannot own lifecycle
+   * The access context the component-facing modules - messaging, value reads, health
+   * checks, signal broadcasts and shutdown warnings - work through. These modules can
+   * inspect live state and dispatch hooks, but cannot own lifecycle
    * transitions. Keep the view live: publication replaces the registry array, and
    * callbacks can change availability between a selection and its dispatch. Forward
    * methods at call time too, preserving subclass overrides and diagnostic seams.
@@ -1165,7 +971,7 @@ export class LifecycleManager
       isLateStartCleanupPending: (name) =>
         manager.state.pendingBulkStartupCleanup.has(name),
       sendMessageSettled: (name, payload, from, options) =>
-        manager.sendMessageSettled(name, payload, from, options),
+        manager.core.messaging.sendMessageSettled(name, payload, from, options),
       checkComponentHealth: (name) => manager.checkComponentHealth(name),
       observeFailureAfterTimeout: (promise, name, message, params) =>
         observeFailureAfterTimeout(
@@ -1178,182 +984,10 @@ export class LifecycleManager
     };
   }
 
-  private sendMessageInternal(
-    componentName: string,
-    payload: unknown,
-    from: string | null,
-    options?: SendMessageOptions,
-  ): Promise<MessageResult> {
-    return sendMessageInternal(
-      this.componentAccess,
-      componentName,
-      payload,
-      from,
-      options,
-    );
-  }
-
-  private broadcastMessageInternal(
-    payload: unknown,
-    from: string | null,
-    options?: BroadcastOptions,
-  ): Promise<BroadcastResult[]> {
-    return broadcastMessageInternal(
-      this.componentAccess,
-      payload,
-      from,
-      options,
-    );
-  }
-
-  private getValueInternal<T = unknown>(
-    componentName: string,
-    key: string,
-    from: string | null,
-    options?: GetValueOptions,
-  ): ValueResult<T> {
-    return getValueInternal<T>(
-      this.componentAccess,
-      componentName,
-      key,
-      from,
-      options,
-    );
-  }
-
-  // ============================================================================
-  // Private Helper Methods
-  // ============================================================================
-
   /**
-   * `getValueInternal()` under a synchronous version of the public-method safety net
-   * (see {@link settleOperation}): `getValue()` answers synchronously, so it gets a
-   * `try`/`catch` rather than a settled promise, but the same promise - an unexpected
-   * failure comes back as `code: 'operation_crashed'` with the original on `error`, and is reported
-   * on the global `'error'` channel. Shared by `getValue()` and the component-scoped
-   * `ComponentLifecycle.getValue()`.
+   * Where the dispatcher delivers each event: this manager's own `emit()`. Safe delivery
+   * also contains an overridden emitter that throws.
    */
-  private getValueSettled<T = unknown>(
-    componentName: string,
-    key: string,
-    from: string | null,
-    options?: GetValueOptions,
-  ): ValueResult<T> {
-    try {
-      return this.getValueInternal<T>(componentName, key, from, options);
-    } catch (error) {
-      reportCallbackError('lifecycle-manager getValue', error);
-
-      return {
-        found: false,
-        value: undefined,
-        componentFound: this.core.registry.isNameRegistered(componentName),
-        componentRunning: this.state.runningComponents.has(componentName),
-        handlerImplemented: false,
-        requestedBy: from,
-        code: 'operation_crashed',
-        error: toError(error),
-      };
-    }
-  }
-
-  /**
-   * `sendMessageInternal()` under the public-method safety net (see
-   * {@link settleOperation}). Shared by `sendMessageToComponent()` and the
-   * component-scoped `ComponentLifecycle.sendMessageToComponent()`, so a message sent
-   * from inside a component resolves the same way one sent from outside does.
-   */
-  private sendMessageSettled(
-    componentName: string,
-    payload: unknown,
-    from: string | null,
-    options?: SendMessageOptions,
-  ): Promise<MessageResult> {
-    return settleOperation(
-      'sendMessageToComponent',
-      () => this.sendMessageInternal(componentName, payload, from, options),
-      (error, _reason, code) => ({
-        sent: false,
-        componentFound: this.core.registry.isNameRegistered(componentName),
-        componentRunning: this.state.runningComponents.has(componentName),
-        handlerImplemented: false,
-        data: undefined,
-        error,
-        timedOut: false,
-        code,
-      }),
-    );
-  }
-
-  /**
-   * `broadcastMessageInternal()` under the public-method safety net, shared the same way
-   * as {@link sendMessageSettled}. The broadcast loop keeps the answers it collected when
-   * it crashes partway. Invalid options - a bad timeout budget or a non-array
-   * `componentNames` - refuse the whole broadcast with `[]` before announcing it, with a
-   * warning rather than a callback-error report. Unexpected
-   * failures before dispatch also answer `[]`, but remain reported on the global channel.
-   */
-  private broadcastMessageSettled(
-    payload: unknown,
-    from: string | null,
-    options?: BroadcastOptions,
-  ): Promise<BroadcastResult[]> {
-    return settleOperation(
-      'broadcastMessage',
-      () => this.broadcastMessageInternal(payload, from, options),
-      (error, _reason, code) => {
-        // The array contract has no aggregate error field. Keep its refusal shape,
-        // but make invalid options (a bad timeout budget, a non-array `componentNames`)
-        // visible through the configured logger instead of silently looking like an
-        // empty recipient list. This is not a callback
-        // crash and must not enter the global callback-error channel.
-        if (code === 'invalid_options') {
-          this.logger.warn('Broadcast refused: {{error.message}}', {
-            params: { error },
-          });
-        }
-        return [];
-      },
-    );
-  }
-
-  private updateStartedFlag(): void {
-    this.state.isStarted =
-      this.state.runningComponents.size > 0 ||
-      this.state.stalledComponents.size > 0;
-  }
-
-  /**
-   * Whether a component is up: running, and not on its way down. A stopping component
-   * stays in `runningComponents` until its stop settles. A dependent must not start on
-   * one - that stop already checked for running dependents, so the dependent ran on a
-   * stopped dependency - and a health check must not call into one mid-stop.
-   */
-  private isComponentUp(name: string): boolean {
-    const state = this.state.componentStates.get(name);
-
-    return (
-      this.state.runningComponents.has(name) &&
-      state !== 'stopping' &&
-      state !== 'force-stopping'
-    );
-  }
-
-  // ============================================================================
-  // Private Helper Methods
-  // ============================================================================
-
-  /** Record now as `field`, keeping the other timestamp from the component's last run. */
-  private stampTimestamp(name: string, field: 'startedAt' | 'stoppedAt'): void {
-    const timestamps = this.state.componentTimestamps.get(name) ?? {
-      startedAt: null,
-      stoppedAt: null,
-    };
-    timestamps[field] = Date.now();
-    this.state.componentTimestamps.set(name, timestamps);
-  }
-
-  /** Safe delivery also contains an overridden emitter that throws. */
   private deliverEvent<K extends LifecycleManagerEventName>(
     event: K,
     data: LifecycleManagerEventMap[K],

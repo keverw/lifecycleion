@@ -1395,7 +1395,7 @@ export class StartupOrchestration {
       });
     }
 
-    this.core.internals.updateStartedFlag();
+    this.core.registry.updateStartedFlag();
     const skippedComponentsArray = [
       ...Array.from(run.skippedDueToDependency),
       ...Array.from(run.skippedDueToStall),

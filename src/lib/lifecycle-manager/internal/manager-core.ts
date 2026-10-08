@@ -6,14 +6,6 @@ import type {
 } from '../../process-signal-manager';
 import type { LifecycleManagerEvents } from '../events';
 import type { LifecycleManager } from '../lifecycle-manager';
-import type {
-  BroadcastOptions,
-  BroadcastResult,
-  GetValueOptions,
-  MessageResult,
-  SendMessageOptions,
-  ValueResult,
-} from '../types';
 import type { ComponentAccessContext } from './component-access-context';
 import { ComponentClaims } from './component-claims';
 import type { ComponentMetadataReader } from './component-metadata-reader';
@@ -24,6 +16,7 @@ import { LateStartRecovery } from './late-start-recovery';
 import { LoggerExitHook } from './logger-exit-hook';
 import type { ManagerConfig } from './manager-config';
 import type { LifecycleManagerState } from './manager-state';
+import { MessagingOperations } from './messaging-operations';
 import { RegistrationOperations } from './registration-operations';
 import type { RegistrationReadTracker } from './registration-read-tracker';
 import { RestartOperations } from './restart-operations';
@@ -34,41 +27,6 @@ import { StartupOrchestration } from './startup-orchestration';
 import { StartupOrdering } from './startup-ordering';
 import type { TransitionEventDispatcher } from './transition-event-dispatcher';
 import { UnexpectedStops } from './unexpected-stops';
-
-/**
- * Manager operations a subsystem calls that still live on the manager itself, because
- * no subsystem owns them yet. The manager supplies them as callbacks that forward to
- * its own members at call time, so a patched or overridden member is the one that
- * runs. An extraction that takes one of these over moves it onto its subsystem.
- */
-export interface ManagerInternals {
-  /** `sendMessageToComponent()` under its safety net, as a component's handle sends it. */
-  sendMessageSettled(
-    componentName: string,
-    payload: unknown,
-    from: string | null,
-    options?: SendMessageOptions,
-  ): Promise<MessageResult>;
-  /** `broadcastMessage()` under its safety net, as a component's handle sends it. */
-  broadcastMessageSettled(
-    payload: unknown,
-    from: string | null,
-    options?: BroadcastOptions,
-  ): Promise<BroadcastResult[]>;
-  /** `getValue()` under its safety net, as a component's handle asks it. */
-  getValueSettled<T = unknown>(
-    componentName: string,
-    key: string,
-    from: string | null,
-    options?: GetValueOptions,
-  ): ValueResult<T>;
-  /** Recompute `isStarted` from the running and stalled sets. */
-  updateStartedFlag(): void;
-  /** Record now as a component's `startedAt` or `stoppedAt`. */
-  stampTimestamp(name: string, field: 'startedAt' | 'stoppedAt'): void;
-  /** Whether a component is up: running, and not on its way down. */
-  isComponentUp(name: string): boolean;
-}
 
 /** What the manager hands its core: everything a subsystem shares, built once. */
 export interface ManagerCoreParts {
@@ -89,7 +47,6 @@ export interface ManagerCoreParts {
   readonly componentMetadata: ComponentMetadataReader;
   /** The live view and dispatch callbacks the component-facing operations use. */
   readonly componentAccess: ComponentAccessContext;
-  readonly internals: ManagerInternals;
   /**
    * Creates the `ProcessSignalManager` signals attach through. Supplied by the manager
    * so these modules never import the Node-only signal manager themselves.
@@ -103,7 +60,7 @@ export interface ManagerCoreParts {
  * The shared core every manager subsystem is built over: the manager's state, config,
  * loggers, event plumbing, registry readers and component access context, plus each
  * subsystem, so subsystems reach one another through it rather than through the
- * manager.
+ * manager. The one way back to the manager is `manager`, for its public methods.
  *
  * Subsystems are created here, after the shared parts, and receive this core in their
  * constructor. A constructor only stores the core: another subsystem may not exist
@@ -120,26 +77,31 @@ export class ManagerCore implements ManagerCoreParts {
   public readonly registryReads: RegistrationReadTracker;
   public readonly componentMetadata: ComponentMetadataReader;
   public readonly componentAccess: ComponentAccessContext;
-  public readonly internals: ManagerInternals;
   public readonly createProcessSignalManager: (
     options: ProcessSignalManagerOptions,
   ) => ProcessSignalManager;
 
-  // Subsystems
+  // Subsystems. Each is created below, over this core, and reached through it.
+
+  // The registry, and what changes it.
   public readonly registry: ComponentRegistry;
+  public readonly registration: RegistrationOperations;
   public readonly startupOrdering: StartupOrdering;
-  public readonly loggerExit: LoggerExitHook;
+  // One component's start and stop, and the claims they hold.
   public readonly claims: ComponentClaims;
-  public readonly componentStop: ComponentStop;
   public readonly componentStart: ComponentStart;
+  public readonly componentStop: ComponentStop;
   public readonly lateStartRecovery: LateStartRecovery;
   public readonly unexpectedStops: UnexpectedStops;
+  // Bulk operations.
+  public readonly startup: StartupOrchestration;
   public readonly shutdownPass: ShutdownPassRunner;
   public readonly shutdownEscalation: ShutdownEscalation;
-  public readonly startup: StartupOrchestration;
   public readonly restart: RestartOperations;
-  public readonly registration: RegistrationOperations;
+  // The process, and requests made of running components.
   public readonly signals: SignalIntegration;
+  public readonly loggerExit: LoggerExitHook;
+  public readonly messaging: MessagingOperations;
 
   constructor(parts: ManagerCoreParts) {
     this.manager = parts.manager;
@@ -152,22 +114,22 @@ export class ManagerCore implements ManagerCoreParts {
     this.registryReads = parts.registryReads;
     this.componentMetadata = parts.componentMetadata;
     this.componentAccess = parts.componentAccess;
-    this.internals = parts.internals;
     this.createProcessSignalManager = parts.createProcessSignalManager;
 
     this.registry = new ComponentRegistry(this);
+    this.registration = new RegistrationOperations(this);
     this.startupOrdering = new StartupOrdering(this);
-    this.loggerExit = new LoggerExitHook(this);
     this.claims = new ComponentClaims(this);
-    this.componentStop = new ComponentStop(this);
     this.componentStart = new ComponentStart(this);
+    this.componentStop = new ComponentStop(this);
     this.lateStartRecovery = new LateStartRecovery(this);
     this.unexpectedStops = new UnexpectedStops(this);
+    this.startup = new StartupOrchestration(this);
     this.shutdownPass = new ShutdownPassRunner(this);
     this.shutdownEscalation = new ShutdownEscalation(this);
-    this.startup = new StartupOrchestration(this);
     this.restart = new RestartOperations(this);
-    this.registration = new RegistrationOperations(this);
     this.signals = new SignalIntegration(this);
+    this.loggerExit = new LoggerExitHook(this);
+    this.messaging = new MessagingOperations(this);
   }
 }

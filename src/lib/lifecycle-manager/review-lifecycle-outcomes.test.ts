@@ -1,6 +1,13 @@
 import { expect, test } from 'bun:test';
 import { ForceShutdownSupersededError } from './errors';
-import { claimReports, deferred, Plain, setup, Stalls } from './test-helpers';
+import {
+  claimReports,
+  coreOf,
+  deferred,
+  Plain,
+  setup,
+  Stalls,
+} from './test-helpers';
 
 test('a status failure after shutdown cleans up a resolved start preserves stopped state', async () => {
   const { logger, manager } = setup();
@@ -141,8 +148,8 @@ test('bulk startup retains its crash error when rollback triggers shutdown', asy
   const { logger, manager } = setup();
   const component = new Plain(logger, 'api');
   await manager.registerComponent(component);
-  const internals = manager as unknown as { updateStartedFlag: () => void };
-  const updateStartedFlag = internals.updateStartedFlag.bind(manager);
+  const internals = coreOf(manager).registry;
+  const updateStartedFlag = internals.updateStartedFlag.bind(internals);
   const failure = new Error('startup completion bookkeeping failed');
   let shutdown: ReturnType<typeof manager.stopAllComponents> | undefined;
   component.stop = () => {
