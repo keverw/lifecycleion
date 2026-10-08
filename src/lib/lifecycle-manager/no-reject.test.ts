@@ -3,6 +3,7 @@ import { BaseComponent } from './base-component';
 import type { LifecycleManager } from './lifecycle-manager';
 import {
   claimReports,
+  coreOf,
   deferred,
   fakeAttachedSignals,
   hasReport,
@@ -433,7 +434,9 @@ describe('LifecycleManager - public methods never reject', () => {
 
     // A step that runs once the stop has claimed the component.
     (
-      manager as unknown as { issueStopAttemptToken: () => string }
+      coreOf(manager).componentStop as unknown as {
+        issueStopAttemptToken: () => string;
+      }
     ).issueStopAttemptToken = (): never => {
       throw new Error('step exploded');
     };
@@ -638,7 +641,9 @@ describe('LifecycleManager - public methods never reject', () => {
 
     // A step that runs once the stop has claimed the component.
     (
-      manager as unknown as { issueStopAttemptToken: () => string }
+      coreOf(manager).componentStop as unknown as {
+        issueStopAttemptToken: () => string;
+      }
     ).issueStopAttemptToken = (): never => {
       throw new Error('step exploded');
     };
@@ -1482,10 +1487,10 @@ describe('LifecycleManager - public methods never reject', () => {
     await manager.registerComponent(failing);
 
     type StopInternal = (name: string, ...rest: unknown[]) => Promise<unknown>;
-    const internals = manager as unknown as {
+    const internals = coreOf(manager).componentStop as unknown as {
       stopComponentInternal: StopInternal;
     };
-    const originalStop = internals.stopComponentInternal.bind(manager);
+    const originalStop = internals.stopComponentInternal.bind(internals);
     const rollbackStops: string[] = [];
     // Forward the rollback options, so `a` is stopped by the rollback path itself.
     internals.stopComponentInternal = (
@@ -1965,7 +1970,7 @@ test('a stalled retry without a force handler does not require a token from a cr
   await manager.startComponent('a');
   // Simulate the same pre-token internal crash as the safety-net coverage above.
   // No ordinary path is known to throw here; recovery must still support its stall.
-  const internals = manager as unknown as {
+  const internals = coreOf(manager).componentStop as unknown as {
     issueStopAttemptToken: (name: string) => string;
   };
   const issueToken = internals.issueStopAttemptToken;
@@ -2009,7 +2014,7 @@ test('missing force-token invariant fails before publishing force-start side eff
     forceEvents++;
   });
   // Invariant-failure injection, not a demonstrated ordinary way to lose a token.
-  const internals = manager as unknown as {
+  const internals = coreOf(manager).componentStop as unknown as {
     issueStopAttemptToken: (name: string) => string;
   };
   const original = internals.issueStopAttemptToken;

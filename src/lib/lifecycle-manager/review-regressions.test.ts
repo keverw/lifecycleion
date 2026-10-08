@@ -5,6 +5,7 @@ import { ArraySink } from '../logger/sinks/array';
 import { LifecycleManager } from './lifecycle-manager';
 import {
   claimReports,
+  coreOf,
   deferred,
   fakeAttachedSignals,
   hasReport,
@@ -1130,6 +1131,8 @@ describe('LifecycleManager - review regressions', () => {
     await manager.registerComponent(new Plain(logger, 'a'));
     const internals = manager as unknown as {
       state: { componentClaims: Map<string, unknown> };
+    };
+    const componentStop = coreOf(manager).componentStop as unknown as {
       issueStopAttemptToken: () => string;
     };
 
@@ -1137,7 +1140,7 @@ describe('LifecycleManager - review regressions', () => {
     expect(internals.state.componentClaims.size).toBe(0);
 
     // A step that runs once the stop has claimed the component.
-    internals.issueStopAttemptToken = (): never => {
+    componentStop.issueStopAttemptToken = (): never => {
       throw new Error('step exploded');
     };
 

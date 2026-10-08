@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import { claimReports, deferred, Plain, setup, Stalls } from './test-helpers';
+import {
+  claimReports,
+  coreOf,
+  deferred,
+  Plain,
+  setup,
+  Stalls,
+} from './test-helpers';
 import type { ComponentOperationResult, StopComponentOptions } from './types';
 
 class Reporter extends Plain {
@@ -237,13 +244,8 @@ test('a stalled retry getter cannot claim an unregistered replacement', async ()
     });
     // Exercise the per-component retry independently of the bulk registration
     // gate, so a property getter can replace the instance before the force claim.
-    const result = await (
-      manager as unknown as {
-        retryStalledComponent: (
-          name: string,
-        ) => Promise<ComponentOperationResult>;
-      }
-    ).retryStalledComponent('a');
+    const result =
+      await coreOf(manager).componentStop.retryStalledComponent('a');
     expect(result.code).toBe('component_not_found');
     await Promise.all([unregister, register]);
     expect(original.forceCalls).toBe(calls);

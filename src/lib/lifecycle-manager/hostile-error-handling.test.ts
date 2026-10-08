@@ -16,6 +16,7 @@ import type { LogEntry } from '../logger/types';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
 import type { LifecycleManagerEventMap } from './events';
+import { coreOf } from './test-helpers';
 import { MAX_TIMER_MS } from '../internal/timer-limits';
 import {
   ComponentStartTimeoutError,
@@ -385,19 +386,19 @@ describe('LifecycleManager - hostile thrown values', () => {
   }
 
   /**
-   * Make one private step of the manager throw, so a detached chain's *body* fails while
-   * the handler that reports the failure still works.
+   * Make one private step of the manager - on one of its subsystems - throw, so a
+   * detached chain's *body* fails while the handler that reports the failure still works.
    *
    * These used to inject the failure through a logger that refused one message. The
    * manager guards its own logger now, so no log line can fail a chain body; the step
    * has to be one that does real work.
    */
   function internalStepThatThrows(
-    lifecycle: LifecycleManager,
+    owner: object,
     step: string,
     message: string,
   ): void {
-    (lifecycle as unknown as Record<string, () => never>)[step] = (): never => {
+    (owner as Record<string, () => never>)[step] = (): never => {
       throw new Error(message);
     };
   }
@@ -412,7 +413,7 @@ describe('LifecycleManager - hostile thrown values', () => {
     // Called from the middle of that sequence, after the state writes and before the
     // late-resolution log line and its events.
     internalStepThatThrows(
-      lifecycle,
+      coreOf(lifecycle).componentStop,
       'resolvePendingForceStopWaiters',
       'late stop resolution exploded',
     );
@@ -554,7 +555,7 @@ describe('LifecycleManager - hostile thrown values', () => {
     const lifecycle = new LifecycleManager({ logger });
 
     internalStepThatThrows(
-      lifecycle,
+      coreOf(lifecycle).componentStop,
       'stopComponentInternal',
       'automatic stop exploded',
     );

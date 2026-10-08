@@ -1,10 +1,11 @@
 # LifecycleManager internals
 
 `LifecycleManager` owns the registry, operation claims, state transitions, startup and
-shutdown orchestration, and late-work reconciliation. These modules implement rules,
-component-facing operations, and narrowly scoped bookkeeping owners. They do not own
-lifecycle claims or orchestrate bulk operations. They are internal implementation
-details, not exports of the package's lifecycle-manager entry.
+shutdown orchestration, and late-work reconciliation, itself or through the subsystems
+described below. These modules implement rules, component-facing operations, and
+narrowly scoped bookkeeping owners. They do not own lifecycle claims or orchestrate
+bulk operations. They are internal implementation details, not exports of the
+package's lifecycle-manager entry.
 
 | Module                        | Responsibility                                                                                                                          |
 | ----------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
@@ -17,6 +18,7 @@ details, not exports of the package's lifecycle-manager entry.
 | `operation-policy.ts`         | Lifecycle-specific timeout error provenance, abort-linked failure detection, async failure containment, and common result construction. |
 | `operation-options.ts`        | Caller options read once, each field in a fixed order, into frozen snapshots of branded types internal code requires.                   |
 | `registration-policy.ts`      | Registration progress reports, placement predicates, and the removed-timeout-hook refusal reason.                                       |
+| `hook-abort.ts`               | The guarded abort controller each call of a component hook gets, and aborting it contained.                                             |
 
 `shutdown-warning.ts` owns warning-hook dispatch, its shared deadline, and warning
 notifications. The manager chooses when this phase runs and retains shutdown ownership.
@@ -38,10 +40,12 @@ Configuration that never changes after construction lives in the config instead.
 The manager's operations move out of `lifecycle-manager.ts` into subsystems: classes
 built over one shared core.
 
-| Module                | Responsibility                                                                                                        |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `manager-core.ts`     | `ManagerCore`: the facade, state, config, loggers, event plumbing, registry readers, and every subsystem.             |
-| `logger-exit-hook.ts` | `LoggerExitHook`: the `beforeExit` callback, settling a pending exit when a pass ends, and the exit-in-progress gate. |
+| Module                | Responsibility                                                                                                                                   |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `manager-core.ts`     | `ManagerCore`: the facade, state, config, loggers, event plumbing, registry readers, and every subsystem.                                        |
+| `logger-exit-hook.ts` | `LoggerExitHook`: the `beforeExit` callback, settling a pending exit when a pass ends, and the exit-in-progress gate.                            |
+| `component-claims.ts` | `ComponentClaims`: taking, checking and releasing the per-component claims start and stop attempts hold.                                         |
+| `component-stop.ts`   | `ComponentStop`: the per-component stop pipeline - refusals, the stop net, graceful and force phases, stalled retries, and late stop resolution. |
 
 Each subsystem receives the core in its constructor and only stores it there, since
 another subsystem may not exist yet. It calls the manager's public, overridable
@@ -50,7 +54,8 @@ the core. Manager members that no subsystem owns yet are reached through
 `core.internals`, callbacks that forward to the manager at call time; an extraction
 that takes one over moves it onto its subsystem. Bookkeeping that only one subsystem
 touches is that subsystem's own private state rather than a state field: the logger
-exit's flags live on `LoggerExitHook`.
+exit's flags live on `LoggerExitHook`, and the stall details beside each stall record
+on `ComponentStop`.
 
 The stateful helpers have deliberately smaller scopes:
 
@@ -121,7 +126,8 @@ Their source stays live, provisional registration advances the generation before
 run, and rollback restores the previous generation without rewinding the counter.
 
 Stop-phase reporting owns only the choice of foreground or late rejection reporter.
-Claims, stop tokens, and late-resolution state reconciliation stay in the manager.
+Claims stay in `ComponentClaims`, and stop tokens and late-resolution state
+reconciliation in `ComponentStop`.
 
 Component metadata reads own the report-once marks for dependency and optional-status
 failures. Registration snapshots those marks and rollback clears only newly made marks;

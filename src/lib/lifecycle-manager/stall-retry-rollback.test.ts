@@ -3,7 +3,14 @@ import { BaseComponent } from './base-component';
 import type { ArraySink, Logger } from '../logger';
 import { LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT } from './constants';
 import type { LifecycleManager } from './lifecycle-manager';
-import { claimReports, hasReport, Plain, setup, Stalls } from './test-helpers';
+import {
+  claimReports,
+  coreOf,
+  hasReport,
+  Plain,
+  setup,
+  Stalls,
+} from './test-helpers';
 import type { ComponentOperationResult, ComponentStallInfo } from './types';
 
 class CountsStops extends Plain {
@@ -72,22 +79,19 @@ function retryStalled(
   manager: LifecycleManager,
   name: string,
 ): Promise<ComponentOperationResult> {
-  return (
-    manager as unknown as {
-      retryStalledComponent(name: string): Promise<ComponentOperationResult>;
-    }
-  ).retryStalledComponent(name);
+  return coreOf(manager).componentStop.retryStalledComponent(name);
 }
 
 /**
- * Make the next call of a private manager step throw, as a crash in the stop's own
- * bookkeeping would, then restore it.
+ * Make the next call of a private step of the stop pipeline throw, as a crash in the
+ * stop's own bookkeeping would, then restore it.
  */
 function crashNextCall(manager: LifecycleManager, method: string): void {
-  Object.defineProperty(manager, method, {
+  const componentStop = coreOf(manager).componentStop;
+  Object.defineProperty(componentStop, method, {
     configurable: true,
     value: (): never => {
-      Reflect.deleteProperty(manager, method);
+      Reflect.deleteProperty(componentStop, method);
       throw new Error('bookkeeping crashed');
     },
   });
@@ -453,7 +457,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
     await manager.startComponent('early');
     // The force phase's recheck, between the graceful timeout and the force claim, is
     // where the escalation crashes - once.
-    const internals = manager as unknown as {
+    const internals = coreOf(manager).componentStop as unknown as {
       checkStopPreconditions: (
         name: string,
         expected?: unknown,
@@ -461,7 +465,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
       ) => unknown;
     };
     const checkStopPreconditions =
-      internals.checkStopPreconditions.bind(manager);
+      internals.checkStopPreconditions.bind(internals);
     let shouldCrash = true;
     internals.checkStopPreconditions = (name, expected, force) => {
       if (shouldCrash && expected !== undefined && force !== undefined) {

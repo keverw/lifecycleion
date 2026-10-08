@@ -2,6 +2,7 @@ import { Logger } from '../logger';
 import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
+import type { ManagerCore } from './internal/manager-core';
 import type { LifecycleManagerOptions } from './types';
 
 // Shared by the lifecycle-manager test files. Not a test file itself, so `bun test`
@@ -24,6 +25,14 @@ export function setup(options: Partial<LifecycleManagerOptions> = {}): {
       ...options,
     }),
   };
+}
+
+/**
+ * The manager's private core, for a test that reaches into a subsystem - to call a
+ * step directly, or to patch one. Its subsystems' private members still need a cast.
+ */
+export function coreOf(manager: LifecycleManager): ManagerCore {
+  return (manager as unknown as { core: ManagerCore }).core;
 }
 
 export function deferred<T = void>(): {

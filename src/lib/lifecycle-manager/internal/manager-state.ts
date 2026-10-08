@@ -43,6 +43,16 @@ export interface StartSettlement {
   interruptStart?: (reason: StartupInterruptedByShutdownError) => boolean;
 }
 
+/** Raw startup or its owned cleanup has not finished, regardless of display state. */
+export function isStartUnfinished(
+  settlement: StartSettlement | undefined,
+): boolean {
+  return (
+    settlement !== undefined &&
+    (settlement.rawStartPending || !settlement.didSettle)
+  );
+}
+
 /** When a stop began, and whether its graceful phase timed out. */
 export interface StopAttempt {
   readonly startedAt: number;
@@ -135,8 +145,8 @@ export interface RepeatedShutdownRequestState {
  * Plain fields, owned by no subsystem in particular: the manager and its subsystems
  * read and write them in place, so every read stays live. Bookkeeping only one
  * subsystem touches lives on that subsystem instead (the logger exit's flags on
- * `LoggerExitHook`), and configuration that never changes lives in the frozen
- * `ManagerConfig`.
+ * `LoggerExitHook`, the stall details on `ComponentStop`), and configuration that never
+ * changes lives in the frozen `ManagerConfig`.
  */
 export class LifecycleManagerState {
   // Component management
@@ -154,15 +164,6 @@ export class LifecycleManagerState {
   public runningComponents: Set<string> = new Set();
   public componentStates: Map<string, ComponentState> = new Map();
   public stalledComponents: Map<string, ComponentStallInfo> = new Map();
-  // What each stall record cannot say itself, kept beside the record object rather than
-  // on the record callers receive: whether its stop had already timed out gracefully - a
-  // force timeout reports `reason: 'timeout'` - so a retry that fails can still report
-  // `'both'`, and whether the stop net recorded it after a crash. Written only by
-  // `markComponentStalled()`; keyed by the record, so it goes when the record does.
-  public readonly stallDetails = new WeakMap<
-    ComponentStallInfo,
-    { readonly gracefulTimedOut: boolean; readonly crashed: boolean }
-  >();
 
   // State tracking for individual components
   public componentTimestamps: Map<

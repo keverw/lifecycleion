@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { ComponentStopTimeoutError } from './errors';
 import { sleep } from '../sleep';
 import type { ArraySink } from '../logger/sinks/array';
-import { deferred, Plain, setup } from './test-helpers';
+import { coreOf, deferred, Plain, setup } from './test-helpers';
 
 for (const shouldDelayNotification of [false, true]) {
   test(`force timeout after graceful completion reports only the real late rejection (delayed notification: ${shouldDelayNotification})`, async () => {
@@ -26,13 +26,13 @@ for (const shouldDelayNotification of [false, true]) {
       // Exercise both race winners without changing the real stopped-state writes:
       // graceful completion is recorded, but its force-waiter notification arrives
       // after the force deadline. The catch must not label that deadline a hook error.
-      const internals = manager as unknown as {
+      const internals = coreOf(manager).componentStop as unknown as {
         createPendingForceStopWaiter: (name: string) => {
           promise: Promise<void>;
           cleanup: () => void;
         };
       };
-      const original = internals.createPendingForceStopWaiter.bind(manager);
+      const original = internals.createPendingForceStopWaiter.bind(internals);
       internals.createPendingForceStopWaiter = (name) => {
         const waiter = original(name);
         return { ...waiter, promise: waiter.promise.then(() => sleep(25)) };

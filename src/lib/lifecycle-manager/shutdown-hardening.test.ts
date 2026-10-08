@@ -5,7 +5,7 @@ import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
 import type { ForceShutdownContext, ShutdownResult } from './types';
 import { sleep } from '../sleep';
-import { claimReports, hasReport } from './test-helpers';
+import { claimReports, coreOf, hasReport } from './test-helpers';
 import { FailingStopComponent } from './test-components';
 
 function setup(shutdownTimeoutMS?: number) {
@@ -849,7 +849,7 @@ describe('LifecycleManager - shutdown hardening', () => {
     await manager.startAllComponents();
 
     // Let the first stop through, then blow up inside the stop loop.
-    const internals = manager as unknown as {
+    const internals = coreOf(manager).componentStop as unknown as {
       stopComponentInternal: (name: string) => Promise<unknown>;
     };
     const original = internals.stopComponentInternal;
@@ -1050,11 +1050,13 @@ describe('LifecycleManager - shutdown hardening', () => {
     // Every pass from here on dies inside the stop loop, so the component never stops
     // and each press has something left to ask for.
     const internals = manager as unknown as {
-      stopComponentInternal: (name: string) => Promise<unknown>;
       handleShutdownRequest: (method: string) => void;
     };
-    const original = internals.stopComponentInternal;
-    internals.stopComponentInternal = (): never => {
+    const componentStop = coreOf(manager).componentStop as unknown as {
+      stopComponentInternal: (name: string) => Promise<unknown>;
+    };
+    const original = componentStop.stopComponentInternal;
+    componentStop.stopComponentInternal = (): never => {
       throw new Error('stop loop exploded');
     };
 
@@ -1085,7 +1087,7 @@ describe('LifecycleManager - shutdown hardening', () => {
       internals.handleShutdownRequest('SIGTERM');
       await done;
     } finally {
-      internals.stopComponentInternal = original;
+      componentStop.stopComponentInternal = original;
       release();
     }
 

@@ -1,8 +1,12 @@
 import type { Logger } from '../../logger';
 import type { LoggerService } from '../../logger/logger-service';
+import type { BaseComponent } from '../base-component';
 import type { LifecycleManagerEvents } from '../events';
 import type { LifecycleManager } from '../lifecycle-manager';
+import type { ComponentStatus } from '../types';
+import { ComponentClaims } from './component-claims';
 import type { ComponentMetadataReader } from './component-metadata-reader';
+import { ComponentStop } from './component-stop';
 import { LoggerExitHook } from './logger-exit-hook';
 import type { ManagerConfig } from './manager-config';
 import type { LifecycleManagerState } from './manager-state';
@@ -20,6 +24,20 @@ export interface ManagerInternals {
   readonly isShuttingDown: boolean;
   /** Record a shutdown request that landed while a shutdown pass was already running. */
   noteShutdownRequestDuringActivePass(): void;
+  /** The committed component registered under `name`. */
+  getComponent(name: string): BaseComponent | undefined;
+  /** A registered component's name, as recorded when it was committed. */
+  nameOf(component: BaseComponent): string;
+  /** The status of the component registered under `name`; the caller has checked it is. */
+  statusOf(name: string): ComponentStatus;
+  /** Recompute `isStarted` from the running and stalled sets. */
+  updateStartedFlag(): void;
+  /** Record now as a component's `startedAt` or `stoppedAt`. */
+  stampTimestamp(name: string, field: 'startedAt' | 'stoppedAt'): void;
+  /** The `detachSignalsOnStop` check a stop runs once it has settled. */
+  detachSignalsAfterLastStop(): void;
+  /** Clear a component's unexpected-stop handler, contained. */
+  clearUnexpectedStopHandler(component: BaseComponent, context: string): void;
 }
 
 /** What the manager hands its core: everything a subsystem shares, built once. */
@@ -65,6 +83,8 @@ export class ManagerCore implements ManagerCoreParts {
 
   // Subsystems
   public readonly loggerExit: LoggerExitHook;
+  public readonly claims: ComponentClaims;
+  public readonly componentStop: ComponentStop;
 
   constructor(parts: ManagerCoreParts) {
     this.manager = parts.manager;
@@ -79,5 +99,7 @@ export class ManagerCore implements ManagerCoreParts {
     this.internals = parts.internals;
 
     this.loggerExit = new LoggerExitHook(this);
+    this.claims = new ComponentClaims(this);
+    this.componentStop = new ComponentStop(this);
   }
 }

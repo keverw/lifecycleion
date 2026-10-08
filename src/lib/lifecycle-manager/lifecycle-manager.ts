@@ -1,14 +1,13 @@
 import { isNullish } from '../internal/is-nullish';
 import { runShutdownWarningPhase } from './internal/shutdown-warning';
 import { ComponentMetadataReader } from './internal/component-metadata-reader';
-import { createStopPhaseObserver } from './internal/stop-phase-observer';
 import { TransitionEventDispatcher } from './internal/transition-event-dispatcher';
 import { RegistrationReadTracker } from './internal/registration-read-tracker';
 import {
   LifecycleManagerState,
+  isStartUnfinished,
   type ShutdownPass,
   type StartSettlement,
-  type StopAttempt,
 } from './internal/manager-state';
 import {
   type ManagerConfig,
@@ -17,6 +16,11 @@ import {
 } from './internal/manager-config';
 import { ManagerCore, type ManagerInternals } from './internal/manager-core';
 import type { ComponentAccessContext } from './internal/component-access-context';
+import type { IndividualStopContext } from './internal/component-stop';
+import {
+  abortHookSignal,
+  createHookAbortController,
+} from './internal/hook-abort';
 import {
   sendMessageInternal,
   broadcastMessageInternal,
@@ -60,7 +64,6 @@ import {
   snapshotStartOptions,
   snapshotStartupOptions,
   snapshotStopAllOptions,
-  snapshotStopOptions,
   snapshotUnregisterOptions,
   type StartOptionsSnapshot,
   type StartupOptionsSnapshot,
@@ -140,9 +143,6 @@ import {
 } from './events';
 import {
   ComponentStartTimeoutError,
-  ComponentStopTimeoutError,
-  ComponentForceTimeoutError,
-  ForceShutdownSupersededError,
   StartupInterruptedByShutdownError,
   DependencyCycleError,
 } from './errors';
@@ -153,12 +153,9 @@ import {
   LIFECYCLE_MANAGER_MESSAGE_BULK_OPERATION_IN_PROGRESS,
   LIFECYCLE_MANAGER_MESSAGE_BULK_STARTUP_IN_PROGRESS,
   LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND,
-  LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_RUNNING,
   LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
   LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE,
   LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE_EXTERNAL,
-  LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
-  LIFECYCLE_MANAGER_MESSAGE_GRACEFUL_SHUTDOWN_TIMED_OUT,
   LIFECYCLE_MANAGER_MESSAGE_PROCESS_EXITING,
   LIFECYCLE_MANAGER_MESSAGE_REGISTER_REQUIRED_DEPENDENCY_DURING_STARTUP,
   LIFECYCLE_MANAGER_MESSAGE_REGISTER_SHUTDOWN_IN_PROGRESS,
@@ -171,7 +168,6 @@ import {
   type ShutdownSignal,
 } from '../process-signal-manager';
 import { adoptPromise } from '../internal/adopt-promise';
-import { guardAbortListeners } from '../internal/guarded-abort-signal';
 import {
   reportCallbackError,
   safeHandleCallback,
@@ -180,14 +176,6 @@ import {
 import { createGuardedLoggerService } from './guarded-logger';
 import { describeError, isErrorValue, toError } from '../to-error';
 import { optionalValidatedTimerDelayMS } from '../internal/timer-limits';
-
-/** Raw startup or its owned cleanup has not finished, regardless of display state. */
-function isStartUnfinished(settlement: StartSettlement | undefined): boolean {
-  return (
-    settlement !== undefined &&
-    (settlement.rawStartPending || !settlement.didSettle)
-  );
-}
 
 /** The running registration and start options approved before restart stops it. */
 interface RestartStartSnapshot {
@@ -242,35 +230,11 @@ class RestartPreparationRefusal extends Error {
   }
 }
 
-/** What a dependent is doing that keeps an individual stop from removing its dependency. */
-type DependentWork = 'running' | 'starting' | 'pending' | 'stalled';
-
-/** Refusal wording per kind of dependent work, in reporting order. */
-const DEPENDENT_WORK_LABELS: Record<DependentWork, string> = {
-  running: 'running dependents',
-  starting: 'starting dependents',
-  pending: 'dependents with pending startup work',
-  stalled: 'stalled dependents',
-};
-
 /**
  * A start's options: a snapshot already taken, or - for a public `startComponent()` - the
  * read that takes it, which the start makes first, under its own net.
  */
 type StartOptionsInput = StartOptionsSnapshot | (() => StartOptionsSnapshot);
-
-/** Call-local policy and claim history for an individual stop or restart. */
-interface IndividualStopContext {
-  readonly operation: 'stop' | 'restart';
-  /** Stays true after this attempt claims, even if its claim is later released. */
-  claimed: boolean;
-  /** The caller's override, from the operation's options snapshot. */
-  readonly allowStopWithRunningDependents?: boolean;
-  isStartupRollback?: boolean;
-  /** Components this startup's rollback has already reached; see dependents check. */
-  rolledBackNames?: ReadonlySet<string>;
-  hasShutdownBegun?: () => boolean;
-}
 
 /** A shutdown request refused because a pass is already running. */
 interface ShutdownPassRefusal {
@@ -1052,7 +1016,7 @@ export class LifecycleManager
   ): Promise<ComponentOperationResult> {
     return settleOperation(
       'stopComponent',
-      () => this.stopComponentOperation(name, options),
+      () => this.core.componentStop.stopComponentOperation(name, options),
       (error, reason, code) =>
         crashedComponentResult(name, error, reason, code),
     );
@@ -1439,6 +1403,14 @@ export class LifecycleManager
       },
       noteShutdownRequestDuringActivePass: () =>
         manager.noteShutdownRequestDuringActivePass(),
+      getComponent: (name) => manager.getComponent(name),
+      nameOf: (component) => manager.nameOf(component),
+      statusOf: (name) => manager.statusOf(name),
+      updateStartedFlag: () => manager.updateStartedFlag(),
+      stampTimestamp: (name, field) => manager.stampTimestamp(name, field),
+      detachSignalsAfterLastStop: () => manager.detachSignalsAfterLastStop(),
+      clearUnexpectedStopHandler: (component, context) =>
+        manager.clearUnexpectedStopHandler(component, context),
     };
   }
 
@@ -2120,7 +2092,7 @@ export class LifecycleManager
     const isStarting =
       this.state.componentStates.get(name) === 'starting' ||
       hasUnfinishedStart();
-    if (!this.isComponentInFlight(name) && !isStarting) {
+    if (!this.core.claims.isInFlight(name) && !isStarting) {
       return null;
     }
 
@@ -3107,7 +3079,7 @@ export class LifecycleManager
                 // alongside the one already underway.
                 const isOwnedElsewhere =
                   this.state.runningComponents.has(name) ||
-                  this.isComponentInFlight(name);
+                  this.core.claims.isInFlight(name);
 
                 if (
                   !this.state.stalledComponents.has(name) &&
@@ -4021,101 +3993,6 @@ export class LifecycleManager
     }
   }
 
-  /** Snapshot the refusal before a guarded logger can re-enter either operation. */
-  private checkIndividualBulkPreconditions(
-    name: string,
-    operation: 'stop' | 'restart',
-  ): ComponentOperationResult | undefined {
-    const isStarting = this.state.isStarting;
-    const isShuttingDown = this.isShuttingDown;
-    if (!isStarting && !isShuttingDown) {
-      // A late start's cleanup marks its component running only to stop it, and
-      // restores the timed-out state afterwards. A plain stop that claimed it first
-      // would leave the cleanup refused and that state lost. A restart may still
-      // claim the cleanup's stop: it starts the component again either way.
-      if (
-        operation === 'stop' &&
-        this.state.pendingBulkStartupCleanup.has(name)
-      ) {
-        this.logger
-          .entity(name)
-          .warn('Cannot stop component during timed-out startup cleanup');
-        return {
-          success: false,
-          componentName: name,
-          reason: LIFECYCLE_MANAGER_MESSAGE_TIMED_OUT_STARTUP_CLEANUP,
-          code: 'component_already_stopping',
-        };
-      }
-      return undefined;
-    }
-    const result: ComponentOperationResult = {
-      success: false,
-      componentName: name,
-      reason: isStarting
-        ? LIFECYCLE_MANAGER_MESSAGE_BULK_STARTUP_IN_PROGRESS
-        : LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
-      code: isStarting ? 'startup_in_progress' : 'shutdown_in_progress',
-    };
-    let message: string;
-    let params: Record<string, boolean>;
-    if (operation === 'restart') {
-      message = 'Cannot restart component during bulk operation';
-      params = { isStarting, isShuttingDown };
-    } else if (isStarting) {
-      message = 'Cannot stop component during bulk startup';
-      params = { isStarting };
-    } else {
-      message = 'Cannot stop component during shutdown';
-      params = { isShuttingDown };
-    }
-    this.logger.entity(name).warn(message, { params });
-    return result;
-  }
-
-  private async stopComponentOperation(
-    name: string,
-    options: StopComponentOptions | undefined,
-  ): Promise<ComponentOperationResult> {
-    const bulkRefusal = this.checkIndividualBulkPreconditions(name, 'stop');
-    if (bulkRefusal) {
-      return bulkRefusal;
-    }
-
-    // Every option is read here, once, before the dependents refusal and the claim, and
-    // the getters are caller code: the bulk check is made again after them.
-    const stopOptions = snapshotStopOptions(options);
-    const afterOptionsRefusal = this.checkIndividualBulkPreconditions(
-      name,
-      'stop',
-    );
-    if (afterOptionsRefusal) {
-      return afterOptionsRefusal;
-    }
-    const stopContext: IndividualStopContext = {
-      operation: 'stop',
-      claimed: false,
-      allowStopWithRunningDependents:
-        stopOptions.allowStopWithRunningDependents,
-    };
-
-    // Checked here as well as by `checkIndividualStopClaim()` right before the claim,
-    // not instead of it. This one gives the refusal precedence: a stop - or restart -
-    // refused for its running dependents answers so without reading the component's
-    // timeouts and force handler, whose getters would otherwise run - and an invalid
-    // value there answer `invalid_options` - for a stop that was never going to happen.
-    // The second catches a dependent those getters started.
-    const dependentRefusal = this.checkIndividualStopDependents(
-      name,
-      stopContext,
-    );
-    if (dependentRefusal) {
-      return dependentRefusal;
-    }
-
-    return await this.stopComponentInternal(name, stopOptions, stopContext);
-  }
-
   /**
    * A restart's stop: its options were read, and its dependents checked, by
    * `restartComponentOperation()`.
@@ -4125,141 +4002,17 @@ export class LifecycleManager
     stopOptions: StopOptionsSnapshot,
     stopContext: IndividualStopContext,
   ): Promise<ComponentOperationResult> {
-    const bulkRefusal = this.checkIndividualBulkPreconditions(name, 'restart');
+    const bulkRefusal =
+      this.core.componentStop.checkIndividualBulkPreconditions(name, 'restart');
     if (bulkRefusal) {
       return bulkRefusal;
     }
 
-    return await this.stopComponentInternal(name, stopOptions, stopContext);
-  }
-
-  /**
-   * Prepared hook and timeout getters can start a dependent before this stop owns
-   * its component. Include start claims as well as running membership: a dependent
-   * awaiting start() already relies on this component, even before it is published
-   * as running. Keep the caller's override in the call-local context so checking
-   * again does not re-read an option getter. Dependency reads are caller code too,
-   * so the phase must still check bulk and component ownership after this helper.
-   */
-  private checkIndividualStopDependents(
-    name: string,
-    context: IndividualStopContext,
-  ): ComponentOperationResult | undefined {
-    if (context.allowStopWithRunningDependents) {
-      return undefined;
-    }
-    // Re-read at each claim boundary: dependency getters can change their answers
-    // without a registration-generation change, so prior reads cannot be reused.
-    // A dependency getter can also register a new dependent. Use the settled
-    // registry read rather than an array captured before those getters ran. If
-    // caller code keeps changing registrations beyond the bounded read, an unread
-    // active component is not evidence that stopping its dependency is safe.
-    // An unfinished start of this registration, under its current attempt token. Looked
-    // up by name, and only for a component neither running nor starting: this runs
-    // every round of the registry read below.
-    const hasPendingStart = (
-      dependent: string,
-      component: BaseComponent,
-    ): boolean => {
-      const settlements =
-        this.state.startSettlementsByName.get(dependent) ?? [];
-      for (const settlement of settlements) {
-        if (
-          isStartUnfinished(settlement) &&
-          settlement.component === component &&
-          settlement.token ===
-            this.state.componentStartAttemptTokens.get(dependent)
-        ) {
-          return true;
-        }
-      }
-      return false;
-    };
-    const readActiveWork = (): Map<BaseComponent, DependentWork> => {
-      const activity = new Map<BaseComponent, DependentWork>();
-      for (const component of this.state.components) {
-        const dependent = this.nameOf(component);
-        // The component being stopped is active itself, but it is not its own
-        // dependent: registration refuses a self-dependency as a cycle. Left in, its
-        // dependency getter would run every round for nothing.
-        if (dependent === name) {
-          continue;
-        }
-        if (this.isComponentRunning(dependent)) {
-          activity.set(component, 'running');
-        } else if (this.state.componentStates.get(dependent) === 'starting') {
-          activity.set(component, 'starting');
-        } else if (hasPendingStart(dependent, component)) {
-          activity.set(component, 'pending');
-        } else if (
-          // Rollback leaves dependencies of unfinished cleanup running: a dependent
-          // whose rollback stop stalled may still be using this component. A stall
-          // from before this startup does not hold back what this startup started.
-          context.rolledBackNames?.has(dependent) === true &&
-          this.state.stalledComponents.has(dependent)
-        ) {
-          activity.set(component, 'stalled');
-        }
-      }
-      return activity;
-    };
-    const { reads } = this.readRegistry(
-      (component) =>
-        this.componentMetadata.readDependencies(component, 'dependents'),
-      undefined,
-      undefined,
-      undefined,
-      // Refresh each round: a dependency getter can start an idle component.
-      () => [...readActiveWork().keys()],
+    return await this.core.componentStop.stopComponentInternal(
+      name,
+      stopOptions,
+      stopContext,
     );
-    const activeWork = readActiveWork();
-    const dependents = this.state.components.filter(
-      (component) =>
-        activeWork.has(component) &&
-        (!this.isReadCurrent(reads, component) ||
-          reads.get(component)?.includes(name) === true),
-    );
-    if (dependents.length === 0) {
-      return undefined;
-    }
-    const byWork: Record<DependentWork, string[]> = {
-      running: [],
-      starting: [],
-      pending: [],
-      stalled: [],
-    };
-    for (const component of dependents) {
-      // Always set: `dependents` holds only components with active work.
-      const work = activeWork.get(component);
-      if (work !== undefined) {
-        byWork[work].push(this.nameOf(component));
-      }
-    }
-    const activity = (Object.keys(DEPENDENT_WORK_LABELS) as DependentWork[])
-      .filter((work) => byWork[work].length > 0)
-      .map(
-        (work) => `${DEPENDENT_WORK_LABELS[work]}: ${byWork[work].join(', ')}`,
-      )
-      .join('; ');
-    const result: ComponentOperationResult = {
-      success: false,
-      componentName: name,
-      reason: `Component has ${activity}. Use { allowStopWithRunningDependents: true } option to bypass.`,
-      code: 'has_running_dependents',
-    };
-    this.logger
-      .entity(name)
-      .warn('Cannot stop component with active dependents', {
-        params: {
-          runningDependents: byWork.running,
-          startingDependents: byWork.starting,
-          pendingStartupDependents: byWork.pending,
-          ...(byWork.stalled.length
-            ? { stalledDependents: byWork.stalled }
-            : {}),
-        },
-      });
-    return result;
   }
 
   /**
@@ -4375,7 +4128,8 @@ export class LifecycleManager
     name: string,
     options?: RestartComponentOptions,
   ): Promise<ComponentOperationResult> {
-    const bulkRefusal = this.checkIndividualBulkPreconditions(name, 'restart');
+    const bulkRefusal =
+      this.core.componentStop.checkIndividualBulkPreconditions(name, 'restart');
     if (bulkRefusal) {
       return bulkRefusal;
     }
@@ -4386,14 +4140,12 @@ export class LifecycleManager
     // that await need not describe the same configuration.
     const { stopOptions, startOptions } =
       snapshotRestartComponentOptions(options);
-    const afterOptionsRefusal = this.checkIndividualBulkPreconditions(
-      name,
-      'restart',
-    );
+    const afterOptionsRefusal =
+      this.core.componentStop.checkIndividualBulkPreconditions(name, 'restart');
     if (afterOptionsRefusal) {
       return afterOptionsRefusal;
     }
-    const preconditions = this.checkStopPreconditions(name);
+    const preconditions = this.core.componentStop.checkStopPreconditions(name);
     if ('success' in preconditions) {
       return preconditions;
     }
@@ -4409,10 +4161,8 @@ export class LifecycleManager
     // Ahead of the timeout reads below, as `stopComponent()` checks ahead of its own.
     // The checks after those reads catch a component the dependency getters stopped
     // or replaced, and the stop checks again for a bulk operation they began.
-    const dependentRefusal = this.checkIndividualStopDependents(
-      name,
-      stopContext,
-    );
+    const dependentRefusal =
+      this.core.componentStop.checkIndividualStopDependents(name, stopContext);
     if (dependentRefusal) {
       return dependentRefusal;
     }
@@ -4438,7 +4188,7 @@ export class LifecycleManager
     if (
       !isCurrentSnapshot ||
       !this.isComponentRunning(name) ||
-      this.isComponentInFlight(name)
+      this.core.claims.isInFlight(name)
     ) {
       if (!isCurrentSnapshot) {
         return {
@@ -4449,7 +4199,7 @@ export class LifecycleManager
           code: 'component_not_found',
         };
       }
-      const preconditions = this.checkStopPreconditions(
+      const preconditions = this.core.componentStop.checkStopPreconditions(
         name,
         startSnapshot.component,
       );
@@ -5946,7 +5696,7 @@ export class LifecycleManager
       const concurrentlyProtectedSkips = new Set<string>();
       const isStartStillInProgress = (name: string): boolean =>
         isStartUnfinished(currentStarts.get(name)) ||
-        this.isComponentInFlight(name);
+        this.core.claims.isInFlight(name);
       // An owner holds its dependencies until it settles: not running, and neither its
       // stop nor its start still in progress.
       const hasSettled = (owner: string): boolean =>
@@ -6328,9 +6078,9 @@ export class LifecycleManager
 
             attemptedStopNames.add(name);
             const result: ComponentOperationResult = isRunning
-              ? await this.stopComponentInternal(name)
+              ? await this.core.componentStop.stopComponentInternal(name)
               : shouldRetryStalled
-                ? await this.retryStalledComponent(name)
+                ? await this.core.componentStop.retryStalledComponent(name)
                 : {
                     success: false,
                     componentName: name,
@@ -6495,7 +6245,7 @@ export class LifecycleManager
             !isStartStillInProgress(name) &&
             !isNeededByInProgressOwner(name)) ||
           (!this.state.runningComponents.has(name) &&
-            !this.isComponentInFlight(name) &&
+            !this.core.claims.isInFlight(name) &&
             !this.state.stalledComponents.has(name))
         ) {
           stoppingComponents.delete(name);
@@ -6780,109 +6530,6 @@ export class LifecycleManager
   }
 
   /**
-   * Retry shutdown for a stalled component: the force phase directly, to avoid re-running
-   * a failing `stop()`. Under the same net as any other stop, so a failure outside the
-   * component's own hooks marks it stalled rather than taking the whole shutdown pass
-   * down with it.
-   */
-  private retryStalledComponent(
-    name: string,
-  ): Promise<ComponentOperationResult> {
-    return this.withComponentStopNet(name, (claim) =>
-      this.retryStalledComponentAttempt(name, claim),
-    );
-  }
-
-  private async retryStalledComponentAttempt(
-    name: string,
-    claim: symbol,
-  ): Promise<ComponentOperationResult> {
-    // A stale retry request may now name an ordinary in-progress start. Preserve
-    // its former not-running result; only an actual stalled retry reports the
-    // more specific in-flight refusal from the force preconditions below.
-    if (
-      this.getComponent(name) !== undefined &&
-      !this.state.stalledComponents.has(name) &&
-      !this.isComponentRunning(name)
-    ) {
-      return {
-        success: false,
-        componentName: name,
-        code: 'component_not_running',
-        reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_RUNNING,
-        status: this.getComponentStatus(name),
-      };
-    }
-    const preconditions = this.checkStopPreconditions(name, undefined, {
-      claim,
-      isStalledRetry: true,
-    });
-    if ('success' in preconditions) {
-      return preconditions;
-    }
-    const { component } = preconditions;
-
-    // The pass asks for a retry only of a stall, but caller code since can have cleared
-    // it - a forced start that is running now. That is an ordinary stop, run under this
-    // net and claim rather than nesting another net inside this one.
-    const priorStall = this.state.stalledComponents.get(name);
-    if (!priorStall) {
-      return await this.stopComponentAttempt(name, undefined, claim, undefined);
-    }
-
-    // A retry continues the stop that stalled: it keeps when that stop began and
-    // whether its graceful phase timed out, for any new stall.
-    return await this.shutdownComponentForce(
-      name,
-      component,
-      {
-        gracefulPhaseRan: false,
-        gracefulTimedOut: this.didStallGracefulTimeOut(name),
-        gracefulError: undefined,
-        startedAt: priorStall.startedAt,
-        isStalledRetry: true,
-      },
-      claim,
-    );
-  }
-
-  private createStopPhaseObserver(
-    name: string,
-  ): ReturnType<typeof createStopPhaseObserver> {
-    return createStopPhaseObserver((error, message, level) => {
-      this.logger.entity(name)[level](message, {
-        params: { error: toError(error) },
-      });
-    });
-  }
-
-  /**
-   * Reject a stop's timeout one macrotask after its signal aborted, not at once.
-   *
-   * An abort listener that releases what `stop()` or `onShutdownForce()` awaits settles
-   * it synchronously, but the settlement reaches the race through several promise hops -
-   * the component's own `async` function, then `adoptPromise()` - while a rejection made
-   * in the same turn gets there in one. The stop finished, yet the timeout won, and the
-   * component was stalled or sent on to a force phase it no longer needed. Past a
-   * macrotask every such hop has run, so a released stop wins the race as the success it
-   * is, however many hops it took. This is the one mechanism for that race.
-   *
-   * Returns the timer, which the caller keeps as its timeout handle so its `finally`
-   * clears it once the stop has settled either way.
-   *
-   * Stops only. A start's timeout still rejects at once: its signal exists to abort the
-   * start, and a `start()` it released is a timed-out start, not a successful one.
-   */
-  private rejectAfterAbort(
-    reject: (error: Error) => void,
-    error: Error,
-  ): NodeJS.Timeout {
-    return setTimeout(() => {
-      reject(error);
-    }, 0);
-  }
-
-  /**
    * `abortPendingStarts`: abort the start signal of each start a shutdown pass found in
    * flight as it began - the cue to give up. Only that: the pass still joins those starts
    * and protects their dependencies as it would without it, and nothing here records a
@@ -6920,51 +6567,6 @@ export class LifecycleManager
   }
 
   /**
-   * Abort the signal an attempt handed to one of the component's hooks - `start()`,
-   * `stop()`, `onShutdownForce()` - once the manager no longer needs that still-pending
-   * call's work: from inside its deadline's timer, as a shutdown pass begins
-   * (`abortPendingStarts`), or when a late graceful completion ends a force phase first.
-   *
-   * Abort listeners are the component's code, but they are the runtime's to call: an
-   * error one throws never reaches `abort()`'s caller, and Node and Bun would report it
-   * as an uncaught exception. `guardAbortListeners()` wrapped the listeners the
-   * component added through the signal's own methods and `onabort`, so theirs are
-   * reported (`lifecycle-manager <phase> abort listener for <name>`) instead. Listeners
-   * it cannot see - on a signal derived from this one, or added through
-   * `EventTarget.prototype` directly - remain the runtime's. Every caller has finished
-   * its bookkeeping before this runs. The `catch` only covers a runtime that let such
-   * an error escape: reported, so it cannot unwind the timer and skip what follows.
-   */
-  private abortHookSignal(
-    hookAbort: AbortController,
-    reason: Error,
-    name: string,
-    hookName: 'start' | 'stop' | 'onShutdownForce',
-  ): void {
-    try {
-      hookAbort.abort(reason);
-    } catch (error) {
-      reportCallbackError(`${name}.${hookName} abort signal listener`, error);
-    }
-  }
-
-  /**
-   * A fresh controller for one call of a component hook, its signal guarded before the
-   * hook sees it so a listener the component adds cannot throw out of the abort.
-   */
-  private createHookAbortController(
-    name: string,
-    phase: 'start' | 'stop' | 'force',
-  ): AbortController {
-    const hookAbort = new AbortController();
-    guardAbortListeners(
-      hookAbort.signal,
-      `lifecycle-manager ${phase} abort listener for ${name}`,
-    );
-    return hookAbort;
-  }
-
-  /**
    * Watch a component's promise that the manager already stopped waiting for - it timed
    * out - so its eventual rejection is logged rather than left unhandled.
    *
@@ -6986,39 +6588,6 @@ export class LifecycleManager
         params: { error: toError(error), ...params },
       });
     });
-  }
-
-  /** Claim `name` for the attempt holding `claim`, recording the state it replaces. */
-  private claimComponent(
-    name: string,
-    state: 'starting' | 'stopping' | 'force-stopping',
-    claim: symbol,
-    stop?: StopAttempt,
-  ): void {
-    this.state.componentClaims.set(name, {
-      claim,
-      previousState: this.state.componentStates.get(name),
-      ...(stop ? { stop } : {}),
-    });
-    this.state.claimsTaken.add(claim);
-    this.state.componentStates.set(name, state);
-  }
-
-  /** Record the stop an attempt still holding `claim` runs, for the stop net. */
-  private recordClaimStop(
-    name: string,
-    claim: symbol,
-    stop: StopAttempt,
-  ): void {
-    const entry = this.state.componentClaims.get(name);
-    if (entry?.claim === claim) {
-      this.state.componentClaims.set(name, { ...entry, stop });
-    }
-  }
-
-  /** Whether `claim` is the attempt that last claimed `name`. */
-  private ownsClaim(name: string, claim: symbol): boolean {
-    return this.state.componentClaims.get(name)?.claim === claim;
   }
 
   private reportDependencyReadFailureOnce(
@@ -7080,45 +6649,6 @@ export class LifecycleManager
         this.state.runningComponents.has(name) &&
         this.state.componentStates.get(name) === 'running' &&
         !this.state.pendingBulkStartupCleanup.has(name),
-    );
-  }
-
-  /**
-   * Whether a start or stop is in flight for the component - the states an attempt
-   * claims. Whatever holds one writes its outcome when it settles, so nothing else may
-   * start, stop, retry, or remove the component under it.
-   */
-  private isComponentInFlight(name: string): boolean {
-    const state = this.state.componentStates.get(name);
-
-    return (
-      state === 'starting' || state === 'stopping' || state === 'force-stopping'
-    );
-  }
-
-  /** Drop an attempt's claim, if it still holds it. */
-  private releaseClaim(name: string, claim: symbol): void {
-    if (this.ownsClaim(name, claim)) {
-      this.state.componentClaims.delete(name);
-    }
-  }
-
-  /**
-   * Whether a force attempt resuming after its `await` no longer owns the component.
-   *
-   * The graceful stop it was escalating from finished late, and something claimed the
-   * component since - a `component:stopped` listener that started it again, say - or it
-   * is no longer the registered instance. The stop did happen, so the attempt answers
-   * as one whose graceful completion won, without writing its outcome over that newer
-   * state: marking a running component stopped, or a replacement stalled.
-   */
-  private isForceAttemptSuperseded(
-    name: string,
-    component: BaseComponent,
-    claim: symbol,
-  ): boolean {
-    return (
-      !this.ownsClaim(name, claim) || this.getComponent(name) !== component
     );
   }
 
@@ -7275,7 +6805,7 @@ export class LifecycleManager
         // Nothing below touches the component unless this attempt claimed it - and still
         // holds that claim. An attempt that crashed before claiming, while another start
         // or stop got in across an `await`, must leave that other one's work alone.
-        const doesOwnComponent = this.ownsClaim(name, claim);
+        const doesOwnComponent = this.core.claims.owns(name, claim);
 
         // A crash after this attempt marked the component running - building its status
         // for the result, say - still fails the start, so it is stopped again: a failed
@@ -7284,7 +6814,8 @@ export class LifecycleManager
         if (doesOwnComponent && this.state.runningComponents.has(name)) {
           reportCallbackError('lifecycle-manager component start', error);
 
-          const stopResult = await this.stopComponentInternal(name);
+          const stopResult =
+            await this.core.componentStop.stopComponentInternal(name);
 
           return crashedComponentResult(
             name,
@@ -7328,7 +6859,7 @@ export class LifecycleManager
     } finally {
       this.state.claimsTaken.delete(claim);
       try {
-        this.releaseClaim(name, claim);
+        this.core.claims.release(name, claim);
       } finally {
         if (settlement.recovery) {
           void settlement.recovery.then(finishSettlement, finishSettlement);
@@ -7734,7 +7265,7 @@ export class LifecycleManager
       this.runDeferredSignalDetach('component startup');
     };
 
-    this.claimComponent(name, 'starting', claim);
+    this.core.claims.take(name, 'starting', claim);
     // The previous run's handler is still keyed to its token, which this attempt only
     // replaces after the logs and listeners below run caller code. A reporter kept from
     // that run and called there would otherwise end this start as its unexpected stop.
@@ -7875,7 +7406,7 @@ export class LifecycleManager
       // the manager stops waiting on this attempt's still-pending `start()` - the timer
       // below - never because `start()` settled, either way. Guarded before `start()`
       // sees it, so a listener the component adds cannot throw out of that abort.
-      const startAbort = this.createHookAbortController(name, 'start');
+      const startAbort = createHookAbortController(name, 'start');
       if (settlement) {
         settlement.interruptStart = (reason): boolean => {
           if (startAbortCause !== undefined || !settlement.rawStartPending) {
@@ -7883,7 +7414,7 @@ export class LifecycleManager
           }
           startAbortCause = 'shutdown';
           shutdownAbortReason = reason;
-          this.abortHookSignal(startAbort, reason, name, 'start');
+          abortHookSignal(startAbort, reason, name, 'start');
           return true;
         };
       }
@@ -7971,7 +7502,7 @@ export class LifecycleManager
             settlement.abandon();
             // The manager has stopped waiting, just as on timeout. Notify the hook
             // even when a broken constructor prevented arming the startup race.
-            this.abortHookSignal(
+            abortHookSignal(
               startAbort,
               toError(adoptionFailure.error),
               name,
@@ -8080,7 +7611,7 @@ export class LifecycleManager
                 name,
                 'Superseded start() failed after its deadline',
               );
-              this.abortHookSignal(startAbort, timeoutError, name, 'start');
+              abortHookSignal(startAbort, timeoutError, name, 'start');
               return;
             }
             if (useBulkDeadline) {
@@ -8099,7 +7630,7 @@ export class LifecycleManager
             // even when those sinks superseded the attempt: the signal is only this
             // attempt's. A shutdown that already aborted it keeps its reason;
             // aborting again does nothing.
-            this.abortHookSignal(startAbort, timeoutError, name, 'start');
+            abortHookSignal(startAbort, timeoutError, name, 'start');
 
             this.observeFailureAfterTimeout(
               startPromise,
@@ -8207,7 +7738,7 @@ export class LifecycleManager
         // stopping it: there is nothing left to stop, or that stop owns it, and stopping
         // it again only failed as not running or already stopping.
         const stopResult = this.isComponentUp(name)
-          ? await this.stopComponentInternal(name)
+          ? await this.core.componentStop.stopComponentInternal(name)
           : undefined;
         // A refusal is the pass's to report, as one its own stop met would be: the
         // component is left up either way, whichever path reached its stop first.
@@ -8463,7 +7994,7 @@ export class LifecycleManager
           // returned otherwise.
           this.restoreStateAfterFailedStart(
             name,
-            this.ownsClaim(name, claim)
+            this.core.claims.owns(name, claim)
               ? this.state.componentClaims.get(name)?.previousState
               : 'registered',
           );
@@ -8524,361 +8055,6 @@ export class LifecycleManager
   }
 
   /**
-   * Internal stop component method - bypasses bulk operation checks
-   * Implements individual component graceful -> force shutdown (global warning handled elsewhere).
-   * The public stop entry explicitly opts into bulk rechecks; bulk shutdown and
-   * cleanup call this internal entry under their own ownership. Keep that policy
-   * call-local instead of maintaining another per-claim registry to infer it.
-   */
-  private stopComponentInternal(
-    name: string,
-    options?: StopOptionsSnapshot,
-    stopContext?: IndividualStopContext,
-  ): Promise<ComponentOperationResult> {
-    return this.withComponentStopNet(name, (claim) =>
-      this.stopComponentAttempt(name, options, claim, stopContext),
-    );
-  }
-
-  /**
-   * The net under every per-component stop - `stopComponentInternal()` and a stalled
-   * component's force-phase retry alike.
-   */
-  private async withComponentStopNet(
-    name: string,
-    run: (claim: symbol) => Promise<ComponentOperationResult>,
-  ): Promise<ComponentOperationResult> {
-    const startedAt = Date.now();
-    const claim = Symbol(name);
-
-    // Released once this attempt settles, however it settled: a claim outlived the attempt
-    // that took it, keeping a stale `previousState` until the next attempt overwrote it.
-    try {
-      try {
-        return await run(claim);
-      } catch (error) {
-        // Classified as the start net does, and the brand dropped for the same reason:
-        // bulk shutdown and rollback log a failed stop's error before they settle.
-        if (
-          takeSettledFailureCode(error) === 'invalid_options' &&
-          !this.state.claimsTaken.has(claim)
-        ) {
-          return crashedComponentResult(
-            name,
-            error as Error,
-            `Stop refused: ${describeError(error)}`,
-            'invalid_options',
-          );
-        }
-
-        // Once an attempt claims `stopping` / `force-stopping`, subsequent hook calls
-        // and result bookkeeping can still throw outside the phase's own `try`.
-        // Left alone, a throw there held that state for good: every later
-        // start or stop answered `component_already_stopping`, and it could never be
-        // unregistered. Nobody can vouch for what the component did stop, which is what
-        // `stalled` means, and a stalled component can be retried or unregistered.
-        const err = toError(error);
-        const state = this.state.componentStates.get(name);
-        // Set only once this crash is recorded as the stop's stall below.
-        let stall: { gracefulTimedOut: boolean } | undefined;
-
-        // Only a stop this attempt claimed: a `stopping` it did not claim belongs to a
-        // concurrent stop - one that got in while this attempt was awaiting, before its
-        // own claim - and must not be stalled by this attempt's crash.
-        if (
-          (state === 'stopping' || state === 'force-stopping') &&
-          this.ownsClaim(name, claim)
-        ) {
-          // A crash describes the stop the attempt runs - when it began and whether
-          // its graceful phase timed out - as that stop's own failure would, whether it
-          // escalated from `stop()` or retried a stall.
-          const stop = this.state.componentClaims.get(name)?.stop ?? {
-            startedAt,
-            gracefulTimedOut: false,
-          };
-          const stallInfo = this.stopStallInfo(
-            name,
-            state === 'stopping' ? 'graceful' : 'force',
-            stop,
-            err,
-          );
-
-          this.markComponentStalled(name, stallInfo, {
-            error: err,
-            gracefulTimedOut: stop.gracefulTimedOut,
-            crashed: true,
-          });
-          stall = { gracefulTimedOut: stop.gracefulTimedOut };
-          // Signals stay attached, as they do for every other stall: a stalled component
-          // was not confirmed stopped, and during a shutdown the operator's next Ctrl+C
-          // still has to reach escalation. No force-stop waiter is left to release here:
-          // the only one this claim could hold is its own force attempt's, which that
-          // attempt's `finally` removed before the crash reached this net, and a waiter
-          // of an attempt superseded earlier was released when the component was marked
-          // stopped.
-          this.lifecycleEvents.componentStalled(name, stallInfo, {
-            reason: stallInfo.reason,
-            // Paired with the reason as every other stall is: a crash still in the graceful
-            // phase after it timed out stays a timeout; otherwise - including a force-phase
-            // crash after a graceful timeout (`both`) - it was the crash.
-            code:
-              stallInfo.reason === 'timeout'
-                ? 'component_shutdown_timeout'
-                : 'operation_crashed',
-          });
-        }
-
-        reportCallbackError('lifecycle-manager component stop', error);
-
-        return this.crashedStopResult(name, err, stall);
-      }
-    } finally {
-      this.state.claimsTaken.delete(claim);
-      this.releaseClaim(name, claim);
-    }
-  }
-
-  /**
-   * The stop preconditions, checked without reading component-owned properties. Each
-   * phase checks again after reading its timeout and hooks: getters
-   * may stop, unregister, or replace the component synchronously. Taking the claim
-   * from that newer stop would call stop() twice and let either completion overwrite
-   * the other's state. A replacement must not inherit the old instance's outcome.
-   */
-  private checkStopPreconditions(
-    name: string,
-    expected?: BaseComponent,
-    force?: { claim: symbol; isStalledRetry: boolean },
-  ): ComponentOperationResult | { component: BaseComponent } {
-    const component = this.getComponent(name);
-
-    if (!component || (expected !== undefined && component !== expected)) {
-      return {
-        success: false,
-        componentName: name,
-        reason:
-          expected === undefined
-            ? LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND
-            : `Component "${name}" was unregistered or replaced while its stop was being prepared`,
-        code: 'component_not_found',
-      };
-    }
-
-    // A force phase may continue its own graceful claim, or retry an idle stall.
-    // It may never replace another in-flight claim, including a forceStalled start.
-    // Do this before the stall check because retries retain the stall record while
-    // their force handler runs.
-    if (force && this.isComponentInFlight(name)) {
-      const state = this.state.componentStates.get(name);
-      if (state === 'stopping' && this.ownsClaim(name, force.claim)) {
-        return { component };
-      }
-      const isStarting = state === 'starting';
-      return {
-        success: false,
-        componentName: name,
-        reason: isStarting
-          ? 'Component is starting'
-          : 'Component is already stopping',
-        code: isStarting
-          ? 'component_already_starting'
-          : 'component_already_stopping',
-        status: this.statusOf(name),
-      };
-    }
-    if (force?.isStalledRetry && this.state.stalledComponents.has(name)) {
-      return { component };
-    }
-
-    // Check if stalled
-    if (this.state.stalledComponents.has(name)) {
-      return {
-        success: false,
-        componentName: name,
-        reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
-        code: 'component_stalled',
-        status: this.statusOf(name),
-      };
-    }
-
-    // Check if not running
-    if (!this.state.runningComponents.has(name)) {
-      return {
-        success: false,
-        componentName: name,
-        reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_RUNNING,
-        code: 'component_not_running',
-        status: this.statusOf(name),
-      };
-    }
-
-    // Check if already stopping to prevent concurrent stop operations
-    const currentState = this.state.componentStates.get(name);
-    if (currentState === 'stopping' || currentState === 'force-stopping') {
-      return {
-        success: false,
-        componentName: name,
-        reason: `Component is already ${currentState}`,
-        code: 'component_already_stopping',
-        status: this.statusOf(name),
-      };
-    }
-
-    return { component };
-  }
-
-  private async stopComponentAttempt(
-    name: string,
-    options: StopOptionsSnapshot | undefined,
-    claim: symbol,
-    stopContext: IndividualStopContext | undefined,
-  ): Promise<ComponentOperationResult> {
-    const preconditions = this.checkStopPreconditions(name);
-    if ('success' in preconditions) {
-      return preconditions;
-    }
-    const { component } = preconditions;
-
-    // Handle forceImmediate option - skip all phases and go straight to force
-    if (options?.forceImmediate === true) {
-      return await this.shutdownComponentForce(
-        name,
-        component,
-        {
-          gracefulPhaseRan: false,
-          gracefulTimedOut: false,
-          gracefulError: undefined,
-          startedAt: Date.now(),
-        },
-        claim,
-        undefined,
-        stopContext,
-      );
-    }
-
-    // Run three-phase shutdown
-    return await this.shutdownComponent(
-      name,
-      component,
-      options,
-      claim,
-      stopContext,
-    );
-  }
-
-  /**
-   * Two-phase shutdown: graceful -> force (global warning handled by stopAllComponents)
-   *
-   * Phase 1: Graceful (always - calls stop())
-   * Phase 2: Force (if Phase 1 failed - calls onShutdownForce())
-   */
-  private async shutdownComponent(
-    name: string,
-    component: BaseComponent,
-    options: StopOptionsSnapshot | undefined,
-    claim: symbol,
-    stopContext: IndividualStopContext | undefined,
-  ): Promise<ComponentOperationResult> {
-    const shutdownStartedAt = Date.now();
-    // Prepare both phases before claiming the component or calling stop(). An invalid
-    // force budget must not first shut down part of the component. Keep the values we
-    // validated: a getter or stop() can change the component before escalation.
-    const requestedTimeoutMS = options?.timeout;
-    const isUsingComponentTimeout = isNullish(requestedTimeoutMS);
-    const timeoutMS = toOperationTimerDelayMS(
-      isUsingComponentTimeout
-        ? component.shutdownGracefulTimeoutMS
-        : requestedTimeoutMS,
-      isUsingComponentTimeout
-        ? `${name}.shutdownGracefulTimeoutMS`
-        : 'stopComponent timeout',
-    );
-    const forcePreparation = this.prepareForceShutdown(name, component);
-
-    // ============================================================================
-    // Phase 1: Graceful (always)
-    // ============================================================================
-    // Internal attempt-local handoff, never the caller's options object. The
-    // observer records a resolution that the foreground race must consume.
-    const gracefulPreparation = {
-      timeoutMS,
-      startedAt: shutdownStartedAt,
-      lateResolution: undefined as string | undefined,
-    };
-    const gracefulResult = await this.shutdownComponentGraceful(
-      name,
-      component,
-      gracefulPreparation,
-      claim,
-      stopContext,
-    );
-
-    // Only an attempt that claimed the graceful phase may escalate it. A refusal
-    // after a re-entrant getter owns no stop, and the current claim may belong to
-    // the nested attempt. Its refusal is the result, not a reason to force that
-    // other attempt's component. The same applies if our claim was superseded while
-    // awaiting the graceful result.
-    if (gracefulResult.success || !this.ownsClaim(name, claim)) {
-      return gracefulResult;
-    }
-
-    // The timeout notification can resolve a bare stop promise before the force
-    // claim. Its observer must not finalize while the foreground race is undecided;
-    // now that it returned, consume the retained resolution under the same token.
-    if (
-      gracefulPreparation.lateResolution !== undefined &&
-      this.state.componentStopAttemptTokens.get(name) ===
-        gracefulPreparation.lateResolution &&
-      this.getComponent(name) === component &&
-      this.state.componentStates.get(name) === 'stopping'
-    ) {
-      if (
-        this.handleLateStopResolution(
-          name,
-          gracefulPreparation.lateResolution,
-          'graceful',
-          true,
-        )
-      ) {
-        return this.successfulStopResult(name);
-      }
-    }
-
-    // ============================================================================
-    // Phase 2: Force (graceful failed)
-    // ============================================================================
-    const didGracefulTimeOut =
-      gracefulResult.code === 'component_shutdown_timeout';
-    // Before the force phase reads its hooks: a crash there still describes this stop.
-    this.recordClaimStop(name, claim, {
-      startedAt: shutdownStartedAt,
-      gracefulTimedOut: didGracefulTimeOut,
-    });
-    this.logger
-      .entity(name)
-      .warn('Graceful shutdown failed, proceeding to force phase', {
-        params: {
-          reason: gracefulResult.reason,
-          code: gracefulResult.code,
-        },
-      });
-
-    return await this.shutdownComponentForce(
-      name,
-      component,
-      {
-        gracefulPhaseRan: true,
-        gracefulTimedOut: didGracefulTimeOut,
-        gracefulError: gracefulResult.error,
-        startedAt: shutdownStartedAt,
-      },
-      claim,
-      forcePreparation,
-      stopContext,
-    );
-  }
-
-  /**
    * Global warning phase (stopAllComponents only)
    * Calls onShutdownWarning() on running components with a global timeout.
    * Kept as a method, not inlined: it is the seam tests use to make a pass crash.
@@ -8889,898 +8065,6 @@ export class LifecycleManager
       componentNames,
       this.config.shutdownWarningTimeoutMS,
     );
-  }
-
-  private checkIndividualStopClaim(
-    name: string,
-    stopContext: IndividualStopContext,
-  ): ComponentOperationResult | undefined {
-    const dependentRefusal = this.checkIndividualStopDependents(
-      name,
-      stopContext,
-    );
-    if (dependentRefusal) {
-      return dependentRefusal;
-    }
-    // Rollback may bypass its own startup latch, never a newer shutdown
-    // accepted by one of the preparation/dependency getters just read.
-    if (stopContext.hasShutdownBegun?.()) {
-      return {
-        success: false,
-        componentName: name,
-        code: 'shutdown_in_progress',
-        reason: LIFECYCLE_MANAGER_MESSAGE_SHUTDOWN_IN_PROGRESS,
-      };
-    }
-    const bulkRefusal = stopContext.isStartupRollback
-      ? undefined
-      : this.checkIndividualBulkPreconditions(name, stopContext.operation);
-    if (bulkRefusal) {
-      return bulkRefusal;
-    }
-    return undefined;
-  }
-
-  /**
-   * Phase 2: Graceful shutdown
-   * Calls stop() with timeout
-   */
-  private async shutdownComponentGraceful(
-    name: string,
-    component: BaseComponent,
-    preparation: {
-      timeoutMS: number;
-      startedAt: number;
-      lateResolution?: string;
-    },
-    claim: symbol,
-    stopContext: IndividualStopContext | undefined,
-  ): Promise<ComponentOperationResult> {
-    const { timeoutMS, startedAt } = preparation;
-
-    if (stopContext) {
-      const refusal = this.checkIndividualStopClaim(name, stopContext);
-      if (refusal) {
-        return refusal;
-      }
-    }
-
-    // All prepared getters are caller code and may already have started another stop.
-    const recheck = this.checkStopPreconditions(name, component);
-    if ('success' in recheck) {
-      return recheck;
-    }
-
-    // Nothing between the recheck and claim runs caller code. Claim first, then
-    // clear the unexpected-stop handler: even the clearing hook can be overridden
-    // to re-enter. It must find this stop already in progress. Both happen before
-    // any async work, so reports of an unexpected stop are ignored from here on.
-    // The stop is recorded with the claim, so a crash anywhere in this phase reaches
-    // the stop net with the time this stop began; its timeout updates it below.
-    this.claimComponent(name, 'stopping', claim, {
-      startedAt,
-      gracefulTimedOut: false,
-    });
-    if (stopContext) {
-      stopContext.claimed = true;
-    }
-    this.clearUnexpectedStopHandler(component, 'stop');
-    this.logger.entity(name).info('Graceful shutdown started');
-    this.lifecycleEvents.componentStopping(name);
-
-    const stopAttemptToken = this.issueStopAttemptToken(name);
-    // Only this attempt's deadline is a timeout. A hook may reject with the same
-    // exported error class and component name for an unrelated reason.
-    let gracefulTimeoutError: ComponentStopTimeoutError | undefined;
-    // Set once that rejection has been delivered to the race - a macrotask after the
-    // deadline fired (see `rejectAfterAbort()`), as in the force phase. A stop
-    // rejection before then still settles the race as a graceful failure.
-    let didDeadlineReject = false;
-    // Set when `stop()` rejected once the deadline fired, linked to that abort (see
-    // `isLinkedToAbort()`): a stop that honored its signal by rejecting is the timeout
-    // it was told of, even when its rejection beats the deferred deadline to the race.
-    let didRejectForDeadline = false;
-    const outcomeObserver = this.createStopPhaseObserver(name);
-
-    let timeoutHandle: NodeJS.Timeout | undefined;
-    // Set once `stop()` has resolved: a throw after that is the bookkeeping's, not the
-    // stop's, and must not be answered as a failed graceful phase and escalated.
-    let didStopResolve = false;
-    // Set once this attempt recorded the stop: a throw after that is only reporting.
-    let didMarkStopped = false;
-
-    // Read apart from the call, after the claim: a `stop` getter that throws has not
-    // run `stop()`, so it reaches the stop net as a crash (`operation_crashed`,
-    // reported) rather than a failed graceful phase (`error`).
-    const stopHook: unknown = Reflect.get(component, 'stop');
-    // One controller per graceful attempt, its signal handed to `stop()`. Aborted only
-    // at this attempt's graceful deadline - the timer below - never because `stop()`
-    // settled, either way, and never by the force phase that may follow.
-    const stopAbort = this.createHookAbortController(name, 'stop');
-
-    try {
-      // Race against graceful timeout
-      // Adopted, for the reason `startComponentAttempt()` adopts `start()`'s.
-      const stopPromise = adoptPromise(
-        Reflect.apply(stopHook as (signal: AbortSignal) => unknown, component, [
-          stopAbort.signal,
-        ]),
-        {
-          // A stop that succeeds once its deadline has fired - a bare promise the
-          // timeout notification itself resolved - is recorded by the reaction that
-          // settles adoption, where the stop settled, so the graceful result's caller
-          // finds it before escalating. The deadline observer below records it too,
-          // a reaction later, and reconciles it.
-          onSettled: (didFulfill) => {
-            if (didFulfill && gracefulTimeoutError !== undefined) {
-              preparation.lateResolution = stopAttemptToken;
-            }
-          },
-        },
-      );
-
-      const delayMS = optionalValidatedTimerDelayMS(timeoutMS);
-      if (delayMS !== undefined) {
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          timeoutHandle = setTimeout(() => {
-            gracefulTimeoutError = new ComponentStopTimeoutError({
-              componentName: name,
-              timeoutMS,
-            });
-            // Listeners that release `stop()` win the race below: the timeout's
-            // rejection waits a macrotask (see `rejectAfterAbort()`).
-            this.abortHookSignal(stopAbort, gracefulTimeoutError, name, 'stop');
-
-            // Attached ahead of both the observer below and the `catch`, so each
-            // reads the link as decided once: the error's members are the caller's.
-            const deadlineReason = gracefulTimeoutError;
-            observeRejection(stopPromise, (error: unknown) => {
-              didRejectForDeadline = isLinkedToAbort(error, deadlineReason);
-            });
-
-            // Detect if stop() eventually resolves after the timeout so the stall
-            // can be cleared automatically without a manual retry. From here on
-            // this observer owns rejection reporting, even if an abort listener makes
-            // stop() reject before the deferred deadline wins the foreground race.
-            outcomeObserver.observe(
-              stopPromise,
-              'Component stop failed after deadline fired',
-              {
-                // Labelled as the result records it: a rejection unrelated to the
-                // abort that beat the deferred deadline is the graceful phase's own
-                // failure (`error`), not one after a timeout.
-                getReport: () => ({
-                  message:
-                    didDeadlineReject || didRejectForDeadline
-                      ? 'Component stop failed after deadline fired'
-                      : 'Graceful shutdown threw error: {{error.message}}',
-                  level: 'warn',
-                }),
-                onResolved: () => {
-                  preparation.lateResolution = stopAttemptToken;
-                  this.handleLateStopResolution(
-                    name,
-                    stopAttemptToken,
-                    'graceful',
-                  );
-                },
-              },
-            );
-            timeoutHandle = this.rejectAfterAbort((timeoutError) => {
-              didDeadlineReject = true;
-              reject(timeoutError);
-            }, gracefulTimeoutError);
-          }, delayMS);
-        });
-
-        await Promise.race([stopPromise, timeoutPromise]);
-      } else {
-        await stopPromise;
-      }
-      didStopResolve = true;
-
-      return this.withTransition(() => {
-        // Update state - graceful succeeded
-        this.markComponentStopped(name);
-        didMarkStopped = true;
-
-        this.logger.entity(name).success('Component stopped gracefully');
-        this.lifecycleEvents.componentStopped(
-          name,
-          this.readStatusOfStopped(name),
-        );
-
-        // Read again, after the event's listeners: the result reports the state they
-        // left, and omits `status` when that read fails.
-        return this.successfulStopResult(name);
-      });
-    } catch (error) {
-      // The component did stop and its state says so; only the notification failed.
-      // Reported, but answered as the stop it was, so a bulk pass does not halt on a
-      // component it stopped.
-      if (didMarkStopped) {
-        reportCallbackError('lifecycle-manager component stop', error);
-        return { success: true, componentName: name };
-      }
-      // Left to the stop net, which answers `operation_crashed`.
-      if (didStopResolve) {
-        throw error;
-      }
-
-      // A timeout: the deadline's own rejection, or a stop that rejected because that
-      // deadline aborted its signal. Either way answered with the deadline's error - the
-      // one the signal was aborted with; the stop's own rejection is the observer's to
-      // report.
-      const timeoutError =
-        gracefulTimeoutError !== undefined &&
-        (error === gracefulTimeoutError || didRejectForDeadline)
-          ? gracefulTimeoutError
-          : undefined;
-      const err = timeoutError ?? toError(error);
-
-      // Store error
-      this.state.componentErrors.set(name, err);
-
-      if (timeoutError !== undefined) {
-        // Recorded for the stop net before anything below runs caller code - the log's
-        // sinks, the event's listeners, an overridden `getComponentStatus()`. Recorded
-        // only once escalation began, a throw building this result reached the net
-        // with no stop on the claim, and the timeout was stalled as an `error`.
-        this.recordClaimStop(name, claim, {
-          startedAt,
-          gracefulTimedOut: true,
-        });
-        this.logger
-          .entity(name)
-          .warn(LIFECYCLE_MANAGER_MESSAGE_GRACEFUL_SHUTDOWN_TIMED_OUT);
-        this.lifecycleEvents.componentStopTimeout(name, err, {
-          timeoutMS,
-          reason: LIFECYCLE_MANAGER_MESSAGE_GRACEFUL_SHUTDOWN_TIMED_OUT,
-        });
-
-        return {
-          success: false,
-          componentName: name,
-          reason: LIFECYCLE_MANAGER_MESSAGE_GRACEFUL_SHUTDOWN_TIMED_OUT,
-          code: 'component_shutdown_timeout',
-          error: err,
-          status: this.getComponentStatus(name),
-        };
-      } else {
-        // Keep the failure result even when the timeout observer owns its log.
-        // Otherwise a rejection caused by an abort listener is reported by both paths.
-        outcomeObserver.reportForeground(
-          err,
-          'Graceful shutdown threw error: {{error.message}}',
-        );
-
-        return {
-          success: false,
-          componentName: name,
-          // Guarded: this runs inside the `catch`, and `toError` returns a
-          // brand-claiming value unchanged, so a `message` accessor that throws
-          // here escapes as a rejection instead of this failure result.
-          reason: describeError(err),
-          code: 'error',
-          error: err,
-          status: this.getComponentStatus(name),
-        };
-      }
-    } finally {
-      if (timeoutHandle) {
-        clearTimeout(timeoutHandle);
-      }
-    }
-  }
-
-  /**
-   * Capture the force handler and its budget together before any stop phase runs.
-   * Immediate and stalled-retry force attempts prepare themselves at their own entry.
-   */
-  private prepareForceShutdown(
-    name: string,
-    component: BaseComponent,
-  ): {
-    onShutdownForce: unknown;
-    timeoutMS: number;
-  } {
-    const onShutdownForce: unknown = Reflect.get(component, 'onShutdownForce');
-    const hasForceHandler = typeof onShutdownForce === 'function';
-    const timeoutMS = hasForceHandler
-      ? toOperationTimerDelayMS(
-          component.shutdownForceTimeoutMS,
-          `${name}.shutdownForceTimeoutMS`,
-        )
-      : 0;
-    return { onShutdownForce, timeoutMS };
-  }
-
-  /**
-   * Phase 3: Force shutdown
-   * Calls onShutdownForce() with timeout, or marks as stalled if not implemented
-   */
-  private async shutdownComponentForce(
-    name: string,
-    component: BaseComponent,
-    context: {
-      gracefulPhaseRan: boolean;
-      gracefulTimedOut: boolean;
-      gracefulError?: Error;
-      startedAt: number;
-      // A stalled component's force-phase retry: a new stop attempt, which issues its
-      // own token - see below.
-      isStalledRetry?: boolean;
-    },
-    claim: symbol,
-    preparation?: ReturnType<LifecycleManager['prepareForceShutdown']>,
-    stopContext?: IndividualStopContext,
-  ): Promise<ComponentOperationResult> {
-    const { onShutdownForce, timeoutMS } =
-      preparation ?? this.prepareForceShutdown(name, component);
-    const hasForceHandler = typeof onShutdownForce === 'function';
-
-    // An individual attempt must respect bulk work started by prepared getters.
-    // An already claimed graceful stop still owns its escalation during bulk work.
-    if (stopContext && !this.ownsClaim(name, claim)) {
-      const refusal = this.checkIndividualStopClaim(name, stopContext);
-      if (refusal) {
-        return refusal;
-      }
-    }
-
-    // Hook and timeout getters can synchronously start another stop, restart a
-    // stalled component, or unregister and replace it. Recheck after all reads and
-    // before changing either ownership or the stop generation. In particular, a
-    // refused outer attempt must not orphan a nested attempt's late completion.
-    const recheck = this.checkStopPreconditions(name, component, {
-      claim,
-      isStalledRetry: context.isStalledRetry === true,
-    });
-    if ('success' in recheck) {
-      return recheck;
-    }
-
-    // A stalled retry without a handler attempts nothing new, so the stall it found
-    // stands as recorded: no claim, no force-start notification that nothing would
-    // end, and no second `component:stalled`. It answers as the stop that recorded it.
-    const priorStall = context.isStalledRetry
-      ? this.state.stalledComponents.get(name)
-      : undefined;
-    if (!hasForceHandler && priorStall) {
-      this.logger
-        .entity(name)
-        .warn('Stalled component has no force handler to retry', {
-          params: { phase: priorStall.phase, reason: priorStall.reason },
-        });
-      return this.stalledStopResult(name, priorStall);
-    }
-    if (priorStall) {
-      this.logger
-        .entity(name)
-        .warn('Retrying stalled component shutdown (force phase)');
-    }
-
-    this.claimComponent(name, 'force-stopping', claim, {
-      startedAt: context.startedAt,
-      gracefulTimedOut: context.gracefulTimedOut,
-    });
-    if (stopContext) {
-      stopContext.claimed = true;
-    }
-    // A fresh force-immediate stop or stalled retry needs a token. Graceful
-    // escalation keeps its token.
-    const forceAttemptToken = !context.gracefulPhaseRan
-      ? this.issueStopAttemptToken(name, context.isStalledRetry === true)
-      : this.state.componentStopAttemptTokens.get(name);
-
-    // The internal claim is not a force-start notification. If bookkeeping is
-    // broken, the stop safety net records this attempt as stalled and releases its
-    // claim; a stall describes unconfirmed cleanup, not proof that a hook ran.
-    // Validate before publishing a force start or invoking any caller code.
-    // A stop without a handler observes no promise and needs no token.
-    if (hasForceHandler && forceAttemptToken === undefined) {
-      throw new Error('Force stop attempt is missing its stop token');
-    }
-
-    // Claim before calling this overridable hook, just as in the graceful phase.
-    // Property-read failures above still leave the unexpected-stop handler intact.
-    this.clearUnexpectedStopHandler(component, 'force stop');
-    // Describes this attempt: a stalled retry runs no graceful phase, so none timed out
-    // here, even when the stop it continues timed out gracefully.
-    const forceStartContext = {
-      gracefulPhaseRan: context.gracefulPhaseRan,
-      gracefulTimedOut: context.gracefulPhaseRan && context.gracefulTimedOut,
-    };
-    this.logger
-      .entity(name)
-      .info('Force shutdown started', { params: { ...forceStartContext } });
-
-    this.lifecycleEvents.componentShutdownForce({
-      name,
-      context: forceStartContext,
-    });
-
-    // If component doesn't implement onShutdownForce, mark as stalled immediately
-    if (!hasForceHandler) {
-      // After a graceful phase, that phase is what failed: there was nothing to escalate
-      // to. A direct `forceImmediate` stop ran no graceful phase - a stalled retry without
-      // a handler returned above - so what failed is the force phase it asked for, which
-      // had no handler to run; the stall says so rather than blame a graceful phase.
-      const isForceImmediate = !context.gracefulPhaseRan;
-      const stallInfo = isForceImmediate
-        ? this.stopStallInfo(
-            name,
-            'force',
-            context,
-            new Error(
-              `Component "${name}" has no onShutdownForce() handler for a forceImmediate stop`,
-            ),
-          )
-        : this.stopStallInfo(name, 'graceful', context, context.gracefulError);
-
-      this.markComponentStalled(name, stallInfo, {
-        error: isForceImmediate ? stallInfo.error : undefined,
-        gracefulTimedOut: context.gracefulTimedOut,
-      });
-
-      this.logger
-        .entity(name)
-        .error(
-          isForceImmediate
-            ? 'Component stalled - no force handler for a forceImmediate stop'
-            : 'Component stalled - graceful shutdown failed',
-          {
-            params: {
-              reason: stallInfo.reason,
-              hasForceHandler: false,
-            },
-          },
-        );
-
-      this.lifecycleEvents.componentStalled(name, stallInfo, {
-        reason: stallInfo.reason,
-        code:
-          stallInfo.reason === 'timeout'
-            ? 'component_shutdown_timeout'
-            : 'error',
-      });
-
-      // Answers with the original graceful phase error, if it ran
-      return this.stalledStopResult(name, stallInfo);
-    }
-
-    const {
-      promise: stoppedDuringForcePromise,
-      cleanup: cleanupForceWaiter,
-      hasResolved: wasStoppedDuringForce,
-    } = this.createPendingForceStopWaiter(name);
-    let timeoutHandle: NodeJS.Timeout | undefined;
-    const outcomeObserver = this.createStopPhaseObserver(name);
-    const abandonedForceMessage =
-      'Force shutdown failed after graceful stop completed';
-    // Severity follows the recorded outcome, not whether the deadline fired.
-    // Once a failed foreground returns, its released claim alone must not make
-    // that real failure look abandoned. Pending attempts may already have lost
-    // ownership to late graceful completion before their continuation resumes.
-    let forceOutcome: 'pending' | 'failed' | 'abandoned' = 'pending';
-    // Stopped by another path: the waiter tells, since only `markComponentStopped()`
-    // releases it - and a late-start cleanup's stop leaves its own state there rather
-    // than `stopped`.
-    const isSuperseded = (): boolean =>
-      this.isForceAttemptSuperseded(name, component, claim) ||
-      wasStoppedDuringForce() ||
-      (this.state.componentStates.get(name) === 'stopped' &&
-        !this.state.runningComponents.has(name));
-
-    // This attempt's own timeout rejection, so the `catch` can tell it apart from
-    // anything `onShutdownForce()` rejects with.
-    let forceTimeoutError: ComponentForceTimeoutError | undefined;
-    // Set once that rejection has been delivered to the race - a macrotask after the
-    // deadline fired (see `rejectAfterAbort()`). A hook rejection before then still
-    // settles the race as the hook's own failure, and is reported as one.
-    let didDeadlineReject = false;
-    // Set when `onShutdownForce()` rejected once the deadline fired, linked to that
-    // abort, as in the graceful phase: the timeout it was told of, not its own failure.
-    let didRejectForDeadline = false;
-    // Set once the force race has settled without a failure: a throw after that is the
-    // bookkeeping's, not the hook's, as in the graceful phase.
-    let didForceResolve = false;
-    // Set once the component is marked stopped, as in the graceful phase: a throw after
-    // that - the success log, say - fails only the notification, not the stop. The
-    // status both carry is read guarded (`readStatusOfStopped()`).
-    let didMarkStopped = false;
-    // One controller per force attempt - an escalation, a `forceImmediate` stop, or a
-    // stalled retry - its signal handed to `onShutdownForce()`. Aborted where the manager
-    // no longer needs that still-pending call: at this attempt's force deadline - the
-    // timer below - or when another path stopped the component first and ended the phase
-    // (see the superseded return below). Never because the hook itself settled.
-    const forceAbort = this.createHookAbortController(name, 'force');
-    // Set once `onShutdownForce()`'s own promise has settled, either way: a call that
-    // finished is not aborted, even when a late graceful completion ends the phase in the
-    // same moment.
-    let didForceHookSettle = false;
-
-    try {
-      // The value read and checked above, not a second read. A synchronous throw races
-      // a graceful completion it caused exactly as the same rejection returned would.
-      let forceReturn: unknown;
-      try {
-        forceReturn = Reflect.apply(
-          onShutdownForce as (signal: AbortSignal) => unknown,
-          component,
-          [forceAbort.signal],
-        );
-      } catch (hookError) {
-        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
-        forceReturn = Promise.reject(hookError);
-      }
-      // Adopted, for the reason `startComponentAttempt()` adopts `start()`'s.
-      const forcePromise = adoptPromise(forceReturn);
-      // Attached before the races below, so it runs before their continuation does.
-      const markForceHookSettled = (): void => {
-        didForceHookSettle = true;
-      };
-      void forcePromise.then(markForceHookSettled, markForceHookSettled);
-
-      // Both races attach rejection handlers in this turn, including when the
-      // timeout is disabled or graceful completion wins. No separate no-op catch
-      // is needed; the outcome observer below adds the abandoned hook's report.
-      const delayMS = optionalValidatedTimerDelayMS(timeoutMS);
-      if (delayMS !== undefined) {
-        const timeoutPromise = new Promise<never>((_, reject) => {
-          timeoutHandle = setTimeout(() => {
-            forceTimeoutError = new ComponentForceTimeoutError({
-              componentName: name,
-              timeoutMS,
-            });
-            this.abortHookSignal(
-              forceAbort,
-              forceTimeoutError,
-              name,
-              'onShutdownForce',
-            );
-
-            // Ahead of the observer below and the `catch`, as in the graceful phase.
-            const deadlineReason = forceTimeoutError;
-            observeRejection(forcePromise, (error: unknown) => {
-              didRejectForDeadline = isLinkedToAbort(error, deadlineReason);
-            });
-
-            // Detect if onShutdownForce() eventually resolves after the timeout
-            // so the stall can be cleared automatically, same as stop().
-            outcomeObserver.observe(
-              forcePromise,
-              'Force shutdown failed after deadline fired',
-              {
-                getReport: () =>
-                  forceOutcome === 'abandoned' ||
-                  (forceOutcome === 'pending' && isSuperseded())
-                    ? { message: abandonedForceMessage, level: 'warn' }
-                    : {
-                        // Labelled as the result records it: a rejection unrelated
-                        // to the abort that beat the deferred deadline is the stall's
-                        // own failure, not one after a timeout.
-                        message:
-                          didDeadlineReject || didRejectForDeadline
-                            ? 'Force shutdown failed after deadline fired'
-                            : 'Force shutdown failed - stalled: {{error.message}}',
-                        level: 'error',
-                      },
-                onResolved: () =>
-                  this.handleLateStopResolution(
-                    name,
-                    forceAttemptToken as string,
-                    'force',
-                  ),
-              },
-            );
-            timeoutHandle = this.rejectAfterAbort((timeoutError) => {
-              didDeadlineReject = true;
-              reject(timeoutError);
-            }, forceTimeoutError);
-          }, delayMS);
-        });
-
-        await Promise.race([
-          forcePromise,
-          timeoutPromise,
-          stoppedDuringForcePromise,
-        ]);
-      } else {
-        await Promise.race([forcePromise, stoppedDuringForcePromise]);
-      }
-      didForceResolve = true;
-
-      if (isSuperseded()) {
-        forceOutcome = 'abandoned';
-        // Graceful completion won. Report abandoned cleanup failures without
-        // changing this or a subsequent run's state.
-        // The phase ended before its deadline with `onShutdownForce()` still pending:
-        // the manager no longer needs that call's work, so it hears so through its
-        // signal below, as it would at the deadline. A deadline that fired already
-        // aborted it.
-        const supersededReason =
-          !didForceHookSettle && forceTimeoutError === undefined
-            ? new ForceShutdownSupersededError({ componentName: name })
-            : undefined;
-        // A fired deadline already installed the late-outcome reporter. Keeping
-        // both would report the same subsequent hook rejection twice. A rejection
-        // linked to the abort below is the hook honoring it, not a failure.
-        outcomeObserver.observe(
-          supersededReason === undefined
-            ? forcePromise
-            : forcePromise.catch((error: unknown) => {
-                if (!isLinkedToAbort(error, supersededReason)) {
-                  throw error;
-                }
-              }),
-          abandonedForceMessage,
-        );
-        try {
-          return this.successfulStopResult(name);
-        } finally {
-          // Snapshot first because abort listeners run caller code, but always abort
-          // the abandoned force work even if building or reporting that snapshot fails.
-          if (supersededReason !== undefined) {
-            this.abortHookSignal(
-              forceAbort,
-              supersededReason,
-              name,
-              'onShutdownForce',
-            );
-          }
-        }
-      }
-
-      return this.withTransition(() => {
-        // A stalled retry clears its stall here; announce that as the late paths do.
-        const clearedStall = this.state.stalledComponents.get(name);
-
-        // Update state - force succeeded
-        this.markComponentStopped(name);
-        didMarkStopped = true;
-
-        this.logger.entity(name).success('Component force stopped');
-        this.lifecycleEvents.componentShutdownForceCompleted(name);
-        if (clearedStall) {
-          this.lifecycleEvents.componentStalledResolved(
-            name,
-            clearedStall,
-            Date.now() - clearedStall.stalledAt,
-          );
-        }
-        this.lifecycleEvents.componentStopped(
-          name,
-          this.readStatusOfStopped(name),
-        );
-
-        // Read again, after the event's listeners: the result reports the state they
-        // left, and omits `status` when that read fails.
-        return this.successfulStopResult(name);
-      });
-    } catch (error) {
-      // The component did stop; answered as the stop it was, so a bulk pass does not
-      // halt on a component it stopped.
-      if (didMarkStopped) {
-        reportCallbackError('lifecycle-manager component stop', error);
-        return { success: true, componentName: name };
-      }
-      // Left to the stop net, which answers `operation_crashed`.
-      if (didForceResolve) {
-        throw error;
-      }
-      if (isSuperseded()) {
-        forceOutcome = 'abandoned';
-        // A real force rejection can race graceful completion, but this attempt's
-        // deadline is not a hook failure. Once the deadline observer is installed,
-        // it alone reports any real late rejection, including a same-turn rejection.
-        if (forceTimeoutError === undefined || error !== forceTimeoutError) {
-          outcomeObserver.reportForeground(error, abandonedForceMessage);
-        }
-        return this.successfulStopResult(name);
-      }
-
-      forceOutcome = 'failed';
-      // Determine if timeout or error - by identity, not by message: an
-      // `onShutdownForce()` that rejected with the same text is still an error. One
-      // that rejected because the deadline aborted its signal is that timeout, answered
-      // with the deadline's error as in the graceful phase.
-      const timeoutError =
-        forceTimeoutError !== undefined &&
-        (error === forceTimeoutError || didRejectForDeadline)
-          ? forceTimeoutError
-          : undefined;
-      const isTimeout = timeoutError !== undefined;
-      const err = timeoutError ?? toError(error);
-
-      return this.withTransition<ComponentOperationResult>(() => {
-        // Mark as stalled - force phase failed
-        const stallInfo = this.stopStallInfo(
-          name,
-          'force',
-          context,
-          err,
-          isTimeout,
-        );
-        this.markComponentStalled(name, stallInfo, {
-          error: err,
-          gracefulTimedOut: context.gracefulTimedOut,
-        });
-
-        if (isTimeout) {
-          this.logger.entity(name).error('Force shutdown timed out - stalled', {
-            params: { timeoutMS },
-          });
-          this.lifecycleEvents.componentShutdownForceTimeout(name, timeoutMS);
-        } else {
-          outcomeObserver.reportForeground(
-            err,
-            'Force shutdown failed - stalled: {{error.message}}',
-            'error',
-          );
-        }
-
-        this.lifecycleEvents.componentStalled(name, stallInfo, {
-          reason: stallInfo.reason,
-          code: isTimeout ? 'component_shutdown_timeout' : 'error',
-        });
-
-        return this.stalledStopResult(name, stallInfo);
-      });
-    } finally {
-      cleanupForceWaiter();
-      if (timeoutHandle) {
-        clearTimeout(timeoutHandle);
-      }
-    }
-  }
-
-  /**
-   * A confirmed stop remains successful even if its diagnostic status cannot be read.
-   * Late graceful completion and superseded force attempts share this boundary.
-   */
-  private successfulStopResult(name: string): ComponentOperationResult {
-    const result: ComponentOperationResult = {
-      success: true,
-      componentName: name,
-    };
-    const status = this.readStatusOfStopped(name);
-    if (status !== undefined) {
-      result.status = status;
-    }
-    return result;
-  }
-
-  /**
-   * The status of a component already recorded as stopped, for its `component:stopped`
-   * event and its result. Read guarded: `getComponentStatus()` is public and can be
-   * overridden, and a throw from it must not cost a stop that happened its notification,
-   * nor turn it into a crash. Reported, and left out.
-   */
-  private readStatusOfStopped(
-    name: string,
-    context = 'lifecycle-manager component stop',
-  ): ComponentStatus | undefined {
-    try {
-      return this.getComponentStatus(name);
-    } catch (error) {
-      reportCallbackError(context, error);
-      return undefined;
-    }
-  }
-
-  /**
-   * The stall record a stop leaves when `phase` fails. A graceful timeout is the reason
-   * while the graceful phase is what stalled, and `'both'` once a force phase failed
-   * after it; a force phase's own timeout is `'timeout'`.
-   */
-  private stopStallInfo(
-    name: string,
-    phase: 'graceful' | 'force',
-    stop: StopAttempt,
-    error: Error | undefined,
-    didForceTimeOut = false,
-  ): ComponentStallInfo {
-    return {
-      name,
-      phase,
-      reason: didForceTimeOut
-        ? 'timeout'
-        : stop.gracefulTimedOut
-          ? phase === 'force'
-            ? 'both'
-            : 'timeout'
-          : 'error',
-      startedAt: stop.startedAt,
-      stalledAt: Date.now(),
-      error,
-    };
-  }
-
-  /**
-   * The result a stop that crashed answers with. The code is always `operation_crashed`,
-   * even for a timeout validation error, since the crash is reported and the stop may
-   * have changed state; the reason says when the graceful phase had
-   * already timed out, and `status` carries the stall the crash left. Read guarded: the
-   * crash may have come from reading state, and this runs where nothing above is left to
-   * catch, so a status that cannot be read is left out.
-   */
-  private crashedStopResult(
-    name: string,
-    error: Error,
-    stall: { gracefulTimedOut: boolean } | undefined,
-  ): ComponentOperationResult {
-    const result = crashedComponentResult(
-      name,
-      error,
-      stall?.gracefulTimedOut === true
-        ? `Stop failed unexpectedly after its graceful phase timed out: ${describeError(error)}`
-        : `Stop failed unexpectedly: ${describeError(error)}`,
-      // Every caller has reported this failure: a crash, even for a branded option
-      // refusal - one the attempt met unclaimed is answered `invalid_options` before
-      // it gets here - and even more so once it left a stall.
-      'operation_crashed',
-    );
-
-    try {
-      const status = this.getComponentStatus(name);
-      if (status !== undefined) {
-        result.status = status;
-      }
-    } catch {
-      // Left out, as `crashedComponentResult()` leaves it out everywhere else.
-    }
-
-    return result;
-  }
-
-  /** Whether the stop that left `name` stalled had its graceful phase time out. */
-  private didStallGracefulTimeOut(name: string): boolean {
-    const stallInfo = this.state.stalledComponents.get(name);
-    return (
-      stallInfo !== undefined &&
-      this.state.stallDetails.get(stallInfo)?.gracefulTimedOut === true
-    );
-  }
-
-  /**
-   * The result a stop that stalled answers with, derived from its stall record so a
-   * retry that attempts nothing answers exactly as the stop that recorded it did.
-   */
-  private stalledStopResult(
-    name: string,
-    stallInfo: ComponentStallInfo,
-  ): ComponentOperationResult {
-    const isForcePhase = stallInfo.phase === 'force';
-    const didTimeOut = stallInfo.reason === 'timeout';
-    const error = stallInfo.error;
-
-    // The stop net recorded this stall after a crash, and answered with its crash result.
-    const details = this.state.stallDetails.get(stallInfo);
-    if (details?.crashed === true && error !== undefined) {
-      return this.crashedStopResult(name, error, details);
-    }
-
-    return {
-      success: false,
-      componentName: name,
-      // A graceful-phase timeout is worded as its `component:stop-timeout` event and log
-      // line word it.
-      reason: didTimeOut
-        ? isForcePhase
-          ? LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT
-          : LIFECYCLE_MANAGER_MESSAGE_GRACEFUL_SHUTDOWN_TIMED_OUT
-        : // Guarded: the stall error is a `toError` result, so its `message` can be
-          // an accessor that throws.
-          error !== undefined
-          ? describeError(error)
-          : isForcePhase
-            ? 'Force shutdown failed'
-            : 'Graceful shutdown failed',
-      code: didTimeOut ? 'component_shutdown_timeout' : 'error',
-      error,
-      status: this.getComponentStatus(name),
-    };
   }
 
   // ============================================================================
@@ -9918,13 +8202,17 @@ export class LifecycleManager
       }
       // Retain dependency protection for independently started work, while allowing
       // this rollback to run under the startup latch it already owns.
-      const result = await this.stopComponentInternal(name, undefined, {
-        operation: 'stop',
-        claimed: false,
-        isStartupRollback: true,
-        rolledBackNames,
-        hasShutdownBegun,
-      });
+      const result = await this.core.componentStop.stopComponentInternal(
+        name,
+        undefined,
+        {
+          operation: 'stop',
+          claimed: false,
+          isStartupRollback: true,
+          rolledBackNames,
+          hasShutdownBegun,
+        },
+      );
       // Refused because a shutdown began while the stop was being prepared - one of
       // its getters began it. Not a failed stop: that shutdown owns this component and
       // the rest of the teardown, as the checks above already hand it over. Not marked
@@ -10024,7 +8312,8 @@ export class LifecycleManager
     // this result only has to describe it. No `status`: this runs inside the start's
     // `try`, and a throw from building one would land in the start's `catch`, which
     // would mark a component this stop may not have stopped as `registered`.
-    const stopResult = await this.stopComponentInternal(name);
+    const stopResult =
+      await this.core.componentStop.stopComponentInternal(name);
     const attachReason = `Could not attach process signals: ${describeError(error)}`;
 
     return {
@@ -10129,7 +8418,7 @@ export class LifecycleManager
     }
 
     for (const name of this.state.componentStates.keys()) {
-      if (this.isComponentInFlight(name)) {
+      if (this.core.claims.isInFlight(name)) {
         return true;
       }
     }
@@ -10303,7 +8592,8 @@ export class LifecycleManager
         if (isSuperseded()) {
           return;
         }
-        const stopResult = await this.stopComponentInternal(name);
+        const stopResult =
+          await this.core.componentStop.stopComponentInternal(name);
 
         if (!stopResult.success) {
           this.logger
@@ -10481,35 +8771,6 @@ export class LifecycleManager
   }
 
   /**
-   * Issues and returns a unique stop attempt token for a component.
-   *
-   * Each stop attempt (graceful or force-retry) gets a unique token.
-   * The late-resolution handler captures this token in its closure so it can
-   * skip any stall entries that were created by a *later* stop attempt — e.g. a
-   * force-retry that also timed out after the original graceful promise floated
-   * in the background.
-   */
-  private issueStopAttemptToken(
-    name: string,
-    // A stalled component's force retry: the attempt it supersedes belongs to the same
-    // stop, so its token joins `stalledStopEarlierTokens` instead of being retired.
-    isContinuingStalledStop = false,
-  ): string {
-    const previous = this.state.componentStopAttemptTokens.get(name);
-    if (isContinuingStalledStop && previous !== undefined) {
-      const earlier =
-        this.state.stalledStopEarlierTokens.get(name) ?? new Set();
-      earlier.add(previous);
-      this.state.stalledStopEarlierTokens.set(name, earlier);
-    } else {
-      this.state.stalledStopEarlierTokens.delete(name);
-    }
-    const next = ulid();
-    this.state.componentStopAttemptTokens.set(name, next);
-    return next;
-  }
-
-  /**
    * Clear a component's unexpected-stop handler, contained. The hook is overridable,
    * and a throw must not skip the operation that clears it. A graceful stop now claims
    * the component before this hook, so re-entry sees the stop in progress; containing
@@ -10578,38 +8839,6 @@ export class LifecycleManager
   }
 
   /**
-   * Record a stall: the bookkeeping every path that stalls a component shares. The
-   * caller emits `component:stalled` and anything particular to its path.
-   *
-   * A stop that settles after the stall is recorded clears it through
-   * `handleLateStopResolution()`; one released by its own abort listener never gets here,
-   * since its timeout rejects a macrotask later (`rejectAfterAbort()`).
-   */
-  private markComponentStalled(
-    name: string,
-    stallInfo: ComponentStallInfo,
-    options: { error?: Error; gracefulTimedOut: boolean; crashed?: boolean },
-  ): void {
-    const { error } = options;
-
-    return this.withTransition(() => {
-      this.state.stalledComponents.set(name, stallInfo);
-      this.state.stallDetails.set(stallInfo, {
-        gracefulTimedOut: options.gracefulTimedOut,
-        crashed: options.crashed === true,
-      });
-      this.state.componentStates.set(name, 'stalled');
-      this.state.runningComponents.delete(name);
-
-      if (error !== undefined) {
-        this.state.componentErrors.set(name, error);
-      }
-
-      this.updateStartedFlag();
-    });
-  }
-
-  /**
    * Mark a component running whose start may have been forced past a stall: the new run
    * supersedes the old stop, so its stall record goes, and with it that stop's token -
    * a late settlement of the old stop must not own this run's state. The retirement is
@@ -10628,7 +8857,7 @@ export class LifecycleManager
       this.state.lateStartCleanupOutcomes.delete(name);
     }
     if (isForcedStart) {
-      this.issueStopAttemptToken(name);
+      this.core.componentStop.issueStopAttemptToken(name);
     }
     this.markComponentRunning(name);
     if (retiredStall !== undefined) {
@@ -10658,256 +8887,6 @@ export class LifecycleManager
     };
     timestamps[field] = Date.now();
     this.state.componentTimestamps.set(name, timestamps);
-  }
-
-  /**
-   * The bookkeeping every path that finds a component stopped shares: a graceful or
-   * force stop that succeeded, and a stalled one that finished late. The caller logs and
-   * emits.
-   */
-  private markComponentStopped(name: string): void {
-    return this.withTransition(() => {
-      // A late-start cleanup's stop leaves the state the cleanup recorded - usually
-      // `starting-timed-out` with the timeout error - not `stopped`: the start that
-      // brought the component up timed out, and the status says so.
-      const lateCleanup = this.state.lateStartCleanupOutcomes.get(name);
-      const isLateStartCleanupStop =
-        lateCleanup !== undefined &&
-        this.state.componentStartAttemptTokens.get(name) === lateCleanup.token;
-      this.state.componentStates.set(
-        name,
-        isLateStartCleanupStop ? lateCleanup.state : 'stopped',
-      );
-      this.state.runningComponents.delete(name);
-      this.state.stalledComponents.delete(name);
-      // The stop is over, so no earlier attempt of it is left to finish it.
-      this.state.stalledStopEarlierTokens.delete(name);
-      // Clear the stall/timeout error so lastError reflects a clean stop.
-      this.state.componentErrors.set(
-        name,
-        isLateStartCleanupStop ? lateCleanup.error : null,
-      );
-      this.state.lateStartCleanupOutcomes.delete(name);
-      this.state.componentUnexpectedStopHadError.delete(name);
-      this.updateStartedFlag();
-      this.resolvePendingForceStopWaiters(name);
-
-      this.detachSignalsAfterLastStop();
-
-      this.stampTimestamp(name, 'stoppedAt');
-    });
-  }
-
-  private createPendingForceStopWaiter(name: string): {
-    promise: Promise<void>;
-    cleanup: () => void;
-    // Whether another path has marked the component stopped since the waiter was made.
-    hasResolved: () => boolean;
-  } {
-    let isResolved = false;
-    let waiters = this.state.pendingForceStopWaiters.get(name);
-
-    if (!waiters) {
-      waiters = new Set();
-      this.state.pendingForceStopWaiters.set(name, waiters);
-    }
-
-    let resolveWaiter!: () => void;
-    const promise = new Promise<void>((resolve) => {
-      resolveWaiter = () => {
-        if (isResolved) {
-          return;
-        }
-
-        isResolved = true;
-        resolve();
-      };
-    });
-
-    waiters.add(resolveWaiter);
-
-    return {
-      promise,
-      hasResolved: () => isResolved,
-      cleanup: () => {
-        const pending = this.state.pendingForceStopWaiters.get(name);
-        if (!pending) {
-          return;
-        }
-
-        pending.delete(resolveWaiter);
-        if (pending.size === 0) {
-          this.state.pendingForceStopWaiters.delete(name);
-        }
-      },
-    };
-  }
-
-  private resolvePendingForceStopWaiters(name: string): void {
-    const waiters = this.state.pendingForceStopWaiters.get(name);
-    if (!waiters || waiters.size === 0) {
-      return;
-    }
-
-    this.state.pendingForceStopWaiters.delete(name);
-    for (const resolve of waiters) {
-      resolve();
-    }
-  }
-
-  /**
-   * Called when a stop promise eventually resolves after its timeout path already fired.
-   *
-   * Usually this means a previously stalled component's original stop() or
-   * onShutdownForce() promise finally resolved, so the manager can clear the
-   * stall and transition the component to stopped without a manual retry.
-   *
-   * There is one extra overlap case for graceful stop(): stop() can resolve
-   * after the graceful timeout but before onShutdownForce() itself times out.
-   * In that window no stall entry exists yet, but the component still finished
-   * stopping cleanly, so we finalize it here and let the later force-timeout
-   * path observe the already-stopped state and no-op. This overlap fix is
-   * scoped to the same stop token and will not cross a later retry attempt.
-   *
-   * Two guards prevent stale floating promises from incorrectly clearing state:
-   *
-   * 1. token guard — if a newer stop attempt has started since this promise was
-   *    launched, its token won't match and we bail out immediately. A stalled
-   *    component's force retry is the exception: it continues the stop that
-   *    stalled, so a late resolution of any earlier attempt of that stop still
-   *    clears the stall (see `stalledStopEarlierTokens`).
-   *
-   * 2. state/stall guard — if the component was unregistered, restarted, or
-   *    already cleared by another path, there will be neither a matching stall
-   *    entry nor the post-graceful-race overlap state, so we bail out.
-   */
-  private handleLateStopResolution(
-    name: string,
-    token: string,
-    source: 'graceful' | 'force',
-    hasGracefulRaceFinished = false,
-  ): boolean {
-    return this.withTransition(() => {
-      // Guard 1: bail if a newer stop attempt has superseded this one. The newer
-      // attempt owns any stop/stall state and must manage its own late resolution -
-      // unless it is a force retry of the stall this attempt left: that continues the
-      // same stop, and this attempt's hook finishing late finishes it.
-      const isCurrentAttempt =
-        this.state.componentStopAttemptTokens.get(name) === token;
-      const isEarlierAttemptOfStalledStop =
-        !isCurrentAttempt &&
-        this.state.stalledStopEarlierTokens.get(name)?.has(token) === true;
-      if (!isCurrentAttempt && !isEarlierAttemptOfStalledStop) {
-        return false;
-      }
-
-      const currentState = this.state.componentStates.get(name);
-      const stallInfo = this.state.stalledComponents.get(name);
-
-      // The stalled stop's force retry is still running when an earlier attempt's hook
-      // finishes: the component did stop, so it is finalized here, as a graceful stop
-      // that finishes during its own escalation is. Marking it stopped releases the
-      // retry's force race, which then finds it stopped and ends as superseded.
-      const isCompletedDuringStallRetry =
-        isEarlierAttemptOfStalledStop &&
-        stallInfo !== undefined &&
-        currentState === 'force-stopping';
-
-      // Once the graceful race has lost, a successful stop can be finalized before
-      // or during force escalation, even without a stall record. Only the caller
-      // that consumed the graceful result can admit the pre-force stopping state.
-      const isCompletedAfterGracefulRace =
-        source === 'graceful' &&
-        !stallInfo &&
-        (currentState === 'force-stopping' ||
-          (hasGracefulRaceFinished && currentState === 'stopping'));
-
-      // Still in flight for this very attempt - it settled as its timeout fired. The
-      // attempt decides how it ended: its timeout rejects a macrotask after the abort
-      // (`rejectAfterAbort()`), so a stop that settled then wins the race. Ahead of
-      // Guard 2, which would take a stalled component's force retry - `force-stopping`,
-      // with the old stall entry still in place - for a newer attempt and discard the
-      // stall under it.
-      if (
-        !isCompletedAfterGracefulRace &&
-        !isCompletedDuringStallRetry &&
-        (currentState === 'stopping' || currentState === 'force-stopping')
-      ) {
-        return false;
-      }
-
-      // Guard 2: once the component is no longer in the stalled state because a
-      // newer lifecycle attempt changed its state, the old stop promise no longer
-      // owns the component state. Clear the stale stall bookkeeping, but do not
-      // emit stopped or overwrite the newer state. It may have been the last stall
-      // holding process signals attached, so the last-stop detach check still runs.
-      // The stall did end - its own stop finished - so it is announced as any late
-      // resolution is: otherwise a forced start that then fails leaves a component
-      // whose `component:stalled` never ended.
-      if (
-        stallInfo &&
-        currentState !== 'stalled' &&
-        !isCompletedDuringStallRetry
-      ) {
-        this.state.stalledComponents.delete(name);
-        this.updateStartedFlag();
-        this.lifecycleEvents.componentStalledResolved(
-          name,
-          stallInfo,
-          Date.now() - stallInfo.stalledAt,
-        );
-        this.detachSignalsAfterLastStop();
-        return false;
-      }
-
-      // Guard 3: bail if neither a stall entry nor the post-graceful-race overlap
-      // exists. This covers unregistered, restarted, or already-cleared paths.
-      if (!stallInfo && !isCompletedAfterGracefulRace) {
-        return false;
-      }
-
-      const stalledDurationMS = stallInfo
-        ? Date.now() - stallInfo.stalledAt
-        : undefined;
-
-      this.markComponentStopped(name);
-
-      this.logger.entity(name).info(
-        stallInfo
-          ? 'Stalled component completed stop late, stall cleared'
-          : hasGracefulRaceFinished
-            ? 'Graceful stop completed before force phase started'
-            : 'Graceful stop completed after force phase started',
-        // A stall cleared within the same millisecond lasted 0ms, which is still a
-        // duration to report.
-        stalledDurationMS !== undefined
-          ? { params: { stalledDurationMS } }
-          : undefined,
-      );
-
-      // If the force promise itself completed late, preserve the same "force
-      // finished" signal that a normal in-time force shutdown would have emitted.
-      if (source === 'force') {
-        this.lifecycleEvents.componentShutdownForceCompleted(name);
-      }
-
-      if (stallInfo && stalledDurationMS !== undefined) {
-        // Late resolution is modeled as: stalled -> stall cleared -> stopped.
-        // Emit both events so observers can distinguish "the stall ended" from
-        // "the component is now fully stopped".
-        this.lifecycleEvents.componentStalledResolved(
-          name,
-          stallInfo,
-          stalledDurationMS,
-        );
-      }
-
-      this.lifecycleEvents.componentStopped(
-        name,
-        this.readStatusOfStopped(name),
-      );
-      return true;
-    });
   }
 
   /**
@@ -11017,7 +8996,7 @@ export class LifecycleManager
         // from a socket or timer callback, where a throw would go uncaught.
         this.lifecycleEvents.componentStopped(
           name,
-          this.readStatusOfStopped(
+          this.core.componentStop.readStatusOfStopped(
             name,
             'lifecycle-manager component unexpected stop',
           ),

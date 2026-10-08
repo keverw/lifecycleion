@@ -2,7 +2,7 @@ import { expect, test } from 'bun:test';
 import { Logger } from '../logger';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
-import { claimReports } from './test-helpers';
+import { claimReports, coreOf } from './test-helpers';
 
 const logger = new Logger({ sinks: [], callProcessExit: false });
 
@@ -288,14 +288,15 @@ test('restart wraps a validation-shaped failure after its stop claim', async () 
   // The force phase's recheck, after the graceful stop failed, rethrows the validation
   // error - once. Reusing a validation error does not undo the graceful stop this
   // restart already attempted. Classification must follow ownership, not its code.
-  const internals = manager as unknown as {
+  const internals = coreOf(manager).componentStop as unknown as {
     checkStopPreconditions: (
       name: string,
       expected?: unknown,
       force?: unknown,
     ) => unknown;
   };
-  const checkStopPreconditions = internals.checkStopPreconditions.bind(manager);
+  const checkStopPreconditions =
+    internals.checkStopPreconditions.bind(internals);
   let shouldThrow = true;
   internals.checkStopPreconditions = (name, expected, force) => {
     if (shouldThrow && expected !== undefined && force !== undefined) {

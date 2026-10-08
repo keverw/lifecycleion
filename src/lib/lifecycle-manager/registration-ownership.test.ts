@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
   claimReports,
+  coreOf,
   deferred,
   fakeSignals,
   Plain,
@@ -622,13 +623,8 @@ test('a stale stalled retry keeps not-running for a component now starting', asy
   await manager.registerComponent(component);
   const start = manager.startComponent('a');
   try {
-    const result = await (
-      manager as unknown as {
-        retryStalledComponent: (
-          name: string,
-        ) => Promise<ComponentOperationResult>;
-      }
-    ).retryStalledComponent('a');
+    const result =
+      await coreOf(manager).componentStop.retryStalledComponent('a');
     expect(result.code).toBe('component_not_running');
     expect(manager.getComponentStatus('a')?.state).toBe('starting');
   } finally {
