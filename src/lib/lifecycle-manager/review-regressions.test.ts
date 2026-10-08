@@ -5245,9 +5245,9 @@ describe('LifecycleManager - round two review regressions', () => {
         // handling of that pass is what this test covers.
         (
           manager as unknown as {
-            state: { isSimulatedLoggerExitProceeding: boolean };
+            core: { loggerExit: { isSimulatedLoggerExitProceeding: boolean } };
           }
-        ).state.isSimulatedLoggerExitProceeding = false;
+        ).core.loggerExit.isSimulatedLoggerExitProceeding = false;
         expect((await manager.startAllComponents()).success).toBe(true);
         stopGate = restartStopGate;
         restart = manager.restartAllComponents();

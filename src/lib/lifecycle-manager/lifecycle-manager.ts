@@ -15,6 +15,7 @@ import {
   type ShutdownPassOptions,
   resolveManagerConfig,
 } from './internal/manager-config';
+import { ManagerCore, type ManagerInternals } from './internal/manager-core';
 import type { ComponentAccessContext } from './internal/component-access-context';
 import {
   sendMessageInternal,
@@ -85,7 +86,7 @@ import {
 } from '../internal/intrinsics';
 import { EventEmitterProtected } from '../event-emitter';
 import { ulid } from 'ulid';
-import type { BeforeExitResult, Logger } from '../logger';
+import type { Logger } from '../logger';
 import type { LoggerService } from '../logger/logger-service';
 import type { BaseComponent } from './base-component';
 import { ComponentLifecycle } from './component-lifecycle';
@@ -147,7 +148,6 @@ import {
 } from './errors';
 import {
   LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP,
-  LIFECYCLE_MANAGER_LOG_LOGGER_EXIT_DURING_SHUTDOWN,
   LIFECYCLE_MANAGER_LOG_OPTIONAL_COMPONENT_UNEXPECTED_STOP_DURING_STARTUP,
   LIFECYCLE_MANAGER_LOG_REQUIRED_COMPONENT_UNEXPECTED_STOP_DURING_STARTUP,
   LIFECYCLE_MANAGER_MESSAGE_BULK_OPERATION_IN_PROGRESS,
@@ -337,6 +337,8 @@ export class LifecycleManager
   );
 
   private readonly componentAccess: ComponentAccessContext;
+  /** The shared core the manager's subsystems are built over, with those subsystems. */
+  private readonly core: ManagerCore;
 
   constructor(options: LifecycleManagerOptions & { logger: Logger }) {
     super();
@@ -356,6 +358,18 @@ export class LifecycleManager
       this.eventDispatcher.emit(event, data);
     });
     this.componentAccess = LifecycleManager.createComponentAccessContext(this);
+    this.core = new ManagerCore({
+      manager: this,
+      state: this.state,
+      config: this.config,
+      logger: this.logger,
+      rootLogger: this.rootLogger,
+      lifecycleEvents: this.lifecycleEvents,
+      dispatcher: this.eventDispatcher,
+      registryReads: this.registrationReads,
+      componentMetadata: this.componentMetadata,
+      internals: LifecycleManager.createManagerInternals(this),
+    });
 
     // Enable logger exit hook if requested
     if (options.enableLoggerExitHook) {
@@ -1270,171 +1284,7 @@ export class LifecycleManager
    * ```
    */
   public enableLoggerExitHook(): void {
-    this.rootLogger.setBeforeExitCallback(async (exitCode: number) => {
-      // An exit that ends the process has already proceeded, or a forced one is logging
-      // that it is about to, and the logger is on its way to `process.exit()`. A later
-      // exit - one a sink makes from its own `close()` or from the forced exit's log line
-      // - must not run a second shutdown, proceed on its own, or re-enter here from a log
-      // line without bound. Its code is the logger's to settle: a failure still replaces
-      // the pending code until the logger publishes it in `exit-process`.
-      if (
-        this.state.isProcessExitCommitted ||
-        this.state.isProceedingForcedExit
-      ) {
-        return { action: 'wait' as const };
-      }
-
-      // Called from inside escalation handling - `onForceShutdown` calling
-      // `logger.exit(1)`, the documented way to force - it is the force itself, so it
-      // proceeds at once. Deferred like any other exit, it waited out the running pass
-      // (its whole timeout, for the stall that prompted the force) or, from the armed
-      // window, started and waited out a new one.
-      if (this.state.forceHandlingDepth > 0) {
-        if (this.isShuttingDown) {
-          this.noteShutdownRequestDuringActivePass();
-        }
-
-        // Committed before the log line, so a sink behind it cannot start anything.
-        const result = this.proceedWithLoggerExit();
-        this.state.isProceedingForcedExit = true;
-
-        try {
-          this.logger.info('Logger exit during forced shutdown, exiting now', {
-            params: { exitCode },
-          });
-        } finally {
-          this.state.isProceedingForcedExit = false;
-        }
-
-        return result;
-      }
-
-      // An exit leads when no earlier one is still being handled. The logger's own
-      // `isFirstExit` is not enough: a logger that does not end the process
-      // (`callProcessExit: false`) reports every exit after its first as a repeat,
-      // even once that first exit has long finished, and each later exit must still
-      // stop the components and keep a restart down.
-      //
-      // A repeat that arrives while a leading exit is still in hand waits, so it cannot
-      // exit ahead of the leading exit or start a second shutdown. That holds before
-      // the leading exit's shutdown has started too: a sink behind its "stopping
-      // components" log line that calls `logger.exit()` synchronously would otherwise
-      // be told to proceed, and exit with every component still running.
-      //
-      // Waiting does not drop the repeat's code. The logger recorded it when the repeat
-      // was made, and a failure replaces the pending code: a component that fails while
-      // stopping and logs `exitCode: 1` turns a SIGTERM's `exit(0)` into a non-zero exit.
-      //
-      // Not logged: this runs synchronously inside the repeat's `logger.exit()`, so a
-      // sink that exits from the lines it writes would re-enter here from the log line
-      // without bound - and before the leading exit's shutdown starts, there is no
-      // shutdown for the line to describe. `logger.exit()` is a one-time request, and the
-      // leading exit is already handling it. `isFirstExit` is not consulted: the logger
-      // marks an exit requested before calling this, so a first exit never finds one
-      // in hand.
-      if (this.state.isHandlingLoggerExit) {
-        return { action: 'wait' as const };
-      }
-
-      // This exit stops being in hand when the pass it depends on releases its latch -
-      // `finalizePendingLoggerExit()` calls `pendingLoggerExitResolve` from there - not
-      // when this hook resumes, a microtask or more later. A `shutdown-completed`
-      // listener can queue a start into that gap, and a repeat made there was told to
-      // wait for an exit already over, leaving the new start running. The `finally`
-      // below releases it only for an exit no pass finalized.
-      let isInHand = true;
-      const releaseExit = (): void => {
-        if (isInHand) {
-          isInHand = false;
-          this.state.isHandlingLoggerExit = false;
-        }
-      };
-
-      // Defer a logger.exit() that arrives during an already-running shutdown until
-      // that shutdown completes.
-      const waitForRunningShutdown = async (): Promise<BeforeExitResult> => {
-        // A pass this exit's own `stopAllComponents()` was refused by can end, and
-        // release the exit, before that refusal reaches it here - with another pass,
-        // a restart's stop phase say, running by then. The exit waits for that one too,
-        // in hand again - unless a later exit took the lead meanwhile, and waits for it.
-        if (!isInHand) {
-          if (this.state.isHandlingLoggerExit) {
-            return { action: 'wait' as const };
-          }
-          isInHand = true;
-          this.state.isHandlingLoggerExit = true;
-        }
-
-        // The process is on its way out, so a restart stopping right now must not
-        // start everything back up behind the exit. Recorded on the pass this exit
-        // waits for, even after a refused `stopAllComponents()` recorded it already:
-        // the pass that refused it may have ended since, and a restart's stop phase
-        // taken its place. Noting the same pass twice raises the stay-down count
-        // again, which only an individual restart that began between the two notes
-        // sees - one that began after this exit was requested, so skipping its start
-        // is still right.
-        this.noteShutdownRequestDuringActivePass();
-
-        this.logger.debug(LIFECYCLE_MANAGER_LOG_LOGGER_EXIT_DURING_SHUTDOWN, {
-          params: { exitCode, pendingExitCode: this.readPendingExitCode() },
-        });
-
-        // Only the leading exit gets here, and it holds `isHandlingLoggerExit` until this
-        // is resolved, so no other deferred exit can be pending.
-        return await new Promise<BeforeExitResult>((resolve) => {
-          this.state.pendingLoggerExitResolve = (result) => {
-            releaseExit();
-            resolve(result);
-          };
-        });
-      };
-
-      this.state.isHandlingLoggerExit = true;
-
-      try {
-        if (this.isShuttingDown) {
-          return await waitForRunningShutdown();
-        }
-
-        this.logger.info('Logger exit triggered, stopping components...', {
-          params: {
-            exitCode,
-            pendingExitCode: this.readPendingExitCode(),
-            timeoutMS: this.config.shutdownOptions.timeoutMS,
-          },
-        });
-
-        // Released when the pass ends, as a deferred exit is - by whichever pass ends
-        // first, should a sink have begun one ahead of this call.
-        this.state.pendingLoggerExitResolve = releaseExit;
-
-        // Stop all components with the manager's `shutdownOptions` defaults
-        const shutdownResult = await this.stopAllComponents();
-
-        // A sink behind the log line above can start the shutdown first. This call
-        // was then refused, and the exit waits for the running pass like any other.
-        if (
-          shutdownResult.code === 'already_in_progress' &&
-          this.isShuttingDown
-        ) {
-          return await waitForRunningShutdown();
-        }
-
-        // Proceed with exit
-        return this.proceedWithLoggerExit();
-      } finally {
-        // Still in hand only if no pass finalized this exit: its resolver is then still
-        // set, and must not release a later exit's latch.
-        if (isInHand) {
-          this.state.pendingLoggerExitResolve = null;
-        }
-        releaseExit();
-      }
-    });
-
-    this.logger.debug('Logger exit hook enabled', {
-      params: { timeoutMS: this.config.shutdownOptions.timeoutMS },
-    });
+    this.core.loggerExit.enable();
   }
 
   /**
@@ -1573,6 +1423,23 @@ export class LifecycleManager
     options?: GetValueOptions,
   ): ValueResult<T> {
     return this.getValueSettled<T>(componentName, key, null, options);
+  }
+
+  /**
+   * The manager members its subsystems still call on it (see `ManagerInternals`),
+   * forwarded at call time like the access context's callbacks, so a patched or
+   * overridden member is the one that runs.
+   */
+  private static createManagerInternals(
+    manager: LifecycleManager,
+  ): ManagerInternals {
+    return {
+      get isShuttingDown() {
+        return manager.isShuttingDown;
+      },
+      noteShutdownRequestDuringActivePass: () =>
+        manager.noteShutdownRequestDuringActivePass(),
+    };
   }
 
   /**
@@ -2339,7 +2206,7 @@ export class LifecycleManager
 
     // Reject once a logger exit has committed the process to ending, or while a simulated
     // one is still closing the sinks
-    if (this.isLoggerExitInProgress()) {
+    if (this.core.loggerExit.isLoggerExitInProgress()) {
       this.logger.warn('Cannot start all components: process is exiting');
 
       return refusedStartupResult(
@@ -6907,116 +6774,8 @@ export class LifecycleManager
         this.state.pendingStartAbortRequest = undefined;
         this.updateStartedFlag();
 
-        this.finalizePendingLoggerExit();
+        this.core.loggerExit.finalizePendingLoggerExit();
       });
-    }
-  }
-
-  /**
-   * Settle a logger exit being handled once the shutdown pass it depends on releases its
-   * latch: release one deferred behind a running pass, and commit the process to ending.
-   *
-   * Committed here, synchronously with the latch release, for an exit that started its
-   * own pass as much as for a deferred one: the exit resumes only a microtask or more
-   * later, and a start a `shutdown-completed` listener queues in between must already be
-   * refused. Every exit still in hand at this point proceeds - its own pass is over, or
-   * it was waiting for this one.
-   */
-  private finalizePendingLoggerExit(): void {
-    if (this.isShuttingDown || !this.state.isHandlingLoggerExit) {
-      return;
-    }
-
-    const result = this.proceedWithLoggerExit();
-    const resolve = this.state.pendingLoggerExitResolve;
-
-    if (resolve !== null) {
-      this.state.pendingLoggerExitResolve = null;
-      resolve(result);
-    }
-  }
-
-  /**
-   * The code the logger's pending exit will commit, for the exit hook's log lines: the
-   * `exitCode` the hook is called with is only that request's, and overlapping requests
-   * settle on the last non-zero one. `undefined` when no exit is pending, or when the
-   * logger cannot say - a logger copy without the getter, or one that throws.
-   */
-  private readPendingExitCode(): number | undefined {
-    try {
-      const code: unknown = this.rootLogger.pendingExitCode;
-      return typeof code === 'number' ? code : undefined;
-    } catch {
-      return undefined;
-    }
-  }
-
-  /**
-   * The answer for a logger exit allowed to proceed. When that exit ends the process,
-   * every start from here on is refused (see `isProcessExitCommitted`). A simulated exit
-   * (`callProcessExit: false`) leaves the process running, so starts are refused only
-   * until its sink cleanup settles (see `isLoggerExitInProgress()`).
-   */
-  private proceedWithLoggerExit(): BeforeExitResult {
-    let doesEndProcess = true;
-
-    try {
-      // Anything but an explicit `false` - a logger copy without the getter, say - is
-      // treated as ending the process, the same assumption a throw gets below.
-      doesEndProcess = this.rootLogger.endsProcessOnExit !== false;
-    } catch {
-      // Unreadable: the exit was told to proceed, so assume the process is ending.
-    }
-
-    if (doesEndProcess) {
-      this.state.isProcessExitCommitted = true;
-    } else {
-      this.state.isSimulatedLoggerExitProceeding = true;
-    }
-
-    return { action: 'proceed' };
-  }
-
-  /**
-   * Whether a logger exit keeps starts refused: one that ends the process has proceeded,
-   * or a simulated one has proceeded and not yet finished closing the sinks. The logger
-   * publishes `exit-process` only after this manager answers 'proceed', so a flag covers
-   * that gap; `isFinishingExit` covers the rest, until `exit-completed`.
-   *
-   * The root logger may be a caller-supplied copy without these getters, or one whose
-   * reads throw; either counts as no exit in progress.
-   */
-  private isLoggerExitInProgress(): boolean {
-    if (this.state.isProcessExitCommitted) {
-      return true;
-    }
-
-    if (this.readLoggerExitFlag('isFinishingExit')) {
-      return true;
-    }
-
-    if (!this.state.isSimulatedLoggerExitProceeding) {
-      return false;
-    }
-
-    // Still between 'proceed' and `exit-process`: the exit is pending until it commits.
-    if (this.readLoggerExitFlag('isPendingExit')) {
-      return true;
-    }
-
-    this.state.isSimulatedLoggerExitProceeding = false;
-    return false;
-  }
-
-  /** A guarded read of one of the root logger's exit getters; anything but `true` is false. */
-  private readLoggerExitFlag(
-    name: 'isFinishingExit' | 'isPendingExit',
-  ): boolean {
-    try {
-      const value: unknown = this.rootLogger[name];
-      return value === true;
-    } catch {
-      return false;
     }
   }
 
@@ -7643,7 +7402,7 @@ export class LifecycleManager
 
     // ALWAYS reject once a logger exit has committed the process to ending, or while a
     // simulated one is still closing the sinks
-    if (this.isLoggerExitInProgress()) {
+    if (this.core.loggerExit.isLoggerExitInProgress()) {
       this.logger
         .entity(name)
         .warn('Cannot start component: process is exiting');

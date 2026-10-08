@@ -35,6 +35,23 @@ The state holds plain public fields that the manager reads and writes in place
 (`this.state.x`), so every read stays live; it has no methods and owns no rules.
 Configuration that never changes after construction lives in the config instead.
 
+The manager's operations move out of `lifecycle-manager.ts` into subsystems: classes
+built over one shared core.
+
+| Module                | Responsibility                                                                                                        |
+| --------------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `manager-core.ts`     | `ManagerCore`: the facade, state, config, loggers, event plumbing, registry readers, and every subsystem.             |
+| `logger-exit-hook.ts` | `LoggerExitHook`: the `beforeExit` callback, settling a pending exit when a pass ends, and the exit-in-progress gate. |
+
+Each subsystem receives the core in its constructor and only stores it there, since
+another subsystem may not exist yet. It calls the manager's public, overridable
+methods through `core.manager` at call time, and reaches other subsystems through
+the core. Manager members that no subsystem owns yet are reached through
+`core.internals`, callbacks that forward to the manager at call time; an extraction
+that takes one over moves it onto its subsystem. Bookkeeping that only one subsystem
+touches is that subsystem's own private state rather than a state field: the logger
+exit's flags live on `LoggerExitHook`.
+
 The stateful helpers have deliberately smaller scopes:
 
 | Module                           | Responsibility                                                                  |
@@ -89,7 +106,8 @@ The stateful helpers have deliberately smaller scopes:
 - Promise-returning manager delegates return the helper promise directly. Adding an
   extra async wrapper or scheduled task can change when callers regain control.
 - These modules must remain usable in Node, Bun, and browsers. Do not import Node
-  runtime modules or the manager implementation into them.
+  runtime modules or the manager implementation into them. The core names the
+  manager's type (`import type`) for `core.manager`, and nothing more.
 
 The focused tests here exercise module contracts directly. The original manager
 suites remain the integration tests for ownership, re-entry, and operation timing.

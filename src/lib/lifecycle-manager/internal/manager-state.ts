@@ -1,5 +1,4 @@
 import { ulid } from 'ulid';
-import type { BeforeExitResult } from '../../logger';
 import type { ProcessSignalManager } from '../../process-signal-manager';
 import type { BaseComponent } from '../base-component';
 import type { StartupInterruptedByShutdownError } from '../errors';
@@ -130,12 +129,14 @@ export interface RepeatedShutdownRequestState {
 
 /**
  * Everything `LifecycleManager` changes after construction: the registry, per-component
- * status and attempt bookkeeping, the startup and shutdown latches, escalation, the
- * logger exit, and signal integration.
+ * status and attempt bookkeeping, the startup and shutdown latches, escalation, and
+ * signal integration.
  *
  * Plain fields, owned by no subsystem in particular: the manager and its subsystems
- * read and write them in place, so every read stays live. Configuration that never
- * changes lives in the frozen `ManagerConfig` instead.
+ * read and write them in place, so every read stays live. Bookkeeping only one
+ * subsystem touches lives on that subsystem instead (the logger exit's flags on
+ * `LoggerExitHook`), and configuration that never changes lives in the frozen
+ * `ManagerConfig`.
  */
 export class LifecycleManagerState {
   // Component management
@@ -295,29 +296,6 @@ export class LifecycleManagerState {
   // acted, whoever holds the component now. Removed by the attempt's net as it settles.
   public readonly claimsTaken = new Set<symbol>();
   public readonly componentClaims = new Map<string, ComponentClaim>();
-  // Settles the leading logger.exit() once the shutdown pass it depends on ends: resolves
-  // one deferred during an already-running shutdown, and releases `isHandlingLoggerExit`
-  // for either kind. See `enableLoggerExitHook()`.
-  public pendingLoggerExitResolve: ((result: BeforeExitResult) => void) | null =
-    null;
-  // Whether a leading logger.exit() is still being handled - stopping components, or
-  // deferred behind a running shutdown. See `enableLoggerExitHook()`.
-  public isHandlingLoggerExit = false;
-  // Set once a logger exit that ends the process has been told to proceed. The logger
-  // still closes its sinks before calling `process.exit()`, and nothing may start in that
-  // window: it would be killed by the exit without a graceful stop. Never cleared - the
-  // process is ending. That holds even if `process.exit` is removed or replaced after
-  // this is set and the logger ends the exit as simulated: the app asked to exit, so
-  // staying down is the safer failure than restarting. See `proceedWithLoggerExit()`.
-  public isProcessExitCommitted = false;
-  // Set once a simulated logger exit (`callProcessExit: false`) has been told to proceed,
-  // covering the window before the logger publishes `exit-process` - from then on its
-  // `isFinishingExit` answers until `exit-completed`. Cleared by the first read that
-  // finds the logger neither pending nor finishing an exit. See `isLoggerExitInProgress()`.
-  public isSimulatedLoggerExitProceeding = false;
-  // Held while a forced logger exit logs that it is exiting, so a sink that exits from
-  // that line waits instead of re-entering the forced branch without bound.
-  public isProceedingForcedExit = false;
   public shutdownMethod: ShutdownMethod | null = null;
   public lastShutdownResult: ShutdownResult | null = null;
   public repeatedShutdownExpiryTimer: NodeJS.Timeout | null = null;
