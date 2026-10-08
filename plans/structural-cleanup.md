@@ -6,6 +6,11 @@ unreleased, so documented behavior may change when the changelog says so.
 
 Order: **E → A1 → A2 → B → D (D0–D9) → C (optional, narrow)**.
 
+Status: E, A1, A2, B and D (D0–D9, plus a registration phase split) are done; review findings
+fixed in `08a7bf7`. C is deferred. Possible follow-ups: split unregistration out of
+`registration-operations.ts`, and per-call records for `component-stop.ts`,
+`component-start.ts` and `startup-orchestration.ts`.
+
 ## E. Logger `exit-completed`; starts refused while a simulated exit finishes
 
 - `logger/types.ts`: add `'exit-completed': { eventType; code: number; endedProcess: boolean }`.
