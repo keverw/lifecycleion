@@ -520,7 +520,7 @@ export class ComponentStart {
     }
 
     const { component } = preconditions;
-    const staleBeforeReads = this.core.internals.refuseStaleRestartSnapshot(
+    const staleBeforeReads = this.core.restart.refuseStaleRestartSnapshot(
       name,
       restartSnapshot,
     );
@@ -629,7 +629,7 @@ export class ComponentStart {
     if ('success' in recheck) {
       return recheck;
     }
-    const staleBeforeClaim = this.core.internals.refuseStaleRestartSnapshot(
+    const staleBeforeClaim = this.core.restart.refuseStaleRestartSnapshot(
       name,
       restartSnapshot,
     );

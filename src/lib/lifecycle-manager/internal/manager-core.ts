@@ -7,14 +7,15 @@ import type { ComponentOperationResult, ComponentStatus } from '../types';
 import type { ComponentAccessContext } from './component-access-context';
 import { ComponentClaims } from './component-claims';
 import type { ComponentMetadataReader } from './component-metadata-reader';
-import type { DependencyRead } from './dependency-policy';
-import { ComponentStart, type RestartStartSnapshot } from './component-start';
+import { ComponentStart } from './component-start';
 import { ComponentStop } from './component-stop';
+import type { DependencyRead } from './dependency-policy';
 import { LateStartRecovery } from './late-start-recovery';
 import { LoggerExitHook } from './logger-exit-hook';
 import type { ManagerConfig } from './manager-config';
 import type { LifecycleManagerState } from './manager-state';
 import type { RegistrationReadTracker } from './registration-read-tracker';
+import { RestartOperations } from './restart-operations';
 import { ShutdownEscalation } from './shutdown-escalation';
 import { ShutdownPassRunner } from './shutdown-pass';
 import { StartupOrchestration } from './startup-orchestration';
@@ -52,11 +53,6 @@ export interface ManagerInternals {
   detachSignalsAfterLastStop(): void;
   /** Whether a component is up: running, and not on its way down. */
   isComponentUp(name: string): boolean;
-  /** A restart's start refused because its registration changed since restart approved it. */
-  refuseStaleRestartSnapshot(
-    name: string,
-    snapshot: RestartStartSnapshot | undefined,
-  ): ComponentOperationResult | undefined;
   /** Attach signals on the manager's own initiative, ahead of a start; never throws. */
   autoAttachSignals(
     trigger: string,
@@ -132,6 +128,7 @@ export class ManagerCore implements ManagerCoreParts {
   public readonly shutdownPass: ShutdownPassRunner;
   public readonly shutdownEscalation: ShutdownEscalation;
   public readonly startup: StartupOrchestration;
+  public readonly restart: RestartOperations;
 
   constructor(parts: ManagerCoreParts) {
     this.manager = parts.manager;
@@ -156,5 +153,6 @@ export class ManagerCore implements ManagerCoreParts {
     this.shutdownPass = new ShutdownPassRunner(this);
     this.shutdownEscalation = new ShutdownEscalation(this);
     this.startup = new StartupOrchestration(this);
+    this.restart = new RestartOperations(this);
   }
 }

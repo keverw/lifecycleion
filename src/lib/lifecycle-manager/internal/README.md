@@ -54,6 +54,7 @@ built over one shared core.
 | `shutdown-escalation.ts`   | `ShutdownEscalation`: shutdown signal requests, repeated-request counting, the post-failure armed window, and the escalation status.                          |
 | `startup-ordering.ts`      | `StartupOrdering`: the registry's dependency order that startup, shutdown, registration and `getStartupOrder()` share, and answering a failure to compute it. |
 | `startup-orchestration.ts` | `StartupOrchestration`: bulk startup - its refusals, the startup latch, the batch loop and follow-up auto-starts, rollback, and releasing what it held.       |
+| `restart-operations.ts`    | `RestartOperations`: bulk and single restarts - refusals, validating both phases before any stop, and the stale-snapshot check.                               |
 
 Each subsystem receives the core in its constructor and only stores it there, since
 another subsystem may not exist yet. It calls the manager's public, overridable
