@@ -211,10 +211,14 @@ describe('a shutdown signal counted against a running pass with an armed window'
     const shutdown = manager.stopAllComponents();
     try {
       // As a failed pass leaves it just before its latch comes down.
-      const internals = manager as unknown as {
-        repeatedShutdownRequestState: { remainsArmedUntil: number | null };
-        repeatedShutdownExpiryTimer: unknown;
-      };
+      const internals = (
+        manager as unknown as {
+          state: {
+            repeatedShutdownRequestState: { remainsArmedUntil: number | null };
+            repeatedShutdownExpiryTimer: unknown;
+          };
+        }
+      ).state;
       const armedUntil = Date.now() + 60_000;
       internals.repeatedShutdownRequestState.remainsArmedUntil = armedUntil;
 
@@ -306,13 +310,13 @@ describe('an option refusal thrown after an attempt claimed its component', () =
     const { logger, manager } = setup();
     await manager.registerComponent(new Plain(logger, 'a'));
     const internals = manager as unknown as {
-      componentClaims: Map<string, unknown>;
+      state: { componentClaims: Map<string, unknown> };
       clearUnexpectedStopHandler: (component: unknown, context: string) => void;
     };
     // Runs right after the start claims `a`: hands the claim to someone else, then
     // throws a branded option refusal.
     internals.clearUnexpectedStopHandler = (): void => {
-      internals.componentClaims.set('a', {
+      internals.state.componentClaims.set('a', {
         claim: Symbol('other'),
         previousState: 'registered',
       });

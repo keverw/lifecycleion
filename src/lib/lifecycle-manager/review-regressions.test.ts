@@ -1129,12 +1129,12 @@ describe('LifecycleManager - review regressions', () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new Plain(logger, 'a'));
     const internals = manager as unknown as {
-      componentClaims: Map<string, unknown>;
+      state: { componentClaims: Map<string, unknown> };
       issueStopAttemptToken: () => string;
     };
 
     await manager.startComponent('a');
-    expect(internals.componentClaims.size).toBe(0);
+    expect(internals.state.componentClaims.size).toBe(0);
 
     // A step that runs once the stop has claimed the component.
     internals.issueStopAttemptToken = (): never => {
@@ -1150,7 +1150,7 @@ describe('LifecycleManager - review regressions', () => {
       release();
     }
 
-    expect(internals.componentClaims.size).toBe(0);
+    expect(internals.state.componentClaims.size).toBe(0);
   });
 
   test('a getDependencies() that throws while protecting a component in flight does not abort the pass', async () => {
@@ -3925,9 +3925,9 @@ describe('LifecycleManager - review regressions', () => {
     // name while its auto-start finished - which a real unregister cannot do mid-start.
     manager.once('component:started', () => {
       // Inject the committed entries to simulate replacement.
-      (manager as unknown as { components: Plain[] }).components = [
-        replacement,
-      ];
+      (
+        manager as unknown as { state: { components: Plain[] } }
+      ).state.components = [replacement];
     });
 
     const result = await manager.insertComponentAt(c, 'end', undefined, {
@@ -4213,8 +4213,8 @@ describe('LifecycleManager - review regressions', () => {
     let retry: Promise<{ success: boolean }> | undefined;
     manager.detachSignals = (): void => {
       (
-        manager as unknown as { processSignalManager: unknown }
-      ).processSignalManager = undefined;
+        manager as unknown as { state: { processSignalManager: unknown } }
+      ).state.processSignalManager = undefined;
       retry ??= manager.startAllComponents();
     };
 
@@ -4358,8 +4358,8 @@ describe('LifecycleManager - review regressions', () => {
     let retry: Promise<{ success: boolean }> | undefined;
     manager.detachSignals = (): void => {
       (
-        manager as unknown as { processSignalManager: unknown }
-      ).processSignalManager = undefined;
+        manager as unknown as { state: { processSignalManager: unknown } }
+      ).state.processSignalManager = undefined;
       retry ??= manager.startAllComponents();
     };
 
@@ -5174,10 +5174,14 @@ describe('LifecycleManager - round two review regressions', () => {
       shutdownWarningTimeoutMS: -1,
       enableLoggerExitHook: true,
     });
-    const internals = manager as unknown as {
-      stayDownRequestCount: number;
-      activeShutdownPass: { shutdownRequested: boolean } | null;
-    };
+    const internals = (
+      manager as unknown as {
+        state: {
+          stayDownRequestCount: number;
+          activeShutdownPass: { shutdownRequested: boolean } | null;
+        };
+      }
+    ).state;
     const stopGate = deferred();
     const a = new Plain(logger, 'a');
     a.stop = (): Promise<void> => stopGate.promise;
@@ -5240,8 +5244,10 @@ describe('LifecycleManager - round two review regressions', () => {
         // restart pass can run before the exit hook reads its refusal; the hook's
         // handling of that pass is what this test covers.
         (
-          manager as unknown as { isSimulatedLoggerExitProceeding: boolean }
-        ).isSimulatedLoggerExitProceeding = false;
+          manager as unknown as {
+            state: { isSimulatedLoggerExitProceeding: boolean };
+          }
+        ).state.isSimulatedLoggerExitProceeding = false;
         expect((await manager.startAllComponents()).success).toBe(true);
         stopGate = restartStopGate;
         restart = manager.restartAllComponents();

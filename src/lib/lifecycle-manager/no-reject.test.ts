@@ -745,7 +745,9 @@ describe('LifecycleManager - public methods never reject', () => {
 
     const internals = manager as unknown as {
       handleShutdownRequest: (method: string) => void;
-      repeatedShutdownRequestState: { remainsArmedUntil: number | null };
+      state: {
+        repeatedShutdownRequestState: { remainsArmedUntil: number | null };
+      };
     };
     const signals: unknown[] = [];
     manager.on('signal:shutdown', (payload) => {
@@ -755,7 +757,8 @@ describe('LifecycleManager - public methods never reject', () => {
     // Armed by the failing pass while its latch is still held; lapse the window and
     // send a signal from right there.
     manager.once('lifecycle-manager:shutdown-escalation-armed', () => {
-      internals.repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+      internals.state.repeatedShutdownRequestState.remainsArmedUntil =
+        Date.now() - 1;
       internals.handleShutdownRequest('SIGTERM');
     });
 
@@ -1176,9 +1179,9 @@ describe('LifecycleManager - public methods never reject', () => {
 
     (
       manager as unknown as {
-        repeatedShutdownRequestState: { remainsArmedUntil: number };
+        state: { repeatedShutdownRequestState: { remainsArmedUntil: number } };
       }
-    ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+    ).state.repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
 
     // Reading the status normalizes the lapsed window, which expires it.
     manager.getShutdownEscalationStatus();
@@ -1315,9 +1318,9 @@ describe('LifecycleManager - public methods never reject', () => {
     });
     (
       manager as unknown as {
-        repeatedShutdownRequestState: { remainsArmedUntil: number };
+        state: { repeatedShutdownRequestState: { remainsArmedUntil: number } };
       }
-    ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+    ).state.repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
 
     const outer = manager.stopAllComponents();
 
@@ -1356,9 +1359,9 @@ describe('LifecycleManager - public methods never reject', () => {
     });
     (
       manager as unknown as {
-        repeatedShutdownRequestState: { remainsArmedUntil: number };
+        state: { repeatedShutdownRequestState: { remainsArmedUntil: number } };
       }
-    ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+    ).state.repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
 
     const signals: unknown[] = [];
     manager.on('signal:shutdown', (payload) => {
@@ -1680,8 +1683,8 @@ describe('LifecycleManager - public methods never reject', () => {
     manager.detachSignals = (): void => {
       isAttached = false;
       (
-        manager as unknown as { processSignalManager: unknown }
-      ).processSignalManager = undefined;
+        manager as unknown as { state: { processSignalManager: unknown } }
+      ).state.processSignalManager = undefined;
     };
 
     const passes: Promise<unknown>[] = [];

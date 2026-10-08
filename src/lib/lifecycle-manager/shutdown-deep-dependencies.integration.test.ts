@@ -57,7 +57,7 @@ test('Node and Bun shut down deep startup and concurrent-stop dependency graphs'
         states.set(top.getName(), 'registered');
         running.delete(top.getName());
       }
-      Object.assign(manager, {
+      Object.assign(manager.state, {
         componentEntries: components,
         components,
         componentsByName: names,

@@ -6,6 +6,11 @@ import { LifecycleManager } from './lifecycle-manager';
 import type { LifecycleManagerOptions } from './types';
 import { claimReports, Plain, setup } from './test-helpers';
 
+/** The manager's constructor options as it resolved them (a private member). */
+function configOf(manager: LifecycleManager): object {
+  return (manager as unknown as { config: object }).config;
+}
+
 const logger = new Logger({ sinks: [], callProcessExit: false });
 
 async function withoutGlobalReports<T>(
@@ -112,7 +117,7 @@ test.each([-1, -Infinity, -100])(
       logger,
       shutdownWarningTimeoutMS: timeout,
     });
-    expect(Reflect.get(manager, 'shutdownWarningTimeoutMS')).toBe(-1);
+    expect(Reflect.get(configOf(manager), 'shutdownWarningTimeoutMS')).toBe(-1);
   },
 );
 
@@ -793,7 +798,9 @@ test('null component and manager timeout options inherit defaults', () => {
     'shutdownWarningTimeoutMS',
     'shutdownOptions',
   ]) {
-    expect(Reflect.get(manager, field)).toEqual(Reflect.get(ordinary, field));
+    expect(Reflect.get(configOf(manager), field)).toEqual(
+      Reflect.get(configOf(ordinary), field),
+    );
   }
   expect(manager.getShutdownEscalationStatus()).toEqual(
     ordinary.getShutdownEscalationStatus(),

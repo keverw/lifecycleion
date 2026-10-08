@@ -172,9 +172,9 @@ for (const action of ['unregister', 'restart'] as const) {
     );
     const settlements = (
       manager as unknown as {
-        startSettlements: Map<symbol, { promise: Promise<void> }>;
+        state: { startSettlements: Map<symbol, { promise: Promise<void> }> };
       }
-    ).startSettlements;
+    ).state.startSettlements;
     expect(settlements.size).toBe(1);
     const abandoned = [...settlements.values()][0].promise;
     if (action === 'unregister') {

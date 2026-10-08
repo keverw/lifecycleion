@@ -69,9 +69,11 @@ export function hasReport(reports: unknown[], text: string): boolean {
 export function fakeAttachedSignals(manager: LifecycleManager): void {
   (
     manager as unknown as {
-      processSignalManager: { getStatus: () => { isAttached: boolean } };
+      state: {
+        processSignalManager: { getStatus: () => { isAttached: boolean } };
+      };
     }
-  ).processSignalManager = { getStatus: () => ({ isAttached: true }) };
+  ).state.processSignalManager = { getStatus: () => ({ isAttached: true }) };
 }
 
 // Replaces `attachSignals()` / `detachSignals()` with fakes that track whether handlers
@@ -94,8 +96,8 @@ export function fakeSignals(manager: LifecycleManager): {
     detachCalls++;
     isAttached = false;
     (
-      manager as unknown as { processSignalManager: unknown }
-    ).processSignalManager = undefined;
+      manager as unknown as { state: { processSignalManager: unknown } }
+    ).state.processSignalManager = undefined;
   };
 
   return {

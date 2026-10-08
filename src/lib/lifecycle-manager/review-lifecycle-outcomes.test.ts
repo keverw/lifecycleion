@@ -187,7 +187,7 @@ test.each([0, 10])(
     );
     // As in shutdown-deep-dependencies.integration.test.ts, seed a committed registry
     // to measure shutdown rather than repeatedly sorting a growing registration graph.
-    Object.assign(manager, {
+    Object.assign((manager as unknown as { state: object }).state, {
       componentEntries: components,
       components,
       componentsByName: names,

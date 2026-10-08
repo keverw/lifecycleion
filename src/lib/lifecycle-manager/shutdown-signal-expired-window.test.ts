@@ -5,9 +5,9 @@ import { deferred, Plain, sendSignal, setup } from './test-helpers';
 function expireArmedWindow(manager: unknown): void {
   (
     manager as {
-      repeatedShutdownRequestState: { remainsArmedUntil: number };
+      state: { repeatedShutdownRequestState: { remainsArmedUntil: number } };
     }
-  ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+  ).state.repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
 }
 
 // A signal landing on a running pass whose armed window has already lapsed finds a stale
@@ -79,12 +79,14 @@ test('a window lapsing during the signal listeners still leaves the press seedin
   try {
     const state = (
       manager as unknown as {
-        repeatedShutdownRequestState: {
-          firstRequestAt: number | null;
-          remainsArmedUntil: number | null;
+        state: {
+          repeatedShutdownRequestState: {
+            firstRequestAt: number | null;
+            remainsArmedUntil: number | null;
+          };
         };
       }
-    ).repeatedShutdownRequestState;
+    ).state.repeatedShutdownRequestState;
     expect(state.firstRequestAt).not.toBeNull();
     state.remainsArmedUntil = Date.now() + 60_000;
     manager.once('signal:shutdown', () => {

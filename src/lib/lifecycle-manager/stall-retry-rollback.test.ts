@@ -361,8 +361,8 @@ describe('LifecycleManager - stall retry and rollback', () => {
     const { manager } = setup();
     let isAttached = true;
     (
-      manager as unknown as { processSignalManager: unknown }
-    ).processSignalManager = {
+      manager as unknown as { state: { processSignalManager: unknown } }
+    ).state.processSignalManager = {
       getStatus: () => ({ isAttached }),
       detach: () => {
         isAttached = false;

@@ -19,8 +19,8 @@ import type { ShutdownResult } from './types';
 function stubSignals(manager: LifecycleManager): void {
   let isAttached = false;
   (
-    manager as unknown as { processSignalManager: unknown }
-  ).processSignalManager = {
+    manager as unknown as { state: { processSignalManager: unknown } }
+  ).state.processSignalManager = {
     attach: (): void => {
       isAttached = true;
     },
@@ -191,9 +191,11 @@ describe('LifecycleManager synchronous control checkpoints', () => {
       await manager.stopAllComponents();
       (
         manager as unknown as {
-          repeatedShutdownRequestState: { remainsArmedUntil: number };
+          state: {
+            repeatedShutdownRequestState: { remainsArmedUntil: number };
+          };
         }
-      ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+      ).state.repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
       let nested: Promise<ShutdownResult> | undefined;
       logger.addSink({
         write: (entry): void => {

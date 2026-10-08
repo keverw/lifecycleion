@@ -336,8 +336,10 @@ test('a failure during provisional map writes releases the name and instance', a
   // Inject a failure while publishing state after the registration hooks.
   // Partial publication must still release the reserved name and instance.
   const timestamps = (
-    manager as unknown as { componentTimestamps: Map<string, unknown> }
-  ).componentTimestamps;
+    manager as unknown as {
+      state: { componentTimestamps: Map<string, unknown> };
+    }
+  ).state.componentTimestamps;
   const set = timestamps.set.bind(timestamps);
   let shouldThrow = true;
   timestamps.set = (name, value): typeof timestamps => {
@@ -701,9 +703,9 @@ test('a deferred registration and a refused explicit start do not update pass re
     ).toBe('signal_attach_failed');
     const reads = (
       manager as unknown as {
-        activeBulkStartup: { dependencyReads: Map<Plain, unknown> };
+        state: { activeBulkStartup: { dependencyReads: Map<Plain, unknown> } };
       }
-    ).activeBulkStartup.dependencyReads;
+    ).state.activeBulkStartup.dependencyReads;
     expect(reads.has(joined)).toBe(false);
   } finally {
     gate.resolve();
@@ -715,12 +717,16 @@ test('a deferred registration and a refused explicit start do not update pass re
 test('registration hooks have no provisional lifecycle state map entries', async () => {
   const { logger, manager } = setup();
   const component = new Plain(logger, 'a');
-  const maps = manager as unknown as {
-    componentStates: Map<string, unknown>;
-    componentTimestamps: Map<string, unknown>;
-    componentErrors: Map<string, unknown>;
-    componentStartAttemptTokens: Map<string, unknown>;
-  };
+  const maps = (
+    manager as unknown as {
+      state: {
+        componentStates: Map<string, unknown>;
+        componentTimestamps: Map<string, unknown>;
+        componentErrors: Map<string, unknown>;
+        componentStartAttemptTokens: Map<string, unknown>;
+      };
+    }
+  ).state;
   let observed: boolean[] = [];
   component._markRegistered = (): void => {
     observed = [
@@ -811,7 +817,12 @@ test('rollback reservations do not contribute dependency reads to cleanup regist
     isRollingBack = true;
     // Raw registry readers must not need a special rollback filter. Reservations
     // live separately until this hook returns; the duplicate tests above cover them.
-    expect(Reflect.get(manager, 'componentEntries')).toEqual([]);
+    expect(
+      Reflect.get(
+        (manager as unknown as { state: object }).state,
+        'componentEntries',
+      ),
+    ).toEqual([]);
     nested = manager.registerComponent(new Plain(logger, 'b'));
   };
   try {

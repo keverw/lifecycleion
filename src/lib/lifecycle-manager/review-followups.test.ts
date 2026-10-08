@@ -293,9 +293,9 @@ test('a signal reseeding a cleared cycle mid-pass is not logged as a restart', a
   // next counts against it.
   (
     manager as unknown as {
-      repeatedShutdownRequestState: { remainsArmedUntil: number };
+      state: { repeatedShutdownRequestState: { remainsArmedUntil: number } };
     }
-  ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+  ).state.repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
   sendSignal(manager, 'SIGINT');
   expect(manager.getShutdownEscalationStatus().firstMethod).toBe('SIGINT');
   sendSignal(manager, 'SIGTERM');

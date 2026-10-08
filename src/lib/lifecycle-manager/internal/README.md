@@ -24,6 +24,17 @@ notifications. The manager chooses when this phase runs and retains shutdown own
 `component-metadata-reader.ts` owns guarded metadata reads and the report-once marks
 described below. Its naming callback stays live; it does not own registration state.
 
+The manager's own data is split by lifetime:
+
+| Module              | Responsibility                                                                                                   |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `manager-state.ts`  | `LifecycleManagerState`: every field the manager changes after construction, and its record types.               |
+| `manager-config.ts` | `resolveManagerConfig()`: the constructor options, validated once in a fixed order, as a frozen `ManagerConfig`. |
+
+The state holds plain public fields that the manager reads and writes in place
+(`this.state.x`), so every read stays live; it has no methods and owns no rules.
+Configuration that never changes after construction lives in the config instead.
+
 The stateful helpers have deliberately smaller scopes:
 
 | Module                           | Responsibility                                                                  |

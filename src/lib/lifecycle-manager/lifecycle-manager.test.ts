@@ -1012,7 +1012,7 @@ describe('LifecycleManager - BaseComponent', () => {
       const b = new TestComponent(logger, { name: 'b', dependencies: ['a'] });
 
       // Inject the committed entries to exercise invalid registry handling.
-      (lifecycle as any).components = [a, b];
+      (lifecycle as any).state.components = [a, b];
 
       const orderResult = lifecycle.getStartupOrder();
       expect(orderResult.success).toBe(false);
@@ -2037,7 +2037,7 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
       await lifecycle.stopAllComponents({ retryStalled: true });
       await lifecycle.stopAllComponents({ retryStalled: true });
 
-      const waiters = (lifecycle as any).pendingForceStopWaiters.get(
+      const waiters = (lifecycle as any).state.pendingForceStopWaiters.get(
         'never-resolving-stop',
       ) as Set<() => void> | undefined;
 
@@ -2844,9 +2844,9 @@ describe('LifecycleManager - Registration & Individual Lifecycle', () => {
 
       const flags = (
         lifecycle as unknown as {
-          componentUnexpectedStopHadError: Map<string, boolean>;
+          state: { componentUnexpectedStopHadError: Map<string, boolean> };
         }
-      ).componentUnexpectedStopHadError;
+      ).state.componentUnexpectedStopHadError;
 
       expect(flags.get('restart')).toBe(true);
 
@@ -4164,8 +4164,8 @@ describe('LifecycleManager - Bulk Operations', () => {
       // pass - directly)
       // Note: This is a bit hacky for testing, but we're testing the internal behavior
       (
-        lifecycle as unknown as { activeShutdownPass: unknown }
-      ).activeShutdownPass = {
+        lifecycle as unknown as { state: { activeShutdownPass: unknown } }
+      ).state.activeShutdownPass = {
         shutdownRequested: false,
         isRestartStopPhase: false,
       };
@@ -5650,7 +5650,8 @@ describe('LifecycleManager - Bulk Operations', () => {
       const failedShutdown = await lifecycle.stopAllComponents();
       expect(failedShutdown.success).toBe(false);
 
-      const repeatedState = (lifecycle as any).repeatedShutdownRequestState;
+      const repeatedState = (lifecycle as any).state
+        .repeatedShutdownRequestState;
       repeatedState.remainsArmedUntil = Date.now() - 1;
 
       component.allowForceShutdownRetry();
@@ -6333,7 +6334,7 @@ describe('LifecycleManager - Bulk Operations', () => {
       );
 
       // Force mark comp-a as stalled
-      (lifecycle as any).stalledComponents.set('comp-a', {
+      (lifecycle as any).state.stalledComponents.set('comp-a', {
         name: 'comp-a',
         stalledAt: Date.now(),
         reason: 'Graceful stop timed out',
@@ -6373,7 +6374,7 @@ describe('LifecycleManager - Bulk Operations', () => {
       );
 
       // Force mark comp-a as stalled
-      (lifecycle as any).stalledComponents.set('comp-a', {
+      (lifecycle as any).state.stalledComponents.set('comp-a', {
         name: 'comp-a',
         stalledAt: Date.now(),
         reason: 'Graceful stop timed out',
@@ -6523,7 +6524,13 @@ describe('LifecycleManager - Bulk Operations', () => {
 
       // Access private committed entries to add them directly
       // This simulates having cycles that weren't caught during registration
-      (lifecycle as any).components.push(compA, compB, compX, compY, compZ);
+      (lifecycle as any).state.components.push(
+        compA,
+        compB,
+        compX,
+        compY,
+        compZ,
+      );
 
       const result = lifecycle.validateDependencies();
 
@@ -7585,7 +7592,10 @@ describe('LifecycleManager - Signal Integration', () => {
 
       // Invoke the onShutdownRequested callback directly through ProcessSignalManager's
       // test helper, which routes it through the closure registered in attachSignals().
-      (lifecycle as any).processSignalManager.triggerShutdown('SIGTERM', true);
+      (lifecycle as any).state.processSignalManager.triggerShutdown(
+        'SIGTERM',
+        true,
+      );
 
       await shutdownCompleted;
 
@@ -8523,10 +8533,12 @@ describe('LifecycleManager - Signal Integration', () => {
         expect(status.armedUntil).toBeLessThanOrEqual(after + maxTimerMS);
         // Inspect and clear the long-lived timer without waiting 24 days.
         const internals = lifecycle as unknown as {
-          repeatedShutdownExpiryTimer: ReturnType<typeof setTimeout>;
+          state: {
+            repeatedShutdownExpiryTimer: ReturnType<typeof setTimeout>;
+          };
           resetRepeatedShutdownRequestState(): void;
         };
-        expect(internals.repeatedShutdownExpiryTimer).toBeDefined();
+        expect(internals.state.repeatedShutdownExpiryTimer).toBeDefined();
         internals.resetRepeatedShutdownRequestState();
       },
     );
@@ -8595,7 +8607,8 @@ describe('LifecycleManager - Signal Integration', () => {
       const failedShutdown = await lifecycle.stopAllComponents();
       expect(failedShutdown.success).toBe(false);
 
-      const repeatedState = (lifecycle as any).repeatedShutdownRequestState;
+      const repeatedState = (lifecycle as any).state
+        .repeatedShutdownRequestState;
       repeatedState.remainsArmedUntil = Date.now() - 1;
 
       const status = lifecycle.getShutdownEscalationStatus();
@@ -10014,7 +10027,8 @@ describe('LifecycleManager - Signal Integration', () => {
       expect(failedShutdown.success).toBe(false);
       expect(shutdownInitiatedCount).toBe(1);
 
-      const repeatedState = (lifecycle as any).repeatedShutdownRequestState;
+      const repeatedState = (lifecycle as any).state
+        .repeatedShutdownRequestState;
       repeatedState.remainsArmedUntil = Date.now() - 1;
 
       (lifecycle as any).handleShutdownRequest('SIGTERM');
@@ -10068,7 +10082,8 @@ describe('LifecycleManager - Signal Integration', () => {
       const failedShutdown = await lifecycle.stopAllComponents();
       expect(failedShutdown.success).toBe(false);
 
-      const repeatedState = (lifecycle as any).repeatedShutdownRequestState;
+      const repeatedState = (lifecycle as any).state
+        .repeatedShutdownRequestState;
       repeatedState.remainsArmedUntil = Date.now() - 1;
 
       (lifecycle as any).handleShutdownRequest('SIGTERM');
@@ -10179,7 +10194,8 @@ describe('LifecycleManager - Signal Integration', () => {
       const firstShutdown = await lifecycle.stopAllComponents();
       expect(firstShutdown.success).toBe(false);
 
-      const repeatedState = (lifecycle as any).repeatedShutdownRequestState;
+      const repeatedState = (lifecycle as any).state
+        .repeatedShutdownRequestState;
       const firstRequestAt = requireDefined(
         repeatedState.firstRequestAt,
         'firstRequestAt',
@@ -13110,7 +13126,9 @@ test('constructor Infinity timeouts use the maximum timer delay and NaN is rejec
     'shutdownWarningTimeoutMS',
   ] as const) {
     const manager = new LifecycleManager({ logger, [field]: Infinity });
-    expect(Reflect.get(manager, field)).toBe(2_147_483_647);
+    expect(
+      Reflect.get((manager as unknown as { config: object }).config, field),
+    ).toBe(2_147_483_647);
     expect(() => new LifecycleManager({ logger, [field]: NaN })).toThrow(
       TypeError,
     );

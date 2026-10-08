@@ -203,9 +203,9 @@ test('restart refuses without starting when its stop phase is refused mid-accept
   await manager.stopAllComponents();
   (
     manager as unknown as {
-      repeatedShutdownRequestState: { remainsArmedUntil: number };
+      state: { repeatedShutdownRequestState: { remainsArmedUntil: number } };
     }
-  ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+  ).state.repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
   const messages: string[] = [];
   let shutdown: ReturnType<typeof manager.stopAllComponents> | undefined;
   logger.addSink({
@@ -294,13 +294,15 @@ test('a registration from the escalation expiry log is caught by restart preflig
   // A lapsed post-failure window, which the restart expires before stopping anything.
   const state = (
     manager as unknown as {
-      repeatedShutdownRequestState: {
-        firstMethod: string | null;
-        firstRequestAt: number | null;
-        remainsArmedUntil: number | null;
+      state: {
+        repeatedShutdownRequestState: {
+          firstMethod: string | null;
+          firstRequestAt: number | null;
+          remainsArmedUntil: number | null;
+        };
       };
     }
-  ).repeatedShutdownRequestState;
+  ).state.repeatedShutdownRequestState;
   state.firstMethod = 'SIGINT';
   state.firstRequestAt = Date.now() - 10;
   state.remainsArmedUntil = Date.now() - 1;

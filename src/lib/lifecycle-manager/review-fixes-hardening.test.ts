@@ -331,7 +331,7 @@ describe('validateDependencies', () => {
         new Plain(logger, `c${index}`, index === 0 ? [] : [`c${index - 1}`]),
       );
     }
-    Object.assign(manager, {
+    Object.assign((manager as unknown as { state: object }).state, {
       componentEntries: components,
       components,
     });

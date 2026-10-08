@@ -591,9 +591,9 @@ describe('LifecycleManager - shutdown hardening', () => {
     // the request path is what expires it - through the `warn` that used to be bare.
     (
       manager as unknown as {
-        repeatedShutdownRequestState: { remainsArmedUntil: number };
+        state: { repeatedShutdownRequestState: { remainsArmedUntil: number } };
       }
-    ).repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
+    ).state.repeatedShutdownRequestState.remainsArmedUntil = Date.now() - 1;
 
     const service = (manager as unknown as { logger: { warn: unknown } })
       .logger;

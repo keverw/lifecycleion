@@ -15,8 +15,8 @@ class Reporter extends Plain {
 function stubSignals(manager: LifecycleManager): void {
   let isAttached = false;
   (
-    manager as unknown as { processSignalManager: unknown }
-  ).processSignalManager = {
+    manager as unknown as { state: { processSignalManager: unknown } }
+  ).state.processSignalManager = {
     attach: (): void => {
       isAttached = true;
     },
@@ -173,9 +173,9 @@ describe('LifecycleManager event transition queue', () => {
     const order: string[] = [];
     const timestamps = (
       manager as unknown as {
-        componentTimestamps: Map<string, unknown>;
+        state: { componentTimestamps: Map<string, unknown> };
       }
-    ).componentTimestamps;
+    ).state.componentTimestamps;
     const originalSet = timestamps.set.bind(timestamps);
     timestamps.set = (name, value) => {
       timestamps.set = originalSet;

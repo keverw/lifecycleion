@@ -609,7 +609,7 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     const internals = manager as unknown as {
       normalizeRepeatedShutdownRequestStateArmedStatus: () => boolean;
       isShuttingDown: boolean;
-      activeShutdownPass: unknown;
+      state: { activeShutdownPass: unknown };
     };
     const original = internals.normalizeRepeatedShutdownRequestStateArmedStatus;
 
@@ -650,7 +650,7 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     // and nothing latched.
     expect(events).toEqual([]);
     expect(internals.isShuttingDown).toBe(false);
-    expect(internals.activeShutdownPass).toBeNull();
+    expect(internals.state.activeShutdownPass).toBeNull();
     expect(manager.getSystemState()).not.toBe('shutting-down');
 
     component.releaseStop();
@@ -780,7 +780,7 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     const internals = manager as unknown as {
       isComponentRunning: (name: string) => boolean;
       isShuttingDown: boolean;
-      activeShutdownPass: unknown;
+      state: { activeShutdownPass: unknown };
     };
     const original = internals.isComponentRunning;
 
@@ -815,7 +815,7 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     // The pass's `finally` dropped it along with the latch, so the next restart runs a
     // pass of its own rather than being refused by a leaked one.
     expect(internals.isShuttingDown).toBe(false);
-    expect(internals.activeShutdownPass).toBeNull();
+    expect(internals.state.activeShutdownPass).toBeNull();
 
     // The throw landed before stop() was ever called, so open the gate for the pass that
     // does reach it.
