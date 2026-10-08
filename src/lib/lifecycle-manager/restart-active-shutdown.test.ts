@@ -57,16 +57,26 @@ test('second restart during shutdown reads no options or component timeout and d
   expect(manager.getComponentStatus('component')?.state).toBe('running');
 });
 
-test('restart refuses when an option getter starts shutdown before reading later options', async () => {
+test('restart reads every option once and then refuses a shutdown an option getter started', async () => {
   const { logger, manager } = setup();
   const component = new GatedStop(logger, 'component');
   await manager.registerComponent(component);
   await manager.startAllComponents();
   let shutdown: ReturnType<typeof manager.stopAllComponents> | undefined;
+  let startupReads = 0;
   let laterReads = 0;
+  let componentReads = 0;
+  Object.defineProperty(component, 'startupTimeoutMS', {
+    get: () => {
+      componentReads++;
+      return 1000;
+    },
+  });
   const options = {
     get startupOptions() {
+      startupReads++;
       shutdown = manager.stopAllComponents();
+      // Invalid, but never validated: the refusal comes first.
       return { timeoutMS: NaN };
     },
     get shutdownTimeoutMS() {
@@ -78,7 +88,11 @@ test('restart refuses when an option getter starts shutdown before reading later
   const result = await manager.restartAllComponents(options);
   expect(result.shutdownResult.code).toBe('already_in_progress');
   expect(result.startupResult.code).toBe('shutdown_in_progress');
-  expect(laterReads).toBe(0);
+  // Each option is read once, all of them before the one re-entry check; no component
+  // getter runs for a restart that check refused.
+  expect(startupReads).toBe(1);
+  expect(laterReads).toBe(1);
+  expect(componentReads).toBe(0);
   component.release.resolve();
   expect((await shutdown)?.success).toBe(true);
 });

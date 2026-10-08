@@ -1063,8 +1063,8 @@ describe('LifecycleManager unregister acts only on its own instance', () => {
     const result = await manager.unregisterComponent('a', {
       get forceStop(): boolean {
         if (replacementStart === undefined) {
-          // Read after the running checks and before the stop: take the original
-          // down, swap the registration, and start the replacement.
+          // Read with `stopIfRunning`, before the replacement check: take the
+          // original down, swap the registration, and start the replacement.
           original.crash();
           void manager.unregisterComponent('a', { stopIfRunning: false });
           void manager.registerComponent(replacement);

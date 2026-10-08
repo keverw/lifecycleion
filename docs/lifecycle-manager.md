@@ -1191,7 +1191,7 @@ interface UnregisterOptions {
 - `forceStop` only applies when `stopIfRunning` is true (passes through to `stopComponent` as `allowStopWithRunningDependents`).
 - If a component is stalled and `stopIfRunning` is true, unregister is blocked.
 - While a start or stop is in flight, unregister is refused with `component_starting` / `component_stopping`: the operation writes its outcome when it settles, so the component has to be left registered until then. This is checked again after unregister's own stop, since a `component:stopped` listener may have started the component again; one that is already back up is refused with `component_running`.
-- The registration itself is rechecked immediately before anything is removed, on every path. Reading `stopIfRunning` off the options object runs caller code, so a getter can unregister the component and register a replacement under the same name before the removal begins. The call then reports `component_not_found`, and the replacement keeps the name and its state. If the getter instead started a bulk startup or shutdown without replacing the component, the usual refusals are checked first, in this order: a start or stop in flight (`component_starting` / `component_stopping`), a stalled component with `stopIfRunning` true (`stop_failed`), and a running component with `stopIfRunning: false` (`component_running`). Otherwise the call reports `bulk_operation_in_progress` before stopping or removing anything.
+- The registration itself is rechecked immediately before anything is removed, on every path. Reading `stopIfRunning` and `forceStop` off the options object runs caller code, so a getter can unregister the component and register a replacement under the same name before the removal begins. The call then reports `component_not_found`, and the replacement keeps the name and its state. If the getter instead started a bulk startup or shutdown without replacing the component, the usual refusals are checked first, in this order: a start or stop in flight (`component_starting` / `component_stopping`), a stalled component with `stopIfRunning` true (`stop_failed`), and a running component with `stopIfRunning: false` (`component_running`). Otherwise the call reports `bulk_operation_in_progress` before stopping or removing anything.
 - Successfully unregistering a component automatically clears its `lifecycle` reference (setting it to `undefined`) and marks it as unregistered, which allows the same component instance to be registered again (either with the same manager or with a different one).
 
 **Returns:**
@@ -1328,8 +1328,12 @@ Individual restart returns pre-stop refusals directly, including `component_not_
 `restart_stop_failed` applies only once the restart has claimed a stop attempt, so
 callers need to handle these refusal codes alongside it. As with `stopComponent()`, a
 component with active dependents answers `has_running_dependents` (unless
-`stopOptions.allowStopWithRunningDependents` is set) before its timeouts are read or
-validated.
+`stopOptions.allowStopWithRunningDependents` is set) before the component's timeouts are
+read or any timeout is validated.
+
+Each operation reads its options once, every field in a fixed order, at its start - after
+the refusals that need no options - so an option getter runs at most once per call and
+later changes to the object do not reach a call already under way.
 
 Availability refusals take precedence over options that would never be used: an active
 bulk startup returns `already_in_progress` without reading new options, and messages

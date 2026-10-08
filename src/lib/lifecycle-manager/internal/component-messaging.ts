@@ -18,9 +18,12 @@ import { LIFECYCLE_MANAGER_LOG_MESSAGE_HANDLER_FAILED } from '../constants';
 import {
   resolveOperationTimeoutMS,
   isOperationOptionRefusal,
-  invalidOperationOptionError,
 } from './operation-policy';
-import { copyBoundedArray } from './bounded-array-copy';
+import {
+  snapshotBroadcastOptions,
+  snapshotGetValueOptions,
+  snapshotSendMessageOptions,
+} from './operation-options';
 import {
   dispatchAnnouncedHook,
   isComponentRunningMember,
@@ -97,8 +100,12 @@ export async function sendMessageInternal(
     };
   }
 
-  const allowStopped = options?.includeStopped === true;
-  const allowStalled = options?.includeStalled === true;
+  // Every option is read here, once, the timeout with the rest: it is validated only
+  // once the availability and handler refusals below are past, but a getter behind it
+  // runs now, before anything is announced.
+  const messageOptions = snapshotSendMessageOptions(options);
+  const allowStopped = messageOptions.includeStopped;
+  const allowStalled = messageOptions.includeStalled;
   // The latest availability read, so each answer below reports what the last recheck
   // found rather than what was true before caller code ran. Even this first one looks
   // the component up again: the `options` reads above can run the caller's getters.
@@ -200,12 +207,12 @@ export async function sendMessageInternal(
     };
   }
 
-  // Read before the sent event, for the reason `getValueInternal()` reads its options
-  // up front: a throwing getter must not leave `message-sent` without its pair.
+  // Validated before the sent event: an invalid budget must not leave `message-sent`
+  // without its pair.
   let timeoutMS: number;
   try {
     timeoutMS = resolveOperationTimeoutMS(
-      options?.timeout,
+      messageOptions.timeout,
       context.messageTimeoutMS,
       'sendMessageToComponent timeout',
     );
@@ -346,54 +353,6 @@ export async function sendMessageInternal(
 }
 
 /**
- * The most `componentNames` a broadcast filter is read for. Far above any registry this
- * manager is meant to hold - and duplicates or unknown names only cost a set entry each -
- * yet small enough that copying a list this long cannot stall the event loop.
- */
-const MAX_BROADCAST_TARGET_NAMES = 100_000;
-
-/**
- * The broadcast's `componentNames` filter, copied once by index - with the same bounded
- * copy `tryReadDependencies()` makes of a dependency list - into a set the filter
- * consults. The array is the caller's: a subclass or proxy runs its own code for
- * `length` and `includes`, and the filter would have asked it once per registered
- * component. A non-array, or a `length` that is not a plausible list size (a proxy can
- * claim `Infinity`), refuses the whole broadcast as an invalid option before it has
- * announced itself - as does a value `Array.isArray` cannot even classify (a revoked
- * proxy), which is no more usable as a list. A `length` or entry read that throws fails
- * it at the same point.
- */
-function copyTargetNames(names: unknown): Set<unknown> | undefined {
-  if (names === undefined) {
-    return undefined;
-  }
-  let isArray: boolean;
-  try {
-    isArray = Array.isArray(names);
-  } catch {
-    isArray = false;
-  }
-  if (!isArray) {
-    throw invalidOperationOptionError(
-      'broadcastMessage componentNames must be an array',
-    );
-  }
-  const entries = copyBoundedArray(
-    names as readonly unknown[],
-    MAX_BROADCAST_TARGET_NAMES,
-    (length) =>
-      invalidOperationOptionError(
-        `broadcastMessage componentNames has an implausible length: ${length} (at most ${String(MAX_BROADCAST_TARGET_NAMES)})`,
-      ),
-  );
-  const copy = new Set<unknown>();
-  for (const name of entries) {
-    copy.add(name);
-  }
-  return copy;
-}
-
-/**
  * Internal broadcast with explicit 'from' parameter
  *
  * @param payload - Message payload
@@ -413,19 +372,19 @@ export async function broadcastMessageInternal(
   // broadcast before it has announced itself, not leave a `broadcast-started` with no
   // `broadcast-completed` after it. From the loop on, every step is per component.
 
-  // Read once: a getter behind it would otherwise run - and could answer differently -
-  // on each read.
-  const targetNames = copyTargetNames(options?.componentNames ?? undefined);
+  // Read once: a getter behind any of them would otherwise run - and could answer
+  // differently - on each read. `componentNames` is copied as it is read.
+  const broadcastOptions = snapshotBroadcastOptions(options);
+  const targetNames = broadcastOptions.componentNames;
   const hasExplicitTargets = targetNames !== undefined && targetNames.size > 0;
 
-  const allowStopped = options?.includeStopped === true;
-  const allowStalled = options?.includeStalled === true;
-  // A snapshot of what each message needs, read once with the rest: every target is
-  // sent the same values, and a getter on the caller's object runs once rather than
-  // once per component.
+  const allowStopped = broadcastOptions.includeStopped;
+  const allowStalled = broadcastOptions.includeStalled;
+  // What each message needs: every target is sent the same values, and the shared
+  // budget is validated once, here, rather than once per component.
   const messageOptions: SendMessageOptions = {
     timeout: resolveOperationTimeoutMS(
-      options?.timeout,
+      broadcastOptions.timeout,
       context.messageTimeoutMS,
       'broadcastMessage timeout',
     ),
@@ -569,8 +528,9 @@ export function getValueInternal<T = unknown>(
 ): ValueResult<T> {
   // Read before the requested event, so an options getter that throws fails the call
   // before anything was announced rather than leaving `value-requested` unpaired.
-  const allowStopped = options?.includeStopped === true;
-  const allowStalled = options?.includeStalled === true;
+  const valueOptions = snapshotGetValueOptions(options);
+  const allowStopped = valueOptions.includeStopped;
+  const allowStalled = valueOptions.includeStalled;
 
   context.lifecycleEvents.componentValueRequested(componentName, key, from);
 

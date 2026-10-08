@@ -15,6 +15,7 @@ details, not exports of the package's lifecycle-manager entry.
 | `bounded-array-copy.ts`       | The bounded by-index copy of caller arrays (dependency lists, broadcast `componentNames`).                                              |
 | `dependency-policy.ts`        | Bounded dependency reads, stable dependency ordering, and cycle discovery.                                                              |
 | `operation-policy.ts`         | Lifecycle-specific timeout error provenance, abort-linked failure detection, async failure containment, and common result construction. |
+| `operation-options.ts`        | Caller options read once, each field in a fixed order, into frozen snapshots of branded types internal code requires.                   |
 | `registration-policy.ts`      | Registration progress reports, placement predicates, and the removed-timeout-hook refusal reason.                                       |
 
 `shutdown-warning.ts` owns warning-hook dispatch, its shared deadline, and warning

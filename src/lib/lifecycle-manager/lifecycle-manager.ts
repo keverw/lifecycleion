@@ -41,6 +41,21 @@ import {
   toOperationFlag,
 } from './internal/operation-policy';
 import {
+  DEFAULT_START_OPTIONS,
+  snapshotRegisterOptions,
+  snapshotRestartAllOptions,
+  snapshotRestartComponentOptions,
+  snapshotStartOptions,
+  snapshotStartupOptions,
+  snapshotStopAllOptions,
+  snapshotStopOptions,
+  snapshotUnregisterOptions,
+  type StartOptionsSnapshot,
+  type StartupOptionsSnapshot,
+  type StopAllOptionsSnapshot,
+  type StopOptionsSnapshot,
+} from './internal/operation-options';
+import {
   type RegistrationProgress,
   newRegistrationProgress,
   positionHasTarget,
@@ -177,8 +192,9 @@ import {
 /**
  * A shutdown pass's options, resolved against the manager's defaults.
  *
- * Resolved by the acceptance step rather than by the pass, so the reads that could throw
- * happen on the side of the latch where a throw costs nothing.
+ * Resolved by the acceptance step rather than by the pass, so the validation that could
+ * throw happens on the side of the latch where a throw costs nothing. The caller's
+ * options were read before that, into a snapshot.
  */
 interface ShutdownPassOptions {
   /**
@@ -245,7 +261,7 @@ interface RestartStartSnapshot {
 
 /** Everything restart preparation reads from the caller, validated before any stop. */
 interface RestartPreparation {
-  readonly startupOptions: StartupOptions;
+  readonly startupOptions: StartupOptionsSnapshot;
   readonly shutdownTimeoutMS: number;
   readonly restartSnapshots: Map<string, RestartStartSnapshot>;
   /** The stop budgets validated so far, per component: see `restartStopNeed()`. */
@@ -305,12 +321,19 @@ const DEPENDENT_WORK_LABELS: Record<DependentWork, string> = {
   stalled: 'stalled dependents',
 };
 
+/**
+ * A start's options: a snapshot already taken, or - for a public `startComponent()` - the
+ * read that takes it, which the start makes first, under its own net.
+ */
+type StartOptionsInput = StartOptionsSnapshot | (() => StartOptionsSnapshot);
+
 /** Call-local policy and claim history for an individual stop or restart. */
 interface IndividualStopContext {
   readonly operation: 'stop' | 'restart';
   /** Stays true after this attempt claims, even if its claim is later released. */
   claimed: boolean;
-  allowStopWithRunningDependents?: boolean;
+  /** The caller's override, from the operation's options snapshot. */
+  readonly allowStopWithRunningDependents?: boolean;
   isStartupRollback?: boolean;
   /** Components this startup's rollback has already reached; see dependents check. */
   rolledBackNames?: ReadonlySet<string>;
@@ -357,6 +380,12 @@ interface ShutdownPass {
   readonly invalidOptionsRefusals: Map<string, Error | undefined>;
 }
 
+/** A shutdown request refused because a pass is already running. */
+interface ShutdownPassRefusal {
+  readonly accepted: false;
+  readonly result: ShutdownResult;
+}
+
 /**
  * What `acceptShutdownPass()` answers: either the refusal the caller reports as its own
  * `ShutdownResult`, or the pass it started.
@@ -365,7 +394,7 @@ interface ShutdownPass {
  * the two apart without depending on which statements in between can throw.
  */
 type ShutdownPassAcceptance =
-  | { readonly accepted: false; readonly result: ShutdownResult }
+  | ShutdownPassRefusal
   | {
       readonly accepted: true;
       readonly pass: ShutdownPass;
@@ -1334,7 +1363,8 @@ export class LifecycleManager
   public startAllComponents(options?: StartupOptions): Promise<StartupResult> {
     return settleOperation(
       'startAllComponents',
-      () => this.startAllComponentsOperation(options),
+      () =>
+        this.startAllComponentsOperation(() => snapshotStartupOptions(options)),
       (error, reason, code) => crashedStartupResult(error, reason, code),
     );
   }
@@ -1429,7 +1459,9 @@ export class LifecycleManager
   ): Promise<ComponentOperationResult> {
     return settleOperation(
       'startComponent',
-      () => this.startComponentInternal(name, options),
+      // Read by the start itself, under its own net, as the first thing it does.
+      () =>
+        this.startComponentInternal(name, () => snapshotStartOptions(options)),
       (error, reason, code) =>
         crashedComponentResult(name, error, reason, code),
     );
@@ -2360,8 +2392,10 @@ export class LifecycleManager
       };
     };
 
-    // Default stopIfRunning to true (opt-out behavior)
-    const shouldStopIfRunning = options?.stopIfRunning !== false;
+    // Both options, read once, here (`stopIfRunning` defaults to true). Their getters
+    // are caller code, so the replacement check follows.
+    const unregisterOptions = snapshotUnregisterOptions(options);
+    const shouldStopIfRunning = unregisterOptions.stopIfRunning;
 
     const replacedAfterOptions = refuseIfReplaced();
 
@@ -2416,7 +2450,6 @@ export class LifecycleManager
     // If running and stopIfRunning is true (default), stop first
     if (isRunning && shouldStopIfRunning) {
       this.logger.entity(name).info('Stopping component before unregistering');
-      const allowStopWithRunningDependents = options?.forceStop;
 
       const replacedBeforeStop = refuseIfReplaced();
 
@@ -2424,9 +2457,9 @@ export class LifecycleManager
         return replacedBeforeStop;
       }
 
-      // The log line and the `forceStop` getter above ran caller code, which may have
-      // begun a stop or a bulk operation of its own. Answer for that one, rather than
-      // reporting the refusal it causes below as this unregister's failed stop.
+      // The log line above ran caller code, which may have begun a stop or a bulk
+      // operation of its own. Answer for that one, rather than reporting the refusal it
+      // causes below as this unregister's failed stop.
       const inFlightBeforeStop = this.refuseUnregisterWhileInFlight(
         name,
         false,
@@ -2441,7 +2474,7 @@ export class LifecycleManager
       }
 
       const stopResult = await this.stopComponent(name, {
-        allowStopWithRunningDependents,
+        allowStopWithRunningDependents: unregisterOptions.forceStop,
       });
 
       // Before reading any state by name: the stop's `await` ran caller code, and a
@@ -2748,8 +2781,13 @@ export class LifecycleManager
     return undefined;
   }
 
+  /**
+   * `readOptions` takes the options snapshot: the caller's object for a public startup,
+   * or the one a restart already took. Called once, after the refusals that need no
+   * options.
+   */
   private async startAllComponentsOperation(
-    options?: StartupOptions,
+    readOptions: () => StartupOptionsSnapshot,
     restartSnapshots?: Map<string, RestartStartSnapshot>,
   ): Promise<StartupResult> {
     const startTime = Date.now();
@@ -2762,9 +2800,10 @@ export class LifecycleManager
     // for good. The timeout is only validated once the availability refusals below are
     // past - still before the latch: a startup that refuses never uses it, and an
     // availability refusal takes precedence over an option that would not be used.
+    const startupOptions = readOptions();
     const shouldIgnoreStalledComponents =
-      options?.ignoreStalledComponents === true;
-    const requestedTimeoutMS = options?.timeoutMS;
+      startupOptions.ignoreStalledComponents;
+    const requestedTimeoutMS = startupOptions.timeoutMS;
 
     // Option getters can start a nested operation. Keep the post-read check too;
     // passing the initial guard does not reserve the startup latch.
@@ -3467,9 +3506,9 @@ export class LifecycleManager
                   };
             const result = await this.startComponentInternal(
               name,
-              {
+              snapshotStartOptions({
                 allowDuringBulkStartup: true,
-              },
+              }),
               // Every follow-up batch shares the original deadline.
               startDeadlineContext,
               dependencyRead,
@@ -3958,8 +3997,23 @@ export class LifecycleManager
   ): Promise<ShutdownResult> {
     // Always the manual method for the public API, as it is not from a signal. A direct
     // stop call made while a shutdown is running expresses the same intent a signal
-    // does, so a refusal is recorded on the running pass.
-    const acceptance = this.acceptShutdownPass('manual', options, true);
+    // does, so a refusal is recorded on the running pass - before reading `options`:
+    // they are the caller's, and a getter that threw there skipped this refusal, so a
+    // request to stay down was never recorded and a restart started everything again.
+    const refusal = this.withTransition(() =>
+      this.refuseShutdownPassWhileActive('manual', true),
+    );
+    if (refusal !== undefined) {
+      return refusal.result;
+    }
+
+    // Read once, outside the acceptance's transition. Its getters are caller code, and
+    // can begin a shutdown: the acceptance checks the latch again first.
+    const acceptance = this.acceptShutdownPass(
+      'manual',
+      snapshotStopAllOptions(options),
+      true,
+    );
 
     return acceptance.accepted ? await acceptance.promise : acceptance.result;
   }
@@ -4022,10 +4076,11 @@ export class LifecycleManager
   }
 
   /**
-   * One caller read during restart preparation, followed by the active-shutdown
-   * check it requires: the read can start a shutdown, which must stop preparation
-   * before validation or the next getter runs. Throws a
-   * {@link RestartPreparationRefusal} carrying the refusal when one did.
+   * One caller read during restart preparation - the options snapshot, or one component
+   * getter - followed by the active-operation check it requires: the read can start a
+   * shutdown or a startup, which must stop preparation before validation or the next
+   * getter runs. Throws a {@link RestartPreparationRefusal} carrying the refusal when
+   * one did.
    */
   private readRestartInput<V>(read: () => V): V {
     const value = read();
@@ -4044,27 +4099,27 @@ export class LifecycleManager
    *
    * Every caller read goes through `readRestartInput()`: each is a re-entry boundary,
    * and a shutdown begun there must prevent both validation and the next getter from
-   * running.
+   * running. The options are one read - every field, then one check - and each
+   * component getter another.
    */
   private prepareRestart(
     options: RestartAllOptions | undefined,
   ): RestartPreparation {
-    const requestedStartupOptions = this.readRestartInput(
-      () => options?.startupOptions,
+    const restartOptions = this.readRestartInput(() =>
+      snapshotRestartAllOptions(options),
     );
     const startupTimeoutMS = resolveOperationTimeoutMS(
-      this.readRestartInput(() => requestedStartupOptions?.timeoutMS),
+      restartOptions.startupOptions.timeoutMS,
       this.startupTimeoutMS,
       'restartAllComponents startupOptions.timeoutMS',
     );
-    const startupOptions: StartupOptions = {
+    const startupOptions = snapshotStartupOptions({
+      ignoreStalledComponents:
+        restartOptions.startupOptions.ignoreStalledComponents,
       timeoutMS: startupTimeoutMS,
-      ignoreStalledComponents: this.readRestartInput(
-        () => requestedStartupOptions?.ignoreStalledComponents === true,
-      ),
-    };
+    });
     const shutdownTimeoutMS = resolveOperationTimeoutMS(
-      this.readRestartInput(() => options?.shutdownTimeoutMS),
+      restartOptions.shutdownTimeoutMS,
       this.shutdownOptions.timeoutMS,
       'restartAllComponents shutdownTimeoutMS',
     );
@@ -4322,7 +4377,7 @@ export class LifecycleManager
       // Phase 1: Stop all components (explicit defaults for restart semantics)
       const stopPhase = this.acceptShutdownPass(
         'manual',
-        {
+        snapshotStopAllOptions({
           timeoutMS: shutdownTimeoutMS,
           // Always retry/halt during restart for deterministic shutdown behavior.
           retryStalled: true,
@@ -4340,7 +4395,7 @@ export class LifecycleManager
           // slow start into a failed one ahead of the same start, and a global setting
           // meant for signal or logger shutdowns must not reach a restart.
           abortPendingStarts: false,
-        },
+        }),
         // Not a request to stay down: see `acceptShutdownPass()`.
         false,
         pendingAutoStarts,
@@ -4487,7 +4542,10 @@ export class LifecycleManager
       const startupResult = await settleOperation(
         'startAllComponents',
         () =>
-          this.startAllComponentsOperation(startupOptions, restartSnapshots),
+          this.startAllComponentsOperation(
+            () => startupOptions,
+            restartSnapshots,
+          ),
         (error, reason, code) => crashedStartupResult(error, reason, code),
       );
 
@@ -4568,57 +4626,62 @@ export class LifecycleManager
 
   private async stopComponentOperation(
     name: string,
-    options?: StopComponentOptions,
-    stopContext: IndividualStopContext = { operation: 'stop', claimed: false },
+    options: StopComponentOptions | undefined,
   ): Promise<ComponentOperationResult> {
-    const bulkRefusal = this.checkIndividualBulkPreconditions(
-      name,
-      stopContext.operation,
-    );
+    const bulkRefusal = this.checkIndividualBulkPreconditions(name, 'stop');
     if (bulkRefusal) {
       return bulkRefusal;
     }
 
-    // A restart has done this already, ahead of its own timeout reads.
-    if (stopContext.operation === 'stop') {
-      const dependentRefusal = this.checkStopDependentsFirst(
-        name,
-        options,
-        stopContext,
-      );
-      if (dependentRefusal) {
-        return dependentRefusal;
-      }
-    }
-
-    return await this.stopComponentInternal(name, options, stopContext);
-  }
-
-  /**
-   * Read `allowStopWithRunningDependents` into the stop's context and refuse a stop
-   * with active dependents. Checked here as well as by `checkIndividualStopClaim()`
-   * right before the claim, not instead of it. This one gives the refusal precedence: a
-   * stop - or restart - refused for its running dependents answers so without reading
-   * the component's timeouts and force handler, whose getters would otherwise run - and
-   * an invalid value there answer `invalid_options` - for a stop that was never going
-   * to happen. The second catches a dependent those getters started.
-   */
-  private checkStopDependentsFirst(
-    name: string,
-    options: StopComponentOptions | undefined,
-    stopContext: IndividualStopContext,
-  ): ComponentOperationResult | undefined {
-    const allowStopWithRunningDependents =
-      options?.allowStopWithRunningDependents;
+    // Every option is read here, once, before the dependents refusal and the claim, and
+    // the getters are caller code: the bulk check is made again after them.
+    const stopOptions = snapshotStopOptions(options);
     const afterOptionsRefusal = this.checkIndividualBulkPreconditions(
       name,
-      stopContext.operation,
+      'stop',
     );
     if (afterOptionsRefusal) {
       return afterOptionsRefusal;
     }
-    stopContext.allowStopWithRunningDependents = allowStopWithRunningDependents;
-    return this.checkIndividualStopDependents(name, stopContext);
+    const stopContext: IndividualStopContext = {
+      operation: 'stop',
+      claimed: false,
+      allowStopWithRunningDependents:
+        stopOptions.allowStopWithRunningDependents,
+    };
+
+    // Checked here as well as by `checkIndividualStopClaim()` right before the claim,
+    // not instead of it. This one gives the refusal precedence: a stop - or restart -
+    // refused for its running dependents answers so without reading the component's
+    // timeouts and force handler, whose getters would otherwise run - and an invalid
+    // value there answer `invalid_options` - for a stop that was never going to happen.
+    // The second catches a dependent those getters started.
+    const dependentRefusal = this.checkIndividualStopDependents(
+      name,
+      stopContext,
+    );
+    if (dependentRefusal) {
+      return dependentRefusal;
+    }
+
+    return await this.stopComponentInternal(name, stopOptions, stopContext);
+  }
+
+  /**
+   * A restart's stop: its options were read, and its dependents checked, by
+   * `restartComponentOperation()`.
+   */
+  private async restartStopOperation(
+    name: string,
+    stopOptions: StopOptionsSnapshot,
+    stopContext: IndividualStopContext,
+  ): Promise<ComponentOperationResult> {
+    const bulkRefusal = this.checkIndividualBulkPreconditions(name, 'restart');
+    if (bulkRefusal) {
+      return bulkRefusal;
+    }
+
+    return await this.stopComponentInternal(name, stopOptions, stopContext);
   }
 
   /**
@@ -4866,11 +4929,12 @@ export class LifecycleManager
       return bulkRefusal;
     }
 
-    // Snapshot start options and the timeout before tearing down a healthy component. The
-    // property may be a getter, and the stop can await arbitrary component code;
-    // a second read after that await need not describe the same configuration.
-    const stopOptions = options?.stopOptions;
-    const startOptions = this.snapshotStartOptions(options?.startOptions);
+    // Snapshot both phases' options before tearing down a healthy component: every
+    // field is read once, here, then the bulk check is made again. A property may be a
+    // getter, and the stop can await arbitrary component code; a second read after
+    // that await need not describe the same configuration.
+    const { stopOptions, startOptions } =
+      snapshotRestartComponentOptions(options);
     const afterOptionsRefusal = this.checkIndividualBulkPreconditions(
       name,
       'restart',
@@ -4888,13 +4952,14 @@ export class LifecycleManager
     const stopContext: IndividualStopContext = {
       operation: 'restart',
       claimed: false,
+      allowStopWithRunningDependents:
+        stopOptions.allowStopWithRunningDependents,
     };
     // Ahead of the timeout reads below, as `stopComponent()` checks ahead of its own.
     // The checks after those reads catch a component the dependency getters stopped
     // or replaced, and the stop checks again for a bulk operation they began.
-    const dependentRefusal = this.checkStopDependentsFirst(
+    const dependentRefusal = this.checkIndividualStopDependents(
       name,
-      stopOptions,
       stopContext,
     );
     if (dependentRefusal) {
@@ -4957,7 +5022,7 @@ export class LifecycleManager
     const stayDownRequestCountAtStop = this.stayDownRequestCount;
     const stopResult = await settleOperation(
       'stopComponent',
-      () => this.stopComponentOperation(name, stopOptions, stopContext),
+      () => this.restartStopOperation(name, stopOptions, stopContext),
       (error, reason, code) =>
         crashedComponentResult(name, error, reason, code),
     );
@@ -5058,7 +5123,7 @@ export class LifecycleManager
     position: InsertPosition,
     targetComponentName: string | undefined,
     isInsertAction: boolean,
-    _options: RegisterOptions | undefined,
+    options: RegisterOptions | undefined,
     // Whether this call committed, and the auto-start it attempted or deferred, kept
     // where the safety net above it can read them. Required: a call that made its own
     // would leave the net reading one that never changes.
@@ -5107,7 +5172,7 @@ export class LifecycleManager
         isInsertPosition(position) && !this.isShuttingDown;
       let shouldAutoStart = false;
       if (canRead()) {
-        shouldAutoStart = _options?.autoStart === true;
+        shouldAutoStart = snapshotRegisterOptions(options).autoStart;
       }
       let isRegisteredWithAManager = false;
       // Strict: a `getDependencies()` that throws, or reports an implausible length,
@@ -5620,14 +5685,14 @@ export class LifecycleManager
             progress.didAutoStartAttempt = true;
             progress.startResult = await this.startComponentInternal(
               componentName,
-              {
+              snapshotStartOptions({
                 // Logging runs caller code. Only the captured completion still owns
                 // this permission; a replacement pass must retain its own bulk guard.
                 allowDuringBulkStartup:
                   this.activeBulkStartup === bulkStartup &&
                   bulkStartup.isCompleting &&
                   !bulkStartup.isRollingBack,
-              },
+              }),
             );
           } else {
             skipReplacedAutoStart();
@@ -6017,27 +6082,19 @@ export class LifecycleManager
    */
   private acceptShutdownPass(
     method: ShutdownMethod,
-    options: StopAllOptions | undefined,
+    options: StopAllOptionsSnapshot | undefined,
     isRequestToStayDown: boolean,
     pendingRestartAutoStarts?: Set<string>,
   ): ShutdownPassAcceptance {
     return this.withTransition(() => {
-      // Reject if already shutting down - before reading `options`: they are the caller's,
-      // and a getter that threw there skipped this refusal, so a request to stay down
-      // was never recorded on the running pass and a restart started everything again.
-      if (this.isShuttingDown) {
-        // A restart's stop phase is refused as the restart, which logs that one
-        // warning: both lines read as two refusals for the one request.
-        if (isRequestToStayDown) {
-          this.logger.warn(
-            'Cannot stop all components: shutdown already in progress',
-            {
-              params: { method },
-            },
-          );
-        }
-
-        return this.refuseShutdownPass(isRequestToStayDown);
+      // Reject if already shutting down - including one begun by the getters of the
+      // options snapshot this call was handed.
+      const refusal = this.refuseShutdownPassWhileActive(
+        method,
+        isRequestToStayDown,
+      );
+      if (refusal !== undefined) {
+        return refusal;
       }
 
       const passOptions: ShutdownPassOptions = {
@@ -7768,7 +7825,7 @@ export class LifecycleManager
    */
   private async startComponentInternal(
     name: string,
-    options?: StartComponentOptions,
+    options?: StartOptionsInput,
     bulkStartup?: {
       deadline: number;
       onTimeout: () => void;
@@ -7947,7 +8004,7 @@ export class LifecycleManager
    */
   private checkStartPreconditions(
     name: string,
-    flags: Required<StartComponentOptions>,
+    flags: StartOptionsSnapshot,
     // On the check before the claim: the instance the attempt read, which must still be
     // the one registered under `name` - it may have been unregistered, or replaced by
     // another, while its code ran.
@@ -8084,24 +8141,13 @@ export class LifecycleManager
     return { component, currentState };
   }
 
-  private snapshotStartOptions(
-    options: StartComponentOptions | undefined,
-  ): Required<StartComponentOptions> {
-    return {
-      allowDuringBulkStartup: options?.allowDuringBulkStartup === true,
-      forceStalled: options?.forceStalled === true,
-      allowNonRunningDependencies:
-        options?.allowNonRunningDependencies === true,
-    };
-  }
-
   /**
    * The start itself, under `startComponentInternal()`'s net - bypasses bulk operation checks
    * Used by both startComponent() and startAllComponents()
    */
   private async startComponentAttempt(
     name: string,
-    options: StartComponentOptions | undefined,
+    options: StartOptionsInput | undefined,
     bulkStartup:
       | {
           deadline: number;
@@ -8114,10 +8160,15 @@ export class LifecycleManager
     startupDependencyReads: Map<BaseComponent, DependencyRead> | undefined,
     restartSnapshot: RestartStartSnapshot | undefined,
   ): Promise<ComponentOperationResult> {
-    // Each option read once, here: the checks below run twice, and a caller's getter that
-    // answered differently the second time - `forceStalled` true for the stalled check,
-    // false where a forced start retires the stalled run's late stop - split the start.
-    const flags = this.snapshotStartOptions(options);
+    // Each option read once, before anything else: the checks below run twice, and a
+    // caller's getter that answered differently the second time - `forceStalled` true
+    // for the stalled check, false where a forced start retires the stalled run's late
+    // stop - split the start. A public start's read is deferred to here, so a getter
+    // that throws fails under this start's net, as every other early failure does.
+    const flags =
+      typeof options === 'function'
+        ? options()
+        : (options ?? DEFAULT_START_OPTIONS);
 
     // A refusal is a result; anything else is the component, clear to proceed.
     const preconditions = this.checkStartPreconditions(
@@ -9115,7 +9166,7 @@ export class LifecycleManager
    */
   private stopComponentInternal(
     name: string,
-    options?: StopComponentOptions,
+    options?: StopOptionsSnapshot,
     stopContext?: IndividualStopContext,
   ): Promise<ComponentOperationResult> {
     return this.withComponentStopNet(name, (claim) =>
@@ -9312,7 +9363,7 @@ export class LifecycleManager
 
   private async stopComponentAttempt(
     name: string,
-    options: StopComponentOptions | undefined,
+    options: StopOptionsSnapshot | undefined,
     claim: symbol,
     stopContext: IndividualStopContext | undefined,
   ): Promise<ComponentOperationResult> {
@@ -9323,7 +9374,7 @@ export class LifecycleManager
     const { component } = preconditions;
 
     // Handle forceImmediate option - skip all phases and go straight to force
-    if (options?.forceImmediate) {
+    if (options?.forceImmediate === true) {
       return await this.shutdownComponentForce(
         name,
         component,
@@ -9358,7 +9409,7 @@ export class LifecycleManager
   private async shutdownComponent(
     name: string,
     component: BaseComponent,
-    options: StopComponentOptions | undefined,
+    options: StopOptionsSnapshot | undefined,
     claim: symbol,
     stopContext: IndividualStopContext | undefined,
   ): Promise<ComponentOperationResult> {
@@ -12209,12 +12260,39 @@ export class LifecycleManager
   }
 
   /**
+   * The refusal of a shutdown request that finds a pass already running, or `undefined`
+   * when none is. Made by `stopAllComponents()` before it reads its options, and by
+   * `acceptShutdownPass()` on entry.
+   */
+  private refuseShutdownPassWhileActive(
+    method: ShutdownMethod,
+    isRequestToStayDown: boolean,
+  ): ShutdownPassRefusal | undefined {
+    if (!this.isShuttingDown) {
+      return undefined;
+    }
+
+    // A restart's stop phase is refused as the restart, which logs that one warning:
+    // both lines read as two refusals for the one request.
+    if (isRequestToStayDown) {
+      this.logger.warn(
+        'Cannot stop all components: shutdown already in progress',
+        {
+          params: { method },
+        },
+      );
+    }
+
+    return this.refuseShutdownPass(isRequestToStayDown);
+  }
+
+  /**
    * Both of `acceptShutdownPass()`'s refusals, so they cannot drift apart on whether the
    * refusal is recorded against the running pass.
    */
   private refuseShutdownPass(
     isRequestToStayDown: boolean,
-  ): ShutdownPassAcceptance {
+  ): ShutdownPassRefusal {
     if (isRequestToStayDown) {
       this.noteShutdownRequestDuringActivePass();
     }
