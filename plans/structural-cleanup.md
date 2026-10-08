@@ -7,9 +7,10 @@ unreleased, so documented behavior may change when the changelog says so.
 Order: **E → A1 → A2 → B → D (D0–D9) → C (optional, narrow)**.
 
 Status: E, A1, A2, B and D (D0–D9, plus a registration phase split) are done; review findings
-fixed in `08a7bf7`. C is deferred. Possible follow-ups: split unregistration out of
-`registration-operations.ts`, and per-call records for `component-stop.ts`,
-`component-start.ts` and `startup-orchestration.ts`.
+fixed in `08a7bf7`. Unregistration is its own subsystem with an attempt record, and
+`component-stop.ts` runs its phases over per-attempt run records, with what a stop leaves in
+`stop-outcomes.ts`. C is deferred. Possible follow-up: per-call records for
+`component-start.ts`.
 
 ## E. Logger `exit-completed`; starts refused while a simulated exit finishes
 

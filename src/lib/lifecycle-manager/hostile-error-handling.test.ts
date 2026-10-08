@@ -409,7 +409,7 @@ describe('LifecycleManager - hostile thrown values', () => {
     // Called from the middle of that sequence, after the state writes and before the
     // late-resolution log line and its events.
     internalStepThatThrows(
-      coreOf(lifecycle).componentStop,
+      coreOf(lifecycle).stopOutcomes,
       'resolvePendingForceStopWaiters',
       'late stop resolution exploded',
     );

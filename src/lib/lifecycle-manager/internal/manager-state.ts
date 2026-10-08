@@ -145,7 +145,7 @@ export interface RepeatedShutdownRequestState {
  * Plain fields, owned by no subsystem in particular: the manager and its subsystems
  * read and write them in place, so every read stays live. Bookkeeping only one
  * subsystem touches lives on that subsystem instead (the logger exit's flags on
- * `LoggerExitHook`, the stall details on `ComponentStop`), and configuration that never
+ * `LoggerExitHook`, the stall details on `StopOutcomes`), and configuration that never
  * changes lives in the frozen `ManagerConfig`.
  */
 export class LifecycleManagerState {

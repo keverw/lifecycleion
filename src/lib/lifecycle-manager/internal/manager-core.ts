@@ -25,6 +25,7 @@ import { ShutdownPassRunner } from './shutdown-pass';
 import { SignalIntegration } from './signal-integration';
 import { StartupOrchestration } from './startup-orchestration';
 import { StartupOrdering } from './startup-ordering';
+import { StopOutcomes } from './stop-outcomes';
 import type { TransitionEventDispatcher } from './transition-event-dispatcher';
 import { UnexpectedStops } from './unexpected-stops';
 import { UnregistrationOperations } from './unregistration-operations';
@@ -93,6 +94,7 @@ export class ManagerCore implements ManagerCoreParts {
   public readonly claims: ComponentClaims;
   public readonly componentStart: ComponentStart;
   public readonly componentStop: ComponentStop;
+  public readonly stopOutcomes: StopOutcomes;
   public readonly lateStartRecovery: LateStartRecovery;
   public readonly unexpectedStops: UnexpectedStops;
   // Bulk operations.
@@ -125,6 +127,7 @@ export class ManagerCore implements ManagerCoreParts {
     this.claims = new ComponentClaims(this);
     this.componentStart = new ComponentStart(this);
     this.componentStop = new ComponentStop(this);
+    this.stopOutcomes = new StopOutcomes(this);
     this.lateStartRecovery = new LateStartRecovery(this);
     this.unexpectedStops = new UnexpectedStops(this);
     this.startup = new StartupOrchestration(this);

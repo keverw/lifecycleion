@@ -83,15 +83,14 @@ function retryStalled(
 }
 
 /**
- * Make the next call of a private step of the stop pipeline throw, as a crash in the
+ * Make the next call of a private step of a stop subsystem throw, as a crash in the
  * stop's own bookkeeping would, then restore it.
  */
-function crashNextCall(manager: LifecycleManager, method: string): void {
-  const componentStop = coreOf(manager).componentStop;
-  Object.defineProperty(componentStop, method, {
+function crashNextCall(subsystem: object, method: string): void {
+  Object.defineProperty(subsystem, method, {
     configurable: true,
     value: (): never => {
-      Reflect.deleteProperty(componentStop, method);
+      Reflect.deleteProperty(subsystem, method);
       throw new Error('bookkeeping crashed');
     },
   });
@@ -392,7 +391,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
       stalledEvents.push(event.reason);
     });
 
-    crashNextCall(manager, 'createPendingForceStopWaiter');
+    crashNextCall(coreOf(manager).stopOutcomes, 'createPendingForceStopWaiter');
     const { reports, release } = claimReports();
     const beforeStop = Date.now();
     let result: ComponentOperationResult;
@@ -423,7 +422,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
     expect(original).toMatchObject({ phase: 'force', reason: 'timeout' });
 
     await new Promise((resolve) => setTimeout(resolve, 5));
-    crashNextCall(manager, 'createPendingForceStopWaiter');
+    crashNextCall(coreOf(manager).stopOutcomes, 'createPendingForceStopWaiter');
     const { release } = claimReports();
     let crashed: ComponentOperationResult;
     try {
@@ -519,7 +518,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
     await manager.registerComponent(new Plain(logger, 'plain'));
     await manager.startComponent('plain');
 
-    crashNextCall(manager, 'createStopPhaseObserver');
+    crashNextCall(coreOf(manager).componentStop, 'createStopPhaseObserver');
     const { release } = claimReports();
     let result: ComponentOperationResult;
     try {
@@ -573,7 +572,7 @@ describe('LifecycleManager - stall retry and rollback', () => {
     await manager.registerComponent(component);
     await manager.startComponent('crash');
 
-    crashNextCall(manager, 'createPendingForceStopWaiter');
+    crashNextCall(coreOf(manager).stopOutcomes, 'createPendingForceStopWaiter');
     const { release } = claimReports();
     let crashed: ComponentOperationResult;
     try {

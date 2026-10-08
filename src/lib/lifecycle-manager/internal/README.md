@@ -40,7 +40,8 @@ and every subsystem, a class built over the core:
 | `startupOrdering`    | `startup-ordering.ts`          | `StartupOrdering`: the dependency order startup, shutdown and registration share, answering a failure to compute it, and `getStartupOrder()` / `validateDependencies()`.     |
 | `claims`             | `component-claims.ts`          | `ComponentClaims`: taking, checking and releasing the per-component claims start and stop attempts hold.                                                                     |
 | `componentStart`     | `component-start.ts`           | `ComponentStart`: the per-component start pipeline - the start net, its preconditions, the attempt, start settlements, and marking a component running.                      |
-| `componentStop`      | `component-stop.ts`            | `ComponentStop`: the per-component stop pipeline - refusals, the stop net, graceful and force phases, stalled retries, and late stop resolution.                             |
+| `componentStop`      | `component-stop.ts`            | `ComponentStop`: the per-component stop pipeline - refusals, the stop net, graceful and force phases, stalled retries, and stop attempt tokens.                              |
+| `stopOutcomes`       | `stop-outcomes.ts`             | `StopOutcomes`: what a stop leaves - marking a component stopped or stalled, force-stop waiters, late stop resolution - and the results it answers with.                     |
 | `lateStartRecovery`  | `late-start-recovery.ts`       | `LateStartRecovery`: stopping a start the manager stopped waiting for if it completes later, and whether such a start is still awaited.                                      |
 | `unexpectedStops`    | `unexpected-stops.ts`          | `UnexpectedStops`: the unexpected-stop handler a running component reports through, clearing it, and draining the stops a bulk startup recorded.                             |
 | `startup`            | `startup-orchestration.ts`     | `StartupOrchestration`: bulk startup - its refusals, the startup latch, the batch loop and follow-up auto-starts, rollback, and releasing what it held.                      |
@@ -63,7 +64,7 @@ and every subsystem, a class built over the core:
   or into a new one - not onto the facade, and not behind a forwarding callback.
 - Bookkeeping that only one subsystem touches is that subsystem's own private state
   rather than a state field: the logger exit's flags live on `LoggerExitHook`, the
-  stall details beside each stall record on `ComponentStop`, and the armed window's
+  stall details beside each stall record on `StopOutcomes`, and the armed window's
   expiry timer on `ShutdownEscalation`.
 - State that lives only as long as one operation is an explicit record that operation
   hands to each of its phases: a bulk startup's progress, deadline and release reasons
@@ -88,6 +89,7 @@ and every subsystem, a class built over the core:
 | `getStartupOrder()`, `validateDependencies()`, the order startup follows | `StartupOrdering`; the graph itself in `dependency-policy.ts`                             |
 | `startComponent()` / `stopComponent()`                                   | `ComponentStart` / `ComponentStop`, holding claims through `ComponentClaims`              |
 | A timed-out start that completes later; a running component's crash      | `LateStartRecovery`; `UnexpectedStops`                                                    |
+| A stop that settles after its deadline; a stall's record and result      | `StopOutcomes`                                                                            |
 | `startAllComponents()` / `stopAllComponents()`                           | `StartupOrchestration` / `ShutdownPassRunner`; warnings in `shutdown-warning.ts`          |
 | SIGINT/SIGTERM and repeated shutdown requests                            | `ShutdownEscalation`                                                                      |
 | `restartAllComponents()` / `restartComponent()`                          | `RestartOperations`                                                                       |
@@ -206,8 +208,8 @@ Their source stays live, provisional registration advances the generation before
 run, and rollback restores the previous generation without rewinding the counter.
 
 Stop-phase reporting owns only the choice of foreground or late rejection reporter.
-Claims stay in `ComponentClaims`, and stop tokens and late-resolution state
-reconciliation in `ComponentStop`.
+Claims stay in `ComponentClaims`, stop tokens in `ComponentStop`, and late-resolution
+state reconciliation in `StopOutcomes`.
 
 Component metadata reads own the report-once marks for dependency and optional-status
 failures. Registration snapshots those marks and rollback clears only newly made marks;

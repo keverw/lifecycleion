@@ -261,7 +261,7 @@ export class UnexpectedStops {
         // from a socket or timer callback, where a throw would go uncaught.
         this.core.lifecycleEvents.componentStopped(
           name,
-          this.core.componentStop.readStatusOfStopped(
+          this.core.stopOutcomes.readStatusOfStopped(
             name,
             'lifecycle-manager component unexpected stop',
           ),

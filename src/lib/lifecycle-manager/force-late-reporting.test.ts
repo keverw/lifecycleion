@@ -26,7 +26,7 @@ for (const shouldDelayNotification of [false, true]) {
       // Exercise both race winners without changing the real stopped-state writes:
       // graceful completion is recorded, but its force-waiter notification arrives
       // after the force deadline. The catch must not label that deadline a hook error.
-      const internals = coreOf(manager).componentStop as unknown as {
+      const internals = coreOf(manager).stopOutcomes as unknown as {
         createPendingForceStopWaiter: (name: string) => {
           promise: Promise<void>;
           cleanup: () => void;
