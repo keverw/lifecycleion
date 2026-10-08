@@ -1,6 +1,7 @@
 import { markNonRetryableAdapterError } from '../internal/adapter-error';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import {
+  applyIntrinsic,
   awaitBoxedPromise,
   createOwnedAbortController,
   promiseResolveIntrinsic,
@@ -988,6 +989,31 @@ export class NodeAdapter implements HTTPAdapter {
         reject(settleRequestBodyForThrow(error));
       };
 
+      /**
+       * Whether the caller's signal has aborted, read guarded - or, when the read itself
+       * throws before a response has arrived, the refusal, which the caller then fails
+       * the request with.
+       *
+       * The signal is the caller's, and one that is not a native `AbortSignal` can refuse
+       * the read. Both readers run where a throw escapes - `req.on('error')` as an emitter
+       * listener, the write task's failure handler as caller-unobserved recovery - so the
+       * read is guarded once, here, and both answer it the same way. Before a response the
+       * refusal is the failure: nothing else is answering. After one it reads as "not
+       * aborted": the response path is answering, a real abort still reaches the request
+       * through its own listener, and what follows - `failStreamSetupOnSocketError`, the
+       * write failure reported by `reportWriteErrorAfterResponse` - still runs. Failing
+       * the request with the refusal there instead left a pending `streamResponse`
+       * factory's signal unfired, and answered `requestBodySettled` with the getter's
+       * error in place of the socket's own.
+       */
+      const readIsAborted = (): boolean | Error => {
+        try {
+          return request.signal?.aborted === true;
+        } catch (readError) {
+          return didReceiveResponse ? false : normalizeError(readError);
+        }
+      };
+
       const observeTaskFailure = (
         task: Promise<void>,
         onFailure: (error: unknown) => void,
@@ -1608,15 +1634,11 @@ export class NodeAdapter implements HTTPAdapter {
       // Network / transport errors (DNS failure, connection refused, cert errors)
       req.on('error', (error) => {
         // Read guarded: this runs as an emitter listener, where a throw is an uncaught
-        // exception and the request never settles. The signal is the caller's, and one
-        // that is not a native `AbortSignal` can refuse the read; that fails the request
-        // with the refusal rather than taking the process down.
-        let isAborted: boolean;
+        // exception and the request never settles. See `readIsAborted`.
+        const isAborted = readIsAborted();
 
-        try {
-          isAborted = request.signal?.aborted === true;
-        } catch (readError) {
-          failRequest(normalizeError(readError));
+        if (isAborted instanceof Error) {
+          failRequest(isAborted);
 
           return;
         }
@@ -1839,25 +1861,15 @@ export class NodeAdapter implements HTTPAdapter {
         // outcome is settled above either way; `failRequest` is first-call-wins, so
         // the abort listener's own answer stands where it got there first.
         //
-        // Read guarded, as `req.on('error')` reads it: the signal is the caller's, and
-        // one that is not a native `AbortSignal` can refuse the read. Before a response,
-        // the refusal is the failure, exactly as it is there. After one, it is read as
-        // "not aborted": the response path is answering, a real abort still reaches the
-        // request through its own listener, and the write failure is reported below
-        // rather than escaping to `observeTaskFailure`.
-        let isAborted: boolean;
+        // Read guarded, as `req.on('error')` reads it, so the write failure is reported
+        // below rather than escaping to `observeTaskFailure`. See `readIsAborted`.
+        const isAborted = readIsAborted();
 
-        try {
-          isAborted = request.signal?.aborted === true;
-        } catch (readError) {
-          if (!didReceiveResponse) {
-            destroyRequestQuietly(req);
-            failRequest(normalizeError(readError));
+        if (isAborted instanceof Error) {
+          destroyRequestQuietly(req);
+          failRequest(isAborted);
 
-            return;
-          }
-
-          isAborted = false;
+          return;
         }
 
         if (isAborted) {
@@ -2374,7 +2386,7 @@ async function streamResponseBody(
  * {@link attachWritableListener}, whose listener stays attached whatever this request
  * does. A late error reaches it once `cleanup` has deregistered `onWritableError`, finds
  * no request behind it, and is reported through the host error reporter exactly as this
- * absorber would report it.
+ * absorber would report it, within the same {@link PENDING_WRITABLE_ERROR_WINDOW_MS}.
  */
 function absorbPendingWritableError(writable: WritableLike): void {
   // Captured once, here, rather than looked up again inside the removal below. Two
@@ -2703,6 +2715,10 @@ function ignoreWritableError(): void {
  * request never settles. Read here, inside `send()`'s own promise, a member that throws
  * fails this send instead. `headers` is copied for the same reason: its entries are read
  * again each time the effective request headers are snapshotted.
+ *
+ * `streamResponse` is called on the caller's request rather than on this copy, so a
+ * factory that is a method reading `this` - a class-instance request - sees the object it
+ * belongs to. Only the member read is moved up front; the receiver is not changed.
  */
 function snapshotAdapterRequest(request: AdapterRequest): AdapterRequest {
   const {
@@ -2727,7 +2743,11 @@ function snapshotAdapterRequest(request: AdapterRequest): AdapterRequest {
     signal,
     onUploadProgress,
     onDownloadProgress,
-    streamResponse,
+    streamResponse:
+      typeof streamResponse === 'function'
+        ? (info, context) =>
+            applyIntrinsic(streamResponse, request, [info, context])
+        : streamResponse,
     attemptNumber,
     requestID,
     initialURL,
@@ -2990,8 +3010,17 @@ type WritableListenerRemover = (
  */
 const sharedWritableListeners = new WeakMap<
   WritableLike,
-  Map<string, Set<(argument: never) => void>>
+  Map<string, SharedWritableListenerEntry>
 >();
+
+interface SharedWritableListenerEntry {
+  readonly listeners: Set<(argument: never) => void>;
+  /**
+   * Until when, as epoch ms, an `'error'` arriving with no request registered is still
+   * reported. Restarted each time the last request deregisters; see `dispatch`.
+   */
+  reportUnclaimedUntil: number;
+}
 
 function attachWritableListener(
   writable: WritableLike,
@@ -3029,25 +3058,35 @@ function attachWritableListener(
   const existing = events.get(event);
 
   if (existing !== undefined) {
-    existing.add(listener);
+    existing.listeners.add(listener);
 
     return;
   }
 
-  const listeners = new Set<(argument: never) => void>([listener]);
+  const entry: SharedWritableListenerEntry = {
+    listeners: new Set<(argument: never) => void>([listener]),
+    reportUnclaimedUntil: 0,
+  };
+  const { listeners } = entry;
 
-  events.set(event, listeners);
+  events.set(event, entry);
 
   // Copied before dispatch: a listener that settles its request deregisters itself from
   // this very set, and mutating a `Set` while iterating it would skip the sibling behind
   // it - two concurrent downloads into one sink, and only one of them hears the failure.
   const dispatch = (argument: never): void => {
     // An `'error'` with no request behind it any more - every one that registered has
-    // settled, or the writable was discarded before any did - is reported rather than
-    // dropped. This listener is permanent, so it is the absorber for such a writable, and
-    // it answers the way `absorbPendingWritableError` does for one that can be detached.
+    // settled, or the writable was discarded before any did - is absorbed, because this
+    // listener is permanent and so is the absorber for such a writable. It answers the
+    // way `absorbPendingWritableError` does for one that can be detached: reported within
+    // `PENDING_WRITABLE_ERROR_WINDOW_MS` of the last request leaving, and past that left
+    // to the owner, as the detachable absorber is by then gone. Reported for the life of
+    // the writable instead, every error a long-lived sink's owner handles itself - an
+    // hour after its last download - also landed on the host's global `'error'` channel.
     if (event === 'error' && listeners.size === 0) {
-      reportUnclaimedWritableError(argument);
+      if (Date.now() <= entry.reportUnclaimedUntil) {
+        reportUnclaimedWritableError(argument);
+      }
 
       return;
     }
@@ -3091,7 +3130,18 @@ function detachWritableListener(
     return;
   }
 
-  sharedWritableListeners.get(writable)?.get(event)?.delete(listener);
+  const entry = sharedWritableListeners.get(writable)?.get(event);
+
+  if (entry === undefined) {
+    return;
+  }
+
+  entry.listeners.delete(listener);
+
+  // The last request has gone, so the reporting window `dispatch` honours starts now.
+  if (entry.listeners.size === 0) {
+    entry.reportUnclaimedUntil = Date.now() + PENDING_WRITABLE_ERROR_WINDOW_MS;
+  }
 }
 
 /**

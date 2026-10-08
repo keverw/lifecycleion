@@ -4,6 +4,7 @@ import { safeHandleCallbackAndWait } from '../safe-handle-callback';
 import {
   allPromises,
   allSettledPromises,
+  attachIntrinsicReactions,
   awaitBoxedPromise,
   observePromise,
   observeBoxed,
@@ -536,4 +537,46 @@ test('a queued task failure reaches the console when no reporter is supplied', a
     console.error = original;
   }
   expect(seen).toEqual([failure]);
+});
+
+test('a derived promise gets its own constructor back despite a get on Object.prototype', () => {
+  let derived: Promise<unknown> | undefined;
+  class OwnConstructorSpecies {
+    constructor(
+      executor: (resolve: (value: unknown) => void, reject: () => void) => void,
+    ) {
+      const promise = new Promise(executor);
+      void Object.defineProperty(promise, 'constructor', {
+        // eslint-disable-next-line @typescript-eslint/naming-convention
+        __proto__: null,
+        value: Promise,
+        configurable: true,
+        writable: true,
+      } as PropertyDescriptor);
+      derived = promise;
+      return promise;
+    }
+  }
+  const source = Promise.resolve(1);
+  void Object.defineProperty(source, 'constructor', {
+    value: { [Symbol.species]: OwnConstructorSpecies },
+  });
+  Object.defineProperty(Object.prototype, 'get', {
+    configurable: true,
+    writable: true,
+    value: () => undefined,
+  });
+  try {
+    attachIntrinsicReactions(
+      source,
+      () => {},
+      () => {},
+    );
+  } finally {
+    Reflect.deleteProperty(Object.prototype, 'get');
+  }
+  expect(derived).toBeDefined();
+  expect(
+    Object.getOwnPropertyDescriptor(derived as object, 'constructor')?.value,
+  ).toBe(Promise);
 });

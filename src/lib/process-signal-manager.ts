@@ -811,9 +811,18 @@ export class ProcessSignalManager {
   private reportCleanupFailuresLater(
     reports: ReadonlyArray<readonly [string, { error: unknown }]>,
   ): void {
-    if (reports.length === 0 || isConsoleReportActive()) {
-      // Cleanup still ran and its primary failure reaches the caller. A retry
-      // entered by terminal console output must not schedule another report.
+    if (reports.length === 0) {
+      return;
+    }
+
+    if (isConsoleReportActive()) {
+      // Entered by terminal console output - a console shim retrying this call. A
+      // queued report would run after the console guard clears and could restart that
+      // shim, so report now, as the raw-mode restore failure already is: nested console
+      // output is dropped while the guard is up, so this cannot loop. Dropping them
+      // would lose a failed `attach()`'s cleanup failures - a listener left on
+      // `process` - since the error its caller sees is the registration error.
+      reportCleanupFailures(reports);
       return;
     }
 

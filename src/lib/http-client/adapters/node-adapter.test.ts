@@ -538,6 +538,57 @@ describe('post-header stream aborts report why the retry stopped', () => {
 });
 
 describe('NodeAdapter streamResponse factory failures', () => {
+  test("the factory is called on the caller's request, not on the adapter's copy", async () => {
+    // `send()` reads every member of the request once, into a plain object of its own.
+    // Calling `streamResponse` off that copy handed a class-instance request's method the
+    // copy as `this`, so a factory reading its own fields threw and the download failed
+    // as a setup error.
+    const net = await import('node:net');
+
+    const server = net.createServer((socket) => {
+      socket.on('data', () => {
+        socket.end(
+          'HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 4\r\n\r\nbody',
+        );
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+    const chunks: Buffer[] = [];
+
+    class Download implements AdapterRequest {
+      public readonly requestURL = `http://127.0.0.1:${port}/data`;
+      public readonly method = 'GET' as const;
+      public readonly headers: Record<string, string> = {};
+      private readonly sink = new Writable({
+        write(chunk: Buffer, _encoding, callback): void {
+          chunks.push(chunk);
+          callback();
+        },
+      });
+
+      public streamResponse(): WritableLike {
+        return this.sink;
+      }
+    }
+
+    try {
+      const response = await new NodeAdapter().send(new Download());
+
+      expect(response.status).toBe(200);
+      expect(response.isStreamError).toBeFalsy();
+      expect(Buffer.concat(chunks).toString()).toBe('body');
+    } finally {
+      await new Promise<void>((done) => {
+        server.close(() => done());
+      });
+    }
+  });
+
   test('a frozen error from the factory is still classified as non-retryable', async () => {
     // `markStreamFactoryError` tags the error in place so the caller keeps its identity.
     // A frozen error refuses that assignment in strict mode, and falling through untagged
@@ -3634,6 +3685,92 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     await runOnce();
 
     expect(handlers.length).toBe(1);
+  });
+
+  test('the permanent fan-out stops reporting unclaimed errors once the window has passed', async () => {
+    // The permanent listener never detaches, so reporting every `'error'` that reached it
+    // with no request registered put each error a long-lived sink's owner handles itself
+    // on the host's global channel, for the life of the writable. It reports within the
+    // window a detachable writable's absorber would have, and only absorbs after that.
+    const handlers: ((error: Error) => void)[] = [];
+    const writable = {
+      write: () => true,
+      end: () => {
+        throw new Error('sync end boom');
+      },
+      on: (event: string, listener: (error: Error) => void) => {
+        if (event === 'error') {
+          handlers.push(listener);
+        }
+
+        return writable;
+      },
+      once: () => writable,
+      destroy: () => writable,
+    } as unknown as WritableLike;
+
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '1',
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('a'));
+            res.emit('end');
+          });
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        streamResponse: () => writable,
+      });
+
+      expect(response.streamErrorCode).toBe('stream_write_error');
+    } finally {
+      requestSpy.mockRestore();
+    }
+
+    expect(handlers.length).toBe(1);
+
+    const reports: ErrorEvent[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+    const realNow = Date.now();
+    const nowSpy = spyOn(Date, 'now').mockImplementation(
+      () => realNow + 60_000,
+    );
+
+    globalThis.addEventListener('error', onError);
+
+    try {
+      // Still absorbed - never an uncaught exception - but no longer reported.
+      expect(() =>
+        handlers[0]?.(new Error('owner handles this one')),
+      ).not.toThrow();
+
+      await new Promise<void>((done) => {
+        setImmediate(done);
+      });
+    } finally {
+      nowSpy.mockRestore();
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(reports).toEqual([]);
   });
 
   test('a refused removal keeps the absorber tracked instead of stacking another', async () => {

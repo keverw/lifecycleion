@@ -58,7 +58,8 @@ The stateful helpers have deliberately smaller scopes:
   holds its `isHookEntryBlocked()` answer and must not evaluate it twice. Messaging,
   value access, health checks, signals and shutdown warnings all apply it; each keeps
   its own refusal codes, and a site that deliberately differs (broadcast selection,
-  warnings to retried stalls) says why where it does.
+  warnings to retried stalls) says why where it does. Messages, value reads and health
+  checks label a refusal with the one `unavailableComponentCode()`.
 - Dependency ordering snapshots names before acquiring dependency lists. The manager
   supplies candidate and generation-aware reads; the graph helper does not own a
   second dependency cache or registration registry.
@@ -66,7 +67,9 @@ The stateful helpers have deliberately smaller scopes:
   deliberately uses the unbranded shared timer helpers; a caller's validation error
   must not become an expected manager refusal just because it has the same type.
   `settleOperation()` drops the brand from the errors a public result hands back, so a
-  caller that rethrows one is not taken for the manager's own refusal.
+  caller that rethrows one is not taken for the manager's own refusal; a refusal
+  answered inline and handed to a logger or listener before the operation settles is
+  classified with `takeSettledFailureCode()`, which drops it there.
 - Promise-returning manager delegates return the helper promise directly. Adding an
   extra async wrapper or scheduled task can change when callers regain control.
 - These modules must remain usable in Node, Bun, and browsers. Do not import Node

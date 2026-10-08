@@ -25,7 +25,8 @@ export const definePropertyIntrinsic: typeof Reflect.defineProperty =
   Reflect.defineProperty;
 const deletePropertyIntrinsic: typeof Reflect.deleteProperty =
   Reflect.deleteProperty;
-const getOwnPropertyDescriptorIntrinsic: typeof Object.getOwnPropertyDescriptor =
+/** `Object.getOwnPropertyDescriptor` as it was at module initialization. */
+export const getOwnPropertyDescriptorIntrinsic: typeof Object.getOwnPropertyDescriptor =
   Object.getOwnPropertyDescriptor;
 /**
  * `Object.prototype.hasOwnProperty` as it was at module initialization, so a later patch
@@ -305,7 +306,14 @@ function containDerivedRejection(derived: unknown): void {
         if (previous === undefined) {
           deletePropertyIntrinsic(derived, 'constructor');
         } else {
-          definePropertyIntrinsic(derived, 'constructor', previous);
+          // Copied onto a null prototype: the descriptor read back inherits from
+          // `Object.prototype`, and a `get` added there would make it invalid, leaving
+          // the shadow constructor in place.
+          definePropertyIntrinsic(derived, 'constructor', {
+            // eslint-disable-next-line @typescript-eslint/naming-convention
+            __proto__: null,
+            ...previous,
+          } as PropertyDescriptor);
         }
       } catch {
         // A hostile Proxy can refuse restoration; reporting cannot repair it.
@@ -316,7 +324,8 @@ function containDerivedRejection(derived: unknown): void {
   void containDerivedThenable(derived);
 }
 
-function noop(): void {}
+/** A reaction that ignores what it is given, for observers that only contain. */
+export function noop(): void {}
 
 async function containDerivedThenable(derived: unknown): Promise<void> {
   try {
@@ -442,6 +451,30 @@ export function awaitBoxedPromise<T>(
   promise: Promise<T>,
 ): Promise<PromiseResultBox<T>> {
   return observePromise(promise, boxPromiseValue);
+}
+
+/**
+ * Make a promise this module owns safe to `await`. `await` reads `constructor` to decide
+ * whether it may use a native promise as-is, and a `Promise.prototype.constructor` getter
+ * that application code broke after load would throw there - synchronously, before
+ * anything reacts to the promise, so its later rejection would go unhandled. An own data
+ * property naming the captured constructor answers that read without the getter. Only
+ * for promises that never reach caller code, which would see the own property.
+ */
+export function pinPromiseConstructor<T>(promise: Promise<T>): Promise<T> {
+  try {
+    definePropertyIntrinsic(promise, 'constructor', {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      __proto__: null,
+      value: promiseConstructorIntrinsic,
+      configurable: true,
+      enumerable: false,
+      writable: true,
+    } as PropertyDescriptor);
+  } catch {
+    // A fresh native promise accepts the definition; nothing else is passed here.
+  }
+  return promise;
 }
 
 /**

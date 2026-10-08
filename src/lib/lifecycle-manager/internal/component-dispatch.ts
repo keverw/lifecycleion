@@ -98,6 +98,27 @@ export function isComponentEnterable(
   );
 }
 
+/** How a message, value read or health check labels a component it refuses to enter. */
+export type UnavailableComponentCode = 'not_found' | 'stalled' | 'stopped';
+
+/**
+ * The label for a component an operation refuses to enter, by the shared rule (see
+ * {@link isComponentEnterable}) or the caller's own: `not_found` once `isCurrent` is false
+ * - the instance is no longer the one registered under `name` - otherwise `stalled` or
+ * `stopped`. The label follows the stall, not what made the component unavailable, so a
+ * stall whose forced `start()` is still pending is `stalled` wherever it is refused.
+ */
+export function unavailableComponentCode(
+  context: Pick<ComponentAccessContext, 'stalledComponents'>,
+  name: string,
+  isCurrent: boolean,
+): UnavailableComponentCode {
+  if (!isCurrent) {
+    return 'not_found';
+  }
+  return context.stalledComponents.has(name) ? 'stalled' : 'stopped';
+}
+
 /** What {@link readHookThenRecheck} found. */
 type HookRead<TValue, TRefusal> =
   /** `value` is what the read returned, or `undefined` when it threw. */

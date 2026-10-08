@@ -229,7 +229,9 @@ export interface RestartComponentOptions {
 
 /**
  * Stable, machine-readable failure codes for individual component operations.
- * `invalid_options` is an expected timeout-validation refusal, not a callback crash.
+ * `invalid_options` is an expected refusal of an option the manager validates itself - an
+ * invalid timeout, or (for a start or restart) a component `ownsLateStartCleanup` that is
+ * not a boolean - not a callback crash.
  * `error` is a component's own hook failing (`start()` or `stop()` threw or rejected,
  * `onShutdownForce()` failed), as `error` is for every other call that runs your code.
  * `operation_crashed` is the operation itself throwing - a bug in the manager, or a

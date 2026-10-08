@@ -10,6 +10,7 @@ import type {
 } from '../types';
 import {
   allPromises,
+  getIntrinsic,
   promiseResolveIntrinsic,
 } from '../../internal/intrinsics';
 import { isObjectLike } from '../../internal/is-object-like';
@@ -22,12 +23,15 @@ import {
 import {
   toOperationTimerDelayMS,
   settledFailureCode,
+  takeSettledFailureCode,
 } from './operation-policy';
 import {
   dispatchAnnouncedHook,
   isComponentEnterable,
   isComponentSelectedRunningMember,
   readHookThenRecheck,
+  unavailableComponentCode,
+  type UnavailableComponentCode,
 } from './component-dispatch';
 
 /** The public method each signal broadcast is named after when it reports a crash. */
@@ -50,7 +54,7 @@ interface SignalBroadcastDescriptor {
   emitFailed: (name: string, error: Error) => void;
 }
 
-type HealthRefusalCode = 'not_found' | 'stalled' | 'stopped';
+type HealthRefusalCode = UnavailableComponentCode;
 
 /** What a health check that timed out is reported as having answered. */
 const HEALTH_CHECK_TIMEOUT_RESULT: ComponentHealthResult = Object.freeze({
@@ -60,22 +64,22 @@ const HEALTH_CHECK_TIMEOUT_RESULT: ComponentHealthResult = Object.freeze({
 
 /**
  * Why a health hook must not be entered now, or `undefined` if it may be: the shared
- * rule (see `isComponentEnterable()`), answered with the health check's own codes.
- * `isCurrent` is the caller's, as `readAvailability()` takes it: whether the checked
- * instance is still the one registered under `name`.
+ * rule (see `isComponentEnterable()`), labelled as every refusal is (see
+ * `unavailableComponentCode()`). `isCurrent` is the caller's, as `readAvailability()`
+ * takes it: whether the checked instance is still the one registered under `name`.
  */
 function healthRefusal(
   context: ComponentAccessContext,
   name: string,
   isCurrent: boolean,
 ): HealthRefusalCode | undefined {
-  if (!isCurrent) {
-    return 'not_found';
-  }
-  if (isComponentEnterable(context, name, context.componentStates.get(name))) {
+  if (
+    isCurrent &&
+    isComponentEnterable(context, name, context.componentStates.get(name))
+  ) {
     return undefined;
   }
-  return context.stalledComponents.has(name) ? 'stalled' : 'stopped';
+  return unavailableComponentCode(context, name, isCurrent);
 }
 
 const HEALTH_REFUSAL_MESSAGES: Record<HealthRefusalCode, string> = {
@@ -133,7 +137,7 @@ export async function checkComponentHealthOperation(
   let readFailureMessage = 'Health check could not be read';
   const handlerRead = readHookThenRecheck(
     () => {
-      const handler: unknown = Reflect.get(component, 'healthCheck');
+      const handler: unknown = getIntrinsic(component, 'healthCheck');
       // Configuration getters are caller code too. Capture the timeout before
       // announcing the check, and distinguish its failure from the handler itself.
       // A component without a health handler does not need timeout configuration.
@@ -161,7 +165,8 @@ export async function checkComponentHealthOperation(
   if (handlerRead.status === 'read_failed') {
     const { error } = handlerRead;
     const err = toError(error);
-    const code = settledFailureCode(error);
+    // Read before the logger and listeners are handed the error.
+    const code = takeSettledFailureCode(error);
 
     // Logged and announced as every other failed check is - `started` first, so a
     // listener counting checks in flight stays paired - and counted as a failure.
@@ -455,6 +460,22 @@ export async function runSignalBroadcast(
     }
     const recheck = () =>
       canDispatch(component) ? undefined : ('unavailable' as const);
+    // A target selected for dispatch that caller code then makes unavailable - its
+    // handler or timeout getter, or a `*-started` listener - answers one `unavailable`
+    // entry, announced `started` then `failed` like every other failed dispatch.
+    const refuseUnavailable = (): void => {
+      const error = new Error(
+        `Component "${name}" became unavailable before ${descriptor.signal} dispatch`,
+      );
+      descriptor.emitFailed(name, error);
+      results.push({
+        name,
+        called: false,
+        error,
+        timedOut: false,
+        code: 'unavailable',
+      });
+    };
     // The handler, and its timeout when there is one, are the component's own
     // properties, so they are read here, per component: one that throws becomes that
     // component's `operation_crashed` entry - an invalid timeout its `invalid_options`
@@ -487,14 +508,20 @@ export async function runSignalBroadcast(
       recheck,
     );
 
-    // The read itself took the component down: skipped, as a component that began
-    // teardown during an earlier component's callback is.
+    // The read itself took the component down. It was already selected for this
+    // dispatch, so it is reported as a started listener taking it down is - `started`
+    // then `failed`, back to back, as a failed read is - whether or not the read found a
+    // handler or threw (that failure was reported above; availability answers).
     if (handlerRead.status === 'refused') {
+      descriptor.emitStarted(name);
+      refuseUnavailable();
       continue;
     }
 
     if (handlerRead.status === 'read_failed') {
       const err = toError(handlerRead.error);
+      // Read before the logger and listeners are handed the error.
+      const code = takeSettledFailureCode(handlerRead.error);
 
       // Logged and announced as a health check whose configuration read fails is -
       // `started` first, so a listener counting signals in flight stays paired - and
@@ -510,7 +537,7 @@ export async function runSignalBroadcast(
         called: false,
         error: err,
         timedOut: false,
-        code: settledFailureCode(handlerRead.error),
+        code,
       });
       continue;
     }
@@ -548,17 +575,7 @@ export async function runSignalBroadcast(
     });
 
     if (dispatch.status === 'refused') {
-      const error = new Error(
-        `Component "${name}" became unavailable before ${descriptor.signal} dispatch`,
-      );
-      descriptor.emitFailed(name, error);
-      results.push({
-        name,
-        called: false,
-        error,
-        timedOut: false,
-        code: 'unavailable',
-      });
+      refuseUnavailable();
     } else if (dispatch.status === 'timed_out') {
       descriptor.emitFailed(
         name,

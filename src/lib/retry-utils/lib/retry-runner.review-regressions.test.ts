@@ -119,6 +119,29 @@ test('a newer cancel from the forced skip prevents replacement', async () => {
   expect(calls).toBe(1);
 });
 
+test('a newer cancel from the forced skip settles a pending cancellation', async () => {
+  const runner = new RetryRunner(policy, () => {});
+  runner.overrideGraceCancelPeriodMS(50);
+  const listenerCancels: Promise<unknown>[] = [];
+  const runResult = runner.run(true);
+  const firstCancel = runner.cancel();
+  expect(runner.runnerState).toBe('stopping');
+  runner.on('attempt-handled', () => {
+    listenerCancels.push(runner.cancel());
+  });
+  expect(await runner.forceTry({ shouldAbortRunning: true })).toMatchObject({
+    status: 'pre_operation_error',
+    code: 'force_try_superseded',
+  });
+  expect(runner.runnerState).toBe('stopped');
+  expect(await firstCancel).toBe('canceled');
+  expect(await Promise.all(listenerCancels)).toEqual(['canceled']);
+  expect(await runResult).toMatchObject({ status: 'canceled' });
+  expect(await runner.waitForCompletion()).toMatchObject({
+    status: 'canceled',
+  });
+});
+
 test('fatal reports record their error without invoking retry jitter', async () => {
   const failure = new Error('original fatal');
   const runner = new RetryRunner({ strategy: 'exponential' }, (report) => {

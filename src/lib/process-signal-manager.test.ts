@@ -11,6 +11,7 @@ import {
   muteConsoleError,
   restoreConsoleError,
 } from './internal/console-test-utils';
+import { reportToConsole } from './internal/report-to-console';
 import { ProcessSignalManager } from './process-signal-manager';
 import readline from 'readline';
 import { sleep } from './sleep';
@@ -3136,4 +3137,57 @@ test('console-origin attach retries do not enqueue another cleanup report', asyn
     on.mockRestore();
     off.mockRestore();
   }
+});
+
+test('a console-origin failed attach still reports its cleanup failure', async () => {
+  const originalOn = process.on.bind(process);
+  const originalOff = process.off.bind(process);
+  const manager = new ProcessSignalManager({ onReloadRequested: () => {} });
+  const attachFailure = new Error('attach failed');
+  const cleanupFailure = new Error('cleanup failed');
+  const heard: unknown[] = [];
+  const onError = (event: Event): void => {
+    heard.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+  const on = spyOn(process, 'on').mockImplementation(
+    function (event, listener) {
+      if (event === 'SIGHUP') {
+        throw attachFailure;
+      }
+      return Reflect.apply(originalOn, process, [event, listener]);
+    },
+  );
+  const off = spyOn(process, 'off').mockImplementation(
+    function (event, listener) {
+      if (event === 'SIGHUP') {
+        throw cleanupFailure;
+      }
+      return Reflect.apply(originalOff, process, [event, listener]);
+    },
+  );
+  let attachError: unknown;
+  globalThis.addEventListener('error', onError);
+  try {
+    console.error = (): void => {
+      try {
+        manager.attach();
+      } catch (error) {
+        attachError = error;
+      }
+    };
+    reportToConsole('terminal line');
+    await sleep(10);
+  } finally {
+    globalThis.removeEventListener('error', onError);
+    on.mockRestore();
+    off.mockRestore();
+  }
+  expect(attachError).toBe(attachFailure);
+  expect(manager.isAttached).toBe(false);
+  expect(heard).toHaveLength(1);
+  expect((heard[0] as Error).message).toContain(
+    'ProcessSignalManager attach cleanup',
+  );
+  expect((heard[0] as Error).cause).toBe(cleanupFailure);
 });

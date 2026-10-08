@@ -8,7 +8,7 @@ import type {
   GetValueOptions,
   ValueResult,
 } from '../types';
-import { applyIntrinsic } from '../../internal/intrinsics';
+import { applyIntrinsic, getIntrinsic } from '../../internal/intrinsics';
 import {
   containDeferredResult,
   UnreadableReturn,
@@ -28,6 +28,7 @@ import {
   isComponentSelectedRunningMember,
   isHookEntryBlocked,
   readHookThenRecheck,
+  unavailableComponentCode,
 } from './component-dispatch';
 
 /**
@@ -54,22 +55,17 @@ function readAvailability(
     isCurrent &&
     !isUnavailable &&
     isComponentRunningMember(context, componentName, state);
-  // The label does not depend on availability: a stall whose forced `start()` is still
-  // pending is refused, but it is still `stalled` - as `checkComponentHealth()` and the
-  // broadcast skip both call it. Gating this on availability made the same component
-  // answer `stopped` here and `stalled` there, flipping with `includeStalled`.
   const isStalled = context.stalledComponents.has(componentName);
+  // Labelled as `checkComponentHealth()` labels its refusals (see
+  // `unavailableComponentCode()`): by the stall, not by availability, so the same
+  // component does not answer `stopped` here and `stalled` there.
   const refusalCode =
     isCurrent &&
     !isUnavailable &&
     (isRunning || (isStalled ? allowStalled : allowStopped))
       ? undefined
-      : !isCurrent
-        ? ('not_found' as const)
-        : isStalled
-          ? ('stalled' as const)
-          : ('stopped' as const);
-  return { isCurrent, isRunning, isStalled, refusalCode };
+      : unavailableComponentCode(context, componentName, isCurrent);
+  return { isCurrent, isRunning, refusalCode };
 }
 
 /**
@@ -145,7 +141,7 @@ export async function sendMessageInternal(
   // reads its handler. Unguarded, a getter that threw escaped to the generic safety
   // net, and one that answered differently the second time failed as a handler error.
   const handlerRead = readHookThenRecheck(
-    () => Reflect.get(component, 'onMessage') as unknown,
+    () => getIntrinsic(component, 'onMessage') as unknown,
     (error) => {
       reportCallbackError('lifecycle-manager sendMessageToComponent', error);
     },
@@ -364,19 +360,27 @@ const MAX_BROADCAST_TARGET_NAMES = 100_000;
  * `length` and `includes`, and the filter would have asked it once per registered
  * component. A non-array, or a `length` that is not a plausible list size (a proxy can
  * claim `Infinity`), refuses the whole broadcast as an invalid option before it has
- * announced itself; a read that throws fails it at the same point.
+ * announced itself - as does a value `Array.isArray` cannot even classify (a revoked
+ * proxy), which is no more usable as a list. A `length` or entry read that throws fails
+ * it at the same point.
  */
 function copyTargetNames(names: unknown): Set<unknown> | undefined {
   if (names === undefined) {
     return undefined;
   }
-  if (!Array.isArray(names)) {
+  let isArray: boolean;
+  try {
+    isArray = Array.isArray(names);
+  } catch {
+    isArray = false;
+  }
+  if (!isArray) {
     throw invalidOperationOptionError(
       'broadcastMessage componentNames must be an array',
     );
   }
   const entries = copyBoundedArray(
-    names,
+    names as readonly unknown[],
     MAX_BROADCAST_TARGET_NAMES,
     (length) =>
       invalidOperationOptionError(
@@ -409,19 +413,11 @@ export async function broadcastMessageInternal(
   // `options` is the caller's object, and a read of it that throws must fail the
   // broadcast before it has announced itself, not leave a `broadcast-started` with no
   // `broadcast-completed` after it. From the loop on, every step is per component.
-  let targetComponents = context.components;
 
   // Read once: a getter behind it would otherwise run - and could answer differently -
   // on each read.
   const targetNames = copyTargetNames(options?.componentNames ?? undefined);
   const hasExplicitTargets = targetNames !== undefined && targetNames.size > 0;
-
-  // Filter by names if specified
-  if (hasExplicitTargets) {
-    targetComponents = targetComponents.filter((c) =>
-      targetNames.has(context.nameOf(c)),
-    );
-  }
 
   const allowStopped = options?.includeStopped === true;
   const allowStalled = options?.includeStalled === true;
@@ -455,6 +451,18 @@ export async function broadcastMessageInternal(
     }
     return isStalled ? 'stalled' : 'stopped';
   };
+
+  // The registry is read only now, after every option: those reads can run the caller's
+  // getters, which can register or unregister components. A snapshot taken before them
+  // reported a component they removed and never sent to one they added.
+  let targetComponents = context.components;
+
+  // Filter by names if specified
+  if (hasExplicitTargets) {
+    targetComponents = targetComponents.filter((c) =>
+      targetNames.has(context.nameOf(c)),
+    );
+  }
 
   // Explicit targets are all reported, eligible or not; otherwise only eligible ones.
   if (!hasExplicitTargets) {
@@ -538,6 +546,15 @@ export async function broadcastMessageInternal(
 }
 
 /**
+ * What {@link answerValueRequest} last found - whether the lookup found the component,
+ * and the latest availability read - so a crash partway is answered with it.
+ */
+interface ValueAnswerProgress {
+  hasComponent: boolean;
+  availability?: ReturnType<typeof readAvailability>;
+}
+
+/**
  * Internal getValue with explicit 'from' parameter
  *
  * @param componentName - Target component name
@@ -558,22 +575,65 @@ export function getValueInternal<T = unknown>(
 
   context.lifecycleEvents.componentValueRequested(componentName, key, from);
 
-  const finish = (result: ValueResult<T>): ValueResult<T> => {
-    const { error: _error, ...eventResult } = result;
-    context.lifecycleEvents.componentValueReturned(
+  const progress: ValueAnswerProgress = { hasComponent: false };
+
+  let result: ValueResult<T>;
+  try {
+    result = answerValueRequest<T>(
+      context,
       componentName,
       key,
       from,
-      eventResult,
+      allowStopped,
+      allowStalled,
+      progress,
     );
-    return result;
-  };
+  } catch (error) {
+    // Every step of the answer guards the caller's code, so this is the manager breaking
+    // its own invariant - or a seam it forwards to, such as a lookup, throwing. Answered
+    // and reported here rather than left to the safety net in `getValue()`, which has no
+    // `value-returned` to pair with the `value-requested` already sent.
+    reportCallbackError('lifecycle-manager getValue', error);
+    result = {
+      found: false,
+      value: undefined,
+      componentFound: progress.availability?.isCurrent ?? progress.hasComponent,
+      componentRunning: progress.availability?.isRunning ?? false,
+      handlerImplemented: false,
+      requestedBy: from,
+      code: 'operation_crashed',
+      error: toError(error),
+    };
+  }
 
+  const { error: _error, ...eventResult } = result;
+  context.lifecycleEvents.componentValueReturned(
+    componentName,
+    key,
+    from,
+    eventResult,
+  );
+  return result;
+}
+
+/**
+ * The answer {@link getValueInternal} announces, once `value-requested` has gone out.
+ * `progress` is updated as the answer learns more (see {@link ValueAnswerProgress}).
+ */
+function answerValueRequest<T>(
+  context: ComponentAccessContext,
+  componentName: string,
+  key: string,
+  from: string | null,
+  allowStopped: boolean,
+  allowStalled: boolean,
+  progress: ValueAnswerProgress,
+): ValueResult<T> {
   // Find component
   const component = context.getComponent(componentName);
 
   if (!component) {
-    return finish({
+    return {
       found: false,
       value: undefined,
       componentFound: false,
@@ -581,8 +641,9 @@ export function getValueInternal<T = unknown>(
       handlerImplemented: false,
       requestedBy: from,
       code: 'not_found',
-    });
+    };
   }
+  progress.hasComponent = true;
 
   const refuseUnavailable = (
     availability: ReturnType<typeof readAvailability>,
@@ -591,7 +652,7 @@ export function getValueInternal<T = unknown>(
     if (availability.refusalCode === undefined) {
       return undefined;
     }
-    const result: ValueResult<T> = {
+    return {
       found: false,
       value: undefined,
       componentFound: availability.isCurrent,
@@ -600,7 +661,6 @@ export function getValueInternal<T = unknown>(
       requestedBy: from,
       code: availability.refusalCode,
     };
-    return finish(result);
   };
   // The latest availability read; see `sendMessageInternal()`. The options were read
   // before the lookup above, so nothing has run since it found `component`.
@@ -611,6 +671,7 @@ export function getValueInternal<T = unknown>(
     allowStopped,
     allowStalled,
   );
+  progress.availability = availability;
   const initialRefusal = refuseUnavailable(availability, false);
   if (initialRefusal) {
     return initialRefusal;
@@ -625,7 +686,7 @@ export function getValueInternal<T = unknown>(
   // is never invoked after it removed/replaced the registration or handed the
   // component to teardown.
   const handlerRead = readHookThenRecheck(
-    () => Reflect.get(component, 'getValue') as unknown,
+    () => getIntrinsic(component, 'getValue') as unknown,
     (error) => {
       reportCallbackError('lifecycle-manager getValue', error);
     },
@@ -637,6 +698,7 @@ export function getValueInternal<T = unknown>(
         allowStopped,
         allowStalled,
       );
+      progress.availability = availability;
       return availability.refusalCode === undefined ? undefined : availability;
     },
   );
@@ -658,7 +720,7 @@ export function getValueInternal<T = unknown>(
         params: { error: err, key, from },
       });
 
-    return finish({
+    return {
       found: false,
       value: undefined,
       componentFound: true,
@@ -667,14 +729,14 @@ export function getValueInternal<T = unknown>(
       requestedBy: from,
       code: 'operation_crashed',
       error: err,
-    });
+    };
   }
 
   const getValueHandler = handlerRead.value;
 
   // Check if handler implemented
   if (typeof getValueHandler !== 'function') {
-    return finish({
+    return {
       found: false,
       value: undefined,
       componentFound: true,
@@ -682,7 +744,7 @@ export function getValueInternal<T = unknown>(
       handlerImplemented: false,
       requestedBy: from,
       code: 'no_handler',
-    });
+    };
   }
 
   // Get value
@@ -708,13 +770,13 @@ export function getValueInternal<T = unknown>(
     }
 
     // Read and validate the synchronous answer once.
-    const wasFound: unknown = Reflect.get(rawResult, 'found');
+    const wasFound: unknown = getIntrinsic(rawResult, 'found');
     if (typeof wasFound !== 'boolean') {
       throw new TypeError('getValue() result.found must be a boolean');
     }
-    const value: unknown = Reflect.get(rawResult, 'value');
+    const value: unknown = getIntrinsic(rawResult, 'value');
 
-    return finish({
+    return {
       found: wasFound,
       value: value as T | undefined,
       componentFound: true,
@@ -722,7 +784,7 @@ export function getValueInternal<T = unknown>(
       handlerImplemented: true,
       requestedBy: from,
       code: wasFound ? 'found' : 'not_found',
-    });
+    };
   } catch (error) {
     const err = toError(error);
 
@@ -732,7 +794,7 @@ export function getValueInternal<T = unknown>(
         params: { error: err, key, from },
       });
 
-    return finish({
+    return {
       found: false,
       value: undefined,
       componentFound: true,
@@ -741,6 +803,6 @@ export function getValueInternal<T = unknown>(
       requestedBy: from,
       code: 'error',
       error: err,
-    });
+    };
   }
 }

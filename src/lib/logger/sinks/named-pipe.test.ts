@@ -3731,6 +3731,11 @@ describe('NamedPipeSink', () => {
         ['late-2', 'lost'],
       ]);
       expect(sink.getHealth().droppedEntries).toBe(3);
+      // Counted under the kind each loss was reported as, which `DroppedEntryKind`
+      // promises: these are failed writes, not lines refused or abandoned by the close.
+      expect(losses.every((failure) => failure.kind === 'write')).toBe(true);
+      expect(sink.getHealth().droppedByKind.write).toBe(3);
+      expect(sink.getHealth().droppedByKind.close).toBe(0);
       expect(sink.getHealth().queueSize).toBe(0);
     } finally {
       await sink.close();
@@ -5466,6 +5471,51 @@ test('concurrent and reentrant pipe closes share one teardown and buffered-byte 
     expect(failures[0]?.error.message).toContain('bytes still buffered');
   } finally {
     await sink.close();
+    await directory.cleanup();
+  }
+});
+
+test('an initialization that rejects is reported, and reconnect and close still settle', async () => {
+  // `initializePipe` is built never to reject, but the constructor stored its promise
+  // with no observer and `reconnect()` awaits that promise directly - one rejection and it
+  // was unhandled until something happened to wait on it. Contained as `FileSink` contains
+  // its own, and reported rather than swallowed, since it would be a bug.
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const initializePipe = spyOn(
+    NamedPipeSink.prototype as unknown as {
+      initializePipe: () => Promise<void>;
+    },
+    'initializePipe',
+  ).mockImplementationOnce(() => Promise.reject(new Error('init exploded')));
+  const captured = muteConsoleError();
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const sink = new NamedPipeSink({
+      pipePath: `${directory.path}/missing.pipe`,
+      onError: () => {},
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    (sink as unknown as { isOpening: boolean }).isOpening = true;
+    const status = await sink.reconnect();
+    expect(status.success).toBe(false);
+    await sink.close();
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(unhandled).toEqual([]);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain(
+      'NamedPipeSink initialization failed unexpectedly',
+    );
+    expect(captured[0]).toContain('init exploded');
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+    restoreConsoleError();
+    initializePipe.mockRestore();
     await directory.cleanup();
   }
 });

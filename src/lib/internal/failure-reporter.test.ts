@@ -1,6 +1,9 @@
 import { expect, spyOn, test } from 'bun:test';
 import * as consoleRung from './report-to-console';
-import { reportThroughHandler } from './failure-reporter';
+import {
+  createFailureReporter,
+  reportThroughHandler,
+} from './failure-reporter';
 import { muteConsoleError, restoreConsoleError } from './console-test-utils';
 
 test.each([false, true])(
@@ -134,4 +137,35 @@ test('a handlerName builder runs only when the handler return is unreadable', ()
   expect(lines[0]).toContain('Failure handler (built handler)');
   expect(lines[1]).toContain('Failure handler (<unnamed callback>)');
   expect(lines[1]).toContain('original failure');
+});
+
+test('a console-origin failure does not spend the operation report', () => {
+  muteConsoleError();
+  const delivered: string[] = [];
+  let settlements = 0;
+  const report = createFailureReporter(
+    'Render',
+    (error, subject) => {
+      delivered.push(`${subject}: ${error.message}`);
+    },
+    () => {
+      settlements++;
+    },
+  );
+  try {
+    console.error = () => {
+      // A shim forwarding the console line back into the operation.
+      report(new Error('inside the shim'), 'first');
+    };
+    consoleRung.reportToConsole('terminal line');
+    expect(delivered).toEqual([]);
+    expect(settlements).toBe(1);
+
+    report(new Error('outside the shim'), 'second');
+    report(new Error('one too many'), 'third');
+    expect(delivered).toEqual(['second: outside the shim']);
+    expect(settlements).toBe(2);
+  } finally {
+    restoreConsoleError();
+  }
 });

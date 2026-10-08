@@ -431,7 +431,10 @@ export interface HTTPClientConfig {
    */
   baseURL?: string;
   defaultHeaders?: Record<string, string | string[]>;
-  /** Null or undefined selects the default timeout. */
+  /**
+   * Null or undefined selects `DEFAULT_TIMEOUT_MS`. In `createSubClient` overrides,
+   * either inherits the parent client's timeout instead.
+   */
   timeout?: number | null;
   cookieJar?: CookieJar | null;
   retryPolicy?: RetryPolicyOptions;
@@ -475,7 +478,7 @@ export interface HTTPRequestOptions {
   headers?: Record<string, string | string[]>;
   params?: Record<string, unknown>;
   body?: unknown;
-  /** Null or undefined selects the default timeout. */
+  /** Null or undefined inherits the client's configured `timeout`. */
   timeout?: number | null;
   signal?: AbortSignal;
   retryPolicy?: RetryPolicyOptions | null;

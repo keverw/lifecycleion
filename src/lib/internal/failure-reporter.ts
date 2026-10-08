@@ -257,7 +257,11 @@ export function createFailureReporter(
       return;
     }
 
-    didReport = true;
+    // A supplied handler is skipped inside a console report (see `reportThroughHandler`),
+    // so such a report delivers nothing and does not spend the operation's one report: a
+    // later failure outside the console shim still reaches the handler.
+    const isConsoleOrigin = handler !== undefined && isConsoleReportActive();
+    didReport = !isConsoleOrigin;
 
     // Normalized rather than trusted: the value reaching here was thrown by caller code -
     // a `redactFunction`, a getter, a trap, a `toString` - and is free to be any value at
@@ -278,7 +282,11 @@ export function createFailureReporter(
       reportThroughHandler(
         () => handler(failure, subject),
         () => `${label} failed for ${subject}: ${describeError(failure)}`,
-        { handlerName, onSettled: onHandlerSettled },
+        {
+          handlerName,
+          onSettled: onHandlerSettled,
+          suppressDiagnostics: isConsoleOrigin,
+        },
       );
 
       return;

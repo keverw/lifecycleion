@@ -113,6 +113,38 @@ describe('reportToConsole', () => {
     }
   });
 
+  test('creates shared console state despite a get added to Object.prototype', () => {
+    const key = Symbol.for('lifecycleion.reportToConsole.v1');
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    Reflect.deleteProperty(globalThis, key);
+    let isSharedActive = false;
+    muteConsoleError();
+    console.error = () => {
+      const shared: unknown = Object.getOwnPropertyDescriptor(
+        globalThis,
+        key,
+      )?.value;
+      isSharedActive = shared instanceof Set && shared.has(true);
+    };
+    Object.defineProperty(Object.prototype, 'get', {
+      configurable: true,
+      writable: true,
+      value: () => undefined,
+    });
+    try {
+      reportToConsole('failure');
+    } finally {
+      Reflect.deleteProperty(Object.prototype, 'get');
+      if (descriptor === undefined) {
+        Reflect.deleteProperty(globalThis, key);
+      } else {
+        Object.defineProperty(globalThis, key, descriptor);
+      }
+    }
+    // Other bundled copies read this slot; without it only the local guard held.
+    expect(isSharedActive).toBe(true);
+  });
+
   test('bounds a console shim that reports another failure and releases the guard', () => {
     muteConsoleError();
     let calls = 0;

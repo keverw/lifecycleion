@@ -1,7 +1,7 @@
 // Captured, and `Object.defineProperty` rather than `Reflect.defineProperty`: a later
 // replacement of either global cannot redirect the write, and a target that refuses the
 // entry - frozen, or holding a non-configurable key - still throws instead of dropping it.
-const definePropertyIntrinsic = Object.defineProperty;
+const throwingDefinePropertyIntrinsic = Object.defineProperty;
 
 /**
  * Write one entry into a record built from caller-controlled keys - a container being
@@ -27,7 +27,7 @@ export function defineEntry<V>(
 ): void {
   // A descriptor without a prototype, so nothing added to `Object.prototype` - a `get`,
   // say - is read as part of it and turns every write into a throw.
-  definePropertyIntrinsic(target, key, {
+  throwingDefinePropertyIntrinsic(target, key, {
     // eslint-disable-next-line @typescript-eslint/naming-convention
     __proto__: null,
     value,

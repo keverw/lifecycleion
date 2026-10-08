@@ -314,13 +314,11 @@ if the adapter finished writing it. It never rejects. For `NodeAdapter`, it is a
 once a supported body has entered the adapter's upload tracking, including when the
 response arrives after the upload has finished. It does not prove that the server
 processed or committed the data. The same outcome is shared by the attempt's retry,
-redirect, and response handling. Ordinary upload Errors retain their identity on
-runtimes with `Error.isError`. Errors with an unknown prototype (including custom
-subclasses), or an unsafe `then` property, use a wrapper with the original in `cause`
-and its readable `message`, `name`, `code`, and `stack`. A subclass with its own
-non-callable data `then` property can retain identity. Runtimes without `Error.isError`
-wrap every upload Error because they cannot rule out a Proxy intercepting property
-lookup. Inspect `cause` for other custom fields.
+redirect, and response handling. An upload Error is always a wrapper, on every runtime:
+the adapter's original Error is its `cause`, and it copies the original's readable
+`message`, `name`, `code`, and `stack`. A rejection with a non-Error value is normalized
+into an Error that likewise carries the value as `cause`. Inspect `cause` for the
+original's identity, class, or other custom fields.
 
 Check that the field exists before interpreting its resolution:
 
@@ -1606,12 +1604,13 @@ Expectations for a custom writable:
   takes them off again afterwards. With neither method it cannot, so it attaches one
   permanent listener per event to that writable instead and registers each request behind
   it - rather than adding a listener per request to a sink reused across many of them,
-  until Node warns about a leak. Behaviour is unchanged either way: an `'error'` that
-  reaches that permanent listener with no request registered behind it is reported through
-  the host error reporter, as the bounded listener described below reports it. The one
-  difference is that the permanent listener never detaches, so that coverage has no time
-  limit. What you save by defining one is that listener. Either name works. A Node stream
-  has both.
+  until Node warns about a leak. Reporting is unchanged either way: an `'error'` that
+  reaches that permanent listener within about a second of the last request leaving it is
+  reported through the host error reporter, as the bounded listener described below
+  reports it. The one difference is that the permanent listener never detaches, so a later
+  `'error'` is still absorbed rather than becoming an uncaught exception, but it is not
+  reported; handle those with your own `'error'` listener. What you save by defining one is
+  that listener. Either name works. A Node stream has both.
 - **Report a failed write.** Either call the callback passed to `write` / `end` with the
   error, or emit `'error'`, which is what a Node stream does. A write that fails destroys
   the stream and its `'error'` often arrives after the request has already settled, so the

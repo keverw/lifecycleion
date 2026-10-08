@@ -264,6 +264,174 @@ test('an early-ack upload whose write fails behind a refusing signal keeps its r
   }
 });
 
+test('a socket error after an early ack behind a refusing signal settles the upload with the socket error', async () => {
+  // The request `'error'` handler failed the request with the signal's refusal whatever
+  // had happened, while the write-failure handler reads the same refusal as "not aborted"
+  // once a response has arrived. With a `200` already in hand that reject was a no-op,
+  // but it still answered `requestBodySettled` with the getter's error instead of the
+  // reset that actually cut the upload short, and the reset itself went unreported.
+  const reset = Object.assign(new Error('read ECONNRESET'), {
+    code: 'ECONNRESET',
+  });
+  let isSignalRefusing = false;
+  let respond: ((res: http.IncomingMessage) => void) | undefined;
+  const req = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    writableEnded: false,
+    setHeader() {},
+    getHeaders: () => ({}),
+    // Never calls back: the upload is still going out when the socket resets.
+    write() {
+      return true;
+    },
+    end() {
+      this.writableEnded = true;
+    },
+    destroy() {
+      this.destroyed = true;
+      return this;
+    },
+  });
+  const requestSpy = spyOn(http, 'request').mockImplementation(((
+    _options: unknown,
+    callback: (res: http.IncomingMessage) => void,
+  ) => {
+    respond = callback;
+    return req as unknown as http.ClientRequest;
+  }) as unknown as typeof http.request);
+  const reports: unknown[] = [];
+  const onError = (event: Event): void => {
+    reports.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onError);
+  try {
+    const pending = new NodeAdapter().send({
+      requestURL: 'http://example.test/upload',
+      method: 'POST',
+      headers: {},
+      body: 'payload',
+      signal: {
+        get aborted() {
+          if (isSignalRefusing) {
+            throw new Error('aborted getter refused');
+          }
+          return false;
+        },
+        addEventListener() {},
+        removeEventListener() {},
+      } as unknown as AbortSignal,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const res = Object.assign(new EventEmitter(), {
+      statusCode: 200,
+      headers: { 'content-length': '2' },
+      complete: false,
+    });
+    respond?.(res as unknown as http.IncomingMessage);
+    res.emit('data', Buffer.from('ok'));
+    res.complete = true;
+    res.emit('end');
+
+    const response = await pending;
+    expect(response.status).toBe(200);
+
+    isSignalRefusing = true;
+    req.emit('error', reset);
+
+    expect(await response.requestBodySettled).toBe(reset);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reports).toEqual([reset]);
+  } finally {
+    globalThis.removeEventListener('error', onError);
+    requestSpy.mockRestore();
+  }
+});
+
+test('a socket error during streamResponse setup behind a refusing signal still aborts the factory', async () => {
+  // An async factory is still setting up its sink on a `200` when the socket resets, and
+  // the caller's signal refuses its `aborted` read by then. The request `'error'` handler
+  // rejected with the refusal and returned, skipping the setup-window handler: the
+  // factory's signal never fired, so its cleanup never ran, and the request failed with
+  // the getter's error rather than settling as the stream failure it was.
+  const reset = Object.assign(new Error('read ECONNRESET'), {
+    code: 'ECONNRESET',
+  });
+  let isSignalRefusing = false;
+  let respond: ((res: http.IncomingMessage) => void) | undefined;
+  let factorySignal: AbortSignal | undefined;
+  const req = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    writableEnded: false,
+    setHeader() {},
+    getHeaders: () => ({}),
+    write() {
+      return true;
+    },
+    end() {
+      this.writableEnded = true;
+    },
+    destroy() {
+      this.destroyed = true;
+      return this;
+    },
+  });
+  const requestSpy = spyOn(http, 'request').mockImplementation(((
+    _options: unknown,
+    callback: (res: http.IncomingMessage) => void,
+  ) => {
+    respond = callback;
+    return req as unknown as http.ClientRequest;
+  }) as unknown as typeof http.request);
+  try {
+    const pending = new NodeAdapter().send({
+      requestURL: 'http://example.test/download',
+      method: 'GET',
+      headers: {},
+      signal: {
+        get aborted() {
+          if (isSignalRefusing) {
+            throw new Error('aborted getter refused');
+          }
+          return false;
+        },
+        addEventListener() {},
+        removeEventListener() {},
+      } as unknown as AbortSignal,
+      streamResponse: (_info, context) => {
+        factorySignal = context.signal;
+
+        // Never settles: the factory is still setting up when the socket goes.
+        return new Promise<WritableLike>(() => {});
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const res = Object.assign(new EventEmitter(), {
+      statusCode: 200,
+      headers: { 'content-length': '2' },
+      complete: false,
+    });
+    respond?.(res as unknown as http.IncomingMessage);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(factorySignal).toBeDefined();
+
+    isSignalRefusing = true;
+    req.emit('error', reset);
+
+    const response = await pending;
+    expect(response.status).toBe(200);
+    expect(response.isStreamError).toBe(true);
+    expect(response.errorCause).toBe(reset);
+    expect(factorySignal?.aborted).toBe(true);
+  } finally {
+    requestSpy.mockRestore();
+  }
+});
+
 test('a response-task recovery that answers and then throws reports only what went undelivered', async () => {
   // The recovery handler rejects with the task's failure, then its teardown throws. The
   // caller has the task's failure, so the host channel is told only about the teardown's,

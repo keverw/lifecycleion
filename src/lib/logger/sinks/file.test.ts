@@ -12,11 +12,13 @@ import { FileSink } from './file';
 import type { SinkFailure, SinkFailureKind } from './internal/sink-failure';
 import type { LogEntry } from '../types';
 import { LogLevel } from '../types';
+import { markDiagnosticEntry } from '../internal/sink-failure-routing';
 import { TmpDir } from '../../tmp-dir';
 import {
   muteConsoleError,
   restoreConsoleError,
 } from '../../internal/console-test-utils';
+import { reportToConsole } from '../../internal/report-to-console';
 
 /**
  * A message the JSON envelope cannot serialize: `JSON.stringify` calls `toJSON` and it
@@ -2923,6 +2925,7 @@ describe('FileSink - entries refused at the door', () => {
     const stream = (
       sink as unknown as {
         logFileStream?: {
+          pending: boolean;
           write: (chunk: string, cb: (err?: Error) => void) => boolean;
           emit: (event: string, error: Error) => void;
         };
@@ -2930,6 +2933,12 @@ describe('FileSink - entries refused at the door', () => {
     ).logFileStream;
 
     expect(stream).toBeDefined();
+
+    // A write failure on a stream that has opened: one still opening reports a failed
+    // callback as the open that failed, which is a `'setup'` loss rather than this one.
+    while (stream?.pending === true) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
 
     if (stream) {
       stream.write = (_chunk, cb) => {
@@ -2992,6 +3001,92 @@ describe('FileSink - entries refused at the door', () => {
     // out.
     expect(sink.getHealth().isHealthy).toBe(false);
     expect(sink.getHealth().isInitialized).toBe(false);
+
+    await sink.close();
+  });
+
+  test('a write to a stream destroyed after it opened is a write loss, not a setup loss', async () => {
+    // A destroyed stream has no descriptor, as one that never opened has none: only the
+    // error code tells the two apart.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'destroyed-after-open',
+      maxRetries: 0,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'opens the stream',
+      message: 'opens the stream',
+    });
+    await sink.flush(2000);
+    const stream = (sink as unknown as { logFileStream: NodeJS.WritableStream })
+      .logFileStream as unknown as { pending: boolean; destroy: () => void };
+    stream.destroy();
+    expect(stream.pending).toBe(true);
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'into a destroyed stream',
+      message: 'into a destroyed stream',
+    });
+    await sink.flush(2000);
+
+    const lost = failures.filter(
+      (failure) => failure.entry?.message === 'into a destroyed stream',
+    );
+    expect(lost.map((failure) => failure.kind)).not.toContain('setup');
+    expect(sink.getHealth().droppedByKind.setup).toBe(0);
+
+    await sink.close();
+  });
+
+  test('a line written to a path that cannot be opened is a setup loss, not a write loss', async () => {
+    // The buffered write's callback hears the failed open before the `'error'` event does,
+    // and its teardown sends that event down the branch that reports nothing - so the
+    // line used to be reported and counted as a failed *write* against a destination that
+    // never had a descriptor.
+    const failures: SinkFailure[] = [];
+    const logPath = `${tmpDir.path}/unopenable-${new Date().toISOString().slice(0, 10)}.log`;
+
+    await fsPromises.mkdir(logPath, { recursive: true });
+
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'unopenable',
+      maxRetries: 1,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    failures.length = 0;
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'nowhere to go',
+      message: 'nowhere to go',
+    });
+    await sink.flush(2000);
+
+    expect(
+      failures.map((failure) => [failure.kind, failure.disposition]),
+    ).toEqual([
+      ['setup', 'retrying'],
+      ['setup', 'lost'],
+    ]);
+    expect(failures[1]?.entry?.message).toBe('nowhere to go');
+    expect(sink.getHealth().droppedByKind.setup).toBe(1);
+    expect(sink.getHealth().droppedByKind.write).toBe(0);
+    expect(sink.getHealth().consecutiveFailures).toBe(0);
+    expect(sink.getHealth().isHealthy).toBe(false);
 
     await sink.close();
   });
@@ -3333,6 +3428,18 @@ describe('FileSink - entries written during close', () => {
         );
         expect(finalLoss).toHaveLength(1);
         expect(finalLoss[0]?.kind).toBe('write');
+        if (shouldFillFromCallback) {
+          // The documented exception to one report per failure: the handler's own line
+          // took the retry's slot, so the same attempt is reported again as the final word.
+          expect(
+            failures
+              .filter((f) => f.entry?.message === 'failed line')
+              .map((f) => [f.disposition, f.attempt]),
+          ).toEqual([
+            ['retrying', 1],
+            ['lost', 1],
+          ]);
+        }
         expect(sink.getHealth().droppedByKind.write).toBe(1);
         expect(sink.getHealth().droppedByKind.queue_full).toBe(
           shouldFillFromCallback ? 0 : 1,
@@ -4101,3 +4208,111 @@ test('concurrent and reentrant file closes share one teardown and buffered-byte 
     await directory.cleanup();
   }
 });
+
+test('a diagnostic eviction does not silence the overflow report for application entries', async () => {
+  const makeEntry = (message: string): LogEntry => ({
+    timestamp: Date.now(),
+    type: 'info',
+    serviceName: 'TestService',
+    template: message,
+    message,
+  });
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const failures: SinkFailure[] = [];
+  const sink = new FileSink({
+    logDir: directory.path,
+    basename: 'diagnostic-overflow',
+    maxQueueSize: 1,
+    onError: (failure) => {
+      failures.push(failure);
+    },
+  });
+  const captured = muteConsoleError();
+  const pending = Promise.withResolvers<void>();
+  try {
+    await sink.flush();
+    const started = Promise.withResolvers<void>();
+    (sink as unknown as { writeEntry: () => Promise<void> }).writeEntry =
+      () => {
+        started.resolve();
+        return pending.promise;
+      };
+    sink.write(makeEntry('in flight'));
+    await started.promise;
+    sink.write(markDiagnosticEntry(makeEntry('diagnostic')));
+    // Evicts only the diagnostic: its report goes to the console, not `onError`.
+    sink.write(makeEntry('first app line'));
+    expect(failures).toEqual([]);
+    expect(captured.some((line) => line.includes('Log queue is full'))).toBe(
+      true,
+    );
+    // Evicts an application entry: still reported to `onError`.
+    sink.write(makeEntry('second app line'));
+    expect(failures.map((failure) => failure.kind)).toEqual(['queue_full']);
+    expect(failures[0]?.entry?.message).toBe('first app line');
+  } finally {
+    pending.resolve();
+    await sink.close();
+    restoreConsoleError();
+    await directory.cleanup();
+  }
+});
+
+test.each(['console', 'diagnostic'] as const)(
+  'a rotation failure reaches onError when a %s entry triggered the rotation',
+  async (origin) => {
+    // The rename failure belongs to no entry, and only the first of a backoff run is
+    // reported. Routed by whichever entry happened to trigger the rotation, a forwarded
+    // console line suppressed that one report and a diagnostic sent it to the console,
+    // so `onError` never heard of the outage at all.
+    const makeEntry = (message: string): LogEntry => ({
+      timestamp: Date.now(),
+      type: 'info',
+      template: message,
+      message,
+    });
+    const directory = new TmpDir({ unsafeCleanup: true });
+    await directory.initialize();
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: directory.path,
+      basename: `rotation-origin-${origin}`,
+      maxSizeMB: 0.001,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+    const captured = muteConsoleError();
+    let renameSpy: { mockRestore(): void } | undefined;
+    try {
+      sink.write(makeEntry('fill-' + 'x'.repeat(2000)));
+      await sink.flush();
+      renameSpy = spyOn(fsPromises, 'rename').mockImplementation(() =>
+        Promise.reject(new Error('archive rename denied')),
+      );
+      if (origin === 'console') {
+        const consoleShim = spyOn(console, 'error').mockImplementation(() => {
+          sink.write(makeEntry('forwarded terminal report'));
+        });
+        try {
+          reportToConsole('terminal failure');
+        } finally {
+          consoleShim.mockRestore();
+        }
+      } else {
+        sink.write(markDiagnosticEntry(makeEntry('diagnostic')));
+      }
+      await sink.flush();
+      expect(failures.map((failure) => failure.kind)).toEqual(['setup']);
+      expect(failures[0]?.disposition).toBe('no_entry');
+      expect(failures[0]?.error.message).toContain('Error rotating log file');
+      expect(captured).toEqual([]);
+    } finally {
+      renameSpy?.mockRestore();
+      await sink.close();
+      restoreConsoleError();
+      await directory.cleanup();
+    }
+  },
+);

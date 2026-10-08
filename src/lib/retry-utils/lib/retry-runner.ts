@@ -874,6 +874,15 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         // Waiting calls join its outcome; non-waiting calls report supersession
         // immediately. Neither revives work the newer request wants stopped.
         if (hasNewStopRequest) {
+          // Aborting during 'stopping' detached the attempt and cleared the grace
+          // timer that would have finished the pending cancellation. Settle it here,
+          // or the cancel()/reset() calls joined to it never resolve.
+          if (
+            this.currentState.runnerState === 'stopping' &&
+            this.currentState.currentAttemptContext === null
+          ) {
+            this.confirmCancellation('stopped', { status: 'canceled' });
+          }
           return shouldWaitForCompletion
             ? operationResolver.promise
             : {

@@ -130,7 +130,7 @@ test.each(['missing headers', 'throwing headers', 'throwing body'] as const)(
       .text('x')
       .send();
     expect(response.status).toBe(0);
-    expect(await response.requestBodySettled).toBe(uploadError);
+    expect((await response.requestBodySettled)?.cause).toBe(uploadError);
     expect(uploadReads).toBe(1);
   },
 );

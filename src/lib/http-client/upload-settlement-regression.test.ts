@@ -356,7 +356,7 @@ test('unreadable upload error code and stack do not reject settlement', async ()
 
 for (const isInherited of [false, true]) {
   for (const thenValue of [undefined, null, 0, 'not callable']) {
-    test(`non-callable data then ${isInherited ? 'wraps an unknown prototype' : 'preserves upload error identity'}: value=${String(thenValue)}`, async () => {
+    test(`non-callable data then on ${isInherited ? 'an unknown prototype' : 'the error itself'} is still wrapped: value=${String(thenValue)}`, async () => {
       class UploadError extends Error {
         public readonly uploadID = 'upload-123';
       }
@@ -384,16 +384,10 @@ for (const isInherited of [false, true]) {
         .get('https://example.com/upload')
         .send();
       const outcome = await response.requestBodySettled;
-      if (isInherited) {
-        expect(outcome).not.toBe(failure);
-        expect(outcome?.cause).toBe(failure);
-        expect(outcome?.message).toBe('upload failed');
-        expect(outcome?.cause).toHaveProperty('uploadID', 'upload-123');
-      } else {
-        expect(outcome).toBe(failure);
-        expect(outcome).toBeInstanceOf(UploadError);
-        expect(outcome).toHaveProperty('uploadID', 'upload-123');
-      }
+      expect(outcome).not.toBe(failure);
+      expect(outcome?.cause).toBe(failure);
+      expect(outcome?.message).toBe('upload failed');
+      expect(outcome?.cause).toHaveProperty('uploadID', 'upload-123');
     });
   }
 }
@@ -406,23 +400,26 @@ test.each([
   SyntaxError,
   TypeError,
   URIError,
-])('ordinary %p upload errors retain identity', async (ErrorType) => {
-  const failure = new ErrorType('upload failed');
-  const adapter: HTTPAdapter = {
-    getType: () => 'node',
-    send: () =>
-      Promise.resolve({
-        status: 200,
-        headers: {},
-        body: null,
-        requestBodySettled: Promise.reject(failure),
-      }),
-  };
-  const response = await new HTTPClient({ adapter })
-    .get('https://example.com/upload')
-    .send();
-  expect(await response.requestBodySettled).toBe(failure);
-});
+])(
+  'ordinary %p upload errors are wrapped with the original as cause',
+  async (ErrorType) => {
+    const failure = new ErrorType('upload failed');
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: {},
+          body: null,
+          requestBodySettled: Promise.reject(failure),
+        }),
+    };
+    const response = await new HTTPClient({ adapter })
+      .get('https://example.com/upload')
+      .send();
+    expect((await response.requestBodySettled)?.cause).toBe(failure);
+  },
+);
 
 test.each(['ordinary', 'proxy'] as const)(
   'without Error.isError, %s upload errors are conservatively wrapped',

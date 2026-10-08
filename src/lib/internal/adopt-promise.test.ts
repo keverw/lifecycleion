@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { muteConsoleError, restoreConsoleError } from './console-test-utils';
 import {
   adoptPromise,
   adoptResult,
@@ -789,3 +790,34 @@ test('adoption ignores an own then on a native promise reparented to Object.prot
   expect(await settle(adoptPromise(promise))).toBe('real native failure');
   expect(calls).toBe(0);
 });
+
+for (const hasOwnThen of [false, true]) {
+  test(`a throwing observation-failure callback keeps the original rejection (own then: ${String(hasOwnThen)})`, async () => {
+    const captured = muteConsoleError();
+    const source = Promise.resolve(1);
+    void Object.defineProperty(source, 'constructor', {
+      get(): never {
+        throw new Error('constructor refused');
+      },
+    });
+    if (hasOwnThen) {
+      void Object.defineProperty(source, 'then', { value: () => {} });
+    }
+    try {
+      let adopted: Promise<unknown> | undefined;
+      expect(() => {
+        adopted = adoptPromise(source, () => {
+          throw new Error('callback failed');
+        });
+      }).not.toThrow();
+      expect(await settle(adopted as Promise<unknown>)).toBe(
+        'constructor refused',
+      );
+      expect(captured).toEqual([
+        'An adoption failure callback threw: callback failed',
+      ]);
+    } finally {
+      restoreConsoleError();
+    }
+  });
+}

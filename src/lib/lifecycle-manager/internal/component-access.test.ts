@@ -557,11 +557,11 @@ test('a health check getter that unregisters and throws is answered as not_found
   expect(reports.map((report) => report.cause)).toEqual([error]);
 });
 
-test('a signal handler read that stops its component skips it without a started event', async () => {
+test('a signal handler read that stops its component reports it unavailable with paired events', async () => {
   const state = fixture();
   const component = state.add('signal-target');
   let calls = 0;
-  const started: string[] = [];
+  const events: string[] = [];
   const result = await runSignalBroadcast(state.context, {
     signal: 'reload',
     pickHandler: (target) => {
@@ -575,14 +575,29 @@ test('a signal handler read that stops its component skips it without a started 
     timeoutLog: 'timeout',
     errorLog: 'failed',
     emitStarted: (name) => {
-      started.push(name);
+      events.push(`started:${name}`);
     },
-    emitCompleted: () => {},
-    emitFailed: () => {},
+    emitCompleted: (name) => {
+      events.push(`completed:${name}`);
+    },
+    emitFailed: (name) => {
+      events.push(`failed:${name}`);
+    },
   });
-  // Skipped as a target that went down during an earlier callback is.
-  expect(result.results).toEqual([]);
-  expect(started).toEqual([]);
+  // Selected for this dispatch, then taken down by its own read: reported as a started
+  // listener taking it down is, with `started` and `failed` back to back.
+  expect(result.code).toBe('error');
+  expect(result.results).toHaveLength(1);
+  expect(result.results[0]).toMatchObject({
+    name: 'signal-target',
+    called: false,
+    timedOut: false,
+    code: 'unavailable',
+  });
+  expect(result.results[0]?.error?.message).toBe(
+    'Component "signal-target" became unavailable before reload dispatch',
+  );
+  expect(events).toEqual(['started:signal-target', 'failed:signal-target']);
   expect(calls).toBe(0);
 });
 

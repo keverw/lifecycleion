@@ -3,7 +3,7 @@ import {
   reportCallbackError,
 } from '../safe-handle-callback';
 import { matchesFilter, scalarHeader } from './utils';
-import { copyRegistrations } from './interceptors';
+import { copyRegistrations } from './internal/copy-registrations';
 import type {
   ResponseObserverFilter,
   ErrorObserverFilter,

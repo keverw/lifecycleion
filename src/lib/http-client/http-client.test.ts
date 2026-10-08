@@ -35,6 +35,7 @@ import type {
   AdapterResponse,
   HTTPAdapter,
   HTTPClientConfig,
+  InterceptedRequest,
   RedirectHopInfo,
   RequestInterceptorContext,
   SubClientConfig,
@@ -686,7 +687,7 @@ describe('HTTPClient — basic HTTP methods', () => {
     // Presence first: the documented contract is that a bodied request has the field, and
     // an absent one answers `undefined` through `await` without ever being missing.
     expect(response.requestBodySettled).toBeDefined();
-    expect(await response.requestBodySettled).toBe(uploadFailure);
+    expect((await response.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   test('a followed redirect keeps the upload outcome from the hop that had the body', async () => {
@@ -739,7 +740,7 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(response.status).toBe(200);
     expect(response.wasRedirectFollowed).toBe(true);
     expect(response.requestBodySettled).toBeDefined();
-    expect(await response.requestBodySettled).toBe(uploadFailure);
+    expect((await response.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   test('a terminal 3xx with no Location after a bodied hop still carries the upload outcome', async () => {
@@ -785,7 +786,7 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(response.status).toBe(302);
     expect(response.wasRedirectFollowed).toBe(true);
     expect(response.requestBodySettled).toBeDefined();
-    expect(await response.requestBodySettled).toBe(uploadFailure);
+    expect((await response.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   test('a throw between hops still carries the upload outcome', async () => {
@@ -828,7 +829,7 @@ describe('HTTPClient — basic HTTP methods', () => {
 
     expect(response.isFailed).toBe(true);
     expect(response.status).toBe(0);
-    expect(await response.requestBodySettled).toBe(uploadFailure);
+    expect((await response.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   test('a throw between hops reports the interceptor-rewritten URL, as every other failure does', async () => {
@@ -878,6 +879,59 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(response.initialURL).toBe('http://example.test/rewritten');
     expect(response.requestURL).toBe('http://example.test/rewritten');
     expect(observedURLs).toEqual(['http://example.test/rewritten']);
+  });
+
+  test('a throw between later hops reports the hop it happened on', async () => {
+    // The `catch` around the whole of `send()` built its response with the initial URL as
+    // `requestURL` and an empty redirect history, so a throw while preparing the second
+    // redirect - after one had already been followed - read as a failure of the first
+    // request.
+    let hop = 0;
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: (): Promise<AdapterResponse> => {
+        hop++;
+
+        return Promise.resolve({
+          status: 302,
+          headers: { location: hop === 1 ? '/next' : '/third' },
+          body: null,
+        });
+      },
+    };
+
+    const jar = new CookieJar();
+
+    jar.getCookieHeaderString = (url: string): string => {
+      if (url.includes('/third')) {
+        throw new Error('jar refused');
+      }
+
+      return '';
+    };
+
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      followRedirects: true,
+      cookieJar: jar,
+    });
+
+    const observedURLs: string[] = [];
+    client.addErrorObserver((_error, request) => {
+      observedURLs.push(request.requestURL);
+    });
+
+    const builder = client.get('/first');
+    const response = await builder.send();
+
+    expect(hop).toBe(2);
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(response.initialURL).toBe('http://example.test/first');
+    expect(response.requestURL).toBe('http://example.test/next');
+    expect(response.redirectHistory).toEqual(['http://example.test/next']);
+    expect(observedURLs).toEqual(['http://example.test/next']);
   });
 
   test("a followed redirect waits for the hop's upload to settle first", async () => {
@@ -1365,7 +1419,7 @@ describe('HTTPClient — basic HTTP methods', () => {
       .send();
 
     expect(response.isFailed).toBe(true);
-    expect(await response.requestBodySettled).toBe(uploadFailure);
+    expect((await response.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   test('a timed-out bodied request carries the upload outcome', async () => {
@@ -1399,7 +1453,7 @@ describe('HTTPClient — basic HTTP methods', () => {
 
     expect(response.isTimeout).toBe(true);
     expect(response.requestBodySettled).toBeDefined();
-    expect(await response.requestBodySettled).toBe(uploadFailure);
+    expect((await response.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   test('a requestBodySettled whose thenable check throws does not fail the response', async () => {
@@ -3970,6 +4024,47 @@ describe('HTTPClient — interceptors', () => {
     expect(errorCodes).toEqual(['interceptor_error']);
   });
 
+  test('request interceptor result without a method becomes interceptor_error', async () => {
+    const adapterCalls: string[] = [];
+    const errorCodes: string[] = [];
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: (request: AdapterRequest): Promise<AdapterResponse> => {
+        adapterCalls.push(request.requestURL);
+        return Promise.resolve({
+          status: 200,
+          headers: {},
+          body: new Uint8Array(),
+        });
+      },
+    };
+
+    const client = new HTTPClient({ adapter });
+    client.addRequestInterceptor(
+      (request) =>
+        ({
+          requestURL: request.requestURL,
+          headers: request.headers,
+          body: request.body,
+        }) as unknown as InterceptedRequest,
+    );
+    client.addErrorObserver((err) => {
+      errorCodes.push(err.code);
+    });
+
+    const builder = client.post('https://example.com/users').json({ a: 1 });
+    const res = await builder.send();
+
+    expect(res.isFailed).toBe(true);
+    expect(builder.error?.code).toBe('interceptor_error');
+    expect(builder.error?.cause?.message).toMatch(
+      /method is not a string \(got undefined\)/,
+    );
+    expect(adapterCalls).toEqual([]);
+    expect(errorCodes).toEqual(['interceptor_error']);
+  });
+
   test('initial-phase interceptor throw notifies default (final-phase) error observers', async () => {
     const adapter: HTTPAdapter = {
       getType: () => 'mock',
@@ -6145,7 +6240,7 @@ describe('HTTPClient — builder state', () => {
 
     expect(res.isCancelled).toBe(true);
     expect(res.requestBodySettled).toBeDefined();
-    expect(await res.requestBodySettled).toBe(uploadFailure);
+    expect((await res.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   for (const outcome of ['response', 'throw'] as const) {
@@ -6431,7 +6526,7 @@ describe('HTTPClient — builder state', () => {
 
     expect(res.isCancelled).toBe(true);
     expect(res.requestBodySettled).toBeDefined();
-    expect(await res.requestBodySettled).toBe(uploadFailure);
+    expect((await res.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   test('a retry-phase interceptor throw carries the previous upload outcome', async () => {
@@ -6465,7 +6560,7 @@ describe('HTTPClient — builder state', () => {
 
     expect(res.isFailed).toBe(true);
     expect(res.requestBodySettled).toBeDefined();
-    expect(await res.requestBodySettled).toBe(uploadFailure);
+    expect((await res.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
   test('a response with no upload outcome has no requestBodySettled property at all', async () => {
@@ -9150,7 +9245,7 @@ test('requestBodySettled uses one then read and observes the captured settlement
   const client = new HTTPClient({ adapter });
   const response = await client.get('https://example.com').send();
   expect(response.status).toBe(200);
-  expect(await response.requestBodySettled).toBe(failure);
+  expect((await response.requestBodySettled)?.cause).toBe(failure);
   expect(reads).toBe(1);
 });
 

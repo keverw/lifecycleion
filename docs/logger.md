@@ -1404,7 +1404,7 @@ const fileSink = new FileSink({
 });
 ```
 
-Two things to know about `failure.entry`. It is the full `LogEntry`, so it carries `params` as well as `redactedParams`: a handler that serializes the whole failure for paging or a backup sink is serializing the raw values, including any the log line masked. Forward `redactedParams ?? params`, or only `message`, rather than the entry itself. And a handler that logs the failure back through this sink is safe: the sink refuses, and counts in `droppedEntries`, a line from inside a `'format'` report that cannot render either, and reports its failure on the console rather than to the handler, which is what stops a failure carrying an unrenderable `entry` from reporting itself forever. `'format'` reports reach the handler one at a time: while it is working on one - until it settles, `async` or not - one more is held and delivered after it, and any others go to the console. A `'write'` failure is reported on every attempt, so a handler that logs each one through a sink that is also failing multiplies the queue by `maxRetries + 1` per line. The queue cap bounds it, but log elsewhere.
+Two things to know about `failure.entry`. It is the full `LogEntry`, so it carries `params` as well as `redactedParams`: a handler that serializes the whole failure for paging or a backup sink is serializing the raw values, including any the log line masked. Forward `redactedParams ?? params`, or only `message`, rather than the entry itself. And a handler that logs the failure back through this sink is safe: the sink refuses, and counts in `droppedEntries`, a line from inside a `'format'` report that cannot render either, and reports its failure on the console rather than to the handler, which is what stops a failure carrying an unrenderable `entry` from reporting itself forever. `'format'` reports reach the handler one at a time: while it is working on one - until it settles, `async` or not - one more is held and delivered after it, and any others go to the console. A `'write'` failure is reported on every attempt, so a handler that logs each one through a sink that is also failing multiplies the queue by `maxRetries + 1` per line. The queue cap bounds it, but log elsewhere. That handler can also see one attempt twice: reported `'retrying'`, then, if its own line took the queue's last free slot or it closed the sink, reported again with the same `attempt` as `'lost'`. The later report is the final word.
 
 A close-time `'lost'` or `'no_entry'` still reaches an explicit `onError` callback. Without one, an attached sink uses its owner's diagnostic channel; a closing logger offers the report to diagnostic listeners and uses console when none are present, without writing to closing sinks. A standalone sink reports to console. A `logger.error(...)` inside an explicit handler during `Logger.close()` is dropped (a closed logger's `handleLog` writes nothing) and does not fall through to console, because the handler succeeded. The example uses `console.error` for that reason.
 
@@ -1502,9 +1502,10 @@ Both queueing sinks, `FileSink` and `NamedPipeSink`, answer a failed write the s
   entries without a queue-size limit
 - over the cap, the **oldest** entry is dropped and counted in
   `getHealth().droppedEntries` and `getHealth().droppedByKind.queue_full`. The first
-  drop in each overflow episode is reported through `onError` with
-  `kind: 'queue_full'` and `disposition: 'lost'`. Further overflow reports are
-  suppressed until the queue drains. The callback carries a dropped entry as a sample,
+  drop of an application entry in each overflow episode is reported through `onError`
+  with `kind: 'queue_full'` and `disposition: 'lost'`. A dropped diagnostic entry is
+  reported once per episode on the console instead, so it never takes the place of
+  that report. Further overflow reports are suppressed until the queue drains. The callback carries a dropped entry as a sample,
   not every lost entry. Without an `onError` handler, the report goes to guarded
   `console.error`
 - `getHealth().droppedEntries` means "lines this sink did not deliver": evicted at the

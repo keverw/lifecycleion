@@ -211,7 +211,7 @@ test('retry setup failure retains the prior upload outcome and attempt count', a
   expect(sends).toBe(1);
   expect(starts).toEqual([1, 2]);
   expect(ends).toEqual([1, 2]);
-  expect(await response.requestBodySettled).toBe(uploadError);
+  expect((await response.requestBodySettled)?.cause).toBe(uploadError);
   expect(request.attemptCount).toBe(2);
 });
 

@@ -1329,7 +1329,10 @@ Individual restart returns pre-stop refusals directly, including `component_not_
 `component_not_running`, `component_stalled`, `component_already_starting`,
 `component_already_stopping`, `has_running_dependents`, and `invalid_options`.
 `restart_stop_failed` applies only once the restart has claimed a stop attempt, so
-callers need to handle these refusal codes alongside it.
+callers need to handle these refusal codes alongside it. As with `stopComponent()`, a
+component with active dependents answers `has_running_dependents` (unless
+`stopOptions.allowStopWithRunningDependents` is set) before its timeouts are read or
+validated.
 
 Availability refusals take precedence over options that would never be used: an active
 bulk startup returns `already_in_progress` without reading new options, and messages
@@ -1451,7 +1454,7 @@ Timeouts operate at **two independent levels** - they don't compete, they're lay
 **1. Global Timeout (Bulk Operation)**
 
 - `stopAllComponents({ timeoutMS })` sets a total time budget for the entire shutdown operation
-- If exceeded: the public call promptly returns partial results and releases the bulk shutdown latch. A stop already in flight continues under its component timeouts. The timed-out shutdown pass initiates no further stops. Deferred logger exits can proceed, so components are not guaranteed to finish before process exit.
+- If exceeded: the public call promptly returns partial results and releases the bulk shutdown latch. A stop already in flight continues under its component timeouts. The timed-out shutdown pass initiates no further stops and joins no further pending starts. Deferred logger exits can proceed, so components are not guaranteed to finish before process exit.
 - Components not yet processed are left in their current state. A later shutdown attempt will not overlap an unfinished stop or stop its dependencies while that stop remains in flight.
 - Constructor option sets the default: `new LifecycleManager({ shutdownOptions: { timeoutMS: 30000 } })`. An explicit invalid duration is refused at construction or returned as a failed shutdown request; `null` or `undefined` selects the default.
 - Method parameter overrides: `await lifecycle.stopAllComponents({ timeoutMS: 5000 })`
@@ -1642,6 +1645,10 @@ another startup batch under the same deadline and rollback rules. Startup repeat
 batch processing and reconciliation until no deferred work remains, or timeout,
 shutdown, or failure ends the pass. Follow-up dependency cycles return `dependency_cycle` after rollback,
 matching initial-order cycle classification.
+
+An auto-start whose own registration logging (a log sink, say) begins a
+`startAllComponents()` or `restartAllComponents()` is left to that operation the same
+way, with `autoStartDeferred: true`, rather than refused alongside it.
 
 If restart is canceled or fails before startup takes ownership,
 the component remains registered without being started, and a warning identifies
@@ -2208,7 +2215,7 @@ if (escalation.configured && escalation.isArmed) {
 
 #### Manual Signal Triggers
 
-Reload/info/debug broadcasts check that each component is still running immediately before invoking its handler. Components that begin teardown during an earlier callback are skipped, as are running components whose `start()` is still pending or whose late-start cleanup is pending. A synchronous signal-started event that makes its target unavailable produces a per-component `unavailable` result and a matching signal-failed event. A handler or `signalTimeoutMS` read that fails - a getter that throws (`operation_crashed`) or an invalid timeout (`invalid_options`) - does not call the handler, but still emits signal-started then signal-failed, as a health check whose configuration read fails does, so a listener counting signals in flight stays paired. Unavailable targets count toward the aggregate `error` or `partial_error` code. A handler timeout also emits signal-failed, while retaining the `timeout` result code; late settlement does not emit a second terminal event. An already-running signal handler is not cancelled by teardown. A timeout event carries an explanatory Error, while its result retains `error: null` and `timedOut: true`; the timeout is not a handler exception. Inspect `code` and `timedOut` as well as `error`.
+Reload/info/debug broadcasts check that each component is still running immediately before invoking its handler. Components that begin teardown during an earlier callback are skipped, as are running components whose `start()` is still pending or whose late-start cleanup is pending. A target that its own handler or `signalTimeoutMS` getter, or a synchronous signal-started listener, makes unavailable produces a per-component `unavailable` result, a signal-started event, and a matching signal-failed event; its handler is not called. When the getter is what made it unavailable, the started and failed events are emitted back to back after the read, and the result is `unavailable` even if the getter also threw. A handler or `signalTimeoutMS` read that fails - a getter that throws (`operation_crashed`) or an invalid timeout (`invalid_options`) - does not call the handler, but still emits signal-started then signal-failed, as a health check whose configuration read fails does, so a listener counting signals in flight stays paired. Unavailable targets count toward the aggregate `error` or `partial_error` code. A handler timeout also emits signal-failed, while retaining the `timeout` result code; late settlement does not emit a second terminal event. An already-running signal handler is not cancelled by teardown. A timeout event carries an explanatory Error, while its result retains `error: null` and `timedOut: true`; the timeout is not a handler exception. Inspect `code` and `timedOut` as well as `error`.
 
 ```typescript
 triggerReload(): Promise<SignalBroadcastResult>
@@ -2316,7 +2323,7 @@ const lifecycle = new LifecycleManager({
 - A shutdown request received during that armed period continues the same escalation state and starts a fresh shutdown attempt
 - While that retry is running, the armed timer is no longer active because shutdown is in progress again
 - If the retry also finishes unsuccessfully, the manager re-arms the post-failure window so follow-up requests can continue the same escalation state
-- It also resets on a fresh `startAllComponents()`
+- It also resets on a fresh `startAllComponents()`. One started from a log sink while a request is being counted leaves that request counted on the old state, so it does not invoke `onForceShutdown()`; the fresh state counts from the next request
 - A later `stopAllComponents()` attempt only continues the same escalation state when `countManualRetriesTowardEscalation` is `true`
 - Once the armed period expires, or shutdown/startup later succeeds, the next escalation state starts fresh
 - The request that finds the armed period already expired is the first of that fresh state: it starts it, as the first request of any shutdown does, rather than being dropped. This holds for a signal landing on a running shutdown too, so the next press counts toward `forceAfterCount`
@@ -2460,7 +2467,7 @@ the exit indefinitely. Keep a non-zero `timeoutMS` when an exit must never hang.
 - If `logger.exit()` is called while shutdown is already in progress, that exit call returns `{ action: 'wait' }` instead of exiting immediately.
 - The first such `logger.exit()` call is kept pending and allowed to proceed when the in-flight shutdown completes or reaches its global timeout.
 - Later duplicate `logger.exit()` calls made while an earlier exit is still being handled - including one a log sink makes synchronously before that exit's shutdown has started - also return `{ action: 'wait' }`, so they cannot exit early or start a second shutdown. Their codes still count: the logger applies [last non-zero wins](logger.md#exit-behavior) to the pending exit, so a component that fails while stopping and logs `exitCode: 1` during a shutdown started by `SIGTERM` and `logger.exit(0)` makes the process exit 1 rather than 0. A later `exit(0)` never downgrades a pending failure. A simulated exit (`callProcessExit: false`) settles its code the same way, so a test of that shutdown sees `logger.exitCode` and the `exit-process` code as 1 too.
-- With a logger that does not end the process (`callProcessExit: false`), an exit made after an earlier one has finished is handled like a first exit: it stops the components again, and settles its own exit code rather than inheriting the earlier one's.
+- With a logger that does not end the process (`callProcessExit: false`), an exit made after an earlier one has finished is handled like a first exit: it stops the components again, and settles its own exit code rather than inheriting the earlier one's. The earlier exit counts as finished from the moment the shutdown pass it depends on ends, so an exit made right after - from a microtask a `shutdown-completed` listener queued, for instance - also stops anything started again in between.
 - Once an exit that ends the process is allowed to proceed, every later start is refused, from the moment the shutdown pass it depends on ends. `startAllComponents()`, `startComponent()`, and `restartAllComponents()`'s startup phase answer `code: 'shutdown_in_progress'` with the reason `Process is exiting after a logger exit`; `restartComponent()` answers `restart_start_failed` (or `component_not_running`, since the exit's shutdown already stopped everything); an `autoStart` registration reports `autoStartSucceeded: false`. The logger still closes its sinks before calling `process.exit()`, and a component started in that window would be killed without a graceful stop. A simulated exit (`callProcessExit: false`) leaves the process running, so later starts stay allowed. The refusal is permanent for that manager: if `process.exit()` is patched not to exit, starts stay refused.
 - After that commit, any further `logger.exit()` returns `{ action: 'wait' }`: it runs no second shutdown. Whether its code counts is the logger's rule: a failure still replaces the pending code until the logger publishes it in `exit-process`, and is ignored after that - as one a sink makes from its own `close()` is, since sinks close after `exit-process`.
 
@@ -3056,7 +3063,7 @@ The `component:unexpected-stop` event gives callers a single place to decide wha
 
 A stalled component started again with `startComponent(name, { forceStalled: true })` that reports an unexpected stop before that start completes goes back to `stalled`, not `stopped`: the stop that stalled is still unfinished, and its stall record stands. It emits `component:unexpected-stop` (with the state already `stalled`) but no `component:stopped`; the stall still ends with `component:stalled-resolved`, as any stall does. The start answers `component_unexpected_stop`.
 
-If a component reports an unexpected stop while `startAllComponents()` is still in progress, the startup attempt is reconciled before completion: a required component causes bulk startup to fail with `code: 'component_unexpected_stop'` and triggers rollback of any later-started components, while a stopped optional component is recorded in `failedOptionalComponents` and startup continues.
+If a component reports an unexpected stop while `startAllComponents()` is still in progress, the startup attempt is reconciled before completion: a required component causes bulk startup to fail with `code: 'component_unexpected_stop'` and triggers rollback of any later-started components, while a stopped optional component is recorded in `failedOptionalComponents` and startup continues. A component that a listener has already started again by the time the report is reconciled (with `allowDuringBulkStartup: true`) is still reported this way, and still counts as started: a required failure's rollback stops it as well. An optional one is then listed in both `failedOptionalComponents` (its failed run) and `startedComponents` (its current one).
 
 ### Component Properties
 
@@ -3191,7 +3198,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `lifecycle-manager:shutdown-initiated` - Shutdown process started
 - `lifecycle-manager:shutdown-warning` - Global warning phase started
 - `lifecycle-manager:shutdown-warning-completed` - Warning phase completed
-- `lifecycle-manager:shutdown-warning-timeout` - Warning phase timed out
+- `lifecycle-manager:shutdown-warning-timeout` - Warning phase timed out; `pending` lists the components reported by `component:shutdown-warning-timeout`, so it leaves out those whose hook already completed, failed, or was skipped
 - `lifecycle-manager:shutdown-completed` - Shutdown attempt completed, includes the `ShutdownResult` fields at the top level plus `method` / `duringStartup`. This is the best single event for centralized logging or follow-up policy when shutdown times out or leaves stalled components. If the global shutdown timeout was hit, the payload reflects the result at the moment the public call stopped waiting. A component stop already in flight is not cancelled: its per-component state continues to reject an overlapping start or stop, while the process-wide shutdown latch is released so exit handling and later shutdown/escalation attempts can proceed. It always pairs with `lifecycle-manager:shutdown-initiated`: a pass that throws outright still emits it with `success: false`, `code: 'operation_crashed'` and a `reason` naming the cause - the same result `stopAllComponents()` resolves with - so a caller waiting on it is never left hanging. Listeners run while the pass still holds its shutdown latch: `getSystemState()` says `shutting-down` there, and any operation started from inside one - `stopAllComponents()`, `startAllComponents()`, a per-component start or stop - is refused (`already_in_progress` / `shutdown_in_progress`). To act on the result, defer out of the listener (`setImmediate`, `queueMicrotask`), or `await` the promise `stopAllComponents()` returned instead of listening.
 
 **Component Registration:**
@@ -3206,9 +3213,10 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `component:start-failed` - Component start failed
 - `component:shutdown-warning` - Component selected for a shutdown warning
 - `component:shutdown-warning-completed` - The invoked warning hook completed. Not emitted for a component already reported by `component:shutdown-warning-timeout`: a hook that settles after the warning phase timed out does not also report completion
+- `component:shutdown-warning-failed` - The invoked warning hook threw synchronously or rejected; includes `name` and `error`. Like completion, not emitted for a component already reported by `component:shutdown-warning-timeout`: a hook that fails after the warning phase timed out is only logged
 - `component:shutdown-warning-skipped` - A selected warning hook was not invoked because its registration or state changed; includes `name`, `reason` (`component_not_found`, `component_changed`, or `component_not_available`), and the name's current `state` when one is registered
 - `component:stopping` - Component stop initiated
-- `component:stopped` - Component is now stopped. Emitted after normal manager-driven stop flows, after late stall resolution, and after `reportUnexpectedStop()` transitions a running component into the stopped state
+- `component:stopped` - Component is now stopped. Emitted after normal manager-driven stop flows, after late stall resolution, and after `reportUnexpectedStop()` transitions a running component into the stopped state. Its `status` is read through `getComponentStatus()`; if an override of it throws, the throw is reported on the global `'error'` channel and the event is still emitted, without `status`
 - `component:stop-failed` - Component stop failed
 - `component:stalled` - Component failed to stop after graceful/force handling timed out or errored
 - `component:stalled-resolved` - A stall was cleared after its stop completed (late, or through a successful `retryStalled` force retry), or retired by a forced start: `reason: 'forced-start'` when the forced start itself brings the component up (or, with shutdown begun meanwhile, straight into cleanup), and `reason: 'late-start-cleanup'` when a timed-out forced start succeeds late and its cleanup retires the stall. Either reason means the old stop was superseded, not that it finished.
@@ -3236,7 +3244,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `component:debug-completed` - Component debug completed
 - `component:debug-failed` - Component debug failed
 
-Each `*-started` event precedes that component's final availability check, which follows the event's listeners even for a broadcast made from inside another listener. A listener that begins teardown synchronously prevents the handler from running; the component then reports `*-failed` and `code: 'unavailable'`. Every `*-started` is followed by exactly one `*-completed` or `*-failed`, including for a component whose handler or `signalTimeoutMS` could not be read: its `*-started` and `*-failed` are emitted back to back, and the handler is not called.
+Each `*-started` event precedes that component's final availability check, which follows the event's listeners even for a broadcast made from inside another listener. A listener that begins teardown synchronously prevents the handler from running; the component then reports `*-failed` and `code: 'unavailable'`. A handler or `signalTimeoutMS` getter that makes its own component unavailable is reported the same way, with its `*-started` and `*-failed` emitted back to back. Every `*-started` is followed by exactly one `*-completed` or `*-failed`, including for a component whose handler or `signalTimeoutMS` could not be read: its `*-started` and `*-failed` are emitted back to back, and the handler is not called.
 
 **Messaging Events:**
 
@@ -4604,5 +4612,17 @@ rechecks the target before invoking its hook. A changed registration or state em
 another instance holds its name, or `component_not_available` when it is no longer in
 the state it was selected in. `state` is the name's current state, and the key is
 omitted when nothing is registered under the name.
-A skipped warning emits neither completion nor timeout. This does not cancel a warning
-hook that has already begun.
+This does not cancel a warning hook that has already begun.
+
+Each `component:shutdown-warning` is followed by exactly one terminal event for that
+component: `component:shutdown-warning-completed` when the hook resolves,
+`component:shutdown-warning-failed` with `{ name, error }` when it throws
+synchronously or rejects, `component:shutdown-warning-skipped` as above, or
+`component:shutdown-warning-timeout` when it is still pending at the phase deadline.
+The first outcome wins: a hook that settles after its timeout was announced emits
+nothing further (a late failure is still logged as a warning), and the phase's
+`lifecycle-manager:shutdown-warning-timeout` `pending` list names exactly the
+components that got a timeout event, leaving out those that already completed,
+failed, or were skipped. With `shutdownWarningTimeoutMS: 0` there is no deadline, so
+every invoked hook reports completed or failed whenever it settles, possibly after
+`lifecycle-manager:shutdown-warning-completed`.

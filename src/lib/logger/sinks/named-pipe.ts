@@ -11,7 +11,10 @@ import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
 import { renderJSONLine } from './internal/render-json-line';
 import { renderTextLine } from './internal/render-text-line';
-import { isConsoleReportActive } from '../../internal/report-to-console';
+import {
+  isConsoleReportActive,
+  reportToConsole,
+} from '../../internal/report-to-console';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { readUnknownMember } from '../../internal/read-member';
 import { sleep } from '../../sleep';
@@ -506,6 +509,8 @@ export class NamedPipeSink implements LogSink {
   private droppedEntries = 0;
   private readonly droppedByKind = createDroppedEntryCounts();
   private didReportDrop = false;
+  /** {@link didReportDrop} for drops reported for a diagnostic entry. */
+  private didReportDiagnosticDrop = false;
   /** Whether the one post-close loss report has gone out. See {@link requeue}. */
   private didReportPostCloseLoss = false;
   /** Streams whose buffered-byte loss close() has already reported. */
@@ -597,6 +602,12 @@ export class NamedPipeSink implements LogSink {
    * See {@link write}. Every such entry is counted; only the first is reported.
    */
   private reportedCloseRefusal = false;
+  /**
+   * The same for a refused diagnostic entry, whose report goes only to the console:
+   * spending {@link reportedCloseRefusal} on it would leave the application entries
+   * refused after it unreported.
+   */
+  private reportedDiagnosticCloseRefusal = false;
 
   private initPromise: Promise<void>;
   private closing = false;
@@ -625,7 +636,21 @@ export class NamedPipeSink implements LogSink {
     );
     this.minLevel = options.minLevel ?? LogLevel.INFO;
 
-    this.initPromise = this.initializePipe();
+    // `initializePipe` reports its own failures and is built never to reject, but nothing
+    // observes this promise until `close()` races it or `reconnect()` awaits it outright.
+    // Contained here, as `FileSink` contains its own init, rather than trusted at each
+    // wait: a rejection from a future change would otherwise go unhandled out of the
+    // constructor and reject `reconnect()`, which answers with a status instead. Reported,
+    // not swallowed, since it would be a bug.
+    this.initPromise = observePromise(
+      this.initializePipe(),
+      undefined,
+      (error: unknown) => {
+        reportToConsole(
+          `NamedPipeSink initialization failed unexpectedly: ${describeError(error)}`,
+        );
+      },
+    );
   }
 
   public write(entry: LogEntry): void {
@@ -653,8 +678,17 @@ export class NamedPipeSink implements LogSink {
 
       // Once, for the reason the abandoned queue reports once: an application still
       // logging through a thirty-second close would otherwise get a callback per line.
-      if (!this.reportedCloseRefusal) {
-        this.reportedCloseRefusal = true;
+      const isDiagnosticRefusal = isDiagnosticEntry(entry);
+      if (
+        isDiagnosticRefusal
+          ? !this.reportedDiagnosticCloseRefusal
+          : !this.reportedCloseRefusal
+      ) {
+        if (isDiagnosticRefusal) {
+          this.reportedDiagnosticCloseRefusal = true;
+        } else {
+          this.reportedCloseRefusal = true;
+        }
 
         this.handleError(
           'close',
@@ -1943,6 +1977,7 @@ export class NamedPipeSink implements LogSink {
       // empty queue, so a pass that stopped short of draining does not re-arm the flood.
       if (this.writeQueue.length === 0) {
         this.didReportDrop = false;
+        this.didReportDiagnosticDrop = false;
       }
 
       this.isProcessing = false;
@@ -2024,8 +2059,10 @@ export class NamedPipeSink implements LogSink {
     if (this.closed) {
       // Past `abandonQueueOnClose()`, so nothing is going to carry this one any further.
       // Counted rather than dropped silently, because the entry was already shifted off
-      // `writeQueue` and so was not among the ones that call reported.
-      this.countDropped('close');
+      // `writeQueue` and so was not among the ones that call reported. Under the kind it
+      // is reported as: a caller that already reported it did so as a failed `'write'`,
+      // and counting that under `'close'` split one loss across two words.
+      this.countDropped(wasReported ? 'write' : 'close');
 
       // Each failed write needs its own final disposition for fallback consumers.
       // The write callback already reports known closed-sink losses; only synthesize
@@ -2461,11 +2498,21 @@ export class NamedPipeSink implements LogSink {
     // ran out, and those are not an overflow: reading the counter here reported a
     // `'queue_full'` the queue never had, and set `didReportDrop` - so the real overflow
     // that followed was suppressed until the queue next drained.
-    if (dropped.count === 0 || this.didReportDrop) {
+    // A diagnostic's report goes only to the console, so it has a latch of its own:
+    // spending the owner's on it would silence the application entries dropped after it.
+    const isDiagnosticDrop = isDiagnosticEntry(dropped.entry);
+    if (
+      dropped.count === 0 ||
+      (isDiagnosticDrop ? this.didReportDiagnosticDrop : this.didReportDrop)
+    ) {
       return;
     }
 
-    this.didReportDrop = true;
+    if (isDiagnosticDrop) {
+      this.didReportDiagnosticDrop = true;
+    } else {
+      this.didReportDrop = true;
+    }
 
     // `'queue_full'` and `'lost'`, as `FileSink` reports the same event. Sent as a
     // `'write'` failure it was counted against the connection's health - which is fine -

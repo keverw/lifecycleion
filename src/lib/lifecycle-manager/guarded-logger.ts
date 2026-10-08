@@ -3,6 +3,7 @@ import { LoggerService } from '../logger/logger-service';
 import { adoptResult, UnreadableReturn } from '../internal/adopt-promise';
 import {
   applyIntrinsic,
+  getIntrinsic,
   observePromise,
   observeRejection,
 } from '../internal/intrinsics';
@@ -200,7 +201,7 @@ export function createGuardedLoggerService(
       ) {
         return {
           ...descriptor,
-          value: Reflect.get(guarded, property) as unknown,
+          value: getIntrinsic(guarded, property) as unknown,
           configurable: true,
         };
       }
@@ -227,7 +228,7 @@ export function createGuardedLoggerService(
         // `JSON.stringify` reading `toJSON` - would otherwise throw at its call site
         // for a service whose accessor throws. Answered as absent.
         try {
-          const passthrough: unknown = Reflect.get(target, property, target);
+          const passthrough: unknown = getIntrinsic(target, property, target);
 
           return passthrough;
         } catch (error) {
@@ -257,7 +258,7 @@ export function createGuardedLoggerService(
       let method: unknown;
 
       try {
-        method = Reflect.get(target, property, target);
+        method = getIntrinsic(target, property, target);
       } catch (error) {
         reportCallbackError(`${GUARDED_LOGGER_LABEL}.${property}`, error);
 

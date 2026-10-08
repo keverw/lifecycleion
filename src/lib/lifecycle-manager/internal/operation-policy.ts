@@ -256,6 +256,20 @@ export function settledFailureCode(error: unknown): SettledFailureCode {
 }
 
 /**
+ * {@link settledFailureCode}, for a failure an operation answers inline and is about to
+ * hand to code that is not its own - its logger, its event listeners - before it settles:
+ * the brand is dropped once the code is read, as {@link settleOperation} drops it from a
+ * result. Left on, a listener holding the error could rethrow it from another
+ * component's getter later in the same operation, and that getter's crash would be
+ * classified as this manager's option refusal and go unreported.
+ */
+export function takeSettledFailureCode(error: unknown): SettledFailureCode {
+  const code = settledFailureCode(error);
+  operationOptionRefusals.delete(error as Error);
+  return code;
+}
+
+/**
  * The `StartupResult` for a startup that failed unexpectedly - crashed, or skipped
  * because the shutdown it followed did - carrying the error. A bulk startup's own crash
  * spreads it and adds what it had started.

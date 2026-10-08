@@ -295,6 +295,8 @@ export class FileSink implements LogSink {
   /** The flush in flight, if any; see {@link flush}. Never rejects. */
   private pendingFlush: Promise<void> = promiseResolveIntrinsic(undefined);
   private didReportDrop = false;
+  /** {@link didReportDrop} for drops reported for a diagnostic entry. */
+  private didReportDiagnosticDrop = false;
   private isInitialized = false;
   private hasFinishedInitialization = false;
   private initPromise?: Promise<void>;
@@ -310,6 +312,12 @@ export class FileSink implements LogSink {
    * See {@link write}. Every such entry is counted; only the first is reported.
    */
   private reportedCloseRefusal = false;
+  /**
+   * The same for a refused diagnostic entry, whose report goes only to the console:
+   * spending {@link reportedCloseRefusal} on it would leave the application entries
+   * refused after it unreported.
+   */
+  private reportedDiagnosticCloseRefusal = false;
 
   /** The entry {@link processQueue} is waiting on `writeEntry` for, if any. */
   private inFlightEntry?: QueuedEntry;
@@ -427,8 +435,17 @@ export class FileSink implements LogSink {
 
       // Once, for the reason the abandoned queue reports once: an application still
       // logging through a thirty-second close would otherwise get a callback per line.
-      if (!this.reportedCloseRefusal) {
-        this.reportedCloseRefusal = true;
+      const isDiagnosticRefusal = isDiagnosticEntry(entry);
+      if (
+        isDiagnosticRefusal
+          ? !this.reportedDiagnosticCloseRefusal
+          : !this.reportedCloseRefusal
+      ) {
+        if (isDiagnosticRefusal) {
+          this.reportedDiagnosticCloseRefusal = true;
+        } else {
+          this.reportedCloseRefusal = true;
+        }
 
         this.handleError(
           'close',
@@ -1094,6 +1111,7 @@ export class FileSink implements LogSink {
       // empty queue, so a pass that stopped short of draining does not re-arm the flood.
       if (this.writeQueue.length === 0) {
         this.didReportDrop = false;
+        this.didReportDiagnosticDrop = false;
       }
 
       this.isProcessing = false;
@@ -1216,14 +1234,24 @@ export class FileSink implements LogSink {
     // write behind it re-queued its entry - so a queue holding one line under a cap of
     // 10,000 reported a `'queue_full'`, and set `didReportDrop`, which suppresses every
     // report until the queue next drains.
-    if (dropped.count === 0 || this.didReportDrop) {
+    // A diagnostic's report goes only to the console, so it has a latch of its own:
+    // spending the owner's on it would silence the application entries dropped after it.
+    const isDiagnosticDrop = isDiagnosticEntry(dropped.entry);
+    if (
+      dropped.count === 0 ||
+      (isDiagnosticDrop ? this.didReportDiagnosticDrop : this.didReportDrop)
+    ) {
       return;
     }
 
     // Reported once, not once per drop: an overflowing queue drops continuously, and a
     // callback fired per entry would be its own flood on a path already in trouble. The
     // running total stays visible through `getHealth()`.
-    this.didReportDrop = true;
+    if (isDiagnosticDrop) {
+      this.didReportDiagnosticDrop = true;
+    } else {
+      this.didReportDrop = true;
+    }
 
     this.handleError(
       'queue_full',
@@ -1360,6 +1388,7 @@ export class FileSink implements LogSink {
       }
 
       const writingTo = this.logFileStream;
+      const writingToFile = this.currentLogFile ?? this.logDir;
 
       this.activeStreamWriteEntry = queued;
       writingTo.write(messageToWrite, (err) => {
@@ -1367,6 +1396,20 @@ export class FileSink implements LogSink {
           this.activeStreamWriteEntry = undefined;
         }
         if (err) {
+          // A stream that never opened failed its open, not this write: `EISDIR` or
+          // `EACCES` from `createWriteStream` reaches a buffered write's callback before
+          // the `'error'` event, and the teardown below sends that event down its
+          // not-current branch, so this is the only place left to classify it. Raised in
+          // the sentence `failureKindFor` reads as `'setup'`, so the line is reported and
+          // counted as a destination that could not be opened, and is not charged to
+          // `consecutiveFailures` as a failed write. Read before the teardown, which can
+          // release the descriptor of a stream that did open. `pending` alone cannot
+          // tell: a stream that opened and was then destroyed has no descriptor either,
+          // and a write reaching it fails with `ERR_STREAM_DESTROYED` - a write failure.
+          const didNeverOpen =
+            writingTo.pending &&
+            (err as NodeJS.ErrnoException).code !== 'ERR_STREAM_DESTROYED';
+
           // The event is told to keep quiet about this particular error; it still tears
           // the stream down, which is the half it does know about. A non-object is not
           // trackable and is simply not suppressed: the event then reports it, which is
@@ -1389,7 +1432,14 @@ export class FileSink implements LogSink {
             }
           }
 
-          reject(new FileSinkError('Error writing to log file', err));
+          reject(
+            didNeverOpen
+              ? new FileSinkError(
+                  `Failed to setup log file: ${writingToFile}`,
+                  err,
+                )
+              : new FileSinkError('Error writing to log file', err),
+          );
         } else {
           // The same identity guard as the error branch. Charged unconditionally, a
           // callback belonging to a stream a rotation had since replaced added its bytes
@@ -1573,12 +1623,17 @@ export class FileSink implements LogSink {
 
         // No `entry`: the stream failed on its own, not while carrying a line this sink
         // can name. Anything queued is retried on the reopened stream and reported on its
-        // own terms if that fails.
+        // own terms if that fails. Routed by the entry in flight all the same: unlike a
+        // rotation, a stream failure is not latched, so one from a forwarded console
+        // line that reached the console again would come back as another such line.
         this.handleError(kind, failure, {
           disposition: 'no_entry',
-          shouldSuppressFailureReport: stream.pending
-            ? shouldSuppressSetupReport
-            : this.activeStreamWriteEntry?.shouldSuppressFailureReport,
+          shouldSuppressFailureReport:
+            (stream.pending
+              ? shouldSuppressSetupReport
+              : this.activeStreamWriteEntry?.shouldSuppressFailureReport ===
+                true) ||
+            this.inFlightEntry?.shouldSuppressFailureReport === true,
           isDiagnostic: stream.pending
             ? isDiagnosticSetup
             : isDiagnosticEntry(this.activeStreamWriteEntry?.entry),
@@ -1908,6 +1963,13 @@ export class FileSink implements LogSink {
    * Every report this sink makes goes through here except a failed write's, which also
    * carries the attempt and is held by `formatReports` when it is a `'format'` failure.
    * `target` defaults to the file being written, or the directory before there is one.
+   *
+   * Routed by `entry` when there is one, and otherwise only by what the caller passes -
+   * never by whichever entry happens to be in flight. A rotation, an archive collision or
+   * a close-time loss belongs to no line, and each is reported once (a rotation only on
+   * the first failure of its backoff run): suppressed because the line that triggered it
+   * was a forwarded console report, or sent to the console because it was a diagnostic,
+   * that one report was the only one `onError` would ever have had.
    */
   private handleError(
     kind: SinkFailureKind,
@@ -1922,11 +1984,7 @@ export class FileSink implements LogSink {
     },
   ): void {
     this.lastError = failure;
-    if (
-      options.shouldSuppressFailureReport === true ||
-      (options.entry === undefined &&
-        this.inFlightEntry?.shouldSuppressFailureReport === true)
-    ) {
+    if (options.shouldSuppressFailureReport === true) {
       return;
     }
 
@@ -1943,9 +2001,7 @@ export class FileSink implements LogSink {
       () => describeError(failure),
       {
         label: 'FileSink',
-        isDiagnostic:
-          options.isDiagnostic ??
-          isDiagnosticEntry(options.entry ?? this.inFlightEntry?.entry),
+        isDiagnostic: options.isDiagnostic ?? isDiagnosticEntry(options.entry),
       },
     );
   }

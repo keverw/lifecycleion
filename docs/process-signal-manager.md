@@ -621,6 +621,14 @@ terminal, then throws the first removal failure; any further failures are report
 restore failure in the same `detach()` is still reported before the throw, so a caller
 that exits from its `catch` does not lose it.
 
+When `attach()` or `detach()` is called from a console shim while Lifecycleion is writing
+a terminal console report, listener-removal failures are reported before the throw
+instead of in a microtask: a report queued past that console write could start the shim
+again. Console output nested inside the shim is dropped, but `'error'` listeners still
+receive the report. Because that report comes first, an `'error'` listener that calls
+`attach()` from it can leave the manager attached behind the `attach()` or `detach()`
+call that then throws.
+
 ### Trigger Methods
 
 All trigger methods share the same behavior pattern and are useful for programmatic triggering or testing.

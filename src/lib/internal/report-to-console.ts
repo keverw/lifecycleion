@@ -1,4 +1,8 @@
-import { applyIntrinsic, definePropertyIntrinsic } from './intrinsics';
+import {
+  applyIntrinsic,
+  definePropertyIntrinsic,
+  getOwnPropertyDescriptorIntrinsic,
+} from './intrinsics';
 
 let isReporting = false;
 const CONSOLE_REPORT_STATE_KEY = Symbol.for('lifecycleion.reportToConsole.v1');
@@ -9,7 +13,6 @@ const setHasIntrinsic = Set.prototype.has;
 const setAddIntrinsic = Set.prototype.add;
 // eslint-disable-next-line @typescript-eslint/unbound-method
 const setDeleteIntrinsic = Set.prototype.delete;
-const getOwnPropertyDescriptorIntrinsic = Object.getOwnPropertyDescriptor;
 
 /**
  * Share the console origin across bundled copies. Native Set operations avoid running
@@ -31,11 +34,15 @@ function sharedConsoleState(): Set<boolean> | undefined {
       // Missing or unusable state. Defining a data property avoids a hostile setter.
     }
     const state = new setConstructorIntrinsic<boolean>();
+    // A descriptor without a prototype, so a `get` added to `Object.prototype` cannot
+    // make it invalid and leave every copy without the shared guard.
     return definePropertyIntrinsic(globalThis, CONSOLE_REPORT_STATE_KEY, {
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      __proto__: null,
       value: state,
       configurable: true,
       writable: true,
-    })
+    } as PropertyDescriptor)
       ? state
       : undefined;
   } catch {

@@ -184,6 +184,11 @@ export interface LifecycleManagerEventMap {
   'lifecycle-manager:shutdown-warning': { timeoutMS: number };
   'component:shutdown-warning': { name: string };
   'component:shutdown-warning-completed': { name: string };
+  /**
+   * The invoked warning hook threw or rejected. Not emitted for a component already
+   * reported by `component:shutdown-warning-timeout`: a late failure is only logged.
+   */
+  'component:shutdown-warning-failed': { name: string; error: Error };
   'component:shutdown-warning-skipped': {
     name: string;
     // `component_not_found`: unregistered. `component_changed`: another instance now
@@ -544,6 +549,10 @@ export class LifecycleManagerEvents {
 
   public componentShutdownWarningCompleted(name: string): void {
     this.emit('component:shutdown-warning-completed', { name });
+  }
+
+  public componentShutdownWarningFailed(name: string, error: Error): void {
+    this.emit('component:shutdown-warning-failed', { name, error });
   }
 
   public lifecycleManagerShutdownWarningCompleted(timeoutMS: number): void {

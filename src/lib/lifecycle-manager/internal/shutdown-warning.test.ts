@@ -303,12 +303,15 @@ test('positive timeout reports only pending components and contains late failure
   reject(error);
   await flushWarnings();
   expect(warning).toHaveBeenLastCalledWith(
-    'Shutdown warning phase failed: {{error.message}}',
+    'Shutdown warning failed after its outcome was reported: {{error.message}}',
     { params: { error } },
   );
+  // The timeout was this component's terminal event; the late failure is only logged.
   expect(
     events.some(
-      ({ name }) => name === 'lifecycle-manager:shutdown-warning-completed',
+      ({ name }) =>
+        name === 'lifecycle-manager:shutdown-warning-completed' ||
+        name === 'component:shutdown-warning-failed',
     ),
   ).toBe(false);
 });
@@ -334,6 +337,15 @@ test('hook and warning-report failures remain contained in both delivery modes',
         ({ name }) => name === 'component:shutdown-warning-completed',
       ),
     ).toBe(false);
+    // A failing report does not cost the component its terminal event.
+    expect(
+      events.filter(({ name }) => name === 'component:shutdown-warning-failed'),
+    ).toEqual([
+      {
+        name: 'component:shutdown-warning-failed',
+        payload: { name: 'failure', error: expect.any(Error) },
+      },
+    ]);
   }
 });
 

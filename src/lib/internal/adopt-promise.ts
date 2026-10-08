@@ -14,6 +14,7 @@ import {
   promiseRejectIntrinsic,
   promiseThenIntrinsic,
   attachIntrinsicReactions,
+  noop,
 } from './intrinsics';
 import { isObjectLike } from './is-object-like';
 import { describeError } from '../to-error';
@@ -101,7 +102,6 @@ function speciesThat(build: (executor: (...args: unknown[]) => void) => void) {
  * written down here.
  */
 function recordSpeciesRefusals(): readonly string[] {
-  const noop = (): void => {};
   const constructors: unknown[] = [
     0,
     // eslint-disable-next-line @typescript-eslint/naming-convention
@@ -302,7 +302,7 @@ function adoptOwnPromise<T>(
           isSpeciesRefusal(error)
         ) {
           didAdopt = true;
-          onObservationFailure?.(error);
+          notifyObservationFailure(onObservationFailure, error);
           // Preserve the original rejection value, as adoption does.
           // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
           reject(error);
@@ -329,7 +329,7 @@ function adopt<T>(
     try {
       return promiseResolveIntrinsic(value);
     } catch (error) {
-      onObservationFailure?.(error);
+      notifyObservationFailure(onObservationFailure, error);
       return promiseRejectIntrinsic(error);
     }
   }
@@ -446,4 +446,24 @@ export function containDeferredResult(
   return typeof then === 'function';
 }
 
-function noop(): void {}
+/**
+ * Tell the caller that observation failed, without letting its callback change the
+ * outcome: a throw here would escape `adoptPromise` synchronously, or replace the
+ * rejection reason the adopted promise is about to carry. Its failure goes to the
+ * console instead, since the adoption itself still reports the original.
+ */
+function notifyObservationFailure(
+  onObservationFailure: ((error: unknown) => void) | undefined,
+  error: unknown,
+): void {
+  if (onObservationFailure === undefined) {
+    return;
+  }
+  try {
+    onObservationFailure(error);
+  } catch (callbackError) {
+    reportToConsole(
+      `An adoption failure callback threw: ${describeError(callbackError)}`,
+    );
+  }
+}

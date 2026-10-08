@@ -5,6 +5,7 @@ import {
   allSettledPromises,
   applyIntrinsic,
   awaitBoxedPromise,
+  getIntrinsic,
   observePromise,
   promiseResolveIntrinsic,
 } from '../../internal/intrinsics';
@@ -70,7 +71,7 @@ export async function runShutdownWarningPhase(
     let warningHook: unknown;
 
     try {
-      warningHook = Reflect.get(component, 'onShutdownWarning');
+      warningHook = getIntrinsic(component, 'onShutdownWarning');
     } catch (error) {
       reportCallbackError(
         `lifecycle-manager shutdown warning for ${name}`,
@@ -96,23 +97,36 @@ export async function runShutdownWarningPhase(
   context.logger.info('Shutdown warning phase');
   context.lifecycleEvents.lifecycleManagerShutdownWarning(timeoutMS);
 
-  // Components already announced as timed out. Their hooks keep running, but each
-  // component gets one outcome: a hook that resolves after its timeout was announced
-  // does not follow `component:shutdown-warning-timeout` (and the phase's own timeout)
-  // with a `completed` that contradicts them.
-  const timedOutNames = new Set<string>();
+  // Each selected component gets exactly one terminal event: completed, failed,
+  // skipped, or timeout. The outcome is recorded synchronously where its event is
+  // emitted, so the timeout branch - which resumes some microtasks after its deadline
+  // fired - never announces a component whose hook settled in that gap, and a hook that
+  // settles after its timeout was announced emits nothing further (a late failure is
+  // still logged).
+  const outcomes = new Map<
+    string,
+    'completed' | 'failed' | 'skipped' | 'timeout'
+  >();
+  const settle = (
+    name: string,
+    outcome: 'completed' | 'failed' | 'skipped' | 'timeout',
+  ): boolean => {
+    if (outcomes.has(name)) {
+      return false;
+    }
+    outcomes.set(name, outcome);
+    return true;
+  };
 
-  // Both delivery modes share the invocation boundary. Returning an explicit
-  // outcome lets the timed mode track rejections without starting a second
-  // reporting chain; the detached mode can safely ignore the settled promise.
+  // Both delivery modes share the invocation boundary. Neither awaits the outcome: the
+  // timed mode races the settled promises against its deadline, and the detached mode
+  // ignores them.
   const startWarning = ({
     name,
     component,
     hook,
     state: selectedState,
-  }: (typeof warningTargets)[number]): Promise<
-    'resolved' | 'rejected' | 'skipped'
-  > => {
+  }: (typeof warningTargets)[number]): Promise<void> => {
     context.lifecycleEvents.componentShutdownWarning(name);
     return (async () => {
       try {
@@ -133,35 +147,51 @@ export async function runShutdownWarningPhase(
         ) {
           // Unregistered and replaced are told apart: `component_changed` for a target
           // that was simply removed sent listeners looking for a replacement.
-          context.lifecycleEvents.componentShutdownWarningSkipped(
-            name,
-            current === undefined
-              ? 'component_not_found'
-              : current !== component
-                ? 'component_changed'
-                : 'component_not_available',
-            state,
-          );
-          return 'skipped' as const;
+          if (settle(name, 'skipped')) {
+            context.lifecycleEvents.componentShutdownWarningSkipped(
+              name,
+              current === undefined
+                ? 'component_not_found'
+                : current !== component
+                  ? 'component_changed'
+                  : 'component_not_available',
+              state,
+            );
+          }
+          return;
         }
         await awaitBoxedPromise(
           adoptPromise(applyIntrinsic(hook, component, [])),
         );
-        if (!timedOutNames.has(name)) {
+        if (settle(name, 'completed')) {
           context.lifecycleEvents.componentShutdownWarningCompleted(name);
         }
-        return 'resolved' as const;
       } catch (error) {
+        // A synchronous throw from the hook lands here too, through `applyIntrinsic`.
+        // After the timeout was announced the failure is only logged: the component
+        // already has its terminal event.
+        const isFirstOutcome = settle(name, 'failed');
+        let failure: Error | undefined;
         try {
+          failure = toError(error);
           context.logger
             .entity(name)
-            .warn('Shutdown warning phase failed: {{error.message}}', {
-              params: { error: toError(error) },
-            });
+            .warn(
+              isFirstOutcome
+                ? 'Shutdown warning phase failed: {{error.message}}'
+                : 'Shutdown warning failed after its outcome was reported: {{error.message}}',
+              { params: { error: failure } },
+            );
         } catch {
           // A detached warning must contain a failure in its reporting path.
         }
-        return 'rejected' as const;
+        if (isFirstOutcome) {
+          // Event delivery contains listener failures, so this cannot escape.
+          context.lifecycleEvents.componentShutdownWarningFailed(
+            name,
+            failure ?? new Error('Shutdown warning hook failed'),
+          );
+        }
       }
     })();
   };
@@ -176,18 +206,9 @@ export async function runShutdownWarningPhase(
     return;
   }
 
-  const statuses = new Map<
-    string,
-    'pending' | 'resolved' | 'rejected' | 'skipped'
-  >();
   const warningPromises: Promise<void>[] = [];
   for (const target of warningTargets) {
-    statuses.set(target.name, 'pending');
-    warningPromises.push(
-      observePromise(startWarning(target), (status) => {
-        statuses.set(target.name, status);
-      }),
-    );
+    warningPromises.push(startWarning(target));
   }
 
   // The warning phase uses an ordinary deadline; shutdown abort hooks stay local.
@@ -201,12 +222,12 @@ export async function runShutdownWarningPhase(
   );
 
   if (result === 'timeout') {
-    const pendingComponents = warningTargets.filter(
-      ({ name }) => statuses.get(name) === 'pending',
+    // Components whose hook already completed, failed, or was skipped are not pending.
+    const pendingComponents = warningTargets.filter(({ name }) =>
+      settle(name, 'timeout'),
     );
 
     for (const { name } of pendingComponents) {
-      timedOutNames.add(name);
       context.logger.entity(name).warn('Shutdown warning phase timed out', {
         params: { timeoutMS },
       });

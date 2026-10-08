@@ -624,6 +624,15 @@ export class BaseHTTPClient {
        */
       let initialRequestURL = url;
 
+      /**
+       * Where the redirect loop below has got to: the request of the hop being followed,
+       * and the redirect history leading to it. Declared out here for the same reason, so
+       * a throw between hops reports the hop it happened on, as every other terminal path
+       * does, rather than presenting a failure on hop two as the first request.
+       */
+      let currentInterceptedRequest: InterceptedRequest | undefined;
+      let redirectHistory: string[] = [];
+
       try {
         // streamResponse is NodeAdapter-only. Validate it inside the normal
         // request setup flow so builder/error observer state is updated the same
@@ -800,8 +809,7 @@ export class BaseHTTPClient {
         //  5. Runs redirect-phase interceptors and observers
         //  6. Continues the loop with the updated request state
         const credentialScope = { url: initialRequestURL };
-        let currentInterceptedRequest: InterceptedRequest = finalRequest;
-        let redirectHistory: string[] = [];
+        currentInterceptedRequest = finalRequest;
         let hopCount = 0;
         // Tracks the last global attempt number across all hops and retries,
         // so the next hop's attempts continue the sequence (e.g. 1,2,3 on
@@ -1349,8 +1357,9 @@ export class BaseHTTPClient {
           wasTimeout: false,
           adapterType: this._adapter.getType(),
           initialURL: initialRequestURL,
-          requestURL: initialRequestURL,
-          redirectHistory: [],
+          requestURL:
+            currentInterceptedRequest?.requestURL ?? initialRequestURL,
+          redirectHistory,
           isNetworkErrorOverride: false,
           // The one terminal path that dropped it: a throw *between* hops - a hostile
           // header read on a redirect, say - lands here after a hop that had a body, and
@@ -1375,9 +1384,9 @@ export class BaseHTTPClient {
         callbacks.setResponse(response);
         await this._runErrorObservers(
           normalizedError,
-          // The interceptor-rewritten request once there is one, matching the URLs above.
+          // The current hop's request once there is one, matching the URLs above.
           this._bestEffortAttemptRequestFromPending(
-            finalRequest,
+            currentInterceptedRequest ?? finalRequest,
             timeout,
             requestID,
           ),
@@ -3592,9 +3601,9 @@ function readBestEffort<T>(read: () => T, fallback: T): T {
  * single value converted to a string, an array's elements each converted, and a
  * one-element array collapsed to its string - so a value whose `toString` answers
  * differently on each call is checked and sent as one string. Names keep their case.
- * Throws on a `requestURL` that is not a string or `headers` that is not an object, and
- * on any read or conversion that throws; each phase reports that as the interceptor's
- * failure.
+ * Throws on a `requestURL` or `method` that is not a string or `headers` that is not an
+ * object, and on any read or conversion that throws; each phase reports that as the
+ * interceptor's failure.
  */
 function snapshotInterceptedRequest(
   request: InterceptedRequest,
@@ -3604,6 +3613,14 @@ function snapshotInterceptedRequest(
   if (typeof requestURL !== 'string') {
     throw new TypeError(
       `[HTTPClient] Interceptor returned a request whose requestURL is not a string (got ${requestURL === null ? 'null' : typeof requestURL}).`,
+    );
+  }
+
+  const candidateMethod: unknown = method;
+
+  if (typeof candidateMethod !== 'string') {
+    throw new TypeError(
+      `[HTTPClient] Interceptor returned a request whose method is not a string (got ${candidateMethod === null ? 'null' : typeof candidateMethod}).`,
     );
   }
 
@@ -3858,72 +3875,34 @@ function adoptRequestBodySettled(
   }
   const boxed = observeBoxed(
     pending,
-    (value) => (value === undefined ? undefined : normalizeError(value)),
-    (error: unknown) => normalizeError(error),
+    (value) => value,
+    (error: unknown) => error,
   );
-  // Stabilize immediately before publishing the raw Error at this public API
-  // boundary, not one promise reaction earlier while the boxed data can still
-  // change. Internal mapping itself never re-adopts the adapter's value.
+  // Stabilize immediately before publishing the Error at this public API boundary, not
+  // one promise reaction earlier while the boxed data can still change. Internal mapping
+  // itself never re-adopts the adapter's value.
   return observePromise(boxed, (result) =>
     result.value === undefined ? undefined : stableUploadError(result.value),
   );
 }
 
-// The slot check rejects Proxy-wrapped Errors. Without it, descriptor inspection
-// cannot prove that native promise resolution will use ordinary property lookup.
-const uploadErrorBrandCheck = (
-  Error as unknown as { isError?: (value: unknown) => boolean }
-).isError;
-const uploadErrorOwnDescriptor = Object.getOwnPropertyDescriptor;
-const uploadErrorPrototypeOf = Object.getPrototypeOf;
-const uploadErrorHasOwn = Object.hasOwn;
-const uploadErrorPrototypes = new Set<object>([
-  Error.prototype,
-  EvalError.prototype,
-  RangeError.prototype,
-  ReferenceError.prototype,
-  SyntaxError.prototype,
-  TypeError.prototype,
-  URIError.prototype,
-  AggregateError.prototype,
-  Object.prototype,
-]);
-
-/** Avoid invoking a caller Error's `then` while resolving the public outcome promise. */
-function stableUploadError(error: Error): Error {
-  try {
-    if (
-      typeof uploadErrorBrandCheck === 'function' &&
-      uploadErrorBrandCheck(error)
-    ) {
-      let object: object | null = error;
-      for (let depth = 0; object !== null && depth < 32; depth++) {
-        const descriptor = uploadErrorOwnDescriptor(object, 'then');
-        if (descriptor !== undefined) {
-          // A genuine Error's own data property is safe even on a subclass. For
-          // inherited properties, inspect only captured ordinary prototypes below.
-          if (
-            uploadErrorHasOwn(descriptor, 'value') &&
-            typeof descriptor.value !== 'function'
-          ) {
-            return error;
-          }
-          break;
-        }
-        object = uploadErrorPrototypeOf(object) as object | null;
-        if (object !== null && !uploadErrorPrototypes.has(object)) {
-          // An unknown prototype may be a Proxy with a synthetic or changing
-          // `then`. Neither a descriptor nor a live probe establishes stability.
-          break;
-        }
-      }
-      if (object === null) {
-        return error;
-      }
-    }
-  } catch {
-    // A proxy may refuse inspection; preserve it as the cause of a safe Error.
+/**
+ * Avoid invoking a caller Error's `then` while resolving the public outcome promise.
+ *
+ * A caller Error is always wrapped, with the original as `cause`: no check available on
+ * every runtime can prove it is not a Proxy whose `then` lookup runs caller code, so the
+ * outcome is the same whatever the runtime or the Error's class. Any other value is
+ * normalized into an Error this client creates, which already carries it as `cause`.
+ */
+function stableUploadError(value: unknown): Error {
+  if (!isErrorValue(value)) {
+    // Locked like the wrapper below: an inherited `then` must not be called while the
+    // public promise resolves with it.
+    const normalized = normalizeError(value);
+    Object.defineProperty(normalized, 'then', { value: undefined });
+    return normalized;
   }
+  const error = value;
   const message = readObjectMember(error, 'message');
   const wrapped = new Error(
     typeof message === 'string' ? message : 'Upload failed',

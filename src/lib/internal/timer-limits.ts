@@ -1,4 +1,4 @@
-import { clamp } from '../clamp';
+import { applyIntrinsic } from './intrinsics';
 
 /**
  * The longest delay a timer can be given and still fire when it was asked to.
@@ -18,16 +18,28 @@ export const MAX_TIMER_MS = 2_147_483_647;
 
 // Internal identity lets lifecycle operations classify configuration failures without
 // mistaking an unrelated TypeError or RangeError thrown by application code for one.
+// Its methods are captured, so a later patch of `WeakSet.prototype` cannot make a
+// configuration failure read as an application error, or the reverse.
 const timeoutValidationErrors = new WeakSet<Error>();
+// eslint-disable-next-line @typescript-eslint/unbound-method
+const weakSetHasIntrinsic = WeakSet.prototype.has;
+// eslint-disable-next-line @typescript-eslint/unbound-method
+const weakSetAddIntrinsic = WeakSet.prototype.add;
+
+function markTimeoutValidationError(error: Error): void {
+  applyIntrinsic(weakSetAddIntrinsic, timeoutValidationErrors, [error]);
+}
 
 /** Whether this module itself rejected a timeout or delay value. */
 export function isTimeoutValidationError(error: unknown): error is Error {
-  return timeoutValidationErrors.has(error as Error);
+  return applyIntrinsic(weakSetHasIntrinsic, timeoutValidationErrors, [
+    error,
+  ]) as boolean;
 }
 
 function invalidTimeoutRange(label: string): RangeError {
   const error = new RangeError(`${label} must be non-negative`);
-  timeoutValidationErrors.add(error);
+  markTimeoutValidationError(error);
   return error;
 }
 
@@ -44,7 +56,8 @@ export function assertNumberOption(
   requested: unknown,
   label: string,
 ): asserts requested is number {
-  if (typeof requested !== 'number' || Number.isNaN(requested)) {
+  // Self-comparison rather than `Number.isNaN`, which application code can replace.
+  if (typeof requested !== 'number' || requested !== requested) {
     throw new TypeError(`${label} must be a number other than NaN`);
   }
 }
@@ -61,7 +74,7 @@ export function assertDurationMS(
   try {
     assertNumberOption(requested, label);
   } catch (error) {
-    timeoutValidationErrors.add(error as Error);
+    markTimeoutValidationError(error as Error);
     throw error;
   }
 }
@@ -82,10 +95,14 @@ export function resolveTimeoutMS(
 }
 
 /** Clamp a numeric delay after the caller validates and interprets its sentinels.
- * NaN is deliberately not repaired here. Math.max normalizes negative zero.
+ * NaN is deliberately not repaired here: it fails both comparisons and passes through.
+ * Comparisons rather than the replaceable `Math` global; `<= 0` normalizes negative zero.
  */
 export function clampTimerDelayMS(delayMS: number): number {
-  return clamp(delayMS, 0, MAX_TIMER_MS);
+  if (delayMS > MAX_TIMER_MS) {
+    return MAX_TIMER_MS;
+  }
+  return delayMS <= 0 ? 0 : delayMS;
 }
 
 /** Validate a required lifecycle duration with no implicit fallback. */

@@ -142,7 +142,12 @@ export interface SinkFailure {
  *
  * Never called for an ordinary success, and never called more than once for one failure -
  * including a failed write that a stream reports twice, once through the write callback
- * and again as an `'error'` event.
+ * and again as an `'error'` event - with one exception, which this handler causes itself.
+ * A failed write is reported `'retrying'` before its retry is committed, so a handler that
+ * fills the queue's last slot by logging through the same sink, or closes the sink, leaves
+ * the line nowhere to go: it is then reported again, with the same `attempt`, as `'lost'`.
+ * The later report is the final word. Without it, a fallback consumer told `'retrying'`
+ * would never learn that the line did not arrive.
  *
  * May be `async`. A handler that throws *or rejects* is reported to the console rather
  * than being allowed to turn one failure into two - see `reportThroughHandler`. Declaring
