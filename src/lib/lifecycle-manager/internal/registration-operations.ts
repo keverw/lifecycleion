@@ -16,6 +16,7 @@ import { DependencyCycleError } from '../errors';
 import type {
   BroadcastOptions,
   ComponentLifecycleRef,
+  ComponentOperationResult,
   GetValueOptions,
   InsertComponentAtResult,
   InsertPosition,
@@ -30,7 +31,11 @@ import type {
 } from '../types';
 import { type DependencyRead, tryReadDependencies } from './dependency-policy';
 import type { ManagerCore } from './manager-core';
-import { isStartUnfinished, type StartSettlement } from './manager-state';
+import {
+  type ActiveBulkStartup,
+  isStartUnfinished,
+  type StartSettlement,
+} from './manager-state';
 import {
   snapshotRegisterOptions,
   snapshotStartOptions,
@@ -51,6 +56,90 @@ import {
   removedTimeoutHooksReason,
   reportedComponentName,
 } from './registration-policy';
+
+/**
+ * One registration call: what it was asked, what it has read of the caller's code, and
+ * where its name sat before it. Created once the name has been read and validated, and
+ * handed to every phase of `registerComponentInternal()`, which reads and updates it in
+ * place. It runs no code of its own.
+ */
+class RegistrationAttempt {
+  // What `readForRegistration()` read, each left at its default when a check that
+  // needs no caller code - an invalid position, a shutdown - stopped the reads first.
+  public shouldAutoStart = false;
+  public isRegisteredWithAManager = false;
+  // Why the component cannot be registered because it still defines a removed
+  // timeout hook. Read first, as the component's own: a getter there is its code.
+  public removedHooksReason: string | undefined;
+  // Strict: a `getDependencies()` that throws, or reports an implausible length,
+  // refuses the registration - once the checks ahead of it have passed. A non-string
+  // entry does not - its own start fails on it - but is reported once the registration
+  // commits: a refused one must not spend the report the next registration makes.
+  public candidateRead: DependencyRead = { dependencies: [] };
+  // Every registered component's list, and whether the reads settled. Its `reads` are
+  // the dependency snapshot every check and refusal orders by.
+  public registryRead: {
+    reads: Map<BaseComponent, DependencyRead>;
+    isSettled: boolean;
+  } = { reads: new Map<BaseComponent, DependencyRead>(), isSettled: true };
+
+  constructor(
+    public readonly component: BaseComponent,
+    public readonly componentName: string,
+    public readonly position: InsertPosition,
+    public readonly targetComponentName: string | undefined,
+    public readonly isInsertAction: boolean,
+    public readonly options: RegisterOptions | undefined,
+    // What a committed registration has done so far, for a failure after the commit to
+    // report rather than contradict: a caller told `autoStartAttempted: false` for an
+    // auto-start that ran could start the component a second time. Whether it committed
+    // is `progress.hasCommitted`: set by this registration's own commit, not inferred
+    // from the registry, since a re-entrant registration of the same instance - from its
+    // own `getDependencies()` - can put it there while this one goes on to fail before
+    // committing anything.
+    public readonly progress: RegistrationProgress,
+    // Where the name sat before this call. Read again once the reads are done: they
+    // can register the name.
+    public registrationIndexBefore: number | null,
+  ) {}
+
+  /** What every refusal of this registration shares; see `refuseRegistration()`. */
+  public refusal(): {
+    progress: RegistrationProgress;
+    componentName: string;
+    registrationIndexBefore: number | null;
+    position: InsertPosition;
+    targetComponentName: string | undefined;
+    isInsertAction: boolean;
+    dependencySnapshot: ReadonlyMap<BaseComponent, DependencyRead>;
+  } {
+    return {
+      progress: this.progress,
+      componentName: this.componentName,
+      registrationIndexBefore: this.registrationIndexBefore,
+      position: this.position,
+      targetComponentName: this.targetComponentName,
+      isInsertAction: this.isInsertAction,
+      dependencySnapshot: this.registryRead.reads,
+    };
+  }
+}
+
+/**
+ * What `placeRegistration()` decided: refused, with the answer, or placed - the
+ * registry's entries with the component inserted where it was asked to go, and the
+ * component's own list, which a placed registration has read successfully.
+ */
+type RegistrationPlacement =
+  | { readonly kind: 'refused'; readonly result: InsertComponentAtResult }
+  | {
+      readonly kind: 'placed';
+      readonly nextComponents: BaseComponent[];
+      readonly candidateRead: Extract<
+        DependencyRead,
+        { dependencies: string[] }
+      >;
+    };
 
 /**
  * Registration and unregistration: `registerComponent()`, `insertComponentAt()` and
@@ -459,8 +548,13 @@ export class RegistrationOperations {
   }
 
   /**
-   * Internal method that handles component registration logic.
-   * Used by both registerComponent and insertComponentAt.
+   * `registerComponent()` and `insertComponentAt()`'s body. Reads and validates the
+   * name, then runs the phases in order over one `RegistrationAttempt`: the reads of the
+   * caller's code (`readForRegistration()`), the checks that refuse or place the
+   * component (`placeRegistration()`), the provisional commit and the component's own
+   * hooks (`commitRegistration()`), the commit's log line (`logCommittedRegistration()`),
+   * the auto-start (`beginAutoStart()`), and the answer (`registeredResult()`). Every
+   * phase is synchronous; an auto-start's start is the one thing awaited, here, directly.
    */
   private async registerComponentInternal(
     component: BaseComponent,
@@ -486,452 +580,32 @@ export class RegistrationOperations {
       );
     }
 
-    // Read again once the reads below are done: they can register the name.
-    let registrationIndexBefore =
-      this.core.registry.getComponentIndex(componentName);
-    // What a committed registration has done so far, for a failure after the commit to
-    // report rather than contradict: a caller told `autoStartAttempted: false` for an
-    // auto-start that ran could start the component a second time. Whether it committed
-    // is `progress.hasCommitted`: set by this registration's own commit, not inferred
-    // from the registry, since a re-entrant registration of the same instance - from its
-    // own `getDependencies()` - can put it there while this one goes on to fail before
-    // committing anything.
-    const { committed } = progress;
+    const attempt = new RegistrationAttempt(
+      component,
+      componentName,
+      position,
+      targetComponentName,
+      isInsertAction,
+      options,
+      progress,
+      this.core.registry.getComponentIndex(componentName),
+    );
 
     try {
-      // Everything of the caller's code registration needs is read first - whether the
-      // instance says it is registered, its own dependency list, and every registered
-      // component's list - and every check that decides the registration runs after,
-      // synchronously, up to the commit. Those reads can register, unregister, start a
-      // bulk startup or begin a shutdown re-entrantly; checks made before them committed
-      // a second component under a taken name, inserted at a stale index, and trusted a
-      // cycle check made against a registry that had since changed. A refusal may still
-      // log and emit its event - it returns straight after.
-      //
-      // The checks that need none of the caller's code come first: a registration they
-      // refuse reads nothing - no component's `getDependencies()` during a shutdown that
-      // may be tearing them down - and answers with its own code, not with whatever
-      // the reads would have made of it. Asked again before each read, since any read
-      // can begin a shutdown; the checks below refuse once one has.
-      const canRead = (): boolean =>
-        isInsertPosition(position) && !this.core.shutdownPass.isShuttingDown;
-      let shouldAutoStart = false;
-      if (canRead()) {
-        shouldAutoStart = snapshotRegisterOptions(options).autoStart;
-      }
-      let isRegisteredWithAManager = false;
-      // Strict: a `getDependencies()` that throws, or reports an implausible length,
-      // refuses the registration - once the checks ahead of it have passed, as before. A
-      // non-string entry does not - its own start fails on it - but is reported once the
-      // registration commits: a refused one must not spend the report the next
-      // registration makes.
-      let candidateRead: DependencyRead = { dependencies: [] };
-      // Kept as reads, as a bulk startup keeps them: one snapshot type for ordering.
-      const readRegistered = (registered: BaseComponent): DependencyRead =>
-        this.core.componentMetadata.readDependenciesReported(
-          registered,
-          'registration',
-        );
-      let registryRead = {
-        reads: new Map<BaseComponent, DependencyRead>(),
-        isSettled: true,
-      };
-      // Why the component cannot be registered because it still defines a removed
-      // timeout hook. Read first, as the component's own: a getter there is its code.
-      let removedHooksReason: string | undefined;
+      this.readForRegistration(attempt);
 
-      if (canRead()) {
-        removedHooksReason = removedTimeoutHooksReason(
-          component,
-          componentName,
-        );
+      const placement = this.placeRegistration(attempt);
+      if (placement.kind === 'refused') {
+        return placement.result;
       }
 
-      if (canRead()) {
-        candidateRead = tryReadDependencies(component);
-      }
-
-      if (canRead()) {
-        // Before the registry's lists, so a component it registers is read with the
-        // rest, and after the candidate's own, which could register this instance
-        // elsewhere with nothing else read to ask again after.
-        isRegisteredWithAManager = component._isRegisteredWithManager();
-      }
-
-      // The registry's lists, and the instance's answer each time they settle, until
-      // neither brings anything new: a list read can register this instance with
-      // another manager, and asking about that can register components whose lists
-      // are then unread. Either answer of the instance's counts.
-      if (canRead()) {
-        registryRead = this.core.registryReads.readRegistry(
-          readRegistered,
-          registryRead.reads,
-          canRead,
-          () => {
-            isRegisteredWithAManager =
-              component._isRegisteredWithManager() || isRegisteredWithAManager;
-          },
-          () => this.core.state.componentEntries,
-        );
-      }
-
-      const dependencySnapshot = registryRead.reads;
-      registrationIndexBefore =
-        this.core.registry.getComponentIndex(componentName);
-
-      // A registry that kept changing under the reads above - each read registering
-      // another component whose own list then had to be read - is refused as a broken
-      // contract, the way a throwing `getName()` is. Reads cut short by a shutdown are
-      // not: the shutdown check below refuses those.
-      if (!registryRead.isSettled && !this.core.shutdownPass.isShuttingDown) {
-        throw new Error(
-          `The registry kept changing while "${componentName}" was being registered; registration refused`,
-        );
-      }
-
-      // What every refusal below shares; see `refuseRegistration()`.
-      const refusal = {
-        progress,
-        componentName,
-        registrationIndexBefore,
-        position,
-        targetComponentName,
-        isInsertAction,
-        dependencySnapshot,
-      };
-
-      if (!isInsertPosition(position)) {
-        return this.refuseRegistration({
-          ...refusal,
-          code: 'invalid_position',
-          message: `Invalid insert position: "${String(position)}". Expected one of: start, end, before, after.`,
-          logLine: 'Invalid insertion position',
-          logParams: { position },
-        });
-      }
-
-      // Block registration during shutdown
-      if (this.core.shutdownPass.isShuttingDown) {
-        return this.refuseRegistration({
-          ...refusal,
-          code: 'shutdown_in_progress',
-          message: LIFECYCLE_MANAGER_MESSAGE_REGISTER_SHUTDOWN_IN_PROGRESS,
-          logLine: 'Cannot register component during shutdown',
-        });
-      }
-
-      // A component written for the timeout hooks the abort signals replaced. Refused
-      // rather than registered with those hooks silently ignored - along with, for the
-      // startup one, the late-start cleanup opt-out it implied.
-      if (removedHooksReason !== undefined) {
-        return this.refuseRegistration({
-          ...refusal,
-          code: 'invalid_options',
-          message: removedHooksReason,
-          logLine: 'Component defines a removed timeout hook',
-          error: invalidOperationOptionError(removedHooksReason),
-        });
-      }
-
-      // Block registration during startup if this component would be a dependency
-      // for any already-registered component (would break dependency ordering)
-      if (
-        this.core.startup.isRequiredDependencyDuringStartup(
-          componentName,
-          dependencySnapshot,
-        )
-      ) {
-        return this.refuseRegistration({
-          ...refusal,
-          code: 'startup_in_progress',
-          message:
-            LIFECYCLE_MANAGER_MESSAGE_REGISTER_REQUIRED_DEPENDENCY_DURING_STARTUP,
-          logLine:
-            'Cannot register component during startup - it is a required dependency for other components',
-        });
-      }
-
-      // Check if component instance is already registered - here, by the instance's own
-      // answer, or with this manager since that answer was read
-      const isRegisteredHere = this.core.registry.isInstanceReserved(component);
-      if (isRegisteredWithAManager || isRegisteredHere) {
-        const message = isRegisteredHere
-          ? LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE
-          : LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE_EXTERNAL;
-
-        return this.refuseRegistration({
-          ...refusal,
-          code: 'duplicate_instance',
-          message,
-          logLine: isRegisteredHere
-            ? 'Component instance already registered'
-            : 'Component instance already registered with another lifecycle manager',
-        });
-      }
-
-      // Check if component name is already registered
-      if (this.core.registry.isNameReserved(componentName)) {
-        return this.refuseRegistration({
-          ...refusal,
-          code: 'duplicate_name',
-          message: `Component "${componentName}" is already registered.`,
-          logLine: 'Component with this name already registered',
-        });
-      }
-
-      // Get the insertion index for the component
-      const insertIndex = this.core.registry.getInsertIndex(
-        position,
-        targetComponentName,
+      const interruptionCode = this.commitRegistration(
+        attempt,
+        placement.nextComponents,
       );
-      if (insertIndex === null) {
-        return this.refuseRegistration({
-          ...refusal,
-          code: 'target_not_found',
-          message: `Target component "${targetComponentName ?? ''}" not found in registry.`,
-          logLine: 'Target component not found',
-          logParams: { target: targetComponentName },
-          target: targetComponentName,
-          targetFound: false,
-        });
-      }
-
-      // Compute dependency order *before* committing registration mutations.
-      // This avoids leaving the registry/state maps inconsistent if a dependency
-      // cycle is detected.
-      const nextComponents = [
-        ...this.core.state.componentEntries.slice(0, insertIndex),
-        component,
-        ...this.core.state.componentEntries.slice(insertIndex),
-      ];
-
-      if (!('dependencies' in candidateRead)) {
-        throw candidateRead.error;
-      }
-
-      let startupOrder: string[];
-
-      try {
-        startupOrder = this.core.startupOrdering.getStartupOrderInternal(
-          nextComponents,
-          {
-            component,
-            name: componentName,
-            dependencies: candidateRead.dependencies,
-          },
-          dependencySnapshot,
-        );
-      } catch (error) {
-        if (error instanceof DependencyCycleError) {
-          return this.refuseRegistration({
-            ...refusal,
-            code: 'dependency_cycle',
-            message: error.message,
-            logLine: 'Registration rejected due to dependency cycle',
-            logParams: { cycle: error.additionalInfo.cycle },
-            cycle: error.additionalInfo.cycle,
-            error,
-            targetFound: positionHasTarget(position) ? true : undefined,
-          });
-        }
-        throw error;
-      }
-
-      // Prepare registration - the registry entry and every state map together,
-      // before the component's own code runs. Startup remains blocked until its
-      // registration hook succeeds, because failure rolls these provisional writes back.
-      // An instance registered before keeps its old recorded name after unregistering,
-      // for work still in flight; a rollback below puts that back rather than dropping
-      // it.
-      const previousRecordedName =
-        this.core.state.registeredNames.get(component);
-      const previousGeneration =
-        this.core.registryReads.currentGeneration(component);
-      // What the report-once marks held before this attempt, so a rollback clears only
-      // marks it made itself.
-      const previousMetadataReports =
-        this.core.componentMetadata.reportMarks(component);
-
-      let interruptionCode:
-        'shutdown_in_progress' | 'startup_in_progress' | undefined;
-      // Both expected bulk-operation refusals and unexpected failures undo only
-      // this attempt. Keep the reservation until finally so rollback hooks cannot
-      // claim its name while cleanup is still in progress.
-      const rollBack = (): void => {
-        this.core.state.rollbackReservations.set(component, componentName);
-        this.core.state.componentEntries =
-          this.core.state.componentEntries.filter(
-            (registered) => registered !== component,
-          );
-        // Rolled back, so this registration did not commit after all.
-        progress.hasCommitted = false;
-        this.core.registryReads.restoreRegistration(
-          component,
-          previousGeneration,
-        );
-
-        this.core.state.componentStates.delete(componentName);
-        this.core.state.componentTimestamps.delete(componentName);
-        this.core.state.componentErrors.delete(componentName);
-        this.core.state.componentStartAttemptTokens.delete(componentName);
-
-        // The component's side too: a hook that marked it registered before throwing
-        // would otherwise leave it believing it is, and its next registration refused as
-        // `duplicate_instance`.
-        this.markComponentUnregistered(
-          component,
-          'lifecycle-manager registration rollback',
-        );
-        // The separate reservation retains the attempted name while bookkeeping is
-        // restored; finally releases it after cleanup has completely finished.
-        if (previousRecordedName === undefined) {
-          this.core.state.registeredNames.delete(component);
-        } else {
-          this.core.state.registeredNames.set(component, previousRecordedName);
-        }
-
-        // "Reported once per registration": this one never happened, so a report made
-        // under it - by the hook's own code reading the component - does not count
-        // against the next. Only such a report: a mark that was already there stays, or
-        // a caller retrying a failing registration would be told the same thing each
-        // time.
-        this.core.componentMetadata.rollBackReports(
-          component,
-          previousMetadataReports,
-        );
-      };
-      this.core.dispatcher.withTransition(() => {
-        try {
-          // A new array rather than a splice, as unregister does: a loop over the registry
-          // that a re-entrant registration lands in keeps walking the array it started on.
-          this.core.state.pendingRegistrations.add(component);
-          this.core.state.componentEntries = nextComponents;
-          this.core.registryReads.advanceRegistration(component);
-          this.core.state.registeredNames.set(component, componentName);
-
-          const internalCallbacks =
-            this.createLifecycleInternalCallbacks(component);
-
-          // The lifecycle setter and registration hook can both be overridden. Keep
-          // the entry unavailable to startup throughout them and their rollback, and
-          // release the guard on every exit before queued notifications are delivered.
-          (
-            component as unknown as { lifecycle: ComponentLifecycleRef }
-          ).lifecycle = new ComponentLifecycle(
-            this.core.manager,
-            componentName,
-            internalCallbacks,
-          );
-          component._markRegistered();
-          // A hook may start shutdown while this entry is invisible to that pass.
-          // It must not publish a new component into the pass after its snapshot.
-          progress.wasDuringStartup = this.core.state.isStarting;
-          if (this.core.shutdownPass.isShuttingDown) {
-            interruptionCode = 'shutdown_in_progress';
-            rollBack();
-            return;
-          }
-          // Startup can also begin inside either hook. Its order excludes this
-          // provisional entry, so publishing a dependency needed by that pass would
-          // contradict the same ordering rule checked before calling the hooks.
-          if (
-            this.core.startup.isRequiredDependencyDuringStartup(
-              componentName,
-              dependencySnapshot,
-            )
-          ) {
-            interruptionCode = 'startup_in_progress';
-            rollBack();
-            return;
-          }
-          this.core.state.componentStates.set(componentName, 'registered');
-          this.core.state.componentTimestamps.set(componentName, {
-            startedAt: null,
-            stoppedAt: null,
-          });
-          this.core.state.componentErrors.set(componentName, null);
-          this.core.state.componentUnexpectedStopHadError.delete(componentName);
-          this.core.state.componentStartAttemptTokens.set(
-            componentName,
-            ulid(),
-          );
-          progress.hasCommitted = true;
-          this.core.state.committedDependencyReads.set(
-            component,
-            candidateRead,
-          );
-        } catch (error) {
-          rollBack();
-          throw error;
-        } finally {
-          this.core.state.pendingRegistrations.delete(component);
-          this.core.state.rollbackReservations.delete(component);
-          // Publish only after hooks succeed (or rebuild after rollback), before
-          // notifications flush. Nested commits and unregisters remain in the live
-          // entries; never restore the stale array captured before calling hooks.
-          this.core.registry.publishRegistry();
-          if (progress.hasCommitted) {
-            // Capture the report before queued listeners can mutate the registry.
-            // The pre-hook order was only the reserved-entry cycle check; hooks may
-            // have committed more components. Merge their validated reads into this
-            // report snapshot without invoking more caller code during publication.
-            try {
-              const reportReads = new Map<BaseComponent, DependencyRead>();
-              let hasCompleteReportReads = true;
-              for (const entry of this.core.state.components) {
-                const read =
-                  entry === component
-                    ? candidateRead
-                    : this.core.registry.currentReadOf(
-                        entry,
-                        dependencySnapshot,
-                      );
-                // Every committed entry receives metadata before publication. If
-                // this invariant ever breaks, the report is unavailable: inventing
-                // an empty list would report a plausible but unjustified order.
-                if (read === undefined) {
-                  hasCompleteReportReads = false;
-                  break;
-                }
-                reportReads.set(entry, read);
-              }
-              startupOrder = hasCompleteReportReads
-                ? this.core.startupOrdering.getStartupOrderInternal(
-                    this.core.state.components,
-                    undefined,
-                    reportReads,
-                  )
-                : [];
-            } catch {
-              // This diagnostic cannot undo publication, regardless of why its
-              // order is unavailable. Snapshots observed at different times can disagree even though
-              // every registration passed its own cycle check. This is a report,
-              // not a failed commit: use an unavailable order rather than throw
-              // after publication or re-enter caller getters to manufacture one.
-              startupOrder = [];
-            }
-            committed.startupOrder = startupOrder;
-            committed.manualPositionRespected =
-              startupOrder.length === 0
-                ? undefined
-                : this.isManualPositionRespected({
-                    componentName,
-                    position,
-                    targetComponentName,
-                    startupOrder,
-                  });
-            // As found at insertion: `getInsertIndex()` refused a relative position
-            // whose target was missing. The hooks since may have unregistered the
-            // target, which does not undo that this registration was placed by it.
-            committed.targetFound = positionHasTarget(position)
-              ? true
-              : undefined;
-          }
-        }
-      });
       if (interruptionCode !== undefined) {
         return this.refuseRegistration({
-          ...refusal,
+          ...attempt.refusal(),
           code: interruptionCode,
           message:
             interruptionCode === 'shutdown_in_progress'
@@ -940,200 +614,15 @@ export class RegistrationOperations {
           logLine: 'Cannot commit component registration during bulk operation',
         });
       }
-      // Only now: a registration refused above - a dependency cycle, a failed hook - used
-      // to have spent this component's one report, leaving the registration that
-      // followed silent about the same broken list.
-      if (candidateRead.invalidEntry !== undefined) {
-        this.core.componentMetadata.reportDependencyReadFailureOnce(
-          component,
-          'registration',
-          candidateRead.invalidEntry,
-          componentName,
-        );
+
+      this.logCommittedRegistration(attempt, placement.candidateRead);
+
+      const autoStart = this.beginAutoStart(attempt);
+      if (autoStart !== undefined) {
+        progress.startResult = await autoStart;
       }
 
-      const registrationIndexAfter =
-        this.core.state.components.indexOf(component);
-
-      if (isInsertAction) {
-        this.core.logger.entity(componentName).info('Component inserted', {
-          params: { position, index: registrationIndexAfter },
-        });
-      } else {
-        this.core.logger.entity(componentName).info('Component registered', {
-          params: { index: registrationIndexAfter },
-        });
-      }
-
-      // The log lines and dependency report above ran caller code, which can unregister
-      // this component and register another under its name. Every auto-start branch
-      // below acts by name: it would start the replacement and report that as this
-      // registration's auto-start, or reserve the name in a startup for it.
-      const isStillThisRegistration = (): boolean =>
-        this.core.registry.getComponent(componentName) === component;
-      const skipReplacedAutoStart = (): void => {
-        this.core.logger
-          .entity(componentName)
-          .warn(
-            'AutoStart: skipped, the component was unregistered during its registration',
-          );
-      };
-
-      if (shouldAutoStart && !isStillThisRegistration()) {
-        skipReplacedAutoStart();
-      } else if (shouldAutoStart) {
-        // Capture this pass before logging runs caller code. Its queue/rollback state
-        // decides whether registration defers, refuses auto-start, or starts work
-        // independently after the completion boundary.
-        const bulkStartup = this.core.state.activeBulkStartup;
-        // Reserve before logging: a sink can synchronously register more components.
-        // The initial order or a follow-up batch owns this start and its outcome.
-        const deferToBulkStartup = (startup: typeof bulkStartup): void => {
-          progress.isAutoStartDeferred = true;
-          // A startup this registration's own log line began has ordered it already.
-          // Queued as well, it would be started twice and, after a rollback, also
-          // reported as an auto-start the startup never attempted. Frozen with the
-          // initial order's deferred names instead, so one the loop never reaches is.
-          if (!startup?.initialOrderNames.has(componentName)) {
-            this.core.state.deferredAutoStartNames.add(componentName);
-          } else if (!startup.reachedNames.has(componentName)) {
-            startup.frozenAutoStarts.add(componentName);
-          }
-          this.core.logger
-            .entity(componentName)
-            .info('AutoStart: left to the bulk startup about to run');
-        };
-        // The restart this start would race: it has accepted its stop phase, and its
-        // upcoming startup reads the registry, this registration included. Reserve
-        // before logs, since sinks can synchronously take the startup latch and claim
-        // the set.
-        const deferToRestart = (pendingRestart: Set<string>): void => {
-          pendingRestart.add(componentName);
-          progress.isAutoStartDeferred = true;
-          this.core.logger
-            .entity(componentName)
-            .info('AutoStart: left to the restart startup about to run');
-        };
-
-        // Bulk startup first: `isStarted` turns true as soon as its first component is
-        // running, and a start without `allowDuringBulkStartup` is refused with
-        // `startup_in_progress` for the rest of it.
-        const pendingRestart = Array.from(
-          this.core.state.pendingRestartAutoStarts,
-        ).at(-1);
-        if (!this.core.state.isStarting && pendingRestart !== undefined) {
-          // The restart has released shutdown's latch but has not claimed startup's
-          // yet. Its upcoming order includes this registration.
-          deferToRestart(pendingRestart);
-        } else if (this.core.state.isStarting && bulkStartup?.isRollingBack) {
-          progress.didAutoStartAttempt = true;
-          progress.startResult = {
-            success: false,
-            componentName,
-            reason:
-              'The bulk startup this auto-start would join is rolling back',
-            code: 'startup_rolled_back',
-            status: this.core.manager.getComponentStatus(componentName),
-          };
-        } else if (this.core.state.isStarting && !bulkStartup?.isCompleting) {
-          deferToBulkStartup(bulkStartup);
-        } else if (this.core.state.isStarting && bulkStartup !== null) {
-          // The pass has closed its queue before terminal notifications. A start from
-          // those callbacks is independent, while the public bulk latch stays held.
-          this.core.logger
-            .entity(componentName)
-            .info('AutoStart: starting component (bulk startup completing)');
-          // That log line ran caller code too.
-          if (isStillThisRegistration()) {
-            progress.didAutoStartAttempt = true;
-            progress.startResult =
-              await this.core.componentStart.startComponentInternal(
-                componentName,
-                snapshotStartOptions({
-                  // Logging runs caller code. Only the captured completion still owns
-                  // this permission; a replacement pass must retain its own bulk guard.
-                  allowDuringBulkStartup:
-                    this.core.state.activeBulkStartup === bulkStartup &&
-                    bulkStartup.isCompleting &&
-                    !bulkStartup.isRollingBack,
-                }),
-              );
-          } else {
-            skipReplacedAutoStart();
-          }
-        } else {
-          this.core.logger
-            .entity(componentName)
-            .info(
-              this.core.state.isStarted
-                ? 'AutoStart: starting component (manager is running)'
-                : 'AutoStart: starting component (manager not running)',
-            );
-          // That log line ran caller code too. A bulk startup or restart it began owns
-          // this start: started here as well, it would be refused `startup_in_progress`
-          // or `shutdown_in_progress` and reported as a failed auto-start while that
-          // startup started the component.
-          const startupBegunByLog = this.core.state.activeBulkStartup;
-          const restartBegunByLog = Array.from(
-            this.core.state.pendingRestartAutoStarts,
-          ).at(-1);
-          if (!isStillThisRegistration()) {
-            skipReplacedAutoStart();
-          } else if (
-            this.core.state.isStarting &&
-            !startupBegunByLog?.isCompleting &&
-            !startupBegunByLog?.isRollingBack
-          ) {
-            deferToBulkStartup(startupBegunByLog);
-          } else if (
-            !this.core.state.isStarting &&
-            restartBegunByLog !== undefined
-          ) {
-            deferToRestart(restartBegunByLog);
-          } else {
-            progress.didAutoStartAttempt = true;
-            progress.startResult =
-              await this.core.componentStart.startComponentInternal(
-                componentName,
-              );
-          }
-        }
-      }
-
-      // Where it is now, not where it landed: an auto-start can register or remove
-      // components around it. By instance, as the failure path reads it: one unregistered
-      // and replaced under its name by a listener must not be described as the other.
-      const indexOfComponent = this.core.state.components.indexOf(component);
-      const registrationIndexNow =
-        indexOfComponent === -1 ? null : indexOfComponent;
-      // The same report, and the same event, as a failure after the commit gives.
-      const report = committedRegistrationReport(
-        progress,
-        position,
-        this.describeRegistryPosition(registrationIndexNow),
-      );
-
-      this.emitCommittedRegistration({
-        progress,
-        componentName,
-        index: registrationIndexNow,
-        isInsertAction,
-        position,
-        targetComponentName,
-        report,
-      });
-
-      return {
-        action: 'insert',
-        success: true,
-        registered: true,
-        componentName,
-        registrationIndexBefore: null,
-        registrationIndexAfter: registrationIndexNow,
-        requestedPosition: { position, targetComponentName },
-        ...report,
-        startResult: progress.startResult,
-      };
+      return this.registeredResult(attempt);
     } catch (error) {
       // Answered by the same guarded code the safety net above uses, which cannot throw:
       // the net is then reached only for a `getName()` that failed, before this `try`.
@@ -1146,10 +635,733 @@ export class RegistrationOperations {
         position,
         targetComponentName,
         isInsertAction,
-        registrationIndexBefore,
+        registrationIndexBefore: attempt.registrationIndexBefore,
         progress,
       });
     }
+  }
+
+  /**
+   * Everything of the caller's code a registration needs, read first - its options,
+   * whether the instance says it is registered, its own dependency list, and every
+   * registered component's list - so every check that decides the registration runs
+   * after, synchronously, up to the commit. Those reads can register, unregister, start
+   * a bulk startup or begin a shutdown re-entrantly; checks made before them committed
+   * a second component under a taken name, inserted at a stale index, and trusted a
+   * cycle check made against a registry that had since changed. Then the name's index
+   * again, since the reads can register it.
+   */
+  private readForRegistration(attempt: RegistrationAttempt): void {
+    const { component, componentName } = attempt;
+    // The checks that need none of the caller's code come first: a registration they
+    // refuse reads nothing - no component's `getDependencies()` during a shutdown that
+    // may be tearing them down - and answers with its own code, not with whatever
+    // the reads would have made of it. Asked again before each read, since any read
+    // can begin a shutdown; the checks refuse once one has.
+    const canRead = (): boolean =>
+      isInsertPosition(attempt.position) &&
+      !this.core.shutdownPass.isShuttingDown;
+    if (canRead()) {
+      attempt.shouldAutoStart = snapshotRegisterOptions(
+        attempt.options,
+      ).autoStart;
+    }
+    // Kept as reads, as a bulk startup keeps them: one snapshot type for ordering.
+    const readRegistered = (registered: BaseComponent): DependencyRead =>
+      this.core.componentMetadata.readDependenciesReported(
+        registered,
+        'registration',
+      );
+
+    if (canRead()) {
+      attempt.removedHooksReason = removedTimeoutHooksReason(
+        component,
+        componentName,
+      );
+    }
+
+    if (canRead()) {
+      attempt.candidateRead = tryReadDependencies(component);
+    }
+
+    if (canRead()) {
+      // Before the registry's lists, so a component it registers is read with the
+      // rest, and after the candidate's own, which could register this instance
+      // elsewhere with nothing else read to ask again after.
+      attempt.isRegisteredWithAManager = component._isRegisteredWithManager();
+    }
+
+    // The registry's lists, and the instance's answer each time they settle, until
+    // neither brings anything new: a list read can register this instance with
+    // another manager, and asking about that can register components whose lists
+    // are then unread. Either answer of the instance's counts.
+    if (canRead()) {
+      attempt.registryRead = this.core.registryReads.readRegistry(
+        readRegistered,
+        attempt.registryRead.reads,
+        canRead,
+        () => {
+          attempt.isRegisteredWithAManager =
+            component._isRegisteredWithManager() ||
+            attempt.isRegisteredWithAManager;
+        },
+        () => this.core.state.componentEntries,
+      );
+    }
+
+    attempt.registrationIndexBefore =
+      this.core.registry.getComponentIndex(componentName);
+  }
+
+  /**
+   * The checks that decide a registration, over what `readForRegistration()` read:
+   * a registry that never settled, an invalid position, a shutdown, a removed timeout
+   * hook, a dependency a running startup needs, a duplicate instance or name, a missing
+   * target, and a dependency cycle. Runs none of the caller's code unless it refuses.
+   * Answers the refusal, or the registry entries with the component in place.
+   */
+  private placeRegistration(
+    attempt: RegistrationAttempt,
+  ): RegistrationPlacement {
+    const { component, componentName, position, targetComponentName } = attempt;
+    const dependencySnapshot = attempt.registryRead.reads;
+
+    // A registry that kept changing under the reads - each read registering another
+    // component whose own list then had to be read - is refused as a broken contract,
+    // the way a throwing `getName()` is. Reads cut short by a shutdown are not: the
+    // shutdown check below refuses those.
+    if (
+      !attempt.registryRead.isSettled &&
+      !this.core.shutdownPass.isShuttingDown
+    ) {
+      throw new Error(
+        `The registry kept changing while "${componentName}" was being registered; registration refused`,
+      );
+    }
+
+    // What every refusal below shares; see `refuseRegistration()`.
+    const refusal = attempt.refusal();
+    const refused = (
+      result: InsertComponentAtResult,
+    ): RegistrationPlacement => ({
+      kind: 'refused',
+      result,
+    });
+
+    if (!isInsertPosition(position)) {
+      return refused(
+        this.refuseRegistration({
+          ...refusal,
+          code: 'invalid_position',
+          message: `Invalid insert position: "${String(position)}". Expected one of: start, end, before, after.`,
+          logLine: 'Invalid insertion position',
+          logParams: { position },
+        }),
+      );
+    }
+
+    // Block registration during shutdown
+    if (this.core.shutdownPass.isShuttingDown) {
+      return refused(
+        this.refuseRegistration({
+          ...refusal,
+          code: 'shutdown_in_progress',
+          message: LIFECYCLE_MANAGER_MESSAGE_REGISTER_SHUTDOWN_IN_PROGRESS,
+          logLine: 'Cannot register component during shutdown',
+        }),
+      );
+    }
+
+    // A component written for the timeout hooks the abort signals replaced. Refused
+    // rather than registered with those hooks silently ignored - along with, for the
+    // startup one, the late-start cleanup opt-out it implied.
+    if (attempt.removedHooksReason !== undefined) {
+      return refused(
+        this.refuseRegistration({
+          ...refusal,
+          code: 'invalid_options',
+          message: attempt.removedHooksReason,
+          logLine: 'Component defines a removed timeout hook',
+          error: invalidOperationOptionError(attempt.removedHooksReason),
+        }),
+      );
+    }
+
+    // Block registration during startup if this component would be a dependency
+    // for any already-registered component (would break dependency ordering)
+    if (
+      this.core.startup.isRequiredDependencyDuringStartup(
+        componentName,
+        dependencySnapshot,
+      )
+    ) {
+      return refused(
+        this.refuseRegistration({
+          ...refusal,
+          code: 'startup_in_progress',
+          message:
+            LIFECYCLE_MANAGER_MESSAGE_REGISTER_REQUIRED_DEPENDENCY_DURING_STARTUP,
+          logLine:
+            'Cannot register component during startup - it is a required dependency for other components',
+        }),
+      );
+    }
+
+    // Check if component instance is already registered - here, by the instance's own
+    // answer, or with this manager since that answer was read
+    const isRegisteredHere = this.core.registry.isInstanceReserved(component);
+    if (attempt.isRegisteredWithAManager || isRegisteredHere) {
+      const message = isRegisteredHere
+        ? LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE
+        : LIFECYCLE_MANAGER_MESSAGE_DUPLICATE_COMPONENT_INSTANCE_EXTERNAL;
+
+      return refused(
+        this.refuseRegistration({
+          ...refusal,
+          code: 'duplicate_instance',
+          message,
+          logLine: isRegisteredHere
+            ? 'Component instance already registered'
+            : 'Component instance already registered with another lifecycle manager',
+        }),
+      );
+    }
+
+    // Check if component name is already registered
+    if (this.core.registry.isNameReserved(componentName)) {
+      return refused(
+        this.refuseRegistration({
+          ...refusal,
+          code: 'duplicate_name',
+          message: `Component "${componentName}" is already registered.`,
+          logLine: 'Component with this name already registered',
+        }),
+      );
+    }
+
+    // Get the insertion index for the component
+    const insertIndex = this.core.registry.getInsertIndex(
+      position,
+      targetComponentName,
+    );
+    if (insertIndex === null) {
+      return refused(
+        this.refuseRegistration({
+          ...refusal,
+          code: 'target_not_found',
+          message: `Target component "${targetComponentName ?? ''}" not found in registry.`,
+          logLine: 'Target component not found',
+          logParams: { target: targetComponentName },
+          target: targetComponentName,
+          targetFound: false,
+        }),
+      );
+    }
+
+    // Compute dependency order *before* committing registration mutations.
+    // This avoids leaving the registry/state maps inconsistent if a dependency
+    // cycle is detected.
+    const nextComponents = [
+      ...this.core.state.componentEntries.slice(0, insertIndex),
+      component,
+      ...this.core.state.componentEntries.slice(insertIndex),
+    ];
+
+    const { candidateRead } = attempt;
+    if (!('dependencies' in candidateRead)) {
+      throw candidateRead.error;
+    }
+
+    // Only the cycle check: the order a committed registration reports is computed
+    // after its hooks, over the registry they left (`recordCommittedReport()`).
+    try {
+      this.core.startupOrdering.getStartupOrderInternal(
+        nextComponents,
+        {
+          component,
+          name: componentName,
+          dependencies: candidateRead.dependencies,
+        },
+        dependencySnapshot,
+      );
+    } catch (error) {
+      if (error instanceof DependencyCycleError) {
+        return refused(
+          this.refuseRegistration({
+            ...refusal,
+            code: 'dependency_cycle',
+            message: error.message,
+            logLine: 'Registration rejected due to dependency cycle',
+            logParams: { cycle: error.additionalInfo.cycle },
+            cycle: error.additionalInfo.cycle,
+            error,
+            targetFound: positionHasTarget(position) ? true : undefined,
+          }),
+        );
+      }
+      throw error;
+    }
+
+    return { kind: 'placed', nextComponents, candidateRead };
+  }
+
+  /**
+   * Commit the registration provisionally and run the component's own registration
+   * hooks: the registry entry and every state map together, before the component's own
+   * code runs. Startup remains blocked until its registration hook succeeds, because
+   * failure rolls these provisional writes back - as does a shutdown, or a startup
+   * that needs this component, begun inside a hook, which this answers with its
+   * refusal code. Publishes the registry either way, and records the committed report.
+   */
+  private commitRegistration(
+    attempt: RegistrationAttempt,
+    nextComponents: BaseComponent[],
+  ): 'shutdown_in_progress' | 'startup_in_progress' | undefined {
+    const { component, componentName, progress } = attempt;
+    // An instance registered before keeps its old recorded name after unregistering,
+    // for work still in flight; a rollback below puts that back rather than dropping
+    // it.
+    const previousRecordedName = this.core.state.registeredNames.get(component);
+    const previousGeneration =
+      this.core.registryReads.currentGeneration(component);
+    // What the report-once marks held before this attempt, so a rollback clears only
+    // marks it made itself.
+    const previousMetadataReports =
+      this.core.componentMetadata.reportMarks(component);
+
+    let interruptionCode:
+      'shutdown_in_progress' | 'startup_in_progress' | undefined;
+    // Both expected bulk-operation refusals and unexpected failures undo only
+    // this attempt. Keep the reservation until finally so rollback hooks cannot
+    // claim its name while cleanup is still in progress.
+    const rollBack = (): void => {
+      this.core.state.rollbackReservations.set(component, componentName);
+      this.core.state.componentEntries =
+        this.core.state.componentEntries.filter(
+          (registered) => registered !== component,
+        );
+      // Rolled back, so this registration did not commit after all.
+      progress.hasCommitted = false;
+      this.core.registryReads.restoreRegistration(
+        component,
+        previousGeneration,
+      );
+
+      this.core.state.componentStates.delete(componentName);
+      this.core.state.componentTimestamps.delete(componentName);
+      this.core.state.componentErrors.delete(componentName);
+      this.core.state.componentStartAttemptTokens.delete(componentName);
+
+      // The component's side too: a hook that marked it registered before throwing
+      // would otherwise leave it believing it is, and its next registration refused as
+      // `duplicate_instance`.
+      this.markComponentUnregistered(
+        component,
+        'lifecycle-manager registration rollback',
+      );
+      // The separate reservation retains the attempted name while bookkeeping is
+      // restored; finally releases it after cleanup has completely finished.
+      if (previousRecordedName === undefined) {
+        this.core.state.registeredNames.delete(component);
+      } else {
+        this.core.state.registeredNames.set(component, previousRecordedName);
+      }
+
+      // "Reported once per registration": this one never happened, so a report made
+      // under it - by the hook's own code reading the component - does not count
+      // against the next. Only such a report: a mark that was already there stays, or
+      // a caller retrying a failing registration would be told the same thing each
+      // time.
+      this.core.componentMetadata.rollBackReports(
+        component,
+        previousMetadataReports,
+      );
+    };
+    this.core.dispatcher.withTransition(() => {
+      try {
+        // A new array rather than a splice, as unregister does: a loop over the registry
+        // that a re-entrant registration lands in keeps walking the array it started on.
+        this.core.state.pendingRegistrations.add(component);
+        this.core.state.componentEntries = nextComponents;
+        this.core.registryReads.advanceRegistration(component);
+        this.core.state.registeredNames.set(component, componentName);
+
+        const internalCallbacks =
+          this.createLifecycleInternalCallbacks(component);
+
+        // The lifecycle setter and registration hook can both be overridden. Keep
+        // the entry unavailable to startup throughout them and their rollback, and
+        // release the guard on every exit before queued notifications are delivered.
+        (
+          component as unknown as { lifecycle: ComponentLifecycleRef }
+        ).lifecycle = new ComponentLifecycle(
+          this.core.manager,
+          componentName,
+          internalCallbacks,
+        );
+        component._markRegistered();
+        // A hook may start shutdown while this entry is invisible to that pass.
+        // It must not publish a new component into the pass after its snapshot.
+        progress.wasDuringStartup = this.core.state.isStarting;
+        if (this.core.shutdownPass.isShuttingDown) {
+          interruptionCode = 'shutdown_in_progress';
+          rollBack();
+          return;
+        }
+        // Startup can also begin inside either hook. Its order excludes this
+        // provisional entry, so publishing a dependency needed by that pass would
+        // contradict the same ordering rule checked before calling the hooks.
+        if (
+          this.core.startup.isRequiredDependencyDuringStartup(
+            componentName,
+            attempt.registryRead.reads,
+          )
+        ) {
+          interruptionCode = 'startup_in_progress';
+          rollBack();
+          return;
+        }
+        this.core.state.componentStates.set(componentName, 'registered');
+        this.core.state.componentTimestamps.set(componentName, {
+          startedAt: null,
+          stoppedAt: null,
+        });
+        this.core.state.componentErrors.set(componentName, null);
+        this.core.state.componentUnexpectedStopHadError.delete(componentName);
+        this.core.state.componentStartAttemptTokens.set(componentName, ulid());
+        progress.hasCommitted = true;
+        this.core.state.committedDependencyReads.set(
+          component,
+          attempt.candidateRead,
+        );
+      } catch (error) {
+        rollBack();
+        throw error;
+      } finally {
+        this.core.state.pendingRegistrations.delete(component);
+        this.core.state.rollbackReservations.delete(component);
+        // Publish only after hooks succeed (or rebuild after rollback), before
+        // notifications flush. Nested commits and unregisters remain in the live
+        // entries; never restore the stale array captured before calling hooks.
+        this.core.registry.publishRegistry();
+        if (progress.hasCommitted) {
+          this.recordCommittedReport(attempt);
+        }
+      }
+    });
+
+    return interruptionCode;
+  }
+
+  /**
+   * What a committed registration reports of its placement, captured as it is
+   * published, before queued listeners can change the registry: the startup order, and
+   * whether the requested position survived it.
+   */
+  private recordCommittedReport(attempt: RegistrationAttempt): void {
+    const { component, candidateRead } = attempt;
+    const { committed } = attempt.progress;
+    let startupOrder: string[];
+    // The cycle check before the hooks ordered only the reserved entry; hooks may have
+    // committed more components. Merge their validated reads into this report snapshot
+    // without invoking more caller code during publication.
+    try {
+      const reportReads = new Map<BaseComponent, DependencyRead>();
+      let hasCompleteReportReads = true;
+      for (const entry of this.core.state.components) {
+        const read =
+          entry === component
+            ? candidateRead
+            : this.core.registry.currentReadOf(
+                entry,
+                attempt.registryRead.reads,
+              );
+        // Every committed entry receives metadata before publication. If
+        // this invariant ever breaks, the report is unavailable: inventing
+        // an empty list would report a plausible but unjustified order.
+        if (read === undefined) {
+          hasCompleteReportReads = false;
+          break;
+        }
+        reportReads.set(entry, read);
+      }
+      startupOrder = hasCompleteReportReads
+        ? this.core.startupOrdering.getStartupOrderInternal(
+            this.core.state.components,
+            undefined,
+            reportReads,
+          )
+        : [];
+    } catch {
+      // This diagnostic cannot undo publication, regardless of why its
+      // order is unavailable. Snapshots observed at different times can disagree even though
+      // every registration passed its own cycle check. This is a report,
+      // not a failed commit: use an unavailable order rather than throw
+      // after publication or re-enter caller getters to manufacture one.
+      startupOrder = [];
+    }
+    committed.startupOrder = startupOrder;
+    committed.manualPositionRespected =
+      startupOrder.length === 0
+        ? undefined
+        : this.isManualPositionRespected({
+            componentName: attempt.componentName,
+            position: attempt.position,
+            targetComponentName: attempt.targetComponentName,
+            startupOrder,
+          });
+    // As found at insertion: `getInsertIndex()` refused a relative position
+    // whose target was missing. The hooks since may have unregistered the
+    // target, which does not undo that this registration was placed by it.
+    committed.targetFound = positionHasTarget(attempt.position)
+      ? true
+      : undefined;
+  }
+
+  /**
+   * After the commit: report a non-string dependency entry, now that the registration
+   * it would count against has happened, and log the registration.
+   */
+  private logCommittedRegistration(
+    attempt: RegistrationAttempt,
+    candidateRead: Extract<DependencyRead, { dependencies: string[] }>,
+  ): void {
+    const { component, componentName } = attempt;
+    // Only now: a registration refused above - a dependency cycle, a failed hook - used
+    // to have spent this component's one report, leaving the registration that
+    // followed silent about the same broken list.
+    if (candidateRead.invalidEntry !== undefined) {
+      this.core.componentMetadata.reportDependencyReadFailureOnce(
+        component,
+        'registration',
+        candidateRead.invalidEntry,
+        componentName,
+      );
+    }
+
+    const registrationIndexAfter =
+      this.core.state.components.indexOf(component);
+
+    if (attempt.isInsertAction) {
+      this.core.logger.entity(componentName).info('Component inserted', {
+        params: { position: attempt.position, index: registrationIndexAfter },
+      });
+    } else {
+      this.core.logger.entity(componentName).info('Component registered', {
+        params: { index: registrationIndexAfter },
+      });
+    }
+  }
+
+  /**
+   * A committed registration's auto-start, when its options asked for one: left to the
+   * bulk startup or restart about to run, refused while a bulk startup rolls back, or
+   * begun - and then answered by the start this returns, which the registration awaits.
+   * Nothing is returned when no start was begun.
+   */
+  private beginAutoStart(
+    attempt: RegistrationAttempt,
+  ): Promise<ComponentOperationResult> | undefined {
+    const { componentName, progress } = attempt;
+
+    if (!attempt.shouldAutoStart) {
+      return undefined;
+    }
+
+    // The log lines and dependency report since the commit ran caller code, which can
+    // unregister this component and register another under its name. Every auto-start
+    // branch below acts by name: it would start the replacement and report that as this
+    // registration's auto-start, or reserve the name in a startup for it.
+    if (!this.isStillThisRegistration(attempt)) {
+      this.skipReplacedAutoStart(attempt);
+      return undefined;
+    }
+
+    // Capture this pass before logging runs caller code. Its queue/rollback state
+    // decides whether registration defers, refuses auto-start, or starts work
+    // independently after the completion boundary.
+    const bulkStartup = this.core.state.activeBulkStartup;
+
+    // Bulk startup first: `isStarted` turns true as soon as its first component is
+    // running, and a start without `allowDuringBulkStartup` is refused with
+    // `startup_in_progress` for the rest of it.
+    const pendingRestart = Array.from(
+      this.core.state.pendingRestartAutoStarts,
+    ).at(-1);
+    if (!this.core.state.isStarting && pendingRestart !== undefined) {
+      // The restart has released shutdown's latch but has not claimed startup's
+      // yet. Its upcoming order includes this registration.
+      this.deferAutoStartToRestart(attempt, pendingRestart);
+    } else if (this.core.state.isStarting && bulkStartup?.isRollingBack) {
+      progress.didAutoStartAttempt = true;
+      progress.startResult = {
+        success: false,
+        componentName,
+        reason: 'The bulk startup this auto-start would join is rolling back',
+        code: 'startup_rolled_back',
+        status: this.core.manager.getComponentStatus(componentName),
+      };
+    } else if (this.core.state.isStarting && !bulkStartup?.isCompleting) {
+      this.deferAutoStartToBulkStartup(attempt, bulkStartup);
+    } else if (this.core.state.isStarting && bulkStartup !== null) {
+      // The pass has closed its queue before terminal notifications. A start from
+      // those callbacks is independent, while the public bulk latch stays held.
+      this.core.logger
+        .entity(componentName)
+        .info('AutoStart: starting component (bulk startup completing)');
+      // That log line ran caller code too.
+      if (this.isStillThisRegistration(attempt)) {
+        progress.didAutoStartAttempt = true;
+        return this.core.componentStart.startComponentInternal(
+          componentName,
+          snapshotStartOptions({
+            // Logging runs caller code. Only the captured completion still owns
+            // this permission; a replacement pass must retain its own bulk guard.
+            allowDuringBulkStartup:
+              this.core.state.activeBulkStartup === bulkStartup &&
+              bulkStartup.isCompleting &&
+              !bulkStartup.isRollingBack,
+          }),
+        );
+      }
+      this.skipReplacedAutoStart(attempt);
+    } else {
+      this.core.logger
+        .entity(componentName)
+        .info(
+          this.core.state.isStarted
+            ? 'AutoStart: starting component (manager is running)'
+            : 'AutoStart: starting component (manager not running)',
+        );
+      // That log line ran caller code too. A bulk startup or restart it began owns
+      // this start: started here as well, it would be refused `startup_in_progress`
+      // or `shutdown_in_progress` and reported as a failed auto-start while that
+      // startup started the component.
+      const startupBegunByLog = this.core.state.activeBulkStartup;
+      const restartBegunByLog = Array.from(
+        this.core.state.pendingRestartAutoStarts,
+      ).at(-1);
+      if (!this.isStillThisRegistration(attempt)) {
+        this.skipReplacedAutoStart(attempt);
+      } else if (
+        this.core.state.isStarting &&
+        !startupBegunByLog?.isCompleting &&
+        !startupBegunByLog?.isRollingBack
+      ) {
+        this.deferAutoStartToBulkStartup(attempt, startupBegunByLog);
+      } else if (
+        !this.core.state.isStarting &&
+        restartBegunByLog !== undefined
+      ) {
+        this.deferAutoStartToRestart(attempt, restartBegunByLog);
+      } else {
+        progress.didAutoStartAttempt = true;
+        return this.core.componentStart.startComponentInternal(componentName);
+      }
+    }
+
+    return undefined;
+  }
+
+  /** Whether the name still holds this registration's instance. */
+  private isStillThisRegistration(attempt: RegistrationAttempt): boolean {
+    return (
+      this.core.registry.getComponent(attempt.componentName) ===
+      attempt.component
+    );
+  }
+
+  private skipReplacedAutoStart(attempt: RegistrationAttempt): void {
+    this.core.logger
+      .entity(attempt.componentName)
+      .warn(
+        'AutoStart: skipped, the component was unregistered during its registration',
+      );
+  }
+
+  /**
+   * Leave the auto-start to the bulk startup about to run. Reserved before logging: a
+   * sink can synchronously register more components. The initial order or a follow-up
+   * batch owns this start and its outcome.
+   */
+  private deferAutoStartToBulkStartup(
+    attempt: RegistrationAttempt,
+    startup: ActiveBulkStartup | null,
+  ): void {
+    const { componentName } = attempt;
+    attempt.progress.isAutoStartDeferred = true;
+    // A startup this registration's own log line began has ordered it already.
+    // Queued as well, it would be started twice and, after a rollback, also
+    // reported as an auto-start the startup never attempted. Frozen with the
+    // initial order's deferred names instead, so one the loop never reaches is.
+    if (!startup?.initialOrderNames.has(componentName)) {
+      this.core.state.deferredAutoStartNames.add(componentName);
+    } else if (!startup.reachedNames.has(componentName)) {
+      startup.frozenAutoStarts.add(componentName);
+    }
+    this.core.logger
+      .entity(componentName)
+      .info('AutoStart: left to the bulk startup about to run');
+  }
+
+  /**
+   * Leave the auto-start to the restart this start would race: it has accepted its
+   * stop phase, and its upcoming startup reads the registry, this registration
+   * included. Reserved before logs, since sinks can synchronously take the startup
+   * latch and claim the set.
+   */
+  private deferAutoStartToRestart(
+    attempt: RegistrationAttempt,
+    pendingRestart: Set<string>,
+  ): void {
+    pendingRestart.add(attempt.componentName);
+    attempt.progress.isAutoStartDeferred = true;
+    this.core.logger
+      .entity(attempt.componentName)
+      .info('AutoStart: left to the restart startup about to run');
+  }
+
+  /** A committed registration's answer, announced with `component:registered`. */
+  private registeredResult(
+    attempt: RegistrationAttempt,
+  ): InsertComponentAtResult {
+    const { componentName, position, targetComponentName, progress } = attempt;
+    // Where it is now, not where it landed: an auto-start can register or remove
+    // components around it. By instance, as the failure path reads it: one unregistered
+    // and replaced under its name by a listener must not be described as the other.
+    const indexOfComponent = this.core.state.components.indexOf(
+      attempt.component,
+    );
+    const registrationIndexNow =
+      indexOfComponent === -1 ? null : indexOfComponent;
+    // The same report, and the same event, as a failure after the commit gives.
+    const report = committedRegistrationReport(
+      progress,
+      position,
+      this.describeRegistryPosition(registrationIndexNow),
+    );
+
+    this.emitCommittedRegistration({
+      progress,
+      componentName,
+      index: registrationIndexNow,
+      isInsertAction: attempt.isInsertAction,
+      position,
+      targetComponentName,
+      report,
+    });
+
+    return {
+      action: 'insert',
+      success: true,
+      registered: true,
+      componentName,
+      registrationIndexBefore: null,
+      registrationIndexAfter: registrationIndexNow,
+      requestedPosition: { position, targetComponentName },
+      ...report,
+      startResult: progress.startResult,
+    };
   }
 
   /**
