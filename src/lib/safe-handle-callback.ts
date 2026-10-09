@@ -224,8 +224,8 @@ function invokeCallbackSafely(
   try {
     // Use `Reflect.apply` so an extracted method keeps its receiver, not
     // `callback.apply(...)`, which reads `apply` off the untrusted callback itself: one
-    // with its own `apply` property would run that instead. With `thisArg` omitted this
-    // is the same bare call as before.
+    // with its own `apply` property would run that instead. With `thisArg` omitted the
+    // callback is called with no receiver.
     result = Reflect.apply(
       callback as (...args: unknown[]) => unknown,
       thisArg,
@@ -310,7 +310,6 @@ function reportToOnError(
  * the return type - and defaults to `unknown`. Supply it explicitly when you know what the
  * callback returns.
  */
-/** Results are null-prototype records; use Object.hasOwn instead of inherited methods. */
 export type CallbackResult<T = unknown> =
   | { success: true; value: T; error?: undefined }
   | { success: false; error: Error; value?: undefined };

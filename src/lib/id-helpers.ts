@@ -85,7 +85,7 @@ export function generateID(type: IdentifierType, seedTime?: number): string {
 
   if (seedTime !== undefined && (!Number.isFinite(seedTime) || seedTime < 0)) {
     throw new TypeError(
-      `seedTime must be a non-negative finite number (milliseconds), got: ${seedTime}`,
+      `seedTime must be a non-negative finite number (milliseconds), got: ${renderName(seedTime, '<unrenderable value>')}`,
     );
   }
 

@@ -266,3 +266,40 @@ test('two failing files send failed diagnostics to console instead of back to on
     await directory.cleanup();
   }
 });
+
+test('a muted ConsoleSink does not swallow an owned sink failure', async () => {
+  const failure = new Error('transform failed');
+  const source = new ArraySink({
+    transformer: () => {
+      throw failure;
+    },
+  });
+  const muted = new ConsoleSink({ muted: true });
+  const logger = new Logger({ sinks: [source, muted], callProcessExit: false });
+  const consoleReport = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    logger.info('original');
+    await sleep(0);
+    // The muted sink is no destination, so the guarded console rung still reports it.
+    expect(consoleReport).toHaveBeenCalledTimes(1);
+    expect(String(consoleReport.mock.calls[0][0])).toContain(
+      'transform failed',
+    );
+
+    // A sink that accepts the diagnostic is a destination, so the console stays quiet.
+    const stored = new ArraySink();
+    logger.addSink(stored);
+    consoleReport.mockClear();
+    logger.info('original');
+    await sleep(0);
+    expect(consoleReport).not.toHaveBeenCalled();
+    expect(
+      stored.logs.filter((log) =>
+        log.tags?.includes('lifecycleion-diagnostic'),
+      ),
+    ).toHaveLength(1);
+  } finally {
+    await logger.close();
+    consoleReport.mockRestore();
+  }
+});

@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import { Logger } from '../logger';
 import { LifecycleManager } from './lifecycle-manager';
 import { claimReports, hasReport, Plain, setup } from './test-helpers';
+import type { BroadcastResult } from './types';
 
 // Regressions for the component access review: messaging, value reads, health checks
 // and signal broadcasts. Each test pins one behavior the fix changed.
@@ -211,6 +212,31 @@ test('a timeout refusal a reload-failed listener rethrows from another getter is
     expect((reports[0] as Error).cause).toBe(captured);
   } finally {
     release();
+    await manager.stopAllComponents();
+    await logger.close();
+  }
+});
+
+test('a broadcast-completed listener cannot change the results the broadcast returns', async () => {
+  const { logger, manager } = setup();
+  await manager.registerComponent(new Receiver(logger, 'first'));
+  await manager.registerComponent(new Receiver(logger, 'second'));
+  await manager.startAllComponents();
+
+  manager.on('component:broadcast-completed', (data) => {
+    const { results } = data as { results: BroadcastResult[] };
+    results[0].code = 'error';
+    results.length = 0;
+  });
+
+  try {
+    const results = await manager.broadcastMessage('payload');
+
+    expect(results.map(({ name, code }) => [name, code])).toEqual([
+      ['first', 'sent'],
+      ['second', 'sent'],
+    ]);
+  } finally {
     await manager.stopAllComponents();
     await logger.close();
   }

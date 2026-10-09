@@ -861,7 +861,11 @@ A FileSink or NamedPipeSink report's `message` names the sink, the failure kind,
 the line (`retrying`, `lost`, attempt number), followed by the I/O error's text, for
 example `FileSink setup failed for /var/log/app (retrying): Failed to setup log file: ...`.
 A `'format'` failure's message omits the error text, which may come from entry content;
-read `diagnostic.error` for it.
+read `diagnostic.error` for it. A muted ConsoleSink does not count as a destination for
+these reports: when it is the only other sink and no `'diagnostic'` listener is
+registered, the report goes to guarded `console.error`. A sink holds its owners weakly,
+so a logger dropped without `close()` stops receiving its failures once it is
+garbage-collected; `close()` or `removeSink()` releases it immediately.
 
 An explicit `onError` or `onFormatError` remains the sink's chosen destination and takes
 precedence over automatic owner routing. Standalone sinks keep their console fallback.
@@ -1454,13 +1458,13 @@ The logger has a separate overall close budget. Raising a sink’s `closeTimeout
 The FileSink and NamedPipeSink `closeTimeoutMS` options use 30,000ms when omitted, `null`,
 or `undefined`. Constructors reject negative values with `RangeError` and NaN or
 other non-number values with `TypeError` before starting initialization.
-Zero retains the existing close behavior, including each sink’s final-flush minimum;
+Zero still allows each sink’s final-flush minimum;
 Infinity and oversized values clamp to 2,147,483,647ms.
 
 The count options follow the same rule for values that are not numbers: `maxQueueSize`,
 `maxRetries`, and FileSink `maxSizeMB` use their defaults when omitted or `null`, and
 constructors reject NaN or any other non-number with a `TypeError` naming the option,
-before starting initialization. Their numeric meanings are unchanged: a negative
+before starting initialization. Numeric values mean: a negative
 `maxQueueSize` (or `Infinity`) is unlimited and `0` takes the default; `maxRetries` of
 zero or less means no retries and `Infinity` takes the default; a `maxSizeMB` of zero or
 less takes the default and `Infinity` never rotates on size.
@@ -1512,8 +1516,10 @@ Both queueing sinks, `FileSink` and `NamedPipeSink`, answer a failed write the s
   with `kind: 'queue_full'` and `disposition: 'lost'`. A dropped diagnostic entry is
   reported once per episode on the console instead, so it never takes the place of
   that report. Further overflow reports are suppressed until the queue drains. The callback carries a dropped entry as a sample,
-  not every lost entry. Without an `onError` handler, the report goes to guarded
-  `console.error`
+  not every lost entry. Without an `onError` handler, an attached sink offers the
+  report to its owning logger's diagnostic channel (see
+  [Dynamic Sink Management](#dynamic-sink-management)), and a standalone sink writes it
+  to guarded `console.error`
 - `getHealth().droppedEntries` means "lines this sink did not deliver": evicted at the
   cap, out of retries, unrenderable, still queued when `close()` gave up on them, or
   known to have failed in flight during close. FileSink reports a timed-out stream

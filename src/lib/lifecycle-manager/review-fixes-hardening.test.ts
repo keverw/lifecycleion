@@ -2,12 +2,14 @@ import { describe, expect, test } from 'bun:test';
 import { sleep } from '../sleep';
 import { Logger } from '../logger';
 import { ArraySink } from '../logger/sinks/array';
+import { LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP } from './constants';
 import { LifecycleManager } from './lifecycle-manager';
 import {
   claimReports,
   failStatusReadOnce,
   fakeSignals,
   Plain,
+  sendSignal,
   setup,
   Stalls,
 } from './test-helpers';
@@ -617,5 +619,102 @@ describe('late-start cleanup availability', () => {
       await sleep(1);
       await manager.stopAllComponents();
     }
+  });
+});
+
+describe('the detach a clean shutdown pass runs', () => {
+  function setupDetaching() {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const manager = new LifecycleManager({
+      logger,
+      detachSignalsOnStop: true,
+      shutdownWarningTimeoutMS: -1,
+    });
+    const signals = fakeSignals(manager);
+    const detachLines = (): string[] =>
+      sink.logs
+        .map((entry) => entry.message)
+        .filter((message) => message.startsWith('Auto-detached'));
+    return { logger, manager, signals, detachLines };
+  }
+
+  test('is the one the last stop deferred, logged as that stop', async () => {
+    const { logger, manager, signals, detachLines } = setupDetaching();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startAllComponents();
+    manager.attachSignals();
+
+    const result = await manager.stopAllComponents();
+
+    expect(result.success).toBe(true);
+    expect(signals.isAttached()).toBe(false);
+    expect(signals.detachCalls()).toBe(1);
+    expect(detachLines()).toEqual([
+      LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP,
+    ]);
+  });
+
+  test('leaves handlers alone when the pass stopped nothing', async () => {
+    const { manager, signals } = setupDetaching();
+    manager.attachSignals();
+
+    const result = await manager.stopAllComponents();
+
+    expect(result.success).toBe(true);
+    expect(signals.isAttached()).toBe(true);
+    expect(signals.detachCalls()).toBe(0);
+  });
+
+  test('is superseded by an attach made after the stop deferred it', async () => {
+    const { logger, manager, signals } = setupDetaching();
+    await manager.registerComponent(new Plain(logger, 'a'));
+    await manager.startAllComponents();
+    manager.attachSignals();
+    manager.once('component:stopped', () => {
+      // The real `attachSignals()`: already attached, it only supersedes the detach.
+      LifecycleManager.prototype.attachSignals.call(manager);
+    });
+
+    const result = await manager.stopAllComponents();
+
+    expect(result.success).toBe(true);
+    expect(signals.isAttached()).toBe(true);
+    expect(signals.detachCalls()).toBe(0);
+  });
+});
+
+describe('an armed retry whose own handling starts the pass', () => {
+  test('is not refused as a second shutdown request', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      shutdownOptions: { timeoutMS: 1000 },
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 3,
+        armedAfterFailureMS: 10_000,
+        onForceShutdown: (): void => {},
+      },
+    });
+    await manager.registerComponent(new Stalls(logger, 'a'));
+    await manager.startAllComponents();
+    expect((await manager.stopAllComponents()).success).toBe(false);
+    expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+
+    let retry: Promise<unknown> | undefined;
+    manager.once('signal:shutdown', () => {
+      retry = manager.stopAllComponents();
+    });
+    sendSignal(manager, 'SIGINT');
+    await retry;
+
+    expect(retry).toBeDefined();
+    expect(
+      sink.logs.some((entry) =>
+        entry.message.startsWith('Cannot stop all components'),
+      ),
+    ).toBe(false);
   });
 });

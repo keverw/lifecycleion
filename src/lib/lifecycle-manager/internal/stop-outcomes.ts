@@ -314,15 +314,23 @@ export class StopOutcomes {
    * Late graceful completion and superseded force attempts share this boundary.
    */
   public successfulStopResult(name: string): ComponentOperationResult {
-    const result: ComponentOperationResult = {
-      success: true,
-      componentName: name,
-    };
-    const status = readComponentStatus(
-      this.core,
-      name,
-      'lifecycle-manager component stop',
-    );
+    return this.withStopStatus(name, { success: true, componentName: name });
+  }
+
+  /**
+   * `result` with the component's status attached, read through the public
+   * `getComponentStatus()` (`readComponentStatus()`): a throwing override is reported
+   * under `context` and the status left out, so it cannot turn the result into a crash.
+   * The results of a stop that ran read their status here - a stop, a failed graceful
+   * phase, a stall, a crash. The stop preconditions' refusals run no caller code and
+   * carry the manager's own status instead (`ComponentStop.checkStopPreconditions()`).
+   */
+  public withStopStatus(
+    name: string,
+    result: ComponentOperationResult,
+    context = 'lifecycle-manager component stop',
+  ): ComponentOperationResult {
+    const status = readComponentStatus(this.core, name, context);
     if (status !== undefined) {
       result.status = status;
     }
@@ -382,16 +390,7 @@ export class StopOutcomes {
       'operation_crashed',
     );
 
-    const status = readComponentStatus(
-      this.core,
-      name,
-      'lifecycle-manager component stop',
-    );
-    if (status !== undefined) {
-      result.status = status;
-    }
-
-    return result;
+    return this.withStopStatus(name, result);
   }
 
   /**
@@ -434,16 +433,11 @@ export class StopOutcomes {
 
     // Guarded as a stopped component's status is: a throwing override must not turn
     // the stall into a crash. Reported, and left out.
-    const status = readComponentStatus(
-      this.core,
+    return this.withStopStatus(
       name,
+      result,
       'lifecycle-manager component stall',
     );
-    if (status !== undefined) {
-      result.status = status;
-    }
-
-    return result;
   }
 
   /** Whether the stop that left `name` stalled had its graceful phase time out. */

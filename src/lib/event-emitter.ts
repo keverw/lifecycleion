@@ -8,7 +8,6 @@
 
 import { reportCallbackError, runCallbackSafely } from './safe-handle-callback';
 import { renderName } from './internal/render-name';
-import { isConsoleReportActive } from './internal/report-to-console';
 
 type EventCallback<T = unknown> = (data: T) => void | Promise<void>;
 
@@ -145,13 +144,10 @@ export class EventEmitterProtected {
       `event handler for ${renderEventName(event)}`;
 
     // Loop-invariant: the reporter depends on the event, not on which handler failed.
-    const shouldSuppressDiagnostics = isConsoleReportActive();
+    // `runCallbackSafely` withholds it from a handler entered by terminal console output,
+    // including a rejection that arrives after that output has finished.
     const handleFailure = (error: unknown): void => {
-      // Listener work entered by terminal console output may reject later. Keep
-      // observing it, but do not feed that automatic diagnostic back to the console.
-      if (!shouldSuppressDiagnostics) {
-        this.handleEventHandlerFailure(event, error, data);
-      }
+      this.handleEventHandlerFailure(event, error, data);
     };
 
     // Snapshot at the start of this emission. Listener changes affect later (including

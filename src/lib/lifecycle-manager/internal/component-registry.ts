@@ -30,6 +30,23 @@ export class ComponentRegistry {
     return this.core.state.componentsByName.has(name);
   }
 
+  /**
+   * Whether `name` still holds the registration an operation began with: `component`,
+   * under the registration generation it read then. The instance alone is not enough -
+   * one unregistered and registered again under the same name is a new registration,
+   * with its own options, state and owner.
+   */
+  public isCurrentRegistration(
+    name: string,
+    component: BaseComponent,
+    generation: number | undefined,
+  ): boolean {
+    return (
+      this.getComponent(name) === component &&
+      this.core.registryReads.currentGeneration(component) === generation
+    );
+  }
+
   /** The committed registry index of the component registered under `name`, if any. */
   public getComponentIndex(name: string): number | null {
     // The name index holds the first committed entry with this name, published with
@@ -133,12 +150,18 @@ export class ComponentRegistry {
 
   /** Whether `name` is held by a registry entry, provisional or committed, or a rollback reservation. */
   public isNameReserved(name: string): boolean {
-    if (
-      this.core.state.componentEntries.some(
-        (component) => this.nameOf(component) === name,
-      )
-    ) {
+    // Every entry is committed and published, or provisional in `pendingRegistrations`,
+    // whenever caller code can ask: a commit marks its entry pending before the entry
+    // joins the registry and publishes as it stops being pending, and an unregister
+    // publishes as it removes one. So the name index and the few pending entries cover
+    // the registry without a scan of it.
+    if (this.core.state.componentsByName.has(name)) {
       return true;
+    }
+    for (const pending of this.core.state.pendingRegistrations) {
+      if (this.nameOf(pending) === name) {
+        return true;
+      }
     }
     for (const reservedName of this.core.state.rollbackReservations.values()) {
       if (reservedName === name) {
@@ -150,7 +173,9 @@ export class ComponentRegistry {
 
   /**
    * Where in `componentEntries` an insertion at `position` lands, or `null` for a
-   * position that is not one or a target that is not registered.
+   * target that is not registered. `position` is one the caller has validated
+   * (`isInsertPosition()`): anything else is a broken invariant, thrown rather than
+   * answered as a missing target.
    */
   public getInsertIndex(
     position: InsertPosition,
@@ -161,7 +186,9 @@ export class ComponentRegistry {
     } else if (position === 'end') {
       return this.core.state.componentEntries.length;
     } else if (position !== 'before' && position !== 'after') {
-      return null;
+      throw new TypeError(
+        `getInsertIndex() needs a validated position, got "${String(position)}"`,
+      );
     }
 
     // Targets must be published, but placement is adjacent to that exact instance
@@ -203,7 +230,13 @@ export class ComponentRegistry {
     }
   }
 
-  /** Current-generation dependency metadata, without running caller getters. */
+  /**
+   * A registered component's dependency metadata for its current registration, without
+   * running caller getters: `preferred`'s answer, then `snapshot`'s, when either was
+   * read for this registration, and otherwise the list its commit validated. That last
+   * is kept from the commit until the component is unregistered, so callers pass only
+   * registered components - an unregistered one has none.
+   */
   public currentReadOf(
     component: BaseComponent,
     snapshot: ReadonlyMap<BaseComponent, DependencyRead>,

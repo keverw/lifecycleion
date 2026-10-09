@@ -141,3 +141,45 @@ test('separate module copies share owners and diagnostic identity', async () => 
     remove();
   }
 });
+
+test('a shared sink does not retain a logger that was dropped without close()', async () => {
+  // Isolated in a child process, as the lifecycle retention probe is: the test runner's
+  // own stack can keep temporaries alive across an in-process collection.
+  const probe = Bun.spawn({
+    cmd: [
+      process.execPath,
+      '--eval',
+      `
+      import { Logger, ArraySink } from ${JSON.stringify(new URL('../index.ts', import.meta.url).href)};
+      import { reportSinkFailure } from ${JSON.stringify(new URL('./sink-failure-routing.ts', import.meta.url).href)};
+      const shared = new ArraySink();
+      const kept = new Logger({ sinks: [shared, new ArraySink()], callProcessExit: false });
+      function dropLogger() {
+        let logger = new Logger({ sinks: [shared, new ArraySink()], callProcessExit: false });
+        const reference = new WeakRef(logger);
+        logger = undefined;
+        return reference;
+      }
+      const dropped = dropLogger();
+      for (let attempt = 0; attempt < 100; attempt++) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        Bun.gc(true);
+      }
+      if (dropped.deref() !== undefined) throw new Error('Dropped logger retained by its shared sink');
+      const report = { kind: 'sink', context: 'write', error: new Error('x'), message: 'x' };
+      if (!reportSinkFailure(shared, report)) throw new Error('Live owner lost its subscription');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await kept.close();
+      if (reportSinkFailure(shared, report)) throw new Error('Closed owner still subscribed');
+    `,
+    ],
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const [exitCode, stderr] = await Promise.all([
+    probe.exited,
+    new Response(probe.stderr).text(),
+  ]);
+  expect(stderr).toBe('');
+  expect(exitCode).toBe(0);
+});

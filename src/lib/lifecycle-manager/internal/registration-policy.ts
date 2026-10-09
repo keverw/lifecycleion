@@ -59,9 +59,12 @@ export function positionHasTarget(position: InsertPosition): boolean {
 }
 
 /**
- * `targetFound` for a registration refused before it looked for a target: `false` for a
- * position that has one, and absent for `start` / `end`. One that failed after its
- * lookup found the target reports `progress.targetFound` instead.
+ * `targetFound` for a registration that failed unexpectedly - `operation_crashed`, or a
+ * cycle thrown rather than found by the check - before its lookup found a target: `false`
+ * for a position that has one, and absent for `start` / `end`. One that failed after the
+ * lookup found the target reports `progress.targetFound` instead. A refusal answers its
+ * own: absent unless its check looked the target up (`target_not_found`, a dependency
+ * cycle, a commit a bulk operation interrupted).
  */
 export function defaultTargetFound(
   position: InsertPosition,
@@ -89,8 +92,9 @@ export function reportedComponentName(progress: RegistrationProgress): string {
  * What a registration reports - where it is, the order it computed, the target it
  * found, and an auto-start it attempted or left to a bulk startup - on its event and
  * its result, from the success path, the registration's own catch and the safety net
- * above it: built once, so they cannot drift. One that never committed reports a
- * refusal's defaults, and so does a part the failure came before.
+ * above it: built once, so they cannot drift. One that never committed reports no
+ * order, no auto-start and `defaultTargetFound()` unless its lookup found the target;
+ * a committed one reports those defaults for any part the failure came before.
  */
 export function committedRegistrationReport(
   progress: RegistrationProgress,

@@ -5,9 +5,11 @@ import type { StopAttempt } from './manager-state';
  * Component claims: which start or stop attempt last claimed each component as
  * `starting`, `stopping` or `force-stopping`, and the state its claim replaced.
  *
- * The start and stop pipelines take, check and release claims only through here. The
- * records themselves stay on the state (`componentClaims`, `claimsTaken`), where the
- * attempts' nets and the bulk operations read them.
+ * The start and stop pipelines take, check and release claims through here. The records
+ * themselves stay on the state (`componentClaims`, `claimsTaken`), where the attempts'
+ * nets read a claim's `previousState` and whether it was taken, the start settlements
+ * and registration ask which attempt holds a component, and unregistering drops the
+ * removed component's record.
  */
 export class ComponentClaims {
   constructor(private readonly core: ManagerCore) {}
@@ -41,8 +43,12 @@ export class ComponentClaims {
     return this.core.state.componentClaims.get(name)?.claim === claim;
   }
 
-  /** Drop an attempt's claim, if it still holds it. */
+  /**
+   * End an attempt's claim once the attempt has settled: no longer counted as taken, and
+   * its record dropped if it still holds it.
+   */
   public release(name: string, claim: symbol): void {
+    this.core.state.claimsTaken.delete(claim);
     if (this.owns(name, claim)) {
       this.core.state.componentClaims.delete(name);
     }

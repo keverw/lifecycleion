@@ -30,7 +30,9 @@ export type FormatReport = (onReported: () => void) => void;
  * reports reaches the handler again; a console shim that logs back into the sink is
  * contained by a guard of its own, under which a nested console report is dropped.
  *
- * `ArraySink` follows the same policy for its `onFormatError`, with its own counters.
+ * `ArraySink` guards its `onFormatError` with counters of its own and a narrower deferral:
+ * only a transformer's late rejection is held for a pending handler, and every other
+ * failure behind one goes to the console.
  */
 export class FormatReportScheduler {
   private isActive = false;

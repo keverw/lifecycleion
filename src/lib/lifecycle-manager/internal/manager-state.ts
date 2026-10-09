@@ -210,8 +210,9 @@ export class LifecycleManagerState {
   // The shutdown pass that most recently began, when it asked to abort pending starts
   // (`abortPendingStarts`), keyed by its `shutdownToken`. A start whose caller code began
   // that pass after the start claimed its component - before it could be interrupted -
-  // delivers the pass's cue to itself (see `startComponentAttempt()`), unless its
-  // lifecycle handle requested the pass from a starting listener. Cleared once the pass ends.
+  // delivers the pass's cue to itself (see `ComponentStart.queueMissedShutdownCue()`),
+  // unless its lifecycle handle requested the pass from a starting listener. Cleared once
+  // the pass ends.
   public pendingStartAbortRequest:
     | {
         shutdownToken: string;
@@ -274,6 +275,7 @@ export class LifecycleManagerState {
   public readonly rollbackReservations = new Map<BaseComponent, string>();
   // Successful registrations retain their validated read for reports and checks of
   // components committed by nested hooks, without probing caller getters again.
+  // Kept from the commit until the component is unregistered.
   public readonly committedDependencyReads = new WeakMap<
     BaseComponent,
     DependencyRead
@@ -287,15 +289,15 @@ export class LifecycleManagerState {
   // exit from there is the force itself - and not on the wider depth, which also covers a
   // fresh request's `signal:shutdown` listeners, where an exit must still wait.
   public forceHandlingDepth = 0;
+  // Every claim an attempt still running has taken, owned or since superseded. A
+  // failure is a refusal only for an attempt that never claimed - one that claimed has
+  // acted, whoever holds the component now. Removed by the attempt's net as it settles.
+  public readonly claimsTaken = new Set<symbol>();
   // Which attempt last claimed each component as `starting`, `stopping` or
   // `force-stopping`, and the state it replaced. The start and stop nets act on a
   // component only through a claim they own: an attempt that crashed before claiming
   // it - while another claimed it across an `await` - must leave that other attempt's
   // claim alone.
-  // Every claim an attempt still running has taken, owned or since superseded. A
-  // failure is a refusal only for an attempt that never claimed - one that claimed has
-  // acted, whoever holds the component now. Removed by the attempt's net as it settles.
-  public readonly claimsTaken = new Set<symbol>();
   public readonly componentClaims = new Map<string, ComponentClaim>();
   public shutdownMethod: ShutdownMethod | null = null;
   public lastShutdownResult: ShutdownResult | null = null;

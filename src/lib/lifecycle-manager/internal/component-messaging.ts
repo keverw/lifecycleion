@@ -1,4 +1,5 @@
 import type { ComponentAccessContext } from './component-access-context';
+import type { BaseComponent } from '../base-component';
 import { reportCallbackError } from '../../safe-handle-callback';
 import type {
   SendMessageOptions,
@@ -34,18 +35,19 @@ import {
 } from './component-dispatch';
 
 /**
- * `isCurrent` is the caller's: whether `component` is still the instance registered
- * under `componentName`. A recheck looks it up again; the first read follows the lookup
- * that found `component` with no caller code between, so it passes `true` rather than
- * repeat a lookup that scans the registry.
+ * Whether `component` may be entered now, looked up again under `componentName` on
+ * every read: each caller's first read already follows caller code - its options
+ * getters, and for a value read the `value-requested` listeners - which can unregister
+ * or replace the component.
  */
 function readAvailability(
   context: ComponentAccessContext,
   componentName: string,
-  isCurrent: boolean,
+  component: BaseComponent,
   allowStopped: boolean,
   allowStalled: boolean,
 ) {
+  const isCurrent = context.getComponent(componentName) === component;
   // Neither override permits entering a provider the shared rule blocks - startup or
   // teardown owning it (see `isHookEntryBlocked()`); they only admit a stopped or
   // stalled component that nothing owns.
@@ -109,21 +111,17 @@ export async function sendMessageInternal(
   // The latest availability read, so each answer below reports what the last recheck
   // found rather than what was true before caller code ran. Even this first one looks
   // the component up again: the `options` reads above can run the caller's getters.
-  let availability = readAvailability(
-    context,
-    componentName,
-    context.getComponent(componentName) === component,
-    allowStopped,
-    allowStalled,
-  );
-  const recheck = () => {
-    availability = readAvailability(
+  const readCurrent = () =>
+    readAvailability(
       context,
       componentName,
-      context.getComponent(componentName) === component,
+      component,
       allowStopped,
       allowStalled,
     );
+  let availability = readCurrent();
+  const recheck = () => {
+    availability = readCurrent();
     return availability.refusalCode;
   };
   // Nothing is announced before dispatch, so a refusal up to then has no event to pair.
@@ -499,13 +497,39 @@ export async function broadcastMessageInternal(
     reportCallbackError('lifecycle-manager broadcastMessage', error);
   }
 
+  // The event gets its own copy of the array and of each entry, as `value-returned`
+  // gets its own result object: a listener that edits what it was handed must not
+  // change the answer this broadcast returns. Handler data and errors are shared.
   context.lifecycleEvents.componentBroadcastCompleted(
     from,
     results.length,
-    results,
+    results.map((result) => ({ ...result })),
   );
 
   return results;
+}
+
+/**
+ * The `ValueResult` for a value read that failed unexpectedly, already reported: by
+ * {@link getValueInternal} once `value-requested` has gone out, and by the safety net
+ * in `MessagingOperations.getValueSettled()` before it has.
+ */
+export function crashedValueResult<T>(
+  from: string | null,
+  error: unknown,
+  isComponentFound: boolean,
+  isComponentRunning: boolean,
+): ValueResult<T> {
+  return {
+    found: false,
+    value: undefined,
+    componentFound: isComponentFound,
+    componentRunning: isComponentRunning,
+    handlerImplemented: false,
+    requestedBy: from,
+    code: 'operation_crashed',
+    error: toError(error),
+  };
 }
 
 /**
@@ -562,16 +586,12 @@ export function getValueInternal<T = unknown>(
     // and reported here rather than left to the safety net in `getValue()`, which has no
     // `value-returned` to pair with the `value-requested` already sent.
     reportCallbackError('lifecycle-manager getValue', error);
-    result = {
-      found: false,
-      value: undefined,
-      componentFound: progress.availability?.isCurrent ?? progress.hasComponent,
-      componentRunning: progress.availability?.isRunning ?? false,
-      handlerImplemented: false,
-      requestedBy: from,
-      code: 'operation_crashed',
-      error: toError(error),
-    };
+    result = crashedValueResult<T>(
+      from,
+      error,
+      progress.availability?.isCurrent ?? progress.hasComponent,
+      progress.availability?.isRunning ?? false,
+    );
   }
 
   const { error: _error, ...eventResult } = result;
@@ -631,14 +651,18 @@ function answerValueRequest<T>(
   // The latest availability read; see `sendMessageInternal()`. Even this first one
   // looks the component up again: the options getters and `value-requested` listeners
   // have run since the lookup that found `component`.
-  let availability = readAvailability(
-    context,
-    componentName,
-    context.getComponent(componentName) === component,
-    allowStopped,
-    allowStalled,
-  );
-  progress.availability = availability;
+  const readCurrent = () => {
+    const current = readAvailability(
+      context,
+      componentName,
+      component,
+      allowStopped,
+      allowStalled,
+    );
+    progress.availability = current;
+    return current;
+  };
+  let availability = readCurrent();
   const initialRefusal = refuseUnavailable(availability, false);
   if (initialRefusal) {
     return initialRefusal;
@@ -658,14 +682,7 @@ function answerValueRequest<T>(
       reportCallbackError('lifecycle-manager getValue', error);
     },
     () => {
-      availability = readAvailability(
-        context,
-        componentName,
-        context.getComponent(componentName) === component,
-        allowStopped,
-        allowStalled,
-      );
-      progress.availability = availability;
+      availability = readCurrent();
       return availability.refusalCode === undefined ? undefined : availability;
     },
   );

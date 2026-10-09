@@ -218,11 +218,11 @@ export class LateStartRecovery {
     for (const settlement of this.core.state.startSettlements.values()) {
       if (
         settlement.isAwaitingLateStart === true &&
-        settlement.component !== undefined &&
-        this.core.registry.getComponent(settlement.name) ===
-          settlement.component &&
-        this.core.state.componentStartAttemptTokens.get(settlement.name) ===
-          settlement.token
+        this.core.startSettlements.isCurrentStartAttempt(
+          settlement.name,
+          settlement.component,
+          settlement.token,
+        )
       ) {
         return true;
       }

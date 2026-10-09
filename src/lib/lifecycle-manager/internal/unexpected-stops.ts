@@ -200,12 +200,10 @@ export class UnexpectedStops {
       const failure = isNullish(error) ? null : toError(error);
 
       // Captured before the normalization above is allowed to blur the distinction, and
-      // asked with the same check `toError` just used. A bare `instanceof` contradicted the
-      // line above it: `toError` keeps a cross-realm error - from a `vm` context, an
-      // iframe - as-is, so `componentErrors` held a real error while this recorded that the
-      // component had reported none, and `startComponent`'s overlapping-failure rule read
-      // the wrong answer. Guarded internally, so the local `try` this replaces is no longer
-      // needed.
+      // asked with the same check `toError` just used, so the two agree: `toError` keeps
+      // a cross-realm error - from a `vm` context, an iframe - as-is, and this records it
+      // as a reported error too, which `startComponent`'s overlapping-failure rule reads.
+      // `isErrorValue()` is guarded internally, so it cannot throw here.
       const didReportError = isErrorValue(error);
 
       this.core.state.componentUnexpectedStopHadError.set(name, didReportError);

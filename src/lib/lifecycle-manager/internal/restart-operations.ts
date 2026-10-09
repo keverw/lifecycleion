@@ -57,10 +57,12 @@ type RestartStopNeed = 'stop' | 'force';
 
 /**
  * Thrown by `readRestartInput()` when a caller read began a shutdown: it unwinds the
- * rest of restart preparation to the one catch in `restartAllComponentsOperation()`,
- * which answers with `result`. Thrown rather than returned, so a newly added read
- * cannot forget the check and let validation run under that shutdown. Never escapes
- * that catch; any other throw - a getter's own, a rejected budget - passes through it.
+ * rest of restart preparation to the catch around that read in
+ * `restartAllComponentsOperation()` - the one around `prepareRestart()`, or the one
+ * around the late stop-budget check - which answers with `result`. Thrown rather than
+ * returned, so a newly added read cannot forget the check and let validation run under
+ * that shutdown. Never escapes those catches; any other throw - a getter's own, a
+ * rejected budget - passes through them.
  */
 class RestartPreparationRefusal extends Error {
   readonly #result: RestartResult;
@@ -82,6 +84,18 @@ class RestartPreparationRefusal extends Error {
     }
     throw error;
   }
+}
+
+/** Why a `restartComponent()` skipped its start for a request to stay down. */
+const RESTART_START_SKIPPED_REASON =
+  'Shutdown requested while restart was stopping the component; startup skipped';
+
+/** The startup phase of a `restartAllComponents()` a request to stay down skipped. */
+function skippedRestartStartupResult(): StartupResult {
+  return refusedStartupResult(
+    'shutdown_requested_during_restart',
+    'Shutdown requested during the restart shutdown phase; startup skipped',
+  );
 }
 
 /**
@@ -282,8 +296,8 @@ export class RestartOperations {
           shutdownResult.code === 'cleanup_incomplete'
             ? 'Restart cleanup is incomplete; startup skipped'
             : 'Restart shutdown timed out; startup skipped';
-        // Logged as the sibling refusals below are: this one answered silently, and a
-        // restart that left the application down said nothing in the logs about why.
+        // Logged as the sibling refusals below are, so a restart that leaves the
+        // application down says why in the logs.
         this.core.logger.warn('Restart abandoned: {{reason}}', {
           params: { reason, shutdownReason: shutdownResult.reason },
         });
@@ -324,11 +338,10 @@ export class RestartOperations {
 
       // A stop phase that ended with components still up - a `haltOnStall` break, which
       // restart always sets, or a stop that failed and left its component running -
-      // cannot be followed by a startup. That startup refused as `partial_state` anyway,
-      // but listed the components the stop phase never restarted as started, while the
-      // ones it had already stopped stayed down. Skipped and said so, as a timed-out
-      // stop phase is. Read live: anything up now is equally something a startup would
-      // refuse over.
+      // cannot be followed by a startup: it would refuse as `partial_state`, listing the
+      // components still up as started while the ones already stopped stay down.
+      // Skipped and said so, as a timed-out stop phase is. Read live: anything up now is
+      // equally something a startup would refuse over.
       if (
         shutdownResult.code === 'partial_state' &&
         this.core.state.runningComponents.size > 0
@@ -401,10 +414,23 @@ export class RestartOperations {
       this.core.state.pendingRestartAutoStarts.delete(pendingAutoStarts);
       const abandoned = Array.from(pendingAutoStarts);
       pendingAutoStarts.clear();
-      this.core.startup.warnAbandonedAutoStarts(
-        abandoned,
-        'restart abandoned before startup',
+      // A newer restart whose stop phase began in this one's gap - the one that refused
+      // this startup - starts the whole registry in its own startup phase. Its handoff
+      // takes these names, so it reports them if it leaves them unattempted, and only
+      // a restart with no successor warns here.
+      const successor = Array.from(this.core.state.pendingRestartAutoStarts).at(
+        -1,
       );
+      if (successor !== undefined) {
+        for (const name of abandoned) {
+          successor.add(name);
+        }
+      } else {
+        this.core.startup.warnAbandonedAutoStarts(
+          abandoned,
+          'restart abandoned before startup',
+        );
+      }
     }
   }
 
@@ -515,6 +541,7 @@ export class RestartOperations {
       name,
       stopOptions,
       stopContext,
+      startSnapshot,
       taken: false,
     };
     const stopDispatchOptions = restartDispatchOptions(stopDispatch);
@@ -552,13 +579,11 @@ export class RestartOperations {
       // no start follows, and it is reported as such. Neither a replacement's status nor
       // a missing one is this restart's, so none is attached.
       if (this.core.state.stayDownRequestCount !== stayDownRequestCountAtStop) {
-        return {
-          success: false,
-          componentName: name,
-          reason:
-            'Shutdown requested while restart was stopping the component, which was replaced or unregistered meanwhile; startup skipped',
-          code: 'shutdown_requested_during_restart',
-        };
+        return this.skippedRestartStartResult(
+          name,
+          false,
+          'Shutdown requested while restart was stopping the component, which was replaced or unregistered meanwhile; startup skipped',
+        );
       }
 
       return {
@@ -570,18 +595,7 @@ export class RestartOperations {
     }
 
     if (this.core.state.stayDownRequestCount !== stayDownRequestCountAtStop) {
-      return {
-        success: false,
-        componentName: name,
-        reason:
-          'Shutdown requested while restart was stopping the component; startup skipped',
-        code: 'shutdown_requested_during_restart',
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager restart',
-        ),
-      };
+      return this.skippedRestartStartResult(name, true);
     }
 
     const startDispatch: RestartStartDispatch = {
@@ -608,18 +622,7 @@ export class RestartOperations {
     // Asked to stay down while an override awaited before handing the options on: the
     // start refused for it, and the restart reports the request, as above.
     if (startDispatch.canceled) {
-      return {
-        success: false,
-        componentName: name,
-        reason:
-          'Shutdown requested while restart was stopping the component; startup skipped',
-        code: 'shutdown_requested_during_restart',
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager restart',
-        ),
-      };
+      return this.skippedRestartStartResult(name, true);
     }
 
     if (!startResult.success) {
@@ -666,7 +669,11 @@ export class RestartOperations {
   /**
    * A restart's stop, the body `stopComponent()` runs for the options
    * `restartComponentOperation()` handed it: those options were read, and its dependents
-   * checked, by the restart.
+   * checked, by the restart. Refused unless the name still holds the registration the
+   * restart approved - an override can await before handing the options on, and an
+   * overridable method the restart calls can replace the component - so a replacement
+   * is never stopped. Nothing runs caller code between this check and the stop's own
+   * lookup of the component, which every later recheck of the stop compares against.
    */
   public async restartStopOperation(
     name: string,
@@ -676,6 +683,15 @@ export class RestartOperations {
       this.core.componentStop.checkIndividualBulkPreconditions(name, 'restart');
     if (bulkRefusal) {
       return bulkRefusal;
+    }
+
+    if (!this.isCurrentRestartSnapshot(name, dispatch.startSnapshot)) {
+      return {
+        success: false,
+        componentName: name,
+        reason: 'Component registration changed before restart could stop it',
+        code: 'component_not_found',
+      };
     }
 
     return await this.core.componentStop.stopComponentInternal(
@@ -700,13 +716,7 @@ export class RestartOperations {
       this.core.state.stayDownRequestCount !== dispatch.stayDownRequestCount
     ) {
       dispatch.canceled = true;
-      return Promise.resolve({
-        success: false,
-        componentName: name,
-        reason:
-          'Shutdown requested while restart was stopping the component; startup skipped',
-        code: 'shutdown_requested_during_restart',
-      });
+      return Promise.resolve(this.skippedRestartStartResult(name, false));
     }
 
     return this.core.componentStart.startComponentInternal(
@@ -732,10 +742,33 @@ export class RestartOperations {
       return undefined;
     }
     dispatch.canceled = true;
-    return refusedStartupResult(
-      'shutdown_requested_during_restart',
-      'Shutdown requested during the restart shutdown phase; startup skipped',
-    );
+    return skippedRestartStartupResult();
+  }
+
+  /**
+   * A `restartComponent()` of `name` whose start a request to stay down skipped, with the
+   * component's status when the restart reports it as this registration's.
+   */
+  private skippedRestartStartResult(
+    name: string,
+    shouldIncludeStatus: boolean,
+    reason = RESTART_START_SKIPPED_REASON,
+  ): ComponentOperationResult {
+    return {
+      success: false,
+      componentName: name,
+      reason,
+      code: 'shutdown_requested_during_restart',
+      ...(shouldIncludeStatus
+        ? {
+            status: readComponentStatus(
+              this.core,
+              name,
+              'lifecycle-manager restart',
+            ),
+          }
+        : {}),
+    };
   }
 
   /** A restart whose startup phase a request to stay down skipped. */
@@ -748,10 +781,7 @@ export class RestartOperations {
 
     return {
       shutdownResult,
-      startupResult: refusedStartupResult(
-        'shutdown_requested_during_restart',
-        'Shutdown requested during the restart shutdown phase; startup skipped',
-      ),
+      startupResult: skippedRestartStartupResult(),
       startupSkippedByShutdownRequest: true,
       success: false,
     };
@@ -852,8 +882,8 @@ export class RestartOperations {
     // shutdown hooks can mutate the property or replace an instance before startup.
     const restartSnapshots = new Map<string, RestartStartSnapshot>();
     const validatedStops = new Map<string, RestartStopNeed>();
-    // Read once: no caller code runs between here and the loop, and the stop pass reads
-    // the same set as it begins.
+    // Read once, ahead of the loop: its getters can change it, and
+    // `validateLateRestartStopBudgets()` below reads it again for what they changed.
     const currentStarts = this.core.startSettlements.currentStartSettlements();
     for (const component of [...this.core.state.components]) {
       const name = this.core.registry.nameOf(component);
@@ -937,8 +967,8 @@ export class RestartOperations {
    * The stop budgets the restart's stop phase will read for `component`, validated
    * before it stops anything - for the same reason as the startup budgets above. The
    * stop phase reads them per component as it reaches each one, so a typo on one stopped
-   * late was found only after its dependents were already down; the halted pass then
-   * skipped startup and left the application half down. Only validated, not
+   * late would surface only after its dependents were already down, halting the pass
+   * with startup skipped and the application half down. Only validated, not
    * snapshotted: each stop still reads its own when it runs, as any stop does.
    *
    * Only for what that stop phase will call - see `restartStopNeed()`.
@@ -970,8 +1000,8 @@ export class RestartOperations {
    * Validate the stop budgets of every component the stop phase would now stop that
    * restart preparation has not validated for that yet. Caller code that runs after the
    * preparation loop passed a component - another component's getter, a sink of the
-   * restart's own log - can start it while it was idle, or stall it; left unvalidated,
-   * an invalid budget there halted the stop phase after the others were already down.
+   * restart's own log - can start it while it was idle, or stall it; an invalid budget
+   * there would halt the stop phase after the others were already down.
    *
    * Repeated until a pass finds nothing new, since the reads it makes are caller code
    * too; each pass validates more, so it ends. Only the registrations preparation
@@ -1014,16 +1044,14 @@ export class RestartOperations {
   /**
    * The names among a restart's snapshots whose registration is no longer the one
    * approved before the stop - unregistered, replaced, or registered again. No caller
-   * code runs here, so registry membership is captured once rather than rescanned for
-   * every snapshot.
+   * code runs here.
    */
   private staleRestartSnapshotNames(
     snapshots: ReadonlyMap<string, RestartStartSnapshot>,
   ): string[] {
-    const currentComponents = new Set(this.core.state.components);
     const stale: string[] = [];
     for (const [name, snapshot] of snapshots) {
-      if (!this.isCurrentRestartSnapshot(name, snapshot, currentComponents)) {
+      if (!this.isCurrentRestartSnapshot(name, snapshot)) {
         stale.push(name);
       }
     }
@@ -1038,14 +1066,11 @@ export class RestartOperations {
   private isCurrentRestartSnapshot(
     name: string,
     snapshot: RestartStartSnapshot,
-    currentComponents?: ReadonlySet<BaseComponent>,
   ): boolean {
-    return (
-      (currentComponents === undefined
-        ? this.core.registry.getComponent(name) === snapshot.component
-        : currentComponents.has(snapshot.component)) &&
-      this.core.registryReads.currentGeneration(snapshot.component) ===
-        snapshot.generation
+    return this.core.registry.isCurrentRegistration(
+      name,
+      snapshot.component,
+      snapshot.generation,
     );
   }
 }

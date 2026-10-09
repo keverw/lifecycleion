@@ -42,12 +42,16 @@ interface RestartDispatchBase {
   taken: boolean;
 }
 
-/** `restartComponent()`'s stop: its options snapshot and its call-local stop context. */
+/**
+ * `restartComponent()`'s stop: its options snapshot, its call-local stop context, and the
+ * registration it approved - the stop refuses any other, as the start does.
+ */
 export interface RestartStopDispatch extends RestartDispatchBase {
   readonly kind: 'stop';
   readonly name: string;
   readonly stopOptions: StopOptionsSnapshot;
   readonly stopContext: IndividualStopContext;
+  readonly startSnapshot: RestartStartSnapshot;
 }
 
 /** `restartComponent()`'s start: its options snapshot and the registration it approved. */

@@ -257,11 +257,17 @@ export function createFailureReporter(
       return;
     }
 
-    // A supplied handler is skipped inside a console report (see `reportThroughHandler`),
-    // so such a report delivers nothing and does not spend the operation's one report: a
-    // later failure outside the console shim still reaches the handler.
-    const isConsoleOrigin = handler !== undefined && isConsoleReportActive();
+    // Nothing is delivered inside a console report - not to a supplied handler (see
+    // `reportThroughHandler`), and not to the global channel, whose listeners would carry
+    // the failure straight back to the console that raised it, as `safeHandleCallback`'s
+    // standard channel declines to. Such a report does not spend the operation's one
+    // report: a later failure outside the console shim is still reported.
+    const isConsoleOrigin = isConsoleReportActive();
     didReport = !isConsoleOrigin;
+
+    if (isConsoleOrigin && handler === undefined) {
+      return;
+    }
 
     // Normalized rather than trusted: the value reaching here was thrown by caller code -
     // a `redactFunction`, a getter, a trap, a `toString` - and is free to be any value at
@@ -300,7 +306,7 @@ export function createFailureReporter(
 
     // The standard channel, so a listening logger records this the way it records a
     // callback failure. `reportToHost` ends on the guarded console rung itself when
-    // nothing claims the event, so a process with no listener behaves exactly as before.
+    // nothing claims the event, so a process with no listener still gets the console line.
     // The cause travels on `cause`; the pre-rendered line is for that console rung.
     reportToHost(
       new Error(`${label} failed for ${subject}`, { cause: failure }),

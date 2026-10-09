@@ -276,6 +276,56 @@ describe('the restart context through an override', () => {
     await logger.close();
   });
 
+  test('a replacement registered while a stop override awaits is never stopped', async () => {
+    const { logger } = setup();
+    const original = new Counted(logger, 'a');
+    const replacement = new Counted(logger, 'a');
+    let replacementStops = 0;
+    replacement.stop = (): Promise<void> => {
+      replacementStops++;
+
+      return Promise.resolve();
+    };
+    let isArmed = false;
+
+    class ReplacingStopManager extends LifecycleManager {
+      public override async stopComponent(
+        name: string,
+        options?: StopComponentOptions,
+      ): Promise<ComponentOperationResult> {
+        if (isArmed) {
+          isArmed = false;
+          await this.unregisterComponent(name);
+          await this.registerComponent(replacement);
+          await this.startComponent(name);
+        }
+
+        return await super.stopComponent(name, options);
+      }
+    }
+
+    const manager = new ReplacingStopManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+    });
+    await manager.registerComponent(original);
+    await manager.startComponent('a');
+    isArmed = true;
+
+    const result = await manager.restartComponent('a');
+
+    expect(result).toMatchObject({
+      success: false,
+      code: 'component_not_found',
+    });
+    expect(replacementStops).toBe(0);
+    expect(replacement.starts).toBe(1);
+    expect(manager.getComponentInstance('a')).toBe(replacement);
+    expect(manager.isComponentRunning('a')).toBe(true);
+    await manager.stopAllComponents();
+    await logger.close();
+  });
+
   // The stop phase makes `db`'s startup timeout invalid. Restart validated it before
   // stopping anything and starts unchanged registrations with that saved value.
   async function restartAllAfterTimeoutBreaks(

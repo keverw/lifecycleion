@@ -101,6 +101,17 @@ interface StartPreparation {
   readonly doesOwnLateStartCleanup: boolean;
 }
 
+/** What first aborted a start attempt's signal, and with which shutdown reason. */
+interface StartAbortState {
+  // Its deadline, a shutdown pass's `abortPendingStarts` cue, or a `start()` promise the
+  // manager could not observe. The signal aborts once; the cause decides how a failure
+  // of `start()` after that is answered.
+  cause: 'timeout' | 'shutdown' | 'observation-failed' | undefined;
+  // The reason a shutdown's cue aborted the signal with: a failure linked to it is the
+  // interruption that cue asked for, not a failed start (see `isLinkedToAbort()`).
+  shutdownReason: StartupInterruptedByShutdownError | undefined;
+}
+
 /** How a start that failed before the component was running is answered. */
 interface StartFailure {
   readonly err: Error;
@@ -111,25 +122,23 @@ interface StartFailure {
 }
 
 /**
- * One start attempt, from its claim on: what it was prepared with, the state it claimed
- * the component over, whether it attached signals and the shutdown token it began under,
- * its deadline, attempt token and settlement, and what `start()` and its race have done so
+ * One start attempt, from its claim on: what it was prepared with, whether it was forced
+ * over a stall, whether it attached signals and the shutdown token it began under, its
+ * deadline, attempt token and settlement, and what `start()` and its race have done so
  * far. Created once the attempt holds `starting` and has announced it, and handed to
- * every step of `startComponentAttempt()`; its deadline's callback and its settlement's
- * `interruptStart()` read and update it in place. It runs no code of its own.
+ * every step of `startComponentAttempt()`; its deadline's callback reads and updates it
+ * in place, and its settlement's `interruptStart()` its `abort` record. It runs no code
+ * of its own.
  */
 class StartRun {
   public timeoutHandle: NodeJS.Timeout | undefined;
   public startupTimeoutError: ComponentStartTimeoutError | undefined;
-  // What first aborted this attempt's start signal: its deadline, a shutdown pass's
-  // `abortPendingStarts` cue, or a `start()` promise the manager could not observe.
-  // The signal aborts once; the cause decides how a failure of `start()` after that
-  // is answered.
-  public startAbortCause:
-    'timeout' | 'shutdown' | 'observation-failed' | undefined;
-  // The reason a shutdown's cue aborted the signal with: a failure linked to it is the
-  // interruption that cue asked for, not a failed start (see `isLinkedToAbort()`).
-  public shutdownAbortReason: StartupInterruptedByShutdownError | undefined;
+  // Why this attempt's start signal aborted. Its own record, so the settlement's
+  // `interruptStart()` - which outlives a start that never settles - holds only it.
+  public readonly abort: StartAbortState = {
+    cause: undefined,
+    shutdownReason: undefined,
+  };
   // What the `finally` names a detach of the signals this start attached after:
   // only a failure is a failed startup. Set by the paths that end otherwise.
   public detachTrigger = 'failed component startup';
@@ -144,7 +153,10 @@ class StartRun {
     public readonly claim: symbol,
     public readonly preparation: StartPreparation,
     public readonly bulkStartup: BulkStartDeadline | undefined,
-    public readonly stateBeforeStart: ComponentState | undefined,
+    // Whether the state the claim replaced was `stalled`: its late cleanup still owes a
+    // stop once the old stall's stop has finished. The state itself is the claim's
+    // `previousState`.
+    public readonly wasForcedFromStall: boolean,
     public readonly didAutoAttachSignals: boolean,
     public readonly shutdownTokenAtStart: string,
     public readonly timeoutMS: number,
@@ -214,8 +226,8 @@ export class ComponentStart {
     const { settlement, finishSettlement } =
       this.core.startSettlements.publishStartSettlement(name, claim);
 
-    // Released once this attempt settles, however it settled: a claim outlived the attempt
-    // that took it, keeping a stale `previousState` until the next attempt overwrote it.
+    // Released once this attempt settles, however it settled, so no claim - nor the
+    // `previousState` it records - outlives the attempt that took it.
     try {
       try {
         return await this.startComponentAttempt(
@@ -248,7 +260,6 @@ export class ComponentStart {
         );
       }
     } finally {
-      this.core.state.claimsTaken.delete(claim);
       try {
         this.core.claims.release(name, claim);
       } finally {
@@ -536,8 +547,9 @@ export class ComponentStart {
   }
 
   /**
-   * The start itself, under `startComponentInternal()`'s net - bypasses bulk operation checks
-   * Used by both startComponent() and startAllComponents()
+   * The start itself, under `startComponentInternal()`'s net, for every caller of that net.
+   * A bulk startup in progress refuses it unless its options allow that
+   * (`allowDuringBulkStartup`, which the bulk startup's own loop passes).
    *
    * Reads what the start needs (`prepareStart()`) and claims the component
    * (`claimStart()`), then runs one `StartRun`: `start()` handed its signal
@@ -792,10 +804,7 @@ export class ComponentStart {
       for (const dependencyName of ownDependencies.dependencies) {
         const dependency = this.core.registry.getComponent(dependencyName);
 
-        if (
-          dependency !== undefined &&
-          !this.core.registry.isComponentUp(dependencyName)
-        ) {
+        if (dependency !== undefined && !this.isDependencyUp(dependencyName)) {
           const generation =
             this.core.registryReads.currentGeneration(dependency);
           if (this.core.componentMetadata.isComponentOptional(dependency)) {
@@ -988,7 +997,7 @@ export class ComponentStart {
       claim,
       preparation,
       bulkStartup,
-      stateBeforeStart,
+      stateBeforeStart === 'stalled',
       didAutoAttachSignalsForComponentStartup,
       shutdownTokenAtStart,
       timeoutMS,
@@ -1027,7 +1036,7 @@ export class ComponentStart {
         };
       }
 
-      if (this.core.registry.isComponentUp(dependencyName)) {
+      if (this.isDependencyUp(dependencyName)) {
         continue;
       }
 
@@ -1087,7 +1096,7 @@ export class ComponentStart {
    * shutdown's cue.
    */
   private beginStart(run: StartRun): AbortController {
-    const { name, preparation, settlement } = run;
+    const { name, preparation, settlement, abort } = run;
     const { component, startupDependencyReads } = preparation;
 
     // Called inside `startComponentAttempt()`'s `try`, so a failure here is a failed
@@ -1115,19 +1124,21 @@ export class ComponentStart {
         preparation.dependencyGeneration,
       );
     }
-    // One controller per attempt, its signal handed to `start()`. Aborted only where
-    // the manager stops waiting on this attempt's still-pending `start()` - the timer
-    // `armStartDeadline()` arms - never because `start()` settled, either way. Guarded
+    // One controller per attempt, its signal handed to `start()`. Aborted only while
+    // this attempt's `start()` is still pending: by the timer `armStartDeadline()` arms,
+    // by a `start()` whose promise could not be observed (`recoverStartObservation()`),
+    // or as a shutdown's cue (`interruptStart()` below) - never because `start()`
+    // settled, either way. Guarded
     // before `start()` sees it, so a listener the component adds cannot throw out of
     // that abort.
     const startAbort = createHookAbortController(name, 'start');
     if (settlement) {
       settlement.interruptStart = (reason): boolean => {
-        if (run.startAbortCause !== undefined || !settlement.rawStartPending) {
+        if (abort.cause !== undefined || !settlement.rawStartPending) {
           return false;
         }
-        run.startAbortCause = 'shutdown';
-        run.shutdownAbortReason = reason;
+        abort.cause = 'shutdown';
+        abort.shutdownReason = reason;
         abortHookSignal(startAbort, reason, name, 'start');
         return true;
       };
@@ -1236,7 +1247,7 @@ export class ComponentStart {
     rawStart: unknown,
     observationError: unknown,
   ): void {
-    const { name } = run;
+    const { name, claim } = run;
 
     // Failing to observe start() does not mean it settled. Keep ownership of
     // its resources and dependencies, and retry attachment once through a
@@ -1249,17 +1260,11 @@ export class ComponentStart {
         attachIntrinsicReactions(
           rawStart as object,
           () => {
-            this.core.startSettlements.markRawStartSettled(
-              settlement,
-              run.claim,
-            );
+            this.core.startSettlements.markRawStartSettled(settlement, claim);
             resolve();
           },
           (reason) => {
-            this.core.startSettlements.markRawStartSettled(
-              settlement,
-              run.claim,
-            );
+            this.core.startSettlements.markRawStartSettled(settlement, claim);
             // Preserve the raw hook's arbitrary rejection value.
             // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
             reject(reason);
@@ -1273,16 +1278,16 @@ export class ComponentStart {
       name,
       recoveryStart,
       run.startAttemptToken,
-      run.claim,
-      run.stateBeforeStart === 'stalled',
-      () => this.isStartSuperseded(run),
+      claim,
+      run.wasForcedFromStall,
+      this.supersededCheck(run),
       'observation-failed',
     );
     settlement.abandon();
     // The manager has stopped waiting, just as on timeout. Notify the hook
     // even when a broken constructor prevented arming the startup race. Its cause
     // is recorded first, so a shutdown pass cannot take this abort for its own cue.
-    run.startAbortCause ??= 'observation-failed';
+    run.abort.cause ??= 'observation-failed';
     abortHookSignal(
       startAbort,
       new ComponentStartObservationError(
@@ -1371,7 +1376,7 @@ export class ComponentStart {
         // Recorded before any caller code below runs: a shutdown a sink starts
         // with `abortPendingStarts` must find this start already timed out, not
         // abort it as interrupted. A shutdown that aborted it first keeps its cause.
-        run.startAbortCause ??= 'timeout';
+        run.abort.cause ??= 'timeout';
         // This attempt must settle, but its old deadline must not abort or
         // announce a timeout for a newer run of the same component. Its own
         // signal is still aborted: that is this attempt's alone, and nothing
@@ -1440,8 +1445,8 @@ export class ComponentStart {
       startPromise,
       run.startAttemptToken,
       run.claim,
-      run.stateBeforeStart === 'stalled',
-      () => this.isStartSuperseded(run),
+      run.wasForcedFromStall,
+      this.supersededCheck(run),
     );
   }
 
@@ -1451,11 +1456,26 @@ export class ComponentStart {
    * unregistered after stopping. Asked at each boundary caller code may have crossed.
    */
   private isStartSuperseded(run: StartRun): boolean {
-    return (
-      this.core.registry.getComponent(run.name) !== run.preparation.component ||
-      this.core.state.componentStartAttemptTokens.get(run.name) !==
-        run.startAttemptToken
+    return !this.core.startSettlements.isCurrentStartAttempt(
+      run.name,
+      run.preparation.component,
+      run.startAttemptToken,
     );
+  }
+
+  /**
+   * `isStartSuperseded()` for late-start recovery, which can stay pending for as long as
+   * `start()` does: it holds the name, component and token, not the whole run.
+   */
+  private supersededCheck(run: StartRun): () => boolean {
+    const { name, startAttemptToken } = run;
+    const { component } = run.preparation;
+    return () =>
+      !this.core.startSettlements.isCurrentStartAttempt(
+        name,
+        component,
+        startAttemptToken,
+      );
   }
 
   /**
@@ -1670,6 +1690,17 @@ export class ComponentStart {
     return undefined;
   }
 
+  /**
+   * Whether a dependency can be started on: up, and not a timed-out start whose late
+   * cleanup marked it running only to stop it - that stop does not check for dependents.
+   */
+  private isDependencyUp(name: string): boolean {
+    return (
+      this.core.registry.isComponentUp(name) &&
+      !this.core.state.pendingBulkStartupCleanup.has(name)
+    );
+  }
+
   /** Whether any component other than `name` is up, stopping at the first found. */
   private isAnotherComponentUp(name: string): boolean {
     for (const other of this.core.state.runningComponents) {
@@ -1757,8 +1788,8 @@ export class ComponentStart {
     const wasInterruptedByShutdown =
       !isStartupTimeout &&
       run.didStartHookFail &&
-      run.startAbortCause === 'shutdown' &&
-      isLinkedToAbort(error, run.shutdownAbortReason);
+      run.abort.cause === 'shutdown' &&
+      isLinkedToAbort(error, run.abort.shutdownReason);
 
     // Asked again, not only at the top of the `catch`: the hook above is overridable,
     // and the error's own `message` is the caller's. Either can have the component
@@ -1895,8 +1926,8 @@ export class ComponentStart {
         // Back to the state the component had before this attempt claimed it, as the
         // start net restores it: a failed restart of a stopped component was answered
         // `registered` - never started - beside the `startedAt` / `stoppedAt` of the
-        // run it had. The claim is still this attempt's: the supersession check in
-        // `startFailureResult()` returned otherwise.
+        // run it had. That state is read from this attempt's claim, which it holds unless
+        // something released it; `registered` then, with nothing recorded to restore.
         this.restoreStateAfterFailedStart(
           name,
           this.core.claims.owns(name, claim)

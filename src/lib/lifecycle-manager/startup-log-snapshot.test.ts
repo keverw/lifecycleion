@@ -163,3 +163,82 @@ test.each(['unchanged', 'registration', 'shutdown', 'stopped'] as const)(
     }
   },
 );
+
+test('a sink that empties the rollback list it is handed does not skip the rollback', async () => {
+  const logger = new Logger({
+    callProcessExit: false,
+    sinks: [
+      {
+        write: (entry) => {
+          const components = entry.params?.components;
+          if (
+            entry.message.startsWith('Rolling back startup') &&
+            Array.isArray(components)
+          ) {
+            components.length = 0;
+          }
+        },
+      },
+    ],
+  });
+  const manager = new LifecycleManager({
+    logger,
+    shutdownWarningTimeoutMS: -1,
+  });
+  let stops = 0;
+  class Stopped extends Component {
+    public override stop() {
+      stops++;
+    }
+  }
+  class Failing extends Component {
+    public override start() {
+      throw new Error('boom');
+    }
+  }
+  await manager.registerComponent(new Stopped(logger, { name: 'base' }));
+  await manager.registerComponent(
+    new Failing(logger, { name: 'failing', dependencies: ['base'] }),
+  );
+
+  const result = await manager.startAllComponents();
+
+  expect(result.code).toBe('required_component_failed');
+  expect(result.startedComponents).toEqual([]);
+  expect(stops).toBe(1);
+  expect(manager.isComponentRunning('base')).toBe(false);
+});
+
+test('a started listener that changes its payload does not change the startup result', async () => {
+  const logger = new Logger({ callProcessExit: false, sinks: [] });
+  const manager = new LifecycleManager({
+    logger,
+    shutdownWarningTimeoutMS: -1,
+  });
+  class FailingOptional extends Component {
+    public override start() {
+      throw new Error('optional failed');
+    }
+  }
+  await manager.registerComponent(new Component(logger, { name: 'first' }));
+  await manager.registerComponent(
+    new FailingOptional(logger, { name: 'optional', optional: true }),
+  );
+  manager.on('lifecycle-manager:started', (data) => {
+    const payload = data as {
+      startedComponents: string[];
+      failedOptionalComponents: unknown[];
+    };
+    payload.startedComponents.length = 0;
+    payload.failedOptionalComponents.length = 0;
+  });
+
+  const result = await manager.startAllComponents();
+
+  expect(result.success).toBe(true);
+  expect(result.startedComponents).toEqual(['first']);
+  expect(result.failedOptionalComponents.map(({ name }) => name)).toEqual([
+    'optional',
+  ]);
+  await manager.stopAllComponents();
+});

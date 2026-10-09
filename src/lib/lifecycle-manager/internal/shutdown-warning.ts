@@ -17,8 +17,10 @@ export type ShutdownWarningContext = Pick<
 >;
 
 /**
- * Global warning phase (stopAllComponents only)
- * Calls onShutdownWarning() on running components with a global timeout
+ * The warning phase of every shutdown pass - `stopAllComponents()`, a shutdown signal,
+ * the logger exit hook, a restart's stop phase - but not of a single `stopComponent()`.
+ * Calls onShutdownWarning() on running components, and on stalled ones the pass is
+ * retrying, under one shared timeout.
  */
 export async function runShutdownWarningPhase(
   context: ShutdownWarningContext,

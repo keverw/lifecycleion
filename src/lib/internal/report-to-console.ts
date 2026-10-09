@@ -2,27 +2,42 @@ let isReporting = false;
 const CONSOLE_REPORT_STATE_KEY = Symbol.for('lifecycleion.reportToConsole.v1');
 
 /**
+ * The shared `Set` once this copy has found or installed it. Every copy keeps a `Set` it
+ * finds in the slot, so the first one there is the one every copy uses, and holding it
+ * here spares each check - one per guarded callback, emit and report - a descriptor
+ * read of the global.
+ */
+let sharedState: Set<boolean> | undefined;
+
+/**
  * Share the console origin across bundled copies. A slot holding something other than a
  * `Set` is replaced when possible; otherwise the local guard still contains this copy's
- * synchronous re-entry.
+ * synchronous re-entry, and the slot is tried again on the next check.
  */
 function sharedConsoleState(): Set<boolean> | undefined {
+  if (sharedState !== undefined) {
+    return sharedState;
+  }
   try {
     const existing: unknown = Object.getOwnPropertyDescriptor(
       globalThis,
       CONSOLE_REPORT_STATE_KEY,
     )?.value;
     if (existing instanceof Set) {
-      return existing as Set<boolean>;
+      sharedState = existing as Set<boolean>;
+      return sharedState;
     }
     const state = new Set<boolean>();
-    return Reflect.defineProperty(globalThis, CONSOLE_REPORT_STATE_KEY, {
-      value: state,
-      configurable: true,
-      writable: true,
-    })
-      ? state
-      : undefined;
+    if (
+      Reflect.defineProperty(globalThis, CONSOLE_REPORT_STATE_KEY, {
+        value: state,
+        configurable: true,
+        writable: true,
+      })
+    ) {
+      sharedState = state;
+    }
+    return sharedState;
   } catch {
     return undefined;
   }

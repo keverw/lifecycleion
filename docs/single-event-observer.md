@@ -2,7 +2,7 @@
 
 A lightweight, type-safe observer for a single event payload type.
 
-Subscriber errors are safely handled through `safeHandleCallback` and reported on the standard global `'error'` event channel.
+Subscriber errors are caught through `runCallbackSafely` (see [safe-handle-callback](./safe-handle-callback.md)) and reported on the standard global `'error'` event channel.
 
 <!-- toc -->
 

@@ -169,3 +169,30 @@ test('a console-origin failure does not spend the operation report', () => {
     restoreConsoleError();
   }
 });
+
+test('a console-origin failure with no handler is not dispatched on the global channel', () => {
+  muteConsoleError();
+  const dispatched: unknown[] = [];
+  const listener = (event: Event): void => {
+    dispatched.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', listener);
+  const report = createFailureReporter('Render');
+  try {
+    console.error = () => {
+      // A shim forwarding the console line back into the operation.
+      report(new Error('inside the shim'), 'first');
+    };
+    consoleRung.reportToConsole('terminal line');
+    expect(dispatched).toEqual([]);
+
+    // Not spent: a later failure outside the shim still reaches the channel.
+    report(new Error('outside the shim'), 'second');
+    expect(dispatched).toHaveLength(1);
+    expect((dispatched[0] as Error).message).toBe('Render failed for second');
+  } finally {
+    globalThis.removeEventListener('error', listener);
+    restoreConsoleError();
+  }
+});

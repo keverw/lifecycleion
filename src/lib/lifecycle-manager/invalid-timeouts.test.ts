@@ -350,6 +350,30 @@ test('explicit Infinity policy arming is reported as explicit', () => {
   });
 });
 
+test('a zero-width window derives arming from the default window, not the disable sentinel', () => {
+  const manager = new LifecycleManager({
+    logger,
+    repeatedShutdownRequestPolicy: {
+      forceAfterCount: 2,
+      withinMS: 0,
+      onForceShutdown: () => {},
+    },
+  });
+  expect(manager.getShutdownEscalationStatus()).toMatchObject({
+    withinMS: 0,
+    armedAfterFailureMS: 4000,
+    armedAfterFailureMSSource: 'derived',
+  });
+});
+
+test('a null repeated shutdown policy means no policy', () => {
+  const manager = new LifecycleManager({
+    logger,
+    repeatedShutdownRequestPolicy: null,
+  });
+  expect(manager.getShutdownEscalationStatus().configured).toBe(false);
+});
+
 test.each([
   ['startup NaN', { startupOptions: { timeoutMS: NaN } }],
   ['startup negative', { startupOptions: { timeoutMS: -1 } }],

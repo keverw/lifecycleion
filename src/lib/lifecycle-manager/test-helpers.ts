@@ -52,8 +52,6 @@ export function deferred<T = void>(): {
   return { promise, resolve, reject };
 }
 
-// Claims every report on the global `'error'` channel until `release()`: asserts they
-// were made, and keeps the `console.error` fall-through out of the test output.
 /**
  * Makes the manager's status read for a result or an event throw `failure` once, the
  * first time `when(name)` holds: a way to crash an operation at that exact point, since
@@ -77,6 +75,8 @@ export function failStatusReadOnce(
   return () => spy.mockRestore();
 }
 
+// Claims every report on the global `'error'` channel until `release()`: asserts they
+// were made, and keeps the `console.error` fall-through out of the test output.
 export function claimReports(): { reports: unknown[]; release: () => void } {
   const reports: unknown[] = [];
   const onError = (event: Event): void => {

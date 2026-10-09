@@ -31,6 +31,13 @@ import {
  * either is the one that runs.
  */
 export class SignalIntegration {
+  /**
+   * The line the detach deferred in `isSignalDetachDeferred` logs once it runs: worded
+   * for what asked for it - the last component stop, say - not for the transient that
+   * held it. Set and cleared with that flag.
+   */
+  private deferredDetachLogMessage: string | undefined;
+
   constructor(private readonly core: ManagerCore) {}
 
   /**
@@ -42,6 +49,7 @@ export class SignalIntegration {
     this.core.dispatcher.withTransition(() => {
       // A new attach supersedes a detach that was still waiting to run.
       this.core.state.isSignalDetachDeferred = false;
+      this.deferredDetachLogMessage = undefined;
 
       // Check if already attached (not just if instance exists)
       if (this.core.state.processSignalManager?.getStatus().isAttached) {
@@ -241,9 +249,10 @@ export class SignalIntegration {
    * component starting or stopping, a late-startup cleanup or the timed-out start it
    * waits on - since each of those can
    * still leave something running or stalled. A shutdown pass in particular still needs
-   * SIGINT/SIGTERM for escalation, and decides once it ends, detaching only after a
-   * clean pass. The detach is deferred rather than dropped, and whichever of those ends
-   * runs it again through {@link runDeferredSignalDetach}.
+   * SIGINT/SIGTERM for escalation, and decides once it ends, running a detach it
+   * deferred only after a clean pass. The detach is deferred rather than dropped, with
+   * the line it logs, and whichever of those ends runs it again through
+   * {@link runDeferredSignalDetach}.
    */
   public detachSignalsIfIdle(
     trigger: string,
@@ -259,12 +268,17 @@ export class SignalIntegration {
         return;
       }
 
+      const logMessage =
+        options.logMessage ?? `Auto-detached process signals after ${trigger}`;
+
       if (this.isSignalDetachWaitingOnTransient(options.isEndingShutdownPass)) {
         this.core.state.isSignalDetachDeferred = true;
+        this.deferredDetachLogMessage = logMessage;
         return;
       }
 
       this.core.state.isSignalDetachDeferred = false;
+      this.deferredDetachLogMessage = undefined;
       // Detached before the line is logged, not after: logging runs the caller's sinks,
       // and one that starts a startup from here attached nothing - the handlers were still
       // up - so detaching after it pulled them out from under that startup. Worded in the
@@ -277,10 +291,7 @@ export class SignalIntegration {
             this.core.state.processSignalManager?.getStatus().isAttached !==
             true
           ) {
-            this.core.logger.info(
-              options.logMessage ??
-                `Auto-detached process signals after ${trigger}`,
-            );
+            this.core.logger.info(logMessage);
           }
         });
       }
@@ -289,11 +300,21 @@ export class SignalIntegration {
 
   /**
    * Run a detach {@link detachSignalsIfIdle} deferred, once one of the transient
-   * operations that held it has ended.
+   * operations that held it has ended, logging the line it was deferred with. Nothing
+   * when none is deferred: nothing asked for one, or an attach since superseded it.
+   *
+   * `isEndingShutdownPass` is for a clean shutdown pass, which runs this before it
+   * releases its own latch.
    */
-  public runDeferredSignalDetach(trigger: string): void {
+  public runDeferredSignalDetach(
+    trigger: string,
+    options: { isEndingShutdownPass?: boolean } = {},
+  ): void {
     if (this.core.state.isSignalDetachDeferred) {
-      this.detachSignalsIfIdle(trigger);
+      this.detachSignalsIfIdle(trigger, {
+        logMessage: this.deferredDetachLogMessage,
+        isEndingShutdownPass: options.isEndingShutdownPass,
+      });
     }
   }
 

@@ -450,3 +450,123 @@ test('a branded option refusal thrown after the claim is a crash, reported once'
   expect(hasReport(reports, 'component start')).toBe(true);
   expect(manager.isComponentRunning('a')).toBe(false);
 });
+
+test('targetFound reports a found target when a shutdown begun in a hook rolls the insert back', async () => {
+  const { logger, manager } = setup();
+  await manager.registerComponent(new Plain(logger, 'target'));
+  const inserted = new Plain(logger, 'inserted');
+  const markRegistered = inserted._markRegistered.bind(inserted);
+  let shutdown: Promise<unknown> | undefined;
+  inserted._markRegistered = (): void => {
+    markRegistered();
+    shutdown = manager.stopAllComponents();
+  };
+  const rejected: Array<{ name: string; targetFound?: boolean }> = [];
+  manager.on(
+    'component:registration-rejected',
+    (event: { name: string; targetFound?: boolean }) => {
+      rejected.push(event);
+    },
+  );
+
+  const result = await manager.insertComponentAt(inserted, 'after', 'target');
+  await shutdown;
+
+  expect(result.code).toBe('shutdown_in_progress');
+  expect(result.registered).toBe(false);
+  expect(result.targetFound).toBe(true);
+  expect(rejected.find((event) => event.name === 'inserted')?.targetFound).toBe(
+    true,
+  );
+});
+
+/**
+ * A manager whose sink runs `onEntry` for entries with `message` until it acts -
+ * answers anything but `false`.
+ */
+function setupWithSink(
+  message: string,
+  onEntry: (manager: LifecycleManager) => boolean | void,
+): { logger: Logger; manager: LifecycleManager } {
+  // eslint-disable-next-line prefer-const -- assigned after the sink that reads it
+  let manager!: LifecycleManager;
+  let isArmed = true;
+  const logger = new Logger({
+    sinks: [
+      {
+        write: (entry): void => {
+          if (isArmed && entry.message === message) {
+            isArmed = onEntry(manager) === false;
+          }
+        },
+      },
+    ],
+    callProcessExit: false,
+  });
+  manager = new LifecycleManager({ logger, shutdownWarningTimeoutMS: -1 });
+  return { logger, manager };
+}
+
+test('an auto-start is left to a bulk startup its own log line began', async () => {
+  let startup: Promise<unknown> | undefined;
+  const { logger, manager } = setupWithSink(
+    'AutoStart: starting component (manager not running)',
+    (sinkManager) => {
+      startup = sinkManager.startAllComponents();
+    },
+  );
+  const component = new Plain(logger, 'a');
+  let starts = 0;
+  component.start = (): Promise<void> => {
+    starts++;
+    return Promise.resolve();
+  };
+
+  const result = await manager.registerComponent(component, {
+    autoStart: true,
+  });
+  await startup;
+
+  expect(result.success).toBe(true);
+  expect(result.autoStartAttempted).toBe(false);
+  expect(result.autoStartDeferred).toBe(true);
+  expect(starts).toBe(1);
+  expect(manager.isComponentRunning('a')).toBe(true);
+  await manager.stopAllComponents();
+  await logger.close();
+});
+
+test('an auto-start after a shutdown its registration log began is refused, never started', async () => {
+  let shutdown: Promise<unknown> | undefined;
+  const { logger, manager } = setupWithSink(
+    'Component registered',
+    (sinkManager) => {
+      if (!sinkManager.hasComponent('a')) {
+        return false;
+      }
+      shutdown = sinkManager.stopAllComponents();
+      return true;
+    },
+  );
+  await manager.registerComponent(new Plain(logger, 'other'));
+  await manager.startAllComponents();
+  const component = new Plain(logger, 'a');
+  let starts = 0;
+  component.start = (): Promise<void> => {
+    starts++;
+    return Promise.resolve();
+  };
+
+  const result = await manager.registerComponent(component, {
+    autoStart: true,
+  });
+  await shutdown;
+
+  expect(shutdown).toBeDefined();
+  expect(result.success).toBe(true);
+  expect(result.autoStartAttempted).toBe(true);
+  expect(result.autoStartSucceeded).toBe(false);
+  expect(result.startResult?.code).toBe('shutdown_in_progress');
+  expect(starts).toBe(0);
+  await logger.close();
+});

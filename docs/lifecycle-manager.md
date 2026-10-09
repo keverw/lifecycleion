@@ -2144,10 +2144,12 @@ come off once the last stall clears: by a later stop, by the original `stop()`
 or `onShutdownForce()` finishing late, or by unregistering it. They also stay
 while anything is still in flight - a startup or shutdown, a component starting
 or stopping, or a timed-out `start()` still pending whose late completion the
-manager will stop - and come off once it ends, if nothing is left. A clean
-`stopAllComponents()` detaches them before it emits
-`lifecycle-manager:shutdown-completed`; a failed one keeps them, so the next
-Ctrl+C still reaches escalation.
+manager will stop - and come off once it ends, if nothing is left. An
+`attachSignals()` call made in the meantime cancels that pending detach. A clean
+`stopAllComponents()` that stopped the last component detaches them before it
+emits `lifecycle-manager:shutdown-completed` (one that stopped nothing leaves
+them alone); a failed one keeps them, so the next Ctrl+C still reaches
+escalation.
 
 #### `detachSignals()`
 
@@ -2368,7 +2370,7 @@ const lifecycle = new LifecycleManager({
 - The repeated-request counter belongs to one active escalation state
 - If shutdown completes successfully, the repeated-request state resets immediately
 - If shutdown completes unsuccessfully, times out, or leaves stalled components behind, escalation stays armed briefly so follow-up shutdown requests can continue the same force count
-- That post-failure armed period defaults to `withinMS * forceAfterCount`, or uses `armedAfterFailureMS` when explicitly configured. The effective duration is capped at 2,147,483,647 ms to match the timer limit
+- That post-failure armed period defaults to `withinMS * forceAfterCount` (with the default 2000 ms window when `withinMS` is `0`, so a zero-width window does not disable arming), or uses `armedAfterFailureMS` when explicitly configured. The effective duration is capped at 2,147,483,647 ms to match the timer limit
 - A shutdown request received during that armed period continues the same escalation state and starts a fresh shutdown attempt
 - While that retry is running, the armed timer is no longer active because shutdown is in progress again
 - If the retry also finishes unsuccessfully, the manager re-arms the post-failure window so follow-up requests can continue the same escalation state
@@ -2712,8 +2714,8 @@ const statuses = lifecycle.getAllComponentStatuses();
 for (const status of statuses) {
   console.log(`${status.name}: ${status.state}`);
 
-  if (status.error) {
-    console.error(`  Error: ${status.error.message}`);
+  if (status.lastError) {
+    console.error(`  Error: ${status.lastError.message}`);
   }
 }
 ```

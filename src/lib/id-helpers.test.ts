@@ -528,6 +528,24 @@ describe('Identifier Helpers', () => {
       expect(id1).not.toEqual(id2);
     });
 
+    test('a symbol or unrenderable seedTime still throws the seedTime TypeError', () => {
+      const symbol = Symbol('seed');
+      // @ts-expect-error: Unit testing non-number input
+      expect(() => generateID('uuid7', symbol)).toThrow(
+        expectedMessage(symbol),
+      );
+
+      const unrenderable = {
+        toString(): string {
+          throw new Error('toString boom');
+        },
+      };
+      // @ts-expect-error: Unit testing non-number input
+      expect(() => generateID('ulid', unrenderable)).toThrow(
+        `seedTime must be a non-negative finite number (milliseconds), got: <unrenderable value>`,
+      );
+    });
+
     test('uuid4 still throws on invalid seedTime', () => {
       expect(() => generateID('uuid4', NaN)).toThrow(TypeError);
       expect(() => generateID('uuid4', -1)).toThrow(TypeError);

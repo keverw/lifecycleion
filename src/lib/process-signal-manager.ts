@@ -7,6 +7,7 @@ import readline from 'readline';
 import { resolveTimeoutMS } from './internal/timer-limits';
 import { queueMicrotaskSafely } from './internal/intrinsics';
 import { isObjectLike } from './internal/is-object-like';
+import { isNullish } from './internal/is-nullish';
 import {
   isConsoleReportActive,
   reportToConsole,
@@ -146,12 +147,12 @@ function reanchorDetachedRawModeOwner(
  * it is not a string, so a name every report is built from fails at construction rather
  * than on each signal or keypress.
  */
-function resolveCallbackName(
+function resolveCallbackNameOption(
   requested: unknown,
   defaultName: string,
   label: string,
 ): string {
-  if (requested === null || requested === undefined) {
+  if (isNullish(requested)) {
     return defaultName;
   }
   if (typeof requested !== 'string') {
@@ -381,22 +382,22 @@ export class ProcessSignalManager {
     this.onReloadRequested = options.onReloadRequested;
     this.onInfoRequested = options.onInfoRequested;
     this.onDebugRequested = options.onDebugRequested;
-    this.shutdownCallbackName = resolveCallbackName(
+    this.shutdownCallbackName = resolveCallbackNameOption(
       options.shutdownCallbackName,
       'onShutdownRequested',
       'shutdownCallbackName',
     );
-    this.reloadCallbackName = resolveCallbackName(
+    this.reloadCallbackName = resolveCallbackNameOption(
       options.reloadCallbackName,
       'onReloadRequested',
       'reloadCallbackName',
     );
-    this.infoCallbackName = resolveCallbackName(
+    this.infoCallbackName = resolveCallbackNameOption(
       options.infoCallbackName,
       'onInfoRequested',
       'infoCallbackName',
     );
-    this.debugCallbackName = resolveCallbackName(
+    this.debugCallbackName = resolveCallbackNameOption(
       options.debugCallbackName,
       'onDebugRequested',
       'debugCallbackName',

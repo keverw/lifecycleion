@@ -16,7 +16,6 @@ import type {
 } from './types';
 
 type RemoveFn = () => void;
-const EMPTY_OBSERVER_CHAIN = async (): Promise<void> => {};
 const DEFAULT_OBSERVER_PHASES: ResponseObserverFilter['phases'] = ['final'];
 const DEFAULT_ERROR_OBSERVER_PHASES: ErrorObserverFilter['phases'] = ['final'];
 
@@ -45,8 +44,9 @@ export class ResponseObserverManager {
     };
   }
 
-  public hasObservers(): boolean {
-    return this.observers.length > 0;
+  /** Whether nothing is registered. See `RequestInterceptorManager.isEmpty`. */
+  public get isEmpty(): boolean {
+    return this.observers.length === 0;
   }
 
   /**
@@ -54,9 +54,6 @@ export class ResponseObserverManager {
    * not reach. See `RequestInterceptorManager.snapshot()`.
    */
   public snapshot(): ResponseObserverChain {
-    if (!this.hasObservers()) {
-      return EMPTY_OBSERVER_CHAIN;
-    }
     const observers = this.observers.slice();
 
     return (response, request, phase) =>
@@ -95,8 +92,8 @@ async function runResponseObservers(
         phase.type,
         'response',
       );
-    } catch (error) {
-      reportCallbackError('ResponseObserver filter', error);
+    } catch (filterError) {
+      reportCallbackError('ResponseObserver filter', filterError);
       continue;
     }
     if (!doesMatch) {
@@ -138,8 +135,9 @@ export class ErrorObserverManager {
     };
   }
 
-  public hasObservers(): boolean {
-    return this.observers.length > 0;
+  /** Whether nothing is registered. See `RequestInterceptorManager.isEmpty`. */
+  public get isEmpty(): boolean {
+    return this.observers.length === 0;
   }
 
   /**
@@ -147,9 +145,6 @@ export class ErrorObserverManager {
    * not reach. See `RequestInterceptorManager.snapshot()`.
    */
   public snapshot(): ErrorObserverChain {
-    if (!this.hasObservers()) {
-      return EMPTY_OBSERVER_CHAIN;
-    }
     const observers = this.observers.slice();
 
     return (error, request, phase) =>
@@ -184,8 +179,8 @@ async function runErrorObservers(
         phase.type,
         'error',
       );
-    } catch (error) {
-      reportCallbackError('ErrorObserver filter', error);
+    } catch (filterError) {
+      reportCallbackError('ErrorObserver filter', filterError);
       continue;
     }
     if (!doesMatch) {

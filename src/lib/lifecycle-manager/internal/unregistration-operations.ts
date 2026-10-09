@@ -180,9 +180,11 @@ export class UnregistrationOperations {
     const { name, component, progress } = attempt;
 
     if (
-      this.core.registry.getComponent(name) === component &&
-      this.core.registryReads.currentGeneration(component) ===
-        attempt.registrationGeneration
+      this.core.registry.isCurrentRegistration(
+        name,
+        component,
+        attempt.registrationGeneration,
+      )
     ) {
       return undefined;
     }
@@ -459,6 +461,8 @@ export class UnregistrationOperations {
       this.core.state.pendingForceStopWaiters.delete(name);
       // A later registration of the same instance reports a broken list afresh.
       this.core.componentMetadata.clearReports(component);
+      // Its commit's validated list belongs to this registration only.
+      this.core.state.committedDependencyReads.delete(component);
       this.core.state.stalledComponents.delete(name);
       this.core.state.runningComponents.delete(name);
       this.core.state.componentClaims.delete(name);

@@ -38,13 +38,13 @@ test('observation transfers reporting synchronously and the first observer retai
   const { observer, reports } = setup();
   const error = new Error('late failure');
   const pending = Promise.reject(error);
-  observer.observe(pending, 'deadline failure', { level: 'error' });
+  observer.observe(pending, 'deadline failure');
   observer.reportForeground(error, 'foreground failure');
   observer.observe(pending, 'abandoned force failure');
   expect(reports).toHaveLength(0);
   await flushObservers();
   expect(reports).toEqual([
-    { error, message: 'deadline failure', level: 'error' },
+    { error, message: 'deadline failure', level: 'warn' },
   ]);
   observer.reportForeground(error, 'after settlement');
   expect(reports).toHaveLength(1);
@@ -58,7 +58,6 @@ test('late rejection selects reporting details at settlement time', async () => 
     level: 'warn',
   };
   observer.observe(Promise.reject(error), 'fallback', {
-    level: 'warn',
     getReport: () => currentReport,
   });
   currentReport = { message: 'after transfer', level: 'error' };
@@ -124,32 +123,6 @@ test('late reconciliation and report-selection failures reach the terminal warni
       level: 'warn',
     },
   ]);
-});
-
-test('a failed report selection falls back to the level given up front', async () => {
-  const { observer, reports } = setup();
-  const hookError = new Error('hook failure');
-  const selectionError = new Error('report selection failed');
-  observer.observe(Promise.reject(hookError), 'fallback', {
-    level: 'warn',
-    getReport: () => {
-      throw selectionError;
-    },
-  });
-  await flushObservers();
-  expect(reports).toEqual([
-    { error: hookError, message: 'fallback', level: 'warn' },
-    {
-      error: selectionError,
-      message: 'Late stop report selection failed',
-      level: 'warn',
-    },
-  ]);
-  expect(
-    reports.some(
-      ({ message }) => message === 'Late stop failure could not be reported',
-    ),
-  ).toBe(false);
 });
 
 test('terminal reporting contains a reporter that throws again', async () => {

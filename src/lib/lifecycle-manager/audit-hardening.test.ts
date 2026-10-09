@@ -1,4 +1,5 @@
-import { expect, test } from 'bun:test';
+import { expect, spyOn, test } from 'bun:test';
+import { Logger } from '../logger';
 import { LifecycleManager } from './lifecycle-manager';
 import { sleep } from '../sleep';
 import { deferred, Plain, setup } from './test-helpers';
@@ -106,6 +107,21 @@ test('untyped false strings do not enable signal attachment or manual escalation
   });
   await logger.close();
 });
+
+for (const value of ['false', 1]) {
+  test(`enableLoggerExitHook: ${JSON.stringify(value)} does not install the exit hook`, async () => {
+    const install = spyOn(Logger.prototype, 'setBeforeExitCallback');
+    const { logger } = setup({
+      enableLoggerExitHook: value as unknown as boolean,
+    });
+    try {
+      expect(install).not.toHaveBeenCalled();
+    } finally {
+      install.mockRestore();
+      await logger.close();
+    }
+  });
+}
 
 test('late startup cleanup that stalls retains its timeout after stop eventually fulfills', async () => {
   const { logger, manager } = setup({ startupTimeoutMS: 5 });

@@ -1,6 +1,7 @@
 import { ulid } from 'ulid';
 import { observeRejection } from '../../internal/intrinsics';
 import { reportCallbackError } from '../../safe-handle-callback';
+import { sleep } from '../../sleep';
 import { describeError, toError } from '../../to-error';
 import {
   LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
@@ -605,12 +606,15 @@ export class ShutdownPassRunner {
           ? []
           : this.core.componentMetadata.readDependencies(component, 'shutdown');
       };
-      const protectDependencies = (
-        name: string,
-        target = protectedDependencies,
-      ): void => {
-        // Keep depth-first getter order without consuming the call stack for each link.
-        const frames = [{ dependencies: readDependencies(name), index: 0 }];
+      // The one walk of `root`'s dependencies, depth-first in getter order without
+      // consuming the call stack for each link. `visit` answers for each dependency
+      // reached: `enter` reads and walks its own, `skip` passes it by, and `found` ends
+      // the walk, which then answers true.
+      const walkDependencies = (
+        root: string,
+        visit: (dependency: string) => 'enter' | 'skip' | 'found',
+      ): boolean => {
+        const frames = [{ dependencies: readDependencies(root), index: 0 }];
         while (frames.length > 0) {
           const frame = frames[frames.length - 1];
           if (frame.index === frame.dependencies.length) {
@@ -618,14 +622,30 @@ export class ShutdownPassRunner {
             continue;
           }
           const dependency = frame.dependencies[frame.index++];
-          if (!target.has(dependency)) {
-            target.add(dependency);
+          const step = visit(dependency);
+          if (step === 'found') {
+            return true;
+          }
+          if (step === 'enter') {
             frames.push({
               dependencies: readDependencies(dependency),
               index: 0,
             });
           }
         }
+        return false;
+      };
+      const protectDependencies = (
+        name: string,
+        target = protectedDependencies,
+      ): void => {
+        walkDependencies(name, (dependency) => {
+          if (target.has(dependency)) {
+            return 'skip';
+          }
+          target.add(dependency);
+          return 'enter';
+        });
       };
       // Components a concurrent stop or start owned when the loop reached them, or whose
       // own stop this pass failed and left running. Their dependencies stay protected
@@ -662,26 +682,16 @@ export class ShutdownPassRunner {
             return false;
           }
           walked.add(from);
-          const frames = [{ dependencies: readDependencies(from), index: 0 }];
-          while (frames.length > 0) {
-            const frame = frames[frames.length - 1];
-            if (frame.index === frame.dependencies.length) {
-              frames.pop();
-              continue;
-            }
-            const dependency = frame.dependencies[frame.index++];
+          return walkDependencies(from, (dependency) => {
             if (dependency === name) {
-              return true;
+              return 'found';
             }
-            if (!walked.has(dependency)) {
-              walked.add(dependency);
-              frames.push({
-                dependencies: readDependencies(dependency),
-                index: 0,
-              });
+            if (walked.has(dependency)) {
+              return 'skip';
             }
-          }
-          return false;
+            walked.add(dependency);
+            return 'enter';
+          });
         };
         for (const owners of [concurrentOwners, concurrentlyProtectedSkips]) {
           for (const owner of owners) {
@@ -797,9 +807,7 @@ export class ShutdownPassRunner {
           // A synchronous requester may reject immediately after asking to exit.
           // Let that settlement drain without joining a hook awaiting this pass.
           if ([...requestingStarts].some((start) => !start.didSettle)) {
-            await new Promise<void>((resolve) => {
-              setTimeout(resolve, 0);
-            });
+            await sleep(0);
             if (hasTimedOut) {
               return;
             }
@@ -910,15 +918,16 @@ export class ShutdownPassRunner {
             );
             return true;
           };
+          // When the loop last yielded below. Not reset by an awaited stop or join: one
+          // can settle on microtasks alone, or after synchronous caller code, without a
+          // timer ever running, so only this yield is known to have let them run.
           let sliceStartedAt = Date.now();
           for (const [index, name] of names.entries()) {
             // Consecutive protected skips otherwise never yield: their fresh graph
             // walks can starve both the shutdown deadline and the concurrent stop's
             // timers. Yield between candidates, then recheck all live ownership below.
             if (Date.now() - sliceStartedAt >= 8) {
-              await new Promise<void>((resolve) => {
-                setTimeout(resolve, 0);
-              });
+              await sleep(0);
               sliceStartedAt = Date.now();
             }
             // Before any join, not only after it: a deadline that fired while the last
@@ -1333,12 +1342,13 @@ export class ShutdownPassRunner {
         // Before the completed event, as the last component's stop detached them before
         // this pass took the detach over: a listener there - one that calls
         // `process.exit()`, say - finds stdin restored and `signals-detached` already
-        // emitted, and one that attaches again is not undone afterwards. Covers the detach
-        // this pass's own stops deferred, and one a refused or aborted startup left to it.
-        // Only after a clean pass: a failed one keeps them, so the operator's next Ctrl+C
-        // still reaches escalation.
+        // emitted, and one that attaches again is not undone afterwards. Only a detach
+        // that was deferred - by this pass's own stops, or by a refused or aborted startup
+        // - and that no attach has superseded since: a pass that stopped nothing leaves
+        // handlers someone attached alone. Only after a clean pass: a failed one keeps
+        // them, so the operator's next Ctrl+C still reaches escalation.
         if (isSuccess) {
-          this.core.signals.detachSignalsIfIdle('shutdown', {
+          this.core.signals.runDeferredSignalDetach('shutdown', {
             isEndingShutdownPass: true,
           });
         }
@@ -1533,8 +1543,7 @@ export class ShutdownPassRunner {
   }
 
   /**
-   * Global warning phase (stopAllComponents only)
-   * Calls onShutdownWarning() on running components with a global timeout.
+   * The pass's warning phase (see `runShutdownWarningPhase()` in `shutdown-warning.ts`).
    * Kept as a method, not inlined: it is the seam tests use to make a pass crash.
    */
   private runShutdownWarningPhase(componentNames: string[]): Promise<void> {

@@ -163,8 +163,9 @@ export class LifecycleManager
         new ProcessSignalManager(signalOptions),
     });
 
-    // Enable logger exit hook if requested
-    if (options.enableLoggerExitHook) {
+    // Enable logger exit hook if requested: only the literal `true` enables it, like
+    // every other constructor flag
+    if (options.enableLoggerExitHook === true) {
       this.enableLoggerExitHook();
     }
   }
@@ -607,7 +608,7 @@ export class LifecycleManager
    *
    * A shutdown request that arrives while the stop phase is running wins: the startup
    * phase is skipped and the result says so through
-   * `startupSkippedByShutdownRequest`. See {@link ShutdownPass}.
+   * `startupSkippedByShutdownRequest`.
    *
    * A restart arriving during an active shutdown returns `already_in_progress` for
    * its stop phase and `shutdown_in_progress` for startup before reading options or

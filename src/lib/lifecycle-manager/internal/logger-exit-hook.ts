@@ -221,8 +221,12 @@ export class LoggerExitHook {
           return await waitForRunningShutdown();
         }
 
-        // Proceed with exit
-        return this.proceedWithLoggerExit();
+        // Proceed with exit - already done by the pass that released this exit, whose
+        // `finalizePendingLoggerExit()` committed it; proceeding a second time would
+        // only repeat that commit.
+        return isInHand
+          ? this.proceedWithLoggerExit()
+          : { action: 'proceed' as const };
       } finally {
         // Still in hand only if no pass finalized this exit: its resolver is then still
         // set, and must not release a later exit's latch.

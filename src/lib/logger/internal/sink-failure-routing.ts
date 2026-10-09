@@ -8,7 +8,12 @@ export type SinkFailureReport = Omit<LoggerDiagnostic, 'timestamp' | 'sink'> & {
 type SinkFailureReporter = (report: SinkFailureReport) => void;
 
 interface RoutingRecord {
-  reporters?: Set<SinkFailureReporter>;
+  /**
+   * Weak, so a sink that outlives its owner does not keep it alive. The unsubscribe
+   * function an owner holds is what keeps its subscription reachable; an owner dropped
+   * without unsubscribing is collected, and its entry is pruned on the next report.
+   */
+  reporters?: Set<WeakRef<SinkFailureReporter>>;
   isDiagnostic?: boolean;
 }
 
@@ -38,7 +43,13 @@ function getSharedState(): WeakMap<object, RoutingRecord> {
   return fallback;
 }
 
-/** Associate one owner with a sink without inspecting or modifying the sink. */
+/**
+ * Associate one owner with a sink without inspecting or modifying the sink.
+ *
+ * The returned function is what keeps the registration alive: the sink holds it only
+ * weakly, so an owner that drops the function without calling it stops receiving reports
+ * once it is collected.
+ */
 export function registerSinkFailureReporter(
   sink: LogSink,
   reporter: SinkFailureReporter,
@@ -50,14 +61,17 @@ export function registerSinkFailureReporter(
   }
   const reporters = (record.reporters ??= new Set());
   // Each registration has its own lifetime, even when callbacks are equal.
-  const subscription: SinkFailureReporter = (report) => reporter(report);
-  reporters.add(subscription);
+  let subscription: SinkFailureReporter | undefined = (report) =>
+    reporter(report);
+  const reference = new WeakRef(subscription);
+  reporters.add(reference);
   return () => {
-    reporters.delete(subscription);
+    reporters.delete(reference);
+    subscription = undefined;
   };
 }
 
-/** Return true when the sink has an owner, even if an owner's reporter fails. */
+/** Return true when the sink has a live owner, even if an owner's reporter fails. */
 export function reportSinkFailure(
   sink: LogSink,
   report: SinkFailureReport,
@@ -67,7 +81,15 @@ export function reportSinkFailure(
     return false;
   }
   // Registration changes during a report apply to later failures.
-  const snapshot = Array.from(reporters);
+  const snapshot: SinkFailureReporter[] = [];
+  for (const reference of Array.from(reporters)) {
+    const reporter = reference.deref();
+    if (reporter === undefined) {
+      reporters.delete(reference);
+    } else {
+      snapshot.push(reporter);
+    }
+  }
   for (const reporter of snapshot) {
     reportThroughHandler(
       () => reporter(report),

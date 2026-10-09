@@ -174,6 +174,30 @@ test('an invalid report status keeps the reported value on cause', async () => {
   expect((runner.lastError as TypeError).cause).toBe(failure);
 });
 
+test('rethrowing the value reported with an invalid status is not reported again', async () => {
+  const failure = new Error('reported with a typo, then rethrown');
+  const reports: unknown[] = [];
+  const onGlobalError = (event: Event): void => {
+    reports.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onGlobalError);
+  try {
+    const runner = new RetryRunner(policy, (report) => {
+      (report as (status: unknown, value: unknown) => void)('eror', failure);
+      throw failure;
+    });
+    expect((await runner.run(true)).status).toBe('attempt_fatal');
+    expect(((runner.lastError as TypeError).cause as Error) === failure).toBe(
+      true,
+    );
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(reports).toEqual([]);
+  } finally {
+    globalThis.removeEventListener('error', onGlobalError);
+  }
+});
+
 test('a late report with a symbol status is reported, not thrown out of reportResult', async () => {
   const reports: unknown[] = [];
   const onGlobalError = (event: Event): void => {

@@ -386,6 +386,11 @@ export class ComponentStop {
    * may stop, unregister, or replace the component synchronously. Taking the claim
    * from that newer stop would call stop() twice and let either completion overwrite
    * the other's state. A replacement must not inherit the old instance's outcome.
+   *
+   * They read internal state only, and a refusal's `status` is the manager's own
+   * (`registry.statusOf()`), not the overridable `getComponentStatus()` that the results
+   * of a stop that ran read (`StopOutcomes.withStopStatus()`): a check runs no caller
+   * code, whether it passes or refuses.
    */
   public checkStopPreconditions(
     name: string,
@@ -472,7 +477,10 @@ export class ComponentStop {
   /**
    * Issues and returns a unique stop attempt token for a component.
    *
-   * Each stop attempt (graceful or force-retry) gets a unique token.
+   * Issued by a graceful phase, by a force phase that runs no graceful phase first - a
+   * `forceImmediate` stop or a stalled component's retry - and by a forced start as its
+   * component comes up (`ComponentStart.markStartRunning()`). A force phase escalating
+   * from a graceful one keeps that phase's token: both belong to the same stop.
    * The late-resolution handler captures this token in its closure so it can
    * skip any stall entries that were created by a *later* stop attempt — e.g. a
    * force-retry that also timed out after the original graceful promise floated
@@ -617,8 +625,8 @@ export class ComponentStop {
     const startedAt = Date.now();
     const claim = Symbol(name);
 
-    // Released once this attempt settles, however it settled: a claim outlived the attempt
-    // that took it, keeping a stale `previousState` until the next attempt overwrote it.
+    // Released once this attempt settles, however it settled, so no claim - nor the
+    // `previousState` it records - outlives the attempt that took it.
     try {
       try {
         return await run(claim);
@@ -626,7 +634,6 @@ export class ComponentStop {
         return this.answerStopCrash(name, claim, startedAt, error);
       }
     } finally {
-      this.core.state.claimsTaken.delete(claim);
       this.core.claims.release(name, claim);
     }
   }
@@ -734,17 +741,12 @@ export class ComponentStop {
       !this.core.state.stalledComponents.has(name) &&
       !this.core.manager.isComponentRunning(name)
     ) {
-      return {
+      return this.core.stopOutcomes.withStopStatus(name, {
         success: false,
         componentName: name,
         code: 'component_not_running',
         reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_RUNNING,
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager component stop',
-        ),
-      };
+      });
     }
     const preconditions = this.checkStopPreconditions(name, undefined, {
       claim,
@@ -808,7 +810,7 @@ export class ComponentStop {
       );
     }
 
-    // Run three-phase shutdown
+    // Run the two-phase shutdown: graceful, then force if that failed
     return await this.shutdownComponent(
       name,
       component,
@@ -874,7 +876,7 @@ export class ComponentStop {
       return gracefulResult;
     }
 
-    // The timeout notification can resolve a bare stop promise before the force
+    // An abort listener at the deadline can resolve a bare stop promise before the force
     // claim. Its observer must not finalize while the foreground race is undecided;
     // now that it returned, consume the retained resolution under the same token.
     if (
@@ -901,11 +903,8 @@ export class ComponentStop {
     // ============================================================================
     const didGracefulTimeOut =
       gracefulResult.code === 'component_shutdown_timeout';
-    // Before the force phase reads its hooks: a crash there still describes this stop.
-    this.core.claims.recordStop(name, claim, {
-      startedAt: shutdownStartedAt,
-      gracefulTimedOut: didGracefulTimeOut,
-    });
+    // The claim already records this stop for the net - taken with it, its timeout
+    // added by `gracefulFailureResult()` - so a crash in the force phase describes it.
     this.core.logger
       .entity(name)
       .warn('Graceful shutdown failed, proceeding to force phase', {
@@ -961,7 +960,7 @@ export class ComponentStop {
   }
 
   /**
-   * Phase 2: Graceful shutdown
+   * Phase 1: Graceful shutdown
    * Calls stop() with timeout
    *
    * Claims the component (`claimGracefulStop()`), then runs one `GracefulStopRun`:
@@ -1017,7 +1016,7 @@ export class ComponentStop {
         ]),
         {
           // A stop that succeeds once its deadline has fired - a bare promise the
-          // timeout notification itself resolved - is recorded by the reaction that
+          // deadline's abort listener resolved - is recorded by the reaction that
           // settles adoption, where the stop settled, so the graceful result's caller
           // finds it before escalating. The deadline observer `armGracefulDeadline()`
           // installs records it too, a reaction later, and reconciles it.
@@ -1233,9 +1232,10 @@ export class ComponentStop {
 
     if (timeoutError !== undefined) {
       // Recorded for the stop net before anything below runs caller code - the log's
-      // sinks, the event's listeners, an overridden `getComponentStatus()`. Recorded
-      // only once escalation began, a throw building this result reached the net
-      // with no stop on the claim, and the timeout was stalled as an `error`.
+      // sinks, the event's listeners, an overridden `getComponentStatus()` - so a throw
+      // there, or in the force phase this escalates to, stalls the stop as the timeout
+      // it is. The claim has recorded this stop since it was taken; only the timeout is
+      // new.
       this.core.claims.recordStop(name, claim, {
         startedAt,
         gracefulTimedOut: true,
@@ -1248,18 +1248,13 @@ export class ComponentStop {
         reason: LIFECYCLE_MANAGER_MESSAGE_GRACEFUL_SHUTDOWN_TIMED_OUT,
       });
 
-      return {
+      return this.core.stopOutcomes.withStopStatus(name, {
         success: false,
         componentName: name,
         reason: LIFECYCLE_MANAGER_MESSAGE_GRACEFUL_SHUTDOWN_TIMED_OUT,
         code: 'component_shutdown_timeout',
         error: err,
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager component stop',
-        ),
-      };
+      });
     } else {
       // Keep the failure result even when the timeout observer owns its log.
       // Otherwise a rejection caused by an abort listener is reported by both paths.
@@ -1268,7 +1263,7 @@ export class ComponentStop {
         'Graceful shutdown threw error: {{error.message}}',
       );
 
-      return {
+      return this.core.stopOutcomes.withStopStatus(name, {
         success: false,
         componentName: name,
         // Guarded: this runs inside `shutdownComponentGraceful()`'s `catch`, and
@@ -1277,12 +1272,7 @@ export class ComponentStop {
         reason: describeError(err),
         code: 'error',
         error: err,
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager component stop',
-        ),
-      };
+      });
     }
   }
 
@@ -1306,7 +1296,7 @@ export class ComponentStop {
   }
 
   /**
-   * Phase 3: Force shutdown
+   * Phase 2: Force shutdown
    * Calls onShutdownForce() with timeout, or marks as stalled if not implemented
    *
    * Claims the component (`claimForceStop()`), stalls one with no handler to run
@@ -1853,8 +1843,8 @@ export class ComponentStop {
    * An abort listener that releases what `stop()` or `onShutdownForce()` awaits settles
    * it synchronously, but the settlement reaches the race through several promise hops -
    * the component's own `async` function, then `adoptPromise()` - while a rejection made
-   * in the same turn gets there in one. The stop finished, yet the timeout won, and the
-   * component was stalled or sent on to a force phase it no longer needed. Past a
+   * in the same turn gets there in one, and would win: a stop that finished would be
+   * stalled or sent on to a force phase it no longer needs. Past a
    * macrotask every such hop has run, so a released stop wins the race as the success it
    * is, however many hops it took. This is the one mechanism for that race.
    *

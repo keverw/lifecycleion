@@ -228,8 +228,9 @@ export class StartupPreflight {
 
     // Partial state - reject to avoid inconsistent startup
     if (runningCount > 0) {
-      // Neither latch is held here: `refuseActiveBulkStartup()` refused both, and
-      // nothing since has run caller code.
+      // `refuseActiveBulkStartup()` refused both latches, and since then only the
+      // manager's count and name getters have run - which a subclass can override, so
+      // one may have taken a latch. The reads after the log check both latches again.
       this.core.logger.error(
         `Cannot start: ${runningCount}/${totalCount} components already running. ` +
           `Call stopAllComponents() first to ensure clean state.`,

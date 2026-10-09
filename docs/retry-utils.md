@@ -364,7 +364,7 @@ Returns `Promise<RunResult<T>>`:
   - `'terminal_dispatch_in_progress'` - called while the operation's terminal outcome is being published
   - `'unexpected_error'` - an unexpected internal error occurred
 
-> **Note:** `unexpected_error` should not occur in normal use and indicates an internal state inconsistency in the library. If you encounter this, call `reset()` before trying again and consider reporting a bug.
+> **Note:** apart from invalid `forceTry()` options, which fail as `pre_operation_error` / `unexpected_error` (with a `TypeError` for a non-boolean value, or the getter's own error), `unexpected_error` should not occur in normal use and indicates an internal state inconsistency in the library. If you encounter it otherwise, call `reset()` before trying again and consider reporting a bug.
 
 ```typescript
 // Start and wait for completion
@@ -499,7 +499,7 @@ On pre-operation error: `{ status: 'pre_operation_error', code, error }` with co
 - `'force_try_in_progress'` - a forced attempt with `shouldAbortRunning: true` is already running
 - `'lock_error'` - concurrent operation call detected
 - `'terminal_dispatch_in_progress'` - called while the operation's terminal outcome is being published
-- `'unexpected_error'` - an unexpected internal error occurred
+- `'unexpected_error'` - invalid options (a non-boolean value, or a getter that throws), or an unexpected internal error
 
 > **Important:** `forceTry()` does not reset the policy's retry budget. If a forced attempt from `'exhausted'` reports `'error'`, the runner returns to `'exhausted'`. If a forced attempt from `'fatal-error'` reports `'error'`, the runner either schedules another retry (if the policy still has remaining budget) or transitions to `'exhausted'`. Use `reset()` to start fresh with a full retry budget.
 

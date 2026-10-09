@@ -29,9 +29,12 @@ export function createHookAbortController(
  * component added through the signal's own methods and `onabort`, so theirs are
  * reported (`lifecycle-manager <phase> abort listener for <name>`) instead. Listeners
  * it cannot see - on a signal derived from this one, or added through
- * `EventTarget.prototype` directly - remain the runtime's. Every caller has finished
- * its bookkeeping before this runs. The `catch` only covers a runtime that let such
- * an error escape: reported, so it cannot unwind the timer and skip what follows.
+ * `EventTarget.prototype` directly - remain the runtime's. The listeners run
+ * synchronously, inside this call, and can re-enter the manager: they see what the
+ * caller recorded before calling this - a deadline its timeout error - but not what it
+ * attaches after, such as a deadline's outcome observer. Those still attach before any
+ * promise reaction the abort causes runs. The `catch` only covers a runtime that let
+ * such an error escape: reported, so it cannot unwind the timer and skip what follows.
  */
 export function abortHookSignal(
   hookAbort: AbortController,

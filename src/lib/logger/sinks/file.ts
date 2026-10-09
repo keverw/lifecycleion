@@ -8,7 +8,7 @@ import {
   reportToConsole,
 } from '../../internal/report-to-console';
 import { renderJSONLine } from './internal/render-json-line';
-import { renderTextLine } from './internal/render-text-line';
+import { renderTextEntry } from './internal/render-text-line';
 import {
   DEFAULT_CLOSE_TIMEOUT_MS,
   MIN_CLOSE_FLUSH_MS,
@@ -162,7 +162,7 @@ export interface FileSinkOptions {
   minLevel?: LogLevel;
   /**
    * Cap on entries waiting to be written. Defaults to 10,000; pass `-1` to hold
-   * everything, which is what this did before the option had a default.
+   * everything with no cap.
    *
    * The queue grows whenever writes fail or stall - a full disk, a directory that went
    * away, a slow volume - and every queued entry holds its rendered line *and* the
@@ -1410,20 +1410,7 @@ export class FileSink implements LogSink {
         this.reportRenderFallback(entry, error);
       });
     } else {
-      let text = '';
-
-      if (entry.type !== 'raw') {
-        text = `[${entry.type}] `;
-        if (entry.serviceName) {
-          text += `[${entry.serviceName}] `;
-        }
-
-        if (entry.entityName) {
-          text += `[${entry.entityName}] `;
-        }
-      }
-      text += renderTextLine(entry.message);
-      formatted = text;
+      formatted = renderTextEntry(entry);
     }
 
     return formatted + '\n';

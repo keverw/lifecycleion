@@ -1,5 +1,4 @@
 import { reportCallbackError } from '../../safe-handle-callback';
-import { toError } from '../../to-error';
 import type {
   BroadcastOptions,
   BroadcastResult,
@@ -10,6 +9,7 @@ import type {
 } from '../types';
 import {
   broadcastMessageInternal,
+  crashedValueResult,
   getValueInternal,
   sendMessageInternal,
 } from './component-messaging';
@@ -124,16 +124,12 @@ export class MessagingOperations {
     } catch (error) {
       reportCallbackError('lifecycle-manager getValue', error);
 
-      return {
-        found: false,
-        value: undefined,
-        componentFound: this.core.registry.isNameRegistered(componentName),
-        componentRunning: this.core.state.runningComponents.has(componentName),
-        handlerImplemented: false,
-        requestedBy: from,
-        code: 'operation_crashed',
-        error: toError(error),
-      };
+      return crashedValueResult<T>(
+        from,
+        error,
+        this.core.registry.isNameRegistered(componentName),
+        this.core.state.runningComponents.has(componentName),
+      );
     }
   }
 }

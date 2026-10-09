@@ -136,10 +136,14 @@ export function resolveManagerConfig(
   });
 }
 
+/** The escalation window `withinMS` defaults to. */
+const DEFAULT_REPEATED_SHUTDOWN_WITHIN_MS = 2000;
+
 function resolveRepeatedShutdownPolicy(
-  policy: RepeatedShutdownRequestPolicy | undefined,
+  policy: RepeatedShutdownRequestPolicy | null | undefined,
 ): RepeatedShutdownPolicyConfig | undefined {
-  if (policy === undefined) {
+  // Null selects the default - no policy - as it does for every other option here.
+  if (isNullish(policy)) {
     return undefined;
   }
 
@@ -150,12 +154,18 @@ function resolveRepeatedShutdownPolicy(
   // explicit durations fail instead of changing the operator's escalation policy.
   const withinMS = resolveTimeoutMS(
     policy.withinMS,
-    2000,
+    DEFAULT_REPEATED_SHUTDOWN_WITHIN_MS,
     'repeatedShutdownRequestPolicy.withinMS',
   );
+  // Derived from the default window when `withinMS` is zero: that option only narrows
+  // the active-shutdown window, and a derived `0` would be the explicit sentinel that
+  // disables post-failure arming.
   const armedAfterFailureMS = resolveTimeoutMS(
     requestedArmedAfterFailureMS,
-    toTimerDelayMS(withinMS * forceAfterCount),
+    toTimerDelayMS(
+      (withinMS === 0 ? DEFAULT_REPEATED_SHUTDOWN_WITHIN_MS : withinMS) *
+        forceAfterCount,
+    ),
     'repeatedShutdownRequestPolicy.armedAfterFailureMS',
   );
 

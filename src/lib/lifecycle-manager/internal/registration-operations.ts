@@ -140,6 +140,17 @@ type RegistrationPlacement =
       >;
     };
 
+/** Where an auto-start goes; see `RegistrationOperations.autoStartRoute()`. */
+type AutoStartRoute =
+  | { readonly kind: 'restart'; readonly pendingRestart: Set<string> }
+  | { readonly kind: 'rolled-back' }
+  | {
+      readonly kind: 'bulk-startup';
+      readonly startup: ActiveBulkStartup | null;
+    }
+  | { readonly kind: 'completing'; readonly startup: ActiveBulkStartup }
+  | { readonly kind: 'start' };
+
 /**
  * Registration: `registerComponent()` and `insertComponentAt()`'s bodies.
  *
@@ -273,6 +284,10 @@ export class RegistrationOperations {
               ? LIFECYCLE_MANAGER_MESSAGE_REGISTER_SHUTDOWN_IN_PROGRESS
               : LIFECYCLE_MANAGER_MESSAGE_REGISTER_REQUIRED_DEPENDENCY_DURING_STARTUP,
           logLine: 'Cannot commit component registration during bulk operation',
+          // Placed by its target before the hooks ran, as a failed hook reports it.
+          ...(attempt.progress.targetFound === true
+            ? { targetFound: true }
+            : {}),
         });
       }
 
@@ -794,11 +809,16 @@ export class RegistrationOperations {
     candidateRead: Extract<DependencyRead, { dependencies: string[] }>,
   ): void {
     const { component, componentName } = attempt;
-    // Only now: a registration refused before reaching here - a dependency cycle in
-    // `placeRegistration()`, a failed hook in `commitRegistration()` - used to have spent
-    // this component's one report, leaving the registration that followed silent about
-    // the same broken list.
-    if (candidateRead.invalidEntry !== undefined) {
+    // Only now, once this registration has happened: one refused before reaching here -
+    // a dependency cycle in `placeRegistration()`, a failed hook in
+    // `commitRegistration()` - must not spend the report the next registration makes.
+    // And only while it still holds: the commit's queued listeners can unregister it,
+    // which clears its marks, and a report made after that would silence the next
+    // registration of the same instance.
+    if (
+      candidateRead.invalidEntry !== undefined &&
+      this.isStillThisRegistration(attempt)
+    ) {
       this.core.componentMetadata.reportDependencyReadFailureOnce(
         component,
         'registration',
@@ -807,8 +827,10 @@ export class RegistrationOperations {
       );
     }
 
+    // `null` once a listener has removed it, as the result reports it.
+    const indexOfComponent = this.core.state.components.indexOf(component);
     const registrationIndexAfter =
-      this.core.state.components.indexOf(component);
+      indexOfComponent === -1 ? null : indexOfComponent;
 
     if (attempt.isInsertAction) {
       this.core.logger.entity(componentName).info('Component inserted', {
@@ -845,22 +867,103 @@ export class RegistrationOperations {
       return undefined;
     }
 
-    // Capture this pass before logging runs caller code. Its queue/rollback state
-    // decides whether registration defers, refuses auto-start, or starts work
-    // independently after the completion boundary.
-    const bulkStartup = this.core.state.activeBulkStartup;
+    const route = this.autoStartRoute();
+    if (route.kind !== 'start' && route.kind !== 'completing') {
+      this.takeAutoStartRoute(attempt, route);
+      return undefined;
+    }
 
-    // Bulk startup first: `isStarted` turns true as soon as its first component is
-    // running, and a start without `allowDuringBulkStartup` is refused with
-    // `startup_in_progress` for the rest of it.
-    const pendingRestart = Array.from(
-      this.core.state.pendingRestartAutoStarts,
-    ).at(-1);
-    if (!this.core.state.isStarting && pendingRestart !== undefined) {
-      // The restart has released shutdown's latch but has not claimed startup's
-      // yet. Its upcoming order includes this registration.
-      this.deferAutoStartToRestart(attempt, pendingRestart);
-    } else if (this.core.state.isStarting && bulkStartup?.isRollingBack) {
+    this.core.logger
+      .entity(componentName)
+      .info(
+        route.kind === 'completing'
+          ? 'AutoStart: starting component (bulk startup completing)'
+          : this.core.state.isStarted
+            ? 'AutoStart: starting component (manager is running)'
+            : 'AutoStart: starting component (manager not running)',
+      );
+
+    // That log line ran caller code too: it can replace this registration, or begin a
+    // bulk startup or restart that owns this start. Started here as well, it would be
+    // refused `startup_in_progress` or `shutdown_in_progress` and reported as a failed
+    // auto-start while that startup started the component. Routed again by the same
+    // rule, so the answer cannot depend on which side of the log the change landed.
+    if (!this.isStillThisRegistration(attempt)) {
+      this.skipReplacedAutoStart(attempt);
+      return undefined;
+    }
+
+    const routeAfterLog = this.autoStartRoute();
+    if (routeAfterLog.kind !== 'start' && routeAfterLog.kind !== 'completing') {
+      this.takeAutoStartRoute(attempt, routeAfterLog);
+      return undefined;
+    }
+
+    progress.didAutoStartAttempt = true;
+    return route.kind === 'completing'
+      ? this.core.componentStart.startComponentInternal(
+          componentName,
+          snapshotStartOptions({
+            // Only the completion captured before the log still owns this
+            // permission; a replacement pass must retain its own bulk guard.
+            allowDuringBulkStartup:
+              routeAfterLog.kind === 'completing' &&
+              routeAfterLog.startup === route.startup,
+          }),
+        )
+      : this.core.componentStart.startComponentInternal(componentName);
+  }
+
+  /**
+   * Where a committed registration's auto-start goes, from the manager's state now:
+   *
+   * - `restart`: no startup holds the latch, but a restart's startup is about to run -
+   *   its stop phase accepted - and its order includes this registration.
+   * - `rolled-back`: the bulk startup it would join is rolling back.
+   * - `bulk-startup`: a bulk startup holds the latch and still takes registrations -
+   *   checked before `isStarted`, which turns true as soon as the startup's first
+   *   component is running, while a start without `allowDuringBulkStartup` is refused
+   *   with `startup_in_progress` for the rest of it.
+   * - `completing`: that startup has closed its queue before its terminal
+   *   notifications; a start from those callbacks is independent, while the public bulk
+   *   latch stays held.
+   * - `start`: none of those; started directly. A plain shutdown begun meanwhile is
+   *   answered by the start's own `shutdown_in_progress` refusal, as an attempted
+   *   auto-start whose `startResult` says why.
+   *
+   * Runs no caller code.
+   */
+  private autoStartRoute(): AutoStartRoute {
+    const { state } = this.core;
+
+    if (!state.isStarting) {
+      const pendingRestart = Array.from(state.pendingRestartAutoStarts).at(-1);
+      return pendingRestart !== undefined
+        ? { kind: 'restart', pendingRestart }
+        : { kind: 'start' };
+    }
+
+    const startup = state.activeBulkStartup;
+    if (startup?.isRollingBack) {
+      return { kind: 'rolled-back' };
+    }
+    if (startup === null || !startup.isCompleting) {
+      return { kind: 'bulk-startup', startup };
+    }
+    return { kind: 'completing', startup };
+  }
+
+  /** Take an auto-start route that begins no start: defer it, or refuse it. */
+  private takeAutoStartRoute(
+    attempt: RegistrationAttempt,
+    route: Exclude<AutoStartRoute, { kind: 'start' | 'completing' }>,
+  ): void {
+    if (route.kind === 'restart') {
+      this.deferAutoStartToRestart(attempt, route.pendingRestart);
+    } else if (route.kind === 'bulk-startup') {
+      this.deferAutoStartToBulkStartup(attempt, route.startup);
+    } else {
+      const { componentName, progress } = attempt;
       progress.didAutoStartAttempt = true;
       progress.startResult = {
         success: false,
@@ -873,66 +976,7 @@ export class RegistrationOperations {
           'lifecycle-manager component registration',
         ),
       };
-    } else if (this.core.state.isStarting && !bulkStartup?.isCompleting) {
-      this.deferAutoStartToBulkStartup(attempt, bulkStartup);
-    } else if (this.core.state.isStarting && bulkStartup !== null) {
-      // The pass has closed its queue before terminal notifications. A start from
-      // those callbacks is independent, while the public bulk latch stays held.
-      this.core.logger
-        .entity(componentName)
-        .info('AutoStart: starting component (bulk startup completing)');
-      // That log line ran caller code too.
-      if (this.isStillThisRegistration(attempt)) {
-        progress.didAutoStartAttempt = true;
-        return this.core.componentStart.startComponentInternal(
-          componentName,
-          snapshotStartOptions({
-            // Logging runs caller code. Only the captured completion still owns
-            // this permission; a replacement pass must retain its own bulk guard.
-            allowDuringBulkStartup:
-              this.core.state.activeBulkStartup === bulkStartup &&
-              bulkStartup.isCompleting &&
-              !bulkStartup.isRollingBack,
-          }),
-        );
-      }
-      this.skipReplacedAutoStart(attempt);
-    } else {
-      this.core.logger
-        .entity(componentName)
-        .info(
-          this.core.state.isStarted
-            ? 'AutoStart: starting component (manager is running)'
-            : 'AutoStart: starting component (manager not running)',
-        );
-      // That log line ran caller code too. A bulk startup or restart it began owns
-      // this start: started here as well, it would be refused `startup_in_progress`
-      // or `shutdown_in_progress` and reported as a failed auto-start while that
-      // startup started the component.
-      const startupBegunByLog = this.core.state.activeBulkStartup;
-      const restartBegunByLog = Array.from(
-        this.core.state.pendingRestartAutoStarts,
-      ).at(-1);
-      if (!this.isStillThisRegistration(attempt)) {
-        this.skipReplacedAutoStart(attempt);
-      } else if (
-        this.core.state.isStarting &&
-        !startupBegunByLog?.isCompleting &&
-        !startupBegunByLog?.isRollingBack
-      ) {
-        this.deferAutoStartToBulkStartup(attempt, startupBegunByLog);
-      } else if (
-        !this.core.state.isStarting &&
-        restartBegunByLog !== undefined
-      ) {
-        this.deferAutoStartToRestart(attempt, restartBegunByLog);
-      } else {
-        progress.didAutoStartAttempt = true;
-        return this.core.componentStart.startComponentInternal(componentName);
-      }
     }
-
-    return undefined;
   }
 
   /**
@@ -941,11 +985,10 @@ export class RegistrationOperations {
    * leaves the instance in place under a new one.
    */
   private isStillThisRegistration(attempt: RegistrationAttempt): boolean {
-    return (
-      this.core.registry.getComponent(attempt.componentName) ===
-        attempt.component &&
-      this.core.registryReads.currentGeneration(attempt.component) ===
-        attempt.registrationGeneration
+    return this.core.registry.isCurrentRegistration(
+      attempt.componentName,
+      attempt.component,
+      attempt.registrationGeneration,
     );
   }
 
@@ -1326,8 +1369,8 @@ export class RegistrationOperations {
 
   /**
    * `component:registration-rejected`, built in one place for every refusal and
-   * failure. `registrationIndexAfter` is `registrationIndexBefore` unless given: a
-   * refusal leaves the registry as it was.
+   * failure. `registrationIndexAfter` is `registrationIndexBefore`: a refusal leaves
+   * the registry as it was.
    */
   private emitRegistrationRejected(input: {
     // Marked announced here once emitted, so the rule lives in one place.
@@ -1336,7 +1379,6 @@ export class RegistrationOperations {
     reason: RegistrationFailureCode;
     message: string;
     registrationIndexBefore: number | null;
-    registrationIndexAfter?: number | null;
     target?: string;
     cycle?: string[];
     startupOrder?: string[];
@@ -1353,10 +1395,7 @@ export class RegistrationOperations {
         ...(input.cycle !== undefined ? { cycle: input.cycle } : {}),
         message: input.message,
         registrationIndexBefore: input.registrationIndexBefore,
-        registrationIndexAfter:
-          'registrationIndexAfter' in input
-            ? input.registrationIndexAfter
-            : input.registrationIndexBefore,
+        registrationIndexAfter: input.registrationIndexBefore,
         ...(input.startupOrder !== undefined
           ? { startupOrder: input.startupOrder }
           : {}),

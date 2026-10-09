@@ -34,7 +34,12 @@ function hasOwnThen(value: object): boolean {
   }
 }
 
-/** Whether `error` is this realm's `TypeError`, as a failed internal-slot check throws. */
+/**
+ * Whether `error` is this realm's `TypeError` - what the native `then`'s internal-slot
+ * check throws for a value that is not a native promise. Anything else comes from past
+ * the check, so from a native promise of some realm. A `RangeError` from running out of
+ * stack counts as the latter: the adoption rejects with it rather than guessing.
+ */
 function isThisRealmTypeError(error: unknown): boolean {
   try {
     return (
@@ -44,16 +49,6 @@ function isThisRealmTypeError(error: unknown): boolean {
   } catch {
     return false;
   }
-}
-
-/**
- * Whether `error` is what the native `then`'s internal-slot check throws for a value that
- * is not a native promise: this realm's `TypeError`. Anything else comes from past the
- * check, so from a native promise of some realm. A `RangeError` from running out of
- * stack counts as the latter: the adoption rejects with it rather than guessing.
- */
-function isSlotCheckFailure(error: unknown): boolean {
-  return isThisRealmTypeError(error);
 }
 
 // A `constructor` value whose species builds, then misuses the executor it is handed.
@@ -315,7 +310,7 @@ function adoptOwnPromise<T>(
         // it. So does a species refusal, which the slot check's `TypeError` resembles.
         if (
           isOnPromiseChain ||
-          !isSlotCheckFailure(error) ||
+          !isThisRealmTypeError(error) ||
           isSpeciesRefusal(error)
         ) {
           didAdopt = true;
@@ -515,7 +510,7 @@ export function containDeferredResult(
   } catch (error) {
     if (
       inheritsFromPromise(result) ||
-      !isSlotCheckFailure(error) ||
+      !isThisRealmTypeError(error) ||
       isSpeciesRefusal(error)
     ) {
       return true;

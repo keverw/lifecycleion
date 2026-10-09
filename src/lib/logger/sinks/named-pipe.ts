@@ -10,7 +10,7 @@ import { isDiagnosticEntry } from '../internal/sink-failure-routing';
 import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
 import { renderJSONLine } from './internal/render-json-line';
-import { renderTextLine } from './internal/render-text-line';
+import { renderTextEntry } from './internal/render-text-line';
 import {
   isConsoleReportActive,
   reportToConsole,
@@ -94,7 +94,7 @@ export interface NamedPipeSinkOptions {
   formatter?: (entry: LogEntry) => string;
   /**
    * Cap on entries queued while the pipe is unavailable. Defaults to 10,000; pass `-1` to
-   * hold everything, which is what this did before the option had a default.
+   * hold everything with no cap.
    *
    * A named pipe with no reader is the ordinary case for this sink - the reader restarts,
    * or has not started yet - and every line logged in the meantime is held. Without a cap
@@ -800,12 +800,10 @@ export class NamedPipeSink implements LogSink {
         return { success: false, reason: 'error', error };
       }
 
-      // Close existing stream if any, bounded. `end()` alone is what `close()` stopped
-      // doing: it flushes before calling back, and a FIFO whose reader is attached but not
-      // consuming - the exact state that prompts a manual `reconnect()` - never flushes,
-      // so `'finish'` never fires, and with the reference dropped here the descriptor and
-      // everything buffered behind it were pinned for the life of the process, once per
-      // call. Flushed if it can be, destroyed if it cannot.
+      // Let go of the existing stream, bounded. The guard above has already refused a
+      // live stream with buffered writes, so what reaches here holds nothing, or has
+      // failed. `end()` alone could still leave the descriptor pinned if `'finish'` never
+      // fired, so `abandonStream` flushes it if it can and destroys it if it cannot.
       //
       // The reference is dropped whether or not the stream was worth flushing, and only
       // the flush is gated on `destroyed`. A `WriteStream` sets `destroyed` synchronously
@@ -1963,12 +1961,12 @@ export class NamedPipeSink implements LogSink {
    * `initializePipe` flushes the queue itself once it succeeds, so recovery needs nothing
    * further from here.
    *
-   * Two guards, and both are load-bearing. Only one attempt may be in flight, because
-   * opening a FIFO with no reader does not fail - it *blocks* until a reader appears,
-   * holding a libuv threadpool slot (four by default) for as long as it waits, so
-   * concurrent attempts would starve every other file operation in the process. And
-   * attempts are spaced by {@link REOPEN_COOLDOWN_MS}, because this is called from
-   * `write`, which during an outage is called as often as the application logs.
+   * Two guards, and both are load-bearing. Only one attempt may be in flight, because two
+   * concurrent probes could each obtain a descriptor and one would be orphaned when their
+   * promotions raced (see `isOpening`). And attempts are spaced by
+   * {@link REOPEN_COOLDOWN_MS}, because this is called from `write`, which during an
+   * outage is called as often as the application logs, and each attempt costs a `stat`
+   * and a non-blocking `open`.
    */
   private ensureConnection(
     isDiagnostic = false,
@@ -2152,15 +2150,9 @@ export class NamedPipeSink implements LogSink {
     try {
       const messageToWrite = queued.formatted ?? '';
 
-      // The return value is deliberately ignored. It says the stream's buffer is over its
-      // high-water mark, which for this sink changes nothing: entries are handed over as
-      // they arrive and Node buffers what the pipe has not taken yet.
-      //
-      // A `once('drain')` listener used to be attached here with an empty body - it
-      // handled nothing, and one was added per backpressured write, so a stalled pipe
-      // reached Node's listener-leak warning within a few thousand entries. Queueing
-      // instead of dropping makes that path far busier, which is what turned a harmless
-      // no-op into a real leak.
+      // A `false` return says the stream's buffer is over its high-water mark, and
+      // `pauseUntilDrain` below holds later entries in this sink's capped queue until
+      // `'drain'`, with one listener at a time rather than one per backpressured write.
       //
       // The *callback* is where a write is confirmed, and it is why this entry is not
       // considered delivered yet. `write` returning is not success: a stream reports
@@ -2332,19 +2324,7 @@ export class NamedPipeSink implements LogSink {
         );
       });
     } else {
-      let text = '';
-      if (entry.type !== 'raw') {
-        text = `[${entry.type}] `;
-        if (entry.serviceName) {
-          text += `[${entry.serviceName}] `;
-        }
-
-        if (entry.entityName) {
-          text += `[${entry.entityName}] `;
-        }
-      }
-      text += renderTextLine(entry.message);
-      formatted = text;
+      formatted = renderTextEntry(entry);
     }
 
     return formatted + '\n';

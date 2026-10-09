@@ -1856,6 +1856,7 @@ export class Logger extends EventEmitter {
           { ...diagnostic, timestamp: ms(), sink },
           true,
           terminalLine,
+          true,
         );
       }),
     );
@@ -1949,6 +1950,7 @@ export class Logger extends EventEmitter {
     diagnostic: LoggerDiagnostic,
     shouldDeliverToSinks = true,
     terminalLine?: () => string,
+    isOwnedSinkFailure = false,
   ): void {
     // A console bridge may log the terminal report successfully. Its failures must
     // not queue a fresh diagnostic after the synchronous console guard comes down.
@@ -1983,10 +1985,15 @@ export class Logger extends EventEmitter {
         // logger closed but before (or after) its sinks finish closing. Built-in sinks
         // refuse diagnostic writes in that state, and their void return cannot tell us
         // that nothing was delivered. Treat a closed logger like one with no destination
-        // so a terminal write failure is not silently lost. This deliberately does not
-        // apply to an open, muted ConsoleSink: muting remains an explicit request for
-        // silence.
-        if (destinations.length === 0 || this._closed) {
+        // so a terminal write failure is not silently lost. An open, muted ConsoleSink
+        // stays silent for the logger's own diagnostics, but it is no destination for a
+        // failure an owned sink handed over in place of its console report: muting the
+        // console's log output does not silence another sink's failure channel.
+        if (
+          destinations.length === 0 ||
+          this._closed ||
+          (isOwnedSinkFailure && destinations.every(isMutedConsoleSink))
+        ) {
           if (!hasListeners) {
             reportToConsole(consoleLine());
           }
@@ -2357,6 +2364,19 @@ export type { LoggerService } from './logger-service';
  */
 function isExitCodeRequest(value: unknown): value is number {
   return typeof value === 'number';
+}
+
+/**
+ * Whether `sink` is a muted `ConsoleSink`, which delivers nothing. Guarded: a sink is
+ * caller-supplied, and `instanceof` on a revoked `Proxy` or an overridden `isMuted`
+ * can throw. A sink that cannot be classified counts as a destination.
+ */
+function isMutedConsoleSink(sink: LogSink): boolean {
+  try {
+    return sink instanceof ConsoleSink && sink.isMuted() === true;
+  } catch {
+    return false;
+  }
 }
 
 /** Own the list by numeric membership; caller iterators do not select destinations. */

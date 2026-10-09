@@ -66,8 +66,8 @@ import { readUnknownMember as readObjectMember } from '../../internal/read-membe
 // steadily into `process.stdout` or a pooled sink would otherwise restart it forever. The
 // ceiling is per absorber, not per writable and not per process - a request settling after
 // it attaches a *fresh* absorber with a fresh ceiling - so continuous traffic does keep a
-// listener on the sink continuously, while no single request's closure is pinned to the
-// caller's stream for longer than the ceiling.
+// listener on the sink continuously, while no single absorber stays on the caller's
+// stream for longer than the ceiling.
 //
 // An error arriving past all of that is the caller's to handle, which is the ordinary
 // contract for a stream they own. Documented for them under "Writing your own
@@ -80,8 +80,9 @@ import { readUnknownMember as readObjectMember } from '../../internal/read-membe
  * that eventually says something. This bounds it for one that does not: a writable handed
  * to `streamResponse` is the caller's, and `process.stdout` or a pooled sink neither errors
  * nor closes. Without a ceiling the absorber outlives the request by the life of the
- * process, swallowing the caller's own later errors and pinning the request scope it closes
- * over.
+ * process, taking over the caller's own later errors: absorbed so they never surface as
+ * the unhandled `'error'` the caller's own handling would see, and reported on the host
+ * channel long after the request they no longer belong to.
  *
  * A second is far past the poll-phase delay this exists to cover - `fs.WriteStream` closes
  * its descriptor asynchronously and emits after it - and far short of forever.
@@ -97,9 +98,9 @@ const PENDING_WRITABLE_ERROR_WINDOW_MS = 1000;
  * without a ceiling, though, that is a deadline that never arrives: `cleanup` asks on every
  * settle of every request, so a caller streaming steadily into `process.stdout` or a pooled
  * sink - the very writables that never error and never close - pushes it out forever, and
- * the absorber stays for the life of the process swallowing the caller's own first genuine
- * error and pinning the *first* request's scope with it. That is the hazard the window
- * exists for, reached by extension rather than by never bounding it at all.
+ * the absorber stays for the life of the process, taking over the caller's own first
+ * genuine error. That is the hazard the window exists for, reached by extension rather
+ * than by never bounding it at all.
  *
  * Counted from when the absorber was attached, so it bounds one listener's whole life
  * rather than any one request's share of it. Five windows: enough that an ordinary burst of
@@ -110,8 +111,8 @@ const PENDING_WRITABLE_ERROR_WINDOW_MS = 1000;
  * cap has expired attaches a *fresh* one - it must, or it would settle with no `'error'`
  * listener at all - so a caller failing continuously into one long-lived sink does keep a
  * listener on it continuously. That is the same coverage a continuous stream of requests
- * gets anyway, and it is the closure behind it, not the listener, that this bounds: no
- * single request's scope is pinned to the writable for longer than this.
+ * gets anyway, and it is each absorber, not the listener coverage, that this bounds: no
+ * single absorber stays on the writable for longer than this.
  */
 const MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS =
   PENDING_WRITABLE_ERROR_WINDOW_MS * 5;
@@ -505,8 +506,13 @@ export class NodeAdapter implements HTTPAdapter {
         } catch (error) {
           // A refreshed value that fails validation is configuration, not transport:
           // retrying reads the same bad value again, and reporting it as a network error
-          // hid what was wrong. Terminal, as the constructor's own check is.
-          markNonRetryableAdapterError(error);
+          // hid what was wrong. Terminal, as the constructor's own check is. Only this
+          // adapter's own refusal is: a throw from caller code read while normalizing
+          // keeps its usual retryable adapter-error behavior, and its error is not tagged.
+          if (crlValidationErrors.has(error as Error)) {
+            markNonRetryableAdapterError(error);
+          }
+
           throw error;
         }
       }
@@ -1613,7 +1619,18 @@ export class NodeAdapter implements HTTPAdapter {
           });
         })();
         observeTaskFailure(responseTask, (error: unknown) => {
+          // Taken before the reject below, which marks the request settled either way.
+          const wasAnswered = didSettleRequest;
+
           failRequest(normalizeError(error));
+
+          // Already answered: the response's `'close'` handler owns teardown, as it does
+          // in `observeTaskFailure`'s recovery, and firing the factory's signal now would
+          // run its abort cleanup over a stream that completed.
+          if (wasAnswered) {
+            return;
+          }
+
           // Every exit the task means to take tears down what it opened. One it did not
           // mean to take - a throw out of code with no `catch` of its own - left the
           // socket open and the factory's signal unfired, so its cleanup listeners never
@@ -2520,9 +2537,8 @@ function absorbPendingWritableError(writable: WritableLike): void {
     // writable to several requests at once and one absorber covers them all, so
     // detaching the moment the first error lands would leave a sibling's unhandled -
     // but staying attached until a `'close'` that a writable is not obliged to emit
-    // keeps this closure, and with it the whole request scope it was declared in,
-    // alive for as long as the writable is. Deferring by one turn covers the siblings
-    // and still bounds it.
+    // keeps this listener on the caller's stream for as long as the writable lives.
+    // Deferring by one turn covers the siblings and still bounds it.
     scheduleDetach();
   };
 
@@ -2623,15 +2639,14 @@ function absorbPendingWritableError(writable: WritableLike): void {
   // writable that is never going to emit at all - a hand-written {@link WritableLike}
   // that throws from `write` or `end` is not obliged to. `'close'` cannot cover one
   // that emits `'error'` and nothing after it, and waiting on a close that never comes
-  // is what would pin this closure, and the request scope around it, to the writable's
-  // lifetime.
+  // is what would pin this absorber to the writable's lifetime.
   try {
     writable.on('close', onClose);
   } catch {
     // Neither bound is available: this writable would not take the `'close'` listener,
     // and `absorb` only fires if the error actually arrives. A writable that emits
-    // nothing at all would keep the absorber, and the request scope it closes over,
-    // for as long as it lives - so fall back to the turn-counted removal. It is the
+    // nothing at all would keep the absorber for as long as it lives - so fall back to
+    // the turn-counted removal. It is the
     // timing that was wrong for a real stream, and a writable that refuses a listener
     // is not one.
     scheduleDetach();
@@ -2642,11 +2657,8 @@ function absorbPendingWritableError(writable: WritableLike): void {
   // well outlive the request without ever closing - `process.stdout`, a pooled sink, a
   // long-lived socket - and for one of those neither `'error'` nor `'close'` is coming.
   // Left unbounded, this absorber would stay on the caller's stream for the life of the
-  // process: swallowing the first genuine error it emits long after this request
-  // succeeded, and pinning the whole request scope - `res`, its listeners, the
-  // accumulated state - to the stream it closes over. That is the hazard the comment
-  // above names, and it applied to the throw paths before this was reached from
-  // `cleanup` on every settle.
+  // process, taking over the first genuine error it emits long after this request
+  // succeeded. That is the hazard the comment above names.
   //
   // Long enough for the case the `'close'` listener exists for - a real `fs.WriteStream`
   // destroys itself through an asynchronous `fs.close(fd)` and emits a poll phase later,
@@ -2855,6 +2867,13 @@ function normalizeCRLEntry(entry: string | Buffer): string | Buffer | string[] {
   return Array.isArray(split) ? split : entry;
 }
 
+/**
+ * The errors {@link splitCRLString} itself raised for a malformed bundle, so `send()` can
+ * tell its own validation refusal from a throw out of caller code that `normalizeCRL`
+ * runs - an array element's getter, an entry's `toString` - which stays retryable.
+ */
+const crlValidationErrors = new WeakSet<Error>();
+
 function splitCRLString(crl: string): string | string[] {
   const blocks = crl.match(PEM_CRL_BLOCK) ?? [];
 
@@ -2872,7 +2891,7 @@ function splitCRLString(crl: string): string | string[] {
   const residue = crl.replace(PEM_CRL_BLOCK, '');
 
   if (RESIDUE_OUTSIDE_PEM_BLOCKS.test(residue)) {
-    throw new Error(
+    const error = new Error(
       'NodeAdapter: the `crl` value contains content outside any complete ' +
         '-----BEGIN/END X509 CRL----- block. Only PEM CRL blocks separated ' +
         'by whitespace are accepted, because a truncated CRL and a line of ' +
@@ -2882,6 +2901,9 @@ function splitCRLString(crl: string): string | string[] {
         'delimiter, or decoded text from `openssl ... -text`, which must be ' +
         'stripped before the bundle is passed here.',
     );
+
+    crlValidationErrors.add(error);
+    throw error;
   }
 
   return blocks.length > 1 ? blocks : crl;

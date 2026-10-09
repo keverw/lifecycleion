@@ -271,8 +271,8 @@ export class StartupOrchestration {
    * The names that are up, in order - what every startup result reports as started:
    * success, abort, timeout, and also a startup that failed and rolled back. A rollback
    * that could not stop a component leaves it up, and the result must match the
-   * registry rather than claim nothing is. One answer for all of them: the failure
-   * paths used running-set membership alone, and listed teardown as started.
+   * registry rather than claim nothing is. One answer for all of them, so no exit lists
+   * a component in teardown as started.
    */
   public runningStartupSnapshot(
     names: readonly string[] = this.core.state.components.map((component) =>
@@ -304,9 +304,9 @@ export class StartupOrchestration {
     // `lifecycle-manager:signals-attached` synchronously, and a listener that calls
     // `startAllComponents()` from there must find a startup already in progress rather
     // than run a second one alongside this. Only the restart handoff below (and the
-    // auto-attach flag) moves before the attach; the shutdown state this startup resets waits until the attach has
-    // succeeded and no shutdown has begun, so a refusal releases the latch, which also
-    // reports the handed-off auto-starts as abandoned.
+    // auto-attach flag) moves before the attach; the shutdown state this startup resets
+    // waits until the attach has succeeded and no shutdown has begun, so a refusal
+    // releases the latch, which also reports the handed-off auto-starts as abandoned.
     this.core.state.isStarting = true;
     // The startup that actually takes the latch owns the current registry, even if
     // a listener started it before the original restart resumed. Transfer every
@@ -565,8 +565,8 @@ export class StartupOrchestration {
   private orderStartup(run: StartupRun): StartupResult | undefined {
     // Get startup order (topological sort)
     // Every list read once, here, and used both for the order and by the batch loop:
-    // read again there, a list that answered differently put a component ahead of a
-    // dependency it then failed on, and rolled the whole startup back.
+    // read again there, a list that answered differently could put a component ahead
+    // of a dependency it then failed on, rolling the whole startup back.
     const startupReads = run.bulkStartup.dependencyReads;
     // Deferred registrations included in any frozen batch still need an
     // abandonment warning if the loop ends before it attempts them.
@@ -807,8 +807,8 @@ export class StartupOrchestration {
     for (const depName of dependencies) {
       const depComponent = this.core.registry.getComponent(depName);
       // Read only where it decides something - a dependency that stalled, was
-      // skipped or failed - and guarded: a healthy dependency's `isOptional()`
-      // that threw used to crash, and roll back, the whole startup.
+      // skipped or failed - and guarded, so a healthy dependency's `isOptional()`
+      // that throws cannot crash, and roll back, the whole startup.
       const isDependencyOptional = (): boolean =>
         depComponent !== undefined &&
         this.core.componentMetadata.isComponentOptional(depComponent);
@@ -1205,16 +1205,18 @@ export class StartupOrchestration {
       },
     });
 
+    // Copies: listeners receive the payload by reference, and the result below is
+    // built from this run's own lists, which a listener must not be able to change.
     this.core.lifecycleEvents.lifecycleManagerStarted(
-      run.startedComponents,
-      run.failedOptionalComponents,
+      [...run.startedComponents],
+      run.failedOptionalComponents.map((entry) => ({ ...entry })),
       skippedComponentsArray,
     );
 
     // Asked once more, after both notifications: each runs caller code, and a
-    // `started` listener or log sink that begins a shutdown left this answering
-    // `success: true` while `getSystemState()` already said `shutting-down` - the
-    // very contradiction the check ahead of them exists to prevent. The `started`
+    // `started` listener or log sink can begin a shutdown, which would leave a
+    // `success: true` answer contradicting a `getSystemState()` that already says
+    // `shutting-down` - the contradiction the check ahead of them prevents. The `started`
     // event stands, since the startup did complete; the result reports the shutdown
     // that is now undoing it, as a startup a shutdown cut short does.
     if (run.hasShutdownBegun()) {
@@ -1328,13 +1330,14 @@ export class StartupOrchestration {
   }
 
   /**
-   * Rollback startup by stopping all started components in reverse order
-   * Used when a required component fails to start during startAllComponents()
+   * Roll the startup back by stopping what it started, in reverse order: for a required
+   * component that failed or stopped unexpectedly, a failed signal attach, or a crash of
+   * the run. Only through `rollBackOnce()`.
    */
   private async rollbackStartup(
     startedComponents: string[],
-    rolledBackNames: Set<string> = new Set(),
-    hasShutdownBegun: () => boolean = () => false,
+    rolledBackNames: Set<string>,
+    hasShutdownBegun: () => boolean,
   ): Promise<void> {
     // Stop components in reverse order - skipping any an earlier rollback of this same
     // startup already reached, which is marked before its stop, so a stop that throws is
@@ -1347,8 +1350,10 @@ export class StartupOrchestration {
       return;
     }
 
+    // A copy: a sink receives its params by reference, and the loop below must stop
+    // every one of these whatever a sink does to the list it was handed.
     this.core.logger.warn('Rolling back startup, stopping started components', {
-      params: { components: componentsToRollback },
+      params: { components: [...componentsToRollback] },
     });
 
     for (const name of componentsToRollback) {
@@ -1496,9 +1501,10 @@ export class StartupOrchestration {
    *
    * Every piece of this startup's state is cleared before any caller code runs. The
    * detach logs through the caller's sinks, which may start the next startup. That
-   * startup runs synchronously up to its first `await` and installs its own record. Cleared after, that record was wiped out from under it:
-   * `isStarting` true with no `activeBulkStartup`, so every auto-start registered for the
-   * rest of it was deferred, never started, and left out of its rollback.
+   * startup runs synchronously up to its first `await` and installs its own record,
+   * which clearing this one afterwards would wipe out from under it: `isStarting` true
+   * with no `activeBulkStartup`, so every auto-start registered for the rest of it
+   * would be deferred, never started, and left out of its rollback.
    */
   private releaseStartupLatch(input: {
     didAutoAttachSignals: boolean;

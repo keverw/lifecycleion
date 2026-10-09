@@ -5,14 +5,14 @@ import { observeRejection } from '../../internal/intrinsics';
  *
  * Race window                 State/result owner        Rejection reporter
  * Before deadline             Foreground claim          Foreground
- * Timeout hook settles work   Foreground claim          Deadline observer
+ * Abort listener settles hook Foreground claim          Deadline observer
  * Graceful wins during force  Graceful token + waiter    Abandoned-force observer*
  * After stalled result        Matching stop token       Deadline observer
  * After retry/restart         New claim/token           Old observer, logs only
  * * The deadline observer keeps reporting ownership if already installed.
  *
  * Installing an observer transfers reporting before promise callbacks run. This
- * includes abort-hook rejections that beat the deferred deadline. Foreground
+ * includes rejections abort listeners cause that beat the deferred deadline. Foreground
  * catches still record results/transitions; their snapshots are never rewritten
  * by later reconciliation. An observed rejection is still a hook error: a fired
  * deadline does not mean its deferred timeout won the race. The caller supplies
@@ -37,7 +37,6 @@ export function createStopPhaseObserver(
     message: string,
     options?: {
       onResolved?: () => void;
-      level?: 'warn' | 'error';
       getReport?: () => { message: string; level: 'warn' | 'error' };
     },
   ) => void;
@@ -63,8 +62,8 @@ export function createStopPhaseObserver(
       }
       isObserved = true;
       // Which branch the terminal observer below hears from. Both reactions can throw,
-      // and a failure to report the hook's rejection is not a failed late resolution:
-      // one label for both sent readers looking for a reconciliation that never ran.
+      // and a failure to report the hook's rejection is not a failed late resolution,
+      // so each gets its own label.
       let terminalLabel = 'Late stop resolution failed';
       // A selection failure the reaction could not throw itself, because reporting the
       // hook's rejection threw first: the terminal observer reports it after that one.
@@ -95,9 +94,8 @@ export function createStopPhaseObserver(
               selected?.message ?? message,
               // The selector exists to choose the level - it may downgrade an abandoned
               // hook to a warning - so without its answer nothing justifies downgrading:
-              // the level given up front, or `error`.
+              // `error`. With no selector at all, the reporter's default.
               selected?.level ??
-                options?.level ??
                 (selectionFailure !== undefined ? 'error' : undefined),
             );
           } catch (reportingError) {

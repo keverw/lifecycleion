@@ -95,15 +95,18 @@ export class ShutdownEscalation {
    * Four cases depending on the current shutdown state:
    *
    * 1. **Active shutdown** (`isShuttingDown = true`): escalate through the
-   *    repeated-shutdown policy if configured, otherwise log and discard.
-   *    Emits `signal:shutdown` with `isAlreadyShuttingDown: true` and returns
-   *    without starting another shutdown. When that shutdown is a restart's stop
-   *    phase, the request also cancels the restart's startup phase.
+   *    repeated-shutdown policy if configured, otherwise log and discard. A pass
+   *    with no escalation cycle yet - a restart's stop phase - has this request seed
+   *    one instead of counting it. Emits `signal:shutdown` with
+   *    `isAlreadyShuttingDown: true` and returns without starting another shutdown.
+   *    When that shutdown is a restart's stop phase, the request also cancels the
+   *    restart's startup phase.
    *
    * 2. **Armed post-failure** (previous shutdown finished, armed window still
    *    open): count the request toward the escalation window, emit
    *    `signal:shutdown` with `isAlreadyShuttingDown: false`, then start a
-   *    new `stopAllComponents()` run to retry.
+   *    new `stopAllComponents()` run to retry - unless the force handler or a
+   *    listener already started one, which is then this request's pass.
    *
    * 3. **Armed post-failure expired** (armed window opened but has since
    *    elapsed): expire the stale state, treat the request as a fresh
@@ -182,17 +185,23 @@ export class ShutdownEscalation {
         this.core.state.escalationHandlingDepth--;
       }
 
-      // That pass is the one this signal asked for. Recorded on it, and announced as
-      // landing on a running pass, but not counted as a press: it is this request.
-      if (!didEmitShutdownSignal && this.core.shutdownPass.isShuttingDown) {
-        this.core.shutdownPass.noteShutdownRequestDuringActivePass();
-        this.core.lifecycleEvents.signalShutdown(method, true);
-
-        return;
+      if (!didEmitShutdownSignal && !this.core.shutdownPass.isShuttingDown) {
+        this.emitSignalShutdownForNewRequest(method);
+        didEmitShutdownSignal = true;
       }
 
-      if (!didEmitShutdownSignal) {
-        this.emitSignalShutdownForNewRequest(method);
+      // A pass begun by this request's own handling - a sink behind the line above, a
+      // `signal:shutdown` listener, or an armed retry's force handler - is the one this
+      // signal asked for. Recorded on it, and announced as landing on a running pass if
+      // the signal was not announced yet, but neither counted as a press nor refused as
+      // a second request: it is this request.
+      if (this.core.shutdownPass.isShuttingDown) {
+        this.core.shutdownPass.noteShutdownRequestDuringActivePass();
+        if (!didEmitShutdownSignal) {
+          this.core.lifecycleEvents.signalShutdown(method, true);
+        }
+
+        return;
       }
 
       // Signal handlers cannot consume a return value, so the acknowledgement is dropped;
@@ -202,8 +211,10 @@ export class ShutdownEscalation {
   }
 
   /**
-   * Tracks repeated shutdown requests during an active shutdown and optionally
-   * invokes the configured force shutdown callback when the threshold is reached.
+   * Counts a repeated shutdown request - a signal landing on a running pass, or a retry
+   * through the post-failure armed window (a signal, or a manual stop under
+   * `countManualRetriesTowardEscalation`) - and invokes the configured force shutdown
+   * callback when the threshold is reached.
    *
    * @param consumedArmedUntil the deadline of the post-failure armed window this request
    * already took for itself through {@link consumeRepeatedShutdownArmedWindow}, or `null`
@@ -450,8 +461,8 @@ export class ShutdownEscalation {
   private startShutdownPass(method: ShutdownSignal): void {
     return this.core.dispatcher.withTransition(() => {
       // A signal means the process should stay down, so a refusal is recorded on the
-      // running pass - including one started from inside this request's own escalation
-      // bookkeeping, which was not there when `handleShutdownRequest()` checked the latch.
+      // running pass. `handleShutdownRequest()` answers a pass its own handling began
+      // before calling this; the acceptance still rechecks the latch itself.
       const acceptance = this.core.shutdownPass.acceptShutdownPass(
         method,
         undefined,

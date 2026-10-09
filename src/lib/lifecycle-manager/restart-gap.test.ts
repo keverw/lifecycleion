@@ -3,7 +3,12 @@ import { Logger } from '../logger';
 import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
-import type { RegisterComponentResult } from './types';
+import type {
+  RegisterComponentResult,
+  RestartResult,
+  StartupOptions,
+  StartupResult,
+} from './types';
 import { claimReports } from './test-helpers';
 
 class Counted extends BaseComponent {
@@ -192,5 +197,55 @@ test('an older restart finalizer does not discard a nested restart handoff', asy
   expect(nestedResult?.success).toBe(true);
   expect(first.starts).toBe(2);
   expect(late.starts).toBe(1);
+  await manager.stopAllComponents();
+});
+
+test('a restart refused by a newer restart hands its gap auto-starts to that restart', async () => {
+  const sink = new ArraySink();
+  const logger = new Logger({ sinks: [sink], callProcessExit: false });
+  let isArmed = false;
+  let newer: Promise<RestartResult> | undefined;
+  let registration: Promise<RegisterComponentResult> | undefined;
+  const late = new Counted(logger, { name: 'late' });
+
+  class GapManager extends LifecycleManager {
+    public override async startAllComponents(
+      options?: StartupOptions,
+    ): Promise<StartupResult> {
+      if (isArmed) {
+        isArmed = false;
+        // Deferred to the older restart, whose handoff is still pending, and then a
+        // newer restart takes the shutdown latch before the older one's startup.
+        registration = this.registerComponent(late, { autoStart: true });
+        await registration;
+        newer = this.restartAllComponents();
+      }
+
+      return await super.startAllComponents(options);
+    }
+  }
+
+  const manager = new GapManager({ logger, shutdownWarningTimeoutMS: -1 });
+  const first = new Counted(logger, { name: 'first' });
+  await manager.registerComponent(first);
+  await manager.startAllComponents();
+  isArmed = true;
+
+  const older = await manager.restartAllComponents();
+  const newerResult = await newer;
+
+  expect(await registration).toMatchObject({ autoStartDeferred: true });
+  expect(older.startupResult.code).toBe('shutdown_in_progress');
+  expect(newerResult?.success).toBe(true);
+  expect(newerResult?.startupResult.startedComponents).toEqual([
+    'first',
+    'late',
+  ]);
+  expect(late.starts).toBe(1);
+  expect(
+    sink.logs.some((log) =>
+      log.message.includes('deferred auto-starts were not attempted'),
+    ),
+  ).toBe(false);
   await manager.stopAllComponents();
 });

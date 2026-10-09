@@ -506,33 +506,12 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
                 if (this.currentState.runnerState === 'stopping') {
                   const context = this.currentState.currentAttemptContext;
 
-                  // Mark handled and detach the current context
-                  context.handled = true;
-                  this.currentState.currentAttemptContext = null;
-
-                  // Cleanup timers before emitting, so `attempt-handled` listeners
-                  // see no pending timer, as they do for a reported attempt.
-                  this.cleanupTimers();
-
-                  // Cache the attempt duration and emit attempt-handled for consistency
-                  const attemptTimeElapsedMS = Date.now() - context.startTime;
-                  this.currentState.lastAttemptTimeTakenMS =
-                    attemptTimeElapsedMS;
-
                   // The scope covers `attempt-handled`, not only the
                   // `confirmCancellation` inside it (which opens its own): a listener
                   // for this forced skip must not start a replacement before the
                   // `'stopped'` outcome is published.
                   this.withTerminalDispatch(true, () => {
-                    this.emit(ATTEMPT_HANDLED, {
-                      attemptID: context.id,
-                      status: 'skip',
-                      data: undefined,
-                      error: undefined,
-                      operationTimeElapsedMS: this.timeTakenMS,
-                      attemptTimeElapsedMS,
-                      wasCanceled: true,
-                    } satisfies OnAttemptHandledInfo<T>);
+                    this.settleAbortedAttempt(context);
 
                     // Force completion after grace period expired.
                     this.confirmCancellation(
@@ -626,23 +605,35 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     ) {
       // A silent abort still ends an attempt. Publish its accounting before its
       // replacement, without consulting retry policy or spending the retry budget.
-      context.handled = true;
-      this.currentState.currentAttemptContext = null;
-      this.cleanupTimers();
-      const attemptTimeElapsedMS = Date.now() - context.startTime;
-      this.currentState.lastAttemptTimeTakenMS = attemptTimeElapsedMS;
-      this.emit(ATTEMPT_HANDLED, {
-        attemptID: context.id,
-        status: 'skip',
-        operationTimeElapsedMS: this.timeTakenMS,
-        attemptTimeElapsedMS,
-        wasCanceled: true,
-      } satisfies OnAttemptHandledInfo<T>);
+      this.settleAbortedAttempt(context);
     }
     return {
       operationResolver,
       hasNewStopRequest: this.stopRequestToken !== stopRequestToken,
     };
+  }
+
+  /**
+   * End an aborted attempt that never reported, as the forced cancellation and the
+   * force-abort replacement both do: detach it, clear timers so `attempt-handled`
+   * listeners see none pending (as for a reported attempt), record its duration and
+   * publish it as a canceled `'skip'`. Consults no retry policy and spends no budget.
+   */
+  private settleAbortedAttempt(context: AttemptContext): void {
+    context.handled = true;
+    this.currentState.currentAttemptContext = null;
+    this.cleanupTimers();
+    const attemptTimeElapsedMS = Date.now() - context.startTime;
+    this.currentState.lastAttemptTimeTakenMS = attemptTimeElapsedMS;
+    this.emit(ATTEMPT_HANDLED, {
+      attemptID: context.id,
+      status: 'skip',
+      data: undefined,
+      error: undefined,
+      operationTimeElapsedMS: this.timeTakenMS,
+      attemptTimeElapsedMS,
+      wasCanceled: true,
+    } satisfies OnAttemptHandledInfo<T>);
   }
 
   /** Claim new work, optionally retaining the result promise for existing waiters. */
@@ -905,8 +896,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         this.currentState.retryTimeoutHandle !== null
       ) {
         this.clearRetryTimer();
-        this.currentState.lastAttemptWasForceTry = true;
 
+        // Marks the attempt forced: the runner is `running`, so it starts one.
         void this.attemptOperation(true);
 
         if (shouldWaitForCompletion) {
@@ -1216,7 +1207,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       //
       // Reported on the global `'error'` channel rather than through this runner's own
       // events, deliberately: the attempt this belongs to has been settled, so emitting
-      // `attempt:handled` for it now would be inventing a lifecycle event out of order.
+      // `attempt-handled` for it now would be inventing a lifecycle event out of order.
       //
       // Only for an attempt that was *not* aborted, which is what separates a caller bug
       // from this API's own documented flow. `forceTry({ shouldAbortRunning: true })` and
@@ -1450,42 +1441,18 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   }
 
   /**
-   * End the operation for an attempt whose setup threw before its operation was invoked,
-   * through the same outcome as a failed retry transition. A listener may already have
-   * replaced, settled or stopped the attempt; the failure then belongs to nothing still
-   * running and is only reported.
+   * End the operation for an attempt whose context could not be created, through the
+   * same outcome as a failed retry transition. Nothing has published the attempt or run
+   * caller code yet, so the runner is still `running` and no attempt is current.
    */
-  private failAttemptSetup(
-    context: AttemptContext | undefined,
-    error: unknown,
-  ): void {
-    const runnerState = this.currentState.runnerState;
-    // No context means the constructor threw, before any caller code could run.
-    const isStillThisAttempt =
-      context === undefined ||
-      (this.currentState.currentAttemptContext === context && !context.handled);
-
-    if (
-      !isStillThisAttempt ||
-      (runnerState !== 'running' && runnerState !== 'stopping')
-    ) {
-      reportCallbackError('RetryRunner attempt setup', error);
-      return;
-    }
-
-    if (context !== undefined) {
-      context.handled = true;
-    }
+  private failAttemptSetup(error: unknown): void {
     this.currentState.currentAttemptContext = null;
     this.cleanupTimers();
-
-    const isCanceling = runnerState === 'stopping';
-    this.confirmCancellation(
-      isCanceling ? 'stopped' : 'fatal-error',
-      isCanceling
-        ? { status: 'canceled' }
-        : { status: 'attempt_fatal', code: 'unexpected_error', error },
-    );
+    this.confirmCancellation('fatal-error', {
+      status: 'attempt_fatal',
+      code: 'unexpected_error',
+      error,
+    });
   }
 
   private async attemptOperation(wasForced: boolean): Promise<void> {
@@ -1493,25 +1460,25 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     if (this.currentState.runnerState === 'running') {
       this.currentState.lastAttemptWasForceTry = wasForced;
 
-      // Every caller discards this method's promise, so a throw while setting up the
-      // attempt must end the operation here: as a rejection it would go unhandled and
-      // leave the runner `running` with nothing to settle it.
-      let context: AttemptContext | undefined;
+      // Every caller discards this method's promise, so a throw while creating the
+      // attempt's context must end the operation here: as a rejection it would go
+      // unhandled and leave the runner `running` with nothing to settle it. `emit` itself
+      // cannot throw: it contains every listener's failure.
+      let context: AttemptContext;
       try {
-        // Create a new context for this attempt.
         context = new AttemptContext();
-        this.currentState.currentAttemptContext = context;
-
-        // emit the attempt started event
-        this.emit(ATTEMPT_STARTED, {
-          attemptID: context.id,
-          operationTimeElapsedMS: this.timeTakenMS,
-          attemptTimeElapsedMS: 0,
-        });
       } catch (error) {
-        this.failAttemptSetup(context, error);
+        this.failAttemptSetup(error);
         return;
       }
+      this.currentState.currentAttemptContext = context;
+
+      // emit the attempt started event
+      this.emit(ATTEMPT_STARTED, {
+        attemptID: context.id,
+        operationTimeElapsedMS: this.timeTakenMS,
+        attemptTimeElapsedMS: 0,
+      });
 
       // An attempt-started listener can force-replace, cancel, or reset this attempt.
       // A replaced attempt is over; an aborted one is acknowledged as the operation
@@ -1555,10 +1522,14 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
       // Whether `failure` repeats the error this attempt already reported (see the
       // `catch` below for why that is not a second outcome).
+      // Any status other than success or skip routes its value as the error, an
+      // unrecognized one included (it becomes a fatal `TypeError` with that value as
+      // `cause`), so a rethrow of that value is the same shape.
       const isReportedErrorAgain = (failure: unknown): boolean =>
         didReport &&
         context.handled &&
-        (reportedStatus === 'error' || reportedStatus === 'fatal') &&
+        reportedStatus !== 'success' &&
+        reportedStatus !== 'skip' &&
         failure === reportedValue;
 
       // A returned value whose `then` could not be read: a return-contract failure, kept
@@ -1588,7 +1559,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         // the aborted case above is excluded for. A throw carrying anything else still
         // reports, which is the failure that would otherwise disappear.
         //
-        // Only a rethrow of a reported *error* - `'error'` or `'fatal'` - is that shape.
+        // Only a rethrow of a reported *error* - any status but success or skip - is that
+        // shape.
         // Comparing against whatever was reported would match a throw against success
         // data too: `reportResult('success')` and `reportResult('skip')` store `undefined`,
         // so a later `throw undefined` or a bare `Promise.reject()` from a cleanup step

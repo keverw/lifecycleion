@@ -40,9 +40,9 @@ export class StartSettlements {
       finish: () => {
         // Released ownership ends the raw start for every holder of this settlement,
         // not only the registry: a pass that captured it must stop protecting for it.
+        // With the raw start ended, `finishSettlement()` withdraws the settlement too.
         settlement.rawStartPending = false;
         finishSettlement();
-        this.deleteStartSettlement(claim);
         resolveRawStart();
       },
       abandon: () => abandon(),
@@ -115,16 +115,35 @@ export class StartSettlements {
     for (const [claim, settlement] of this.core.state.startSettlements) {
       if (
         this.core.state.componentClaims.get(settlement.name)?.claim === claim ||
-        (settlement.component !== undefined &&
-          this.core.registry.getComponent(settlement.name) ===
-            settlement.component &&
-          this.core.state.componentStartAttemptTokens.get(settlement.name) ===
-            settlement.token)
+        this.isCurrentStartAttempt(
+          settlement.name,
+          settlement.component,
+          settlement.token,
+        )
       ) {
         currentStarts.set(settlement.name, settlement);
       }
     }
     return currentStarts;
+  }
+
+  /**
+   * Whether `component` is still the instance registered under `name` and
+   * `startAttemptToken` the start attempt last issued for it: the attempt, or the
+   * settlement that recorded both, still describes the name's current start. Shared by
+   * the start pipeline's supersession checks, this map, and late-start recovery.
+   */
+  public isCurrentStartAttempt(
+    name: string,
+    component: BaseComponent | undefined,
+    startAttemptToken: string | undefined,
+  ): boolean {
+    return (
+      component !== undefined &&
+      this.core.registry.getComponent(name) === component &&
+      this.core.state.componentStartAttemptTokens.get(name) ===
+        startAttemptToken
+    );
   }
 
   /**
@@ -144,13 +163,11 @@ export class StartSettlements {
     if (settlements === undefined) {
       return false;
     }
+    // A pending raw start always has its instance recorded: `rawStartPending` is set only
+    // once `recordStartAttempt()` has run.
     const component = this.core.registry.getComponent(name);
     for (const settlement of settlements) {
-      if (
-        settlement.rawStartPending &&
-        (settlement.component === undefined ||
-          settlement.component === component)
-      ) {
+      if (settlement.rawStartPending && settlement.component === component) {
         return true;
       }
     }

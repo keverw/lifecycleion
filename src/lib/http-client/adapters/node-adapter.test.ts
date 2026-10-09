@@ -15,6 +15,7 @@ import type { NodeAdapterConfig } from './node-adapter';
 import { HTTPClient } from '../http-client';
 import { CookieJar } from '../cookie-jar';
 import {
+  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
@@ -7501,6 +7502,48 @@ test('a refreshed CRL that fails validation is a non-retryable adapter_error', a
     expect(builder.error?.isRetriesExhausted).toBe(false);
     expect(builder.error?.cause?.message).toMatch(/outside any complete/);
     expect(attempts).toBe(1);
+    expect(requestSpy).not.toHaveBeenCalled();
+  } finally {
+    requestSpy.mockRestore();
+  }
+});
+
+test('a caller throw while a refreshed CRL is normalized stays retryable and untagged', async () => {
+  // Not the adapter's validation refusal: caller code run by the normalization threw.
+  // It keeps the usual retryable adapter-error path, and the caller's error object is
+  // not given the adapter's terminal flag.
+  const failure = new Error('crl source not ready');
+  const config: NodeAdapterConfig = { crl: '' };
+  const adapter = new NodeAdapter(config);
+  const requestSpy = spyOn(https, 'request');
+  let attempts = 0;
+
+  config.crl = [
+    {
+      toString(): string {
+        throw failure;
+      },
+    } as unknown as Buffer,
+  ];
+
+  try {
+    const builder = new HTTPClient({ adapter })
+      .get('https://crl.test/api')
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 })
+      .onAttemptEnd(() => {
+        attempts++;
+      });
+
+    const res = await builder.send();
+
+    expect(res.isFailed).toBe(true);
+    expect(attempts).toBe(3);
+    expect(builder.error?.cause).toBe(failure);
+    expect(
+      Object.getOwnPropertyNames(failure).includes(
+        NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
+      ),
+    ).toBe(false);
     expect(requestSpy).not.toHaveBeenCalled();
   } finally {
     requestSpy.mockRestore();

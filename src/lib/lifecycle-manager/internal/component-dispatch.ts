@@ -8,8 +8,11 @@ import { reportCallbackError } from '../../safe-handle-callback';
 import type { ComponentState } from '../types';
 
 /**
- * The two steps every component hook dispatch - message, value, health check, signal -
- * shares. Each operation keeps its own events, result shapes and refusal labels; only
+ * The steps component hook dispatch shares: every one - message, value, health check,
+ * signal - reads its hook then rechecks ({@link readHookThenRecheck}), and the
+ * asynchronous ones - all but the synchronous value read - then announce, recheck and
+ * invoke under a deadline ({@link dispatchAnnouncedHook}). Each operation keeps its own
+ * events, result shapes and refusal labels; only
  * the order of reads, rechecks and the deadline lives here, so it cannot drift between
  * them. Each operation's refusal codes stay the caller's: `recheck` answers a refusal,
  * or `undefined` while the component may still be entered. The core of that rule -
@@ -193,9 +196,9 @@ interface HookDispatchRequest<TRefusal> {
  *
  * The handler's result is adopted, not raced as it is (see `adoptPromise()`). A timeout
  * is logged and the still-running handler observed, so a late failure is reported rather
- * than floating. A synchronous throw, a rejection, and a failure to log the timeout are
- * all answered `threw`, as each operation answered them before this was shared. A
- * failure to observe the timed-out handler is the manager's own, not the handler's: it
+ * than floating; the timeout is logged through the guarded logger, which cannot throw
+ * here. A synchronous throw and a rejection are both answered `threw`. A failure to
+ * observe the timed-out handler is the manager's own, not the handler's: it
  * is reported on the global channel and the dispatch still answers `timed_out`.
  */
 export async function dispatchAnnouncedHook<TRefusal>(

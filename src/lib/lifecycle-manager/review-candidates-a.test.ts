@@ -227,3 +227,42 @@ test('a restart that claims a late-start cleanup stop starts the component again
 
   await manager.stopAllComponents();
 });
+
+test('a dependent cannot start on a dependency its late-start cleanup is stopping', async () => {
+  const { logger, manager, setOnLog } = setupWithLogHook();
+  const db = new Plain(logger, 'db');
+  const gate = deferred();
+  db.start = () => gate.promise;
+  Object.defineProperty(db, 'startupTimeoutMS', { value: 10 });
+  const api = new Plain(logger, 'api', ['db']);
+  let apiStarts = 0;
+  api.start = () => {
+    apiStarts++;
+    return Promise.resolve();
+  };
+  await manager.registerComponent(db);
+  await manager.registerComponent(api);
+  expect((await manager.startComponent('db')).code).toBe(
+    'component_startup_timeout',
+  );
+
+  let apiStart: Promise<ComponentOperationResult> | undefined;
+  setOnLog((message) => {
+    if (
+      apiStart === undefined &&
+      message.includes('completed startup after timeout')
+    ) {
+      apiStart = manager.startComponent('api');
+    }
+  });
+  gate.resolve();
+  for (let i = 0; i < 100 && apiStart === undefined; i++) {
+    await sleep(1);
+  }
+
+  expect((await apiStart)?.code).toBe('dependency_not_running');
+  expect(apiStarts).toBe(0);
+  expect(manager.isComponentRunning('api')).toBe(false);
+
+  await manager.stopAllComponents();
+});
