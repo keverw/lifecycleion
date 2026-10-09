@@ -1403,7 +1403,8 @@ export interface RepeatedShutdownRequestPolicy {
   /**
    * How long escalation should remain armed after an unsuccessful shutdown
    * returns. When omitted, the manager derives it as `withinMS * forceAfterCount`,
-   * using the default 2000 ms window when `withinMS` is `0`. The effective duration is capped at 2,147,483,647 ms (the timer limit).
+   * using the default 2000 ms window when `withinMS` is `0`. The effective
+   * duration is capped at 2,147,483,647 ms (the timer limit).
    * Set to `0` to disable post-failure arming entirely — the escalation window
    * will not persist once a shutdown attempt returns, and each new request will
    * start a fresh escalation cycle. (Note: `withinMS = 0` is a separate option

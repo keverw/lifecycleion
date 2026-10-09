@@ -447,9 +447,10 @@ export class LifecycleManager
       },
       components: {
         registered: registeredNames,
-        running: this.getRunningComponentNames(),
+        // From the same state as the counts, so one snapshot always agrees with itself.
+        running: Array.from(this.state.runningComponents),
         stopped: stoppedNames,
-        stalled: this.getStalledComponentNames(),
+        stalled: Array.from(this.state.stalledComponents.keys()),
         startTimedOut: startTimedOutNames,
       },
     };
