@@ -2,7 +2,7 @@ import {
   queueMicrotaskSafely,
   attachIntrinsicReactions,
   noop,
-} from './intrinsics';
+} from './promise-reactions';
 import { isObjectLike } from './is-object-like';
 import { describeError } from '../to-error';
 import { reportToConsole } from './report-to-console';

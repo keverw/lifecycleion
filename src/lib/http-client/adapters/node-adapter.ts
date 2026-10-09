@@ -1,6 +1,6 @@
 import { markNonRetryableAdapterError } from '../internal/adapter-error';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
-import { observeRejection } from '../../internal/intrinsics';
+import { observeRejection } from '../../internal/promise-reactions';
 import * as http from 'node:http';
 import { guardProgressCallback } from '../internal/progress';
 import * as https from 'node:https';
@@ -525,15 +525,25 @@ export class NodeAdapter implements HTTPAdapter {
     }
 
     /**
-     * The request body's outcome, held out here rather than inside the executor.
+     * How the request body ended, for a response that is resolved before it does.
      *
-     * Out here because a `Promise` executor rejects on a *synchronous* throw as well as
-     * through `reject`, and that path touches none of the executor's own handlers:
-     * `httpModule.request` validates headers and the path synchronously
-     * (`ERR_INVALID_HTTP_TOKEN`, `ERR_UNESCAPED_CHARACTERS`), `Buffer.from` can raise a
-     * `RangeError` on a huge body, and `req.setHeader` can throw - all after the outcome
-     * promise has been opened. Reached from here, `settleRequestBodyForThrow` below is the
-     * one choke point every rejection passes through, whatever raised it.
+     * Carried on the response as {@link AdapterResponse.requestBodySettled} and never
+     * waited for: the response is the server's real answer and is delivered as soon as
+     * it is complete, which is usually before the upload it answered over has finished.
+     * Waiting for the writer instead is what this must not do - it turned a `413` that
+     * stopped reading into a network error with the server's explanation dropped, and
+     * let an abort during the wait discard a response that had already arrived in full.
+     *
+     * Resolves, never rejects: a caller that ignores it must not be handed an unhandled
+     * rejection for an upload it never asked about.
+     *
+     * Held out here rather than inside the executor because a `Promise` executor rejects
+     * on a *synchronous* throw as well as through `reject`, and that path touches none of
+     * the executor's own handlers: `httpModule.request` validates headers and the path
+     * synchronously (`ERR_INVALID_HTTP_TOKEN`, `ERR_UNESCAPED_CHARACTERS`), `Buffer.from`
+     * can raise a `RangeError` on a huge body, and `req.setHeader` can throw - all after
+     * the outcome promise has been opened. Reached from here, `settleRequestBodyForThrow`
+     * below is the one choke point every rejection passes through, whatever raised it.
      */
     const upload: {
       outcome: Promise<Error | undefined> | null;
@@ -650,26 +660,35 @@ export class NodeAdapter implements HTTPAdapter {
             headers: Record<string, string | string[]>;
           }
         | undefined;
-      let isStreamFactoryPending = false;
-      let abortStreamSetup: (() => void) | undefined;
-
       /**
-       * Settle a socket failure that lands while a `streamResponse` factory is setting up.
-       *
-       * The one window where "the response side always settles on its own" is not true.
-       * `res`'s own `'error'`, `'aborted'` and `'close'` handlers are installed by
-       * `streamResponseBody`, which does not run until the factory has resolved, so a
-       * socket reset during an `await`ed factory reached nothing: the request `'error'`
-       * handler stood down on {@link didReceiveResponse}, `res` had no listeners to see it,
-       * and the adapter promise never settled - the caller hung until its own signal.
-       *
-       * Set only for the duration of that await, and cleared the moment the factory
-       * returns; from there `streamResponseBody`'s handlers have it. Aborting the stream
-       * signal is what lets the factory's own cleanup listeners run, and the
-       * `streamAbort.signal.aborted` check after the await then destroys a writable that
-       * arrived too late.
+       * A `streamResponse` factory that is still setting up its sink, or `undefined`
+       * outside that await. Set when the factory is called and cleared the moment it
+       * returns or throws; from there `streamResponseBody`'s handlers have the response.
        */
-      let failStreamSetupOnSocketError: ((error: Error) => void) | undefined;
+      let pendingStreamSetup:
+        | {
+            /** Fire the factory's stream signal, so its cleanup listeners run. */
+            abort: () => void;
+
+            /**
+             * Settle a socket failure that lands during the setup.
+             *
+             * The one window where "the response side always settles on its own" is not
+             * true. `res`'s own `'error'`, `'aborted'` and `'close'` handlers are
+             * installed by `streamResponseBody`, which does not run until the factory has
+             * resolved, so a socket reset during an `await`ed factory reached nothing:
+             * the request `'error'` handler stood down on {@link didReceiveResponse},
+             * `res` had no listeners to see it, and the adapter promise never settled -
+             * the caller hung until its own signal.
+             *
+             * One-shot: cleared on its first call, while the setup itself stays pending.
+             * Aborting the stream signal is what lets the factory's own cleanup listeners
+             * run, and the `streamAbort.signal.aborted` check after the await then
+             * destroys a writable that arrived too late.
+             */
+            failOnSocketError: ((error: Error) => void) | undefined;
+          }
+        | undefined;
 
       /**
        * Whether the server has already answered.
@@ -852,20 +871,6 @@ export class NodeAdapter implements HTTPAdapter {
       };
 
       /**
-       * How the request body ended, for a response that is resolved before it does.
-       *
-       * Carried on the response as {@link AdapterResponse.requestBodySettled} and never
-       * waited for: the response is the server's real answer and is delivered as soon as
-       * it is complete, which is usually before the upload it answered over has finished.
-       * Waiting for the writer instead is what this must not do - it turned a `413` that
-       * stopped reading into a network error with the server's explanation dropped, and
-       * let an abort during the wait discard a response that had already arrived in full.
-       *
-       * Resolves, never rejects: a caller that ignores it must not be handed an unhandled
-       * rejection for an upload it never asked about.
-       */
-
-      /**
        * Open the outcome promise, so it exists from the moment the request has a body.
        *
        * Opened here rather than at the first write, which is where it used to be created:
@@ -909,7 +914,7 @@ export class NodeAdapter implements HTTPAdapter {
        * stall watchdog and an immediate `destroy`. Flipping it there would have changed
        * that teardown as a side effect of answering the caller.
        *
-       * Idempotent through `settleBodyWrite`, which is cleared on the first call: a
+       * Idempotent through `upload.settle`, which is cleared on the first call: a
        * promise resolves once, and the second settle would be silently dropped anyway.
        */
       const settleBodyOutcome = (failure?: unknown): void => {
@@ -923,10 +928,8 @@ export class NodeAdapter implements HTTPAdapter {
       };
 
       /**
-       * The writer is done, one way or the other.
-       *
-       * Idempotent through `settleBodyWrite`, which is cleared on the first call: a
-       * promise resolves once, and the second settle would be silently dropped anyway.
+       * The writer is done, one way or the other. Idempotent, as
+       * {@link settleBodyOutcome} is.
        */
       const endBodyWrite = (failure?: unknown): void => {
         isWritingBody = false;
@@ -998,11 +1001,12 @@ export class NodeAdapter implements HTTPAdapter {
        * read is guarded once, here, and both answer it the same way. Before a response the
        * refusal is the failure: nothing else is answering. After one it reads as "not
        * aborted": the response path is answering, a real abort still reaches the request
-       * through its own listener, and what follows - `failStreamSetupOnSocketError`, the
-       * write failure reported by `reportWriteErrorAfterResponse` - still runs. Failing
-       * the request with the refusal there instead left a pending `streamResponse`
-       * factory's signal unfired, and answered `requestBodySettled` with the getter's
-       * error in place of the socket's own.
+       * through its own listener, and what follows - a pending stream setup's
+       * `failOnSocketError`, the write failure reported by
+       * `reportWriteErrorAfterResponse` - still runs. Failing the request with the
+       * refusal there instead left a pending `streamResponse` factory's signal unfired,
+       * and answered `requestBodySettled` with the getter's error in place of the
+       * socket's own.
        */
       const readIsAborted = (): boolean | Error => {
         try {
@@ -1310,7 +1314,7 @@ export class NodeAdapter implements HTTPAdapter {
 
             let writable: WritableLike | null | StreamResponseCancel;
             const setupFailed = (error: Error): void => {
-              failStreamSetupOnSocketError?.(error);
+              pendingStreamSetup?.failOnSocketError?.(error);
             };
             const setupClosed = (): void => {
               if (!res.complete) {
@@ -1323,27 +1327,31 @@ export class NodeAdapter implements HTTPAdapter {
             };
 
             try {
-              isStreamFactoryPending = true;
-              abortStreamSetup = abortStream;
-              failStreamSetupOnSocketError = (error: Error): void => {
-                failStreamSetupOnSocketError = undefined;
-                abortStream();
-                // Guarded, because this one runs from inside `req.on('error', ...)`.
-                // Every other destroy on this path is in the request's own promise chain,
-                // where a throw is rejected into it; a throw out of an event handler is the
-                // uncaught exception the rest of this file's absorbers exist to prevent -
-                // and a socket already gone can answer `ERR_SOCKET_CLOSED` from `destroy()`
-                // on some runtimes, which is precisely the state this is reached in.
-                destroyRequestQuietly(req);
-                settleResponse({
-                  status,
-                  headers,
-                  body: null,
-                  isStreamError: true,
-                  streamErrorCode: 'stream_response_error',
-                  errorCause: error,
-                });
+              const setup: NonNullable<typeof pendingStreamSetup> = {
+                abort: abortStream,
+                failOnSocketError: (error: Error): void => {
+                  setup.failOnSocketError = undefined;
+                  abortStream();
+                  // Guarded, because this one runs from inside `req.on('error', ...)`.
+                  // Every other destroy on this path is in the request's own promise
+                  // chain, where a throw is rejected into it; a throw out of an event
+                  // handler is the uncaught exception the rest of this file's absorbers
+                  // exist to prevent - and a socket already gone can answer
+                  // `ERR_SOCKET_CLOSED` from `destroy()` on some runtimes, which is
+                  // precisely the state this is reached in.
+                  destroyRequestQuietly(req);
+                  settleResponse({
+                    status,
+                    headers,
+                    body: null,
+                    isStreamError: true,
+                    streamErrorCode: 'stream_response_error',
+                    errorCause: error,
+                  });
+                },
               };
+
+              pendingStreamSetup = setup;
               // Response-side termination may never emit a request-side error.
               // Listen before awaiting caller code so a stalled factory cannot hide it.
               res.once('error', setupFailed);
@@ -1397,8 +1405,10 @@ export class NodeAdapter implements HTTPAdapter {
                 );
               }
             } catch (error) {
-              isStreamFactoryPending = false;
-              failStreamSetupOnSocketError = undefined;
+              // Cleared here as well as in `finally`, ahead of the teardown: aborting the
+              // stream signal runs the factory's listeners, and an abort they raise on
+              // the request's own signal is not one that landed mid-setup.
+              pendingStreamSetup = undefined;
               // Factory threw — non-retryable setup error, equivalent to an
               // interceptor throw. Abort the stream signal so any partial cleanup
               // listeners run, destroy the request, and propagate as a setup failure.
@@ -1407,22 +1417,20 @@ export class NodeAdapter implements HTTPAdapter {
               failRequest(markStreamFactoryError(error, req, request.headers));
               return;
             } finally {
-              abortStreamSetup = undefined;
+              pendingStreamSetup = undefined;
               res.removeListener('error', setupFailed);
               res.removeListener('aborted', setupClosed);
               res.removeListener('close', setupClosed);
             }
-            isStreamFactoryPending = false;
-            failStreamSetupOnSocketError = undefined;
 
             // The request may have been cancelled, timed out or lost its socket while
             // an async factory was still setting up its sink. In that case the outer
-            // promise has already settled through the abort listener or
-            // `failStreamSetupOnSocketError`; close the newly created writable and stop
-            // here. This is the one exit between the factory returning and
-            // `streamResponseBody` attaching its listeners that holds a writable - the
-            // others hold `null`, a cancel object, or nothing - so it is the one that
-            // must cover the writable's `'error'` itself: see `discardUnstreamedWritable`.
+            // promise has already settled through the abort listener or the setup's
+            // `failOnSocketError`; close the newly created writable and stop here. This
+            // is the one exit between the factory returning and `streamResponseBody`
+            // attaching its listeners that holds a writable - the others hold `null`, a
+            // cancel object, or nothing - so it is the one that must cover the
+            // writable's `'error'` itself: see `discardUnstreamedWritable`.
             if (streamAbort.signal.aborted) {
               if (writable && !isStreamResponseCancel(writable)) {
                 discardUnstreamedWritable(writable);
@@ -1680,9 +1688,9 @@ export class NodeAdapter implements HTTPAdapter {
         // been consumed: see `reportWriteErrorAfterResponse`.
         if (didReceiveResponse) {
           // Except in the one window where the response side has nobody listening yet:
-          // see `failStreamSetupOnSocketError`.
-          if (failStreamSetupOnSocketError) {
-            failStreamSetupOnSocketError(normalizeError(error));
+          // see `pendingStreamSetup`.
+          if (pendingStreamSetup?.failOnSocketError) {
+            pendingStreamSetup.failOnSocketError(normalizeError(error));
 
             return;
           }
@@ -1790,7 +1798,7 @@ export class NodeAdapter implements HTTPAdapter {
         const onAbort = (): void => {
           // Settlement removes the relay listener during this same abort dispatch.
           // Notify a pending factory first, while its cleanup still has ownership.
-          abortStreamSetup?.();
+          pendingStreamSetup?.abort();
           if (activeResponseStream) {
             const { status, headers, writable } = activeResponseStream;
             activeResponseStream = undefined;
@@ -1839,7 +1847,7 @@ export class NodeAdapter implements HTTPAdapter {
             return;
           }
 
-          if (isStreamFactoryPending) {
+          if (pendingStreamSetup) {
             destroyRequestQuietly(req);
             const abortErr = new Error(
               'Request aborted during streamResponse setup',

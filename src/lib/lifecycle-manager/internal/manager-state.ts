@@ -175,10 +175,10 @@ export class LifecycleManagerState {
    * Whether `reportUnexpectedStop()` was called with a real `Error`, as opposed to with
    * nothing or with an off-type value.
    *
-   * Recorded separately because `componentErrors` now holds a *normalized* error:
-   * `toError` turns any reported value into an `Error`, which is what keeps a hostile
-   * value from stranding the manager, but it also means `instanceof Error` can no longer
-   * answer "did the component explain why it stopped?". The overlapping-startup-failure
+   * Recorded separately because `componentErrors` holds a *normalized* error: `toError`
+   * turns any reported value into an `Error`, which is what keeps a hostile value from
+   * stranding the manager, but it also means `instanceof Error` cannot answer "did the
+   * component explain why it stopped?". The overlapping-startup-failure
    * rule in `startComponent` depends on that distinction.
    */
   public componentUnexpectedStopHadError: Map<string, boolean> = new Map();
@@ -203,10 +203,6 @@ export class LifecycleManagerState {
     Set<StartSettlement>
   >();
   public readonly invokingStarts = new Set<StartSettlement>();
-  // Set when a `detachSignalsOnStop` detach was due - nothing left running or stalled -
-  // but something transient was still in flight: a startup or shutdown latch, a start or
-  // stop, a late-startup cleanup. Whichever of those ends runs the check again.
-  public isSignalDetachDeferred = false;
   // The shutdown pass that most recently began, when it asked to abort pending starts
   // (`abortPendingStarts`), keyed by its `shutdownToken`. A start whose caller code began
   // that pass after the start claimed its component - before it could be interrupted -

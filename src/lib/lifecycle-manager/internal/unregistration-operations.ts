@@ -255,8 +255,12 @@ export class UnregistrationOperations {
   }
 
   /**
-   * Announce the stop a running component needs first, then refuse if that log line's
-   * caller code replaced the component or began an operation of its own.
+   * Announce that a running component is to be stopped first, then refuse if that log
+   * line's caller code replaced the component or began an operation of its own.
+   *
+   * Logged before the rechecks rather than after them: the line runs the caller's sinks,
+   * and the rechecks are what answer for anything a sink changes before the stop. So it
+   * is worded as the intent - a refusal below means the stop never runs.
    */
   private refuseBeforeStopping(
     attempt: UnregisterAttempt,
@@ -265,7 +269,7 @@ export class UnregistrationOperations {
 
     this.core.logger
       .entity(name)
-      .info('Stopping component before unregistering');
+      .info('Unregistering running component; stopping it first');
 
     const replacedBeforeStop = this.refuseIfReplaced(attempt);
 
@@ -454,8 +458,8 @@ export class UnregistrationOperations {
 
       // Clean up state - the manager's own maps first, all of them, so the component is
       // either fully registered or fully gone. The component's hooks run after, contained:
-      // they can be overridden, and one that threw used to leave the component out of the
-      // registry but still in every state map.
+      // they can be overridden, and one that throws must not leave the component out of
+      // the registry but still in every state map.
       // A removed registration must not survive as deferred work in a restart
       // handoff. A later registration of the name decides its own auto-start policy.
       // `deferredAutoStartNames` needs no such step: it holds names only while a
@@ -632,8 +636,8 @@ function unregisterCodeForRefusedStop(
 /**
  * Tell a component it is no longer registered. Its own `_markUnregistered()` first, so
  * an override that extends it still runs; if that throws, the two fields it would have
- * cleared are cleared directly. Left set, the instance believed it was still
- * registered, and registering it again was refused as `duplicate_instance`.
+ * cleared are cleared directly, so the instance never goes on believing it is
+ * registered and having its next registration refused as `duplicate_instance`.
  */
 export function markComponentUnregistered(
   component: BaseComponent,

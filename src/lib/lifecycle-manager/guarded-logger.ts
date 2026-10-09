@@ -1,7 +1,7 @@
 import { isObjectLike } from '../internal/is-object-like';
 import { LoggerService } from '../logger/logger-service';
 import { adoptResult, UnreadableReturn } from '../internal/adopt-promise';
-import { observeRejection } from '../internal/intrinsics';
+import { observeRejection } from '../internal/promise-reactions';
 import {
   reportCallbackError,
   runCallbackSafely,
@@ -13,18 +13,20 @@ import {
  *
  * Deliberately generic. The guard sits at the logger, not at the ~140 call sites that
  * use it, so it cannot name the operation that was being logged - and a per-call-site
- * label was what made the old line-by-line guards expensive to keep correct. The thrown
+ * label is what would make line-by-line guards expensive to keep correct. The thrown
  * value travels on `cause` (see {@link reportCallbackError}), and the logger's own
  * message and params are the caller's to recognize.
  */
 const GUARDED_LOGGER_LABEL = 'lifecycle-manager logger';
 
 /**
- * How many guarded `entity()` children one guarded logger keeps. The manager only ever
- * passes component names, so an ordinary app never gets near this; the cap is for one
- * that registers and unregisters uniquely named components - per job, per tenant - where
- * the cache would otherwise grow for the manager's whole lifetime. Past it, the least
- * recently used name is dropped and simply rebuilt if it is logged about again.
+ * How many guarded `entity()` children one guarded logger keeps beyond its
+ * `entityCacheReserve`. The manager only ever passes component names, and reserves room
+ * for every registered one, so this is the room left for names that are not registered:
+ * the cap is for an app that registers and unregisters uniquely named components - per
+ * job, per tenant - where the cache would otherwise grow for the manager's whole
+ * lifetime. Past it, the least recently used name is dropped and simply rebuilt if it is
+ * logged about again.
  */
 const MAX_CACHED_ENTITY_CHILDREN = 256;
 // Captured for identity comparison only; invocation always preserves the receiver.
@@ -58,12 +60,12 @@ const GUARDED_LOG_METHODS: Record<
  *
  * `LifecycleManager` logs from inside OS signal handlers, timer callbacks, terminal
  * promise handlers, and the middle of its own startup and shutdown passes. The logger is
- * caller-supplied, so a method that throws - or returns a rejecting promise - used to
- * propagate into whichever lifecycle operation happened to be logging: a throw in the
- * stop loop rejected the shutdown pass, leaving the components it had not reached
- * running and every `lifecycle-manager:shutdown-completed` listener waiting on a pass
- * that was already over. The guard keeps a logger failure off that path entirely, rather
- * than relying on the pass reporting its own death.
+ * caller-supplied, and a method that throws - or returns a rejecting promise - would
+ * otherwise propagate into whichever lifecycle operation happened to be logging: a throw
+ * in the stop loop would reject the shutdown pass, leaving the components it had not
+ * reached running and every `lifecycle-manager:shutdown-completed` listener waiting on a
+ * pass that was already over. The guard keeps a logger failure off that path entirely,
+ * rather than relying on the pass reporting its own death.
  *
  * Guarding at the logger rather than at each call site is what makes that impossible:
  * there is one wrapper, applied once in the constructor, instead of ~140 call sites that
@@ -91,11 +93,19 @@ const GUARDED_LOG_METHODS: Record<
  * user code must stay the object the caller passed in.
  *
  * @param logger The service logger to guard. Never modified.
+ * @param options.entityCacheReserve How many `entity()` children to keep on top of
+ * `MAX_CACHED_ENTITY_CHILDREN`, read each time one is added. The manager passes its
+ * registry size: a bulk pass logs every registered component in registry order, and a
+ * cache smaller than the registry would evict each child just before that pass reached
+ * its name again.
  * @returns A guarded stand-in with the same type and the same log output.
  */
 export function createGuardedLoggerService(
   logger: LoggerService,
+  options: { entityCacheReserve?: () => number } = {},
 ): LoggerService {
+  const { entityCacheReserve } = options;
+
   // Each wrapper is built once per method it wraps and then reused, rather than on
   // every read: the manager's logger is its own private service logger, so in practice
   // every method stays the same for the manager's lifetime and each is wrapped once.
@@ -110,9 +120,9 @@ export function createGuardedLoggerService(
   // Guarded children of `entity()`, by entity name, for the `entity` method that built
   // them. `LoggerService.entity()` builds a fresh logger from the same parts plus the
   // name on every call, so one child per name answers every later call the same way.
-  // Capped at `MAX_CACHED_ENTITY_CHILDREN`. Dropped whenever the resolved `entity`
-  // changes, and a call that failed - and fell back to this parent - is never cached, so
-  // each failure is still reported when it happens.
+  // Capped at `MAX_CACHED_ENTITY_CHILDREN` plus the `entityCacheReserve`. Dropped
+  // whenever the resolved `entity` changes, and a call that failed - and fell back to
+  // this parent - is never cached, so each failure is still reported when it happens.
   //
   // A cached child is shared, so an assignment through it (`entity('db').warn = fn`)
   // outlives the call that made it, and it keeps the parts the service held when it was
@@ -302,12 +312,19 @@ export function createGuardedLoggerService(
               // until eviction or method replacement, so only successful children
               // are memoized and each failed invocation retains its own report.
               if (child !== guarded) {
-                if (children.size >= MAX_CACHED_ENTITY_CHILDREN) {
+                const capacity =
+                  MAX_CACHED_ENTITY_CHILDREN + (entityCacheReserve?.() ?? 0);
+
+                // A loop rather than one eviction: the reserve shrinks as components
+                // unregister, and the next addition trims the cache back to it.
+                while (children.size >= capacity) {
                   const oldest = children.keys().next();
 
-                  if (!oldest.done) {
-                    children.delete(oldest.value);
+                  if (oldest.done) {
+                    break;
                   }
+
+                  children.delete(oldest.value);
                 }
 
                 children.set(entityName, child);

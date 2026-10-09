@@ -1,4 +1,4 @@
-import { observeRejection } from './internal/intrinsics';
+import { observeRejection } from './internal/promise-reactions';
 import { errorToString } from './error-to-string';
 import { toError } from './to-error';
 import { DOUBLE_EOL } from './constants';

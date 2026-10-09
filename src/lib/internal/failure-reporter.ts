@@ -2,7 +2,7 @@ import { describeError, toError } from '../to-error';
 import { adoptResult, UnreadableReturn } from './adopt-promise';
 import { isConsoleReportActive, reportToConsole } from './report-to-console';
 import { reportToHost } from './report-to-host';
-import { observeRejection } from './intrinsics';
+import { observeRejection } from './promise-reactions';
 import { resolveName } from './render-name';
 
 /**

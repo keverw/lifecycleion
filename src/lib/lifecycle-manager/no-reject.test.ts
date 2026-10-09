@@ -863,9 +863,9 @@ describe('LifecycleManager - public methods never reject', () => {
 
     (
       coreOf(manager).signals as unknown as {
-        broadcastReload: () => Promise<never>;
+        broadcastSignal: () => Promise<never>;
       }
-    ).broadcastReload = (): Promise<never> =>
+    ).broadcastSignal = (): Promise<never> =>
       Promise.reject(new Error('broadcast exploded'));
 
     const { release } = claimReports();

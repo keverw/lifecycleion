@@ -83,6 +83,23 @@ const HEALTH_REFUSAL_MESSAGES: Record<HealthRefusalCode, string> = {
   stopped: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_RUNNING,
 };
 
+/** The result for a health check whose component is not registered under its name. */
+function notFoundHealthResult(
+  name: string,
+  checkedAt: number,
+): HealthCheckResult {
+  return {
+    name,
+    healthy: false,
+    message: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND,
+    checkedAt,
+    durationMS: 0,
+    error: null,
+    timedOut: false,
+    code: 'not_found',
+  };
+}
+
 export async function checkComponentHealthOperation(
   context: ComponentAccessContext,
   name: string,
@@ -93,16 +110,7 @@ export async function checkComponentHealthOperation(
   const component = context.getComponent(name);
 
   if (!component) {
-    return {
-      name,
-      healthy: false,
-      message: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND,
-      checkedAt: startTime,
-      durationMS: 0,
-      error: null,
-      timedOut: false,
-      code: 'not_found',
-    };
+    return notFoundHealthResult(name, startTime);
   }
 
   const refused = (code: HealthRefusalCode): HealthCheckResult => ({
@@ -371,7 +379,7 @@ export async function checkAllHealthOperation(
 
   // Running members, selected as `broadcastMessage()` selects its recipients: a late
   // start's cleanup marks its component running only to stop it, so it is not one the
-  // report is about. Checked, it answered `stopped` and flipped the aggregate to
+  // report is about. Checked, it would answer `stopped` and flip the aggregate to
   // `degraded`. A running member that is mid-stop is still selected and answers
   // `stopped`, as a broadcast reports it.
   const runningComponents = context.components.filter((c) => {
@@ -385,16 +393,7 @@ export async function checkAllHealthOperation(
     // Earlier hook getters can replace a later selected instance before this dispatch.
     // Keep the report about its original selection, never the replacement by name.
     if (context.getComponent(name) !== component) {
-      return Promise.resolve<HealthCheckResult>({
-        name,
-        healthy: false,
-        message: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND,
-        checkedAt: Date.now(),
-        durationMS: 0,
-        error: null,
-        timedOut: false,
-        code: 'not_found',
-      });
+      return Promise.resolve(notFoundHealthResult(name, Date.now()));
     }
     return context.checkComponentHealth(name);
   });

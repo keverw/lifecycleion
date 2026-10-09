@@ -4,7 +4,7 @@ import {
   namedArrayKeys,
 } from '../../internal/container-entries';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
-import { observeRejection } from '../../internal/intrinsics';
+import { observeRejection } from '../../internal/promise-reactions';
 import { describeError } from '../../to-error';
 import { isConsoleReportActive } from '../../internal/report-to-console';
 import { isPlainContainer } from '../../internal/is-plain-container';

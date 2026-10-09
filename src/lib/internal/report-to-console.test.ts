@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { join } from 'node:path';
 import {
   breakConsoleError,
   muteConsoleError,
@@ -77,6 +78,59 @@ describe('reportToConsole', () => {
         Object.defineProperty(globalThis, key, descriptor);
       }
     }
+  });
+
+  test('a global that refuses the shared slot is tried once, and re-entry is still bounded', async () => {
+    // `Object.preventExtensions(globalThis)` cannot be undone, so it runs in a process of
+    // its own. Every check after the refused install reads this copy's own state.
+    const script = `
+      Object.preventExtensions(globalThis);
+      const { isConsoleReportActive, reportToConsole } = await import(
+        ${JSON.stringify(join(import.meta.dir, 'report-to-console.ts'))}
+      );
+      let defines = 0;
+      const defineProperty = Reflect.defineProperty;
+      const key = Symbol.for('lifecycleion.reportToConsole.v1');
+      Reflect.defineProperty = (target, property, descriptor) => {
+        if (target === globalThis && property === key) {
+          defines++;
+        }
+        return defineProperty(target, property, descriptor);
+      };
+      for (let index = 0; index < 5; index++) {
+        isConsoleReportActive();
+      }
+      let calls = 0;
+      let wasActive = false;
+      console.error = () => {
+        calls++;
+        wasActive = isConsoleReportActive();
+        reportToConsole('nested failure');
+      };
+      reportToConsole('first failure');
+      reportToConsole('later failure');
+      process.stdout.write(
+        JSON.stringify({ defines, calls, wasActive, isActive: isConsoleReportActive() }),
+      );
+    `;
+    const child = Bun.spawn([process.execPath, '-e', script], {
+      stdout: 'pipe',
+      stderr: 'pipe',
+    });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+
+    expect(stderr).toBe('');
+    expect(exitCode).toBe(0);
+    expect(JSON.parse(stdout)).toEqual({
+      defines: 1,
+      calls: 2,
+      wasActive: true,
+      isActive: false,
+    });
   });
 
   test('bounds a console shim that reports another failure and releases the guard', () => {

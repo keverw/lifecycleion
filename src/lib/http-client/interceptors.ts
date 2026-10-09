@@ -1,5 +1,9 @@
 import { matchesFilter } from './utils';
 import { adoptPromise } from '../internal/adopt-promise';
+import {
+  CallbackRegistry,
+  type RegisteredCallback,
+} from './internal/callback-registry';
 import type {
   RequestInterceptorFilter,
   RequestInterceptor,
@@ -9,44 +13,16 @@ import type {
   InterceptorPhase,
 } from './types';
 
-interface RegisteredInterceptor<T> {
-  fn: T;
-  filter?: RequestInterceptorFilter;
-}
-
-type RemoveFn = () => void;
 const DEFAULT_INTERCEPTOR_PHASES: RequestInterceptorFilter['phases'] = [
   'initial',
 ];
 
-export class RequestInterceptorManager {
-  private interceptors: RegisteredInterceptor<RequestInterceptor>[] = [];
-
-  public add(
-    fn: RequestInterceptor,
-    filter?: RequestInterceptorFilter,
-  ): RemoveFn {
-    const entry: RegisteredInterceptor<RequestInterceptor> = {
-      fn,
-      filter: {
-        ...filter,
-        phases: filter?.phases ?? DEFAULT_INTERCEPTOR_PHASES,
-      },
-    };
-    this.interceptors.push(entry);
-
-    return () => {
-      const idx = this.interceptors.indexOf(entry);
-
-      if (idx !== -1) {
-        this.interceptors.splice(idx, 1);
-      }
-    };
-  }
-
-  /** Whether nothing is registered, so a chain taken now would hand the request back. */
-  public get isEmpty(): boolean {
-    return this.interceptors.length === 0;
+export class RequestInterceptorManager extends CallbackRegistry<
+  RequestInterceptor,
+  RequestInterceptorFilter
+> {
+  constructor() {
+    super(DEFAULT_INTERCEPTOR_PHASES);
   }
 
   /**
@@ -56,7 +32,7 @@ export class RequestInterceptorManager {
    * other's chain is awaiting applies to the next chain run, not this one.
    */
   public snapshot(): InterceptorChain {
-    const interceptors = this.interceptors.slice();
+    const interceptors = this.copyRegistrations();
 
     return (request, phase, context) =>
       runInterceptors(interceptors, request, phase, context);
@@ -70,7 +46,9 @@ export type InterceptorChain = (
 ) => Promise<InterceptedRequest | InterceptorCancel>;
 
 async function runInterceptors(
-  interceptors: readonly RegisteredInterceptor<RequestInterceptor>[],
+  interceptors: ReadonlyArray<
+    RegisteredCallback<RequestInterceptor, RequestInterceptorFilter>
+  >,
   request: InterceptedRequest,
   phase: InterceptorPhase,
   context: RequestInterceptorContext,

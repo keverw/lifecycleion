@@ -1,5 +1,5 @@
 import { ulid } from 'ulid';
-import { observeRejection } from '../../internal/intrinsics';
+import { observeRejection } from '../../internal/promise-reactions';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { sleep } from '../../sleep';
 import { describeError, toError } from '../../to-error';

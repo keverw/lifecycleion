@@ -1,4 +1,4 @@
-import { observeRejection } from '../../internal/intrinsics';
+import { observeRejection } from '../../internal/promise-reactions';
 import type { ShutdownSignal } from '../../process-signal-manager';
 import {
   reportCallbackError,

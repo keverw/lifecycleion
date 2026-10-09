@@ -11,7 +11,6 @@ import { renderJSONLine } from './internal/render-json-line';
 import { renderTextEntry } from './internal/render-text-line';
 import {
   DEFAULT_CLOSE_TIMEOUT_MS,
-  MIN_CLOSE_FLUSH_MS,
   resolveMaxQueueSize,
   resolveMaxRetries,
 } from './internal/queue-policy';
@@ -20,19 +19,14 @@ import {
   resolveTimeoutMS,
 } from '../../internal/timer-limits';
 import {
-  createDroppedEntryCounts,
   reportSinkError,
   type DroppedEntryCounts,
-  type DroppedEntryKind,
   type SinkErrorHandler,
   type SinkFailureDisposition,
   type SinkFailureKind,
 } from './internal/sink-failure';
-import {
-  abandonQueuedEntries,
-  evictQueuedEntries,
-  ReportOnceLatch,
-} from './internal/queue-accounting';
+import { describeEntryCount, LossLedger } from './internal/loss-ledger';
+import { endStreamWithin } from './internal/end-stream';
 import { deferClose } from './internal/deferred-close';
 import { FormatReportScheduler } from './internal/format-report-scheduler';
 
@@ -284,8 +278,16 @@ export class FileSink implements LogSink {
   private currentLogSize = 0;
   private writeQueue: QueuedEntry[] = [];
   private maxQueueSize?: number;
-  private droppedEntries = 0;
-  private readonly droppedByKind = createDroppedEntryCounts();
+  /**
+   * Lines this sink did not deliver, by reason, and the once-per-episode reports for the
+   * refused, evicted and abandoned ones. See {@link LossLedger}.
+   */
+  private readonly losses = new LossLedger((kind, message, entry) => {
+    this.handleError(kind, new FileSinkError(message), {
+      disposition: 'lost',
+      entry,
+    });
+  });
   /**
    * Where the last {@link flush} stopped counting, so the next one starts there.
    *
@@ -297,8 +299,6 @@ export class FileSink implements LogSink {
   private flushBaselineDropped = 0;
   /** The flush in flight, if any; see {@link flush}. Never rejects. */
   private pendingFlush: Promise<void> = Promise.resolve(undefined);
-  /** Whether the current overflow episode's `'queue_full'` report has gone out. */
-  private readonly queueFullReport = new ReportOnceLatch();
   private isInitialized = false;
   private hasFinishedInitialization = false;
   private initPromise?: Promise<void>;
@@ -308,12 +308,6 @@ export class FileSink implements LogSink {
   private rotationRetryDelayMS = 0;
   private nextRotationAttemptAt = 0;
   private totalEntriesWritten = 0;
-  /**
-   * Whether the first entry refused because the sink is closing has been reported.
-   *
-   * See {@link write}. Every such entry is counted; only the first is reported.
-   */
-  private readonly closeRefusalReport = new ReportOnceLatch();
 
   /** The entry {@link processQueue} is waiting on `writeEntry` for, if any. */
   private inFlightEntry?: QueuedEntry;
@@ -426,27 +420,13 @@ export class FileSink implements LogSink {
     }
 
     if (this.closing || this.closed) {
-      // After the level filter, never before it: an entry below `minLevel` was never
-      // going to be written, so it is not a line this sink failed to deliver and must not
-      // land in `droppedEntries` - or fire a `'close'` report for a `debug` line.
-      // Counted and said, not discarded quietly - the same answer `NamedPipeSink` gives.
-      // `close()` waits up to `closeTimeoutMS`, and every line logged in that window left
-      // through this early return with `droppedEntries` unmoved, `onError` silent and
-      // `getHealth()` reporting a clean shutdown. `abandonQueueOnClose` counts what was
-      // already queued; these are the ones refused at the door.
-      this.countDropped('close');
-
-      // Once, for the reason the abandoned queue reports once: an application still
-      // logging through a thirty-second close would otherwise get a callback per line.
-      if (this.closeRefusalReport.claim(entry)) {
-        this.handleError(
-          'close',
-          new FileSinkError(
-            `Entry logged after close() began; it was not written, and further ones are counted in droppedEntries without being reported`,
-          ),
-          { disposition: 'lost', entry },
-        );
-      }
+      // Counted and said, not discarded quietly: `close()` waits up to `closeTimeoutMS`,
+      // and a line logged in that window is one this sink did not deliver.
+      this.losses.refuseAfterClose(
+        entry,
+        () =>
+          `Entry logged after close() began; it was not written, and further ones are counted in droppedEntries without being reported`,
+      );
 
       return;
     }
@@ -517,8 +497,8 @@ export class FileSink implements LogSink {
       lastError: this.lastError,
       consecutiveFailures: this.consecutiveFailures,
       isInitialized: this.isInitialized,
-      droppedEntries: this.droppedEntries,
-      droppedByKind: { ...this.droppedByKind },
+      droppedEntries: this.losses.droppedEntries,
+      droppedByKind: this.losses.droppedByKind(),
     };
   }
 
@@ -644,24 +624,14 @@ export class FileSink implements LogSink {
     this.abandonQueueOnClose();
     this.reportInFlightWriteOnClose(didAbandonInFlightWrite);
 
-    // Close stream, on what is left of the *whole* close's budget. `endStream()` waits on
-    // `stream.end(cb)`, which flushes before it calls back - so with `logDir` on a hung
-    // network mount, or a path that resolves to a FIFO or device with no reader, that
-    // callback never fired and `await sink.close()` never resolved: a shutdown hang from
-    // the one method that documents a bound. `closeTimeoutMS` covered the init wait and
-    // the drain loop above and stopped short of the flush that follows them.
-    //
-    // Floored, for the reason `NamedPipeSink.close()` floors its own: the drain loop exits
-    // on the same deadline, so a stalled destination arrives here with nothing left, and a
-    // zero-millisecond timer registered in the same tick as `end()` always beats a
-    // `'finish'` that cannot fire synchronously - which would make the final flush
-    // unreachable for a stream that would have flushed at once.
-    const remainingCloseMS = Math.max(
-      MIN_CLOSE_FLUSH_MS,
+    // Close stream, on what is left of the *whole* close's budget, so the init wait, the
+    // drain loop above and the final flush share one deadline. Bounded and floored as
+    // `endStreamWithin` describes, and held open by its timer: the caller is awaiting this
+    // close, and the report below has to reach it before the process exits.
+    const bytesLeft = await this.endCurrentStream(
       this.closeTimeoutMS - (Date.now() - startTime),
+      false,
     );
-
-    const bytesLeft = await this.endStreamWithin(remainingCloseMS);
 
     // What the flush timeout gave up on, said before this resolves - the same report at
     // the same moment as `NamedPipeSink.close()`. This sink writes one line at a time and
@@ -670,6 +640,10 @@ export class FileSink implements LogSink {
     // the backstop for the case the model says cannot happen: bytes the stream still
     // held at the timeout that no report has named. Skipped when the in-flight report
     // fired, since it would describe the same bytes twice.
+    //
+    // `'no_entry'` and not counted, unlike `NamedPipeSink`'s `'lost'`: those bytes may
+    // still reach the file, since destroying the stream does not cancel a write already
+    // handed to the filesystem - the same unknown the in-flight report describes.
     if (bytesLeft > 0 && !didAbandonInFlightWrite) {
       this.handleError(
         'close',
@@ -711,82 +685,40 @@ export class FileSink implements LogSink {
   }
 
   /**
-   * End the current stream and wait for it to flush, giving up after `timeoutMS`.
+   * End the current stream, bounded by `timeoutMS`, and let go of it.
    *
-   * The bound is the whole point, and it is needed wherever the sink waits on a flush -
-   * not only at `close()`. `end(cb)` flushes before it calls back, so on a hung network
-   * mount or a path that resolves to a FIFO with no reader that callback never fires: the
-   * first size-triggered rotation then suspended `writeEntry` forever with `isProcessing`
-   * still set, so the queue never drained again, later lines were evicted at
-   * `maxQueueSize`, and `flush()` and `close()` could only time out. A rotation that gives
-   * up on the flush loses what was buffered in that one stream; a rotation that never
-   * returns loses the sink.
-   */
-  private async endStreamWithin(timeoutMS: number): Promise<number> {
-    const stream = this.logFileStream;
-
-    // Rotations run outside close too: a stalled mount must not keep the process
-    // alive just for this deadline. Retain the flush floor, while sharing timer
-    // cleanup with the other bounded sink waits.
-    await raceDeadline(
-      this.endStream(),
-      Math.max(MIN_CLOSE_FLUSH_MS, timeoutMS),
-      () => undefined,
-      { shouldUnref: true },
-    );
-
-    // Whatever `end()` did not manage in that window is not going to happen: the descriptor
-    // is released rather than held for the life of the process. Cleared only if it is still
-    // the stream this found, matching `endStream()`'s own check. How much it still held is
-    // answered to the caller, so `close()` can say so.
-    let bytesLeft = 0;
-
-    if (stream && !stream.destroyed) {
-      bytesLeft = stream.writableLength;
-
-      try {
-        stream.destroy();
-      } catch {
-        // Best effort; the stream is going away either way.
-      }
-    }
-
-    if (this.logFileStream === stream) {
-      this.logFileStream = undefined;
-      this.isInitialized = false;
-    }
-
-    return bytesLeft;
-  }
-
-  /**
-   * End the current stream and wait for it to flush.
+   * The one place this sink ends a stream, because every caller has to: `end()` is what
+   * flushes what is buffered, and a stream replaced without it keeps its descriptor and
+   * loses its buffer. The bound is needed wherever the sink waits on a flush, not only at
+   * `close()`: an unbounded wait on a hung mount suspended a size-triggered rotation's
+   * `writeEntry` forever with `isProcessing` still set, so the queue never drained again.
+   * See {@link endStreamWithin}.
    *
-   * The one place that does this, because every caller has to: `end()` is what flushes
-   * what is buffered, and a stream replaced without it keeps its descriptor and loses its
-   * buffer. `close()` and both rotation paths reach it through `endStreamWithin`, which is
-   * what puts a bound on the wait.
+   * `isBackground` for a rotation, whose deadline must not keep the process alive on a
+   * stalled mount; `close()` passes `false`. Answers how many bytes the stream still held
+   * when the wait gave up, so the caller can say so.
    */
-  private async endStream(): Promise<void> {
+  private async endCurrentStream(
+    timeoutMS: number,
+    isBackground: boolean,
+  ): Promise<number> {
     const stream = this.logFileStream;
+    const bytesLeft =
+      stream === undefined
+        ? 0
+        : await endStreamWithin(stream, timeoutMS, {
+            shouldUnref: isBackground,
+          });
 
-    if (!stream) {
-      return;
-    }
-
-    await new Promise<void>((resolve) => {
-      stream.end(() => {
-        resolve();
-      });
-    });
-
-    // Cleared only if it is still the one this ended: a rotation that ran while `end()`
+    // Cleared only if it is still the stream this found: a rotation that ran while `end()`
     // was flushing has already installed its replacement, and clearing unconditionally
     // would drop a live stream on the floor.
     if (this.logFileStream === stream) {
       this.logFileStream = undefined;
       this.isInitialized = false;
     }
+
+    return bytesLeft;
   }
 
   /**
@@ -828,30 +760,14 @@ export class FileSink implements LogSink {
    * Give up on whatever is still queued when `close()` stops waiting, and say so.
    *
    * `close()` is bounded by `closeTimeoutMS`, so a slow or broken destination leaves
-   * entries behind - and once `closed` is set nothing will ever process them. Those
-   * entries went nowhere, which is the same thing that happens at the queue cap, so they
-   * are counted the same way: `droppedEntries` means "lines this sink did not deliver",
-   * whatever the reason. Reported once with `disposition: 'lost'` rather than once per
-   * entry, for the same reason the cap reports once - a shutdown that abandons a full
-   * queue would otherwise fire the callback ten thousand times.
+   * entries behind - and once `closed` is set nothing will ever process them. Counted in
+   * `droppedEntries` and reported once as `'lost'`; see {@link LossLedger.abandon}.
    */
   private abandonQueueOnClose(): void {
-    const abandoned = abandonQueuedEntries(this.writeQueue);
-
-    if (abandoned.count === 0) {
-      return;
-    }
-
-    this.countDropped('close', abandoned.count);
-
-    this.handleError(
-      'close',
-      new FileSinkError(
-        `Closed with ${String(abandoned.count)} entr${abandoned.count === 1 ? 'y' : 'ies'} still queued (closeTimeoutMS=${String(this.closeTimeoutMS)}); they were not written`,
-      ),
-      // The oldest abandoned entry, as a sample. Every entry in the queue was lost, so
-      // unlike the cap's report there is no surviving line to confuse this with.
-      { disposition: 'lost', entry: abandoned.entry },
+    this.losses.abandon(
+      this.writeQueue,
+      (count) =>
+        `Closed with ${describeEntryCount(count)} still queued (closeTimeoutMS=${String(this.closeTimeoutMS)}); they were not written`,
     );
   }
 
@@ -1058,7 +974,7 @@ export class FileSink implements LogSink {
             // `{ isHealthy: true, droppedEntries: 0 }` - against that field's own
             // documented meaning, "lines this sink did not deliver". `flush()` reads the
             // same counter, so the two can no longer disagree about what was lost.
-            this.countDropped(
+            this.losses.count(
               kind === 'format' || kind === 'close' || kind === 'setup'
                 ? kind
                 : this.closed
@@ -1071,13 +987,10 @@ export class FileSink implements LogSink {
     } finally {
       this.inFlightEntry = undefined;
 
-      // A drained queue closes the reported episode. `queueFullReport` gates the report so
-      // an overflowing queue does not fire a callback per dropped line, but nothing else
-      // cleared it: a sink that overflowed during one brief outage, recovered, and
-      // overflowed again hours later stayed silent the second time. Reset only on an
-      // empty queue, so a pass that stopped short of draining does not re-arm the flood.
+      // A drained queue closes the reported overflow episode, so a sink that overflows
+      // again hours later says so again.
       if (this.writeQueue.length === 0) {
-        this.queueFullReport.reset();
+        this.losses.endOverflowEpisode();
       }
 
       this.isProcessing = false;
@@ -1128,7 +1041,7 @@ export class FileSink implements LogSink {
         return this.settleFlush({
           success: false,
           entriesWritten: this.totalEntriesWritten - startWritten,
-          entriesFailed: this.droppedEntries - startFailed,
+          entriesFailed: this.losses.droppedEntries - startFailed,
           timedOut: true,
         });
       }
@@ -1139,7 +1052,7 @@ export class FileSink implements LogSink {
       if (Date.now() - startTime > timeoutMS) {
         // Timeout reached
         const entriesWritten = this.totalEntriesWritten - startWritten;
-        const entriesFailed = this.droppedEntries - startFailed;
+        const entriesFailed = this.losses.droppedEntries - startFailed;
 
         return this.settleFlush({
           success: false,
@@ -1153,7 +1066,7 @@ export class FileSink implements LogSink {
     }
 
     const entriesWritten = this.totalEntriesWritten - startWritten;
-    const entriesFailed = this.droppedEntries - startFailed;
+    const entriesFailed = this.losses.droppedEntries - startFailed;
 
     return this.settleFlush({
       success: entriesFailed === 0,
@@ -1172,52 +1085,21 @@ export class FileSink implements LogSink {
    */
   private settleFlush(result: FlushResult): FlushResult {
     this.flushBaselineWritten = this.totalEntriesWritten;
-    this.flushBaselineDropped = this.droppedEntries;
+    this.flushBaselineDropped = this.losses.droppedEntries;
 
     return result;
   }
 
   /**
-   * Discard the oldest entries once the queue is over `maxQueueSize`.
-   *
-   * A loop rather than a single shift: a re-queued retry can push the length past the cap
-   * by more than one, and a cap that only ever removes one entry per call is not a cap.
+   * Discard the oldest entries once the queue is over `maxQueueSize`, and report the first
+   * eviction of the episode. See {@link LossLedger.evict}.
    */
   private enforceQueueLimit(): void {
-    const limit = this.maxQueueSize;
-
-    if (limit === undefined) {
-      return;
-    }
-
-    const dropped = evictQueuedEntries(this.writeQueue, limit);
-    this.countDropped('queue_full', dropped.count);
-
-    // Gated on an eviction this call made, not on the cumulative count, for the reason
-    // `NamedPipeSink.enforceQueueLimit` is: `droppedEntries` now also counts entries
-    // `abandonQueueOnClose` gave up on, and those are not an overflow. A `close()` that
-    // times out with a write still in flight left the counter non-zero, and the failing
-    // write behind it re-queued its entry - so a queue holding one line under a cap of
-    // 10,000 reported a `'queue_full'` and latched `queueFullReport`, which suppresses
-    // every report until the queue next drains.
-    // A diagnostic's report goes only to the console, so it has a latch of its own:
-    // spending the owner's on it would silence the application entries dropped after it.
-    if (dropped.count === 0 || !this.queueFullReport.claim(dropped.entry)) {
-      return;
-    }
-
-    // Reported once, not once per drop: an overflowing queue drops continuously, and a
-    // callback fired per entry would be its own flood on a path already in trouble. The
-    // running total stays visible through `getHealth()`.
-    this.handleError(
-      'queue_full',
-      new FileSinkError(
+    this.losses.evict(
+      this.writeQueue,
+      this.maxQueueSize,
+      (limit) =>
         `Log queue is full (maxQueueSize=${limit}); dropping the oldest entries`,
-      ),
-      // A dropped entry, never a surviving one: a handler that reads `'lost'` as "this
-      // line is gone" and writes it elsewhere would otherwise duplicate an entry still
-      // queued for the file.
-      { disposition: 'lost', entry: dropped.entry },
     );
   }
 
@@ -1465,7 +1347,7 @@ export class FileSink implements LogSink {
     // `new FileSink(...)`, one `write()`, `await close()`. Refusing during the drain phase
     // meant that sink created no file at all and reported the entry lost after exhausting
     // its retries, where the same sequence wrote it before. The descriptor a drain-phase
-    // open creates is still the one `close()` ends afterwards, since `endStreamWithin`
+    // open creates is still the one `close()` ends afterwards, since `endCurrentStream`
     // reads whatever stream is current when it runs.
     if (this.closed) {
       return;
@@ -1698,7 +1580,7 @@ export class FileSink implements LogSink {
     // Date changed - setup new file
     if (this.currentLogFile !== expectedFile) {
       // Guarded exactly as `rotateFile()` is, and for both of its reasons. This branch
-      // awaits `endStreamWithin(this.closeTimeoutMS)` - a *fresh* full-length wait, begun
+      // awaits `endCurrentStream(this.closeTimeoutMS)` - a *fresh* full-length wait, begun
       // from inside a close that is already keeping its own budget, so a UTC midnight
       // crossed during a shutdown on a stalled mount made a documented thirty-second bound
       // a sixty-second one. And it ends the stream `close()` is draining through to open the
@@ -1716,10 +1598,10 @@ export class FileSink implements LogSink {
       // the life of the process, and whatever sat in its buffer was never flushed - not by
       // `close()`, which only ends the stream that is current by then.
       //
-      // Bounded, like every other flush this sink waits on: see `endStreamWithin`. What
+      // Bounded, like every other flush this sink waits on: see `endCurrentStream`. What
       // the bound gave up on is reported rather than dropped: see
       // `reportRotationFlushLoss`.
-      const bytesLeft = await this.endStreamWithin(this.closeTimeoutMS);
+      const bytesLeft = await this.endCurrentStream(this.closeTimeoutMS, true);
 
       this.reportRotationFlushLoss(
         bytesLeft,
@@ -1748,7 +1630,7 @@ export class FileSink implements LogSink {
     }
 
     // Guarded like `setupLogFile`, and for the failure that has no other guard. A rotation
-    // that starts as `close()` runs calls `endStreamWithin(this.closeTimeoutMS)` of its
+    // that starts as `close()` runs calls `endCurrentStream(this.closeTimeoutMS)` of its
     // own, which begins a fresh full-length wait *outside* the budget the close is keeping:
     // on a stalled mount the close times out and reports the sink shut down, and this then
     // resumes and renames the live log to an archive while the `setupLogFile` that would
@@ -1766,9 +1648,9 @@ export class FileSink implements LogSink {
 
     const currentDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
 
-    // Close current stream, bounded: see `endStreamWithin`. Read before the rename below
+    // Close current stream, bounded: see `endCurrentStream`. Read before the rename below
     // moves the file, so the report names the file the bytes were written for.
-    const bytesLeft = await this.endStreamWithin(this.closeTimeoutMS);
+    const bytesLeft = await this.endCurrentStream(this.closeTimeoutMS, true);
 
     this.reportRotationFlushLoss(bytesLeft, this.currentLogFile);
 
@@ -1783,7 +1665,7 @@ export class FileSink implements LogSink {
     const rotatedFile = await this.reserveRotatedFileName(currentDate);
 
     // Asked again, for the failure the check at the top cannot cover on its own. Both
-    // awaits above are long: `endStreamWithin` waits out `closeTimeoutMS` on a stalled
+    // awaits above are long: `endCurrentStream` waits out `closeTimeoutMS` on a stalled
     // mount, and `reserveRotatedFileName` probes the disk. A `close()` racing this one
     // resumes in that window, times out, and reports the sink shut down - and this then
     // renamed the live log to an archive that `setupLogFile` would never replace, because
@@ -1909,7 +1791,7 @@ export class FileSink implements LogSink {
     );
     const line = () => this.describeWriteFailure(failure);
 
-    this.countDropped('format');
+    this.losses.count('format');
 
     if (
       this.formatReports.isFused ||
@@ -2040,14 +1922,5 @@ export class FileSink implements LogSink {
   /** The console line for a failed write, the same one {@link processQueue} reports. */
   private describeWriteFailure(error: Error): string {
     return `FileSink error writing to ${this.currentLogFile ?? this.logDir}: ${describeError(error)}`;
-  }
-
-  /**
-   * One more line this sink did not deliver, and why. The total and the breakdown move
-   * together so they cannot disagree.
-   */
-  private countDropped(kind: DroppedEntryKind, count = 1): void {
-    this.droppedEntries += count;
-    this.droppedByKind[kind] += count;
   }
 }

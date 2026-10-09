@@ -13,7 +13,11 @@ import { RequestTracker } from './request-tracker';
 import type { RequestInfo } from './request-tracker';
 import { HTTPRequestBuilder } from './http-request-builder';
 import { RequestInterceptorManager } from './interceptors';
-import { ResponseObserverManager, ErrorObserverManager } from './observers';
+import {
+  ResponseObserverManager,
+  ErrorObserverManager,
+  runParentThenOwnObservers,
+} from './observers';
 import {
   assertSupportedAdapterRuntimeAndConfig,
   assertSupportedRequestBody,
@@ -590,11 +594,14 @@ export class BaseHTTPClient {
 
       let finalRequest = interceptedRequest;
       let response: HTTPResponse<T>;
-      let observerRequest = this._bestEffortAttemptRequestFromPending(
-        interceptedRequest,
-        timeout,
-        requestID,
-      );
+      /**
+       * The request the `final` observers below are handed. Every path that reaches them
+       * has been through `_dispatchRequestAttempts`, so it is that call's `sentRequest`,
+       * replaced with a best-effort snapshot of the hop by the redirect branches that end
+       * the request between hops. The paths that end before the redirect loop build
+       * their own snapshot and return, so none is built up front.
+       */
+      let observerRequest: AttemptRequest;
       let errorCode: HTTPClientError['code'] | undefined;
       let adapterCause: Error | undefined;
       let cancelReason: string | undefined;
@@ -667,15 +674,18 @@ export class BaseHTTPClient {
           interceptResult = initialRun.result;
 
           if (!('cancel' in interceptResult)) {
-            // With no interceptor registered there is no caller object to copy; see
-            // `_runInterceptors`.
-            interceptResult = takeInterceptedRequest(
-              interceptResult,
-              initialRun.isIntercepted,
-              (candidate) => {
-                initialRequestCandidate = candidate;
-              },
-            );
+            // Taken for the rest of the phase through `snapshotInterceptedRequest`. A
+            // failure below reports from what the chain returned while the snapshot is
+            // being taken - a getter that throws there is still reported best-effort -
+            // and from the snapshot once it exists. With no interceptor registered there
+            // is no caller object to copy; see `_runInterceptors`.
+            initialRequestCandidate = interceptResult;
+
+            if (initialRun.isIntercepted) {
+              interceptResult = snapshotInterceptedRequest(interceptResult);
+              initialRequestCandidate = interceptResult;
+            }
+
             this._assertRequestIsSupported(interceptResult);
             initialRequestURL = interceptResult.requestURL;
             this._assertInterceptorResolvedURL(initialRequestURL);
@@ -1113,13 +1123,10 @@ export class BaseHTTPClient {
                 // interceptor registered: this request's headers come from the adapter's
                 // record of what it sent, not from `mergeHeaders`, so the snapshot is
                 // still what puts them in the shape the other phases' requests have.
-                redirectIntercept = takeInterceptedRequest(
-                  redirectIntercept,
-                  true,
-                  (candidate) => {
-                    failedRedirectRequest = candidate;
-                  },
-                );
+                failedRedirectRequest = redirectIntercept;
+                redirectIntercept =
+                  snapshotInterceptedRequest(redirectIntercept);
+                failedRedirectRequest = redirectIntercept;
                 this._assertRequestIsSupported(redirectIntercept);
                 redirectInterceptURL = redirectIntercept.requestURL;
 
@@ -1883,13 +1890,13 @@ export class BaseHTTPClient {
           if (!('cancel' in retryIntercept)) {
             // Snapshotted as the initial phase in `_execute` does, and skipped on the
             // same condition; see there.
-            retryIntercept = takeInterceptedRequest(
-              retryIntercept,
-              retryRun.isIntercepted,
-              (candidate) => {
-                failedRetryRequest = candidate;
-              },
-            );
+            failedRetryRequest = retryIntercept;
+
+            if (retryRun.isIntercepted) {
+              retryIntercept = snapshotInterceptedRequest(retryIntercept);
+              failedRetryRequest = retryIntercept;
+            }
+
             this._assertRequestIsSupported(retryIntercept);
             this._assertInterceptorResolvedURL(retryIntercept.requestURL);
           }
@@ -3407,50 +3414,32 @@ export class BaseHTTPClient {
     };
   }
 
-  private async _runResponseObservers(
+  private _runResponseObservers(
     response: HTTPResponse,
     request: AttemptRequest,
     phase: ResponseObserverPhase,
   ): Promise<void> {
-    // Both taken before either runs, as `_runInterceptors` takes them; an empty manager
-    // has nothing to snapshot or run.
-    const parent = this._parentClient?._responseObservers;
-    const parentChain =
-      parent === undefined || parent.isEmpty ? undefined : parent.snapshot();
-    const ownChain = this._responseObservers.isEmpty
-      ? undefined
-      : this._responseObservers.snapshot();
-
-    if (parentChain) {
-      await parentChain(response, request, phase);
-    }
-
-    if (ownChain) {
-      await ownChain(response, request, phase);
-    }
+    return runParentThenOwnObservers(
+      this._parentClient?._responseObservers,
+      this._responseObservers,
+      response,
+      request,
+      phase,
+    );
   }
 
-  private async _runErrorObservers(
+  private _runErrorObservers(
     error: HTTPClientError,
     request: AttemptRequest,
     phase: ErrorObserverPhase,
   ): Promise<void> {
-    // Both taken before either runs, as `_runInterceptors` takes them; an empty manager
-    // has nothing to snapshot or run.
-    const parent = this._parentClient?._errorObservers;
-    const parentChain =
-      parent === undefined || parent.isEmpty ? undefined : parent.snapshot();
-    const ownChain = this._errorObservers.isEmpty
-      ? undefined
-      : this._errorObservers.snapshot();
-
-    if (parentChain) {
-      await parentChain(error, request, phase);
-    }
-
-    if (ownChain) {
-      await ownChain(error, request, phase);
-    }
+    return runParentThenOwnObservers(
+      this._parentClient?._errorObservers,
+      this._errorObservers,
+      error,
+      request,
+      phase,
+    );
   }
 
   /**
@@ -3602,27 +3591,6 @@ function readStringMember(
   const value = readObjectMember(source, key);
 
   return typeof value === 'string' ? value : fallback;
-}
-
-/**
- * Take an interceptor chain's request for the rest of its phase: snapshotted when
- * `shouldSnapshot`, and handed to `setCandidate` both before and after, so the phase's
- * failure path reports from what the interceptor returned while the snapshot is being
- * taken - a getter that throws there is still reported best-effort - and from the
- * snapshot once it exists. See {@link snapshotInterceptedRequest}.
- */
-function takeInterceptedRequest(
-  request: InterceptedRequest,
-  shouldSnapshot: boolean,
-  setCandidate: (candidate: InterceptedRequest) => void,
-): InterceptedRequest {
-  setCandidate(request);
-
-  const owned = shouldSnapshot ? snapshotInterceptedRequest(request) : request;
-
-  setCandidate(owned);
-
-  return owned;
 }
 
 /**

@@ -2,7 +2,7 @@ import type { BaseComponent } from '../base-component';
 import type { ComponentAccessContext } from './component-access-context';
 import { raceDeadline } from '../../internal/race-deadline';
 import { optionalValidatedTimerDelayMS } from '../../internal/timer-limits';
-import { observeRejection } from '../../internal/intrinsics';
+import { observeRejection } from '../../internal/promise-reactions';
 import { adoptPromise } from '../../internal/adopt-promise';
 import { reportCallbackError } from '../../safe-handle-callback';
 import type { ComponentState } from '../types';

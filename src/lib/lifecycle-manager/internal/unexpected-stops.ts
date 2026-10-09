@@ -116,10 +116,13 @@ export class UnexpectedStops {
     // Optionality getters and reconciliation logs run caller code. They can report
     // a stop for a name that this scan already kept, so one scan is not a stable
     // reconciliation boundary. Drain reports for the surviving names before giving
-    // control back to startup. Every repeated scan removes at least one survivor;
-    // the original finite list bounds this work even if a sink repeatedly reports
-    // an already-consumed name. New registrations belong to the batch queue, and
-    // reports for names outside this attempt do not keep this drain alive.
+    // control back to startup. A repeated scan need not remove a survivor - a name up
+    // again is kept - so what bounds the drain is that each repeat needs a fresh
+    // report for a survivor, and the handler accepts one only from the current start
+    // while the component is starting or running, then marks it stopped: every repeat
+    // follows a new start of that component by caller code. New registrations belong
+    // to the batch queue, and reports for names outside this attempt do not keep this
+    // drain alive.
     do {
       const candidates = remainingStartedComponents;
       remainingStartedComponents = [];

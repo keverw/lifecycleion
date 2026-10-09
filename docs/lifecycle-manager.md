@@ -2612,8 +2612,8 @@ The normalized `err` is also captured in `params` for structured sinks that need
 
 The logger is yours, so every line the manager writes runs code it does not own - inside OS signal handlers, timer callbacks, floating promise chains, and the middle of a startup or shutdown pass. The manager wraps its own service logger once, at construction, so this holds for every operation, not just for a particular path:
 
-- **A log method that throws, or that returns a rejecting promise, cannot fail or derail the operation that was logging.** Startup, shutdown, restart, and every per-component operation carry on and return their normal result. Before this, a throw inside the shutdown stop loop rejected the pass, leaving the components it had not reached running and every `lifecycle-manager:shutdown-completed` listener waiting on a pass that was already over. The guard keeps a logger failure off the pass's failure path in the first place, so it is not reported as a failed shutdown either.
-- **Only built-in entity children are cached.** A custom `entity()` factory runs on each call, allowing it to refresh context when a component name is reused.
+- **A log method that throws, or that returns a rejecting promise, cannot fail or derail the operation that was logging.** Startup, shutdown, restart, and every per-component operation carry on and return their normal result: a throw inside the shutdown stop loop does not reject the pass, leave the components it has not reached running, or keep `lifecycle-manager:shutdown-completed` listeners waiting on a pass that is already over. The guard keeps a logger failure off the pass's failure path in the first place, so it is not reported as a failed shutdown either.
+- **Only built-in entity children are cached.** A custom `entity()` factory runs on each call, allowing it to refresh context when a component name is reused. The cache keeps a child for every registered component plus up to 256 other names, least recently used first out, so a pass that logs every component reuses their children however many are registered, while names that come and go - per-job or per-tenant components - stay bounded.
 - **`logger.entity(name)` is covered too.** If `entity()` itself throws, the chain still gets something callable back - the line lands under the service name, without the entity scope.
 - **Failures are reported on the global `'error'` channel**, never back through the logger that just failed. See [safe-handle-callback](./safe-handle-callback.md). The report names the logger method (for example `lifecycle-manager logger.warn`) and carries the original failure on `cause`. Listen with `globalThis.addEventListener('error', handler)` and call `event.preventDefault()` to claim it.
 - **Your logger object is never wrapped or modified.** `rootLogger` stays the exact instance you passed in: `enableLoggerExitHook()`, `logger.exit()`, and the scoped logger every component builds all go through your object unchanged. Only the manager's own internal logging is guarded.
@@ -3272,7 +3272,7 @@ lifecycle.on('lifecycle-manager:shutdown-completed', (data) => {
 - `component:shutdown-warning` - Component selected for a shutdown warning
 - `component:shutdown-warning-completed` - The invoked warning hook completed. Not emitted for a component already reported by `component:shutdown-warning-timeout`: a hook that settles after the warning phase timed out does not also report completion
 - `component:shutdown-warning-failed` - The invoked warning hook threw synchronously or rejected; includes `name` and `error`. Like completion, not emitted for a component already reported by `component:shutdown-warning-timeout`: a hook that fails after the warning phase timed out is only logged
-- `component:shutdown-warning-skipped` - A selected warning hook was not invoked because its registration or state changed; includes `name`, `reason` (`component_not_found`, `component_changed`, or `component_not_available`), and the name's current `state` when one is registered
+- `component:shutdown-warning-skipped` - A selected warning hook was not invoked because its registration or state changed, or a lifecycle phase took it; includes `name`, `reason` (`component_not_found`, `component_changed`, or `component_not_available`), and the name's current `state` when one is registered
 - `component:stopping` - Component stop initiated
 - `component:stopped` - Component is now stopped. Emitted after normal manager-driven stop flows, after late stall resolution, and after `reportUnexpectedStop()` transitions a running component into the stopped state. Its `status` is read through `getComponentStatus()`; if an override of it throws, the throw is reported on the global `'error'` channel and the event is still emitted, without `status`
 - `component:stop-failed` - Component stop failed
@@ -4664,12 +4664,15 @@ manager's own deadline counts as a timeout.
 
 Shutdown warnings target running components, or stalled components included through
 `retryStalled`. After `component:shutdown-warning` announces selection, the manager
-rechecks the target before invoking its hook. A changed registration or state emits
+rechecks the target before invoking its hook. A changed registration or state, or a
+lifecycle phase that took the component meanwhile, emits
 `component:shutdown-warning-skipped` with `{ name, reason, state }`: `reason` is
 `component_not_found` once the component was unregistered, `component_changed` once
 another instance holds its name, or `component_not_available` when it is no longer in
-the state it was selected in. `state` is the name's current state, and the key is
-omitted when nothing is registered under the name.
+the state it was selected in, or still is but a phase owns it - its raw `start()` is
+still pending, or a late start's cleanup keeps it `running` only to stop it. `state` is
+the name's current state, and the key is omitted when nothing is registered under the
+name.
 This does not cancel a warning hook that has already begun.
 
 Each `component:shutdown-warning` is followed by exactly one terminal event for that

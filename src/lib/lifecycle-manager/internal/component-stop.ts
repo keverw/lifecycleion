@@ -1,7 +1,7 @@
 import { ulid } from 'ulid';
 import { isNullish } from '../../internal/is-nullish';
 import { adoptPromise } from '../../internal/adopt-promise';
-import { observeRejection } from '../../internal/intrinsics';
+import { observeRejection } from '../../internal/promise-reactions';
 import { optionalValidatedTimerDelayMS } from '../../internal/timer-limits';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { describeError, toError } from '../../to-error';
@@ -101,16 +101,45 @@ const ABANDONED_FORCE_MESSAGE =
   'Force shutdown failed after graceful stop completed';
 
 /**
+ * What a stop phase's deadline (`ComponentStop.armStopDeadline()`) records on its run -
+ * a `GracefulStopRun` or a `ForceStopRun` - and what it hands the hook's late outcome to.
+ */
+interface StopDeadlineRun<TimeoutError extends Error> {
+  readonly name: string;
+  readonly outcomeObserver: StopPhaseObserver;
+  timeoutError: TimeoutError | undefined;
+  didDeadlineReject: boolean;
+  didRejectForDeadline: boolean;
+  timeoutHandle: NodeJS.Timeout | undefined;
+}
+
+/**
+ * The run's deadline error when `error` is that deadline's timeout: its own rejection,
+ * or the hook's rejection linked to the abort it caused - the timeout the hook was told
+ * of. By identity, not by message: a hook that rejected with the same exported error
+ * class and text is still its own failure.
+ */
+function deadlineErrorFor<TimeoutError extends Error>(
+  run: StopDeadlineRun<TimeoutError>,
+  error: unknown,
+): TimeoutError | undefined {
+  return run.timeoutError !== undefined &&
+    (error === run.timeoutError || run.didRejectForDeadline)
+    ? run.timeoutError
+    : undefined;
+}
+
+/**
  * One graceful phase attempt, from its claim on: what it was prepared with, its stop
  * token, outcome observer and abort controller, and what its race has seen so far.
  * Created once the phase holds its claim and has read `stop`, and handed to every step
  * of `shutdownComponentGraceful()`; its deadline's callbacks read and update it in
  * place. It runs no code of its own.
  */
-class GracefulStopRun {
+class GracefulStopRun implements StopDeadlineRun<ComponentStopTimeoutError> {
   // Only this attempt's deadline is a timeout. A hook may reject with the same
   // exported error class and component name for an unrelated reason.
-  public gracefulTimeoutError: ComponentStopTimeoutError | undefined;
+  public timeoutError: ComponentStopTimeoutError | undefined;
   // Set once that rejection has been delivered to the race - a macrotask after the
   // deadline fired (see `rejectAfterAbort()`), as in the force phase. A stop
   // rejection before then still settles the race as a graceful failure.
@@ -144,7 +173,7 @@ class GracefulStopRun {
  * `shutdownComponentForce()`; its deadline's callbacks read and update it in place. It
  * runs no code of its own.
  */
-class ForceStopRun {
+class ForceStopRun implements StopDeadlineRun<ComponentForceTimeoutError> {
   // Severity follows the recorded outcome, not whether the deadline fired.
   // Once a failed foreground returns, its released claim alone must not make
   // that real failure look abandoned. Pending attempts may already have lost
@@ -152,7 +181,7 @@ class ForceStopRun {
   public forceOutcome: 'pending' | 'failed' | 'abandoned' = 'pending';
   // This attempt's own timeout rejection, so the `catch` can tell it apart from
   // anything `onShutdownForce()` rejects with.
-  public forceTimeoutError: ComponentForceTimeoutError | undefined;
+  public timeoutError: ComponentForceTimeoutError | undefined;
   // Set once that rejection has been delivered to the race - a macrotask after the
   // deadline fired (see `rejectAfterAbort()`). A hook rejection before then still
   // settles the race as the hook's own failure, and is reported as one.
@@ -1038,7 +1067,7 @@ export class ComponentStop {
           // finds it before escalating. The deadline observer `armGracefulDeadline()`
           // installs records it too, a reaction later, and reconciles it.
           onSettled: (didFulfill) => {
-            if (didFulfill && run.gracefulTimeoutError !== undefined) {
+            if (didFulfill && run.timeoutError !== undefined) {
               preparation.lateResolution = stopAttemptToken;
             }
           },
@@ -1066,7 +1095,7 @@ export class ComponentStop {
       // component it stopped.
       if (run.didMarkStopped) {
         reportCallbackError('lifecycle-manager component stop', error);
-        return { success: true, componentName: name };
+        return this.core.stopOutcomes.successfulStopResult(name);
       }
       // Left to the stop net, which answers `operation_crashed`.
       if (run.didStopResolve) {
@@ -1126,72 +1155,41 @@ export class ComponentStop {
     return undefined;
   }
 
-  /**
-   * The graceful deadline, as a promise that only rejects: its timer records the
-   * timeout on the run, aborts `stop()`'s signal, hands the stop's late outcome to the
-   * run's observer, and rejects a macrotask later.
-   */
+  /** The graceful deadline (`armStopDeadline()`), for `stop()`. */
   private armGracefulDeadline(
     run: GracefulStopRun,
     stopPromise: Promise<unknown>,
     delayMS: number,
   ): Promise<never> {
-    const { name, preparation, stopAttemptToken, outcomeObserver, stopAbort } =
-      run;
-    const { timeoutMS } = preparation;
+    const { name, preparation, stopAttemptToken } = run;
 
-    return new Promise<never>((_, reject) => {
-      run.timeoutHandle = setTimeout(() => {
-        run.gracefulTimeoutError = new ComponentStopTimeoutError({
+    return this.armStopDeadline(run, stopPromise, delayMS, {
+      hookAbort: run.stopAbort,
+      hookName: 'stop',
+      createTimeoutError: () =>
+        new ComponentStopTimeoutError({
           componentName: name,
-          timeoutMS,
-        });
-        // Listeners that release `stop()` win the race in
-        // `shutdownComponentGraceful()`: the timeout's rejection waits a macrotask
-        // (see `rejectAfterAbort()`).
-        abortHookSignal(stopAbort, run.gracefulTimeoutError, name, 'stop');
-
-        // Attached ahead of both the observer below and the `catch` in
-        // `shutdownComponentGraceful()`, so each reads the link as decided once: the
-        // error's members are the caller's.
-        const deadlineReason = run.gracefulTimeoutError;
-        observeRejection(stopPromise, (error: unknown) => {
-          run.didRejectForDeadline = isLinkedToAbort(error, deadlineReason);
-        });
-
-        // Detect if stop() eventually resolves after the timeout so the stall
-        // can be cleared automatically without a manual retry. From here on
-        // this observer owns rejection reporting, even if an abort listener makes
-        // stop() reject before the deferred deadline wins the foreground race.
-        outcomeObserver.observe(
-          stopPromise,
-          'Component stop failed after deadline fired',
-          {
-            // Labelled as the result records it: a rejection unrelated to the
-            // abort that beat the deferred deadline is the graceful phase's own
-            // failure (`error`), not one after a timeout.
-            getReport: () => ({
-              message:
-                run.didDeadlineReject || run.didRejectForDeadline
-                  ? 'Component stop failed after deadline fired'
-                  : 'Graceful shutdown threw error: {{error.message}}',
-              level: 'warn',
-            }),
-            onResolved: () => {
-              preparation.lateResolution = stopAttemptToken;
-              this.core.stopOutcomes.handleLateStopResolution(
-                name,
-                stopAttemptToken,
-                'graceful',
-              );
-            },
-          },
+          timeoutMS: preparation.timeoutMS,
+        }),
+      lateFailureMessage: 'Component stop failed after deadline fired',
+      // Labelled as the result records it: a rejection unrelated to the abort that
+      // beat the deferred deadline is the graceful phase's own failure (`error`), not
+      // one after a timeout.
+      getReport: () => ({
+        message:
+          run.didDeadlineReject || run.didRejectForDeadline
+            ? 'Component stop failed after deadline fired'
+            : 'Graceful shutdown threw error: {{error.message}}',
+        level: 'warn',
+      }),
+      onResolved: () => {
+        preparation.lateResolution = stopAttemptToken;
+        this.core.stopOutcomes.handleLateStopResolution(
+          name,
+          stopAttemptToken,
+          'graceful',
         );
-        run.timeoutHandle = this.rejectAfterAbort((timeoutError) => {
-          run.didDeadlineReject = true;
-          reject(timeoutError);
-        }, run.gracefulTimeoutError);
-      }, delayMS);
+      },
     });
   }
 
@@ -1237,11 +1235,7 @@ export class ComponentStop {
     // deadline aborted its signal. Either way answered with the deadline's error - the
     // one the signal was aborted with; the stop's own rejection is the observer's to
     // report.
-    const timeoutError =
-      run.gracefulTimeoutError !== undefined &&
-      (error === run.gracefulTimeoutError || run.didRejectForDeadline)
-        ? run.gracefulTimeoutError
-        : undefined;
+    const timeoutError = deadlineErrorFor(run, error);
     const err = timeoutError ?? toError(error);
 
     // Store error
@@ -1423,7 +1417,7 @@ export class ComponentStop {
       // halt on a component it stopped.
       if (run.didMarkStopped) {
         reportCallbackError('lifecycle-manager component stop', error);
-        return { success: true, componentName: name };
+        return this.core.stopOutcomes.successfulStopResult(name);
       }
       // Left to the stop net, which answers `operation_crashed`.
       if (run.didForceResolve) {
@@ -1434,10 +1428,7 @@ export class ComponentStop {
         // A real force rejection can race graceful completion, but this attempt's
         // deadline is not a hook failure. Once the deadline observer is installed,
         // it alone reports any real late rejection, including a same-turn rejection.
-        if (
-          run.forceTimeoutError === undefined ||
-          error !== run.forceTimeoutError
-        ) {
+        if (run.timeoutError === undefined || error !== run.timeoutError) {
           outcomeObserver.reportForeground(error, ABANDONED_FORCE_MESSAGE);
         }
         return this.core.stopOutcomes.successfulStopResult(name);
@@ -1611,72 +1602,95 @@ export class ComponentStop {
     return this.core.stopOutcomes.stalledStopResult(name, stallInfo);
   }
 
-  /**
-   * The force deadline, as a promise that only rejects: its timer records the timeout
-   * on the run, aborts `onShutdownForce()`'s signal, hands the hook's late outcome to the
-   * run's observer, and rejects a macrotask later.
-   */
+  /** The force deadline (`armStopDeadline()`), for `onShutdownForce()`. */
   private armForceDeadline(
     run: ForceStopRun,
     forcePromise: Promise<unknown>,
     delayMS: number,
   ): Promise<never> {
-    const { name, timeoutMS, forceAttemptToken, outcomeObserver, forceAbort } =
-      run;
+    const { name, timeoutMS, forceAttemptToken } = run;
+
+    return this.armStopDeadline(run, forcePromise, delayMS, {
+      hookAbort: run.forceAbort,
+      hookName: 'onShutdownForce',
+      createTimeoutError: () =>
+        new ComponentForceTimeoutError({ componentName: name, timeoutMS }),
+      lateFailureMessage: 'Force shutdown failed after deadline fired',
+      getReport: () =>
+        run.forceOutcome === 'abandoned' ||
+        (run.forceOutcome === 'pending' && this.isForceAttemptSuperseded(run))
+          ? { message: ABANDONED_FORCE_MESSAGE, level: 'warn' }
+          : {
+              // Labelled as the result records it: a rejection unrelated to the
+              // abort that beat the deferred deadline is the stall's own failure,
+              // not one after a timeout.
+              message:
+                run.didDeadlineReject || run.didRejectForDeadline
+                  ? 'Force shutdown failed after deadline fired'
+                  : 'Force shutdown failed - stalled: {{error.message}}',
+              level: 'error',
+            },
+      onResolved: () =>
+        this.core.stopOutcomes.handleLateStopResolution(
+          name,
+          forceAttemptToken as string,
+          'force',
+        ),
+    });
+  }
+
+  /**
+   * A stop phase's deadline, as a promise that only rejects: its timer records the
+   * timeout on the run, aborts the hook's signal, hands the hook's late outcome to the
+   * run's observer, and rejects a macrotask later. Each phase supplies its error, how
+   * a late failure is reported, and what a late success reconciles.
+   */
+  private armStopDeadline<TimeoutError extends Error>(
+    run: StopDeadlineRun<TimeoutError>,
+    hookPromise: Promise<unknown>,
+    delayMS: number,
+    deadline: {
+      hookAbort: AbortController;
+      hookName: 'stop' | 'onShutdownForce';
+      createTimeoutError: () => TimeoutError;
+      lateFailureMessage: string;
+      getReport: () => { message: string; level: 'warn' | 'error' };
+      onResolved: () => void;
+    },
+  ): Promise<never> {
+    const { name, outcomeObserver } = run;
 
     return new Promise<never>((_, reject) => {
       run.timeoutHandle = setTimeout(() => {
-        run.forceTimeoutError = new ComponentForceTimeoutError({
-          componentName: name,
-          timeoutMS,
-        });
+        const timeoutError = deadline.createTimeoutError();
+        run.timeoutError = timeoutError;
+        // Listeners that release the hook win the phase's race: the timeout's
+        // rejection waits a macrotask (see `rejectAfterAbort()`).
         abortHookSignal(
-          forceAbort,
-          run.forceTimeoutError,
+          deadline.hookAbort,
+          timeoutError,
           name,
-          'onShutdownForce',
+          deadline.hookName,
         );
 
-        // Ahead of the observer below and `shutdownComponentForce()`'s `catch`, as in
-        // the graceful phase.
-        const deadlineReason = run.forceTimeoutError;
-        observeRejection(forcePromise, (error: unknown) => {
-          run.didRejectForDeadline = isLinkedToAbort(error, deadlineReason);
+        // Attached ahead of both the observer below and the phase's `catch`, so each
+        // reads the link as decided once: the error's members are the caller's.
+        observeRejection(hookPromise, (error: unknown) => {
+          run.didRejectForDeadline = isLinkedToAbort(error, timeoutError);
         });
 
-        // Detect if onShutdownForce() eventually resolves after the timeout
-        // so the stall can be cleared automatically, same as stop().
-        outcomeObserver.observe(
-          forcePromise,
-          'Force shutdown failed after deadline fired',
-          {
-            getReport: () =>
-              run.forceOutcome === 'abandoned' ||
-              (run.forceOutcome === 'pending' &&
-                this.isForceAttemptSuperseded(run))
-                ? { message: ABANDONED_FORCE_MESSAGE, level: 'warn' }
-                : {
-                    // Labelled as the result records it: a rejection unrelated
-                    // to the abort that beat the deferred deadline is the stall's
-                    // own failure, not one after a timeout.
-                    message:
-                      run.didDeadlineReject || run.didRejectForDeadline
-                        ? 'Force shutdown failed after deadline fired'
-                        : 'Force shutdown failed - stalled: {{error.message}}',
-                    level: 'error',
-                  },
-            onResolved: () =>
-              this.core.stopOutcomes.handleLateStopResolution(
-                name,
-                forceAttemptToken as string,
-                'force',
-              ),
-          },
-        );
-        run.timeoutHandle = this.rejectAfterAbort((timeoutError) => {
+        // Detect if the hook eventually resolves after the timeout so the stall can
+        // be cleared automatically without a manual retry. From here on this
+        // observer owns rejection reporting, even if an abort listener makes the hook
+        // reject before the deferred deadline wins the foreground race.
+        outcomeObserver.observe(hookPromise, deadline.lateFailureMessage, {
+          getReport: deadline.getReport,
+          onResolved: deadline.onResolved,
+        });
+        run.timeoutHandle = this.rejectAfterAbort((rejection) => {
           run.didDeadlineReject = true;
-          reject(timeoutError);
-        }, run.forceTimeoutError);
+          reject(rejection);
+        }, timeoutError);
       }, delayMS);
     });
   }
@@ -1700,7 +1714,7 @@ export class ComponentStop {
     // signal below, as it would at the deadline. A deadline that fired already
     // aborted it.
     const supersededReason =
-      !run.didForceHookSettle && run.forceTimeoutError === undefined
+      !run.didForceHookSettle && run.timeoutError === undefined
         ? new ForceShutdownSupersededError({ componentName: name })
         : undefined;
     // A fired deadline already installed the late-outcome reporter. Keeping
@@ -1776,15 +1790,10 @@ export class ComponentStop {
     const { name, context, timeoutMS, outcomeObserver } = run;
 
     run.forceOutcome = 'failed';
-    // Determine if timeout or error - by identity, not by message: an
-    // `onShutdownForce()` that rejected with the same text is still an error. One
-    // that rejected because the deadline aborted its signal is that timeout, answered
-    // with the deadline's error as in the graceful phase.
-    const timeoutError =
-      run.forceTimeoutError !== undefined &&
-      (error === run.forceTimeoutError || run.didRejectForDeadline)
-        ? run.forceTimeoutError
-        : undefined;
+    // Determine if timeout or error (`deadlineErrorFor()`). One that rejected because
+    // the deadline aborted its signal is that timeout, answered with the deadline's
+    // error as in the graceful phase.
+    const timeoutError = deadlineErrorFor(run, error);
     const isTimeout = timeoutError !== undefined;
     const err = timeoutError ?? toError(error);
 

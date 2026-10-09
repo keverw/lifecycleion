@@ -5,7 +5,7 @@ import {
 import { ulid } from 'ulid';
 import readline from 'readline';
 import { resolveTimeoutMS } from './internal/timer-limits';
-import { queueMicrotaskSafely } from './internal/intrinsics';
+import { queueMicrotaskSafely } from './internal/promise-reactions';
 import { isObjectLike } from './internal/is-object-like';
 import { isNullish } from './internal/is-nullish';
 import {
@@ -1207,10 +1207,10 @@ export class ProcessSignalManager {
     }
 
     // Pause stdin when last instance detaches - re-checked here rather than trusted from
-    // the `isLastInstance` read above. `setRawMode()` is stdin's own code and can run
-    // anything, including an `attach()`: the set is the live answer, and a stale flag
-    // paused stdin under a freshly attached instance, leaving its keypress handler
-    // registered and silent.
+    // the `isLastInstance` read above. A failed `setRawMode()` emits 'error' on stdin
+    // synchronously, so a caller's listener runs inside it and can `attach()`: the set is
+    // the live answer, and a stale flag would pause stdin under a freshly attached
+    // instance, leaving its keypress handler registered and silent.
     if (
       (wasAttachedToStdin || didResume) &&
       isLastInstance &&
@@ -1229,10 +1229,11 @@ export class ProcessSignalManager {
 
 /**
  * Turn raw mode off for the last attached instance that owned it. An attach from inside
- * `setRawMode(false)` may have adopted the raw mode being turned off; turn it back on
- * for that instance rather than clearing its claim. A disable failure throws, leaving
- * ownership for the caller to repair; a re-enable failure is returned, so it is reported
- * as what it is rather than as a failed restore.
+ * `setRawMode(false)` - from a caller's stdin 'error' listener, which a failed mode change
+ * is emitted to synchronously - may have adopted the raw mode being turned off; turn it
+ * back on for that instance rather than clearing its claim. A disable failure throws,
+ * leaving ownership for the caller to repair; a re-enable failure is returned, so it is
+ * reported as what it is rather than as a failed restore.
  */
 function releaseRawMode(
   shared: ProcessSignalManagerSharedState,

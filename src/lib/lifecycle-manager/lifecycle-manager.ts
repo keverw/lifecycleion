@@ -17,7 +17,6 @@ import {
   settleOperation,
   crashedStartupResult,
   crashedShutdownResult,
-  crashedSignalBroadcastResult,
   crashedHealthCheckResult,
   crashedHealthReport,
   crashedComponentResult,
@@ -143,7 +142,11 @@ export class LifecycleManager
     // Guarded once, here, rather than at the ~140 call sites that log: the logger is
     // caller-supplied, and a method that throws or rejects would otherwise propagate
     // into whatever lifecycle operation happened to be logging at the time.
-    this.logger = createGuardedLoggerService(this.rootLogger.service(name));
+    // Its `entity()` cache keeps room for every registered component, so a bulk pass
+    // logging each in turn reuses their children.
+    this.logger = createGuardedLoggerService(this.rootLogger.service(name), {
+      entityCacheReserve: () => this.state.components.length,
+    });
     this.config = resolveManagerConfig(name, options);
     this.lifecycleEvents = new LifecycleManagerEvents((event, data) => {
       this.eventDispatcher.emit(event, data);
@@ -178,32 +181,28 @@ export class LifecycleManager
   /**
    * Register a component at the end of the registry list.
    */
-  public async registerComponent(
+  public registerComponent(
     component: BaseComponent,
     options?: RegisterOptions,
   ): Promise<RegisterComponentResult> {
-    const result = await this.core.registration.registerComponentSettled(
-      component,
-      'end',
-      undefined,
-      false,
-      options,
-    );
+    return this.core.registration
+      .registerComponentSettled(component, 'end', undefined, false, options)
+      .then((result): RegisterComponentResult => {
+        // Share registration fields without exposing insertion-only metadata.
+        const {
+          action: _action,
+          requestedPosition: _requestedPosition,
+          actualPosition: _actualPosition,
+          manualPositionRespected: isManualPositionRespectedIgnored,
+          targetFound: wasTargetFound,
+          ...registration
+        } = result;
 
-    // Share registration fields without exposing insertion-only metadata.
-    const {
-      action: _action,
-      requestedPosition: _requestedPosition,
-      actualPosition: _actualPosition,
-      manualPositionRespected: isManualPositionRespectedIgnored,
-      targetFound: wasTargetFound,
-      ...registration
-    } = result;
-
-    return {
-      ...registration,
-      action: 'register',
-    };
+        return {
+          ...registration,
+          action: 'register',
+        };
+      });
   }
 
   /**
@@ -214,13 +213,13 @@ export class LifecycleManager
    * - Dependencies may override this preference; the result object includes `startupOrder`
    *   and `manualPositionRespected` so callers can see if the request was achievable.
    */
-  public async insertComponentAt(
+  public insertComponentAt(
     component: BaseComponent,
     position: InsertPosition,
     targetComponentName?: string,
     options?: RegisterOptions,
   ): Promise<InsertComponentAtResult> {
-    return await this.core.registration.registerComponentSettled(
+    return this.core.registration.registerComponentSettled(
       component,
       position,
       targetComponentName,
@@ -251,8 +250,9 @@ export class LifecycleManager
     // the component as it actually is: stopped, even though unregistering then failed.
     // `wasRegistered` is taken now, as the field is documented - registered when this
     // call started - and through the manager's own registry rather than the public,
-    // overridable `hasComponent()`: read at failure time, it described whatever held
-    // the name by then, and an override that threw made this safety net reject.
+    // overridable `hasComponent()`, so it describes this call's component rather than
+    // whatever holds the name when a failure is answered, and an override that throws
+    // cannot make this safety net reject.
     const progress = {
       wasStopped: false,
       wasRegistered: this.core.registry.isNameRegistered(name),
@@ -497,8 +497,8 @@ export class LifecycleManager
    * Get stopped (not running, not stalled) component names
    */
   public getStoppedComponentNames(): string[] {
-    // The manager's own sets, asked directly: copying them into arrays and back into
-    // sets cost two allocations per call for the same membership answer.
+    // The manager's own sets, asked directly, so the call allocates nothing beyond the
+    // filtered names.
     return this.getComponentNames().filter(
       (name) =>
         !this.state.runningComponents.has(name) &&
@@ -741,12 +741,7 @@ export class LifecycleManager
    * @returns Result of broadcasting reload to components
    */
   public triggerReload(): Promise<SignalBroadcastResult> {
-    return settleOperation(
-      'triggerReload',
-      () => this.core.signals.handleReloadRequest(),
-      (error, _reason, code) =>
-        crashedSignalBroadcastResult('reload', error, code),
-    );
+    return this.core.signals.settleSignalRequest('reload', 'trigger');
   }
 
   /**
@@ -754,12 +749,7 @@ export class LifecycleManager
    * @returns Result of broadcasting info to components
    */
   public triggerInfo(): Promise<SignalBroadcastResult> {
-    return settleOperation(
-      'triggerInfo',
-      () => this.core.signals.handleInfoRequest(),
-      (error, _reason, code) =>
-        crashedSignalBroadcastResult('info', error, code),
-    );
+    return this.core.signals.settleSignalRequest('info', 'trigger');
   }
 
   /**
@@ -767,12 +757,7 @@ export class LifecycleManager
    * @returns Result of broadcasting debug to components
    */
   public triggerDebug(): Promise<SignalBroadcastResult> {
-    return settleOperation(
-      'triggerDebug',
-      () => this.core.signals.handleDebugRequest(),
-      (error, _reason, code) =>
-        crashedSignalBroadcastResult('debug', error, code),
-    );
+    return this.core.signals.settleSignalRequest('debug', 'trigger');
   }
 
   // ============================================================================

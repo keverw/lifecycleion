@@ -1,4 +1,4 @@
-import { queueMicrotaskSafely } from '../../../internal/intrinsics';
+import { queueMicrotaskSafely } from '../../../internal/promise-reactions';
 
 /**
  * The promise a queueing sink's `close()` hands to every caller, running `run` once on a

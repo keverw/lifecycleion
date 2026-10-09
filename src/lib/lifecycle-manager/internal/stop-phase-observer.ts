@@ -1,4 +1,4 @@
-import { observeRejection } from '../../internal/intrinsics';
+import { observeRejection } from '../../internal/promise-reactions';
 
 /**
  * Reporting belongs to one observer per phase; state ownership is separate.

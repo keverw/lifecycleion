@@ -156,10 +156,10 @@ export class StartupOrchestration {
       return alreadyActive;
     }
     // Every option is read up front, before the startup takes its latch: `options` is
-    // the caller's object, and a getter that threw once `isStarting` was set left it set
-    // for good. The timeout is only validated once the availability refusals below are
-    // past - still before the latch: a startup that refuses never uses it, and an
-    // availability refusal takes precedence over an option that would not be used.
+    // the caller's object, and a getter that throws once `isStarting` is set would leave
+    // it set for good. The timeout is only validated once the availability refusals
+    // below are past - still before the latch: a startup that refuses never uses it, and
+    // an availability refusal takes precedence over an option that would not be used.
     const startupOptions =
       restart?.startupOptions ?? snapshotStartupOptions(options);
     const shouldIgnoreStalledComponents =
@@ -916,7 +916,6 @@ export class StartupOrchestration {
       // A shutdown pass that began answered above, and owns the teardown. Refused
       // without one - a logger exit in progress - nothing else will stop what this
       // startup started, so it is rolled back as for a required failure.
-      clearTimeout(run.timeoutHandle);
       return {
         kind: 'rollback',
         pending: this.rollBackOnce(run, run.startedComponents),
@@ -952,7 +951,6 @@ export class StartupOrchestration {
         run.startedComponents.push(name);
       }
       if (!isOptional) {
-        clearTimeout(run.timeoutHandle);
         return {
           kind: 'rollback',
           pending: this.rollBackOnce(run, run.startedComponents),
@@ -964,8 +962,7 @@ export class StartupOrchestration {
       // configured to handle signals and cannot, so it does not come up at all.
       // Continuing would retry the attach on every later component, and an all-
       // optional registry would report success with nothing running.
-      clearTimeout(run.timeoutHandle);
-
+      //
       // The failed component itself is included if stopping it again did not take:
       // it is not in `startedComponents`, and leaving it running is exactly what a
       // failed attach must not do.
@@ -1000,7 +997,6 @@ export class StartupOrchestration {
             },
           );
 
-        clearTimeout(run.timeoutHandle);
         return {
           kind: 'rollback',
           pending: this.rollBackOnce(run, run.startedComponents),
@@ -1155,7 +1151,6 @@ export class StartupOrchestration {
       return { kind: 'result', value: this.abortOnShutdownSignal(run) };
     }
     if (reconciled.requiredFailure) {
-      clearTimeout(run.timeoutHandle);
       return {
         kind: 'rollback',
         pending: this.rollBackOnce(run, run.startedComponents),
@@ -1256,15 +1251,13 @@ export class StartupOrchestration {
   }
 
   /**
-   * Report a crash of the run - a dependency cycle a follow-up batch introduced is logged
-   * as the configuration failure it is, anything else reported as unplanned - and stop
-   * its deadline ahead of the rollback that follows.
+   * Report a crash of the run: a dependency cycle a follow-up batch introduced is logged
+   * as the configuration failure it is, anything else reported as unplanned.
    */
   private reportStartupCrash(run: StartupRun, error: unknown): StartupCrash {
     run.detachReason = 'failed bulk startup';
     const crashError = toError(error);
 
-    clearTimeout(run.timeoutHandle);
     const isDependencyCycle = crashError instanceof DependencyCycleError;
     if (isDependencyCycle) {
       // A follow-up can introduce a cycle after earlier batches started. It is
@@ -1334,18 +1327,19 @@ export class StartupOrchestration {
     return !run.hasTimedOut && !run.hasShutdownBegun();
   }
 
-  /** Roll back what the run started, unless a shutdown that owns the teardown began. */
+  /**
+   * Roll back what the run started, unless a shutdown that owns the teardown began. The
+   * run's deadline is stopped first either way: every caller is ending the run's starts,
+   * and the rollback has its own stop timeouts.
+   */
   private async rollBackOnce(run: StartupRun, names: string[]): Promise<void> {
+    clearTimeout(run.timeoutHandle);
     if (run.hasShutdownBegun()) {
       return;
     }
     run.abandonReason = 'failed and rolled back';
     run.bulkStartup.isRollingBack = true;
-    await this.rollbackStartup(
-      names,
-      run.rolledBackNames,
-      run.hasShutdownBegun,
-    );
+    await this.rollbackStartup(run, names);
   }
 
   /**
@@ -1354,10 +1348,10 @@ export class StartupOrchestration {
    * the run. Only through `rollBackOnce()`.
    */
   private async rollbackStartup(
+    run: StartupRun,
     startedComponents: string[],
-    rolledBackNames: Set<string>,
-    hasShutdownBegun: () => boolean,
   ): Promise<void> {
+    const { rolledBackNames, hasShutdownBegun } = run;
     // Stop components in reverse order - skipping any an earlier rollback of this same
     // startup already reached, which is marked before its stop, so a stop that throws is
     // not retried either.

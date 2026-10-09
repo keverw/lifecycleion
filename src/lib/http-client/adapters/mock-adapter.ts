@@ -1,6 +1,6 @@
 import { markNonRetryableAdapterError } from '../internal/adapter-error';
 import { defineEntry } from '../../internal/define-entry';
-import { observeRejection } from '../../internal/intrinsics';
+import { observeRejection } from '../../internal/promise-reactions';
 import Router from 'find-my-way';
 import { guardProgressCallback } from '../internal/progress';
 import { materializeRequestHeaders } from '../internal/header-utils';

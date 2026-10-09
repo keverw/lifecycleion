@@ -619,6 +619,14 @@ export class RegistrationOperations {
 
     let interruptionCode:
       'shutdown_in_progress' | 'startup_in_progress' | undefined;
+    // What this attempt put on the component, so a rollback clears only that: the
+    // `lifecycle` handle it assigned, and the registered flag once `_markRegistered()`
+    // has been called - an override may set it and then throw. A lifecycle setter that
+    // throws first never reached the registered flag, and whatever it did to the
+    // component - registering it with another manager, say - is not this attempt's to
+    // undo.
+    let assignedLifecycle: ComponentLifecycle | undefined;
+    let hasCalledMarkRegistered = false;
     // Both expected bulk-operation refusals and unexpected failures undo only
     // this attempt. Keep the reservation until finally so rollback hooks cannot
     // claim its name while cleanup is still in progress.
@@ -643,10 +651,18 @@ export class RegistrationOperations {
       // The component's side too: a hook that marked it registered before throwing
       // would otherwise leave it believing it is, and its next registration refused as
       // `duplicate_instance`.
-      markComponentUnregistered(
-        component,
-        'lifecycle-manager registration rollback',
-      );
+      if (hasCalledMarkRegistered) {
+        markComponentUnregistered(
+          component,
+          'lifecycle-manager registration rollback',
+        );
+      } else if (assignedLifecycle !== undefined) {
+        clearAssignedLifecycle(
+          component,
+          assignedLifecycle,
+          'lifecycle-manager registration rollback',
+        );
+      }
       // The separate reservation retains the attempted name while bookkeeping is
       // restored; finally releases it after cleanup has completely finished.
       if (previousRecordedName === undefined) {
@@ -682,13 +698,15 @@ export class RegistrationOperations {
         // The lifecycle setter and registration hook can both be overridden. Keep
         // the entry unavailable to startup throughout them and their rollback, and
         // release the guard on every exit before queued notifications are delivered.
-        (
-          component as unknown as { lifecycle: ComponentLifecycleRef }
-        ).lifecycle = new ComponentLifecycle(
+        assignedLifecycle = new ComponentLifecycle(
           this.core.manager,
           componentName,
           internalCallbacks,
         );
+        (
+          component as unknown as { lifecycle: ComponentLifecycleRef }
+        ).lifecycle = assignedLifecycle;
+        hasCalledMarkRegistered = true;
         component._markRegistered();
         // A hook may start shutdown while this entry is invisible to that pass.
         // It must not publish a new component into the pass after its snapshot.
@@ -1480,7 +1498,8 @@ export class RegistrationOperations {
    * Where the registry entry at `index` sits, described by its neighbours, as a
    * registration reports it. Read at report time, from the registry as it is then: an
    * auto-start can register or remove components around the new one, and a position
-   * captured before it described a registry that had moved on.
+   * captured before it would describe a registry that has moved on. Neighbours are
+   * tested against `undefined`, not for truthiness, so one named `''` is described too.
    */
   private describeRegistryPosition(
     index: number | null,
@@ -1494,22 +1513,24 @@ export class RegistrationOperations {
         positionDescription = 'only component';
       } else if (index === 0) {
         const nextComponent = this.core.registry.nameOfAt(1);
-        positionDescription = nextComponent
-          ? `at start, before ${nextComponent}`
-          : 'at start';
+        positionDescription =
+          nextComponent !== undefined
+            ? `at start, before ${nextComponent}`
+            : 'at start';
       } else if (index === totalComponents - 1) {
         const prevComponent = this.core.registry.nameOfAt(totalComponents - 2);
-        positionDescription = prevComponent
-          ? `at end, after ${prevComponent}`
-          : 'at end';
+        positionDescription =
+          prevComponent !== undefined
+            ? `at end, after ${prevComponent}`
+            : 'at end';
       } else {
         const prevComponent = this.core.registry.nameOfAt(index - 1);
         const nextComponent = this.core.registry.nameOfAt(index + 1);
-        if (prevComponent && nextComponent) {
+        if (prevComponent !== undefined && nextComponent !== undefined) {
           positionDescription = `after ${prevComponent}, before ${nextComponent}`;
-        } else if (prevComponent) {
+        } else if (prevComponent !== undefined) {
           positionDescription = `after ${prevComponent}`;
-        } else if (nextComponent) {
+        } else if (nextComponent !== undefined) {
           positionDescription = `before ${nextComponent}`;
         }
       }
@@ -1612,5 +1633,28 @@ export class RegistrationOperations {
         this.core.state.invokingStarts.delete(settlement);
       }
     }
+  }
+}
+
+/**
+ * Clear the `lifecycle` handle a rolled-back registration assigned, when the component
+ * still holds it. The read and the write both run the component's own accessors, so
+ * each is contained and reported.
+ */
+function clearAssignedLifecycle(
+  component: BaseComponent,
+  assigned: ComponentLifecycle,
+  label: string,
+): void {
+  try {
+    const fields = component as unknown as {
+      lifecycle?: ComponentLifecycleRef;
+    };
+
+    if (fields.lifecycle === assigned) {
+      fields.lifecycle = undefined;
+    }
+  } catch (error) {
+    reportCallbackError(`${label} lifecycle`, error);
   }
 }

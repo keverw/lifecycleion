@@ -5,18 +5,102 @@ import {
 } from '../../safe-handle-callback';
 import { describeError, toError } from '../../to-error';
 import { LIFECYCLE_MANAGER_LOG_AUTO_DETACH_LAST_COMPONENT_STOP } from '../constants';
+import type { LifecycleManagerEvents } from '../events';
 import type {
   ComponentOperationResult,
   LifecycleSignalStatus,
   SignalBroadcastResult,
 } from '../types';
 import { runSignalBroadcast } from './component-inspection';
+import type { ManagerConfig } from './manager-config';
 import type { ManagerCore } from './manager-core';
 import {
   crashedSignalBroadcastResult,
   failedSignalCallbackResult,
   settleOperation,
 } from './operation-policy';
+
+type SignalRequestKind = SignalBroadcastResult['signal'];
+
+/** Where a reload, info or debug request came from. */
+type SignalRequestSource = 'signal' | 'trigger';
+
+/** Everything a reload, info or debug request and its broadcast differ by. */
+interface SignalRequestDescriptor {
+  /** The public method a `trigger*()` call of this request settles under. */
+  triggerOperation: string;
+  dispatchedLogLabel: string;
+  emitSignal: (events: LifecycleManagerEvents) => void;
+  customCallback: (
+    config: ManagerConfig,
+  ) =>
+    | ((
+        broadcastFn: () => Promise<SignalBroadcastResult>,
+      ) => void | Promise<void>)
+    | undefined;
+  /** The component hook the broadcast calls. */
+  handlerName: 'onReload' | 'onInfo' | 'onDebug';
+  startupLog: string;
+  timeoutLog: string;
+  errorLog: string;
+  emitStarted: (events: LifecycleManagerEvents, name: string) => void;
+  emitCompleted: (events: LifecycleManagerEvents, name: string) => void;
+  emitFailed: (
+    events: LifecycleManagerEvents,
+    name: string,
+    error: Error,
+  ) => void;
+}
+
+const SIGNAL_REQUESTS: Readonly<
+  Record<SignalRequestKind, SignalRequestDescriptor>
+> = {
+  reload: {
+    triggerOperation: 'triggerReload',
+    dispatchedLogLabel: 'Reload dispatched',
+    emitSignal: (events) => events.signalReload(),
+    customCallback: (config) => config.onReloadRequested,
+    handlerName: 'onReload',
+    startupLog:
+      'Reload during startup: only reloading already-started components',
+    timeoutLog: 'Reload handler timed out',
+    errorLog: 'Reload failed: {{error.message}}',
+    emitStarted: (events, name) => events.componentReloadStarted(name),
+    emitCompleted: (events, name) => events.componentReloadCompleted(name),
+    emitFailed: (events, name, error) =>
+      events.componentReloadFailed(name, error),
+  },
+  info: {
+    triggerOperation: 'triggerInfo',
+    dispatchedLogLabel: 'Info dispatched',
+    emitSignal: (events) => events.signalInfo(),
+    customCallback: (config) => config.onInfoRequested,
+    handlerName: 'onInfo',
+    startupLog:
+      'Info during startup: only notifying already-started components',
+    timeoutLog: 'Info handler timed out',
+    errorLog: 'Info handler failed: {{error.message}}',
+    emitStarted: (events, name) => events.componentInfoStarted(name),
+    emitCompleted: (events, name) => events.componentInfoCompleted(name),
+    emitFailed: (events, name, error) =>
+      events.componentInfoFailed(name, error),
+  },
+  debug: {
+    triggerOperation: 'triggerDebug',
+    dispatchedLogLabel: 'Debug dispatched',
+    emitSignal: (events) => events.signalDebug(),
+    customCallback: (config) => config.onDebugRequested,
+    handlerName: 'onDebug',
+    startupLog:
+      'Debug during startup: only notifying already-started components',
+    timeoutLog: 'Debug handler timed out',
+    errorLog: 'Debug handler failed: {{error.message}}',
+    emitStarted: (events, name) => events.componentDebugStarted(name),
+    emitCompleted: (events, name) => events.componentDebugCompleted(name),
+    emitFailed: (events, name, error) =>
+      events.componentDebugFailed(name, error),
+  },
+};
 
 /**
  * Process signal integration: attaching and detaching the `ProcessSignalManager`
@@ -31,6 +115,12 @@ import {
  * either is the one that runs.
  */
 export class SignalIntegration {
+  /**
+   * Set when a `detachSignalsOnStop` detach was due - nothing left running or stalled -
+   * but something transient was still in flight: a startup or shutdown latch, a start or
+   * stop, a late-startup cleanup. Whichever of those ends runs the check again.
+   */
+  private isSignalDetachDeferred = false;
   /**
    * The line the detach deferred in `isSignalDetachDeferred` logs once it runs: worded
    * for what asked for it - the last component stop, say - not for the transient that
@@ -48,7 +138,7 @@ export class SignalIntegration {
   public attach(): void {
     this.core.dispatcher.withTransition(() => {
       // A new attach supersedes a detach that was still waiting to run.
-      this.core.state.isSignalDetachDeferred = false;
+      this.isSignalDetachDeferred = false;
       this.deferredDetachLogMessage = undefined;
 
       // Check if already attached (not just if instance exists)
@@ -72,26 +162,9 @@ export class SignalIntegration {
             // resolves under this manager's own label rather than relying on
             // `ProcessSignalManager` to catch its rejection.
             onReloadRequested: () =>
-              settleOperation(
-                'reload signal',
-                () => this.handleReloadRequest('signal'),
-                (error, _reason, code) =>
-                  crashedSignalBroadcastResult('reload', error, code),
-              ),
-            onInfoRequested: () =>
-              settleOperation(
-                'info signal',
-                () => this.handleInfoRequest('signal'),
-                (error, _reason, code) =>
-                  crashedSignalBroadcastResult('info', error, code),
-              ),
-            onDebugRequested: () =>
-              settleOperation(
-                'debug signal',
-                () => this.handleDebugRequest('signal'),
-                (error, _reason, code) =>
-                  crashedSignalBroadcastResult('debug', error, code),
-              ),
+              this.settleSignalRequest('reload', 'signal'),
+            onInfoRequested: () => this.settleSignalRequest('info', 'signal'),
+            onDebugRequested: () => this.settleSignalRequest('debug', 'signal'),
           });
       }
 
@@ -272,12 +345,12 @@ export class SignalIntegration {
         options.logMessage ?? `Auto-detached process signals after ${trigger}`;
 
       if (this.isSignalDetachWaitingOnTransient(options.isEndingShutdownPass)) {
-        this.core.state.isSignalDetachDeferred = true;
+        this.isSignalDetachDeferred = true;
         this.deferredDetachLogMessage = logMessage;
         return;
       }
 
-      this.core.state.isSignalDetachDeferred = false;
+      this.isSignalDetachDeferred = false;
       this.deferredDetachLogMessage = undefined;
       // Detached before the line is logged, not after: logging runs the caller's sinks,
       // and one that starts a startup from here attached nothing - the handlers were still
@@ -310,7 +383,7 @@ export class SignalIntegration {
     trigger: string,
     options: { isEndingShutdownPass?: boolean } = {},
   ): void {
-    if (this.core.state.isSignalDetachDeferred) {
+    if (this.isSignalDetachDeferred) {
       this.detachSignalsIfIdle(trigger, {
         logMessage: this.deferredDetachLogMessage,
         isEndingShutdownPass: options.isEndingShutdownPass,
@@ -318,48 +391,22 @@ export class SignalIntegration {
     }
   }
 
-  public async handleReloadRequest(
-    source: 'signal' | 'trigger' = 'trigger',
+  /**
+   * A reload, info or debug request under the public-method safety net: `trigger*()`'s
+   * body for a `trigger` source, settled under that method's name, and the
+   * `ProcessSignalManager` callback's for a `signal` source, settled as `<signal> signal`.
+   */
+  public settleSignalRequest(
+    signal: SignalRequestKind,
+    source: SignalRequestSource,
   ): Promise<SignalBroadcastResult> {
-    return await this.handleSignalRequest(
-      {
-        signal: 'reload',
-        dispatchedLogLabel: 'Reload dispatched',
-        emitSignal: () => this.core.lifecycleEvents.signalReload(),
-        customCallback: this.core.config.onReloadRequested,
-        broadcast: () => this.broadcastReload(),
-      },
-      source,
-    );
-  }
-
-  public async handleInfoRequest(
-    source: 'signal' | 'trigger' = 'trigger',
-  ): Promise<SignalBroadcastResult> {
-    return await this.handleSignalRequest(
-      {
-        signal: 'info',
-        dispatchedLogLabel: 'Info dispatched',
-        emitSignal: () => this.core.lifecycleEvents.signalInfo(),
-        customCallback: this.core.config.onInfoRequested,
-        broadcast: () => this.broadcastInfo(),
-      },
-      source,
-    );
-  }
-
-  public async handleDebugRequest(
-    source: 'signal' | 'trigger' = 'trigger',
-  ): Promise<SignalBroadcastResult> {
-    return await this.handleSignalRequest(
-      {
-        signal: 'debug',
-        dispatchedLogLabel: 'Debug dispatched',
-        emitSignal: () => this.core.lifecycleEvents.signalDebug(),
-        customCallback: this.core.config.onDebugRequested,
-        broadcast: () => this.broadcastDebug(),
-      },
-      source,
+    return settleOperation(
+      source === 'signal'
+        ? `${signal} signal`
+        : SIGNAL_REQUESTS[signal].triggerOperation,
+      () => this.handleSignalRequest(signal, source),
+      (error, _reason, code) =>
+        crashedSignalBroadcastResult(signal, error, code),
     );
   }
 
@@ -388,11 +435,11 @@ export class SignalIntegration {
    * Detach signals on the manager's own initiative, once nothing is left running.
    *
    * Contained for the reason {@link autoAttachSignals} is: every caller is partway through
-   * settling a stop, an unregister, or a failed start, and a detach that throws there
-   * derailed the rest - a clean graceful stop was sent on to the force phase, and an
-   * unregister rejected after it had already removed the component.
-   * `ProcessSignalManager.detach()` marks itself detached even when it throws, so there
-   * is nothing to retry.
+   * settling a stop, an unregister, or a failed start, and must finish it whatever the
+   * detach does - a clean graceful stop stays clean rather than going on to the force
+   * phase, and an unregister that has removed the component resolves. A failure is
+   * logged and reported instead. `ProcessSignalManager.detach()` marks itself detached
+   * even when it throws, so there is nothing to retry.
    */
   private autoDetachSignals(trigger: string): boolean {
     try {
@@ -426,119 +473,71 @@ export class SignalIntegration {
    * and results are returned for programmatic use.
    */
   private async handleSignalRequest(
-    descriptor: {
-      signal: 'reload' | 'info' | 'debug';
-      dispatchedLogLabel: string;
-      emitSignal: () => void;
-      customCallback?: (
-        broadcastFn: () => Promise<SignalBroadcastResult>,
-      ) => void | Promise<void>;
-      broadcast: () => Promise<SignalBroadcastResult>;
-    },
-    source: 'signal' | 'trigger',
+    signal: SignalRequestKind,
+    source: SignalRequestSource,
   ): Promise<SignalBroadcastResult> {
+    const descriptor = SIGNAL_REQUESTS[signal];
     this.core.logger.info(descriptor.dispatchedLogLabel, {
       params: { source },
     });
-    descriptor.emitSignal();
+    descriptor.emitSignal(this.core.lifecycleEvents);
 
-    if (descriptor.customCallback) {
-      // Guarded: the callback is the caller's, and a throw or rejection from it rejected
-      // `triggerReload()` and friends. It is reported, and the result says `error`.
+    const customCallback = descriptor.customCallback(this.core.config);
+    if (customCallback) {
+      // Guarded: the callback is the caller's, so a throw or rejection from it is
+      // reported, and the result says `error`.
       // The broadcast handed to the callback is settled as well, so a callback that
       // fires it without awaiting - `void broadcast()` - can never be left holding an
       // unhandled rejection.
       const outcome = await safeHandleCallbackAndWait(
-        `lifecycle-manager ${descriptor.signal} request callback`,
-        descriptor.customCallback,
+        `lifecycle-manager ${signal} request callback`,
+        customCallback,
         (): Promise<SignalBroadcastResult> =>
           settleOperation(
-            `${descriptor.signal} broadcast`,
-            descriptor.broadcast,
+            `${signal} broadcast`,
+            () => this.broadcastSignal(signal),
             (error, _reason, code) =>
-              crashedSignalBroadcastResult(descriptor.signal, error, code),
+              crashedSignalBroadcastResult(signal, error, code),
           ),
       );
 
       if (!outcome.success) {
-        return failedSignalCallbackResult(descriptor.signal, outcome.error);
+        return failedSignalCallbackResult(signal, outcome.error);
       }
 
       // Return empty result (custom callback handled it)
       return {
-        signal: descriptor.signal,
+        signal,
         results: [],
         timedOut: false,
         code: 'ok',
       };
     }
 
-    return await descriptor.broadcast();
+    return await this.broadcastSignal(signal);
   }
 
   /**
-   * Broadcast reload signal to all running components.
-   * Calls onReload() on components that implement it.
+   * Broadcast a reload, info or debug signal to all running components.
+   * Calls the component's `onReload()`, `onInfo()` or `onDebug()` where it implements it.
    * Continues on errors - collects all results.
    */
-  private broadcastReload(): Promise<SignalBroadcastResult> {
-    return runSignalBroadcast(this.core.componentAccess, {
-      signal: 'reload',
-      pickHandler: (component) => Reflect.get(component, 'onReload'),
-      startupLog:
-        'Reload during startup: only reloading already-started components',
-      timeoutLog: 'Reload handler timed out',
-      errorLog: 'Reload failed: {{error.message}}',
-      emitStarted: (name) =>
-        this.core.lifecycleEvents.componentReloadStarted(name),
-      emitCompleted: (name) =>
-        this.core.lifecycleEvents.componentReloadCompleted(name),
-      emitFailed: (name, error) =>
-        this.core.lifecycleEvents.componentReloadFailed(name, error),
-    });
-  }
+  private broadcastSignal(
+    signal: SignalRequestKind,
+  ): Promise<SignalBroadcastResult> {
+    const descriptor = SIGNAL_REQUESTS[signal];
+    const events = this.core.lifecycleEvents;
 
-  /**
-   * Broadcast info signal to all running components.
-   * Calls onInfo() on components that implement it.
-   * Continues on errors - collects all results.
-   */
-  private broadcastInfo(): Promise<SignalBroadcastResult> {
     return runSignalBroadcast(this.core.componentAccess, {
-      signal: 'info',
-      pickHandler: (component) => Reflect.get(component, 'onInfo'),
-      startupLog:
-        'Info during startup: only notifying already-started components',
-      timeoutLog: 'Info handler timed out',
-      errorLog: 'Info handler failed: {{error.message}}',
-      emitStarted: (name) =>
-        this.core.lifecycleEvents.componentInfoStarted(name),
-      emitCompleted: (name) =>
-        this.core.lifecycleEvents.componentInfoCompleted(name),
-      emitFailed: (name, error) =>
-        this.core.lifecycleEvents.componentInfoFailed(name, error),
-    });
-  }
-
-  /**
-   * Broadcast debug signal to all running components.
-   * Calls onDebug() on components that implement it.
-   * Continues on errors - collects all results.
-   */
-  private broadcastDebug(): Promise<SignalBroadcastResult> {
-    return runSignalBroadcast(this.core.componentAccess, {
-      signal: 'debug',
-      pickHandler: (component) => Reflect.get(component, 'onDebug'),
-      startupLog:
-        'Debug during startup: only notifying already-started components',
-      timeoutLog: 'Debug handler timed out',
-      errorLog: 'Debug handler failed: {{error.message}}',
-      emitStarted: (name) =>
-        this.core.lifecycleEvents.componentDebugStarted(name),
-      emitCompleted: (name) =>
-        this.core.lifecycleEvents.componentDebugCompleted(name),
-      emitFailed: (name, error) =>
-        this.core.lifecycleEvents.componentDebugFailed(name, error),
+      signal,
+      pickHandler: (component) =>
+        Reflect.get(component, descriptor.handlerName),
+      startupLog: descriptor.startupLog,
+      timeoutLog: descriptor.timeoutLog,
+      errorLog: descriptor.errorLog,
+      emitStarted: (name) => descriptor.emitStarted(events, name),
+      emitCompleted: (name) => descriptor.emitCompleted(events, name),
+      emitFailed: (name, error) => descriptor.emitFailed(events, name, error),
     });
   }
 }

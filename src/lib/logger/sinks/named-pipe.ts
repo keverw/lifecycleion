@@ -18,7 +18,7 @@ import {
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { readUnknownMember } from '../../internal/read-member';
 import { sleep } from '../../sleep';
-import { observeRejection } from '../../internal/intrinsics';
+import { observeRejection } from '../../internal/promise-reactions';
 import {
   DEFAULT_CLOSE_TIMEOUT_MS,
   MIN_CLOSE_FLUSH_MS,
@@ -27,19 +27,14 @@ import {
 } from './internal/queue-policy';
 import { resolveTimeoutMS } from '../../internal/timer-limits';
 import {
-  createDroppedEntryCounts,
   reportSinkError,
   type DroppedEntryCounts,
-  type DroppedEntryKind,
   type SinkErrorHandler,
   type SinkFailureDisposition,
   type SinkFailureKind,
 } from './internal/sink-failure';
-import {
-  abandonQueuedEntries,
-  evictQueuedEntries,
-  ReportOnceLatch,
-} from './internal/queue-accounting';
+import { describeEntryCount, LossLedger } from './internal/loss-ledger';
+import { endStreamWithin } from './internal/end-stream';
 import { deferClose } from './internal/deferred-close';
 import { FormatReportScheduler } from './internal/format-report-scheduler';
 
@@ -481,10 +476,13 @@ export class NamedPipeSink implements LogSink {
   private maxQueueSize?: number;
   private maxRetries: number;
   private minLevel: LogLevel;
-  private droppedEntries = 0;
-  private readonly droppedByKind = createDroppedEntryCounts();
-  /** Whether the current overflow episode's `'queue_full'` report has gone out. */
-  private readonly queueFullReport = new ReportOnceLatch();
+  /**
+   * Lines this sink did not deliver, by reason, and the once-per-episode reports for the
+   * refused, evicted and abandoned ones. See {@link LossLedger}.
+   */
+  private readonly losses = new LossLedger((kind, message, entry) => {
+    this.handleError(kind, new Error(message), { disposition: 'lost', entry });
+  });
   /** Whether the one post-close loss report has gone out. See {@link requeue}. */
   private didReportPostCloseLoss = false;
   /** Streams whose buffered-byte loss close() has already reported. */
@@ -568,13 +566,6 @@ export class NamedPipeSink implements LogSink {
    */
   private readonly formatReports = new FormatReportScheduler();
 
-  /**
-   * Whether the first entry refused because the sink is closing has been reported.
-   *
-   * See {@link write}. Every such entry is counted; only the first is reported.
-   */
-  private readonly closeRefusalReport = new ReportOnceLatch();
-
   private initPromise: Promise<void>;
   private closing = false;
   private closePromise?: Promise<void>;
@@ -620,28 +611,14 @@ export class NamedPipeSink implements LogSink {
     }
 
     if (this.closing || this.closed) {
-      // After the level filter, never before it: an entry below `minLevel` was never
-      // going to be written, so it is not a line this sink failed to deliver and must not
-      // land in `droppedEntries` - or fire a `'close'` report for a `debug` line.
-      // Counted and said, not discarded quietly. `close()` waits up to `closeTimeoutMS`
-      // for the queue to drain, and everything logged in that window used to leave through
-      // this early return with nothing to show for it: `droppedEntries` unmoved, `onError`
-      // silent, `getHealth()` claiming a clean shutdown. `abandonQueueOnClose` counts the
-      // lines that were already queued; these are the ones refused at the door, and they
-      // went nowhere just the same.
-      this.countDropped('close');
-
-      // Once, for the reason the abandoned queue reports once: an application still
-      // logging through a thirty-second close would otherwise get a callback per line.
-      if (this.closeRefusalReport.claim(entry)) {
-        this.handleError(
-          'close',
-          new Error(
-            `Entry logged after close() began for ${this.pipePath}; it was not written, and further ones are counted in droppedEntries without being reported`,
-          ),
-          { disposition: 'lost', entry },
-        );
-      }
+      // Counted and said, not discarded quietly: `close()` waits up to `closeTimeoutMS`
+      // for the queue to drain, and a line logged in that window is one this sink did not
+      // deliver.
+      this.losses.refuseAfterClose(
+        entry,
+        () =>
+          `Entry logged after close() began for ${this.pipePath}; it was not written, and further ones are counted in droppedEntries without being reported`,
+      );
 
       return;
     }
@@ -738,8 +715,8 @@ export class NamedPipeSink implements LogSink {
       isHealthy:
         this.consecutiveFailures === 0 && this.isInitialized && !this.closing,
       queueSize: this.writeQueue.length,
-      droppedEntries: this.droppedEntries,
-      droppedByKind: { ...this.droppedByKind },
+      droppedEntries: this.losses.droppedEntries,
+      droppedByKind: this.losses.droppedByKind(),
       isInitialized: this.isInitialized,
       isReconnecting: this._isReconnecting,
       lastError: this.lastError,
@@ -994,87 +971,44 @@ export class NamedPipeSink implements LogSink {
     if (this.pipeStream && !this.pipeStream.destroyed) {
       const stream = this.pipeStream;
 
-      // What is left of the *whole* close's budget, not a fresh one. `closeTimeoutMS`
-      // counted from here on top of the drain loop above - which counts from `startTime`
-      // and spins its full length against a reader that has stalled - made a documented
-      // thirty-second bound a sixty-second one, which is the stall a shutdown timeout
-      // exists to prevent. Measured from `startTime`, so the init wait, the drain, and
-      // this flush share one deadline.
-      //
-      // Floored rather than allowed to reach zero. The drain loop exits on the same
-      // deadline, so a stalled reader arrives here with nothing left, and a `0` ms timer
-      // registered before `end()` is called in the same tick always wins the race against
-      // a `'finish'` that cannot fire synchronously - which would make the final flush
-      // unreachable for the very stream that has a reader again by the time it is asked.
-      // The floor is what the whole close can overshoot by, and it is a tenth of a second
-      // against a default of thirty.
-      const remainingCloseMS = Math.max(
-        MIN_CLOSE_FLUSH_MS,
+      // What is left of the *whole* close's budget, not a fresh one, so the init wait, the
+      // drain and this flush share one deadline. Bounded and floored as `endStreamWithin`
+      // describes: `end()` flushes before it calls back, and a FIFO with no reader cannot
+      // flush. Held open by its timer, since the caller is awaiting this close and the
+      // stream's own retries keep nothing alive: unreferenced, a stalled reader let the
+      // process exit before the report below went out.
+      await endStreamWithin(
+        stream,
         this.closeTimeoutMS - (Date.now() - startTime),
+        {
+          shouldUnref: false,
+          onAbandon: (bufferedBytes) => {
+            // Report buffered loss before close resolves: the write callbacks errored by
+            // destroy() can arrive later, after a shutdown handler has already exited.
+            // Callbacks count the entries, but the byte summary is their only report -
+            // which is why it is `'lost'`, where `FileSink`'s is `'no_entry'`: these
+            // bytes are lines the reader did not take, each counted as dropped.
+            if (bufferedBytes > 0 && !this.didReportPostCloseLoss) {
+              this.didReportPostCloseLoss = true;
+
+              this.handleError(
+                'close',
+                new Error(
+                  `Closed with ${String(bufferedBytes)} bytes still buffered for ${this.pipePath} (closeTimeoutMS=${String(this.closeTimeoutMS)}); the reader did not take them and they were not written`,
+                ),
+                { disposition: 'lost' },
+              );
+            }
+
+            this.closeAbandonedStreams.add(stream);
+          },
+          onEndError: (error) => {
+            this.handleError('close', error);
+          },
+        },
       );
 
-      return await new Promise<void>((resolve) => {
-        // Bounded, by `remainingCloseMS` above. Until this existed the close itself had no
-        // timeout at all - `closeTimeoutMS` covered only the wait for *initialization*. `end()` flushes before it calls back,
-        // and a FIFO with no reader cannot flush - so on the sink's most ordinary failure
-        // this callback never fired and `close()` never resolved, hanging whatever was
-        // shutting the process down. The timeout matters more now that the sink reopens on
-        // its own: a stream created during an outage is one `close()` will find here.
-        let isSettled = false;
-
-        const finish = (): void => {
-          if (isSettled) {
-            return;
-          }
-
-          isSettled = true;
-          clearTimeout(timeoutHandle);
-          this.pipeStream = undefined;
-          resolve();
-        };
-
-        const timeoutHandle = setTimeout(() => {
-          // Report buffered loss before close resolves: the write callbacks errored by
-          // destroy() can arrive later, after a shutdown handler has already exited.
-          // Callbacks count the entries, but the byte summary is their only report.
-          const bufferedBytes = stream.writableLength;
-
-          if (bufferedBytes > 0 && !this.didReportPostCloseLoss) {
-            this.didReportPostCloseLoss = true;
-
-            this.handleError(
-              'close',
-              new Error(
-                `Closed with ${String(bufferedBytes)} bytes still buffered for ${this.pipePath} (closeTimeoutMS=${String(this.closeTimeoutMS)}); the reader did not take them and they were not written`,
-              ),
-              { disposition: 'lost' },
-            );
-          }
-
-          this.closeAbandonedStreams.add(stream);
-
-          // Destroyed rather than left pending, so the descriptor is not held for the life
-          // of the process by a flush that is never going to happen.
-          try {
-            stream.destroy();
-          } catch {
-            // Nothing further to try; the sink is closing either way.
-          }
-
-          finish();
-        }, remainingCloseMS);
-
-        // Keep the process alive until an explicitly awaited close settles.
-
-        try {
-          stream.end(() => {
-            finish();
-          });
-        } catch (error) {
-          this.handleError('close', error);
-          finish();
-        }
-      });
+      this.pipeStream = undefined;
     }
   }
 
@@ -1087,28 +1021,15 @@ export class NamedPipeSink implements LogSink {
    * rather than vanishing: `droppedEntries` means the same thing here as at the queue cap
    * and at the end of an entry's retries.
    *
-   * Reported once, not once per entry, for the reason `enforceQueueLimit` reports once: a
-   * shutdown that abandons a full queue would otherwise fire the callback ten thousand
-   * times, on the way out of the process. `'close'` rather than `'write'`, so it is not
-   * counted against a connection that is being torn down anyway.
+   * Reported once, with the oldest entry as a sample; see {@link LossLedger.abandon}.
+   * `'close'` rather than `'write'`, so it is not counted against a connection that is
+   * being torn down anyway.
    */
   private abandonQueueOnClose(): void {
-    const abandoned = abandonQueuedEntries(this.writeQueue);
-
-    if (abandoned.count === 0) {
-      return;
-    }
-
-    this.countDropped('close', abandoned.count);
-
-    this.handleError(
-      'close',
-      new Error(
-        `Closed with ${String(abandoned.count)} entr${abandoned.count === 1 ? 'y' : 'ies'} still queued for ${this.pipePath}; they were not written`,
-      ),
-      // The oldest abandoned entry, as a sample, as `FileSink` reports it. Every entry in
-      // the queue was lost, so there is no surviving line to confuse this with.
-      { disposition: 'lost', entry: abandoned.entry },
+    this.losses.abandon(
+      this.writeQueue,
+      (count) =>
+        `Closed with ${describeEntryCount(count)} still queued for ${this.pipePath}; they were not written`,
     );
   }
 
@@ -1128,40 +1049,12 @@ export class NamedPipeSink implements LogSink {
    * Let go of a stream this sink will not write to again, without leaking its descriptor.
    *
    * `end()` first, so anything still buffered reaches a reader that is consuming, then
-   * `destroy()` on a timer for the one that is not - `end()`'s callback cannot fire on a
-   * FIFO that cannot flush, and the caller has already stopped waiting for it. The timer
-   * is unreferenced: this must not be a reason the process stays alive.
+   * `destroy()` after {@link MIN_CLOSE_FLUSH_MS} for the one that is not - `end()`'s
+   * callback cannot fire on a FIFO that cannot flush, and the caller does not wait for it.
+   * The timer is unreferenced: this must not be a reason the process stays alive.
    */
   private abandonStream(stream: fs.WriteStream): void {
-    let isSettled = false;
-
-    const destroy = (): void => {
-      if (isSettled) {
-        return;
-      }
-
-      isSettled = true;
-
-      try {
-        stream.destroy();
-      } catch {
-        // Nothing further to try; the sink has already let go of this stream.
-      }
-    };
-
-    const timer = setTimeout(destroy, MIN_CLOSE_FLUSH_MS);
-
-    timer.unref?.();
-
-    try {
-      stream.end(() => {
-        clearTimeout(timer);
-        destroy();
-      });
-    } catch {
-      clearTimeout(timer);
-      destroy();
-    }
+    void endStreamWithin(stream, MIN_CLOSE_FLUSH_MS, { shouldUnref: true });
   }
 
   /**
@@ -1706,13 +1599,10 @@ export class NamedPipeSink implements LogSink {
     try {
       this.drainQueue();
     } finally {
-      // A drained queue closes the reported episode. `queueFullReport` gates the report so
-      // an overflowing queue does not fire a callback per dropped line, but nothing else
-      // cleared it: a sink that overflowed during one brief outage, recovered, and
-      // overflowed again hours later stayed silent the second time. Reset only on an
-      // empty queue, so a pass that stopped short of draining does not re-arm the flood.
+      // A drained queue closes the reported overflow episode, so a sink that overflows
+      // again hours later says so again.
       if (this.writeQueue.length === 0) {
-        this.queueFullReport.reset();
+        this.losses.endOverflowEpisode();
       }
 
       this.isProcessing = false;
@@ -1797,7 +1687,7 @@ export class NamedPipeSink implements LogSink {
       // `writeQueue` and so was not among the ones that call reported. Under the kind it
       // is reported as: a caller that already reported it did so as a failed `'write'`,
       // and counting that under `'close'` split one loss across two words.
-      this.countDropped(wasReported ? 'write' : 'close');
+      this.losses.count(wasReported ? 'write' : 'close');
 
       // Each failed write needs its own final disposition for fallback consumers.
       // The write callback already reports known closed-sink losses; only synthesize
@@ -1824,7 +1714,7 @@ export class NamedPipeSink implements LogSink {
       queued.attempts >= this.maxRetries ||
       !this.hasRetryRoom()
     ) {
-      this.countDropped('write');
+      this.losses.count('write');
 
       if (!wasReported) {
         // Synthesized rather than re-reporting `lastError`, which may be an unrelated
@@ -2047,42 +1937,16 @@ export class NamedPipeSink implements LogSink {
   }
 
   /**
-   * Discard the oldest entries once the queue is over `maxQueueSize`.
-   *
-   * Reported once rather than per entry: an outage drops continuously, and a callback
-   * fired per line would be its own flood on a path already in trouble.
+   * Discard the oldest entries once the queue is over `maxQueueSize`, and report the first
+   * eviction of the episode as `'queue_full'` / `'lost'`, as `FileSink` reports it. See
+   * {@link LossLedger.evict}.
    */
   private enforceQueueLimit(): void {
-    const limit = this.maxQueueSize;
-
-    if (limit === undefined) {
-      return;
-    }
-
-    const dropped = evictQueuedEntries(this.writeQueue, limit);
-    this.countDropped('queue_full', dropped.count);
-
-    // Gated on an eviction this call made, not on the cumulative count.
-    // `droppedEntries` also counts entries given up on by `requeue` after their retries
-    // ran out, and those are not an overflow: reading the counter here reported a
-    // `'queue_full'` the queue never had and latched `queueFullReport` - so the real
-    // overflow that followed was suppressed until the queue next drained.
-    // A diagnostic's report goes only to the console, so it has a latch of its own:
-    // spending the owner's on it would silence the application entries dropped after it.
-    if (dropped.count === 0 || !this.queueFullReport.claim(dropped.entry)) {
-      return;
-    }
-
-    // `'queue_full'` and `'lost'`, as `FileSink` reports the same event. Sent as a
-    // `'write'` failure it was counted against the connection's health - which is fine -
-    // and carried the default `'no_entry'` disposition, which says the failure is about no
-    // particular line. It is about several: the oldest ones, and they are gone.
-    this.handleError(
-      'queue_full',
-      new Error(
+    this.losses.evict(
+      this.writeQueue,
+      this.maxQueueSize,
+      (limit) =>
         `Pipe queue is full (maxQueueSize=${limit}); dropping the oldest entries`,
-      ),
-      { disposition: 'lost', entry: dropped.entry },
     );
   }
 
@@ -2118,7 +1982,7 @@ export class NamedPipeSink implements LogSink {
       // failed renders reported three `format`/`lost` callbacks while `getHealth()` still
       // answered `{ isHealthy: true, queueSize: 0, droppedEntries: 0 }`, so an operator
       // polling health saw a sink in perfect condition that had delivered nothing.
-      this.countDropped('format');
+      this.losses.count('format');
 
       // The same guard `formatEntry` holds over a throwing `formatter`, for the half it
       // did not cover. That guard stops a formatter that throws from being reported
@@ -2194,7 +2058,7 @@ export class NamedPipeSink implements LogSink {
           }
 
           if (this.closeAbandonedStreams.has(stream)) {
-            this.countDropped('close');
+            this.losses.count('close');
             return;
           }
 
@@ -2221,7 +2085,7 @@ export class NamedPipeSink implements LogSink {
 
           // Never replay a record whose prefix may already have been consumed.
           if (wasPartiallyWritten) {
-            this.countDropped('write');
+            this.losses.count('write');
           } else {
             this.requeue(queued, !willRetry);
           }
@@ -2490,14 +2354,5 @@ export class NamedPipeSink implements LogSink {
   /** The console line for a failure, the one {@link handleError} falls back to. */
   private describeFailure(kind: SinkFailureKind, failure: Error): string {
     return `NamedPipeSink error (${kind}): ${describeError(failure)}`;
-  }
-
-  /**
-   * One more line this sink did not deliver, and why. The total and the breakdown move
-   * together so they cannot disagree.
-   */
-  private countDropped(kind: DroppedEntryKind, count = 1): void {
-    this.droppedEntries += count;
-    this.droppedByKind[kind] += count;
   }
 }

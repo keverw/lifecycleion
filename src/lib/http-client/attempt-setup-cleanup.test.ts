@@ -440,9 +440,9 @@ test.each(['body', 'header'] as const)(
     });
     await client.put('https://example.com/').json(body).send();
     expect(observed).toHaveLength(1);
-    // One build for the request's opening snapshot, one for the attempt; the
-    // failed attempt's snapshot adds none.
-    expect(serializations).toBe(2);
+    // One build, for the attempt: no snapshot is taken up front, and the failed
+    // attempt's snapshot adds none.
+    expect(serializations).toBe(1);
     if (failure === 'body') {
       // Reported as it came, without a second validate-and-clone.
       expect(observed[0]).toEqual({ body: null, rawBody: body });

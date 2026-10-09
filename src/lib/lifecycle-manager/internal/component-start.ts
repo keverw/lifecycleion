@@ -6,7 +6,7 @@ import {
   noop,
   observeRejection,
   queueMicrotaskSafely,
-} from '../../internal/intrinsics';
+} from '../../internal/promise-reactions';
 import { optionalValidatedTimerDelayMS } from '../../internal/timer-limits';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { describeError, toError } from '../../to-error';

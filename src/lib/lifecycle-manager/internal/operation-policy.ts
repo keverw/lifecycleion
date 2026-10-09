@@ -1,7 +1,7 @@
 import { describeError, toError } from '../../to-error';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { readMember } from '../../internal/read-member';
-import { observeRejection } from '../../internal/intrinsics';
+import { observeRejection } from '../../internal/promise-reactions';
 import type { LoggerService } from '../../logger/logger-service';
 import {
   isTimeoutValidationError,

@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import { adoptPromise } from './adopt-promise';
 import { safeHandleCallbackAndWait } from '../safe-handle-callback';
-import { observeRejection, queueMicrotaskSafely } from './intrinsics';
+import { observeRejection, queueMicrotaskSafely } from './promise-reactions';
 
 test('a native race over an adopted promise preserves a fulfilled value without reading its then again', async () => {
   let reads = 0;

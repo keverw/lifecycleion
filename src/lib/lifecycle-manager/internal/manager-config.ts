@@ -92,8 +92,9 @@ export function resolveManagerConfig(
     60000,
     'startupTimeoutMS',
   );
-  // Each field read once, off the caller's object itself: a spread copy dropped
-  // inherited and non-enumerable ones, so a class getter's timeout became the default.
+  // Each field read once, off the caller's object itself, so inherited and
+  // non-enumerable ones - a class getter's timeout - count like own fields; a spread
+  // copy would drop them.
   const {
     timeoutMS: shutdownTimeoutMS,
     retryStalled: shouldRetryStalled,

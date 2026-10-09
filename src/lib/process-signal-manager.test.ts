@@ -1841,7 +1841,8 @@ describe('ProcessSignalManager', () => {
     });
 
     test('an attach from inside setRawMode(false) does not have stdin paused under it', () => {
-      // `setRawMode()` is stdin's own code. One that attaches a new instance returns
+      // A caller's stdin 'error' listener runs inside a failed `setRawMode()` (see the
+      // next test); the mock attaches directly. An attach from there returns
       // into `restoreStdin` after its `isLastInstance` read, and only the live re-check
       // of the attached set keeps the pause from landing under that new instance.
       let replacement: ProcessSignalManager | undefined;
@@ -1876,6 +1877,68 @@ describe('ProcessSignalManager', () => {
         expect((process.stdin as any).isRaw).toBe(false);
         expect(readShared()?.rawModeOwner).toBeNull();
       } finally {
+        if (replacement?.isAttached) {
+          replacement.detach();
+        }
+        tty.restore();
+      }
+    });
+
+    test("an attach from a caller's stdin 'error' listener during a failed setRawMode(false) keeps its raw-mode claim", () => {
+      // Node's and Bun's `setRawMode()` report a failed mode change by emitting 'error'
+      // on stdin, synchronously, and leave `isRaw` as it was - so a caller's listener runs
+      // inside the restore. An attach from it adopts the raw mode still on, and the
+      // detach that was restoring must leave that claim alone rather than clear it.
+      let replacement: ProcessSignalManager | undefined;
+      let shouldFailDisable = true;
+      const tty = mockRawTTY(() => {
+        if (shouldFailDisable) {
+          shouldFailDisable = false;
+          process.stdin.emit('error', new Error('setRawMode failed'));
+          throw new Error('setRawMode failed');
+        }
+      });
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const failingSetRawMode = process.stdin.setRawMode;
+      // Like the real one: a failure is emitted, not thrown, and `isRaw` is unchanged.
+      (process.stdin as any).setRawMode = mock((enableRaw: boolean) => {
+        try {
+          failingSetRawMode.call(process.stdin, enableRaw);
+        } catch {
+          // Emitted above.
+        }
+        return process.stdin;
+      });
+      const onStdinError = (): void => {
+        replacement ??= new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        replacement.attach();
+      };
+      process.stdin.on('error', onStdinError);
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+        manager.detach();
+
+        expect(replacement?.isAttached).toBe(true);
+        expect(readShared()?.attachedInstances.size).toBe(1);
+        expect(tty.stdinCalls).not.toContain('pause');
+        expect((process.stdin as any).isRaw).toBe(true);
+        expect(readShared()?.rawModeEnabledByManager).toBe(true);
+        expect(attachedOwner()).not.toBeNull();
+
+        // The claim it kept is what lets its own detach restore the terminal.
+        replacement?.detach();
+        expect((process.stdin as any).isRaw).toBe(false);
+        expect(readShared()?.rawModeOwner).toBeNull();
+        expect(tty.stdinCalls.at(-1)).toBe('pause');
+      } finally {
+        process.stdin.off('error', onStdinError);
         if (replacement?.isAttached) {
           replacement.detach();
         }

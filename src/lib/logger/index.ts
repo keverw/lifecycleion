@@ -3,7 +3,7 @@ import {
   noop,
   observeRejection,
   queueMicrotaskSafely,
-} from '../internal/intrinsics';
+} from '../internal/promise-reactions';
 import { EventEmitter } from '../event-emitter';
 import { ms } from '../unix-time-helpers';
 import {

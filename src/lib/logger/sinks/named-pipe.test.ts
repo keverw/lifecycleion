@@ -4885,7 +4885,7 @@ test.each(['callback', 'throw', 'reentrant'] as const)(
     const state = sink as any;
     state.closing = true;
     // The overflow report has already gone out for this episode.
-    state.queueFullReport.claim(undefined);
+    state.losses.queueFullReport.claim(undefined);
     if (mode !== 'reentrant') {
       state.writeQueue.push(newer);
     }

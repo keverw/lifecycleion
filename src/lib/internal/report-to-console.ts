@@ -2,22 +2,24 @@ let isReporting = false;
 const CONSOLE_REPORT_STATE_KEY = Symbol.for('lifecycleion.reportToConsole.v1');
 
 /**
- * The shared `Set` once this copy has found or installed it. Every copy keeps a `Set` it
- * finds in the slot, so the first one there is the one every copy uses, and holding it
- * here spares each check - one per guarded callback, emit and report - a descriptor
- * read of the global.
+ * The `Set` this copy uses, once it has found, installed or given up on the shared one.
+ * Every copy keeps a `Set` it finds in the slot, so the first one there is the one every
+ * copy uses, and holding it here spares each check - one per guarded callback, emit and
+ * report - a descriptor read of the global.
  */
 let sharedState: Set<boolean> | undefined;
 
 /**
  * Share the console origin across bundled copies. A slot holding something other than a
- * `Set` is replaced when possible; otherwise the local guard still contains this copy's
- * synchronous re-entry, and the slot is tried again on the next check.
+ * `Set` is replaced when possible. When it is not - a frozen `globalThis`, a
+ * non-configurable property - no copy can ever install one, so this copy keeps a `Set` of
+ * its own instead, which contains only its own re-entry, and does not try the slot again.
  */
-function sharedConsoleState(): Set<boolean> | undefined {
+function sharedConsoleState(): Set<boolean> {
   if (sharedState !== undefined) {
     return sharedState;
   }
+  const state = new Set<boolean>();
   try {
     const existing: unknown = Object.getOwnPropertyDescriptor(
       globalThis,
@@ -27,20 +29,16 @@ function sharedConsoleState(): Set<boolean> | undefined {
       sharedState = existing as Set<boolean>;
       return sharedState;
     }
-    const state = new Set<boolean>();
-    if (
-      Reflect.defineProperty(globalThis, CONSOLE_REPORT_STATE_KEY, {
-        value: state,
-        configurable: true,
-        writable: true,
-      })
-    ) {
-      sharedState = state;
-    }
-    return sharedState;
+    void Reflect.defineProperty(globalThis, CONSOLE_REPORT_STATE_KEY, {
+      value: state,
+      configurable: true,
+      writable: true,
+    });
   } catch {
-    return undefined;
+    // Unshared, as for a refused definition.
   }
+  sharedState = state;
+  return state;
 }
 
 /** Capture this when queuing work so its failures cannot feed a console report back. */
@@ -48,8 +46,7 @@ export function isConsoleReportActive(): boolean {
   if (isReporting) {
     return true;
   }
-  const shared = sharedConsoleState();
-  return shared !== undefined && shared.has(true);
+  return sharedConsoleState().has(true);
 }
 
 /**
@@ -110,16 +107,14 @@ export function reportToConsole(...args: unknown[]): void {
     return;
   }
   const shared = sharedConsoleState();
-  if (shared !== undefined && shared.has(true)) {
+  if (shared.has(true)) {
     return;
   }
 
   // Include the property read: a console shim can log from its getter as well as its
   // function body. Queued reporters must also capture this state when work is created.
   isReporting = true;
-  if (shared !== undefined) {
-    shared.add(true);
-  }
+  shared.add(true);
 
   try {
     // eslint-disable-next-line no-console -- this function is the console rung itself
@@ -129,9 +124,7 @@ export function reportToConsole(...args: unknown[]): void {
     // missing `console`, a replaced `error` that is not a function, and a console that
     // throws on write all land here, and all of them are quieter than the alternative.
   } finally {
-    if (shared !== undefined) {
-      shared.delete(true);
-    }
+    shared.delete(true);
     isReporting = false;
   }
 }

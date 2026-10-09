@@ -1459,7 +1459,10 @@ The FileSink and NamedPipeSink `closeTimeoutMS` options use 30,000ms when omitte
 or `undefined`. Constructors reject negative values with `RangeError` and NaN or
 other non-number values with `TypeError` before starting initialization.
 Zero still allows each sink’s final-flush minimum;
-Infinity and oversized values clamp to 2,147,483,647ms.
+Infinity and oversized values clamp to 2,147,483,647ms. The final flush's deadline
+keeps the event loop alive until `close()` settles, so a report about bytes it gave up
+on is delivered before the process can exit. The flush a FileSink rotation waits on is
+bounded by the same `closeTimeoutMS` but does not hold the process open.
 
 The count options follow the same rule for values that are not numbers: `maxQueueSize`,
 `maxRetries`, and FileSink `maxSizeMB` use their defaults when omitted or `null`, and
