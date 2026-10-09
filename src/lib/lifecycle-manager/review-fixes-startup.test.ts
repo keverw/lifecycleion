@@ -202,4 +202,47 @@ describe('component start review fixes', () => {
       await logger.close();
     }
   });
+
+  test('a detach that throws after a crashed claim is reported on its own, not in place of the crash', async () => {
+    const { logger, manager } = setup({
+      attachSignalsBeforeStartup: true,
+      detachSignalsOnStop: true,
+    });
+    fakeSignals(manager);
+    const a = new Plain(logger, 'a');
+    await manager.registerComponent(a);
+    const core = coreOf(manager);
+    const settlements = core.startSettlements;
+    const recordStartAttempt = settlements.recordStartAttempt.bind(settlements);
+    const crash = new Error('claim bookkeeping exploded');
+    settlements.recordStartAttempt = (): never => {
+      throw crash;
+    };
+    const detachSignalsIfIdle = core.signals.detachSignalsIfIdle.bind(
+      core.signals,
+    );
+    core.signals.detachSignalsIfIdle = (trigger, options): void => {
+      if (trigger === 'crashed component startup') {
+        throw new Error('detach exploded');
+      }
+      detachSignalsIfIdle(trigger, options);
+    };
+
+    const { reports, release } = claimReports();
+    try {
+      const result = await manager.startComponent('a');
+      expect(result).toMatchObject({
+        success: false,
+        code: 'operation_crashed',
+        error: crash,
+      });
+      expect(hasReport(reports, 'crashed start signal detach')).toBe(true);
+      expect(manager.getComponentStatus('a')?.state).toBe('registered');
+    } finally {
+      settlements.recordStartAttempt = recordStartAttempt;
+      core.signals.detachSignalsIfIdle = detachSignalsIfIdle;
+      release();
+      await logger.close();
+    }
+  });
 });
