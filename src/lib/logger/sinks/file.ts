@@ -59,6 +59,22 @@ const ROTATION_RETRY_INITIAL_MS = 1000;
 const ROTATION_RETRY_MAX_MS = 30_000;
 
 /**
+ * How long a line waits before retrying a log file that could not be set up.
+ *
+ * A setup is a `mkdir`, an `access`, possibly a `writeFile`, and an `open`. Retried
+ * back-to-back, the retries buy no time for anything to recover - an `EMFILE`, a
+ * permission being fixed, a mount coming back - and a burst of lines against an
+ * unwritable `logDir` runs that whole sequence, and `onError`, `maxRetries + 1` times per
+ * line as fast as the disk will refuse it. A tenth of a second spaces one line's attempts
+ * across `maxRetries` tenths (300 ms under the default), which holds a dead destination to
+ * roughly a dozen setup attempts a second, while a destination that comes back holds the
+ * queue up for at most one interval. Flat rather than backed off, so the delay a line can
+ * add is exactly `maxRetries` times this. Shorter than `NamedPipeSink`'s one-second reopen
+ * cooldown because this one is paid per line, by a queue that waits behind it.
+ */
+const SETUP_RETRY_DELAY_MS = 100;
+
+/**
  * The rotation threshold this sink will honour, in megabytes.
  *
  * The sibling of `resolveMaxQueueSize` and `resolveMaxRetries`, and here for a sharper
@@ -347,6 +363,12 @@ export class FileSink implements LogSink {
    */
   private pendingOpenFailure?: { entry: QueuedEntry; failure: FileSinkError };
 
+  /**
+   * The pause {@link processQueue} is taking before it retries a failed setup, if any;
+   * see {@link waitBeforeSetupRetry}. `end` resumes it early.
+   */
+  private setupRetryWait?: { timer: NodeJS.Timeout; end: () => void };
+
   private closing = false;
   private closePromise?: Promise<void>;
   private closed = false;
@@ -574,6 +596,9 @@ export class FileSink implements LogSink {
     this.closing = true;
     // Publish ownership before any close-time callback can re-enter close().
     this.closePromise ??= deferClose(() => this.closeInternal());
+    // A setup retry paused for a destination to recover would spend the close's budget
+    // on that recovery. Resumed now, the drain retries on the closing rules instead.
+    this.endSetupRetryWait();
     return this.closePromise;
   }
 
@@ -965,6 +990,16 @@ export class FileSink implements LogSink {
             // aggregate queue-full notification has already been emitted.
             queuedEntry.attempts++;
             this.writeQueue.unshift(queuedEntry);
+
+            // A destination that could not be opened gets time to recover before the
+            // next attempt: see `SETUP_RETRY_DELAY_MS`. Not once `close()` has begun,
+            // since it ends the pause anyway. The entry waits in the queue rather than in
+            // flight, so a `close()` that gives up meanwhile abandons it with the rest of
+            // the queue instead of putting it back a second time.
+            if (kind === 'setup' && !this.closing) {
+              this.inFlightEntry = undefined;
+              await this.waitBeforeSetupRetry();
+            }
           } else {
             // Max retries exceeded - entry is lost
             //
@@ -995,6 +1030,39 @@ export class FileSink implements LogSink {
 
       this.isProcessing = false;
     }
+  }
+
+  /**
+   * Wait {@link SETUP_RETRY_DELAY_MS} before the next setup attempt, or until `close()`
+   * ends the wait.
+   *
+   * One at a time, since only `processQueue` waits here and only one pass runs. The timer
+   * is unreferenced, as a rotation's flush deadline is: a pause between attempts at a file
+   * this cannot open is no reason for the process to stay alive. `flush()` does not end
+   * it - a flush is not a shutdown, and one that retried at once would bring back the storm
+   * for anything flushing on an interval - so a flush waits it out within its own timeout.
+   */
+  private waitBeforeSetupRetry(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const timer = setTimeout(() => {
+        this.endSetupRetryWait();
+      }, SETUP_RETRY_DELAY_MS);
+      timer.unref?.();
+
+      this.setupRetryWait = { timer, end: resolve };
+    });
+  }
+
+  /** End the pause {@link waitBeforeSetupRetry} is taking, if any, and clear its timer. */
+  private endSetupRetryWait(): void {
+    const wait = this.setupRetryWait;
+    if (wait === undefined) {
+      return;
+    }
+
+    this.setupRetryWait = undefined;
+    clearTimeout(wait.timer);
+    wait.end();
   }
 
   /** The body of {@link flush}, run one at a time; see there. */

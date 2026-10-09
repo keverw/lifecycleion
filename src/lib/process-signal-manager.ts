@@ -360,6 +360,10 @@ export class ProcessSignalManager {
    * `process` 'newListener' or 'removeListener' listener, a stdin 'error' listener a
    * failed `setRawMode()` emits to - and a nested call on this instance must not
    * register or remove listeners under the one in progress.
+   *
+   * This only orders this instance's own calls. Who owns stdin raw mode and the
+   * keypress listener across instances (and duplicate module copies) is decided by the
+   * shared state on `globalThis`, which a deferred call goes through like any other.
    */
   private transition?: 'attach' | 'detach';
 

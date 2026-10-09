@@ -4529,3 +4529,207 @@ test('a refusal suppressed inside a console report leaves the one refusal report
     await directory.cleanup();
   }
 });
+
+describe('FileSink - setup retries wait for the destination', () => {
+  // A setup that failed was retried back-to-back, so the retries bought no time for the
+  // destination to recover, and a burst of lines against an unwritable directory ran the
+  // whole open path and `onError` `maxRetries + 1` times per line as fast as the disk
+  // refused it. Each setup retry now waits `SETUP_RETRY_DELAY_MS` (100 ms) first.
+  const SETUP_RETRY_DELAY_MS = 100;
+
+  let directory: TmpDir;
+
+  beforeEach(async () => {
+    directory = new TmpDir({
+      unsafeCleanup: true,
+      prefix: 'filesink-setup-retry-',
+    });
+    await directory.initialize();
+  });
+
+  afterEach(async () => {
+    await directory.cleanup();
+  });
+
+  const makeEntry = (message: string): LogEntry => ({
+    timestamp: Date.now(),
+    type: 'info',
+    template: message,
+    message,
+  });
+
+  /** A sink whose `logDir` sits under a regular file, so every `mkdir` fails. */
+  const makeUnopenableSink = async (
+    maxRetries: number,
+  ): Promise<{
+    sink: FileSink;
+    attempts: { failure: SinkFailure; at: number }[];
+  }> => {
+    const blocker = `${directory.path}/not-a-directory`;
+    await fsPromises.writeFile(blocker, '');
+
+    const attempts: { failure: SinkFailure; at: number }[] = [];
+    const sink = new FileSink({
+      logDir: `${blocker}/logs`,
+      basename: 'setup-retry',
+      maxRetries,
+      onError: (failure) => {
+        // The constructor's own failed setup belongs to no line.
+        if (failure.entry !== undefined) {
+          attempts.push({ failure, at: Date.now() });
+        }
+      },
+    });
+
+    // Past the constructor's failed setup, so the line's first attempt starts at once.
+    await sink.flush(1000);
+
+    return { sink, attempts };
+  };
+
+  const waitUntil = async (
+    condition: () => boolean,
+    timeoutMS = 2000,
+  ): Promise<void> => {
+    const deadline = Date.now() + timeoutMS;
+    while (!condition()) {
+      if (Date.now() > deadline) {
+        throw new Error('condition not met in time');
+      }
+      await new Promise((resolve) => setTimeout(resolve, 2));
+    }
+  };
+
+  test('each setup retry waits before trying again', async () => {
+    const { sink, attempts } = await makeUnopenableSink(2);
+
+    sink.write(makeEntry('spaced out'));
+    const result = await sink.flush(2000);
+
+    expect(
+      attempts.map(({ failure }) => [
+        failure.kind,
+        failure.attempt,
+        failure.disposition,
+      ]),
+    ).toEqual([
+      ['setup', 1, 'retrying'],
+      ['setup', 2, 'retrying'],
+      ['setup', 3, 'lost'],
+    ]);
+
+    // A little slack under the delay for timer granularity; back-to-back retries land
+    // within a millisecond or two of each other.
+    for (let index = 1; index < attempts.length; index++) {
+      const gap = attempts[index].at - attempts[index - 1].at;
+      expect(gap).toBeGreaterThanOrEqual(SETUP_RETRY_DELAY_MS - 10);
+    }
+
+    // Timing only: the line is still reported and counted as it was.
+    expect(result).toEqual({
+      success: false,
+      entriesWritten: 0,
+      entriesFailed: 1,
+      timedOut: false,
+    });
+    expect(sink.getHealth().droppedByKind.setup).toBe(1);
+    expect(sink.getHealth().consecutiveFailures).toBe(0);
+
+    await sink.close();
+  });
+
+  test('an ordinary write failure is still retried at once', async () => {
+    const attempts: number[] = [];
+    const sink = new FileSink({
+      logDir: directory.path,
+      basename: 'write-retry',
+      maxRetries: 3,
+      onError: (failure) => {
+        if (failure.entry !== undefined) {
+          attempts.push(Date.now());
+        }
+      },
+    });
+    await sink.flush(1000);
+
+    (sink as unknown as { writeEntry: () => Promise<void> }).writeEntry = () =>
+      Promise.reject(new Error('disk said no'));
+
+    sink.write(makeEntry('not delayed'));
+    await sink.flush(2000);
+
+    expect(attempts).toHaveLength(4);
+    expect(attempts[3] - attempts[0]).toBeLessThan(SETUP_RETRY_DELAY_MS);
+    expect(sink.getHealth().droppedByKind.write).toBe(1);
+
+    await sink.close();
+  });
+
+  test('close() ends the wait and drains on the closing rules', async () => {
+    const { sink, attempts } = await makeUnopenableSink(3);
+
+    sink.write(makeEntry('closed mid-wait'));
+    await waitUntil(() => attempts.length >= 1);
+
+    // Mid-wait: the first attempt failed and the second has not started.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(attempts).toHaveLength(1);
+    expect(sink.getHealth().queueSize).toBe(1);
+
+    const startedAt = Date.now();
+    await sink.close();
+
+    // Well inside the rest of the waits it would have sat out (70 + 100 + 100 ms).
+    expect(Date.now() - startedAt).toBeLessThan(150);
+
+    // The remaining retries ran during the drain, so the line ends as a setup loss.
+    expect(
+      attempts.map(({ failure }) => [failure.attempt, failure.disposition]),
+    ).toEqual([
+      [1, 'retrying'],
+      [2, 'retrying'],
+      [3, 'retrying'],
+      [4, 'lost'],
+    ]);
+    expect(sink.getHealth().droppedByKind).toMatchObject({
+      setup: 1,
+      close: 0,
+    });
+    expect(sink.getHealth().queueSize).toBe(0);
+    expect(
+      (sink as unknown as { setupRetryWait?: unknown }).setupRetryWait,
+    ).toBeUndefined();
+  });
+
+  test('flush() waits out a setup retry within its own timeout', async () => {
+    const { sink, attempts } = await makeUnopenableSink(2);
+
+    sink.write(makeEntry('flushed mid-wait'));
+    await waitUntil(() => attempts.length >= 1);
+
+    // A deadline shorter than the wait: nothing is lost yet, the line is still queued.
+    expect(await sink.flush(30)).toEqual({
+      success: false,
+      entriesWritten: 0,
+      entriesFailed: 0,
+      timedOut: true,
+    });
+    expect(sink.getHealth().queueSize).toBe(1);
+    expect(attempts).toHaveLength(1);
+
+    // A deadline that covers the waits sees the line out, once.
+    expect(await sink.flush(2000)).toEqual({
+      success: false,
+      entriesWritten: 0,
+      entriesFailed: 1,
+      timedOut: false,
+    });
+    expect(attempts.map(({ failure }) => failure.disposition)).toEqual([
+      'retrying',
+      'retrying',
+      'lost',
+    ]);
+
+    await sink.close();
+  });
+});
