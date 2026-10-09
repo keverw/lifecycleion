@@ -37,8 +37,8 @@ export function calculateExponentialDelay({
   // simply by enough attempts at an ordinary factor. Jitter then computed
   // `Infinity - Infinity`, which is `NaN`, and `clamp` is `Math.max`/`Math.min`, which
   // pass `NaN` straight through. A policy that reads as "back off to the maximum" would
-  // then hand the runner a `NaN` delay, which it can only treat as its 1ms minimum - a
-  // near-busy retry loop. Bounding the base here keeps every later arithmetic step
+  // then hand the runner a `NaN` delay, which its timer runs as about 1ms - a near-busy
+  // retry loop. Bounding the base here keeps every later arithmetic step
   // finite.
   if (!(delay <= maxTimeoutMS)) {
     delay = maxTimeoutMS;
@@ -56,8 +56,9 @@ export function calculateExponentialDelay({
   const clamped = clamp(delay, minTimeoutMS, maxTimeoutMS);
 
   // Last line of defence, so this function's contract is "a finite number" with no case
-  // left over. `clamp` cannot restore a `NaN`, and the runner turns a `NaN` delay into a
-  // 1ms timer - the busy-retry this whole guard exists to prevent.
+  // left over. `clamp` cannot restore a `NaN`, and the runner uses its delay as given, so
+  // a `NaN` becomes a timer of about 1ms - the busy-retry this whole guard exists to
+  // prevent.
   //
   // The bounds are tried in turn rather than trusting either: `RetryPolicy` refuses a
   // `NaN` timeout and clamps `Infinity` to the timer ceiling, so its bounds are always

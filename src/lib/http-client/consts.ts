@@ -87,18 +87,13 @@ export function validateRequestTimeoutMS(
 /**
  * The per-attempt timeout a request will actually run under.
  *
- * `HTTPClientConfig.timeout` and `HTTPRequestOptions.timeout` both document `<= 0` as
- * "disable the per-attempt timer", and that reading is kept. What used to be taken
- * literally is everything else a `number` can be: `NaN` - `Number(process.env.UNSET)` -
- * passed both the `> 0` check that arms the timer and the `<= 0` check that disables the
- * upload-settle wait, so the attempt ran with no timer while the wait re-armed a `NaN`
- * timer every millisecond and could never expire; `Infinity` did the same to the wait and
- * fired the attempt timer after 1 ms. `NaN` and non-nullish non-numbers fail clearly.
- * Null and undefined select the configured default.
- * `Infinity` is what a caller writes to mean "no timeout", and that is what `0` already
- * means, so it disables the timer rather than being bounded at a number nobody chose. A
- * finite value past {@link MAX_TIMER_MS} is clamped there, the closest wait a timer can
- * keep.
+ * Null and undefined select the configured default. `<= 0` disables the per-attempt
+ * timer, as `HTTPClientConfig.timeout` and `HTTPRequestOptions.timeout` document, and so
+ * does `Infinity`, which is what a caller writes to mean "no timeout". A finite value past
+ * {@link MAX_TIMER_MS} is clamped there, the closest wait a timer can keep. `NaN` and any
+ * non-nullish value that is not a number fail clearly: `NaN` - `Number(process.env.UNSET)`
+ * - fits neither "armed" nor "disabled", and would leave the attempt without a timer while
+ * the upload-settle wait could never expire.
  */
 export function resolveRequestTimeoutMS(
   requested: unknown,

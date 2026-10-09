@@ -858,8 +858,10 @@ diagnostic sinks, or the other regular sinks when no diagnostic sinks are config
 The failed sink is excluded. For example, a FileSink whose disk is full can report
 through a ConsoleSink or a remote sink without retrying that diagnostic in the same file.
 A FileSink or NamedPipeSink report's `message` names the sink, the failure kind, the target path and what became of
-the line (`retrying`, `lost`, attempt number), followed by the I/O error's text, for
-example `FileSink setup failed for /var/log/app (retrying): Failed to setup log file: ...`.
+the line (`retrying`, `lost`, attempt number; omitted for a failure about no particular
+line), followed by the I/O error's text, for example
+`FileSink write failed for /var/log/app/app.log (retrying, attempt 1): ...` or, for a log
+file that could not be set up at startup, `FileSink setup failed for /var/log/app: Failed to setup log file: ...`.
 A `'format'` failure's message omits the error text, which may come from entry content;
 read `diagnostic.error` for it. A muted ConsoleSink does not count as a destination for
 these reports: when it is the only other sink and no `'diagnostic'` listener is
@@ -1541,6 +1543,12 @@ Both queueing sinks, `FileSink` and `NamedPipeSink`, answer a failed write the s
   entry
 - a broken stream is reopened automatically on a later write, so neither sink needs an API
   call to recover
+- one difference: what an unopenable destination costs a line. A FileSink line whose log
+  file cannot be set up spends its retries on it, 100 ms apart, so a setup outage shows as
+  `setup` losses. A NamedPipeSink line spends none while the pipe is not open: lines wait
+  in the queue while the sink reopens it, about once a second, so a pipe outage shows as
+  `queue_full` evictions. A pipe's reader restarting is routine; a log file that cannot be
+  set up, as with `EACCES`, rarely recovers on its own
 - `minLevel` / `setMinLevel()` / `getMinLevel()` filter by level, defaulting to
   `LogLevel.INFO` as `ConsoleSink` does. A `raw` entry is always written
 - entries stay in the sink's own queue until the destination is genuinely writable, so the

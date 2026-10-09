@@ -185,28 +185,31 @@ export class StartupPreflight {
   ): StartupResult | undefined {
     // Stalled components this startup would skip (`ignoreStalledComponents`): they are
     // neither running nor left for it to start, so they count toward neither side.
-    const stalledToSkip = (): string[] =>
+    const stalledToSkip = (names: readonly string[]): string[] =>
       shouldIgnoreStalledComponents
-        ? this.core.manager
-            .getComponentNames()
-            .filter((name) => this.core.state.stalledComponents.has(name))
+        ? names.filter((name) => this.core.state.stalledComponents.has(name))
         : [];
 
     // All running - nothing to do. At least one: an empty registry was refused earlier,
     // and one whose components are all stalled is left to the startup itself to skip.
     if (
       runningCount > 0 &&
-      runningCount === totalCount - stalledToSkip().length
+      runningCount ===
+        totalCount - stalledToSkip(this.core.manager.getComponentNames()).length
     ) {
       this.core.logger.info('All components already running');
       // The sink can begin teardown or change registrations. Decide from the same
-      // post-log snapshot we return, rather than the count captured before it ran.
-      const startedComponents = this.core.startup.runningStartupSnapshot();
-      const skippedDueToStall = stalledToSkip();
+      // post-log snapshot we return, rather than the count captured before it ran: the
+      // registry's names, read once, for every part of it - not the overridable
+      // `getComponentNames()`, whose answer the count check could disagree with.
+      const names = this.core.state.components.map((component) =>
+        this.core.registry.nameOf(component),
+      );
+      const startedComponents = this.core.startup.runningStartupSnapshot(names);
+      const skippedDueToStall = stalledToSkip(names);
       const isStillAllRunning =
         startedComponents.length > 0 &&
-        startedComponents.length ===
-          this.core.state.components.length - skippedDueToStall.length &&
+        startedComponents.length === names.length - skippedDueToStall.length &&
         !this.core.shutdownPass.isShuttingDown &&
         !this.core.state.isStarting;
       return {

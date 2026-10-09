@@ -40,6 +40,56 @@ test.each(['shouldWaitForCompletion', 'shouldAbortRunning'] as const)(
   },
 );
 
+test('run and resume refuse a non-boolean shouldWaitForCompletion as forceTry does', async () => {
+  let calls = 0;
+  const runner = new RetryRunner(
+    { strategy: 'fixed', delayMS: 60_000, maxRetryAttempts: 3 },
+    (report) => {
+      calls++;
+      if (calls === 1) {
+        report('error', new Error('first attempt'));
+      } else {
+        report('success');
+      }
+    },
+  );
+  const invalidValues: unknown[] = [null, 1, 'false', {}];
+
+  for (const value of invalidValues) {
+    const result = await runner.run(value as boolean);
+    expect(result).toMatchObject({
+      status: 'pre_operation_error',
+      code: 'unexpected_error',
+    });
+    if (result.status === 'pre_operation_error') {
+      expect(result.error).toMatchObject({ invokedMethod: 'run' });
+      expect(
+        (result.error as { originalError: Error }).originalError,
+      ).toBeInstanceOf(TypeError);
+    }
+  }
+  expect(calls).toBe(0);
+  expect(runner.runnerState).toBe('not-started');
+
+  // The first attempt fails and schedules a retry; cancelling it leaves `stopped`.
+  expect(await runner.run()).toEqual({ status: 'running' });
+  expect(await runner.cancel()).toBe('canceled');
+  expect(runner.runnerState).toBe('stopped');
+
+  for (const value of invalidValues) {
+    expect(await runner.resume(value as boolean)).toMatchObject({
+      status: 'pre_operation_error',
+      code: 'unexpected_error',
+      error: { invokedMethod: 'resume' },
+    });
+  }
+  expect(calls).toBe(1);
+  expect(runner.runnerState).toBe('stopped');
+  expect(await runner.resume(true)).toMatchObject({
+    status: 'attempt_success',
+  });
+});
+
 test('a non-Error thrown by a forceTry option getter is wrapped on originalError', async () => {
   const runner = new RetryRunner(policy, (report) => {
     report('success');

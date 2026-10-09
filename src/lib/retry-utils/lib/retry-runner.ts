@@ -9,7 +9,7 @@ import { isPlainObject } from '../../is-plain-object';
 import { isFunction } from '../../is-function';
 import { toError } from '../../to-error';
 import { RetryPolicy } from './retry-policy';
-import { clampTimerDelayMS, toTimerDelayMS } from '../../internal/timer-limits';
+import { toTimerDelayMS } from '../../internal/timer-limits';
 import type {
   RetryPolicyOptions,
   RetryPolicyValidated,
@@ -444,12 +444,15 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
   public async cancel(): Promise<CancelResult> {
     // Stop intent is recorded whatever this call then returns, as reset() records it.
-    // An abort listener that reports fatal (or exhausts the budget) and then cancels has
+    // Only abortAttemptAndReadOwnership() reads it, comparing the token across its own
+    // synchronous abort dispatch, so outside that window the change is inert. Inside it,
+    // an abort listener that reports fatal (or exhausts the budget) and then cancels has
     // already ended the operation, so there is nothing left to cancel and this returns
     // 'not-running' - but the forceTry({ shouldAbortRunning: true }) that dispatched the
-    // abort must still not start a replacement its caller just asked to stop. A committed
-    // success is the one exception: forceTry() can never revive a completed operation,
-    // and it reports that more precisely as already_completed.
+    // abort must still not start a replacement its caller just asked to stop. The runner
+    // is terminal there just as it is when idle, so the token changes on every call. A
+    // committed success is the one exception: forceTry() can never revive a completed
+    // operation, and it reports that more precisely as already_completed.
     if (!this.policy.wasSuccessful) {
       this.stopRequestToken = Symbol();
     }
@@ -746,6 +749,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     shouldWaitForCompletion: boolean,
   ): RunResult<T> | Promise<RunResult<T>> {
     return this.dispatchUnderLock('run', () => {
+      assertWaitOption('run', shouldWaitForCompletion);
       // check if in a disallowed state for this operation
       const checkDisallowedStates = this.checkForDisallowedPerOperationStates(
         'run',
@@ -782,6 +786,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     shouldWaitForCompletion: boolean,
   ): RunResult<T> | Promise<RunResult<T>> {
     return this.dispatchUnderLock('resume', () => {
+      assertWaitOption('resume', shouldWaitForCompletion);
       // check if in a disallowed state for this operation
       const checkDisallowedStates = this.checkForDisallowedPerOperationStates(
         'resume',
@@ -869,7 +874,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
             : {
                 status: 'pre_operation_error',
                 code: 'force_try_superseded',
-                error: new RetryUtilsErrRunnerForceTrySuperseded(),
+                error: new RetryUtilsErrRunnerForceTrySuperseded('forceTry'),
               };
         }
         const afterAbort = this.checkForDisallowedPerOperationStates(
@@ -1352,16 +1357,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
             // branch. A listener can still force the next attempt synchronously
             // during that publication; timer-driven retries wait for dispatch to end.
             //
-            // Bounded again here, not only in `RetryPolicy`. `this.policy` is always a
-            // `RetryPolicy` this runner built, whose delays are already finite, capped and at
-            // least 1ms, so this is a backstop: a `setTimeout` past `MAX_TIMER_MS` fires on
-            // the next tick, turning "wait a month" into a busy retry loop.
-            // `clampTimerDelayMS` does not repair `NaN`, so that case takes `RetryPolicy`'s
-            // 1ms minimum. The same value is recorded, so the remaining-time bookkeeping
-            // describes the timer that actually exists.
-            const delayMS = Number.isNaN(shouldRetryQuery.delayMS)
-              ? 1
-              : clampTimerDelayMS(shouldRetryQuery.delayMS);
+            // Used as given: `this.policy` is always a `RetryPolicy` this runner built, and
+            // every delay it grants is finite, at least 1ms and at most `MAX_TIMER_MS`.
+            const delayMS = shouldRetryQuery.delayMS;
 
             this.currentState.retryTimeoutStartTime = Date.now();
             this.currentState.retryTimeoutDelayMS = delayMS;
@@ -1600,5 +1598,18 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         );
       }
     }
+  }
+}
+
+/**
+ * Refuse a `shouldWaitForCompletion` that is not a boolean, as `forceTry()` refuses its
+ * options: thrown inside `dispatchUnderLock`, so it resolves as `unexpected_error` before
+ * any state is inspected or work is started, rather than truthiness deciding a `'yes'`.
+ */
+function assertWaitOption(method: 'run' | 'resume', value: unknown): void {
+  if (typeof value !== 'boolean') {
+    throw new TypeError(
+      `${method}() shouldWaitForCompletion must be a boolean when provided`,
+    );
   }
 }

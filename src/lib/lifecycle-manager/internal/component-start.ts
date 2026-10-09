@@ -168,7 +168,7 @@ class StartRun {
     // The bulk startup's budget left at the claim, when it runs under one.
     public readonly bulkBudgetMS: number | undefined,
     public readonly startAttemptToken: string,
-    public readonly settlement: StartSettlement | undefined,
+    public readonly settlement: StartSettlement,
   ) {}
 }
 
@@ -255,17 +255,12 @@ export class ComponentStart {
           return crashResult;
         }
 
-        const stopResult =
-          await this.core.componentStop.stopComponentInternal(name);
+        const stopOutcome = await this.stopAfterFailedStart(name);
 
         return crashedComponentResult(
           name,
           toError(error),
-          `Start failed unexpectedly after the component was running: ${describeError(error)}; ${
-            stopResult.success
-              ? 'component stopped again'
-              : `stopping it again also failed: ${stopResult.reason ?? 'unknown reason'}`
-          }`,
+          `Start failed unexpectedly after the component was running: ${describeError(error)}; ${stopOutcome}`,
           'operation_crashed',
         );
       }
@@ -281,6 +276,30 @@ export class ComponentStart {
         }
       }
     }
+  }
+
+  /**
+   * Stop again a component whose start failed once it was running, and say how that
+   * went, for the failed start's reason. Not when caller code the failure ran - a
+   * `started` listener, a log sink, a host error listener for the crash report - already
+   * began stopping it or took it down: that stop owns it, and stopping it again would
+   * only fail as already stopping or not running. The check itself runs no caller code.
+   */
+  public async stopAfterFailedStart(name: string): Promise<string> {
+    if (!this.core.registry.isComponentUp(name)) {
+      const state = this.core.state.componentStates.get(name);
+
+      return state === 'stopping' || state === 'force-stopping'
+        ? 'another stop is already stopping it'
+        : 'it was no longer running';
+    }
+
+    const stopResult =
+      await this.core.componentStop.stopComponentInternal(name);
+
+    return stopResult.success
+      ? 'component stopped again'
+      : `stopping it again also failed: ${stopResult.reason ?? 'unknown reason'}`;
   }
 
   /**
@@ -1012,6 +1031,15 @@ export class ComponentStart {
         component,
         startAttemptToken,
       );
+      // Published by `startComponentInternal()` before this attempt began, and withdrawn
+      // only once it settles or by a removal of its registration - which the rechecks
+      // above refused, and which refuses a component claimed `starting`, with nothing
+      // awaited since the claim. A gap here is a broken invariant, not a state to run on.
+      if (settlement === undefined) {
+        throw new Error(
+          `Start settlement for "${name}" was withdrawn before its attempt was recorded`,
+        );
+      }
 
       return new StartRun(
         name,
@@ -1168,17 +1196,15 @@ export class ComponentStart {
     // before `start()` sees it, so a listener the component adds cannot throw out of
     // that abort.
     const startAbort = createHookAbortController(name, 'start');
-    if (settlement) {
-      settlement.interruptStart = (reason): boolean => {
-        if (abort.cause !== undefined || !settlement.rawStartPending) {
-          return false;
-        }
-        abort.cause = 'shutdown';
-        abort.shutdownReason = reason;
-        abortHookSignal(startAbort, reason, name, 'start');
-        return true;
-      };
-    }
+    settlement.interruptStart = (reason): boolean => {
+      if (abort.cause !== undefined || !settlement.rawStartPending) {
+        return false;
+      }
+      abort.cause = 'shutdown';
+      abort.shutdownReason = reason;
+      abortHookSignal(startAbort, reason, name, 'start');
+      return true;
+    };
 
     return startAbort;
   }
@@ -1204,17 +1230,13 @@ export class ComponentStart {
     // `queueMissedShutdownCue()`.
     const startAbortRequest = this.core.state.pendingStartAbortRequest;
     const shutdownTokenBeforeStartHook = this.core.state.shutdownToken;
-    if (settlement) {
-      this.core.state.invokingStarts.add(settlement);
-    }
+    this.core.state.invokingStarts.add(settlement);
     // A `start` getter that throws has not run `start()`: it is a crash of this
     // attempt (`operation_crashed`, reported), not a failed hook (`error`).
     let didReadStartHook = false;
     let didRawStartObservationFail = false;
     try {
-      if (settlement) {
-        settlement.rawStartPending = true;
-      }
+      settlement.rawStartPending = true;
       const startHook: unknown = Reflect.get(component, 'start');
       didReadStartHook = true;
       const rawStart = Reflect.apply(
@@ -1229,37 +1251,31 @@ export class ComponentStart {
         onObservationFailure: (error) => {
           adoptionFailure = { error };
         },
-        onSettled: settlement
-          ? (): void =>
-              this.core.startSettlements.markRawStartSettled(settlement, claim)
-          : undefined,
+        onSettled: (): void =>
+          this.core.startSettlements.markRawStartSettled(settlement, claim),
       });
-      if (settlement) {
-        if (adoptionFailure) {
-          observeRejection(startPromise, noop);
-          didRawStartObservationFail = true;
-          this.recoverStartObservation(
-            run,
-            settlement,
-            startAbort,
-            rawStart,
-            adoptionFailure.error,
-          );
-          throw adoptionFailure.error;
-        }
-        // Later setup can fail before it installs the deadline wait.
+      if (adoptionFailure) {
         observeRejection(startPromise, noop);
+        didRawStartObservationFail = true;
+        this.recoverStartObservation(
+          run,
+          settlement,
+          startAbort,
+          rawStart,
+          adoptionFailure.error,
+        );
+        throw adoptionFailure.error;
       }
+      // Later setup can fail before it installs the deadline wait.
+      observeRejection(startPromise, noop);
     } catch (error) {
       if (!didRawStartObservationFail) {
-        settlement?.settleRawStart();
+        settlement.settleRawStart();
       }
       run.didStartHookFail = didReadStartHook;
       throw error;
     } finally {
-      if (settlement) {
-        this.core.state.invokingStarts.delete(settlement);
-      }
+      this.core.state.invokingStarts.delete(settlement);
     }
 
     this.queueMissedShutdownCue(
@@ -1364,7 +1380,6 @@ export class ComponentStart {
     // `invokeStartHook()` attached: a `start()` that settled synchronously has cleared
     // `rawStartPending` by then, and a settled start is not aborted.
     if (
-      settlement !== undefined &&
       startAbortRequest !== undefined &&
       startAbortRequest.shutdownToken === shutdownTokenBeforeStartHook &&
       run.shutdownTokenAtStart !== shutdownTokenBeforeStartHook &&
@@ -1437,7 +1452,7 @@ export class ComponentStart {
           this.monitorLateStart(run, startPromise);
           // Only this timer path abandons an unresolved start. The other
           // monitor call handles an already fulfilled start and must join cleanup.
-          settlement?.abandon();
+          settlement.abandon();
         }
         // After the bookkeeping above, so abort listeners (the component's code)
         // find the abandonment and any late cleanup already arranged. Aborted

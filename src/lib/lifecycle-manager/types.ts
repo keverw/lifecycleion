@@ -301,7 +301,7 @@ export interface UnregisterComponentResult extends BaseOperationResult {
   /** More detail when stop_failed occurs */
   stopFailureReason?: UnregisterStopFailureReason;
 
-  /** Whether the component was stopped before unregistering */
+  /** Whether this call stopped the component before unregistering it */
   wasStopped: boolean;
 
   /** Whether the component was found in registry */

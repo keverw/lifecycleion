@@ -8,6 +8,7 @@
 
 import { reportCallbackError, runCallbackSafely } from './safe-handle-callback';
 import { renderName } from './internal/render-name';
+import { isNullish } from './internal/is-nullish';
 
 type EventCallback<T = unknown> = (data: T) => void | Promise<void>;
 
@@ -113,14 +114,15 @@ export class EventEmitterProtected {
 
   /**
    * Remove all event listeners
-   * @param event Optional event name. If `undefined`, removes all listeners for all events;
-   * any other value (`''` included) removes only the listeners for that event
+   * @param event Optional event name. If `undefined` (or `null`, from JavaScript), removes
+   * all listeners for all events; any other value (`''` included) removes only the
+   * listeners for that event
    */
   public clear(event?: string): void {
-    if (event !== undefined) {
-      this.events.delete(event);
-    } else {
+    if (isNullish(event)) {
       this.events.clear();
+    } else {
+      this.events.delete(event);
     }
   }
 

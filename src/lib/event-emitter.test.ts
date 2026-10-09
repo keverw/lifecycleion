@@ -491,6 +491,25 @@ test('clear accepts an empty event name without removing other events', () => {
   expect(emitter.hasListeners('other')).toBe(true);
 });
 
+test('clear treats null like undefined and removes every event', () => {
+  const emitter = new EventEmitter();
+  emitter.on('a', () => {});
+  emitter.on('b', () => {});
+  emitter.clear(null as unknown as string);
+  expect(emitter.hasListeners('a')).toBe(false);
+  expect(emitter.hasListeners('b')).toBe(false);
+});
+
+test('clear removes only the named event for a falsy non-nullish name', () => {
+  const emitter = new EventEmitter();
+  const zero = 0 as unknown as string;
+  emitter.on(zero, () => {});
+  emitter.on('other', () => {});
+  emitter.clear(zero);
+  expect(emitter.hasListeners(zero)).toBe(false);
+  expect(emitter.hasListeners('other')).toBe(true);
+});
+
 test('async listeners entered by console forwarding do not restart diagnostics', async () => {
   const emitter = new EventEmitter();
   let calls = 0;

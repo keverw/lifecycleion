@@ -2,20 +2,20 @@ import { expect, spyOn, test } from 'bun:test';
 import { EventEmitter } from 'node:events';
 import * as http from 'node:http';
 import { NodeAdapter } from './node-adapter';
-import { REQUEST_BODY_SETTLED_KEY } from '../consts';
 import type { AdapterRequest, WritableLike } from '../types';
 
 test.each(['string', 'bytes', 'multipart'] as const)(
-  '%s upload whose signal refuses its abort-state read rejects with the refusal',
+  '%s upload whose signal refuses its abort-state read fails with the write error',
   async (kind) => {
+    // The refusal reads as "not aborted", so the write failure - the real one - answers
+    // the request and `requestBodySettled`, rather than the getter's error standing in
+    // for it.
     const writeFailure = new Error('request end failed');
-    const handlerFailure = new Error(
-      'signal aborted getter failed during recovery',
-    );
     let hasWriteFailed = false;
     const req = Object.assign(new EventEmitter(), {
       destroyed: false,
       setHeader() {},
+      getHeaders: () => ({}),
       write(_data: unknown, callback?: (error: Error | null) => void) {
         callback?.(null);
         return true;
@@ -52,13 +52,13 @@ test.each(['string', 'bytes', 'multipart'] as const)(
             : kind === 'bytes'
               ? new TextEncoder().encode('payload')
               : 'payload',
-        // The request itself is read once, when `send()` is called, so the throw that
-        // reaches the recovery handler comes from the signal's own `aborted`, which a
-        // signal that is not a native `AbortSignal` can still refuse at any read.
+        // The request itself is read once, when `send()` is called, so the throw comes
+        // from the signal's own `aborted`, which a signal that is not a native
+        // `AbortSignal` can still refuse at any read.
         signal: {
           get aborted() {
             if (hasWriteFailed) {
-              throw handlerFailure;
+              throw new Error('signal aborted getter refused');
             }
             return false;
           },
@@ -69,7 +69,7 @@ test.each(['string', 'bytes', 'multipart'] as const)(
       const pending = new NodeAdapter().send(request);
       let deadline: ReturnType<typeof setTimeout> | undefined;
       try {
-        const bounded = Promise.race([
+        const response = await Promise.race([
           pending,
           new Promise<never>((_resolve, reject) => {
             deadline = setTimeout(
@@ -78,19 +78,14 @@ test.each(['string', 'bytes', 'multipart'] as const)(
             );
           }),
         ]);
-        const failure = await bounded.then(
-          () => undefined,
-          (error: unknown) => error,
-        );
-        expect(failure).toBe(handlerFailure);
+        expect(response.status).toBe(0);
+        expect(response.isTransportError).toBe(true);
+        expect(response.errorCause).toBe(writeFailure);
+        expect(await response.requestBodySettled).toBe(writeFailure);
       } finally {
         clearTimeout(deadline);
       }
-      // Delivered as the rejection, so not reported on the host channel a second time.
       expect(reports).toHaveLength(0);
-      const outcome = Reflect.get(handlerFailure, REQUEST_BODY_SETTLED_KEY);
-      expect(outcome).toBeDefined();
-      expect(await outcome).toBe(writeFailure);
       expect(req.destroyed).toBe(true);
     } finally {
       globalThis.removeEventListener('error', onError);
@@ -100,6 +95,66 @@ test.each(['string', 'bytes', 'multipart'] as const)(
   },
   1000,
 );
+
+test('a socket error before a response behind a refusing signal fails with the socket error', async () => {
+  // The request `'error'` handler reads the signal guarded; a refusal reads as "not
+  // aborted", so the reset itself answers the request and `requestBodySettled`.
+  const reset = Object.assign(new Error('read ECONNRESET'), {
+    code: 'ECONNRESET',
+  });
+  let isSignalRefusing = false;
+  const req = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    writableEnded: false,
+    setHeader() {},
+    getHeaders: () => ({}),
+    // Never calls back: the upload is still going out when the socket resets.
+    write() {
+      return true;
+    },
+    end() {
+      this.writableEnded = true;
+    },
+    destroy() {
+      this.destroyed = true;
+      return this;
+    },
+  });
+  const requestSpy = spyOn(http, 'request').mockImplementation(
+    () => req as unknown as http.ClientRequest,
+  );
+  try {
+    const pending = new NodeAdapter().send({
+      requestURL: 'http://example.test/upload',
+      method: 'POST',
+      headers: {},
+      body: 'payload',
+      signal: {
+        get aborted() {
+          if (isSignalRefusing) {
+            throw new Error('aborted getter refused');
+          }
+          return false;
+        },
+        addEventListener() {},
+        removeEventListener() {},
+      } as unknown as AbortSignal,
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    isSignalRefusing = true;
+    req.emit('error', reset);
+
+    const response = await pending;
+    expect(response.status).toBe(0);
+    expect(response.isTransportError).toBe(true);
+    expect(response.errorCause).toBe(reset);
+    expect(await response.requestBodySettled).toBe(reset);
+  } finally {
+    requestSpy.mockRestore();
+  }
+});
 
 test('an unexpected response-task failure aborts the stream and frees the connection', async () => {
   // Nothing on the response path is meant to throw past its own `catch`, so the failure

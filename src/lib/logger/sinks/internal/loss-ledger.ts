@@ -116,7 +116,8 @@ export class LossLedger {
     limit: number | undefined,
     message: (limit: number) => string,
   ): void {
-    if (limit === undefined) {
+    // Every enqueue comes through here, so a queue within its cap allocates nothing.
+    if (limit === undefined || queue.length <= limit) {
       return;
     }
 

@@ -530,9 +530,10 @@ describe('FileSink', () => {
 
     expect(failures.length).toBeGreaterThanOrEqual(1);
     expect(failures[0]?.kind).toBe('setup');
-    // Nothing is lost here: the queue still holds every entry and a later write tries the
-    // setup again, so a fallback consumer must not write a duplicate copy.
-    expect(failures[0]?.disposition).toBe('retrying');
+    // Nothing is lost here and no line is at stake: the queue still holds every entry and
+    // a later write tries the setup again, so a fallback consumer has nothing to write.
+    expect(failures[0]?.disposition).toBe('no_entry');
+    expect(Object.hasOwn(failures[0] ?? {}, 'entry')).toBe(false);
     expect(sink.getHealth().lastError).toBeDefined();
 
     await sink.close();
@@ -3648,6 +3649,11 @@ describe('FileSink - entries written during close', () => {
     expect(sink.getHealth().droppedEntries).toBe(1);
     expect(sink.getHealth().droppedByKind.close).toBe(1);
     expect(sink.getHealth().lastError?.message).toContain('still queued');
+    // Its pass is over, so the sink no longer holds the entry or its params.
+    expect(
+      (sink as unknown as { abandonedInFlightEntry?: unknown })
+        .abandonedInFlightEntry,
+    ).toBeUndefined();
   });
 
   test('close() reports the write it gave up on, and does not call it a clean shutdown', async () => {

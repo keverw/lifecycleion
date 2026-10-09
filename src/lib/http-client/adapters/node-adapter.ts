@@ -991,28 +991,25 @@ export class NodeAdapter implements HTTPAdapter {
       };
 
       /**
-       * Whether the caller's signal has aborted, read guarded - or, when the read itself
-       * throws before a response has arrived, the refusal, which the caller then fails
-       * the request with.
+       * Whether the caller's signal has aborted, read guarded: a read that throws counts
+       * as "not aborted".
        *
        * The signal is the caller's, and one that is not a native `AbortSignal` can refuse
        * the read. Both readers run where a throw escapes - `req.on('error')` as an emitter
        * listener, the write task's failure handler as caller-unobserved recovery - so the
-       * read is guarded once, here, and both answer it the same way. Before a response the
-       * refusal is the failure: nothing else is answering. After one it reads as "not
-       * aborted": the response path is answering, a real abort still reaches the request
-       * through its own listener, and what follows - a pending stream setup's
-       * `failOnSocketError`, the write failure reported by
-       * `reportWriteErrorAfterResponse` - still runs. Failing the request with the
-       * refusal there instead left a pending `streamResponse` factory's signal unfired,
-       * and answered `requestBodySettled` with the getter's error in place of the
-       * socket's own.
+       * read is guarded once, here. Both readers hold a real failure of their own - the
+       * socket's error, or the body write's - and a refusal read as "not aborted" lets
+       * that failure answer the request and `requestBodySettled`, where the getter's
+       * error would have discarded it. A real abort still reaches the request through
+       * its own listener, and once a response has arrived what follows - a pending stream
+       * setup's `failOnSocketError`, the write failure reported by
+       * `reportWriteErrorAfterResponse` - still runs.
        */
-      const readIsAborted = (): boolean | Error => {
+      const readIsAborted = (): boolean => {
         try {
           return request.signal?.aborted === true;
-        } catch (readError) {
-          return didReceiveResponse ? false : normalizeError(readError);
+        } catch {
+          return false;
         }
       };
 
@@ -1630,17 +1627,20 @@ export class NodeAdapter implements HTTPAdapter {
           });
         })();
         observeTaskFailure(responseTask, (error: unknown) => {
-          // Taken before the reject below, which marks the request settled either way.
-          const wasAnswered = didSettleRequest;
+          // Already answered, so the host channel is the only place the failure can go.
+          // Checked before `failRequest`, whose reject is then a no-op but which would
+          // still settle the upload with this error and take off the abort listener an
+          // early-ack upload still needs. The response's `'close'` handler owns
+          // teardown, as it does in `observeTaskFailure`'s recovery, and firing the
+          // factory's signal now would run its abort cleanup over a stream that
+          // completed.
+          if (didSettleRequest) {
+            reportCallbackError('NodeAdapter response task', error);
 
-          failRequest(normalizeError(error));
-
-          // Already answered: the response's `'close'` handler owns teardown, as it does
-          // in `observeTaskFailure`'s recovery, and firing the factory's signal now would
-          // run its abort cleanup over a stream that completed.
-          if (wasAnswered) {
             return;
           }
+
+          failRequest(normalizeError(error));
 
           // Every exit the task means to take tears down what it opened. One it did not
           // mean to take - a throw out of code with no `catch` of its own - left the
@@ -1653,18 +1653,10 @@ export class NodeAdapter implements HTTPAdapter {
 
       // Network / transport errors (DNS failure, connection refused, cert errors)
       req.on('error', (error) => {
-        // Read guarded: this runs as an emitter listener, where a throw is an uncaught
+        // Abort signal fired before network error — priorities the abort path. Read
+        // guarded: this runs as an emitter listener, where a throw is an uncaught
         // exception and the request never settles. See `readIsAborted`.
-        const isAborted = readIsAborted();
-
-        if (isAborted instanceof Error) {
-          failRequest(isAborted);
-
-          return;
-        }
-
-        // Abort signal fired before network error — priorities the abort path
-        if (isAborted) {
+        if (readIsAborted()) {
           const abortErr = new Error('Request aborted');
           abortErr.name = 'AbortError';
           failRequest(abortErr);
@@ -1883,16 +1875,7 @@ export class NodeAdapter implements HTTPAdapter {
         //
         // Read guarded, as `req.on('error')` reads it, so the write failure is reported
         // below rather than escaping to `observeTaskFailure`. See `readIsAborted`.
-        const isAborted = readIsAborted();
-
-        if (isAborted instanceof Error) {
-          destroyRequestQuietly(req);
-          failRequest(isAborted);
-
-          return;
-        }
-
-        if (isAborted) {
+        if (readIsAborted()) {
           destroyRequestQuietly(req);
 
           const abortErr = new Error('Request aborted');

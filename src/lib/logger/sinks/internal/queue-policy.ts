@@ -89,6 +89,19 @@ export function resolveMaxQueueSize(
 }
 
 /**
+ * Whether a failed entry can go back on `queue` without the cap evicting it at once.
+ *
+ * A retry that would only push the queue over `maxQueueSize` (`undefined` for no cap) is
+ * not a retry: the entry is reported `'lost'` instead of re-queued and evicted.
+ */
+export function hasRetryRoom(
+  queue: readonly unknown[],
+  maxQueueSize: number | undefined,
+): boolean {
+  return maxQueueSize === undefined || queue.length < maxQueueSize;
+}
+
+/**
  * How many attempts a failed write gets, never fewer than the one it already had.
  *
  * A negative or zero value resolves to none rather than being honoured literally: the

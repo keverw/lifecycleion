@@ -18,6 +18,7 @@ import type {
   InsertComponentAtResult,
   InsertPosition,
   LifecycleInternalCallbacks,
+  RegisterComponentResult,
   RegisterOptions,
   RegistrationFailureCode,
   RestartAllOptions,
@@ -179,15 +180,30 @@ export class RegistrationOperations {
   /**
    * `registerComponentInternal()` under the public-method safety net (see
    * {@link settleOperation}). Its own `catch` covers the registration body, but the name
-   * and index reads ahead of it run the component's own getters.
+   * and index reads ahead of it run the component's own getters. Answers in the shape
+   * of the method that called it (see {@link resultForAction}).
    */
+  public registerComponentSettled(
+    component: BaseComponent,
+    position: 'end',
+    targetComponentName: undefined,
+    isInsertAction: false,
+    options?: RegisterOptions,
+  ): Promise<RegisterComponentResult>;
+  public registerComponentSettled(
+    component: BaseComponent,
+    position: InsertPosition,
+    targetComponentName: string | undefined,
+    isInsertAction: true,
+    options?: RegisterOptions,
+  ): Promise<InsertComponentAtResult>;
   public registerComponentSettled(
     component: BaseComponent,
     position: InsertPosition,
     targetComponentName: string | undefined,
     isInsertAction: boolean,
     options?: RegisterOptions,
-  ): Promise<InsertComponentAtResult> {
+  ): Promise<RegistrationResult> {
     // Shared with the registration, so this net answers `registered` and the auto-start
     // fields as it would.
     const progress = newRegistrationProgress();
@@ -207,20 +223,23 @@ export class RegistrationOperations {
       // `getName()` that threw or answered a non-string: every later failure is answered
       // inside the registration by the same method, which cannot throw. Named from what `getName()` answered, never by asking again.
       (error, reason) =>
-        this.answerRegistrationFailure({
-          component,
-          componentName: reportedComponentName(progress),
-          error,
-          // `settleOperation` has reported it.
-          isErrorReported: true,
-          reason,
-          position,
-          targetComponentName,
+        resultForAction(
+          this.answerRegistrationFailure({
+            component,
+            componentName: reportedComponentName(progress),
+            error,
+            // `settleOperation` has reported it.
+            isErrorReported: true,
+            reason,
+            position,
+            targetComponentName,
+            isInsertAction,
+            // Unknown: there is no name to look it up by.
+            registrationIndexBefore: null,
+            progress,
+          }),
           isInsertAction,
-          // Unknown: there is no name to look it up by.
-          registrationIndexBefore: null,
-          progress,
-        }),
+        ),
     );
   }
 
@@ -243,7 +262,7 @@ export class RegistrationOperations {
     // where the safety net above it can read them. Required: a call that made its own
     // would leave the net reading one that never changes.
     progress: RegistrationProgress,
-  ): Promise<InsertComponentAtResult> {
+  ): Promise<RegistrationResult> {
     const componentName: unknown = component.getName();
     progress.nameRead = { value: componentName };
 
@@ -273,7 +292,7 @@ export class RegistrationOperations {
 
       const placement = this.placeRegistration(attempt);
       if (placement.kind === 'refused') {
-        return placement.result;
+        return resultForAction(placement.result, isInsertAction);
       }
 
       const interruptionCode = this.commitRegistration(
@@ -281,7 +300,7 @@ export class RegistrationOperations {
         placement.nextComponents,
       );
       if (interruptionCode !== undefined) {
-        return this.refuseRegistration({
+        const refusal = this.refuseRegistration({
           ...attempt.refusal(),
           code: interruptionCode,
           message:
@@ -294,6 +313,7 @@ export class RegistrationOperations {
             ? { targetFound: true }
             : {}),
         });
+        return resultForAction(refusal, isInsertAction);
       }
 
       this.logCommittedRegistration(attempt, placement.candidateRead);
@@ -303,22 +323,25 @@ export class RegistrationOperations {
         progress.startResult = await autoStart;
       }
 
-      return this.registeredResult(attempt);
+      return resultForAction(this.registeredResult(attempt), isInsertAction);
     } catch (error) {
       // Answered by the same guarded code the safety net above uses, which cannot throw:
       // the net is then reached only for a `getName()` that failed, before this `try`.
-      return this.answerRegistrationFailure({
-        component,
-        componentName,
-        error,
-        isErrorReported: false,
-        reason: undefined,
-        position,
-        targetComponentName,
+      return resultForAction(
+        this.answerRegistrationFailure({
+          component,
+          componentName,
+          error,
+          isErrorReported: false,
+          reason: undefined,
+          position,
+          targetComponentName,
+          isInsertAction,
+          registrationIndexBefore: attempt.registrationIndexBefore,
+          progress,
+        }),
         isInsertAction,
-        registrationIndexBefore: attempt.registrationIndexBefore,
-        progress,
-      });
+      );
     }
   }
 
@@ -1634,6 +1657,36 @@ export class RegistrationOperations {
       }
     }
   }
+}
+
+/** What `registerComponent()` or `insertComponentAt()` answers. */
+type RegistrationResult = InsertComponentAtResult | RegisterComponentResult;
+
+/**
+ * A registration's answer in the shape of the method that asked: every result is built
+ * as an insert's, and `registerComponent()`'s leaves out what only an insert reports.
+ * Shaped here, inside the operation, so `registerComponent()` returns this helper's
+ * promise directly and resolves when `insertComponentAt()` would.
+ */
+function resultForAction(
+  result: InsertComponentAtResult,
+  isInsertAction: boolean,
+): RegistrationResult {
+  if (isInsertAction) {
+    return result;
+  }
+
+  // Bound only to be left out; the booleans are named for the naming rule.
+  const {
+    action: _action,
+    requestedPosition: _requestedPosition,
+    actualPosition: _actualPosition,
+    manualPositionRespected: isOmittedManualPositionRespected,
+    targetFound: isOmittedTargetFound,
+    ...registration
+  } = result;
+
+  return { ...registration, action: 'register' };
 }
 
 /**

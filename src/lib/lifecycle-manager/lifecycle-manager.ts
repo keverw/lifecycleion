@@ -222,24 +222,13 @@ export class LifecycleManager
     component: BaseComponent,
     options?: RegisterOptions,
   ): Promise<RegisterComponentResult> {
-    return this.core.registration
-      .registerComponentSettled(component, 'end', undefined, false, options)
-      .then((result): RegisterComponentResult => {
-        // Share registration fields without exposing insertion-only metadata.
-        const {
-          action: _action,
-          requestedPosition: _requestedPosition,
-          actualPosition: _actualPosition,
-          manualPositionRespected: isManualPositionRespectedIgnored,
-          targetFound: wasTargetFound,
-          ...registration
-        } = result;
-
-        return {
-          ...registration,
-          action: 'register',
-        };
-      });
+    return this.core.registration.registerComponentSettled(
+      component,
+      'end',
+      undefined,
+      false,
+      options,
+    );
   }
 
   /**
@@ -284,14 +273,16 @@ export class LifecycleManager
     options?: UnregisterOptions,
   ): Promise<UnregisterComponentResult> {
     // What the operation got through before it crashed, so the failure result describes
-    // the component as it actually is: stopped, even though unregistering then failed.
-    // `wasRegistered` is taken now, as the field is documented - registered when this
-    // call started - and through the manager's own registry rather than the public,
-    // overridable `hasComponent()`, so it describes this call's component rather than
-    // whatever holds the name when a failure is answered, and an override that throws
-    // cannot make this safety net reject.
+    // the component as it actually is: stopped, even though unregistering then failed,
+    // and removed, when the failure came after the removal - which `reason` says, as
+    // `wasRegistered` cannot. That is taken now, as the field is documented - registered
+    // when this call started - and through the manager's own registry rather than the
+    // public, overridable `hasComponent()`, so it describes this call's component rather
+    // than whatever holds the name when a failure is answered, and an override that
+    // throws cannot make this safety net reject.
     const progress = {
       wasStopped: false,
+      wasRemoved: false,
       wasRegistered: this.core.registry.isNameRegistered(name),
     };
 
@@ -306,7 +297,9 @@ export class LifecycleManager
       (error, reason, code) => ({
         success: false,
         componentName: name,
-        reason,
+        reason: progress.wasRemoved
+          ? `Component was unregistered, but ${reason}`
+          : reason,
         code,
         error,
         wasStopped: progress.wasStopped,
@@ -384,7 +377,18 @@ export class LifecycleManager
    * Get stopped (not running, not stalled) component count
    */
   public getStoppedComponentCount(): number {
-    return this.getStoppedComponentNames().length;
+    // Counted from state, as `getStatus()` counts it, without building the names.
+    let count = 0;
+    for (const component of this.state.components) {
+      const name = this.core.registry.nameOf(component);
+      if (
+        !this.state.runningComponents.has(name) &&
+        !this.state.stalledComponents.has(name)
+      ) {
+        count++;
+      }
+    }
+    return count;
   }
 
   /**
@@ -392,7 +396,14 @@ export class LifecycleManager
    * starts retaining a stall are reported by the stalled APIs instead.
    */
   public getStartTimedOutComponentCount(): number {
-    return this.getStartTimedOutComponentNames().length;
+    let count = 0;
+    for (const component of this.state.components) {
+      const name = this.core.registry.nameOf(component);
+      if (this.state.componentStates.get(name) === 'starting-timed-out') {
+        count++;
+      }
+    }
+    return count;
   }
 
   /**

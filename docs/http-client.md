@@ -1670,6 +1670,12 @@ returns, with this listener attached first. An error that writable emits anyway,
 `createWriteStream()` into a missing directory failing to open, is reported through the
 host error reporter, because the request it belonged to has already answered.
 
+That destroy is one of three: the adapter also destroys the writable when the request is
+cancelled or times out mid-stream, and when the stream fails mid-body. A sink handed to
+several concurrent requests is therefore destroyed as soon as any one of them ends that
+way, under the others still writing to it. Return a fresh writable from each factory call
+unless that is what you want.
+
 The practical consequence for a sink you wrote: an error emitted more than a few seconds
 after the last request touching it settled is yours to handle. On a Node stream with no
 `'error'` listener of your own, that is an uncaught exception under the ordinary contract for a

@@ -1309,53 +1309,6 @@ export class Logger extends EventEmitter {
       }
     }
 
-    // The reporter for every fail-closed path below, built on first use so an ordinary
-    // log call allocates nothing for it.
-    //
-    // These paths were silent, which broke the diagnostic promise the formatter makes
-    // everywhere else: a failure leaves a diagnosis and not only a marker. The other four
-    // surfaces keep it - `applyRedaction` for params, `errorToString` for an error's
-    // `sensitiveFieldNames`, `redactValue` and `stringifyValue` - because each builds a
-    // reporter and hands every failure to it. Only these guards, which exist precisely
-    // for the input nothing below them could read, dropped the cause on the floor and
-    // left an operator with `(null)` or a marker and nothing to trace it with.
-    //
-    // One reporter per kind shared across all of them, so the several guards a single
-    // unreadable list trips report once rather than once each - the same bound
-    // `createFormatReporter` gives every other caller, which is once per *kind* per
-    // operation and not once in total. These are handed to `applyRedaction` as well, so
-    // that function's own two reporters nest inside these instead of carrying budgets of
-    // their own: the params are one pass, and one pass reports once per kind.
-    //
-    // Per kind, because collapsing them loses a failure. `applyRedaction` raises both -
-    // a `redactFunction` that throws is `'redaction'`, a leaf whose `toString` throws on
-    // the way to the mask is `'render'` - and it splits its reporters for exactly that
-    // reason. Funnelled into a single `'redaction'` reporter here, a params bag that
-    // failed both ways emitted once, with the kind of whichever failure arrived first
-    // first written over it, and the other failure was never mentioned to anyone.
-    const backstopReporters = new Map<FormatFailureKind, ReportFormatFailure>();
-
-    const reportBackstopOfKind = (
-      kind: FormatFailureKind,
-      error: unknown,
-      key: string,
-    ): void => {
-      let reporter = backstopReporters.get(kind);
-
-      if (reporter === undefined) {
-        reporter = createFormatReporter(kind, this.formatErrorHandler());
-        backstopReporters.set(kind, reporter);
-      }
-
-      reporter(error, key);
-    };
-
-    // Everything this method fails closed on is a redaction failure: the list itself
-    // could not be read, or could not be trusted.
-    const reportBackstop = (error: unknown, key: string): void => {
-      reportBackstopOfKind('redaction', error, key);
-    };
-
     // Decided from the snapshot, never from a second read of the caller's own object.
     // `length` is the wrong question for anything that is not an array - a `Set` of keys,
     // or any object without a numeric `length`, answered `undefined`, and `undefined > 0`
@@ -1389,6 +1342,57 @@ export class Logger extends EventEmitter {
       params !== undefined &&
       redactedKeys !== undefined
     ) {
+      // The reporter for every fail-closed path below, set up only once redaction was
+      // requested and each kind's built on first use, so an ordinary log call allocates
+      // nothing for it.
+      //
+      // These paths were silent, which broke the diagnostic promise the formatter makes
+      // everywhere else: a failure leaves a diagnosis and not only a marker. The other four
+      // surfaces keep it - `applyRedaction` for params, `errorToString` for an error's
+      // `sensitiveFieldNames`, `redactValue` and `stringifyValue` - because each builds a
+      // reporter and hands every failure to it. Only these guards, which exist precisely
+      // for the input nothing below them could read, dropped the cause on the floor and
+      // left an operator with `(null)` or a marker and nothing to trace it with.
+      //
+      // One reporter per kind shared across all of them, so the several guards a single
+      // unreadable list trips report once rather than once each - the same bound
+      // `createFormatReporter` gives every other caller, which is once per *kind* per
+      // operation and not once in total. These are handed to `applyRedaction` as well, so
+      // that function's own two reporters nest inside these instead of carrying budgets of
+      // their own: the params are one pass, and one pass reports once per kind.
+      //
+      // Per kind, because collapsing them loses a failure. `applyRedaction` raises both -
+      // a `redactFunction` that throws is `'redaction'`, a leaf whose `toString` throws on
+      // the way to the mask is `'render'` - and it splits its reporters for exactly that
+      // reason. Funnelled into a single `'redaction'` reporter here, a params bag that
+      // failed both ways emitted once, with the kind of whichever failure arrived first
+      // first written over it, and the other failure was never mentioned to anyone.
+      const backstopReporters = new Map<
+        FormatFailureKind,
+        ReportFormatFailure
+      >();
+
+      const reportBackstopOfKind = (
+        kind: FormatFailureKind,
+        error: unknown,
+        key: string,
+      ): void => {
+        let reporter = backstopReporters.get(kind);
+
+        if (reporter === undefined) {
+          reporter = createFormatReporter(kind, this.formatErrorHandler());
+          backstopReporters.set(kind, reporter);
+        }
+
+        reporter(error, key);
+      };
+
+      // Everything this method fails closed on is a redaction failure: the list itself
+      // could not be read, or could not be trusted.
+      const reportBackstop = (error: unknown, key: string): void => {
+        reportBackstopOfKind('redaction', error, key);
+      };
+
       if (snapshot === null) {
         // Failed closed here, on the one read already made, rather than handed to
         // `applyRedaction` to be read again. Its own `snapshotList` is the same check,

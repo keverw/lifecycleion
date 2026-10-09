@@ -1026,7 +1026,7 @@ interface LifecycleManagerOptions {
   name?: string; // Manager name for logging (default: 'lifecycle-manager')
   logger: Logger; // Logger instance (required)
   startupTimeoutMS?: number | null; // Global timeout for startup in ms (default: 60000, 0 = disabled)
-  shutdownOptions?: StopAllOptions; // Default stopAll options for shutdown hooks (defaults: timeoutMS=30000, retryStalled=true, haltOnStall=true)
+  shutdownOptions?: StopAllOptions; // Default stopAll options for shutdown hooks (defaults: timeoutMS=30000, retryStalled=true, haltOnStall=true, allowStopWithPendingStarts=false, waitForAbandonedStarts=false, abortPendingStarts=false)
   shutdownWarningTimeoutMS?: number | null; // Global warning phase timeout in ms (default: 500, 0 = fire-and-forget, <0 = skip)
   messageTimeoutMS?: number | null; // Default message timeout in ms (default: 5000, 0 = disabled)
   attachSignalsBeforeStartup?: boolean; // Auto-attach signals before startAllComponents()/startComponent() begins work, even if startup later fails (default: false)
@@ -1044,10 +1044,13 @@ interface LifecycleManagerOptions {
   onDebugRequested?: (
     broadcastDebug: () => Promise<SignalBroadcastResult>,
   ) => void | Promise<void>;
+
+  // Escalation for repeated shutdown requests during a running shutdown (default: none)
+  repeatedShutdownRequestPolicy?: RepeatedShutdownRequestPolicy | null; // null or omitted = no policy
 }
 ```
 
-`onReloadRequested`, `onInfoRequested` and `onDebugRequested` take `null` or omission as no callback; any other value that is not a function makes the constructor throw a `TypeError`. A `repeatedShutdownRequestPolicy` requires `onForceShutdown` to be a function, and throws the same way without one.
+`onReloadRequested`, `onInfoRequested` and `onDebugRequested` take `null` or omission as no callback; any other value that is not a function makes the constructor throw a `TypeError`. A [`repeatedShutdownRequestPolicy`](#repeated-shutdown-request-policy) requires `onForceShutdown` to be a function, and throws the same way without one.
 
 ### Component Registration
 
@@ -1206,6 +1209,8 @@ interface UnregisterOptions {
 - While a start or stop is in flight, unregister is refused with `component_starting` / `component_stopping`: the operation writes its outcome when it settles, so the component has to be left registered until then. This is checked again after unregister's own stop, since a `component:stopped` listener may have started the component again; one that is already back up is refused with `component_running`.
 - The registration itself is rechecked immediately before anything is removed, on every path. Reading `stopIfRunning` and `forceStop` off the options object runs caller code, so a getter can unregister the component and register a replacement under the same name before the removal begins. The call then reports `component_not_found`, and the replacement keeps the name and its state. If the getter instead started a bulk startup or shutdown without replacing the component, the usual refusals are checked first, in this order: a start or stop in flight (`component_starting` / `component_stopping`), a stalled component with `stopIfRunning` true (`stop_failed`), and a running component with `stopIfRunning: false` (`component_running`). Otherwise the call reports `bulk_operation_in_progress` before stopping or removing anything.
 - Successfully unregistering a component automatically clears its `lifecycle` reference (setting it to `undefined`) and marks it as unregistered, which allows the same component instance to be registered again (either with the same manager or with a different one).
+- `wasStopped` is `true` only for a stop this call made. A component that was already stopped, or that something else stopped before this call's stop ran (an unexpected stop reported meanwhile), is removed with `wasStopped: false`.
+- `component:unregistered` is queued as the component is removed, before its own unregister hooks run, so a registration of the name that one of them makes is announced after it. A failure after the removal is answered `operation_crashed` with a `reason` beginning `Component was unregistered, but`; the component stays unregistered and the event is still emitted.
 
 **Returns:**
 
@@ -2142,7 +2147,9 @@ is covered even if startup fails. If attaching fails, the start is refused with
 
 If `attachSignalsOnStart` is enabled, handlers are auto-attached when the
 first component comes up (no other component is up) and none are attached. If attaching fails, its start
-returns `code: 'signal_attach_failed'` and the manager attempts to stop it.
+returns `code: 'signal_attach_failed'` and the manager attempts to stop it, unless
+caller code the failure ran (a `component:started` listener, a log sink) already began
+stopping it; the `reason` then says another stop is already stopping it.
 `startAllComponents()` fails with the same code and attempts rollback, even for an
 optional component. Cleanup can fail or time out; inspect the result and current
 component status rather than assuming all resources were released.

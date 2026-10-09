@@ -497,7 +497,7 @@ describe('NodeAdapter.send() reads the request once', () => {
     expect(escaped).toEqual([]);
   });
 
-  test('a signal whose aborted read throws in the transport error handler fails the send', async () => {
+  test('a signal whose aborted read throws in the transport error handler keeps the transport error', async () => {
     const escaped = watchUncaught();
     const refusal = new Error('aborted unreadable');
     let reads = 0;
@@ -514,22 +514,22 @@ describe('NodeAdapter.send() reads the request once', () => {
       removeEventListener() {},
     } as unknown as AbortSignal;
 
-    const outcome = await new NodeAdapter()
-      .send({
-        // Nothing listens on port 1, so the request fails with a transport error.
-        requestURL: 'http://127.0.0.1:1/',
-        method: 'GET',
-        headers: {},
-        body: null,
-        signal,
-      })
-      .then(
-        () => 'resolved',
-        (error: unknown) => error,
-      );
+    // Nothing listens on port 1, so the request fails with a transport error, and the
+    // refusal reads as "not aborted" rather than standing in for it.
+    const response = await new NodeAdapter().send({
+      requestURL: 'http://127.0.0.1:1/',
+      method: 'GET',
+      headers: {},
+      body: null,
+      signal,
+    });
     await sleep(20);
 
-    expect(outcome).toBe(refusal);
+    expect(reads).toBeGreaterThan(1);
+    expect(response.status).toBe(0);
+    expect(response.isTransportError).toBe(true);
+    expect(response.errorCause).not.toBe(refusal);
+    expect(response.errorCause).toHaveProperty('code', 'ECONNREFUSED');
     expect(escaped).toEqual([]);
   });
 

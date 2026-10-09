@@ -281,19 +281,17 @@ export class SignalIntegration {
 
     // `stopComponentInternal()` answers every failure it can foresee with a result and
     // turns anything else into a stall, so the component's state is settled either way;
-    // this result only has to describe it. No `status`: this runs inside the start's
-    // `try`, and a throw from building one would land in the start's `catch`, which
-    // would mark a component this stop may not have stopped as `registered`.
-    const stopResult =
-      await this.core.componentStop.stopComponentInternal(name);
-    const attachReason = `Could not attach process signals: ${describeError(error)}`;
+    // this result only has to describe it. Left to a stop the `started` listeners or the
+    // log above already began. No `status`: this runs inside the start's `try`, and a
+    // throw from building one would land in the start's `catch`, which would mark a
+    // component this stop may not have stopped as `registered`.
+    const stopOutcome =
+      await this.core.componentStart.stopAfterFailedStart(name);
 
     return {
       success: false,
       componentName: name,
-      reason: stopResult.success
-        ? `${attachReason}; component stopped again`
-        : `${attachReason}; stopping it again also failed: ${stopResult.reason ?? 'unknown reason'}`,
+      reason: `Could not attach process signals: ${describeError(error)}; ${stopOutcome}`,
       code: 'signal_attach_failed',
       error,
     };

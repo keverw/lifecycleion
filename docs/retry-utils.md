@@ -343,7 +343,7 @@ const operation = async (reportResult, signal) => {
 
 #### `run(shouldWaitForCompletion?: boolean)`
 
-Starts the operation with retries. Defaults to `shouldWaitForCompletion = false`.
+Starts the operation with retries. Defaults to `shouldWaitForCompletion = false`. Only a boolean or `undefined` is accepted; any other value resolves as `pre_operation_error` / `unexpected_error` without starting work.
 
 Returns `Promise<RunResult<T>>`:
 
@@ -362,9 +362,9 @@ Returns `Promise<RunResult<T>>`:
   - `'attempts_exhausted'` - all retries used (use `forceTry()` or `reset()`)
   - `'lock_error'` - concurrent operation call detected
   - `'terminal_dispatch_in_progress'` - called while the operation's terminal outcome is being published
-  - `'unexpected_error'` - an unexpected internal error occurred
+  - `'unexpected_error'` - `shouldWaitForCompletion` is not a boolean, or an unexpected internal error occurred
 
-> **Note:** apart from invalid `forceTry()` options, which fail as `pre_operation_error` / `unexpected_error`, `unexpected_error` should not occur in normal use and indicates an internal state inconsistency in the library. If you encounter it otherwise, call `reset()` before trying again and consider reporting a bug. Its `error` is always a `RetryUtilsErrRunnerUnexpectedError`; the failure itself is on its `originalError`: for invalid `forceTry()` options, a `TypeError` for a non-boolean value or the error an option getter threw. A thrown value that is not an `Error` is wrapped in one, with the value on `cause`.
+> **Note:** apart from invalid arguments to `run()`, `resume()` or `forceTry()`, which fail as `pre_operation_error` / `unexpected_error`, `unexpected_error` should not occur in normal use and indicates an internal state inconsistency in the library. If you encounter it otherwise, call `reset()` before trying again and consider reporting a bug. Its `error` is always a `RetryUtilsErrRunnerUnexpectedError`; the failure itself is on its `originalError`: for an invalid argument, a `TypeError` for a non-boolean value or the error a `forceTry()` option getter threw. A thrown value that is not an `Error` is wrapped in one, with the value on `cause`.
 
 ```typescript
 // Start and wait for completion
@@ -406,7 +406,7 @@ Returns `Promise<CancelResult>`:
 - `'canceled'` - operation acknowledged the abort signal and stopped
 - `'superseded'` - a newer forced restart took over while cancellation was pending; the runner may still be running
 - `'forced'` - operation did not acknowledge within the grace period and was force-stopped
-- `'not-running'` - no cancelable operation remains, including a terminal outcome already being published or success/fatal completion that wins while cancellation is pending. Use `waitForCompletion()` for that operation's result. Even then, unless the operation succeeded, the call still records stop intent: a `cancel()` from an abort listener (or a terminal listener it triggers) supersedes the `forceTry({ shouldAbortRunning: true })` that sent the abort, so that force starts no replacement - see `forceTry()`.
+- `'not-running'` - no cancelable operation remains, including a terminal outcome already being published or success/fatal completion that wins while cancellation is pending. Use `waitForCompletion()` for that operation's result. Such a call has no effect, with one exception: made from an abort listener (or a terminal listener it triggers) while `forceTry({ shouldAbortRunning: true })` is dispatching its abort, it still supersedes that force, which then starts no replacement - unless the operation succeeded. See `forceTry()`.
 
 ```typescript
 const cancelResult = await runner.cancel();
@@ -444,7 +444,7 @@ await runner.run(true);
 
 #### `resume(shouldWaitForCompletion?: boolean)`
 
-Resumes a previously canceled operation. Only works when `runnerState` is `'stopped'`.
+Resumes a previously canceled operation. Only works when `runnerState` is `'stopped'`. `shouldWaitForCompletion` is validated as for `run()`.
 
 Returns `Promise<RunResult<T>>` - same completion statuses as `run()`.
 
@@ -458,7 +458,7 @@ On pre-operation error: `{ status: 'pre_operation_error', code, error }` with co
 - `'not_paused'` - runner is not in `'stopped'` state
 - `'lock_error'` - concurrent operation call detected
 - `'terminal_dispatch_in_progress'` - called while the operation's terminal outcome is being published
-- `'unexpected_error'` - an unexpected internal error occurred
+- `'unexpected_error'` - `shouldWaitForCompletion` is not a boolean, or an unexpected internal error occurred
 
 ```typescript
 await runner.cancel();

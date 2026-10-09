@@ -21,6 +21,7 @@ import { sleep } from '../../sleep';
 import { observeRejection } from '../../internal/promise-reactions';
 import {
   DEFAULT_CLOSE_TIMEOUT_MS,
+  hasRetryRoom,
   MIN_CLOSE_FLUSH_MS,
   resolveMaxQueueSize,
   resolveMaxRetries,
@@ -1665,13 +1666,6 @@ export class NamedPipeSink implements LogSink {
     });
   }
 
-  private hasRetryRoom(): boolean {
-    return (
-      this.maxQueueSize === undefined ||
-      this.writeQueue.length < this.maxQueueSize
-    );
-  }
-
   /**
    * Put a failed entry back on the queue, or give up on it.
    *
@@ -1723,7 +1717,7 @@ export class NamedPipeSink implements LogSink {
     if (
       wasReported ||
       queued.attempts >= this.maxRetries ||
-      !this.hasRetryRoom()
+      !hasRetryRoom(this.writeQueue, this.maxQueueSize)
     ) {
       this.losses.count('write');
 
@@ -2080,7 +2074,7 @@ export class NamedPipeSink implements LogSink {
             !this.closed &&
             !wasPartiallyWritten &&
             queued.attempts < this.maxRetries &&
-            this.hasRetryRoom();
+            hasRetryRoom(this.writeQueue, this.maxQueueSize);
           this.handleError('write', error, {
             shouldSuppressFailureReport: this.shouldSuppressWriteReport(
               queued,
@@ -2121,7 +2115,7 @@ export class NamedPipeSink implements LogSink {
       const willRetry =
         !this.closed &&
         queued.attempts < this.maxRetries &&
-        this.hasRetryRoom();
+        hasRetryRoom(this.writeQueue, this.maxQueueSize);
       this.handleError('write', error, {
         shouldSuppressFailureReport: this.shouldSuppressWriteReport(
           queued,

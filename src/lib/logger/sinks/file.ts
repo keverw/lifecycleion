@@ -11,6 +11,7 @@ import { renderJSONLine } from './internal/render-json-line';
 import { renderTextEntry } from './internal/render-text-line';
 import {
   DEFAULT_CLOSE_TIMEOUT_MS,
+  hasRetryRoom,
   resolveMaxQueueSize,
   resolveMaxRetries,
 } from './internal/queue-policy';
@@ -842,9 +843,10 @@ export class FileSink implements LogSink {
             );
 
       // Setup belongs to no particular line, and the queue still holds every entry: a
-      // later write retries this, so nothing here is lost.
+      // later write retries this, so nothing here is lost. Each line that then fails
+      // setup is reported on its own, `'retrying'` or `'lost'`.
       this.handleError('setup', failure, {
-        disposition: 'retrying',
+        disposition: 'no_entry',
         shouldSuppressFailureReport,
       });
     }
@@ -917,14 +919,11 @@ export class FileSink implements LogSink {
           // times, against a sink that could only answer `Cannot write to closed sink` -
           // before finally being counted. `NamedPipeSink.requeue` takes the same view: past
           // the close, the honest answer is that the entry is lost.
-          const hasRetryRoom = () =>
-            this.maxQueueSize === undefined ||
-            this.writeQueue.length < this.maxQueueSize;
           let willRetry =
             queuedEntry.formatError === undefined &&
             !this.closed &&
             queuedEntry.attempts < this.maxRetries &&
-            hasRetryRoom();
+            hasRetryRoom(this.writeQueue, this.maxQueueSize);
 
           // The shared rung, which also closes a gap this had and `NamedPipeSink` did
           // not: the console line lived *inside* the `catch` for a throwing callback, so
@@ -979,7 +978,10 @@ export class FileSink implements LogSink {
           reportFailure(willRetry);
           // A callback may enqueue another line or close the sink. Recheck before
           // committing a retry and report its final loss if the callback consumed room.
-          if (willRetry && (this.closed || !hasRetryRoom())) {
+          if (
+            willRetry &&
+            (this.closed || !hasRetryRoom(this.writeQueue, this.maxQueueSize))
+          ) {
             willRetry = false;
             reportFailure(false);
           }
@@ -1021,6 +1023,10 @@ export class FileSink implements LogSink {
       }
     } finally {
       this.inFlightEntry = undefined;
+      // The pass `close()` abandoned an entry in is the only one that can see it again,
+      // and no pass starts after a close, so the guard has nothing left to catch. Held
+      // any longer, it would keep the caller's params graph alive with the sink.
+      this.abandonedInFlightEntry = undefined;
 
       // A drained queue closes the reported overflow episode, so a sink that overflows
       // again hours later says so again.

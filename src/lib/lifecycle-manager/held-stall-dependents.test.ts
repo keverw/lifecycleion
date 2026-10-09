@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import type { LifecycleManagerOptions } from './types';
+import { sleep } from '../sleep';
 import { deferred, Plain, setup } from './test-helpers';
 
 // `x` depends on `db`; `x`'s stop fails and it has no force handler, so it stalls.
@@ -144,6 +145,54 @@ test('an isComponentRunning() override does not hide a running dependent from a 
     expect(result.reason).toContain('running dependents: api');
   } finally {
     Reflect.deleteProperty(manager, 'isComponentRunning');
+    await manager.stopAllComponents();
+    await logger.close();
+  }
+});
+
+test('a stall a retry attempted nothing for, cleared after its dependency was skipped, releases that dependency', async () => {
+  const { logger, manager } = setup();
+  const later = new Plain(logger, 'later');
+  const db = new Plain(logger, 'db');
+  const x = new Plain(logger, 'x', ['db']);
+  const xStop = deferred();
+  x.stop = () => xStop.promise;
+  Object.defineProperty(x, 'onShutdownForce', {
+    value: undefined,
+    writable: true,
+  });
+  Object.assign(x, { shutdownGracefulTimeoutMS: 5 });
+  await manager.registerComponent(later);
+  await manager.registerComponent(db);
+  await manager.registerComponent(x);
+  await manager.startAllComponents();
+  // Timed out with its `stop()` still pending: stalled, until that stop finishes late.
+  await manager.stopComponent('x');
+  expect(manager.getComponentStatus('x')?.state).toBe('stalled');
+
+  const order: string[] = [];
+  db.stop = () => {
+    order.push('db');
+    return Promise.resolve();
+  };
+  // Reached after `db` was skipped for the held stall: the stall clears here, so only
+  // the pass's second look at `db` can stop it.
+  later.stop = async () => {
+    order.push('later');
+    xStop.resolve();
+    await sleep(0);
+    expect(manager.getComponentStatus('x')?.state).toBe('stopped');
+  };
+
+  try {
+    // `retryStalled` retries `x`, which has no force handler: nothing attempted, so the
+    // stall is held - under `haltOnStall` - rather than halting the pass.
+    const result = await manager.stopAllComponents();
+    expect(order).toEqual(['later', 'db']);
+    expect(result.success).toBe(true);
+    expect(manager.getComponentStatus('db')?.state).toBe('stopped');
+  } finally {
+    xStop.resolve();
     await manager.stopAllComponents();
     await logger.close();
   }

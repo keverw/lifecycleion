@@ -1,4 +1,5 @@
 import { readMember } from './internal/read-member';
+import { isFunction } from './is-function';
 import { reportCallbackError, runCallbackSafely } from './safe-handle-callback';
 
 /**
@@ -30,7 +31,7 @@ export class SingleEventObserverProtected<T> {
    */
 
   public subscribe(fn: (data: T) => void | Promise<void>): void {
-    if (typeof fn !== 'function') {
+    if (!isFunction(fn)) {
       throw new TypeError(
         `SingleEventObserver subscriber must be a function, got: ${fn === null ? 'null' : typeof fn}`,
       );

@@ -147,9 +147,10 @@ Gets the number of subscribers for an event.
 Removes event listeners.
 
 - With event name: removes all listeners for that event only. Any value other than
-  `undefined` is treated as an event name, so `clear('')` removes only listeners
-  registered under `''`
-- Without event name (or with `undefined`): removes all listeners for all events
+  `undefined` or `null` is treated as an event name, so `clear('')` removes only
+  listeners registered under `''`
+- Without event name (or with `undefined`, or `null` from JavaScript): removes all
+  listeners for all events
 
 ## Error Handling
 

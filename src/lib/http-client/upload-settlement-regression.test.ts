@@ -613,3 +613,30 @@ test.each([
     expect(outcome).toBeInstanceOf(Error);
   },
 );
+
+test.each([
+  ['an Error', new Error('upload failed')],
+  ['a non-Error value', 'upload failed'],
+] as const)(
+  'an upload outcome from %s carries no own then',
+  async (_label, failure) => {
+    // `serializeError` walks `getOwnPropertyNames`, so an own `then` would reach its output.
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: {},
+          body: null,
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+          requestBodySettled: Promise.reject(failure),
+        }),
+    };
+    const response = await new HTTPClient({ adapter })
+      .get('https://example.com/upload')
+      .send();
+    const outcome = await response.requestBodySettled;
+    expect(outcome).toBeInstanceOf(Error);
+    expect(Object.getOwnPropertyNames(outcome)).not.toContain('then');
+  },
+);

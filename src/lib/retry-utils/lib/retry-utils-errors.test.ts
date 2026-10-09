@@ -30,7 +30,7 @@ describe('retry-utils errors', () => {
       new RetryUtilsErrRunnerAlreadyCompleted('run'),
       new RetryUtilsErrRunnerAlreadyRunning('run'),
       new RetryUtilsErrRunnerForceTryRetryInProgress('forceTry'),
-      new RetryUtilsErrRunnerForceTrySuperseded(),
+      new RetryUtilsErrRunnerForceTrySuperseded('forceTry'),
       new RetryUtilsErrRunnerNotPaused('resume'),
       new RetryUtilsErrRunnerCancelPending('run'),
       new RetryUtilsErrRunnerRetryCanceled('run'),
@@ -77,11 +77,8 @@ describe('retry-utils errors', () => {
   });
 });
 
-test.each([undefined, 'forceTry'] as const)(
-  'superseded force error identifies the method and recovery (%s)',
-  (method) => {
-    const error = new RetryUtilsErrRunnerForceTrySuperseded(method);
-    expect(error.invokedMethod).toBe('forceTry');
-    expect(error.message).toContain('Await');
-  },
-);
+test('superseded force error identifies the method and recovery', () => {
+  const error = new RetryUtilsErrRunnerForceTrySuperseded('forceTry');
+  expect(error.invokedMethod).toBe('forceTry');
+  expect(error.message).toContain('Await');
+});

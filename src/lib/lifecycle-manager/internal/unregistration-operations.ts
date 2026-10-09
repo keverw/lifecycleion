@@ -21,11 +21,19 @@ import {
 } from './operation-options';
 
 /**
+ * What an unregister has done so far, shared with the safety net that wraps it, so a
+ * crash still reports a stop that happened and a removal that did.
+ */
+export interface UnregisterProgress {
+  wasStopped: boolean;
+  wasRemoved: boolean;
+}
+
+/**
  * One unregister call: the name it was asked to remove, the instance registered under
  * that name when it began and that registration's generation, the options it read, and
- * what it has done so far - `progress`, shared with the safety net that wraps it, so a
- * crash still reports a stop that happened. Created once the options are read, and
- * handed to every phase of `unregisterComponentOperation()`. It runs no code of its own.
+ * what it has done so far (`progress`). Created once the options are read, and handed to
+ * every phase of `unregisterComponentOperation()`. It runs no code of its own.
  */
 class UnregisterAttempt {
   constructor(
@@ -33,7 +41,7 @@ class UnregisterAttempt {
     public readonly component: BaseComponent,
     public readonly registrationGeneration: number | undefined,
     public readonly options: UnregisterOptionsSnapshot,
-    public readonly progress: { wasStopped: boolean },
+    public readonly progress: UnregisterProgress,
   ) {}
 }
 
@@ -62,7 +70,7 @@ export class UnregistrationOperations {
   public async unregisterComponentOperation(
     name: string,
     options: UnregisterOptions | undefined,
-    progress: { wasStopped: boolean },
+    progress: UnregisterProgress,
   ): Promise<UnregisterComponentResult> {
     // Block unregistration during bulk operations
     if (this.isBulkOperationBlockingUnregister(name)) {
@@ -151,8 +159,10 @@ export class UnregistrationOperations {
       };
     }
 
+    const shouldStopFirst = isRunning && attempt.options.stopIfRunning;
+
     // If running and stopIfRunning is true (default), stop first
-    if (isRunning && attempt.options.stopIfRunning) {
+    if (shouldStopFirst) {
       const refusedBeforeStopping = this.refuseBeforeStopping(attempt);
 
       if (refusedBeforeStopping !== undefined) {
@@ -170,7 +180,7 @@ export class UnregistrationOperations {
       }
     }
 
-    const refusedAfterStop = this.refuseAfterStop(attempt);
+    const refusedAfterStop = this.refuseAfterStop(attempt, shouldStopFirst);
 
     if (refusedAfterStop !== undefined) {
       return refusedAfterStop;
@@ -297,7 +307,7 @@ export class UnregistrationOperations {
   /**
    * Answer the stop this unregister ran: the refusal when the name was replaced across
    * it or the component is not safely stopped, or `undefined` once it is, with
-   * `progress.wasStopped` set.
+   * `progress.wasStopped` set when this stop is what stopped it.
    */
   private answerStop(
     attempt: UnregisterAttempt,
@@ -372,7 +382,14 @@ export class UnregistrationOperations {
       };
     }
 
-    progress.wasStopped = true;
+    // Stopped by this stop, unless it refused before running `stop()`: then something
+    // else stopped the component first - a log sink that reported an unexpected stop on
+    // the line before - and the stop found it not running. Safe to remove, but not a
+    // stop this unregister made.
+    progress.wasStopped =
+      stopResult.success ||
+      (stopResult.code !== 'component_not_running' &&
+        unregisterCodeForRefusedStop(stopResult.code) === undefined);
 
     return undefined;
   }
@@ -380,10 +397,12 @@ export class UnregistrationOperations {
   /**
    * The refusals between the stop, or the decision that there was nothing to stop, and
    * the removal: a replacement, a start or stop a `component:stopped` listener began,
-   * and a bulk operation that took the registry meanwhile.
+   * and a bulk operation that took the registry meanwhile. `didRunStop` is whether this
+   * unregister asked for a stop, whether or not that stop is what stopped it.
    */
   private refuseAfterStop(
     attempt: UnregisterAttempt,
+    didRunStop: boolean,
   ): UnregisterComponentResult | undefined {
     const { name, progress } = attempt;
 
@@ -395,7 +414,7 @@ export class UnregistrationOperations {
       return replacedAfterStop;
     }
 
-    if (progress.wasStopped) {
+    if (didRunStop) {
       // Asked first, as the checks below follow caller code: `isComponentRunning()` is
       // overridable, and an override can replace the registration - which the removal
       // would then wipe by name - or begin a start or stop of its own.
@@ -409,7 +428,10 @@ export class UnregistrationOperations {
       // A `component:stopped` listener may also have started it again, or begun another
       // stop. Removing it now would orphan that operation: a start that finished on an
       // unregistered component left whatever it brought up running, owned by nothing.
-      const inFlightAfterStop = this.refuseUnregisterWhileInFlight(name, true);
+      const inFlightAfterStop = this.refuseUnregisterWhileInFlight(
+        name,
+        progress.wasStopped,
+      );
 
       if (inFlightAfterStop !== null) {
         return inFlightAfterStop;
@@ -427,7 +449,7 @@ export class UnregistrationOperations {
           componentName: name,
           reason: 'Component was started again while it was being stopped',
           code: 'component_running',
-          wasStopped: true,
+          wasStopped: progress.wasStopped,
           wasRegistered: true,
         };
       }
@@ -452,7 +474,8 @@ export class UnregistrationOperations {
 
   /**
    * Remove the component, in one transition: from the registry, then from every state
-   * map, then the component's own side and the auto-detach, then the announcement.
+   * map, then the announcement, then the component's own side, the auto-detach and the
+   * log line.
    */
   private removeComponent(
     attempt: UnregisterAttempt,
@@ -463,6 +486,7 @@ export class UnregistrationOperations {
       // Remove from registry
       this.core.state.componentEntries =
         this.core.state.componentEntries.filter((c) => c !== component);
+      progress.wasRemoved = true;
 
       this.core.registry.publishRegistry();
 
@@ -501,6 +525,12 @@ export class UnregistrationOperations {
       // overwrites the entry when it commits.
       this.core.registry.updateStartedFlag();
 
+      // Queued before any caller code runs below - the component's own hooks, the log
+      // line's sinks - so a registration of the name one of them makes is announced
+      // after this removal rather than before it, and a failure after the removal still
+      // announces it.
+      this.core.lifecycleEvents.componentUnregistered(name, false);
+
       this.core.unexpectedStops.clearUnexpectedStopHandler(
         component,
         'unregister',
@@ -514,7 +544,6 @@ export class UnregistrationOperations {
       );
 
       this.core.logger.entity(name).info('Component unregistered');
-      this.core.lifecycleEvents.componentUnregistered(name, false);
 
       return {
         success: true,

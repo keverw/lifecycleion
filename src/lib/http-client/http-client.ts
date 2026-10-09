@@ -2673,7 +2673,7 @@ export class BaseHTTPClient {
           return {
             adapterResponse: null,
             ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
-            sentRequest: sentRequestForNonRetryableAdapterCallbackError(
+            sentRequest: sentRequestForObservedAdapterError(
               sentRequest,
               error,
               observedSentRequest,
@@ -3725,23 +3725,6 @@ function isAbortError(err: unknown): err is Error {
   return isErrorValue(err) && readObjectMember(err, 'name') === 'AbortError';
 }
 
-/**
- * When `adapter.send()` rejects before resolving (e.g. stream factory throw),
- * adapters may still attach `effectiveRequestHeaders` on the error so observers
- * see the same merged headers as on a successful `AdapterResponse`.
- */
-function sentRequestForNonRetryableAdapterCallbackError(
-  sentRequest: AttemptRequest,
-  error: unknown,
-  observedAfterAdapterResolve: AttemptRequest,
-): AttemptRequest {
-  return sentRequestForObservedAdapterError(
-    sentRequest,
-    error,
-    observedAfterAdapterResolve,
-  );
-}
-
 function isNonRetryableClientCallbackError(err: unknown): boolean {
   return (
     readObjectMember(err, NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG) ===
@@ -3753,6 +3736,11 @@ function isStreamFactoryClientCallbackError(err: unknown): boolean {
   return readObjectMember(err, STREAM_FACTORY_ERROR_FLAG) === true;
 }
 
+/**
+ * When `adapter.send()` rejects before resolving (e.g. stream factory throw),
+ * adapters may still attach `effectiveRequestHeaders` on the error so observers
+ * see the same merged headers as on a successful `AdapterResponse`.
+ */
 function sentRequestForObservedAdapterError(
   sentRequest: AttemptRequest,
   error: unknown,
@@ -3928,14 +3916,12 @@ function adoptRequestBodySettled(
  * every runtime can prove it is not a Proxy whose `then` lookup runs caller code, so the
  * outcome is the same whatever the runtime or the Error's class. Any other value is
  * normalized into an Error this client creates, which already carries it as `cause`.
+ * Either way the promise resolves with a fresh Error whose `then` lookup reaches only
+ * the built-in prototypes.
  */
 function stableUploadError(value: unknown): Error {
   if (!isErrorValue(value)) {
-    // Locked like the wrapper below: an inherited `then` must not be called while the
-    // public promise resolves with it.
-    const normalized = normalizeError(value);
-    Object.defineProperty(normalized, 'then', { value: undefined });
-    return normalized;
+    return normalizeError(value);
   }
   const error = value;
   const message = readObjectMember(error, 'message');
@@ -3960,8 +3946,7 @@ function stableUploadError(value: unknown): Error {
   if (code !== undefined) {
     defineEntry(wrapped as unknown as Record<string, unknown>, 'code', code);
   }
-  // Not `defineEntry`: `stack` stays non-enumerable, as a native Error's own is, and
-  // `then` below is deliberately locked rather than an ordinary entry.
+  // Not `defineEntry`: `stack` stays non-enumerable, as a native Error's own is.
   const stack = readObjectMember(error, 'stack');
   if (typeof stack === 'string') {
     Object.defineProperty(wrapped, 'stack', {
@@ -3970,7 +3955,6 @@ function stableUploadError(value: unknown): Error {
       configurable: true,
     });
   }
-  Object.defineProperty(wrapped, 'then', { value: undefined });
   return wrapped;
 }
 

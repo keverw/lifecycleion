@@ -31,8 +31,10 @@ type Wrapper = (this: unknown, event: unknown) => void;
  *
  * Not covered, by design: listeners on a signal derived from this one (`AbortSignal.any`,
  * for instance) are that signal's, and calling `EventTarget.prototype.addEventListener`
- * on this signal directly registers the raw listener. Consumers that listen internally
- * (`fetch`, `AbortSignal.any`) are unaffected.
+ * on this signal directly registers the raw listener. A platform consumer is covered only
+ * when it subscribes through the signal's own `addEventListener`: Node's `fetch` (undici)
+ * does, so its listener is wrapped like any other and still runs on the signal, while one
+ * that subscribes inside the runtime (Bun's native `fetch`, for instance) is unaffected.
  *
  * Must be called on a signal nothing else has seen yet. Throws a `TypeError` if the
  * signal refuses installation of the guard.
