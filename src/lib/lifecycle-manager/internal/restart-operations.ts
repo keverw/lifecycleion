@@ -344,8 +344,8 @@ export class RestartOperations {
       }
 
       // A stop phase that ended with components still up - a `haltOnStall` break, which
-      // restart always sets, or a stop that failed and left its component running -
-      // cannot be followed by a startup: it would refuse as `partial_state`, listing the
+      // restart always sets, a stop that failed and left its component running, or the
+      // dependencies held for a stall its retry had nothing to run for - cannot be followed by a startup: it would refuse as `partial_state`, listing the
       // components still up as started while the ones already stopped stay down.
       // Skipped and said so, as a timed-out stop phase is. Read live: anything up now is
       // equally something a startup would refuse over.

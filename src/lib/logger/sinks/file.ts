@@ -348,9 +348,10 @@ export class FileSink implements LogSink {
    *
    * Reporting it from the handler too would print a console line for every attempt at
    * every entry, outside the rule `processQueue` keeps for the console: only the attempt
-   * that loses the line.
+   * that loses the line. Kept with that entry, so a pass that ends before raising it -
+   * `close()` winning, say - cannot hand it to a later entry.
    */
-  private pendingOpenFailure?: FileSinkError;
+  private pendingOpenFailure?: { entry: QueuedEntry; failure: FileSinkError };
 
   private closing = false;
   private closePromise?: Promise<void>;
@@ -1276,7 +1277,7 @@ export class FileSink implements LogSink {
     // the reason for this entry when it had one.
     if (!this.logFileStream) {
       throw (
-        this.takeOpenFailure() ??
+        this.takeOpenFailure(queued) ??
         new FileSinkError('No log file stream available', undefined, 'setup')
       );
     }
@@ -1347,7 +1348,7 @@ export class FileSink implements LogSink {
       // path, which retries it and, if that runs out, reports it.
       if (!this.logFileStream) {
         return reject(
-          this.takeOpenFailure() ??
+          this.takeOpenFailure(queued) ??
             new FileSinkError('No log file stream available'),
         );
       }
@@ -1578,7 +1579,7 @@ export class FileSink implements LogSink {
           // An entry is waiting on this open, and `writeEntry` raises the failure as that
           // entry's: see `pendingOpenFailure`.
           if (this.inFlightEntry !== undefined) {
-            this.pendingOpenFailure = failure;
+            this.pendingOpenFailure = { entry: this.inFlightEntry, failure };
 
             return;
           }
@@ -1659,12 +1660,12 @@ export class FileSink implements LogSink {
     }
   }
 
-  /** The open failure left for the entry in flight, if any, consumed by reading it. */
-  private takeOpenFailure(): FileSinkError | undefined {
-    const failure = this.pendingOpenFailure;
+  /** The open failure left for `queued`, if any, consumed by reading it. */
+  private takeOpenFailure(queued: QueuedEntry): FileSinkError | undefined {
+    const pending = this.pendingOpenFailure;
     this.pendingOpenFailure = undefined;
 
-    return failure;
+    return pending?.entry === queued ? pending.failure : undefined;
   }
 
   /**

@@ -39,6 +39,104 @@ test('a stalled retry with no force handler does not halt the pass before later 
   }
 });
 
+// A stall the pass leaves as it found it - no force handler to retry, or not retried -
+// keeps its dependencies up under `haltOnStall`, while unrelated components are stopped.
+async function setupHeldStall(): Promise<
+  ReturnType<typeof setup> & { cleanup: () => Promise<void> }
+> {
+  const context = setup();
+  const { logger, manager } = context;
+  const db = new Plain(logger, 'db');
+  const unrelated = new Plain(logger, 'unrelated');
+  const x = new Plain(logger, 'x', ['db']);
+  x.stop = () => Promise.reject(new Error('stop failed'));
+  Object.defineProperty(x, 'onShutdownForce', {
+    value: undefined,
+    writable: true,
+  });
+  await manager.registerComponent(db);
+  await manager.registerComponent(unrelated);
+  await manager.registerComponent(x);
+  await manager.startAllComponents();
+  await manager.stopComponent('x');
+  expect(manager.getComponentStatus('x')?.state).toBe('stalled');
+  return {
+    ...context,
+    cleanup: async () => {
+      await manager.unregisterComponent('x', { forceStop: true });
+      await manager.stopAllComponents();
+      await logger.close();
+    },
+  };
+}
+
+for (const shouldRetryStalled of [true, false]) {
+  test(`a held stall keeps its dependencies up and does not halt the pass (retryStalled: ${shouldRetryStalled})`, async () => {
+    const { manager, cleanup } = await setupHeldStall();
+    try {
+      const result = await manager.stopAllComponents({
+        retryStalled: shouldRetryStalled,
+      });
+      expect(result.success).toBe(false);
+      expect(result.code).toBe('partial_state');
+      expect(result.reason).toBe('Stalled: x; Not attempted: db');
+      expect(manager.getComponentStatus('unrelated')?.state).toBe('stopped');
+      expect(manager.isComponentRunning('db')).toBe(true);
+      expect(manager.getComponentStatus('x')?.state).toBe('stalled');
+    } finally {
+      await cleanup();
+    }
+  });
+}
+
+test('with haltOnStall: false a held stall releases its dependencies', async () => {
+  const { manager, cleanup } = await setupHeldStall();
+  try {
+    const result = await manager.stopAllComponents({ haltOnStall: false });
+    expect(result.reason).toBe('Stalled: x');
+    expect(manager.getComponentStatus('unrelated')?.state).toBe('stopped');
+    expect(manager.getComponentStatus('db')?.state).toBe('stopped');
+  } finally {
+    await cleanup();
+  }
+});
+
+test('a held stall that clears mid-pass releases the dependencies skipped for it', async () => {
+  const { logger, manager } = setup();
+  const unrelated = new Plain(logger, 'unrelated');
+  const db = new Plain(logger, 'db');
+  const x = new Plain(logger, 'x', ['db']);
+  const stuckStop = deferred();
+  x.stop = () => stuckStop.promise;
+  Object.defineProperty(x, 'onShutdownForce', {
+    value: undefined,
+    writable: true,
+  });
+  // Stopped after `db` was skipped: the stalled stop finishes while the pass runs.
+  unrelated.stop = async () => {
+    stuckStop.resolve();
+    await sleep(0);
+  };
+  await manager.registerComponent(unrelated);
+  await manager.registerComponent(db);
+  await manager.registerComponent(x);
+  await manager.startAllComponents();
+  try {
+    await manager.stopComponent('x', { timeout: 20 });
+    expect(manager.getComponentStatus('x')?.state).toBe('stalled');
+
+    const result = await manager.stopAllComponents({ retryStalled: false });
+    expect(result.success).toBe(true);
+    expect(manager.getComponentStatus('x')?.state).toBe('stopped');
+    expect(manager.getComponentStatus('db')?.state).toBe('stopped');
+    expect(manager.getComponentStatus('unrelated')?.state).toBe('stopped');
+  } finally {
+    stuckStop.resolve();
+    await manager.stopAllComponents();
+    await logger.close();
+  }
+});
+
 test('a failed stalled retry replaces the stall record without resolving it', async () => {
   const { logger, manager } = setup();
   const component = new Stalls(logger, 'a');

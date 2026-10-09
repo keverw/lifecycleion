@@ -656,6 +656,18 @@ export class ShutdownPassRunner {
       // then it may still be running on them.
       const concurrentOwners = new Set<string>();
       const concurrentlyProtectedSkips = new Set<string>();
+      // Stalls the pass found already recorded and leaves as they are - not retried
+      // (`retryStalled: false`), or retried with nothing to run. No new failure, so they
+      // do not halt it; under `haltOnStall` their dependencies stay up while they remain
+      // stalled, since the stop that stalled may still be using them.
+      const heldStalls = new Set<string>();
+      if (shouldHaltOnStall && !shouldRetryStalled) {
+        for (const name of stalledComponentNames) {
+          heldStalls.add(name);
+        }
+      }
+      const isHeldStallReleased = (owner: string): boolean =>
+        !this.core.state.stalledComponents.has(owner);
       const isStartStillInProgress = (name: string): boolean =>
         isStartUnfinished(currentStarts.get(name)) ||
         this.core.claims.isInFlight(name);
@@ -697,6 +709,11 @@ export class ShutdownPassRunner {
             if (!hasSettled(owner) && reaches(owner)) {
               return true;
             }
+          }
+        }
+        for (const owner of heldStalls) {
+          if (!isHeldStallReleased(owner) && reaches(owner)) {
+            return true;
           }
         }
         return false;
@@ -1039,7 +1056,11 @@ export class ShutdownPassRunner {
               // A stalled retry with no force handler attempted nothing, so nothing
               // failed anew: the stall stands as recorded and is reported with the
               // pass. Halting here would leave every later component untried on every
-              // pass for as long as it stays stalled.
+              // pass for as long as it stays stalled. Under haltOnStall its dependencies
+              // are held instead.
+              if (shouldHaltOnStall) {
+                heldStalls.add(name);
+              }
               continue;
             } else if (
               result.code === 'component_already_stopping' ||
@@ -1109,7 +1130,10 @@ export class ShutdownPassRunner {
         if (
           !(await runStopLoop(stopOrder)) &&
           !hasTimedOut &&
-          [...concurrentOwners, ...concurrentlyProtectedSkips].some(hasSettled)
+          ([...concurrentOwners, ...concurrentlyProtectedSkips].some(
+            hasSettled,
+          ) ||
+            [...heldStalls].some(isHeldStallReleased))
         ) {
           await runStopLoop(
             stopOrder.filter((name) => concurrentlyProtectedSkips.has(name)),
@@ -1214,7 +1238,7 @@ export class ShutdownPassRunner {
           !finalStalledNames.has(name),
       );
       // Never tried by this pass: past a `haltOnStall` break, or held up for a component
-      // still running after a failed stop.
+      // still running after a failed stop, or for a stall the pass left as it was.
       const wasNotAttempted = (name: string): boolean =>
         haltSkippedNames.has(name) ||
         (concurrentlyProtectedSkips.has(name) && !attemptedStopNames.has(name));

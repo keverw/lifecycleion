@@ -1011,7 +1011,15 @@ export class ComponentStart {
       );
     } catch (error) {
       if (didAutoAttachSignalsForComponentStartup) {
-        this.core.signals.detachSignalsIfIdle('crashed component startup');
+        // Reported on its own: the crash being rethrown is what the start answers.
+        try {
+          this.core.signals.detachSignalsIfIdle('crashed component startup');
+        } catch (detachError) {
+          reportCallbackError(
+            'lifecycle-manager crashed start signal detach',
+            detachError,
+          );
+        }
       }
       throw error;
     }
