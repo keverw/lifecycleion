@@ -4423,3 +4423,68 @@ test.each(['console', 'diagnostic'] as const)(
     }
   },
 );
+
+describe('FileSink - an open failure belongs to its entry', () => {
+  let tmpDir: TmpDir;
+
+  const makeQueued = (message: string): object => ({
+    entry: {
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: message,
+      message,
+    },
+    attempts: 0,
+  });
+
+  beforeEach(async () => {
+    tmpDir = new TmpDir({
+      unsafeCleanup: true,
+      prefix: 'filesink-open-failure-',
+    });
+    await tmpDir.initialize();
+  });
+
+  afterEach(async () => {
+    await tmpDir.cleanup();
+  });
+
+  test('a failure left for one entry is not raised for another', async () => {
+    const sink = new FileSink({ logDir: tmpDir.path, basename: 'owned' });
+    await sink.flush();
+    const privateSink = sink as unknown as {
+      logFileStream?: unknown;
+      setupLogFile: () => Promise<void>;
+      pendingOpenFailure?: { entry: object; failure: Error };
+      writeEntry: (queued: object) => Promise<void>;
+    };
+    const stream = privateSink.logFileStream;
+    // An open that fails leaves no stream behind.
+    privateSink.logFileStream = undefined;
+    privateSink.setupLogFile = () => Promise.resolve();
+    const owner = makeQueued('owner');
+    const failure = new Error('Failed to setup log file: owned.log');
+    try {
+      // Left for `owner`, whose pass ended before raising it: the next entry gets the
+      // plain no-stream failure, and the stale one is dropped.
+      privateSink.pendingOpenFailure = { entry: owner, failure };
+      const failed = (queued: object): Promise<unknown> =>
+        privateSink.writeEntry(queued).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      expect(((await failed(makeQueued('later'))) as Error).message).toBe(
+        'No log file stream available',
+      );
+      expect(privateSink.pendingOpenFailure).toBeUndefined();
+
+      privateSink.pendingOpenFailure = { entry: owner, failure };
+      expect(await failed(owner)).toBe(failure);
+    } finally {
+      delete (privateSink as { setupLogFile?: unknown }).setupLogFile;
+      privateSink.logFileStream = stream;
+      await sink.close();
+    }
+  });
+});
