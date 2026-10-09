@@ -37,6 +37,7 @@ import {
 import { takeRestartStopDispatch } from './restart-dispatch';
 import type { PendingForceStopWaiter } from './stop-outcomes';
 import { createStopPhaseObserver } from './stop-phase-observer';
+import { readComponentStatus } from './read-status';
 
 /** Call-local policy and claim history for an individual stop or restart. */
 export interface IndividualStopContext {
@@ -164,7 +165,7 @@ class ForceStopRun {
   public didForceResolve = false;
   // Set once the component is marked stopped, as in the graceful phase: a throw after
   // that - the success log, say - fails only the notification, not the stop. The
-  // status both carry is read guarded (`readStatusOfStopped()`).
+  // status both carry is read guarded (`readComponentStatus()`).
   public didMarkStopped = false;
   // Set once `onShutdownForce()`'s own promise has settled, either way: a call that
   // finished is not aborted, even when a late graceful completion ends the phase in the
@@ -738,7 +739,11 @@ export class ComponentStop {
         componentName: name,
         code: 'component_not_running',
         reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_RUNNING,
-        status: this.core.manager.getComponentStatus(name),
+        status: readComponentStatus(
+          this.core,
+          name,
+          'lifecycle-manager component stop',
+        ),
       };
     }
     const preconditions = this.checkStopPreconditions(name, undefined, {
@@ -1186,7 +1191,11 @@ export class ComponentStop {
       this.core.logger.entity(name).success('Component stopped gracefully');
       this.core.lifecycleEvents.componentStopped(
         name,
-        this.core.stopOutcomes.readStatusOfStopped(name),
+        readComponentStatus(
+          this.core,
+          name,
+          'lifecycle-manager component stop',
+        ),
       );
     });
 
@@ -1245,7 +1254,11 @@ export class ComponentStop {
         reason: LIFECYCLE_MANAGER_MESSAGE_GRACEFUL_SHUTDOWN_TIMED_OUT,
         code: 'component_shutdown_timeout',
         error: err,
-        status: this.core.manager.getComponentStatus(name),
+        status: readComponentStatus(
+          this.core,
+          name,
+          'lifecycle-manager component stop',
+        ),
       };
     } else {
       // Keep the failure result even when the timeout observer owns its log.
@@ -1264,7 +1277,11 @@ export class ComponentStop {
         reason: describeError(err),
         code: 'error',
         error: err,
-        status: this.core.manager.getComponentStatus(name),
+        status: readComponentStatus(
+          this.core,
+          name,
+          'lifecycle-manager component stop',
+        ),
       };
     }
   }
@@ -1724,7 +1741,11 @@ export class ComponentStop {
       }
       this.core.lifecycleEvents.componentStopped(
         name,
-        this.core.stopOutcomes.readStatusOfStopped(name),
+        readComponentStatus(
+          this.core,
+          name,
+          'lifecycle-manager component stop',
+        ),
       );
     });
 

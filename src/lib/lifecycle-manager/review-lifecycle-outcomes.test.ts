@@ -4,6 +4,7 @@ import {
   claimReports,
   coreOf,
   deferred,
+  failStatusReadOnce,
   Plain,
   setup,
   Stalls,
@@ -22,13 +23,7 @@ test('a status failure after shutdown cleans up a resolved start preserves stopp
   manager.on('component:start-failed', () => {
     failedStarts++;
   });
-  manager.getComponentStatus = (name) => {
-    if (shouldThrow) {
-      shouldThrow = false;
-      throw failure;
-    }
-    return status(name);
-  };
+  const restoreStatusRead = failStatusReadOnce(failure, () => shouldThrow);
   const { reports, release } = claimReports();
   try {
     const starting = manager.startComponent('api');
@@ -46,7 +41,7 @@ test('a status failure after shutdown cleans up a resolved start preserves stopp
     expect(reports).toHaveLength(1);
   } finally {
     gate.resolve();
-    manager.getComponentStatus = status;
+    restoreStatusRead();
     release();
     await manager.stopAllComponents();
     await logger.close();

@@ -30,6 +30,7 @@ import {
   resolveOperationTimeoutMS,
 } from './operation-policy';
 import { runShutdownWarningPhase } from './shutdown-warning';
+import { readComponentStatus } from './read-status';
 
 /** A shutdown request refused because a pass is already running. */
 export interface ShutdownPassRefusal {
@@ -1520,7 +1521,8 @@ export class ShutdownPassRunner {
       reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
       code: 'component_stalled',
     };
-    const status = this.core.stopOutcomes.readStatusOfStopped(
+    const status = readComponentStatus(
+      this.core,
       name,
       'lifecycle-manager shutdown pass',
     );

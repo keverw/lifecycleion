@@ -7,6 +7,7 @@ import {
   LIFECYCLE_MANAGER_LOG_REQUIRED_COMPONENT_UNEXPECTED_STOP_DURING_STARTUP,
 } from '../constants';
 import type { ManagerCore } from './manager-core';
+import { readComponentStatus } from './read-status';
 
 /**
  * Unexpected stops: a component that reports through `reportUnexpectedStop()` that it
@@ -261,7 +262,8 @@ export class UnexpectedStops {
         // from a socket or timer callback, where a throw would go uncaught.
         this.core.lifecycleEvents.componentStopped(
           name,
-          this.core.stopOutcomes.readStatusOfStopped(
+          readComponentStatus(
+            this.core,
             name,
             'lifecycle-manager component unexpected stop',
           ),

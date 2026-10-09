@@ -7,6 +7,7 @@ import { LifecycleManager } from './lifecycle-manager';
 import {
   claimReports,
   deferred,
+  failStatusReadOnce,
   fakeSignals,
   hasReport,
   Plain,
@@ -427,21 +428,16 @@ test('a branded option refusal thrown after the claim is a crash, reported once'
   const brandedError = refused.error as Error;
 
   // Fails the success path's status read, after the component is marked running.
-  const readStatus = manager.getComponentStatus.bind(manager);
-  let shouldThrow = true;
-  manager.getComponentStatus = (name) => {
-    if (shouldThrow && manager.isComponentRunning(name)) {
-      shouldThrow = false;
-      throw brandedError;
-    }
-    return readStatus(name);
-  };
+  const restoreStatusRead = failStatusReadOnce(brandedError, (name) =>
+    manager.isComponentRunning(name),
+  );
 
   const { reports, release } = claimReports();
   let result;
   try {
     result = await manager.startComponent('a');
   } finally {
+    restoreStatusRead();
     release();
   }
 

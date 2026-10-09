@@ -1,4 +1,3 @@
-import { reportCallbackError } from '../../safe-handle-callback';
 import { describeError } from '../../to-error';
 import {
   LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
@@ -7,11 +6,11 @@ import {
 import type {
   ComponentOperationResult,
   ComponentStallInfo,
-  ComponentStatus,
 } from '../types';
 import type { ManagerCore } from './manager-core';
 import type { StopAttempt } from './manager-state';
 import { crashedComponentResult } from './operation-policy';
+import { readComponentStatus } from './read-status';
 
 /** A force phase's wait for another path to mark its component stopped. */
 export interface PendingForceStopWaiter {
@@ -42,25 +41,6 @@ export class StopOutcomes {
   >();
 
   constructor(private readonly core: ManagerCore) {}
-
-  /**
-   * The status of a component already recorded as stopped, for its `component:stopped`
-   * event and its result - or as stalled, for the stall's result. Read guarded:
-   * `getComponentStatus()` is public and can be overridden, and a throw from it must not
-   * cost a stop that happened its notification, nor turn it or a stall into a crash.
-   * Reported, and left out.
-   */
-  public readStatusOfStopped(
-    name: string,
-    context = 'lifecycle-manager component stop',
-  ): ComponentStatus | undefined {
-    try {
-      return this.core.manager.getComponentStatus(name);
-    } catch (error) {
-      reportCallbackError(context, error);
-      return undefined;
-    }
-  }
 
   public createPendingForceStopWaiter(name: string): PendingForceStopWaiter {
     let isResolved = false;
@@ -251,7 +231,11 @@ export class StopOutcomes {
 
       this.core.lifecycleEvents.componentStopped(
         name,
-        this.readStatusOfStopped(name),
+        readComponentStatus(
+          this.core,
+          name,
+          'lifecycle-manager component stop',
+        ),
       );
       return true;
     });
@@ -337,7 +321,11 @@ export class StopOutcomes {
       success: true,
       componentName: name,
     };
-    const status = this.readStatusOfStopped(name);
+    const status = readComponentStatus(
+      this.core,
+      name,
+      'lifecycle-manager component stop',
+    );
     if (status !== undefined) {
       result.status = status;
     }
@@ -449,7 +437,8 @@ export class StopOutcomes {
 
     // Guarded as a stopped component's status is: a throwing override must not turn
     // the stall into a crash. Reported, and left out.
-    const status = this.readStatusOfStopped(
+    const status = readComponentStatus(
+      this.core,
       name,
       'lifecycle-manager component stall',
     );

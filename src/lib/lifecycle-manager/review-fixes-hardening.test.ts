@@ -5,6 +5,7 @@ import { ArraySink } from '../logger/sinks/array';
 import { LifecycleManager } from './lifecycle-manager';
 import {
   claimReports,
+  failStatusReadOnce,
   fakeSignals,
   Plain,
   setup,
@@ -398,15 +399,11 @@ describe('graceful timeout crash', () => {
     a.stop = (): Promise<void> => new Promise<void>(() => {});
     await manager.registerComponent(a);
     await manager.startComponent('a');
-    const getComponentStatus = manager.getComponentStatus.bind(manager);
     let isArmed = false;
-    manager.getComponentStatus = (name: string) => {
-      if (isArmed) {
-        isArmed = false;
-        throw new Error('status exploded');
-      }
-      return getComponentStatus(name);
-    };
+    const restoreStatusRead = failStatusReadOnce(
+      new Error('status exploded'),
+      () => isArmed,
+    );
     manager.once('component:stop-timeout', () => {
       isArmed = true;
     });
@@ -416,6 +413,7 @@ describe('graceful timeout crash', () => {
     try {
       result = await manager.stopComponent('a');
     } finally {
+      restoreStatusRead();
       release();
     }
 

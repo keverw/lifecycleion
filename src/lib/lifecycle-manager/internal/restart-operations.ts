@@ -37,6 +37,7 @@ import {
   type RestartStartupDispatch,
   type RestartStopDispatch,
 } from './restart-dispatch';
+import { readComponentStatus } from './read-status';
 
 /** Everything restart preparation reads from the caller, validated before any stop. */
 interface RestartPreparation {
@@ -575,7 +576,11 @@ export class RestartOperations {
         reason:
           'Shutdown requested while restart was stopping the component; startup skipped',
         code: 'shutdown_requested_during_restart',
-        status: this.core.manager.getComponentStatus(name),
+        status: readComponentStatus(
+          this.core,
+          name,
+          'lifecycle-manager restart',
+        ),
       };
     }
 
@@ -609,7 +614,11 @@ export class RestartOperations {
         reason:
           'Shutdown requested while restart was stopping the component; startup skipped',
         code: 'shutdown_requested_during_restart',
-        status: this.core.manager.getComponentStatus(name),
+        status: readComponentStatus(
+          this.core,
+          name,
+          'lifecycle-manager restart',
+        ),
       };
     }
 
@@ -626,7 +635,7 @@ export class RestartOperations {
     return {
       success: true,
       componentName: name,
-      status: this.core.manager.getComponentStatus(name),
+      status: readComponentStatus(this.core, name, 'lifecycle-manager restart'),
     };
   }
 

@@ -5,6 +5,7 @@ import {
   claimReports,
   coreOf,
   deferred,
+  failStatusReadOnce,
   fakeAttachedSignals,
   hasReport,
   Plain,
@@ -592,23 +593,38 @@ describe('LifecycleManager - public methods never reject', () => {
     expect(result.error?.message).toBe('getter exploded');
   });
 
+  test('a status override that throws does not crash a start', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Plain(logger, 'a'));
+
+    const originalGetStatus = manager.getComponentStatus.bind(manager);
+    manager.getComponentStatus = (): never => {
+      throw new Error('status exploded');
+    };
+
+    const { reports, release } = claimReports();
+    let result;
+
+    try {
+      result = await manager.startComponent('a');
+    } finally {
+      manager.getComponentStatus = originalGetStatus;
+      release();
+    }
+
+    // The start happened: reported, and answered without a status.
+    expect(result).toMatchObject({ success: true, componentName: 'a' });
+    expect(result.status).toBeUndefined();
+    expect(manager.isComponentRunning('a')).toBe(true);
+    expect(hasReport(reports, 'lifecycle-manager component start')).toBe(true);
+  });
+
   test('a start that crashes after the component is running stops it again', async () => {
     const { logger, manager } = setup();
     await manager.registerComponent(new Plain(logger, 'a'));
 
     // The success path builds the component's status once it is already running.
-    const originalGetStatus = manager.getComponentStatus.bind(manager);
-    let shouldThrow = true;
-    manager.getComponentStatus = (
-      name: string,
-    ): ReturnType<LifecycleManager['getComponentStatus']> => {
-      if (shouldThrow) {
-        shouldThrow = false;
-        throw new Error('status exploded');
-      }
-
-      return originalGetStatus(name);
-    };
+    const restoreStatusRead = failStatusReadOnce(new Error('status exploded'));
 
     const { release } = claimReports();
     let result;
@@ -616,6 +632,7 @@ describe('LifecycleManager - public methods never reject', () => {
     try {
       result = await manager.startComponent('a');
     } finally {
+      restoreStatusRead();
       release();
     }
 
@@ -772,18 +789,7 @@ describe('LifecycleManager - public methods never reject', () => {
     await manager.startComponent('a');
 
     // The `component_already_running` refusal builds a status; make that throw once.
-    const originalGetStatus = manager.getComponentStatus.bind(manager);
-    let shouldThrow = true;
-    manager.getComponentStatus = (
-      name: string,
-    ): ReturnType<LifecycleManager['getComponentStatus']> => {
-      if (shouldThrow) {
-        shouldThrow = false;
-        throw new Error('status exploded');
-      }
-
-      return originalGetStatus(name);
-    };
+    const restoreStatusRead = failStatusReadOnce(new Error('status exploded'));
 
     const { release } = claimReports();
     let result;
@@ -791,6 +797,7 @@ describe('LifecycleManager - public methods never reject', () => {
     try {
       result = await manager.startComponent('a');
     } finally {
+      restoreStatusRead();
       release();
     }
 

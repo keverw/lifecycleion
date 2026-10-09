@@ -2643,6 +2643,8 @@ if (lifecycle.isComponentRunning('cache')) {
 
 Get detailed status for a specific component. Returns `undefined` if component not found.
 
+The manager reads the `status` on its results and events through this method, so a subclass override is the one used. If an override throws, the throw is reported on the global `'error'` channel and the result or event leaves `status` out; the operation itself is not affected.
+
 ```typescript
 const status = lifecycle.getComponentStatus('web-server');
 if (status) {

@@ -1,8 +1,10 @@
+import { spyOn } from 'bun:test';
 import { Logger } from '../logger';
 import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
 import { LifecycleManager } from './lifecycle-manager';
 import type { ManagerCore } from './internal/manager-core';
+import * as readStatus from './internal/read-status';
 import type { LifecycleManagerOptions } from './types';
 
 // Shared by the lifecycle-manager test files. Not a test file itself, so `bun test`
@@ -52,6 +54,29 @@ export function deferred<T = void>(): {
 
 // Claims every report on the global `'error'` channel until `release()`: asserts they
 // were made, and keeps the `console.error` fall-through out of the test output.
+/**
+ * Makes the manager's status read for a result or an event throw `failure` once, the
+ * first time `when(name)` holds: a way to crash an operation at that exact point, since
+ * a throwing `getComponentStatus()` override is contained. Returns the restore.
+ */
+export function failStatusReadOnce(
+  failure: unknown,
+  when: (name: string) => boolean = () => true,
+): () => void {
+  const read = readStatus.readComponentStatus;
+  let hasThrown = false;
+  const spy = spyOn(readStatus, 'readComponentStatus').mockImplementation(
+    (core, name, context) => {
+      if (!hasThrown && when(name)) {
+        hasThrown = true;
+        throw failure;
+      }
+      return read(core, name, context);
+    },
+  );
+  return () => spy.mockRestore();
+}
+
 export function claimReports(): { reports: unknown[]; release: () => void } {
   const reports: unknown[] = [];
   const onError = (event: Event): void => {

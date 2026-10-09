@@ -50,6 +50,7 @@ import {
   reportedComponentName,
 } from './registration-policy';
 import { markComponentUnregistered } from './unregistration-operations';
+import { readComponentStatus } from './read-status';
 
 /**
  * One registration call: what it was asked, what it has read of the caller's code, and
@@ -866,7 +867,11 @@ export class RegistrationOperations {
         componentName,
         reason: 'The bulk startup this auto-start would join is rolling back',
         code: 'startup_rolled_back',
-        status: this.core.manager.getComponentStatus(componentName),
+        status: readComponentStatus(
+          this.core,
+          componentName,
+          'lifecycle-manager component registration',
+        ),
       };
     } else if (this.core.state.isStarting && !bulkStartup?.isCompleting) {
       this.deferAutoStartToBulkStartup(attempt, bulkStartup);
