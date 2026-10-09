@@ -566,3 +566,50 @@ test('redirect and final observers share the already-adopted upload outcome', as
   expect(await response.requestBodySettled).toBeUndefined();
   expect(adoptions).toBe(1);
 });
+
+test.each([
+  [
+    'a rejected promise',
+    // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- the hostile adapter value under test
+    () => Promise.reject<Error | undefined>(undefined),
+  ],
+  [
+    'a foreign thenable',
+    () =>
+      ({
+        then(_resolve: unknown, reject: (reason: unknown) => void) {
+          reject(undefined);
+        },
+      }) as Promise<Error | undefined>,
+  ],
+] as const)(
+  'an upload settlement rejected with undefined from %s reports an Error, not completion',
+  async (_label, makeSource) => {
+    const source = makeSource();
+
+    if (source instanceof Promise) {
+      source.catch(() => undefined);
+    }
+
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: () =>
+        Promise.resolve<AdapterResponse>({
+          status: 200,
+          headers: {},
+          body: null,
+          requestBodySettled: source,
+        }),
+    };
+
+    const response = await new HTTPClient({ adapter })
+      .put('https://example.com/upload')
+      .text('body')
+      .send();
+    expect(response.status).toBe(200);
+    const outcome = await response.requestBodySettled;
+    // `undefined` is the documented value for a completed upload; a rejection is a
+    // failure whatever its reason.
+    expect(outcome).toBeInstanceOf(Error);
+  },
+);

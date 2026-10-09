@@ -3338,10 +3338,15 @@ export class BaseHTTPClient {
     try {
       const candidate: unknown = request.headers;
 
-      // Only an object is a header record. `Object.keys` on a string answers its indices,
-      // so an interceptor that returned `headers: 'abc'` reported headers named `0`, `1`
-      // and `2`; anything that is not an object leaves the snapshot without headers.
-      if (typeof candidate === 'object' && candidate !== null) {
+      // Only a non-array object is a header record. `Object.keys` on a string or an
+      // array answers its indices, so an interceptor that returned `headers: 'abc'`
+      // reported headers named `0`, `1` and `2`; anything else leaves the snapshot
+      // without headers.
+      if (
+        typeof candidate === 'object' &&
+        candidate !== null &&
+        !Array.isArray(candidate)
+      ) {
         sourceHeaders = candidate as Record<string, string | string[]>;
         headerNames = Object.keys(sourceHeaders);
       }
@@ -3592,9 +3597,9 @@ function readBestEffort<T>(read: () => T, fallback: T): T {
  * single value converted to a string, an array's elements each converted, and a
  * one-element array collapsed to its string - so a value whose `toString` answers
  * differently on each call is checked and sent as one string. Names keep their case.
- * Throws on a `requestURL` or `method` that is not a string or `headers` that is not an
- * object, and on any read or conversion that throws; each phase reports that as the
- * interceptor's failure.
+ * Throws on a `requestURL` or `method` that is not a string or `headers` that is not a
+ * non-array object, and on any read or conversion that throws; each phase reports that
+ * as the interceptor's failure.
  */
 function snapshotInterceptedRequest(
   request: InterceptedRequest,
@@ -3617,9 +3622,15 @@ function snapshotInterceptedRequest(
 
   const candidateHeaders: unknown = headers;
 
-  if (typeof candidateHeaders !== 'object' || candidateHeaders === null) {
+  // An array passes `typeof === 'object'`, but `Object.entries` would turn its indices
+  // into header names, so it is refused like any other non-record.
+  if (
+    typeof candidateHeaders !== 'object' ||
+    candidateHeaders === null ||
+    Array.isArray(candidateHeaders)
+  ) {
     throw new TypeError(
-      `[HTTPClient] Interceptor returned a request whose headers is not an object (got ${candidateHeaders === null ? 'null' : typeof candidateHeaders}).`,
+      `[HTTPClient] Interceptor returned a request whose headers is not an object (got ${candidateHeaders === null ? 'null' : Array.isArray(candidateHeaders) ? 'array' : typeof candidateHeaders}).`,
     );
   }
 
@@ -3865,10 +3876,13 @@ function adoptRequestBodySettled(
     return undefined;
   }
   // Stabilized in the reaction that publishes the Error at this public API boundary,
-  // so the adapter's value never settles a promise itself.
-  const publish = (value: unknown): Error | undefined =>
-    value === undefined ? undefined : stableUploadError(value);
-  return pending.then(({ value }) => publish(value), publish);
+  // so the adapter's value never settles a promise itself. Only a fulfilment may answer
+  // `undefined` (the upload completed): a rejection is always a failure, so a rejection
+  // reason of `undefined` is normalized to an Error like any other reason.
+  return pending.then(
+    ({ value }) => (value === undefined ? undefined : stableUploadError(value)),
+    (error: unknown) => stableUploadError(error),
+  );
 }
 
 /**

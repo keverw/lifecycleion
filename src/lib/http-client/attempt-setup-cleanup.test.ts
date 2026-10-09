@@ -639,6 +639,7 @@ test.each(['initial', 'retry', 'redirect'] as const)(
 test.each([
   ['a string', 'abc'],
   ['null', null],
+  ['an array', ['a', 'b', 'c']],
 ] as const)(
   'an interceptor returning headers that are %s fails as interceptor_error with an empty header snapshot',
   async (_label, headers) => {
@@ -665,7 +666,7 @@ test.each([
 
     expect(request.error?.code).toBe('interceptor_error');
     expect(sends).toBe(0);
-    // Not `{ 0: 'a', 1: 'b', 2: 'c' }`: a string is not a header record.
+    // Not `{ 0: 'a', 1: 'b', 2: 'c' }`: a string or an array is not a header record.
     expect(observed).toEqual([{}]);
   },
 );
