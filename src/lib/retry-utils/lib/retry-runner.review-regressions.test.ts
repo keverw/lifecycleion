@@ -4,6 +4,7 @@ import {
   type ReportResult,
   type OnAttemptHandledInfo,
 } from './retry-runner';
+import * as idHelpers from '../../id-helpers';
 
 const policy = { strategy: 'fixed', delayMS: 1, maxRetryAttempts: 1 } as const;
 
@@ -159,5 +160,82 @@ test('fatal reports record their error without invoking retry jitter', async () 
     expect(random).not.toHaveBeenCalled();
   } finally {
     random.mockRestore();
+  }
+});
+
+test('an invalid report status keeps the reported value on cause', async () => {
+  const failure = new Error('reported with a typo');
+  const runner = new RetryRunner(policy, (report) => {
+    (report as (status: unknown, value: unknown) => void)('eror', failure);
+  });
+  const result = await runner.run(true);
+  expect(result.status).toBe('attempt_fatal');
+  expect(runner.lastError).toBeInstanceOf(TypeError);
+  expect((runner.lastError as TypeError).cause).toBe(failure);
+});
+
+test('a late report with a symbol status is reported, not thrown out of reportResult', async () => {
+  const reports: unknown[] = [];
+  const onGlobalError = (event: Event): void => {
+    reports.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onGlobalError);
+  try {
+    let lateCall: (() => void) | undefined;
+    const runner = new RetryRunner(policy, (report) => {
+      report('success', 'done');
+      lateCall = () =>
+        (report as (status: unknown) => void)(Symbol('late-status'));
+    });
+    expect(await runner.run(true)).toEqual({
+      status: 'attempt_success',
+      data: 'done',
+    });
+    expect(() => lateCall?.()).not.toThrow();
+    expect(reports).toHaveLength(1);
+    expect(String((reports[0] as Error).message)).toContain(
+      'attempt already settled',
+    );
+    expect(String(((reports[0] as Error).cause as Error).message)).toContain(
+      "reportResult('Symbol(late-status)')",
+    );
+  } finally {
+    globalThis.removeEventListener('error', onGlobalError);
+  }
+});
+
+test('a throw while setting up an attempt ends the operation as an unexpected fatal error', async () => {
+  const setupError = new Error('id generation failed');
+  const unhandled: unknown[] = [];
+  const onUnhandled = (reason: unknown): void => {
+    unhandled.push(reason);
+  };
+  process.on('unhandledRejection', onUnhandled);
+  const generateID = spyOn(idHelpers, 'generateID').mockImplementation(() => {
+    throw setupError;
+  });
+  let calls = 0;
+  try {
+    const runner = new RetryRunner(policy, (report) => {
+      calls++;
+      report('success');
+    });
+    expect(await runner.run(true)).toEqual({
+      status: 'attempt_fatal',
+      code: 'unexpected_error',
+      error: setupError,
+    });
+    expect(runner.runnerState).toBe('fatal-error');
+    expect(await runner.waitForCompletion()).toMatchObject({
+      status: 'attempt_fatal',
+      code: 'unexpected_error',
+    });
+    expect(calls).toBe(0);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(unhandled).toEqual([]);
+  } finally {
+    generateID.mockRestore();
+    process.off('unhandledRejection', onUnhandled);
   }
 });

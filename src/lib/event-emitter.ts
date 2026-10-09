@@ -114,7 +114,8 @@ export class EventEmitterProtected {
 
   /**
    * Remove all event listeners
-   * @param event Optional event name. If not provided, removes all listeners for all events
+   * @param event Optional event name. If `undefined`, removes all listeners for all events;
+   * any other value (`''` included) removes only the listeners for that event
    */
   public clear(event?: string): void {
     if (event !== undefined) {

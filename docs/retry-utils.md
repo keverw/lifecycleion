@@ -279,7 +279,7 @@ type ReportResult<T> = {
 - **`'skip'`** - Skip this attempt (e.g., when device knows it's offline for sure). Does not count against the retry budget, and does not increment `attempts` or `retryCount`. The `value` is available as `data` in the `attempt-handled` event payload. A retry is still scheduled using the policy delay, but since the skip does not advance the error count, the delay is the same as it would have been before the skip (i.e., exponential backoff does not advance). However, if prior `'error'` results have already exhausted the retry budget, a `'skip'` will still result in `'exhausted'` because the policy's retry count has already reached its limit.
   - **Note:** After the very first skip, `attempts` will be `1` because the initial attempt is considered taken as soon as the operation starts, even if it was skipped. Subsequent skips do not increase `attempts` or `retryCount`.
 
-> An unrecognized runtime status ends the attempt as a fatal `TypeError`; it never schedules a retry.
+> An unrecognized runtime status ends the attempt as a fatal `TypeError`, with the reported value (when there is one) on its `cause`; it never schedules a retry.
 
 > **CRITICAL:** `reportResult` **MUST** be called exactly once per attempt. If your operation completes without calling `reportResult` and without throwing an error, the attempt will hang indefinitely (it will wait forever, blocking any retry logic). The only exception is throwing an error, which is automatically treated as `reportResult('error', thrownError)`. A genuine second or late call is ignored by the runner and reported on the global `'error'` channel. An aborted attempt may still acknowledge cancellation with `reportResult('skip', ...)` without producing that report.
 
@@ -351,7 +351,7 @@ Returns `Promise<RunResult<T>>`:
 - If `shouldWaitForCompletion` is `true`: resolves when the operation finishes with one of:
   - `{ status: 'attempt_success', data?: T }` - succeeded
   - `{ status: 'attempts_exhausted', error? }` - retry budget exhausted (`error` is from the final attempt; a forced attempt that reports `skip` may omit it)
-  - `{ status: 'attempt_fatal', error?, code? }` - fatal error, no retry; `code: 'unexpected_error'` identifies a failure while evaluating the retry policy or installing its timer
+  - `{ status: 'attempt_fatal', error?, code? }` - fatal error, no retry; `code: 'unexpected_error'` identifies a failure while setting up an attempt, evaluating the retry policy or installing its timer
   - `{ status: 'canceled' }` - canceled during execution
 - On pre-operation error: `{ status: 'pre_operation_error', code, error }` with codes:
   - `'already_running'` - operation is already in progress
@@ -380,7 +380,7 @@ Waits for the current operation to complete. Returns `Promise<RunResult<T>>` wit
 
 - `{ status: 'attempt_success', data?: T }` - succeeded
 - `{ status: 'attempts_exhausted', error? }` - retry budget exhausted (`error` is from the final attempt; a forced attempt that reports `skip` may omit it)
-- `{ status: 'attempt_fatal', error?, code? }` - fatal error, no retry; `code: 'unexpected_error'` identifies a failure while evaluating the retry policy or installing its timer
+- `{ status: 'attempt_fatal', error?, code? }` - fatal error, no retry; `code: 'unexpected_error'` identifies a failure while setting up an attempt, evaluating the retry policy or installing its timer
 - `{ status: 'canceled' }` - canceled during execution
 - `{ status: 'not_started', code: 'not_running', error }` - runner has not been started
 

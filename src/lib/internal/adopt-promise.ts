@@ -47,10 +47,40 @@ function isThisRealmTypeError(error: unknown): boolean {
 }
 
 /**
+ * Frames of headroom {@link isStackNearlyExhausted} asks for: far more than the few
+ * frames between its caller and the native `then`'s slot check, so a check that ran out
+ * of stack leaves too little for this many.
+ */
+const STACK_HEADROOM_FRAMES = 64;
+
+// Not a tail call, so an engine with proper tail calls still spends a frame per level.
+function descend(depth: number): number {
+  return depth <= 0 ? 0 : descend(depth - 1) + 1;
+}
+
+/**
+ * Whether the stack, here, is too close to its limit for the native `then`'s slot check
+ * to have run - the one way that check throws a `RangeError`. A `RangeError` thrown with
+ * headroom to spare came from past the check: a species constructor or getter of a
+ * native promise.
+ */
+function isStackNearlyExhausted(): boolean {
+  try {
+    descend(STACK_HEADROOM_FRAMES);
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
  * Whether `error` is what the native `then`'s internal-slot check can throw for a value
  * that is not a native promise: this realm's `TypeError`, or - with the stack nearly
  * exhausted, where even that check cannot run - this realm's `RangeError`. Anything else
  * comes from past the check, so from a native promise of some realm.
+ *
+ * Called from the `catch` around the native `then`, at nearly the depth the check ran
+ * at, so a `RangeError` counts only while the stack is still that close to its limit.
  */
 function isSlotCheckFailure(error: unknown): boolean {
   if (isThisRealmTypeError(error)) {
@@ -59,7 +89,8 @@ function isSlotCheckFailure(error: unknown): boolean {
   try {
     return (
       isObjectLike(error) &&
-      Reflect.getPrototypeOf(error) === RangeError.prototype
+      Reflect.getPrototypeOf(error) === RangeError.prototype &&
+      isStackNearlyExhausted()
     );
   } catch {
     return false;

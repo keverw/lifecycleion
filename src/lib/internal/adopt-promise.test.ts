@@ -700,6 +700,53 @@ for (const entry of ['adoptPromise', 'adoptResult'] as const) {
   });
 }
 
+// A species `RangeError` thrown with stack to spare is not the slot check running out of
+// stack, so the value is a native promise and its own `then` is not trusted.
+for (const entry of ['adoptPromise', 'adoptResult'] as const) {
+  test(`${entry} rejects a re-prototyped promise whose species throws a RangeError rather than trusting its own then`, async () => {
+    const promise: object = Promise.resolve(1);
+    void Object.setPrototypeOf(promise, {
+      constructor: {
+        [Symbol.species]: class {
+          constructor() {
+            throw new RangeError('species refused');
+          }
+        },
+      },
+    });
+    let isOwnThenCalled = false;
+    void Object.defineProperty(promise, 'then', {
+      value: (): void => {
+        isOwnThenCalled = true;
+      },
+    });
+
+    const pending =
+      entry === 'adoptPromise'
+        ? adoptPromise(promise)
+        : (adoptResult(promise) as Promise<unknown>);
+    const outcome = await settleWithin(pending, 100);
+    expect(outcome).toBeInstanceOf(RangeError);
+    expect((outcome as RangeError).message).toBe('species refused');
+    expect(isOwnThenCalled).toBe(false);
+  });
+}
+
+test('containDeferredResult counts a re-prototyped promise whose species throws a RangeError as a promise', () => {
+  const promise: object = Promise.resolve(1);
+  void Object.setPrototypeOf(promise, {
+    constructor: {
+      [Symbol.species]: class {
+        constructor() {
+          throw new RangeError('species refused');
+        }
+      },
+    },
+  });
+  void Object.defineProperty(promise, 'then', { value: 1 });
+  expect(containDeferredResult(promise)).toBe(true);
+});
+
 test('containDeferredResult observes a native rejection reparented to Object.prototype', async () => {
   const promise = Promise.reject(new Error('reparented native failure'));
   void Object.setPrototypeOf(promise, Object.prototype);
