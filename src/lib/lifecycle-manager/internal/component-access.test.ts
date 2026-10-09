@@ -839,7 +839,7 @@ test('message availability evaluates the hook-entry block once per read', async 
   expect(blockReads).toBe(2);
 });
 
-test('getValue and health checks look the component up once before reading its hook', async () => {
+test('health checks look the component up once before reading its hook, getValue again after its options', async () => {
   const { context, add } = fixture();
   add('target');
   let lookups = 0;
@@ -851,19 +851,93 @@ test('getValue and health checks look the component up once before reading its h
     },
   };
 
-  // No handler: the lookup that finds the component, then the recheck after the handler
-  // read. The first availability read follows that lookup with no caller code between,
-  // so it does not repeat it.
+  // No handler: the lookup that finds the component, the first availability read - the
+  // options getters and `value-requested` listeners have run since that lookup - and
+  // the recheck after the handler read.
   expect(getValueInternal(counted, 'target', 'key', null).code).toBe(
     'no_handler',
   );
-  expect(lookups).toBe(2);
+  expect(lookups).toBe(3);
 
+  // The lookup, then the recheck after the handler read. The first availability read
+  // follows that lookup with no caller code between, so it does not repeat it.
   lookups = 0;
   expect((await checkComponentHealthOperation(counted, 'target')).code).toBe(
     'no_handler',
   );
   expect(lookups).toBe(2);
+});
+
+test('getValue answers a missing component not_found without reading its options', () => {
+  const { context, events } = fixture();
+  const options = {
+    get includeStopped(): boolean {
+      throw new Error('options exploded');
+    },
+  };
+
+  const result = getValueInternal(context, 'missing', 'key', null, options);
+
+  expect(result).toMatchObject({
+    found: false,
+    componentFound: false,
+    handlerImplemented: false,
+    code: 'not_found',
+  });
+  expect(events).toEqual([
+    'component:value-requested',
+    'component:value-returned',
+  ]);
+});
+
+test('getValue rechecks the captured component after its options getters run', () => {
+  const { context, state, add, events } = fixture();
+  add('target');
+  const options = {
+    get includeStopped(): boolean {
+      state.components = [];
+      return false;
+    },
+  };
+
+  const result = getValueInternal(context, 'target', 'key', null, options);
+
+  expect(result).toMatchObject({ componentFound: false, code: 'not_found' });
+  expect(events).toEqual([
+    'component:value-requested',
+    'component:value-returned',
+  ]);
+});
+
+test('a message handler getter that stops its component reports the handler it returned', async () => {
+  const state = fixture();
+  const component = state.add('recipient');
+  Object.defineProperty(component, 'onMessage', {
+    get() {
+      stopIn(state, 'recipient');
+      return () => 'unused';
+    },
+  });
+  Object.defineProperty(component, 'getValue', {
+    get() {
+      stopIn(state, 'recipient');
+      return () => ({ found: true, value: 'unused' });
+    },
+  });
+
+  const message = await sendMessageInternal(
+    state.context,
+    'recipient',
+    'hi',
+    null,
+  );
+  state.componentStates.set('recipient', 'running');
+  state.runningComponents.add('recipient');
+  const value = getValueInternal(state.context, 'recipient', 'key', null);
+
+  // Both record whether the captured target's handler was found.
+  expect(message).toMatchObject({ code: 'stopped', handlerImplemented: true });
+  expect(value).toMatchObject({ code: 'stopped', handlerImplemented: true });
 });
 
 test('checkAllHealth aggregates entry outcomes into its code', async () => {

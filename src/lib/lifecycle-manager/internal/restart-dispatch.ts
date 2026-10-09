@@ -5,6 +5,7 @@ import type {
 } from '../types';
 import type { RestartStartSnapshot } from './component-start';
 import type { IndividualStopContext } from './component-stop';
+import type { ManagerCore } from './manager-core';
 import type {
   StartOptionsSnapshot,
   StartupOptionsSnapshot,
@@ -27,11 +28,16 @@ import type {
  * one. An override that hands that object on keeps the restart's behavior; one that
  * passes a new object gets a plain start or stop of the name.
  *
- * Each context is taken at most once, and only for the name it was issued for: a second
- * call with the same object, or a call for another name, is a plain call.
+ * Each context is taken at most once, only by the manager whose restart issued it, only
+ * for the name it was issued for, and only while the restart's public call is still
+ * pending: the restart revokes it once that call settles (`revokeRestartDispatch()`). A
+ * second call with the same object, a call on another manager or for another name, or a
+ * replay of a saved object after the call, is a plain call.
  */
 
 interface RestartDispatchBase {
+  /** The core of the manager whose restart issued this context: only it takes it. */
+  readonly issuer: ManagerCore;
   /** Set once a public method took this context: the override handed the object on. */
   taken: boolean;
 }
@@ -50,6 +56,10 @@ export interface RestartStartDispatch extends RestartDispatchBase {
   readonly name: string;
   readonly startOptions: StartOptionsSnapshot;
   readonly startSnapshot: RestartStartSnapshot;
+  /** `stayDownRequestCount` when the restart's stop began: see `restartStartOperation()`. */
+  readonly stayDownRequestCount: number;
+  /** Set when the start refused because a shutdown asked to stay down meanwhile. */
+  canceled: boolean;
 }
 
 /** `restartAllComponents()`'s startup phase: its validated options and saved snapshots. */
@@ -57,6 +67,10 @@ export interface RestartStartupDispatch extends RestartDispatchBase {
   readonly kind: 'startup';
   readonly startupOptions: StartupOptionsSnapshot;
   readonly restartSnapshots: Map<string, RestartStartSnapshot>;
+  /** `stayDownPassCount` when the stop phase began: see `refuseCanceledRestartStartup()`. */
+  readonly stayDownPassCount: number;
+  /** Set when the startup refused because a shutdown asked to stay down meanwhile. */
+  canceled: boolean;
 }
 
 type RestartDispatch =
@@ -108,41 +122,68 @@ export function restartDispatchOptions(dispatch: RestartDispatch): object {
   return options;
 }
 
-/** The restart stop `options` carries for `name`, taken; `undefined` for a plain stop. */
+/**
+ * Ends the context `options` carries, taken or not: called by the restart once the public
+ * call it handed `options` to has settled, so an override that kept the object cannot
+ * replay the restart's context later.
+ */
+export function revokeRestartDispatch(options: object): void {
+  dispatches.delete(options);
+}
+
+/**
+ * The restart stop `options` carries for `name` on `core`'s manager, taken; `undefined`
+ * for a plain stop.
+ */
 export function takeRestartStopDispatch(
+  core: ManagerCore,
   name: string,
   options: unknown,
 ): RestartStopDispatch | undefined {
-  const dispatch = lookUp(options);
+  const dispatch = lookUp(core, options);
   return dispatch?.kind === 'stop' && dispatch.name === name
     ? take(options, dispatch)
     : undefined;
 }
 
-/** The restart start `options` carries for `name`, taken; `undefined` for a plain start. */
+/**
+ * The restart start `options` carries for `name` on `core`'s manager, taken; `undefined`
+ * for a plain start.
+ */
 export function takeRestartStartDispatch(
+  core: ManagerCore,
   name: string,
   options: unknown,
 ): RestartStartDispatch | undefined {
-  const dispatch = lookUp(options);
+  const dispatch = lookUp(core, options);
   return dispatch?.kind === 'start' && dispatch.name === name
     ? take(options, dispatch)
     : undefined;
 }
 
-/** The restart startup phase `options` carries, taken; `undefined` for a plain startup. */
+/**
+ * The restart startup phase `options` carries on `core`'s manager, taken; `undefined` for
+ * a plain startup.
+ */
 export function takeRestartStartupDispatch(
+  core: ManagerCore,
   options: unknown,
 ): RestartStartupDispatch | undefined {
-  const dispatch = lookUp(options);
+  const dispatch = lookUp(core, options);
   return dispatch?.kind === 'startup' ? take(options, dispatch) : undefined;
 }
 
-// `typeof` and a `WeakMap` lookup run no caller code, even for a proxy.
-function lookUp(options: unknown): RestartDispatch | undefined {
-  return typeof options === 'object' && options !== null
-    ? dispatches.get(options)
-    : undefined;
+// `typeof`, a `WeakMap` lookup and an identity comparison run no caller code, even for a
+// proxy. Another manager's context is left in place for its own manager.
+function lookUp(
+  core: ManagerCore,
+  options: unknown,
+): RestartDispatch | undefined {
+  const dispatch =
+    typeof options === 'object' && options !== null
+      ? dispatches.get(options)
+      : undefined;
+  return dispatch?.issuer === core ? dispatch : undefined;
 }
 
 function take<D extends RestartDispatch>(options: unknown, dispatch: D): D {

@@ -458,7 +458,8 @@ test('a value fallback does not report a provisional component as found', async 
   };
   try {
     await manager.registerComponent(component);
-    expect(result?.code).toBe('operation_crashed');
+    // Not yet registered, so answered `not_found` before the throwing option is read.
+    expect(result?.code).toBe('not_found');
     expect(result?.componentFound).toBe(false);
   } finally {
     release();

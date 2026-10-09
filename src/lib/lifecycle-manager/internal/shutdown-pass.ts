@@ -198,13 +198,18 @@ export class ShutdownPassRunner {
       // set, force could never fire for it. Signals need no such step: they reseed when
       // not armed before they get here.
       //
+      // A restart's stop phase finishes the cycle even when it took a live armed window:
+      // it is not a retry of that shutdown, and opens no cycle of its own, so the first
+      // signal during it is the operator's initial request rather than a press counted
+      // against the failed shutdown's cycle.
+      //
       // Not while a shutdown is running: expiring a lapsed window logs through the
       // caller's sinks, and a sink may start a shutdown and seed its live cycle. This
       // request must not wipe it and is refused below. The expiry event itself is a
       // queued notification, so its listeners cannot interrupt this acceptance.
       if (
         method === 'manual' &&
-        consumedArmedUntil === null &&
+        (consumedArmedUntil === null || !isRequestToStayDown) &&
         this.core.state.escalationHandlingDepth === 0 &&
         !this.isShuttingDown &&
         this.core.state.repeatedShutdownRequestState.firstRequestAt !== null
@@ -214,9 +219,10 @@ export class ShutdownPassRunner {
 
       // Only a request to stay down is an operator's retry. A restart's stop phase does not
       // advance the escalation count - it would force-kill a process it was asked to
-      // restart - and does not clear it as a request either. It is still a shutdown pass,
-      // so its outcome settles escalation as any pass's does: a clean stop resets it, a
-      // failed one re-arms it with the count carried over.
+      // restart. It is still a shutdown pass, so its outcome settles whatever cycle it
+      // runs under (one a signal during it seeds, or one it was started inside the
+      // handling of): a clean stop resets it, a failed one re-arms it with the count
+      // carried over.
       if (isManualRetryWhileArmed && isRequestToStayDown) {
         if (repeatedShutdownPolicy.countManualRetriesTowardEscalation) {
           this.core.shutdownEscalation.handleRepeatedShutdownRequest(
@@ -1017,13 +1023,7 @@ export class ShutdownPassRunner {
               ? await this.core.componentStop.stopComponentInternal(name)
               : shouldRetryStalled
                 ? await this.core.componentStop.retryStalledComponent(name)
-                : {
-                    success: false,
-                    componentName: name,
-                    reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
-                    code: 'component_stalled',
-                    status: this.core.manager.getComponentStatus(name),
-                  };
+                : this.stalledWithoutRetryResult(name);
 
             if (
               result.code === 'invalid_options' &&
@@ -1506,6 +1506,28 @@ export class ShutdownPassRunner {
           .info('Aborted pending start for shutdown');
       }
     }
+  }
+
+  /**
+   * The result for a stalled component a pass with `retryStalled: false` does not try.
+   * Its status is read guarded: an overridden `getComponentStatus()` that throws must not
+   * crash the pass. Reported, and left out.
+   */
+  private stalledWithoutRetryResult(name: string): ComponentOperationResult {
+    const result: ComponentOperationResult = {
+      success: false,
+      componentName: name,
+      reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
+      code: 'component_stalled',
+    };
+    const status = this.core.stopOutcomes.readStatusOfStopped(
+      name,
+      'lifecycle-manager shutdown pass',
+    );
+    if (status !== undefined) {
+      result.status = status;
+    }
+    return result;
   }
 
   /**

@@ -68,9 +68,13 @@ export class StartSettlements {
   }
 
   /**
-   * An attempt that has issued its token: every other settlement of `name` released, and
-   * the attempt's instance and token recorded on its own - unless a release before this
-   * already withdrew it, when there is none to answer.
+   * An attempt that has issued its token: the settlement of every earlier attempt of
+   * `name` that issued one released, and the attempt's instance and token recorded on its
+   * own - unless a release before this already withdrew it, when there is none to answer.
+   *
+   * A settlement with no token yet is left alone: its attempt has published but not
+   * claimed - still in `prepareStart()`, whose component code started this one - so it
+   * tracks no raw start to end, and needs its settlement once it claims after this.
    */
   public recordStartAttempt(
     name: string,
@@ -78,7 +82,12 @@ export class StartSettlements {
     component: BaseComponent,
     startAttemptToken: string,
   ): StartSettlement | undefined {
-    this.releaseStartSettlements(name, claim);
+    for (const other of this.core.state.startSettlementsByName.get(name) ??
+      []) {
+      if (other.token !== undefined) {
+        other.finish();
+      }
+    }
     const settlement = this.core.state.startSettlements.get(claim);
     if (settlement) {
       settlement.component = component;
@@ -119,19 +128,13 @@ export class StartSettlements {
   }
 
   /**
-   * Release every start settlement of `name` but the one `exceptClaim` holds: each ends
-   * the raw start it tracks for whoever captured it, not only in the registry.
+   * Release every start settlement of `name`: each ends the raw start it tracks for
+   * whoever captured it, not only in the registry.
    */
-  public releaseStartSettlements(name: string, exceptClaim?: symbol): void {
-    const exceptSettlement =
-      exceptClaim === undefined
-        ? undefined
-        : this.core.state.startSettlements.get(exceptClaim);
+  public releaseStartSettlements(name: string): void {
     for (const settlement of this.core.state.startSettlementsByName.get(name) ??
       []) {
-      if (settlement !== exceptSettlement) {
-        settlement.finish();
-      }
+      settlement.finish();
     }
   }
 

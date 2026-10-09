@@ -83,6 +83,81 @@ test('targetFound reports the target found at insertion, even if a hook removes 
   expect(result.targetFound).toBe(true);
 });
 
+test('an auto-start is skipped when a sink re-registers the same instance before it runs', async () => {
+  // eslint-disable-next-line prefer-const -- assigned after the sink that reads it
+  let manager!: LifecycleManager;
+  let isArmed = false;
+  const logger = new Logger({
+    sinks: [
+      {
+        write: (entry): void => {
+          if (isArmed && entry.message === 'Component registered') {
+            isArmed = false;
+            void manager.unregisterComponent('a', { stopIfRunning: false });
+            // The same instance, registered again without autoStart.
+            void manager.registerComponent(component);
+          }
+        },
+      },
+    ],
+    callProcessExit: false,
+  });
+  manager = new LifecycleManager({ logger, shutdownWarningTimeoutMS: -1 });
+  const component = new Plain(logger, 'a');
+  let starts = 0;
+  component.start = (): Promise<void> => {
+    starts++;
+    return Promise.resolve();
+  };
+
+  isArmed = true;
+  const result = await manager.registerComponent(component, {
+    autoStart: true,
+  });
+  await sleep(1);
+
+  // The name holds the same instance, but under the later registration, which asked
+  // for no auto-start.
+  expect(manager.getComponentInstance('a')).toBe(component);
+  expect(result.autoStartAttempted).toBe(false);
+  expect(result.startResult).toBeUndefined();
+  expect(starts).toBe(0);
+  expect(manager.isComponentRunning('a')).toBe(false);
+  await logger.close();
+});
+
+test('targetFound reports a found target when the candidate getDependencies() throws', async () => {
+  const { logger, manager } = setup();
+  await manager.registerComponent(new Plain(logger, 'db'));
+  const rejected: Array<{ name: string; targetFound?: boolean }> = [];
+  manager.on(
+    'component:registration-rejected',
+    (event: { name: string; targetFound?: boolean }) => {
+      rejected.push(event);
+    },
+  );
+  const candidate = new Plain(logger, 'c');
+  candidate.getDependencies = (): string[] => {
+    throw new Error('dependencies unavailable');
+  };
+
+  const { reports, release } = claimReports();
+  let result;
+
+  try {
+    result = await manager.insertComponentAt(candidate, 'before', 'db');
+  } finally {
+    release();
+  }
+
+  expect(result.success).toBe(false);
+  expect(result.code).toBe('operation_crashed');
+  expect(result.error?.message).toBe('dependencies unavailable');
+  expect(hasReport(reports, 'registerComponent')).toBe(true);
+  expect(result.targetFound).toBe(true);
+  expect(rejected.find((event) => event.name === 'c')?.targetFound).toBe(true);
+});
+
 test('a forced start finishing after shutdown began reports a re-stop that failed', async () => {
   const { logger, manager } = setup();
   const component = new Plain(logger, 'a');

@@ -9,6 +9,7 @@ import type {
   RestartComponentOptions,
   RestartResult,
   ShutdownResult,
+  StartupResult,
 } from '../types';
 import type { RestartStartSnapshot } from './component-start';
 import type { IndividualStopContext } from './component-stop';
@@ -31,7 +32,9 @@ import {
 } from './operation-policy';
 import {
   restartDispatchOptions,
+  revokeRestartDispatch,
   type RestartStartDispatch,
+  type RestartStartupDispatch,
   type RestartStopDispatch,
 } from './restart-dispatch';
 
@@ -264,21 +267,7 @@ export class RestartOperations {
       // stronger statement, and reporting it beats reporting whatever startup would
       // have refused for instead.
       if (wasCanceledByShutdownRequest) {
-        const startupResult = refusedStartupResult(
-          'shutdown_requested_during_restart',
-          'Shutdown requested during the restart shutdown phase; startup skipped',
-        );
-
-        this.core.logger.warn('Restart canceled by shutdown request', {
-          params: { shutdownSuccess: shutdownResult.success },
-        });
-
-        return {
-          shutdownResult,
-          startupResult,
-          startupSkippedByShutdownRequest: true,
-          success: false,
-        };
+        return this.restartCanceledByShutdownRequest(shutdownResult);
       }
 
       // A deadline ended the wait, not the stop work. Starting again can merely
@@ -366,16 +355,31 @@ export class RestartOperations {
         restartSnapshots.delete(name);
       }
       // Through the public method, so an override or instance patch of it runs. The
-      // options it is handed carry this restart's validated options and snapshots: see
-      // `restart-dispatch.ts`.
-      const startupResult = await this.core.manager.startAllComponents(
-        restartDispatchOptions({
-          kind: 'startup',
-          startupOptions,
-          restartSnapshots,
-          taken: false,
-        }),
-      );
+      // options it is handed carry this restart's validated options and snapshots, and
+      // the baseline its startup checks again for a request to stay down made while an
+      // override awaited before handing them on: see `restart-dispatch.ts`.
+      const startupDispatch: RestartStartupDispatch = {
+        kind: 'startup',
+        issuer: this.core,
+        startupOptions,
+        restartSnapshots,
+        stayDownPassCount: stayDownPassCountAtStopPhase,
+        canceled: false,
+        taken: false,
+      };
+      const startupDispatchOptions = restartDispatchOptions(startupDispatch);
+      let startupResult: StartupResult;
+      try {
+        startupResult = await this.core.manager.startAllComponents(
+          startupDispatchOptions,
+        );
+      } finally {
+        revokeRestartDispatch(startupDispatchOptions);
+      }
+
+      if (startupDispatch.canceled) {
+        return this.restartCanceledByShutdownRequest(shutdownResult);
+      }
 
       const isSuccess = shutdownResult.success && startupResult.success;
 
@@ -506,15 +510,22 @@ export class RestartOperations {
     // `restartStopOperation()` and the start: see `restart-dispatch.ts`.
     const stopDispatch: RestartStopDispatch = {
       kind: 'stop',
+      issuer: this.core,
       name,
       stopOptions,
       stopContext,
       taken: false,
     };
-    const stopResult = await this.core.manager.stopComponent(
-      name,
-      restartDispatchOptions(stopDispatch),
-    );
+    const stopDispatchOptions = restartDispatchOptions(stopDispatch);
+    let stopResult: ComponentOperationResult;
+    try {
+      stopResult = await this.core.manager.stopComponent(
+        name,
+        stopDispatchOptions,
+      );
+    } finally {
+      revokeRestartDispatch(stopDispatchOptions);
+    }
 
     if (!stopResult.success) {
       // Once this restart took a stop claim, even a later refusal or validation
@@ -570,15 +581,37 @@ export class RestartOperations {
 
     const startDispatch: RestartStartDispatch = {
       kind: 'start',
+      issuer: this.core,
       name,
       startOptions,
       startSnapshot,
+      stayDownRequestCount: stayDownRequestCountAtStop,
+      canceled: false,
       taken: false,
     };
-    const startResult = await this.core.manager.startComponent(
-      name,
-      restartDispatchOptions(startDispatch),
-    );
+    const startDispatchOptions = restartDispatchOptions(startDispatch);
+    let startResult: ComponentOperationResult;
+    try {
+      startResult = await this.core.manager.startComponent(
+        name,
+        startDispatchOptions,
+      );
+    } finally {
+      revokeRestartDispatch(startDispatchOptions);
+    }
+
+    // Asked to stay down while an override awaited before handing the options on: the
+    // start refused for it, and the restart reports the request, as above.
+    if (startDispatch.canceled) {
+      return {
+        success: false,
+        componentName: name,
+        reason:
+          'Shutdown requested while restart was stopping the component; startup skipped',
+        code: 'shutdown_requested_during_restart',
+        status: this.core.manager.getComponentStatus(name),
+      };
+    }
 
     if (!startResult.success) {
       return {
@@ -641,6 +674,78 @@ export class RestartOperations {
       dispatch.stopOptions,
       dispatch.stopContext,
     );
+  }
+
+  /**
+   * A restart's start, the body `startComponent()` runs for the options
+   * `restartComponentOperation()` handed it: refused when a shutdown asked to stay down
+   * since the restart's stop began - an override can await before handing the options
+   * on, and that request can be made and its pass finish meanwhile - otherwise a start
+   * of the registration the restart approved, with the options it read.
+   */
+  public restartStartOperation(
+    name: string,
+    dispatch: RestartStartDispatch,
+  ): Promise<ComponentOperationResult> {
+    if (
+      this.core.state.stayDownRequestCount !== dispatch.stayDownRequestCount
+    ) {
+      dispatch.canceled = true;
+      return Promise.resolve({
+        success: false,
+        componentName: name,
+        reason:
+          'Shutdown requested while restart was stopping the component; startup skipped',
+        code: 'shutdown_requested_during_restart',
+      });
+    }
+
+    return this.core.componentStart.startComponentInternal(
+      name,
+      dispatch.startOptions,
+      undefined,
+      undefined,
+      undefined,
+      dispatch.startSnapshot,
+    );
+  }
+
+  /**
+   * A restart's startup phase refused when a shutdown that asks to stay down was
+   * accepted since the stop phase began - the startup body's first check, for an
+   * override that awaited before handing the options on while such a pass ran and
+   * finished. `undefined` lets the startup proceed.
+   */
+  public refuseCanceledRestartStartup(
+    dispatch: RestartStartupDispatch,
+  ): StartupResult | undefined {
+    if (this.core.state.stayDownPassCount === dispatch.stayDownPassCount) {
+      return undefined;
+    }
+    dispatch.canceled = true;
+    return refusedStartupResult(
+      'shutdown_requested_during_restart',
+      'Shutdown requested during the restart shutdown phase; startup skipped',
+    );
+  }
+
+  /** A restart whose startup phase a request to stay down skipped. */
+  private restartCanceledByShutdownRequest(
+    shutdownResult: ShutdownResult,
+  ): RestartResult {
+    this.core.logger.warn('Restart canceled by shutdown request', {
+      params: { shutdownSuccess: shutdownResult.success },
+    });
+
+    return {
+      shutdownResult,
+      startupResult: refusedStartupResult(
+        'shutdown_requested_during_restart',
+        'Shutdown requested during the restart shutdown phase; startup skipped',
+      ),
+      startupSkippedByShutdownRequest: true,
+      success: false,
+    };
   }
 
   /** Either active-operation refusal, the shutdown one first. */

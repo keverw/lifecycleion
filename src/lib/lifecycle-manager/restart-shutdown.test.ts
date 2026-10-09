@@ -953,6 +953,72 @@ describe('LifecycleManager - shutdown during restartAllComponents()', () => {
     expect(forceShutdownCalls).toBe(2);
     await restart;
   });
+
+  test('a restart inside a live armed window leaves the first signal uncounted', async () => {
+    const logger = new Logger({
+      sinks: [new ArraySink()],
+      callProcessExit: false,
+    });
+    let forceShutdownCalls = 0;
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 1,
+        withinMS: 5000,
+        onForceShutdown: (): void => {
+          forceShutdownCalls++;
+        },
+      },
+    });
+
+    // Fails its first stop outright, then parks in the stalled retry's force phase.
+    class FailsThenParks extends BaseComponent {
+      public readonly parked = deferred();
+      public readonly gate = deferred();
+      private forceCalls = 0;
+      public start(): Promise<void> {
+        return Promise.resolve();
+      }
+      public stop(): Promise<void> {
+        return Promise.reject(new Error('stop failed'));
+      }
+      public async onShutdownForce(): Promise<void> {
+        this.forceCalls++;
+        if (this.forceCalls === 1) {
+          throw new Error('force failed');
+        }
+        this.parked.resolve();
+        await this.gate.promise;
+      }
+    }
+
+    const component = new FailsThenParks(logger, {
+      name: 'flaky',
+      dependencies: [],
+    });
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+
+    const firstDone = shutdownCompleted(manager);
+    sendSignal(manager, 'SIGINT');
+    await firstDone;
+    expect(manager.getShutdownEscalationStatus().firstMethod).toBe('SIGINT');
+    expect(forceShutdownCalls).toBe(0);
+
+    // The restart spends the armed window but is not a retry of that shutdown: the
+    // first signal during it is the operator's initial request, not a press.
+    const restart = manager.restartAllComponents();
+    await component.parked.promise;
+    sendSignal(manager, 'SIGTERM');
+
+    expect(forceShutdownCalls).toBe(0);
+    expect(manager.getShutdownEscalationStatus().firstMethod).toBe('SIGTERM');
+    expect(manager.getShutdownEscalationStatus().requestCount).toBe(0);
+
+    component.gate.resolve();
+    expect((await restart).startupSkippedByShutdownRequest).toBe(true);
+  });
 });
 
 describe('LifecycleManager - shutdown during restartComponent()', () => {

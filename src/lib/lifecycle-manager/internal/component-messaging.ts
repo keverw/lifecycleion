@@ -127,20 +127,22 @@ export async function sendMessageInternal(
     return availability.refusalCode;
   };
   // Nothing is announced before dispatch, so a refusal up to then has no event to pair.
+  // `hasHandler` is whether the handler read found one, as `getValueInternal()` reports.
   const refuseBeforeAnnouncement = (
     code: NonNullable<ReturnType<typeof readAvailability>['refusalCode']>,
+    hasHandler: boolean,
   ): MessageResult => ({
     sent: false,
     componentFound: availability.isCurrent,
     componentRunning: false,
-    handlerImplemented: false,
+    handlerImplemented: hasHandler,
     data: undefined,
     error: null,
     timedOut: false,
     code,
   });
   if (availability.refusalCode !== undefined) {
-    return refuseBeforeAnnouncement(availability.refusalCode);
+    return refuseBeforeAnnouncement(availability.refusalCode, false);
   }
 
   // Read once, guarded, and that value is what gets called - as `getValueInternal()`
@@ -154,7 +156,10 @@ export async function sendMessageInternal(
     recheck,
   );
   if (handlerRead.status === 'refused') {
-    return refuseBeforeAnnouncement(handlerRead.refusal);
+    return refuseBeforeAnnouncement(
+      handlerRead.refusal,
+      typeof handlerRead.value === 'function',
+    );
   }
 
   if (handlerRead.status === 'read_failed') {
@@ -526,11 +531,14 @@ export function getValueInternal<T = unknown>(
   from: string | null,
   options?: GetValueOptions,
 ): ValueResult<T> {
+  // Found first, so a missing component answers `not_found` without its options being
+  // read - as every operation but `restartComponent()` refuses.
+  const component = context.getComponent(componentName);
   // Read before the requested event, so an options getter that throws fails the call
   // before anything was announced rather than leaving `value-requested` unpaired.
-  const valueOptions = snapshotGetValueOptions(options);
-  const allowStopped = valueOptions.includeStopped;
-  const allowStalled = valueOptions.includeStalled;
+  const valueOptions = component ? snapshotGetValueOptions(options) : undefined;
+  const allowStopped = valueOptions?.includeStopped ?? false;
+  const allowStalled = valueOptions?.includeStalled ?? false;
 
   context.lifecycleEvents.componentValueRequested(componentName, key, from);
 
@@ -541,6 +549,7 @@ export function getValueInternal<T = unknown>(
     result = answerValueRequest<T>(
       context,
       componentName,
+      component,
       key,
       from,
       allowStopped,
@@ -582,15 +591,13 @@ export function getValueInternal<T = unknown>(
 function answerValueRequest<T>(
   context: ComponentAccessContext,
   componentName: string,
+  component: ReturnType<ComponentAccessContext['getComponent']>,
   key: string,
   from: string | null,
   allowStopped: boolean,
   allowStalled: boolean,
   progress: ValueAnswerProgress,
 ): ValueResult<T> {
-  // Find component
-  const component = context.getComponent(componentName);
-
   if (!component) {
     return {
       found: false,
@@ -621,12 +628,13 @@ function answerValueRequest<T>(
       code: availability.refusalCode,
     };
   };
-  // The latest availability read; see `sendMessageInternal()`. The options were read
-  // before the lookup above, so nothing has run since it found `component`.
+  // The latest availability read; see `sendMessageInternal()`. Even this first one
+  // looks the component up again: the options getters and `value-requested` listeners
+  // have run since the lookup that found `component`.
   let availability = readAvailability(
     context,
     componentName,
-    true,
+    context.getComponent(componentName) === component,
     allowStopped,
     allowStalled,
   );

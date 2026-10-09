@@ -566,6 +566,94 @@ describe('LifecycleManager - stall retry and rollback', () => {
     expect(hasReport(reports, 'lifecycle-manager component stop')).toBe(true);
   });
 
+  test('a stall whose status cannot be read still answers as the stall', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Stalls(logger, 'stalls'));
+    await manager.startComponent('stalls');
+
+    Object.defineProperty(manager, 'getComponentStatus', {
+      configurable: true,
+      value: (): never => {
+        throw new Error('status read crashed');
+      },
+    });
+    const { reports, release } = claimReports();
+    let result: ComponentOperationResult;
+    try {
+      result = await manager.stopComponent('stalls', { forceImmediate: true });
+    } finally {
+      release();
+      Reflect.deleteProperty(manager, 'getComponentStatus');
+    }
+
+    expect(result).toMatchObject({
+      success: false,
+      code: 'error',
+      reason: 'force failed',
+    });
+    expect(result.status).toBeUndefined();
+    expect(manager.getComponentStatus('stalls')?.state).toBe('stalled');
+    expect(hasReport(reports, 'lifecycle-manager component stall')).toBe(true);
+  });
+
+  test('a pass that skips a stall whose status cannot be read does not crash', async () => {
+    const { logger, manager } = setup();
+    await manager.registerComponent(new Stalls(logger, 'stalls'));
+    await manager.startComponent('stalls');
+    await manager.stopComponent('stalls');
+
+    // Reported running once - as the pass builds its stop list - so the loop reaches a
+    // component it then finds stalled, with `retryStalled` off.
+    let runningReads = 0;
+    Object.defineProperty(manager, 'isComponentRunning', {
+      configurable: true,
+      value: (name: string): boolean =>
+        name === 'stalls' && runningReads++ === 0,
+    });
+    Object.defineProperty(manager, 'getComponentStatus', {
+      configurable: true,
+      value: (): never => {
+        throw new Error('status read crashed');
+      },
+    });
+    const { reports, release } = claimReports();
+    let result;
+    try {
+      result = await manager.stopAllComponents({ retryStalled: false });
+    } finally {
+      release();
+      Reflect.deleteProperty(manager, 'getComponentStatus');
+      Reflect.deleteProperty(manager, 'isComponentRunning');
+    }
+
+    expect(result.code).not.toBe('operation_crashed');
+    expect(result.stalledComponents?.map((stall) => stall.name)).toEqual([
+      'stalls',
+    ]);
+    expect(hasReport(reports, 'lifecycle-manager shutdown pass')).toBe(true);
+  });
+
+  for (const phase of ['graceful', 'force'] as const) {
+    test(`a ${phase} stop answers with the status its stopped listeners left`, async () => {
+      const { logger, manager } = setup();
+      const component = new Plain(logger, 'a');
+      if (phase === 'force') {
+        component.stop = (): Promise<void> => Promise.reject(new Error('no'));
+      }
+      await manager.registerComponent(component);
+      await manager.startComponent('a');
+      manager.on('component:stopped', () => {
+        void manager.unregisterComponent('a');
+      });
+
+      const result = await manager.stopComponent('a');
+
+      expect(result.success).toBe(true);
+      expect(manager.hasComponent('a')).toBe(false);
+      expect(result.status).toBeUndefined();
+    });
+  }
+
   test('a no-handler retry of a crash-recorded stall answers with the crash result', async () => {
     const { logger, manager } = setup();
     const component = new HangsThenForceThrows(logger, 'crash');

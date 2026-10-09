@@ -142,7 +142,13 @@ export class StartupOrchestration {
   public async startAllComponentsOperation(
     options: StartupOptions | undefined,
   ): Promise<StartupResult> {
-    const restart = takeRestartStartupDispatch(options);
+    const restart = takeRestartStartupDispatch(this.core, options);
+    // A restart asked to stay down while an override awaited before handing this on.
+    const canceledRestart =
+      restart && this.core.restart.refuseCanceledRestartStartup(restart);
+    if (canceledRestart) {
+      return canceledRestart;
+    }
     const startTime = Date.now();
     const alreadyActive =
       this.core.startupPreflight.refuseActiveBulkStartup(startTime);

@@ -175,6 +175,41 @@ describe('LifecycleManager - logger exit commits the process to ending', () => {
     });
   });
 
+  for (const [label, override] of [
+    [
+      'throws',
+      (): never => {
+        throw new Error('override exploded');
+      },
+    ],
+    ['rejects', (): Promise<never> => Promise.reject(new Error('rejected'))],
+    [
+      'answers with no result',
+      (): Promise<undefined> => Promise.resolve(undefined),
+    ],
+  ] as const) {
+    test(`an exit still commits when a stopAllComponents() override ${label}`, async () => {
+      await withStubbedExit(async (exits, release, sink) => {
+        const { logger, manager } = realExitManager(sink);
+        await manager.registerComponent(new Plain(logger, 'a'));
+        Object.assign(manager, { stopAllComponents: override });
+
+        logger.exit(0);
+        await waitFor(() => logger.didExit);
+        release();
+        await waitFor(() => exits.length > 0);
+        expect(exits).toEqual([0]);
+
+        // The logger has finished, so only the commit keeps the start refused: the
+        // exit proceeded through the hook rather than past a rejected callback.
+        const start = await manager.startComponent('a');
+        expect(start.success).toBe(false);
+        expect(start.code).toBe('shutdown_in_progress');
+        expect(start.reason).toBe(LIFECYCLE_MANAGER_MESSAGE_PROCESS_EXITING);
+      });
+    });
+  }
+
   test('an exit that starts its own shutdown commits as that pass ends', async () => {
     await withStubbedExit(async (exits, release, sink) => {
       const { logger, manager } = realExitManager(sink);

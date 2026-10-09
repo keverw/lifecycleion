@@ -1,6 +1,8 @@
 import { LIFECYCLE_MANAGER_LOG_LOGGER_EXIT_DURING_SHUTDOWN } from '../constants';
 import type { BeforeExitResult } from '../../logger';
 import type { ManagerCore } from './manager-core';
+import { isObjectLike } from '../../internal/is-object-like';
+import { toError } from '../../to-error';
 
 /**
  * The logger exit hook: `logger.exit()` stops the components before the process exits,
@@ -188,13 +190,32 @@ export class LoggerExitHook {
         // first, should a sink have begun one ahead of this call.
         this.pendingLoggerExitResolve = releaseExit;
 
-        // Stop all components with the manager's `shutdownOptions` defaults
-        const shutdownResult = await this.core.manager.stopAllComponents();
+        // Stop all components with the manager's `shutdownOptions` defaults, through the
+        // public method so an override of it runs. Guarded as `autoAttachSignals()`
+        // guards `attachSignals()`: an override that throws, rejects or answers with
+        // something other than a result must not keep this exit from proceeding.
+        let shutdownCode: unknown;
+        let didStopFail = false;
+
+        try {
+          const shutdownResult: unknown =
+            await this.core.manager.stopAllComponents();
+          shutdownCode = isObjectLike(shutdownResult)
+            ? Reflect.get(shutdownResult, 'code')
+            : undefined;
+        } catch (error) {
+          didStopFail = true;
+          this.core.logger.error(
+            'Logger exit could not stop components: {{error.message}}',
+            { params: { error: toError(error), exitCode } },
+          );
+        }
 
         // A sink behind the log line above can start the shutdown first. This call
-        // was then refused, and the exit waits for the running pass like any other.
+        // was then refused, and the exit waits for the running pass like any other -
+        // as it does for a pass a failed override left running.
         if (
-          shutdownResult.code === 'already_in_progress' &&
+          (didStopFail || shutdownCode === 'already_in_progress') &&
           this.core.shutdownPass.isShuttingDown
         ) {
           return await waitForRunningShutdown();

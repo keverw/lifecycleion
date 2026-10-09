@@ -20,6 +20,7 @@ import {
   LIFECYCLE_MANAGER_MESSAGE_TIMED_OUT_STARTUP_CLEANUP,
 } from '../constants';
 import {
+  ComponentStartObservationError,
   ComponentStartTimeoutError,
   StartupInterruptedByShutdownError,
 } from '../errors';
@@ -119,10 +120,12 @@ interface StartFailure {
 class StartRun {
   public timeoutHandle: NodeJS.Timeout | undefined;
   public startupTimeoutError: ComponentStartTimeoutError | undefined;
-  // What first aborted this attempt's start signal: its deadline, or a shutdown pass's
-  // `abortPendingStarts` cue. The signal aborts once; the cause decides how a failure
-  // of `start()` after that is answered.
-  public startAbortCause: 'timeout' | 'shutdown' | undefined;
+  // What first aborted this attempt's start signal: its deadline, a shutdown pass's
+  // `abortPendingStarts` cue, or a `start()` promise the manager could not observe.
+  // The signal aborts once; the cause decides how a failure of `start()` after that
+  // is answered.
+  public startAbortCause:
+    'timeout' | 'shutdown' | 'observation-failed' | undefined;
   // The reason a shutdown's cue aborted the signal with: a failure linked to it is the
   // interruption that cue asked for, not a failed start (see `isLinkedToAbort()`).
   public shutdownAbortReason: StartupInterruptedByShutdownError | undefined;
@@ -179,17 +182,10 @@ export class ComponentStart {
     name: string,
     options: StartComponentOptions | undefined,
   ): Promise<ComponentOperationResult> {
-    const restart = takeRestartStartDispatch(name, options);
+    const restart = takeRestartStartDispatch(this.core, name, options);
     return restart === undefined
       ? this.startComponentInternal(name, () => snapshotStartOptions(options))
-      : this.startComponentInternal(
-          name,
-          restart.startOptions,
-          undefined,
-          undefined,
-          undefined,
-          restart.startSnapshot,
-        );
+      : this.core.restart.restartStartOperation(name, restart);
   }
 
   /**
@@ -1247,8 +1243,18 @@ export class ComponentStart {
     );
     settlement.abandon();
     // The manager has stopped waiting, just as on timeout. Notify the hook
-    // even when a broken constructor prevented arming the startup race.
-    abortHookSignal(startAbort, toError(observationError), name, 'start');
+    // even when a broken constructor prevented arming the startup race. Its cause
+    // is recorded first, so a shutdown pass cannot take this abort for its own cue.
+    run.startAbortCause ??= 'observation-failed';
+    abortHookSignal(
+      startAbort,
+      new ComponentStartObservationError(
+        { componentName: name },
+        observationError,
+      ),
+      name,
+      'start',
+    );
     observeFailureAfterTimeout(
       this.core.logger,
       recoveryStart,
@@ -1586,12 +1592,14 @@ export class ComponentStart {
     // Only if it is still up: this runs after `component:started`, and a listener
     // there may have had it report an unexpected stop or begin stopping it. Attaching
     // now would leave handlers on an idle manager, or roll back a stop already owned.
+    //
+    // Handlers already attached are checked first, and the scan stops at the first other
+    // component up: a bulk startup runs this for every component it starts.
     if (
       this.core.config.attachSignalsOnStart &&
+      this.core.state.processSignalManager?.getStatus().isAttached !== true &&
       this.core.registry.isComponentUp(name) &&
-      ![...this.core.state.runningComponents].some(
-        (other) => other !== name && this.core.registry.isComponentUp(other),
-      )
+      !this.isAnotherComponentUp(name)
     ) {
       const signalAttach = this.core.signals.autoAttachSignals(
         'first component start',
@@ -1603,6 +1611,16 @@ export class ComponentStart {
     }
 
     return undefined;
+  }
+
+  /** Whether any component other than `name` is up, stopping at the first found. */
+  private isAnotherComponentUp(name: string): boolean {
+    for (const other of this.core.state.runningComponents) {
+      if (other !== name && this.core.registry.isComponentUp(other)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**

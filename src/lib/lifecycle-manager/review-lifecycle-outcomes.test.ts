@@ -19,9 +19,6 @@ test('a status failure after shutdown cleans up a resolved start preserves stopp
   const status = manager.getComponentStatus.bind(manager);
   let shouldThrow = false;
   let failedStarts = 0;
-  manager.on('component:stopped', () => {
-    shouldThrow = true;
-  });
   manager.on('component:start-failed', () => {
     failedStarts++;
   });
@@ -36,6 +33,8 @@ test('a status failure after shutdown cleans up a resolved start preserves stopp
   try {
     const starting = manager.startComponent('api');
     await manager.stopAllComponents({ allowStopWithPendingStarts: true });
+    // Armed once the stop has answered: the next read is the start's own result.
+    shouldThrow = true;
     gate.resolve();
     expect(await starting).toMatchObject({
       success: false,

@@ -210,7 +210,7 @@ export class ComponentStop {
     name: string,
     options: StopComponentOptions | undefined,
   ): Promise<ComponentOperationResult> {
-    const restart = takeRestartStopDispatch(name, options);
+    const restart = takeRestartStopDispatch(this.core, name, options);
     return restart === undefined
       ? this.individualStopOperation(name, options)
       : this.core.restart.restartStopOperation(name, restart);
@@ -1178,7 +1178,7 @@ export class ComponentStop {
   private completeGracefulStop(run: GracefulStopRun): ComponentOperationResult {
     const { name } = run;
 
-    return this.core.dispatcher.withTransition(() => {
+    this.core.dispatcher.withTransition(() => {
       // Update state - graceful succeeded
       this.core.stopOutcomes.markComponentStopped(name);
       run.didMarkStopped = true;
@@ -1188,11 +1188,13 @@ export class ComponentStop {
         name,
         this.core.stopOutcomes.readStatusOfStopped(name),
       );
-
-      // Read again, after the event's listeners: the result reports the state they
-      // left, and omits `status` when that read fails.
-      return this.core.stopOutcomes.successfulStopResult(name);
     });
+
+    // Read again, outside the transition: its end delivers the event (unless this stop
+    // runs inside another event's listener, whose drain delivers it later), so the
+    // result reports the state the listeners left, and omits `status` when that read
+    // fails.
+    return this.core.stopOutcomes.successfulStopResult(name);
   }
 
   /**
@@ -1703,7 +1705,7 @@ export class ComponentStop {
   private completeForceStop(run: ForceStopRun): ComponentOperationResult {
     const { name } = run;
 
-    return this.core.dispatcher.withTransition(() => {
+    this.core.dispatcher.withTransition(() => {
       // A stalled retry clears its stall here; announce that as the late paths do.
       const clearedStall = this.core.state.stalledComponents.get(name);
 
@@ -1724,11 +1726,13 @@ export class ComponentStop {
         name,
         this.core.stopOutcomes.readStatusOfStopped(name),
       );
-
-      // Read again, after the event's listeners: the result reports the state they
-      // left, and omits `status` when that read fails.
-      return this.core.stopOutcomes.successfulStopResult(name);
     });
+
+    // Read again, outside the transition: its end delivers the events (unless this stop
+    // runs inside another event's listener, whose drain delivers them later), so the
+    // result reports the state the listeners left, and omits `status` when that read
+    // fails.
+    return this.core.stopOutcomes.successfulStopResult(name);
   }
 
   /**

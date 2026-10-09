@@ -42,7 +42,6 @@ import {
 import {
   type RegistrationProgress,
   committedRegistrationReport,
-  defaultTargetFound,
   isInsertPosition,
   isManualPositionRespected,
   newRegistrationProgress,
@@ -77,6 +76,10 @@ class RegistrationAttempt {
     reads: Map<BaseComponent, DependencyRead>;
     isSettled: boolean;
   } = { reads: new Map<BaseComponent, DependencyRead>(), isSettled: true };
+  // The registration generation this attempt's commit allocated: the instance alone
+  // cannot tell this registration from a later one of the same instance under the same
+  // name, made by caller code after the commit.
+  public registrationGeneration: number | undefined;
 
   constructor(
     public readonly component: BaseComponent,
@@ -514,6 +517,10 @@ export class RegistrationOperations {
         }),
       );
     }
+    // Found: a failure from here on - the candidate's own read, say - reports so.
+    if (positionHasTarget(position)) {
+      attempt.progress.targetFound = true;
+    }
 
     // Compute dependency order *before* committing registration mutations.
     // This avoids leaving the registry/state maps inconsistent if a dependency
@@ -641,6 +648,8 @@ export class RegistrationOperations {
         this.core.state.pendingRegistrations.add(component);
         this.core.state.componentEntries = nextComponents;
         this.core.registryReads.advanceRegistration(component);
+        attempt.registrationGeneration =
+          this.core.registryReads.currentGeneration(component);
         this.core.state.registeredNames.set(component, componentName);
 
         const internalCallbacks =
@@ -921,11 +930,17 @@ export class RegistrationOperations {
     return undefined;
   }
 
-  /** Whether the name still holds this registration's instance. */
+  /**
+   * Whether the name still holds this registration: its instance, under the generation
+   * its commit allocated - an unregister and re-registration of the same instance
+   * leaves the instance in place under a new one.
+   */
   private isStillThisRegistration(attempt: RegistrationAttempt): boolean {
     return (
       this.core.registry.getComponent(attempt.componentName) ===
-      attempt.component
+        attempt.component &&
+      this.core.registryReads.currentGeneration(attempt.component) ===
+        attempt.registrationGeneration
     );
   }
 
@@ -1271,7 +1286,7 @@ export class RegistrationOperations {
               message: reason,
               registrationIndexBefore: input.registrationIndexBefore,
               startupOrder: [],
-              targetFound: defaultTargetFound(position),
+              targetFound: report.targetFound,
               ...(cycle !== undefined ? { cycle } : {}),
               isInsertAction: input.isInsertAction,
               position,

@@ -10,6 +10,7 @@ import {
   MissingDependencyError,
   ComponentStartupError,
   ComponentStartTimeoutError,
+  ComponentStartObservationError,
   ComponentStopTimeoutError,
   ComponentForceTimeoutError,
   ForceShutdownSupersededError,
@@ -671,6 +672,16 @@ describe('LifecycleManager - BaseComponent', () => {
         'StartupInterrupted',
         { componentName: 'db', method: 'manual' },
         'Component "db" startup interrupted by shutdown (manual)',
+      ],
+      [
+        'ComponentStartObservationError',
+        new ComponentStartObservationError(
+          { componentName: 'db' },
+          new Error('boom'),
+        ),
+        'StartObservationFailed',
+        { componentName: 'db' },
+        'Component "db" start() returned a promise that could not be observed',
       ],
       [
         'ComponentStopTimeoutError',

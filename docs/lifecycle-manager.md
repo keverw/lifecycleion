@@ -414,13 +414,14 @@ fresh signal.
 `errCode` (also listed in `lifecycleManagerErrCodes`), so it can be checked with
 `instanceof` or by code:
 
-| Signal                    | Reason class                        | `errCode`            | Fired by                                                                    |
-| ------------------------- | ----------------------------------- | -------------------- | --------------------------------------------------------------------------- |
-| `start(signal)`           | `ComponentStartTimeoutError`        | `StartTimeout`       | `startupTimeoutMS` or a bulk startup deadline (the start result's `error`)  |
-| `start(signal)`           | `StartupInterruptedByShutdownError` | `StartupInterrupted` | a shutdown pass with `abortPendingStarts: true` beginning                   |
-| `stop(signal)`            | `ComponentStopTimeoutError`         | `StopTimeout`        | `shutdownGracefulTimeoutMS` or a `stopComponent()` `timeout`                |
-| `onShutdownForce(signal)` | `ComponentForceTimeoutError`        | `ForceTimeout`       | `shutdownForceTimeoutMS` (the stalled result's `error`)                     |
-| `onShutdownForce(signal)` | `ForceShutdownSupersededError`      | `ForceSuperseded`    | the earlier `stop()` completing late - the component is down; not a failure |
+| Signal                    | Reason class                        | `errCode`                | Fired by                                                                    |
+| ------------------------- | ----------------------------------- | ------------------------ | --------------------------------------------------------------------------- |
+| `start(signal)`           | `ComponentStartTimeoutError`        | `StartTimeout`           | `startupTimeoutMS` or a bulk startup deadline (the start result's `error`)  |
+| `start(signal)`           | `StartupInterruptedByShutdownError` | `StartupInterrupted`     | a shutdown pass with `abortPendingStarts: true` beginning                   |
+| `start(signal)`           | `ComponentStartObservationError`    | `StartObservationFailed` | a `start()` promise the manager cannot observe (its error is the `cause`)   |
+| `stop(signal)`            | `ComponentStopTimeoutError`         | `StopTimeout`            | `shutdownGracefulTimeoutMS` or a `stopComponent()` `timeout`                |
+| `onShutdownForce(signal)` | `ComponentForceTimeoutError`        | `ForceTimeout`           | `shutdownForceTimeoutMS` (the stalled result's `error`)                     |
+| `onShutdownForce(signal)` | `ForceShutdownSupersededError`      | `ForceSuperseded`        | the earlier `stop()` completing late - the component is down; not a failure |
 
 ```typescript
 import { lifecycleManagerErrCodes } from 'lifecycleion/lifecycle-manager';
@@ -482,7 +483,11 @@ pending, or is told to stop wanting it:
   [Multi-Phase Shutdown](#multi-phase-shutdown)). That abort is only a cue, with a
   `StartupInterruptedByShutdownError` as `signal.reason`: nothing is marked timed
   out. Only a failure linked to it is answered
-  `shutdown_in_progress`; an unrelated one is still `error`.
+  `shutdown_in_progress`; an unrelated one is still `error`;
+- the promise `start()` returned cannot be observed (see [Late-Start
+  Cleanup](#late-start-cleanup)): the start fails at once, so its signal aborts with a
+  `ComponentStartObservationError` carrying that failure as `cause`, and a shutdown
+  pass with `abortPendingStarts` does not abort it again.
 
 It is never aborted because `start()` resolved, rejected or threw. Without
 `abortPendingStarts`, a shutdown pass does not abort it either - including one using
@@ -555,7 +560,8 @@ with `component_already_stopping`.
 
 If the manager cannot observe the promise returned by `start()` because its
 constructor or species throws, the start operation returns that error and aborts
-the start signal immediately. The manager retains ownership of the unfinished
+the start signal immediately, with a `ComponentStartObservationError` whose `cause`
+is that error. The manager retains ownership of the unfinished
 start and attempts to observe it again for automatic late cleanup. Unregistration
 is refused while that work remains unresolved, and a successful cleanup retains
 the original observation error. A promise whose constructor persistently prevents
@@ -1467,7 +1473,7 @@ Timeouts operate at **two independent levels** - they don't compete, they're lay
 **2. Per-Component Timeouts (Individual Component)**
 
 - Each component's `shutdownGracefulTimeoutMS` (default 5s) and `shutdownForceTimeoutMS` (default 2s) control its individual shutdown phases
-- If the graceful phase exceeds its timeout or throws, and the force phase is unavailable or also fails, that component becomes stalled. Shutdown continues with the next component unless `haltOnStall: true`
+- If the graceful phase exceeds its timeout or throws, and the force phase is unavailable or also fails, that component becomes stalled. With the default `haltOnStall: true` the pass stops there; with `haltOnStall: false` it continues with the next component
 
 **Example:**
 
@@ -1475,18 +1481,23 @@ Timeouts operate at **two independent levels** - they don't compete, they're lay
 // Global: 30s for entire shutdown operation
 await lifecycle.stopAllComponents({ timeoutMS: 30000 });
 
-// Component A has 3s graceful timeout
+// Component A has 3s graceful timeout and no onShutdownForce()
 class ComponentA extends BaseComponent {
   constructor() {
     super(logger, { name: 'A', shutdownGracefulTimeoutMS: 3000 });
   }
 }
 
-// If Component A's stop() takes 4 seconds:
-// - Component A becomes stalled (exceeded its 3s graceful timeout)
-// - Bulk operation continues with Component B (global 30s timer still has 26s left)
+// If Component A's stop() never settles:
+// - At 3s its graceful phase times out; with no force phase, Component A becomes stalled
+// - With the default haltOnStall: true, the pass stops there: Component B and the rest
+//   are not attempted (listed under `Not attempted:` in the result's `reason`)
+// - With haltOnStall: false, the pass continues with Component B (global 30s timer
+//   still has 27s left)
+// A stop() that resolves after its timeout - at 4s, say - clears the stall and records
+// Component A stopped, but the pass has already treated it as stalled.
 //
-// If global 30s expires while Component C is stopping:
+// With haltOnStall: false, if global 30s expires while Component C is stopping:
 // - Manager stops initiating new stops after timeout; current stop may still run
 //   until its per-component timeout (if any) elapses
 // - Returns { success: false, timedOut: true, stoppedComponents: ['B'], stalledComponents: [...] }
@@ -1534,7 +1545,7 @@ interface ShutdownResult {
     | 'partial_state' // Preparation refused, or shutdown left stalled/running components
     | 'invalid_options'
     | 'operation_crashed';
-  error?: Error; // The thrown value, when the pass itself failed (operation_crashed)
+  error?: Error; // operation_crashed: the thrown value. invalid_options: the option validation error - the call's own, or that of a component stop the pass refused, leaving its component up (kept here under cleanup_incomplete too)
 }
 ```
 
@@ -1745,8 +1756,12 @@ object, a spread copy included, gets a plain start or stop of the name: the star
 on whatever is registered under the name by then rather than only the registration the
 restart approved, a startup timeout is read again rather than taken from the restart's
 check, the startup phase validates every registration as `startAllComponents()` does,
-and any failed stop is answered `restart_stop_failed`. An override that throws or
-rejects is a crash of the restart, answered `operation_crashed`.
+and any failed stop is answered `restart_stop_failed`. The object carries the context
+only into its own manager and only until that call settles: passed to another manager,
+or kept and passed again later, it is a plain call too. A shutdown request made while an
+override awaits before passing the object on still skips the restart's start, answered
+`shutdown_requested_during_restart` as one made during the stop is. An override that
+throws or rejects is a crash of the restart, answered `operation_crashed`.
 
 ```typescript
 class AuditedManager extends LifecycleManager {
@@ -2296,7 +2311,7 @@ Terminology used below:
 - **Escalation state** is the logical repeated-shutdown context for one shutdown cycle
 - **Armed window** is the short post-failure period after an unsuccessful shutdown returns, before the next retry starts
 - During an active retry, the escalation state is still preserved, but the armed window is not active because shutdown is running again
-- A `restartAllComponents()` stop phase does not start an escalation cycle of its own. The first shutdown signal during it is the operator's initial request: it cancels the restart and starts the cycle (`firstMethod` is that signal) without being counted. Signals after it count as presses, as they would against any running shutdown. A restart whose stop phase fails with no signal leaves nothing armed
+- A `restartAllComponents()` stop phase does not start an escalation cycle of its own, and one started while an earlier failed shutdown's window is still armed ends that cycle rather than carrying its count. The first shutdown signal during it is the operator's initial request: it cancels the restart and starts the cycle (`firstMethod` is that signal) without being counted. Signals after it count as presses, as they would against any running shutdown. A restart whose stop phase fails with no signal leaves nothing armed
 
 This applies to shutdown requests from:
 

@@ -581,3 +581,44 @@ test("a pass the start's starting listener requests through its lifecycle handle
   expect(worker.signals[0]?.aborted).toBe(false);
   expect(manager.getRunningComponentNames()).toEqual([]);
 });
+
+// A start the outer attempt's own `getDependencies()` re-enters records its attempt while
+// the outer one has published but not yet claimed. That must not release the outer
+// attempt's settlement: once it claims, a pass must still find and abort its start.
+test('a nested start from getDependencies() leaves the outer attempt abortable by the pass', async () => {
+  const { logger, manager } = setup();
+  const worker = new Starts(logger, 'worker');
+  let shouldReenter = false;
+  let nested: Promise<unknown> | undefined;
+  worker.getDependencies = (): string[] => {
+    if (shouldReenter) {
+      shouldReenter = false;
+      nested = manager.startComponent('worker');
+    }
+    return [];
+  };
+  let startCalls = 0;
+  worker.onStart = (): Promise<void> => {
+    if (++startCalls === 1) {
+      throw new Error('nested start failed');
+    }
+    return worker.gate.promise;
+  };
+  await manager.registerComponent(worker);
+  shouldReenter = true;
+
+  const starting = manager.startComponent('worker');
+  expect(await nested).toMatchObject({ success: false, code: 'error' });
+  await sleep(0);
+  expect(startCalls).toBe(2);
+
+  const shutdown = manager.stopAllComponents({
+    abortPendingStarts: true,
+    timeoutMS: 1000,
+  });
+  expect(worker.signals[1]?.aborted).toBe(true);
+  worker.gate.resolve();
+  expect((await starting).code).toBe('shutdown_in_progress');
+  expect(await shutdown).toMatchObject({ success: true });
+  expect(manager.getRunningComponentNames()).toEqual([]);
+});

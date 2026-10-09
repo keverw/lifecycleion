@@ -35,6 +35,10 @@ export interface RegistrationProgress {
   // component's code a second time, may answer differently, and would fall back to a
   // name an earlier registration of the same instance recorded.
   nameRead?: { value: unknown };
+  // `true` once the lookup found a relative position's target, so a failure after it -
+  // a throwing `getDependencies()`, a failed hook - reports the target as found.
+  // Absent before the lookup, and for `start` / `end`.
+  targetFound?: true;
 }
 
 export function newRegistrationProgress(): RegistrationProgress {
@@ -56,7 +60,8 @@ export function positionHasTarget(position: InsertPosition): boolean {
 
 /**
  * `targetFound` for a registration refused before it looked for a target: `false` for a
- * position that has one, and absent for `start` / `end`.
+ * position that has one, and absent for `start` / `end`. One that failed after its
+ * lookup found the target reports `progress.targetFound` instead.
  */
 export function defaultTargetFound(
   position: InsertPosition,
@@ -108,7 +113,7 @@ export function committedRegistrationReport(
     return {
       startupOrder: [],
       manualPositionRespected: undefined,
-      targetFound: defaultTargetFound(position),
+      targetFound: progress.targetFound ?? defaultTargetFound(position),
       autoStartAttempted: false,
     };
   }
@@ -121,7 +126,7 @@ export function committedRegistrationReport(
     targetFound:
       'targetFound' in committed
         ? committed.targetFound
-        : defaultTargetFound(position),
+        : (progress.targetFound ?? defaultTargetFound(position)),
     autoStartAttempted: progress.didAutoStartAttempt,
     ...(progress.isAutoStartDeferred ? { autoStartDeferred: true } : {}),
     ...(progress.didAutoStartAttempt

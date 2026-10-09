@@ -1,5 +1,7 @@
 import { expect, test } from 'bun:test';
+import type { ArraySink } from '../logger/sinks/array';
 import { sleep } from '../sleep';
+import { ComponentStartObservationError } from './errors';
 import { deferred, Plain, setup } from './test-helpers';
 
 // Adoption succeeds; the subsequent raw-start observer fails before attaching.
@@ -406,6 +408,53 @@ test('unregister cannot orphan a resolved raw start before failed-observation cl
     expect(stops).toBe(1);
     expect(hasResources).toBe(false);
     expect((await manager.unregisterComponent('api')).success).toBe(true);
+  } finally {
+    gate.resolve();
+    await manager.stopAllComponents({
+      timeoutMS: 0,
+      waitForAbandonedStarts: true,
+    });
+    await logger.close();
+  }
+});
+
+test('a failed raw-start observation aborts the signal with a typed reason a later pass leaves alone', async () => {
+  const { logger, manager } = setup();
+  const sink = logger.getSinks()[0] as ArraySink;
+  const gate = deferred();
+  const failure = new Error('raw start observation failed');
+  const component = new Plain(logger, 'api');
+  Object.defineProperty(component, 'startupTimeoutMS', { value: 0 });
+  let signal: AbortSignal | undefined;
+  component.start = (startSignal) => {
+    signal = startSignal;
+    return failSecondConstructorRead(gate.promise, failure);
+  };
+  await manager.registerComponent(component);
+  try {
+    expect((await manager.startComponent('api')).error).toBe(failure);
+    expect(signal?.aborted).toBe(true);
+    const reason: unknown = signal?.reason;
+    expect(reason).toBeInstanceOf(ComponentStartObservationError);
+    expect(reason).toMatchObject({
+      errCode: 'StartObservationFailed',
+      additionalInfo: { componentName: 'api' },
+      cause: failure,
+    });
+
+    const shutdown = manager.stopAllComponents({
+      timeoutMS: 0,
+      waitForAbandonedStarts: true,
+      abortPendingStarts: true,
+    });
+    gate.resolve();
+    expect((await shutdown).success).toBe(true);
+    expect(signal?.reason).toBe(reason);
+    expect(
+      sink.logs.some((entry) =>
+        entry.message.includes('Aborted pending start for shutdown'),
+      ),
+    ).toBe(false);
   } finally {
     gate.resolve();
     await manager.stopAllComponents({

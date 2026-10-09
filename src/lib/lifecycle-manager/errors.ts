@@ -156,6 +156,27 @@ export class StartupInterruptedByShutdownError extends Error {
 }
 
 /**
+ * The reason a start signal aborts when the manager cannot observe the promise `start()`
+ * returned (its `constructor` or species throws): the start fails at once with that
+ * failure, which this carries as `cause`, and the manager stops waiting on the call.
+ */
+export class ComponentStartObservationError extends Error {
+  public errPrefix = 'LifecycleManagerErr';
+  public errType = 'Component';
+  public errCode = 'StartObservationFailed';
+  public additionalInfo: { componentName: string };
+
+  constructor(additionalInfo: { componentName: string }, cause: unknown) {
+    super(
+      `Component "${additionalInfo.componentName}" start() returned a promise that could not be observed`,
+      { cause },
+    );
+    this.name = 'ComponentStartObservationError';
+    this.additionalInfo = additionalInfo;
+  }
+}
+
+/**
  * Error thrown when a component stop operation times out
  */
 export class ComponentStopTimeoutError extends Error {
@@ -269,6 +290,7 @@ export const lifecycleManagerErrCodes = {
   StartupTimeout: 'StartupTimeout',
   StartTimeout: 'StartTimeout',
   StartupInterrupted: 'StartupInterrupted',
+  StartObservationFailed: 'StartObservationFailed',
   StopTimeout: 'StopTimeout',
   ForceTimeout: 'ForceTimeout',
   ForceSuperseded: 'ForceSuperseded',

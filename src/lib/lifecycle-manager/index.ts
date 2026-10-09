@@ -88,6 +88,7 @@ export {
   MissingDependencyError,
   ComponentStartupError,
   ComponentStartTimeoutError,
+  ComponentStartObservationError,
   ComponentStopTimeoutError,
   ComponentForceTimeoutError,
   ForceShutdownSupersededError,

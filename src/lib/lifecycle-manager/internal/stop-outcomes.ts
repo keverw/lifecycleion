@@ -45,9 +45,10 @@ export class StopOutcomes {
 
   /**
    * The status of a component already recorded as stopped, for its `component:stopped`
-   * event and its result. Read guarded: `getComponentStatus()` is public and can be
-   * overridden, and a throw from it must not cost a stop that happened its notification,
-   * nor turn it into a crash. Reported, and left out.
+   * event and its result - or as stalled, for the stall's result. Read guarded:
+   * `getComponentStatus()` is public and can be overridden, and a throw from it must not
+   * cost a stop that happened its notification, nor turn it or a stall into a crash.
+   * Reported, and left out.
    */
   public readStatusOfStopped(
     name: string,
@@ -426,7 +427,7 @@ export class StopOutcomes {
       return this.crashedStopResult(name, error, details);
     }
 
-    return {
+    const result: ComponentOperationResult = {
       success: false,
       componentName: name,
       // A graceful-phase timeout is worded as its `component:stop-timeout` event and log
@@ -444,8 +445,19 @@ export class StopOutcomes {
             : 'Graceful shutdown failed',
       code: didTimeOut ? 'component_shutdown_timeout' : 'error',
       error,
-      status: this.core.manager.getComponentStatus(name),
     };
+
+    // Guarded as a stopped component's status is: a throwing override must not turn
+    // the stall into a crash. Reported, and left out.
+    const status = this.readStatusOfStopped(
+      name,
+      'lifecycle-manager component stall',
+    );
+    if (status !== undefined) {
+      result.status = status;
+    }
+
+    return result;
   }
 
   /** Whether the stop that left `name` stalled had its graceful phase time out. */

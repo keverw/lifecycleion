@@ -375,3 +375,161 @@ test('instance patches of the lifecycle methods run for restarts', async () => {
   await manager.stopAllComponents();
   await logger.close();
 });
+
+describe('the restart context outside the restart call', () => {
+  test('restartComponent() skips its start when a shutdown ran while an override awaited', async () => {
+    const { logger } = setup();
+    let isArmed = false;
+
+    class AwaitingManager extends LifecycleManager {
+      public override async startComponent(
+        name: string,
+        options?: StartComponentOptions,
+      ): Promise<ComponentOperationResult> {
+        if (isArmed) {
+          isArmed = false;
+          await this.stopAllComponents();
+        }
+
+        return await super.startComponent(name, options);
+      }
+    }
+
+    const manager = new AwaitingManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+    });
+    const component = new Counted(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+    isArmed = true;
+
+    const result = await manager.restartComponent('a');
+
+    expect(result.success).toBe(false);
+    expect(result.code).toBe('shutdown_requested_during_restart');
+    expect(component.starts).toBe(1);
+    expect(manager.isComponentRunning('a')).toBe(false);
+    await logger.close();
+  });
+
+  test('restartAllComponents() skips its startup when a shutdown ran while an override awaited', async () => {
+    const { logger } = setup();
+    let isArmed = false;
+
+    class AwaitingManager extends LifecycleManager {
+      public override async startAllComponents(
+        options?: StartupOptions,
+      ): Promise<StartupResult> {
+        if (isArmed) {
+          isArmed = false;
+          await this.stopAllComponents();
+        }
+
+        return await super.startAllComponents(options);
+      }
+    }
+
+    const manager = new AwaitingManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+    });
+    const component = new Counted(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.startAllComponents();
+    isArmed = true;
+
+    const result = await manager.restartAllComponents();
+
+    expect(result.success).toBe(false);
+    expect(result.startupSkippedByShutdownRequest).toBe(true);
+    expect(result.startupResult.code).toBe('shutdown_requested_during_restart');
+    expect(component.starts).toBe(1);
+    expect(manager.isComponentRunning('a')).toBe(false);
+    await logger.close();
+  });
+
+  test("another manager handed a restart's options makes a plain call", async () => {
+    const { logger } = setup();
+    const other = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+    });
+    const otherComponent = new Counted(logger, 'a');
+    await other.registerComponent(otherComponent);
+    const otherResults: ComponentOperationResult[] = [];
+    let isArmed = false;
+
+    class ForwardingManager extends LifecycleManager {
+      public override async startComponent(
+        name: string,
+        options?: StartComponentOptions,
+      ): Promise<ComponentOperationResult> {
+        if (isArmed) {
+          otherResults.push(await other.startComponent(name, options));
+        }
+
+        return await super.startComponent(name, options);
+      }
+    }
+
+    const manager = new ForwardingManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+    });
+    const component = new Counted(logger, 'a');
+    await manager.registerComponent(component);
+    await manager.startComponent('a');
+    isArmed = true;
+
+    const result = await manager.restartComponent('a');
+
+    // The other manager starts its own `a`, not against this restart's snapshot, and
+    // leaves the restart's context for this manager's start.
+    expect(otherResults.map((value) => value.success)).toEqual([true]);
+    expect(otherComponent.starts).toBe(1);
+    expect(result.success).toBe(true);
+    expect(component.starts).toBe(2);
+    await other.stopAllComponents();
+    await manager.stopAllComponents();
+    await logger.close();
+  });
+
+  test("a restart's options replayed after the restart returned make a plain call", async () => {
+    const { logger } = setup();
+    let saved: StartComponentOptions | undefined;
+
+    class SavingManager extends LifecycleManager {
+      public override startComponent(
+        name: string,
+        options?: StartComponentOptions,
+      ): Promise<ComponentOperationResult> {
+        saved ??= options;
+
+        return super.startComponent(name, { ...options });
+      }
+    }
+
+    const manager = new SavingManager({ logger, shutdownWarningTimeoutMS: -1 });
+    const original = new Counted(logger, 'a');
+    await manager.registerComponent(original);
+    await manager.startComponent('a');
+    saved = undefined;
+    expect((await manager.restartComponent('a')).success).toBe(true);
+    expect(saved).toBeDefined();
+
+    await manager.stopComponent('a');
+    await manager.unregisterComponent('a');
+    const replacement = new Counted(logger, 'a');
+    await manager.registerComponent(replacement);
+
+    // Not the restart's start, whose snapshot names the unregistered original.
+    const replay = await manager.startComponent('a', saved);
+
+    expect(replay.success).toBe(true);
+    expect(replacement.starts).toBe(1);
+    expect(original.starts).toBe(2);
+    await manager.stopAllComponents();
+    await logger.close();
+  });
+});
