@@ -5066,3 +5066,39 @@ test('an initialization that rejects is reported, and reconnect and close still 
     await directory.cleanup();
   }
 });
+
+test('reconnect() answers with a status when its own initialization rejects', async () => {
+  // The constructor's attempt was contained; the one `reconnect()` started was awaited
+  // raw, so an unexpected rejection rejected `reconnect()` itself.
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const initializePipe = spyOn(
+    NamedPipeSink.prototype as unknown as {
+      initializePipe: () => Promise<void>;
+    },
+    'initializePipe',
+  )
+    .mockImplementationOnce(() => Promise.resolve())
+    .mockImplementationOnce(() => Promise.reject(new Error('reopen exploded')));
+  const captured = muteConsoleError();
+  try {
+    const sink = new NamedPipeSink({
+      pipePath: `${directory.path}/missing.pipe`,
+      onError: () => {},
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    const status = await sink.reconnect();
+    expect(status).toEqual({
+      success: false,
+      reason: 'error',
+      error: expect.any(Error),
+    });
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('reopen exploded');
+    await sink.close();
+  } finally {
+    restoreConsoleError();
+    initializePipe.mockRestore();
+    await directory.cleanup();
+  }
+});

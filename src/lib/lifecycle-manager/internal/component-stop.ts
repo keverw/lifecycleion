@@ -199,7 +199,21 @@ class ForceStopRun {
  * recorded through `core.stopOutcomes`.
  */
 export class ComponentStop {
+  // The answers of stalled retries that had no force handler and so attempted nothing,
+  // by identity (`claimForceStop()`), for `didRetryAttemptNothing()`.
+  private readonly unattemptedRetryResults =
+    new WeakSet<ComponentOperationResult>();
+
   constructor(private readonly core: ManagerCore) {}
+
+  /**
+   * Whether `result` answers a stalled retry that attempted nothing: no force handler to
+   * run, so the stall it found stands as recorded rather than failing anew. The shutdown
+   * pass does not halt on one.
+   */
+  public didRetryAttemptNothing(result: ComponentOperationResult): boolean {
+    return this.unattemptedRetryResults.has(result);
+  }
 
   /**
    * The body of the manager's public `stopComponent()`: a restart's stop when `options`
@@ -605,8 +619,11 @@ export class ComponentStop {
       if (
         isStartUnfinished(settlement) &&
         settlement.component === component &&
-        settlement.token ===
-          this.core.state.componentStartAttemptTokens.get(dependent)
+        this.core.startSettlements.isCurrentStartAttempt(
+          dependent,
+          component,
+          settlement.token,
+        )
       ) {
         return true;
       }
@@ -1481,7 +1498,9 @@ export class ComponentStop {
         .warn('Stalled component has no force handler to retry', {
           params: { phase: priorStall.phase, reason: priorStall.reason },
         });
-      return this.core.stopOutcomes.stalledStopResult(name, priorStall);
+      const result = this.core.stopOutcomes.stalledStopResult(name, priorStall);
+      this.unattemptedRetryResults.add(result);
+      return result;
     }
     if (priorStall) {
       this.core.logger

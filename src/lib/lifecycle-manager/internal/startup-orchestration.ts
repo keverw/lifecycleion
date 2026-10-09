@@ -181,6 +181,13 @@ export class StartupOrchestration {
     if (preflight) {
       return preflight;
     }
+    // The preflight reads the registry through the manager's count and name getters,
+    // which a subclass can override - and one can start a bulk operation of its own.
+    const becameActiveDuringPreflight =
+      this.core.startupPreflight.refuseActiveBulkStartup(startTime);
+    if (becameActiveDuringPreflight) {
+      return becameActiveDuringPreflight;
+    }
 
     const effectiveTimeout = resolveOperationTimeoutMS(
       requestedTimeoutMS,
@@ -906,13 +913,19 @@ export class StartupOrchestration {
         }),
       };
     } else if (result.code === 'shutdown_in_progress') {
+      // A shutdown pass that began answered above, and owns the teardown. Refused
+      // without one - a logger exit in progress - nothing else will stop what this
+      // startup started, so it is rolled back as for a required failure.
+      clearTimeout(run.timeoutHandle);
       return {
-        kind: 'result',
-        value: this.abortedByShutdown(
-          run,
-          result.reason || 'Shutdown triggered during startup',
-          result.error,
-        ),
+        kind: 'rollback',
+        pending: this.rollBackOnce(run, run.startedComponents),
+        finish: () =>
+          this.abortedByShutdown(
+            run,
+            result.reason || 'Shutdown triggered during startup',
+            result.error,
+          ),
       };
     } else if (result.code === 'component_unexpected_stop') {
       // This branch is for components that reported an unexpected stop
@@ -932,6 +945,12 @@ export class StartupOrchestration {
           error,
           run.failedOptionalComponents,
         );
+      // Up again by now - a listener on its stop started it again - it is still this
+      // startup's to report and to roll back, as in reconciliation. Asked after the
+      // callbacks above, which can report it stopped again.
+      if (this.core.registry.isComponentUp(name)) {
+        run.startedComponents.push(name);
+      }
       if (!isOptional) {
         clearTimeout(run.timeoutHandle);
         return {

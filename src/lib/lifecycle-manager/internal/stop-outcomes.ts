@@ -281,6 +281,11 @@ export class StopOutcomes {
    * Record a stall: the bookkeeping every path that stalls a component shares. The
    * caller emits `component:stalled` and anything particular to its path.
    *
+   * A stalled retry that fails replaces the record it found rather than ending it: the
+   * stall never cleared, so no `component:stalled-resolved` comes between the two
+   * `component:stalled` events, and the one that ends the stall carries the latest
+   * record.
+   *
    * A stop that settles after the stall is recorded clears it through
    * `handleLateStopResolution()`; one released by its own abort listener never gets here,
    * since its timeout rejects a macrotask later (`rejectAfterAbort()`).

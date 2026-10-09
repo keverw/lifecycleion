@@ -113,6 +113,13 @@ function skippedRestartStartupResult(): StartupResult {
  * the check the start pipeline makes against them.
  */
 export class RestartOperations {
+  // `stayDownRequestCount` when each `restartComponent()` stop began, by its dispatch:
+  // see `restartStopOperation()`.
+  private readonly stayDownRequestCountsAtStop = new WeakMap<
+    RestartStopDispatch,
+    number
+  >();
+
   constructor(private readonly core: ManagerCore) {}
 
   public async restartAllComponentsOperation(
@@ -544,6 +551,10 @@ export class RestartOperations {
       startSnapshot,
       taken: false,
     };
+    this.stayDownRequestCountsAtStop.set(
+      stopDispatch,
+      stayDownRequestCountAtStop,
+    );
     const stopDispatchOptions = restartDispatchOptions(stopDispatch);
     let stopResult: ComponentOperationResult;
     try {
@@ -572,30 +583,24 @@ export class RestartOperations {
       };
     }
 
+    const stayDownRefusal = this.refuseRestartAskedToStayDown(
+      name,
+      startSnapshot,
+      stayDownRequestCountAtStop,
+    );
+    if (stayDownRefusal) {
+      return stayDownRefusal;
+    }
+
     // A stop listener may have unregistered or replaced this instance while the
     // stop awaited. The restart may only start the registration it stopped.
     if (!this.isCurrentRestartSnapshot(name, startSnapshot)) {
-      // Replaced or unregistered, and asked to stay down meanwhile: the request is why
-      // no start follows, and it is reported as such. Neither a replacement's status nor
-      // a missing one is this restart's, so none is attached.
-      if (this.core.state.stayDownRequestCount !== stayDownRequestCountAtStop) {
-        return this.skippedRestartStartResult(
-          name,
-          false,
-          'Shutdown requested while restart was stopping the component, which was replaced or unregistered meanwhile; startup skipped',
-        );
-      }
-
       return {
         success: false,
         componentName: name,
         reason: 'Component changed while restart was stopping it',
         code: 'restart_start_failed',
       };
-    }
-
-    if (this.core.state.stayDownRequestCount !== stayDownRequestCountAtStop) {
-      return this.skippedRestartStartResult(name, true);
     }
 
     const startDispatch: RestartStartDispatch = {
@@ -674,11 +679,29 @@ export class RestartOperations {
    * overridable method the restart calls can replace the component - so a replacement
    * is never stopped. Nothing runs caller code between this check and the stop's own
    * lookup of the component, which every later recheck of the stop compares against.
+   * Refused first when a shutdown asked to stay down since the restart's stop began:
+   * only an override that awaited before handing the options on lets one in, and that
+   * shutdown may have stopped the component already. The request is why no start
+   * follows, as for one made during the stop itself.
    */
   public async restartStopOperation(
     name: string,
     dispatch: RestartStopDispatch,
   ): Promise<ComponentOperationResult> {
+    const stayDownRequestCountAtStop =
+      this.stayDownRequestCountsAtStop.get(dispatch);
+    const stayDownRefusal =
+      stayDownRequestCountAtStop === undefined
+        ? undefined
+        : this.refuseRestartAskedToStayDown(
+            name,
+            dispatch.startSnapshot,
+            stayDownRequestCountAtStop,
+          );
+    if (stayDownRefusal) {
+      return stayDownRefusal;
+    }
+
     const bulkRefusal =
       this.core.componentStop.checkIndividualBulkPreconditions(name, 'restart');
     if (bulkRefusal) {
@@ -743,6 +766,31 @@ export class RestartOperations {
     }
     dispatch.canceled = true;
     return skippedRestartStartupResult();
+  }
+
+  /**
+   * A `restartComponent()` of `name` asked to stay down since its stop began, answered
+   * `shutdown_requested_during_restart`; `undefined` when no such request was made.
+   * Replaced or unregistered meanwhile, the request is still why no start follows, but
+   * neither a replacement's status nor a missing one is this restart's, so none is
+   * attached.
+   */
+  private refuseRestartAskedToStayDown(
+    name: string,
+    startSnapshot: RestartStartSnapshot,
+    stayDownRequestCountAtStop: number,
+  ): ComponentOperationResult | undefined {
+    if (this.core.state.stayDownRequestCount === stayDownRequestCountAtStop) {
+      return undefined;
+    }
+    if (!this.isCurrentRestartSnapshot(name, startSnapshot)) {
+      return this.skippedRestartStartResult(
+        name,
+        false,
+        'Shutdown requested while restart was stopping the component, which was replaced or unregistered meanwhile; startup skipped',
+      );
+    }
+    return this.skippedRestartStartResult(name, true);
   }
 
   /**

@@ -331,7 +331,10 @@ export interface StartupResult {
     error: Error;
   }>;
 
-  /** Components skipped because their optional dependency failed */
+  /**
+   * Components skipped because a required dependency failed, stalled or was itself
+   * skipped. An optional dependency that did so does not block its dependents.
+   */
   skippedDueToDependency: string[];
 
   /** Stalled components actually skipped with ignoreStalledComponents; absent when none were skipped. */
@@ -497,10 +500,13 @@ export interface MessageResult {
   /** Was message delivered to handler */
   sent: boolean;
 
-  /** Does component exist */
+  /**
+   * Did the component exist. Like `componentRunning`, as of the last check before the
+   * handler was called: what the handler itself does to the component is not reflected.
+   */
   componentFound: boolean;
 
-  /** Is component currently running */
+  /** Was the component running, as of the last check before the handler was called */
   componentRunning: boolean;
 
   /** Does component have onMessage() method */
@@ -583,7 +589,7 @@ export interface BroadcastResult {
   /** Was message delivered */
   sent: boolean;
 
-  /** Was component running */
+  /** Was the component running, as of the last check before the handler was called */
   running: boolean;
 
   /** Data returned from onMessage handler (undefined if not sent or no return) */
@@ -768,10 +774,14 @@ export interface ValueResult<T = unknown> {
   /** The returned value */
   value: T | undefined;
 
-  /** Component exists in registry */
+  /**
+   * Component exists in registry. Like `componentRunning`, as of the last check before
+   * the handler was called: what the handler itself does to the component is not
+   * reflected.
+   */
   componentFound: boolean;
 
-  /** Component is in 'running' state */
+  /** Component is in 'running' state, as of the last check before the handler was called */
   componentRunning: boolean;
 
   /** Component has getValue() method */

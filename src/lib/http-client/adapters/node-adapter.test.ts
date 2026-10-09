@@ -3977,6 +3977,8 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         },
       });
 
+      // Let the response reach the factory, so the abort lands during its setup.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       controller.abort();
 
       let caught: Error | undefined;
@@ -4061,6 +4063,8 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         },
       });
 
+      // Let the response reach the factory, so the abort lands during its setup.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       controller.abort();
 
       let caught: Error | undefined;
@@ -7656,3 +7660,57 @@ test.each(['aborted', 'addEventListener', 'setHeader'] as const)(
     }
   },
 );
+
+test('a response arriving after the signal aborted does not call the streamResponse factory', async () => {
+  let respond: ((res: http.IncomingMessage) => void) | undefined;
+  const request = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    setHeader: () => {},
+    end: () => {},
+    destroy() {
+      this.destroyed = true;
+      return this;
+    },
+  });
+  const requestSpy = spyOn(http, 'request').mockImplementation(((
+    _options: unknown,
+    callback: (res: http.IncomingMessage) => void,
+  ) => {
+    respond = callback;
+    return request;
+  }) as unknown as typeof http.request);
+  const controller = new AbortController();
+  let factoryCalls = 0;
+  try {
+    const sending = new NodeAdapter().send(
+      makeAdapterRequest('http://example.test', {
+        signal: controller.signal,
+        streamResponse: () => {
+          factoryCalls++;
+          return makeMemoryWritable().stream;
+        },
+      }),
+    );
+    controller.abort();
+    // A response the transport had already parsed still reaches the callback.
+    respond?.(
+      Object.assign(new EventEmitter(), {
+        statusCode: 200,
+        headers: {},
+        complete: false,
+      }) as unknown as http.IncomingMessage,
+    );
+    let caught: unknown;
+    try {
+      await sending;
+    } catch (error) {
+      caught = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect((caught as Error).name).toBe('AbortError');
+    expect(request.destroyed).toBe(true);
+    expect(factoryCalls).toBe(0);
+  } finally {
+    requestSpy.mockRestore();
+  }
+});

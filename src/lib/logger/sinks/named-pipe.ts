@@ -110,7 +110,7 @@ export interface NamedPipeSinkOptions {
    *
    * Shared with `FileSink`, which reads the same option the same way.
    */
-  maxQueueSize?: number;
+  maxQueueSize?: number | null;
   /**
    * Attempts a failed write gets before the entry is given up on. Defaults to 3, matching
    * `FileSink`; `0` writes once and never retries.
@@ -120,7 +120,7 @@ export interface NamedPipeSinkOptions {
    * It is re-queued and goes out when the pipe is next usable, rather than being dropped
    * where it stood.
    */
-  maxRetries?: number;
+  maxRetries?: number | null;
 }
 
 /**
@@ -406,6 +406,20 @@ function openFailureKind(error: unknown): SinkFailureKind {
 }
 
 /**
+ * An initialization attempt as `initPromise` holds it: never rejecting, so a `reconnect()`
+ * or `close()` awaiting it answers with its own status. `initializePipe` reports its own
+ * failures and is built never to reject, so a rejection here is a bug - reported, not
+ * swallowed.
+ */
+function containInitFailure(attempt: Promise<void>): Promise<void> {
+  return attempt.catch((error: unknown) => {
+    reportToConsole(
+      `NamedPipeSink initialization failed unexpectedly: ${describeError(error)}`,
+    );
+  });
+}
+
+/**
  * NamedPipeSink writes logs to a named pipe (FIFO)
  * Only supported on Linux and macOS
  */
@@ -588,17 +602,10 @@ export class NamedPipeSink implements LogSink {
     );
     this.minLevel = options.minLevel ?? LogLevel.INFO;
 
-    // `initializePipe` reports its own failures and is built never to reject, but nothing
-    // observes this promise until `close()` races it or `reconnect()` awaits it outright.
-    // Contained here, as `FileSink` contains its own init, rather than trusted at each
-    // wait: a rejection from a future change would otherwise go unhandled out of the
-    // constructor and reject `reconnect()`, which answers with a status instead. Reported,
-    // not swallowed, since it would be a bug.
-    this.initPromise = this.initializePipe().catch((error: unknown) => {
-      reportToConsole(
-        `NamedPipeSink initialization failed unexpectedly: ${describeError(error)}`,
-      );
-    });
+    // Nothing observes this promise until `close()` races it or `reconnect()` awaits it
+    // outright. Contained here, as `FileSink` contains its own init, rather than trusted
+    // at each wait: see `containInitFailure`.
+    this.initPromise = containInitFailure(this.initializePipe());
   }
 
   public write(entry: LogEntry): void {
@@ -837,7 +844,9 @@ export class NamedPipeSink implements LogSink {
       this.reportedDiagnosticOpenFailureCap = false;
       this.reportedOpenFailureCap = false;
 
-      this.initPromise = this.initializePipe(false, false, true);
+      this.initPromise = containInitFailure(
+        this.initializePipe(false, false, true),
+      );
       await this.initPromise;
 
       // Check if initialization actually succeeded
@@ -2013,20 +2022,17 @@ export class NamedPipeSink implements LogSink {
       isDiagnostic,
       shouldSuppressFailureReport,
     );
-    this.initPromise = (async (): Promise<void> => {
-      try {
-        await attempt;
-      } finally {
-        this._isReconnecting = false;
-      }
-    })();
-
-    // `initializePipe` reports its own failures through `handleError` and never rejects,
-    // but this chain is not awaited by anyone, so a throw from the `finally` above would
-    // be an unhandled rejection raised out of an ordinary `logger.info()`.
-    observeRejection(this.initPromise, () => {
-      // Nothing left to report with.
-    });
+    // Contained, since `reconnect()` awaits whatever attempt is current and answers with
+    // a status rather than rejecting: see `containInitFailure`.
+    this.initPromise = containInitFailure(
+      (async (): Promise<void> => {
+        try {
+          await attempt;
+        } finally {
+          this._isReconnecting = false;
+        }
+      })(),
+    );
   }
 
   /**

@@ -519,8 +519,10 @@ const result = await runner.forceTry({
 Overrides the default 1000ms cancellation grace period. This setter requires a numeric
 argument: `null`, `undefined`, an omitted argument, or `NaN` throws `TypeError`; negative
 values throw `RangeError`. To restore the default, pass `1000` explicitly. `Infinity`
-selects the timer ceiling. A value of `0` force-cancels on the next timer turn without waiting for the operation to acknowledge
-the abort signal.
+selects the timer ceiling. A value of `0` force-cancels on the next timer turn: the zero-length timer
+is still armed, so an operation that acknowledges the abort signal before it fires - in its
+`'abort'` listener or a microtask - still settles the cancellation as `'canceled'` rather
+than `'forced'`.
 
 ### Events
 

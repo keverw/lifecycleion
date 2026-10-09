@@ -77,6 +77,9 @@ class RegistrationAttempt {
     reads: Map<BaseComponent, DependencyRead>;
     isSettled: boolean;
   } = { reads: new Map<BaseComponent, DependencyRead>(), isSettled: true };
+  // Whether those reads ran and settled: every component registered then was read.
+  // `isSettled` alone is also true of reads a check before them never let run.
+  public hasReadRegistry = false;
   // The registration generation this attempt's commit allocated: the instance alone
   // cannot tell this registration from a later one of the same instance under the same
   // name, made by caller code after the commit.
@@ -111,6 +114,7 @@ class RegistrationAttempt {
     targetComponentName: string | undefined;
     isInsertAction: boolean;
     dependencySnapshot: ReadonlyMap<BaseComponent, DependencyRead>;
+    hasReadRegistry: boolean;
   } {
     return {
       progress: this.progress,
@@ -120,6 +124,7 @@ class RegistrationAttempt {
       targetComponentName: this.targetComponentName,
       isInsertAction: this.isInsertAction,
       dependencySnapshot: this.registryRead.reads,
+      hasReadRegistry: this.hasReadRegistry,
     };
   }
 }
@@ -333,10 +338,12 @@ export class RegistrationOperations {
     // refuse reads nothing - no component's `getDependencies()` during a shutdown that
     // may be tearing them down - and answers with its own code, not with whatever
     // the reads would have made of it. Asked again before each read, since any read
-    // can begin a shutdown; the checks refuse once one has.
+    // can begin a shutdown; the checks refuse once one has. A removed timeout hook is
+    // refused as surely, so once one is found nothing further is read either.
     const canRead = (): boolean =>
       isInsertPosition(attempt.position) &&
-      !this.core.shutdownPass.isShuttingDown;
+      !this.core.shutdownPass.isShuttingDown &&
+      attempt.removedHooksReason === undefined;
     if (canRead()) {
       attempt.shouldAutoStart = snapshotRegisterOptions(
         attempt.options,
@@ -383,6 +390,7 @@ export class RegistrationOperations {
         },
         () => this.core.state.componentEntries,
       );
+      attempt.hasReadRegistry = attempt.registryRead.isSettled;
     }
 
     attempt.registrationIndexBefore =
@@ -1098,6 +1106,7 @@ export class RegistrationOperations {
     targetComponentName: string | undefined;
     isInsertAction: boolean;
     dependencySnapshot: ReadonlyMap<BaseComponent, DependencyRead>;
+    hasReadRegistry: boolean;
     code: RegistrationFailureCode;
     message: string;
     logLine: string;
@@ -1121,6 +1130,7 @@ export class RegistrationOperations {
         error: input.error,
         targetFound: input.targetFound,
         dependencySnapshot: input.dependencySnapshot,
+        hasReadRegistry: input.hasReadRegistry,
       });
 
       this.core.logger
@@ -1165,27 +1175,40 @@ export class RegistrationOperations {
     // component's `getDependencies()` for a refusal made during a shutdown, and a read
     // that registered again was refused the same way, recursing.
     dependencySnapshot: ReadonlyMap<BaseComponent, DependencyRead>;
+    // Whether those reads ran and settled; see `RegistrationAttempt.hasReadRegistry`.
+    hasReadRegistry: boolean;
   }): InsertComponentAtResult {
     let startupOrder: string[];
 
     try {
-      // Only from a snapshot that read every registered component. One refused before
-      // reading - an invalid position, a shutdown - or cut short by a shutdown has no
-      // list for some of them, and ordering those as though they had no dependencies
-      // reported an order that ignored them. Empty, rather than an order that is not the
-      // startup order - on the result and on `registration-rejected` alike.
-      const isSnapshotComplete = this.core.state.components.every((component) =>
-        this.core.registryReads.isReadCurrent(
-          input.dependencySnapshot,
-          component,
-        ),
-      );
+      // Only once the registration read every registered component. One refused before
+      // reading - an invalid position, a shutdown, a removed timeout hook - or cut short
+      // by a shutdown has no list for some of them, and ordering those as though they had
+      // no dependencies reported an order that ignored them. Empty, rather than an order
+      // that is not the startup order - on the result and on `registration-rejected`
+      // alike. A component its hooks registered before a rollback has the list its own
+      // commit validated, as the committed report reads it (`recordCommittedReport()`).
+      const reportReads = new Map<BaseComponent, DependencyRead>();
+      let hasCompleteReportReads = input.hasReadRegistry;
+      for (const component of this.core.state.components) {
+        const read = hasCompleteReportReads
+          ? this.core.registry.currentReadOf(
+              component,
+              input.dependencySnapshot,
+            )
+          : undefined;
+        if (read === undefined) {
+          hasCompleteReportReads = false;
+          break;
+        }
+        reportReads.set(component, read);
+      }
 
-      startupOrder = isSnapshotComplete
+      startupOrder = hasCompleteReportReads
         ? this.core.startupOrdering.getStartupOrderInternal(
             undefined,
             undefined,
-            input.dependencySnapshot,
+            reportReads,
           )
         : [];
     } catch (error) {

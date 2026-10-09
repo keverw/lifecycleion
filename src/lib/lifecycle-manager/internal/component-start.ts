@@ -962,49 +962,59 @@ export class ComponentStart {
       };
     }
 
-    // The unexpected-stop record from the previous run is cleared once the attach checks
-    // are past: that flag describes a stop that already happened, and a start that
-    // reads it later would take an old failure for a new one.
-    this.core.state.componentUnexpectedStopHadError.delete(name);
-    const shutdownTokenAtStart = shutdownTokenBeforeAttach;
-    this.core.logger.entity(name).info('Starting component');
+    // A throw from here on is the start net's to answer: it puts the claimed state back
+    // and runs any detach deferred meanwhile. The detach this attach calls for is one -
+    // deferred behind the claim - so the handlers it attached do not outlive the attempt.
+    try {
+      // The unexpected-stop record from the previous run is cleared once the attach checks
+      // are past: that flag describes a stop that already happened, and a start that
+      // reads it later would take an old failure for a new one.
+      this.core.state.componentUnexpectedStopHadError.delete(name);
+      const shutdownTokenAtStart = shutdownTokenBeforeAttach;
+      this.core.logger.entity(name).info('Starting component');
 
-    // Taken before the starting log and event, not after: a listener there that calls
-    // `stopAllComponents()` starts a pass this start must notice, so the component is
-    // sent through the stop pipeline once `start()` settles rather than coming up after
-    // the shutdown.
-    this.core.lifecycleEvents.componentStarting(name);
+      // Taken before the starting log and event, not after: a listener there that calls
+      // `stopAllComponents()` starts a pass this start must notice, so the component is
+      // sent through the stop pipeline once `start()` settles rather than coming up after
+      // the shutdown.
+      this.core.lifecycleEvents.componentStarting(name);
 
-    const remainingBudget =
-      bulkStartup === undefined
-        ? undefined
-        : Math.max(1, bulkStartup.deadline - Date.now());
-    const useBulkDeadline =
-      remainingBudget !== undefined &&
-      (componentTimeout === 0 || remainingBudget <= componentTimeout);
-    const timeoutMS = useBulkDeadline ? remainingBudget : componentTimeout;
-    const startAttemptToken = ulid();
-    this.core.state.componentStartAttemptTokens.set(name, startAttemptToken);
-    const settlement = this.core.startSettlements.recordStartAttempt(
-      name,
-      claim,
-      component,
-      startAttemptToken,
-    );
+      const remainingBudget =
+        bulkStartup === undefined
+          ? undefined
+          : Math.max(1, bulkStartup.deadline - Date.now());
+      const useBulkDeadline =
+        remainingBudget !== undefined &&
+        (componentTimeout === 0 || remainingBudget <= componentTimeout);
+      const timeoutMS = useBulkDeadline ? remainingBudget : componentTimeout;
+      const startAttemptToken = ulid();
+      this.core.state.componentStartAttemptTokens.set(name, startAttemptToken);
+      const settlement = this.core.startSettlements.recordStartAttempt(
+        name,
+        claim,
+        component,
+        startAttemptToken,
+      );
 
-    return new StartRun(
-      name,
-      claim,
-      preparation,
-      bulkStartup,
-      stateBeforeStart === 'stalled',
-      didAutoAttachSignalsForComponentStartup,
-      shutdownTokenAtStart,
-      timeoutMS,
-      useBulkDeadline,
-      startAttemptToken,
-      settlement,
-    );
+      return new StartRun(
+        name,
+        claim,
+        preparation,
+        bulkStartup,
+        stateBeforeStart === 'stalled',
+        didAutoAttachSignalsForComponentStartup,
+        shutdownTokenAtStart,
+        timeoutMS,
+        useBulkDeadline,
+        startAttemptToken,
+        settlement,
+      );
+    } catch (error) {
+      if (didAutoAttachSignalsForComponentStartup) {
+        this.core.signals.detachSignalsIfIdle('crashed component startup');
+      }
+      throw error;
+    }
   }
 
   /**
@@ -1753,6 +1763,16 @@ export class ComponentStart {
         try {
           this.core.dispatcher.withTransition(() => {
             this.markStartRunning(name, run.preparation.flags.forceStalled);
+            // Announced as started, as `markStartedUnderShutdown()` does, so the stop
+            // the start net runs follows a `started` rather than a bare `starting`.
+            this.core.lifecycleEvents.componentStarted(
+              name,
+              readComponentStatus(
+                this.core,
+                name,
+                'lifecycle-manager component start',
+              ),
+            );
           });
         } catch {
           // The start net contains the bookkeeping failure as well.

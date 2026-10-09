@@ -3383,6 +3383,76 @@ describe('FileSink - entries written during close', () => {
   });
 
   test.each([false, true])(
+    "an open that fails under a queued entry is that entry's setup failure (onError=%p)",
+    async (hasHandler) => {
+      // The `'error'` event for an unopenable path lands while `setupLogFile` awaits
+      // `stat`, so `writeEntry` found no stream and raised a failed *write*, while the
+      // event reported its own `'setup'` on every attempt - one console line per attempt
+      // per entry with no handler. Held in `stat` so the event lands there every run.
+      const currentDate = new Date().toISOString().slice(0, 10);
+      await fsPromises.mkdir(`${tmpDir.path}/eisdir-entry-${currentDate}.log`, {
+        recursive: true,
+      });
+      const statSpy = spyOn(fsPromises, 'stat').mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+
+        throw new Error('stat held open long enough for the open to fail');
+      });
+      const failures: SinkFailure[] = [];
+      const captured = muteConsoleError();
+
+      try {
+        const sink = new FileSink({
+          logDir: tmpDir.path,
+          basename: 'eisdir-entry',
+          maxRetries: 1,
+          ...(hasHandler
+            ? {
+                onError: (failure: SinkFailure) => {
+                  failures.push(failure);
+                },
+              }
+            : {}),
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 200));
+        // Initialization's own report, about no entry.
+        failures.length = 0;
+        captured.length = 0;
+
+        sink.write(makeEntry('never opens'));
+        await sink.flush(2000);
+
+        if (hasHandler) {
+          expect(
+            failures.map((failure) => [failure.kind, failure.disposition]),
+          ).toEqual([
+            ['setup', 'retrying'],
+            ['setup', 'lost'],
+          ]);
+          expect(
+            failures.every(
+              (failure) => failure.entry?.message === 'never opens',
+            ),
+          ).toBe(true);
+        } else {
+          expect(captured).toHaveLength(1);
+        }
+
+        const health = sink.getHealth();
+        expect(health.droppedByKind.setup).toBe(1);
+        expect(health.droppedByKind.write).toBe(0);
+        expect(health.consecutiveFailures).toBe(0);
+
+        await sink.close();
+      } finally {
+        restoreConsoleError();
+        statSpy.mockRestore();
+      }
+    },
+  );
+
+  test.each([false, true])(
     'reports a failed line lost when retry room is consumed (callback=%p)',
     async (shouldFillFromCallback) => {
       const failures: SinkFailure[] = [];
@@ -4144,9 +4214,14 @@ test('exhausted setup attempts are counted under setup, matching their failure r
   });
   try {
     await sink.flush();
-    const internals = sink as unknown as { writeEntry: () => Promise<void> };
-    internals.writeEntry = () =>
-      Promise.reject(new Error('Failed to setup log file'));
+    // A log directory that cannot be created: a regular file stands where it would go.
+    const internals = sink as unknown as {
+      destroyStream: () => void;
+      logDir: string;
+    };
+    await fsPromises.writeFile(`${directory.path}/not-a-directory`, '');
+    internals.destroyStream();
+    internals.logDir = `${directory.path}/not-a-directory/logs`;
     sink.write({
       timestamp: Date.now(),
       type: 'info',
@@ -4159,6 +4234,36 @@ test('exhausted setup attempts are counted under setup, matching their failure r
     expect(failures[0]?.disposition).toBe('lost');
     expect(sink.getHealth().droppedByKind.setup).toBe(1);
     expect(sink.getHealth().droppedByKind.write).toBe(0);
+  } finally {
+    await sink.close();
+    await directory.cleanup();
+  }
+});
+
+test('bytes a rotation abandons are reported as a write loss, not a close', async () => {
+  // Nothing is closing during a rotation, so `'close'` routed it to owners as a close
+  // failure of a sink that was still running.
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const failures: SinkFailure[] = [];
+  const sink = new FileSink({
+    logDir: directory.path,
+    basename: 'rotation-loss',
+    onError: (failure) => {
+      failures.push(failure);
+    },
+  });
+  try {
+    await sink.flush();
+    (
+      sink as unknown as {
+        reportRotationFlushLoss(bytes: number, target: string): void;
+      }
+    ).reportRotationFlushLoss(42, directory.path);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.kind).toBe('write');
+    expect(failures[0]?.disposition).toBe('no_entry');
+    expect(failures[0]?.error.message).toContain('Rotation abandoned 42 bytes');
   } finally {
     await sink.close();
     await directory.cleanup();

@@ -1094,7 +1094,8 @@ describe('LifecycleManager - review regressions', () => {
     expect(hasReport(reports, 'component start')).toBe(true);
     expect(stops).toBe(1);
     expect(manager.getComponentStatus('a')?.state).toBe('stopped');
-    expect(events).toEqual(['stopped']);
+    // It was marked running before the net stopped it, so observers see both ends.
+    expect(events).toEqual(['started', 'stopped']);
   });
 
   test('a start() promise whose constructor throws only when observed fails the start', async () => {

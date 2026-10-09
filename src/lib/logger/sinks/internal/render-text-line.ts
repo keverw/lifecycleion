@@ -13,7 +13,8 @@ export function renderTextLine(message: string): string {
 
 /**
  * The text-mode line both queueing sinks write, without its trailing newline:
- * `[type] [service] [entity] message`, with no prefix for a `raw` entry.
+ * `[type] [service] [entity] message`, with no prefix for a `raw` entry. The service and
+ * entity names are caller-supplied too, so they get the same line-break boundary.
  */
 export function renderTextEntry(entry: LogEntry): string {
   let text = '';
@@ -22,11 +23,11 @@ export function renderTextEntry(entry: LogEntry): string {
     text = `[${entry.type}] `;
 
     if (entry.serviceName) {
-      text += `[${entry.serviceName}] `;
+      text += `[${renderTextLine(entry.serviceName)}] `;
     }
 
     if (entry.entityName) {
-      text += `[${entry.entityName}] `;
+      text += `[${renderTextLine(entry.entityName)}] `;
     }
   }
 

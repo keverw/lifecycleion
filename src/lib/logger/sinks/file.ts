@@ -150,9 +150,9 @@ export interface FileSinkOptions {
    * other's archive. Give each process its own `basename`.
    */
   basename: string;
-  maxSizeMB?: number;
+  maxSizeMB?: number | null;
   jsonFormat?: boolean;
-  maxRetries?: number;
+  maxRetries?: number | null;
   /**
    * Close budget in ms (default: 30000). Null or undefined uses the default.
    * NaN/other non-numbers throw TypeError; negatives throw RangeError.
@@ -178,7 +178,7 @@ export interface FileSinkOptions {
    *
    * Shared with `NamedPipeSink`, which reads the same option the same way.
    */
-  maxQueueSize?: number;
+  maxQueueSize?: number | null;
   /**
    * Notified when this sink cannot do its job, in the shape every sink reports.
    * Explicit handlers take precedence. With no handler, failures go to owning
@@ -238,12 +238,16 @@ export interface FlushResult {
 }
 
 /**
- * Error handler class for FileSink
+ * Error handler class for FileSink.
+ *
+ * `kind` is set where a failure is raised for `processQueue` to classify, and read by
+ * `failureKindFor`; an error without one is a failed write.
  */
 class FileSinkError extends Error {
   constructor(
     message: string,
     public cause?: Error,
+    public readonly kind?: SinkFailureKind,
   ) {
     super(message);
     this.name = 'FileSinkError';
@@ -337,6 +341,16 @@ export class FileSink implements LogSink {
    * remembering one cannot keep it alive.
    */
   private readonly suppressedWriteErrors = new WeakSet<object>();
+
+  /**
+   * An open that failed while {@link inFlightEntry} was waiting on it, left by the stream's
+   * `'error'` handler for `writeEntry` to raise as that entry's `'setup'` failure.
+   *
+   * Reporting it from the handler too would print a console line for every attempt at
+   * every entry, outside the rule `processQueue` keeps for the console: only the attempt
+   * that loses the line.
+   */
+  private pendingOpenFailure?: FileSinkError;
 
   private closing = false;
   private closePromise?: Promise<void>;
@@ -677,9 +691,9 @@ export class FileSink implements LogSink {
    * silent-loss shape the close-path report was added to close, reached through the door
    * this sink goes through far more often.
    *
-   * `kind: 'close'`, because a rotation's loss happens while ending a stream and that is
-   * what the close channel names; `disposition: 'no_entry'`, because the bytes are a
-   * stream buffer rather than any one entry this sink could hand back.
+   * `kind: 'write'`, because written lines are what is at risk and nothing is closing;
+   * `disposition: 'no_entry'`, because the bytes are a stream buffer rather than any one
+   * entry this sink could hand back.
    */
   private reportRotationFlushLoss(bytesLeft: number, target: string): void {
     if (bytesLeft <= 0) {
@@ -687,7 +701,7 @@ export class FileSink implements LogSink {
     }
 
     this.handleError(
-      'close',
+      'write',
       new FileSinkError(
         `Rotation abandoned ${String(bytesLeft)} bytes still buffered for ${target} (closeTimeoutMS=${String(this.closeTimeoutMS)}); whether they reached the file is unknown`,
       ),
@@ -875,14 +889,14 @@ export class FileSink implements LogSink {
       // too.
       // `setupLogFile` already raises a `FileSinkError` that names the file, so wrapping
       // one produced `Failed to setup log file: Failed to setup log file: ...`. Only what
-      // arrives as something else - `mkdir`'s raw `ENOTDIR`, `EACCES` - is given the
-      // sentence `failureKindFor` recognizes.
+      // arrives as something else - `mkdir`'s raw `ENOTDIR`, `EACCES` - is wrapped.
       const failure =
         error instanceof FileSinkError
           ? error
           : new FileSinkError(
               `Failed to setup log file: ${describeError(error)}`,
               toError(error),
+              'setup',
             );
 
       // Setup belongs to no particular line, and the queue still holds every entry: a
@@ -1207,36 +1221,18 @@ export class FileSink implements LogSink {
   }
 
   /**
-   * Which kind of failure a thrown `FileSinkError` describes.
+   * Which kind of failure a thrown error describes: the `kind` its throw site set, or
+   * `'write'` for anything raised without one.
    *
-   * The discriminator this sink never had. Every failure arrived as an `Error` whose
-   * message was the only way to tell a failed rotation from a failed write, so a consumer
-   * that wanted to treat them differently had to match on text.
+   * An entry `close()` finished under is raised as `'close'`, not `'write'`: the
+   * destination was fine and the sink was shut down out from under a pass still in flight
+   * (see the second `closed` check in `writeEntry`), and `NamedPipeSink` counts the
+   * identical event as `'close'`.
    */
   private failureKindFor(error: Error): SinkFailureKind {
-    const message = describeError(error);
-
-    if (message.startsWith('Failed to format log entry')) {
-      return 'format';
-    }
-
-    if (
-      message.startsWith('Failed to setup log file') ||
-      message.startsWith('Error rotating log file')
-    ) {
-      return 'setup';
-    }
-
-    // An entry `close()` finished under is not a write that failed: the destination was
-    // fine and the sink was shut down out from under a pass still in flight (see the
-    // second `closed` check in `writeEntry`). Reported and counted as `'write'`, it made a
-    // timed-out shutdown look like a broken disk in `droppedByKind`, and disagreed with
-    // `NamedPipeSink`, which counts the identical event as `'close'`.
-    if (message.startsWith('Cannot write to closed sink')) {
-      return 'close';
-    }
-
-    return 'write';
+    return error instanceof FileSinkError && error.kind !== undefined
+      ? error.kind
+      : 'write';
   }
 
   /**
@@ -1248,11 +1244,19 @@ export class FileSink implements LogSink {
     // entry with no line must not reach the stream, and is never re-rendered. Raised as an
     // ordinary failure so `onError`, `lastError` and the counters still see it.
     if (queued.formatError !== undefined) {
-      throw new FileSinkError('Failed to format log entry', queued.formatError);
+      throw new FileSinkError(
+        'Failed to format log entry',
+        queued.formatError,
+        'format',
+      );
     }
 
     if (this.closed) {
-      throw new FileSinkError('Cannot write to closed sink');
+      throw new FileSinkError(
+        'Cannot write to closed sink',
+        undefined,
+        'close',
+      );
     }
 
     if (!this.logFileStream) {
@@ -1261,11 +1265,20 @@ export class FileSink implements LogSink {
 
     // Setup may return without a stream when close finishes while it is suspended.
     if (this.closed) {
-      throw new FileSinkError('Cannot write to closed sink');
+      throw new FileSinkError(
+        'Cannot write to closed sink',
+        undefined,
+        'close',
+      );
     }
 
+    // Setup that returns without a stream failed to open one: the `'error'` handler left
+    // the reason for this entry when it had one.
     if (!this.logFileStream) {
-      throw new FileSinkError('No log file stream available');
+      throw (
+        this.takeOpenFailure() ??
+        new FileSinkError('No log file stream available', undefined, 'setup')
+      );
     }
 
     // Check rotation before writing (handles date change and size limit)
@@ -1279,7 +1292,11 @@ export class FileSink implements LogSink {
     // counted and reported like any other line this sink did not deliver, rather than
     // landing in a file nobody is expecting to grow any more.
     if (this.closed) {
-      throw new FileSinkError('Cannot write to closed sink');
+      throw new FileSinkError(
+        'Cannot write to closed sink',
+        undefined,
+        'close',
+      );
     }
 
     // Always the line rendered in `write`. A render that threw has already been raised
@@ -1310,7 +1327,11 @@ export class FileSink implements LogSink {
     // rotation that notices the close returns without changing the stream, so do not let
     // this older write continue into a sink that has already reported itself closed.
     if (this.closed) {
-      throw new FileSinkError('Cannot write to closed sink');
+      throw new FileSinkError(
+        'Cannot write to closed sink',
+        undefined,
+        'close',
+      );
     }
 
     // Write to file
@@ -1325,7 +1346,10 @@ export class FileSink implements LogSink {
       // never written. Failing here instead routes it through the ordinary write-failure
       // path, which retries it and, if that runs out, reports it.
       if (!this.logFileStream) {
-        return reject(new FileSinkError('No log file stream available'));
+        return reject(
+          this.takeOpenFailure() ??
+            new FileSinkError('No log file stream available'),
+        );
       }
 
       const writingTo = this.logFileStream;
@@ -1340,13 +1364,13 @@ export class FileSink implements LogSink {
           // A stream that never opened failed its open, not this write: `EISDIR` or
           // `EACCES` from `createWriteStream` reaches a buffered write's callback before
           // the `'error'` event, and the teardown below sends that event down its
-          // not-current branch, so this is the only place left to classify it. Raised in
-          // the sentence `failureKindFor` reads as `'setup'`, so the line is reported and
-          // counted as a destination that could not be opened, and is not charged to
-          // `consecutiveFailures` as a failed write. Read before the teardown, which can
-          // release the descriptor of a stream that did open. `pending` alone cannot
-          // tell: a stream that opened and was then destroyed has no descriptor either,
-          // and a write reaching it fails with `ERR_STREAM_DESTROYED` - a write failure.
+          // not-current branch, so this is the only place left to classify it. Raised as
+          // `'setup'`, so the line is reported and counted as a destination that could not
+          // be opened, and is not charged to `consecutiveFailures` as a failed write.
+          // Read before the teardown, which can release the descriptor of a stream that
+          // did open. `pending` alone cannot tell: a stream that opened and was then
+          // destroyed has no descriptor either, and a write reaching it fails with
+          // `ERR_STREAM_DESTROYED` - a write failure.
           const didNeverOpen =
             writingTo.pending &&
             (err as NodeJS.ErrnoException).code !== 'ERR_STREAM_DESTROYED';
@@ -1378,6 +1402,7 @@ export class FileSink implements LogSink {
               ? new FileSinkError(
                   `Failed to setup log file: ${writingToFile}`,
                   err,
+                  'setup',
                 )
               : new FileSinkError('Error writing to log file', err),
           );
@@ -1464,6 +1489,7 @@ export class FileSink implements LogSink {
         return;
       }
 
+      this.pendingOpenFailure = undefined;
       const stream = fs.createWriteStream(currentLogFile, { flags: 'a' });
 
       this.logFileStream = stream;
@@ -1532,6 +1558,7 @@ export class FileSink implements LogSink {
             ? `Failed to setup log file: ${currentLogFile}`
             : 'Log file stream failed',
           toError(streamError),
+          kind,
         );
 
         // Only a failure of a stream that had a descriptor says anything about this
@@ -1547,6 +1574,14 @@ export class FileSink implements LogSink {
           // The next `writeEntry` calls `setupLogFile` again and sets it back when the
           // open really does succeed.
           this.isInitialized = false;
+
+          // An entry is waiting on this open, and `writeEntry` raises the failure as that
+          // entry's: see `pendingOpenFailure`.
+          if (this.inFlightEntry !== undefined) {
+            this.pendingOpenFailure = failure;
+
+            return;
+          }
         }
 
         // No `entry`: the stream failed on its own, not while carrying a line this sink
@@ -1619,8 +1654,17 @@ export class FileSink implements LogSink {
       throw new FileSinkError(
         `Failed to setup log file: ${currentLogFile}`,
         toError(error),
+        'setup',
       );
     }
+  }
+
+  /** The open failure left for the entry in flight, if any, consumed by reading it. */
+  private takeOpenFailure(): FileSinkError | undefined {
+    const failure = this.pendingOpenFailure;
+    this.pendingOpenFailure = undefined;
+
+    return failure;
   }
 
   /**

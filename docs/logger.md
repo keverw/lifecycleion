@@ -968,7 +968,7 @@ console.log(logger.getSinks().length); // 0
 
 ### Service Loggers
 
-Service and entity names are trimmed, and each run of control characters in them (line breaks included) becomes one space, before they reach any sink. The text sinks frame the two as `[service] [entity]` with nothing escaped, so a name carrying a newline could otherwise end the line and start a forged entry.
+Service and entity names are trimmed, and each run of control characters in them (line breaks included) becomes one space, before they reach any sink. The text sinks frame the two as `[service] [entity]`, so a name carrying a newline could otherwise end the line and start a forged entry.
 
 ```typescript
 const logger = new Logger({
@@ -1418,7 +1418,7 @@ Two things to know about `failure.entry`. It is the full `LogEntry`, so it carri
 
 A close-time `'lost'` or `'no_entry'` still reaches an explicit `onError` callback. Without one, an attached sink uses its owner's diagnostic channel; a closing logger offers the report to diagnostic listeners and uses console when none are present, without writing to closing sinks. A standalone sink reports to console. A `logger.error(...)` inside an explicit handler during `Logger.close()` is dropped (a closed logger's `handleLog` writes nothing) and does not fall through to console, because the handler succeeded. The example uses `console.error` for that reason.
 
-In text mode (`jsonFormat: false`), CR, LF, and the Unicode line/paragraph separators in the message are collapsed to spaces so one entry remains one physical line. JSON mode escapes them instead, preserving the characters in the parsed message while still keeping one entry per line.
+In text mode (`jsonFormat: false`), CR, LF, and the Unicode line/paragraph separators in the message, service name, and entity name are collapsed to spaces so one entry remains one physical line, including for an entry passed to the sink's `write()` directly. JSON mode escapes them instead, preserving the characters in the parsed message while still keeping one entry per line.
 
 #### Health Monitoring
 

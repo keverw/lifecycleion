@@ -7,6 +7,7 @@ import {
   resolveManagerConfig,
 } from './internal/manager-config';
 import { ManagerCore } from './internal/manager-core';
+import { readComponentStatus } from './internal/read-status';
 import type { ComponentAccessContext } from './internal/component-access-context';
 import {
   checkComponentHealthOperation,
@@ -367,13 +368,25 @@ export class LifecycleManager
   }
 
   /**
-   * Get statuses for all components
+   * Get statuses for all components, each read through `getComponentStatus()` so a
+   * subclass override or an instance patch is the one that runs, as for the statuses
+   * on results and events. An entry the override throws for or answers `undefined`
+   * for is left out; a throw is reported on the global `'error'` channel.
    */
   public getAllComponentStatuses(): ComponentStatus[] {
-    // One walk: each entry is already in hand, so it is not looked up by name again.
-    return this.state.components.map((component) =>
-      this.core.registry.statusOf(this.core.registry.nameOf(component)),
-    );
+    const statuses: ComponentStatus[] = [];
+    // The array in hand: an override that changes the registry replaces it, not this.
+    for (const component of this.state.components) {
+      const status = readComponentStatus(
+        this.core,
+        this.core.registry.nameOf(component),
+        'lifecycle-manager getAllComponentStatuses',
+      );
+      if (status !== undefined) {
+        statuses.push(status);
+      }
+    }
+    return statuses;
   }
 
   /**
@@ -694,7 +707,8 @@ export class LifecycleManager
   /**
    * Attach signal handlers for graceful shutdown, reload, info, and debug.
    * Creates ProcessSignalManager instance if needed and attaches it.
-   * Idempotent - calling multiple times has no effect.
+   * Attaching again while attached adds no second set of handlers, but every call
+   * cancels a pending automatic detach (`detachSignalsOnStop`).
    */
   public attachSignals(): void {
     this.core.signals.attach();

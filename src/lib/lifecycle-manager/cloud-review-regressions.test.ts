@@ -380,7 +380,9 @@ test('a bulk deadline callback cannot abort the replacement start it triggers', 
     expect((await replacement)?.success).toBe(true);
     expect(signals).toHaveLength(2);
     expect(signals[1].aborted).toBe(false);
-    expect(manager.getComponentStatus('x')?.state).toBe('running');
+    // The replacement is up when the startup sees its stop, so the timed-out
+    // startup's rollback stops it, as reconciliation does.
+    expect(manager.getComponentStatus('x')?.state).toBe('stopped');
   } finally {
     gate.resolve();
     await manager.stopAllComponents();

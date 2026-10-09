@@ -7,8 +7,10 @@ import {
 } from '../constants';
 import type {
   ComponentLifecycleRef,
+  ComponentOperationFailureCode,
   ComponentOperationResult,
   UnregisterComponentResult,
+  UnregisterFailureCode,
   UnregisterOptions,
 } from '../types';
 import type { ManagerCore } from './manager-core';
@@ -124,6 +126,14 @@ export class UnregistrationOperations {
 
     // If running and stopIfRunning explicitly set to false, reject
     if (isRunning && !attempt.options.stopIfRunning) {
+      // `isComponentRunning()` is overridable, so its answer may describe a
+      // replacement it registered rather than this call's component.
+      const replacedWhileChecking = this.refuseIfReplaced(attempt);
+
+      if (replacedWhileChecking !== undefined) {
+        return replacedWhileChecking;
+      }
+
       this.core.logger
         .entity(name)
         .warn(
@@ -323,14 +333,16 @@ export class UnregistrationOperations {
           },
         });
 
-      // A stop refused for its own configuration never ran: the unregister's own
-      // `invalid_options`, not a failed stop.
-      if (stopResult.code === 'invalid_options') {
+      // A stop refused before it ran `stop()` is answered with the unregister's own
+      // code for that refusal, not as a failed stop.
+      const refusalCode = unregisterCodeForRefusedStop(stopResult.code);
+
+      if (refusalCode !== undefined) {
         return {
           success: false,
           componentName: name,
           reason: stopResult.reason ?? 'Failed to stop component',
-          code: 'invalid_options',
+          code: refusalCode,
           error: stopResult.error,
           wasStopped: false,
           wasRegistered: true,
@@ -347,7 +359,9 @@ export class UnregistrationOperations {
             ? 'timeout'
             : stopResult.code === 'operation_crashed'
               ? 'operation_crashed'
-              : 'error',
+              : stopResult.code === 'component_stalled'
+                ? 'stalled'
+                : 'error',
         error: stopResult.error,
         wasStopped: false,
         wasRegistered: true,
@@ -509,15 +523,16 @@ export class UnregistrationOperations {
     name: string,
     wasStopped: boolean,
   ): UnregisterComponentResult | null {
-    const component = this.core.registry.getComponent(name);
     const hasUnfinishedStart = (): boolean => {
       for (const settlement of this.core.state.startSettlementsByName.get(
         name,
       ) ?? []) {
         if (
-          settlement.component === component &&
-          this.core.state.componentStartAttemptTokens.get(name) ===
-            settlement.token &&
+          this.core.startSettlements.isCurrentStartAttempt(
+            name,
+            settlement.component,
+            settlement.token,
+          ) &&
           ((settlement.didFailRawStartObservation === true &&
             isStartUnfinished(settlement)) ||
             (!settlement.rawStartPending &&
@@ -585,6 +600,32 @@ export class UnregistrationOperations {
       wasStopped,
       wasRegistered,
     };
+  }
+}
+
+/**
+ * The unregister code for a stop refused before it ran `stop()`, or `undefined` for one
+ * that ran and failed, answered `stop_failed`: an invalid option, running dependents
+ * without `forceStop` (the component is left running), a start or stop that owns the
+ * component, or a bulk operation that owns the registry.
+ */
+function unregisterCodeForRefusedStop(
+  code: ComponentOperationFailureCode | undefined,
+): UnregisterFailureCode | undefined {
+  switch (code) {
+    case 'invalid_options':
+      return 'invalid_options';
+    case 'has_running_dependents':
+      return 'component_running';
+    case 'component_already_starting':
+      return 'component_starting';
+    case 'component_already_stopping':
+      return 'component_stopping';
+    case 'startup_in_progress':
+    case 'shutdown_in_progress':
+      return 'bulk_operation_in_progress';
+    default:
+      return undefined;
   }
 }
 

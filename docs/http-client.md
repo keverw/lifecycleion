@@ -1142,7 +1142,7 @@ const authClient = client.createSubClient({
 - `'replace'` (default): the sub-client's `defaultHeaders` replace the parent's entirely.
 - `'merge'`: the sub-client's `defaultHeaders` are layered on top of the parent's.
 
-Any `HTTPClientConfig` field can be overridden. An omitted or explicitly `undefined` field inherits the parent value. `null` follows the individual option: a null `timeout` inherits, while `cookieJar: null` disables cookies for that sub-client even if the parent has one.
+Any `HTTPClientConfig` field can be overridden. An omitted or explicitly `undefined` field inherits the parent value. Of the options typed to accept `null`, a null `timeout` inherits, while `cookieJar: null` disables cookies for that sub-client even if the parent has one. A `null` given to an option whose type excludes it also inherits for `adapter`, `defaultHeaders` and `followRedirects`; for every other option it reaches the new client as given and is handled as `new HTTPClient()` handles it, so `retryPolicy: null` disables the parent's retries, a null boolean option reads as `false`, a null `userAgent` as unset, and a null `maxRedirects` throws.
 
 Sub-clients inherit the parent's interceptors and observers. The parent chain runs first, then the sub-client's own. This means shared concerns like auth headers or global logging happen before sub-client-specific logic. Adding interceptors or observers to a sub-client does not affect the parent.
 

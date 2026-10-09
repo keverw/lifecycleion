@@ -31,7 +31,6 @@ import {
   resolveOperationTimeoutMS,
 } from './operation-policy';
 import { runShutdownWarningPhase } from './shutdown-warning';
-import { readComponentStatus } from './read-status';
 
 /** A shutdown request refused because a pass is already running. */
 export interface ShutdownPassRefusal {
@@ -905,19 +904,11 @@ export class ShutdownPassRunner {
           return false;
         };
         // Returns true when the pass must stop here: its deadline passed, or a failure
-        // halted it under `haltOnStall`.
+        // halted it under `haltOnStall`. A deadline is logged once, when it fires: the
+        // loop can reach it after the pass has answered, and is silent then.
         const runStopLoop = async (
           names: readonly string[],
         ): Promise<boolean> => {
-          const haltForTimeout = (): true => {
-            this.core.logger.warn(
-              'Shutdown timeout reached, stopping further component shutdown',
-              {
-                params: { timeoutMS: effectiveTimeout },
-              },
-            );
-            return true;
-          };
           // When the loop last yielded below. Not reset by an awaited stop or join: one
           // can settle on microtasks alone, or after synchronous caller code, without a
           // timer ever running, so only this yield is known to have let them run.
@@ -935,7 +926,7 @@ export class ShutdownPassRunner {
             // would wait on starts for a pass that is over - with
             // `waitForAbandonedStarts`, on a raw `start()` that may never settle.
             if (hasTimedOut) {
-              return haltForTimeout();
+              return true;
             }
             // A stall this pass is retrying, with a forced start of it in flight: joined
             // here, and retried below once that start has settled without bringing it up.
@@ -961,7 +952,7 @@ export class ShutdownPassRunner {
               continue;
             }
             if (hasTimedOut) {
-              return haltForTimeout();
+              return true;
             }
 
             // A stop owned by another caller may have stalled while this pass awaited
@@ -1044,6 +1035,12 @@ export class ShutdownPassRunner {
 
             if (result.success) {
               stoppedComponents.add(name);
+            } else if (this.core.componentStop.didRetryAttemptNothing(result)) {
+              // A stalled retry with no force handler attempted nothing, so nothing
+              // failed anew: the stall stands as recorded and is reported with the
+              // pass. Halting here would leave every later component untried on every
+              // pass for as long as it stays stalled.
+              continue;
             } else if (
               result.code === 'component_already_stopping' ||
               result.code === 'component_already_starting'
@@ -1525,21 +1522,16 @@ export class ShutdownPassRunner {
    * crash the pass. Reported, and left out.
    */
   private stalledWithoutRetryResult(name: string): ComponentOperationResult {
-    const result: ComponentOperationResult = {
-      success: false,
-      componentName: name,
-      reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
-      code: 'component_stalled',
-    };
-    const status = readComponentStatus(
-      this.core,
+    return this.core.stopOutcomes.withStopStatus(
       name,
+      {
+        success: false,
+        componentName: name,
+        reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
+        code: 'component_stalled',
+      },
       'lifecycle-manager shutdown pass',
     );
-    if (status !== undefined) {
-      result.status = status;
-    }
-    return result;
   }
 
   /**

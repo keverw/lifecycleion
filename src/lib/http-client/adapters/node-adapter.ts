@@ -1289,8 +1289,11 @@ export class NodeAdapter implements HTTPAdapter {
             if (request.signal) {
               const signal = request.signal;
 
+              // Already cancelled: the request's own abort listener has settled it, so
+              // the factory is not asked to open a sink nothing will write to.
               if (signal.aborted) {
                 abortStream();
+                return;
               }
 
               const relayAbortToStream = (): void => {

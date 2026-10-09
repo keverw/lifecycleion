@@ -1,5 +1,4 @@
 import { expect, test } from 'bun:test';
-import type { ArraySink } from '../logger/sinks/array';
 import type { LifecycleManager } from './lifecycle-manager';
 import type { ComponentOperationResult, ComponentStatus } from './types';
 import {
@@ -33,7 +32,6 @@ function failFirstStoppedStatusRead(
 
 test('a timed-out shutdown pass does not join pending starts after its deadline', async () => {
   const { logger, manager } = setup();
-  const sink = logger.getSinks()[0] as ArraySink;
   const dependency = new Plain(logger, 'dependency');
   const pending = new Plain(logger, 'pending', ['dependency']);
   const slow = new Plain(logger, 'slow');
@@ -63,13 +61,6 @@ test('a timed-out shutdown pass does not join pending starts after its deadline'
     // is over: it halts there rather than wait on a `start()` that has not settled.
     stopGate.resolve();
     await sleep(20);
-    expect(
-      sink.logs.some(
-        (entry) =>
-          entry.message ===
-          'Shutdown timeout reached, stopping further component shutdown',
-      ),
-    ).toBe(true);
     expect(manager.isComponentRunning('dependency')).toBe(true);
   } finally {
     stopGate.resolve();

@@ -78,6 +78,42 @@ test.each(['bigint', 'circular', 'toJSON'] as const)(
   },
 );
 
+test('an attempt signal that cannot be composed leaves no attempt timer behind', async () => {
+  const anyDescriptor = Object.getOwnPropertyDescriptor(AbortSignal, 'any');
+  Object.defineProperty(AbortSignal, 'any', {
+    value: () => {
+      throw new Error('composition failed');
+    },
+    configurable: true,
+  });
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
+  };
+  const timeoutMS = 12_345;
+  const timer = spyOn(globalThis, 'setTimeout');
+  try {
+    const request = new HTTPClient({ adapter })
+      .get('https://example.com/')
+      .timeout(timeoutMS);
+    await request.send();
+    expect(request.error?.code).toBe('request_setup_error');
+    expect(timer.mock.calls.some((call) => call[1] === timeoutMS)).toBe(false);
+  } finally {
+    for (const result of timer.mock.results) {
+      if (result.type === 'return') {
+        clearTimeout(result.value);
+      }
+    }
+    timer.mockRestore();
+    if (anyDescriptor) {
+      Object.defineProperty(AbortSignal, 'any', anyDescriptor);
+    } else {
+      Reflect.deleteProperty(AbortSignal, 'any');
+    }
+  }
+});
+
 test.each([Number.NaN, '5000'])(
   'invalid timeout %s is rejected before the builder sends',
   async (timeout) => {

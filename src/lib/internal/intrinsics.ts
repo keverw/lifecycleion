@@ -56,6 +56,24 @@ function containDerivedRejection(derived: unknown): void {
     return;
   }
 
+  // A plain native promise under unmodified built-ins builds a plain `Promise` from its
+  // own `then`, so it needs no shadowing. A value that only looks plain - a Proxy, say -
+  // throws from the native `then` and takes the general path below.
+  try {
+    if (
+      Object.getPrototypeOf(derived) === Promise.prototype &&
+      !Object.hasOwn(derived, 'constructor') &&
+      Promise.prototype.constructor === Promise &&
+      Promise[Symbol.species] === Promise
+    ) {
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      void Reflect.apply(Promise.prototype.then, derived, [noop, noop]);
+      return;
+    }
+  } catch {
+    // Not a native promise, or a trap threw; the general path decides.
+  }
+
   let previous: PropertyDescriptor | undefined;
   let didShadow = false;
   try {

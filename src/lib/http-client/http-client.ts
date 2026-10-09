@@ -1774,13 +1774,6 @@ export class BaseHTTPClient {
       let isTimedOut = false;
       let timeoutID: ReturnType<typeof setTimeout> | undefined;
 
-      if (timeout > 0) {
-        timeoutID = setTimeout(() => {
-          isTimedOut = true;
-          timeoutController.abort();
-        }, timeout);
-      }
-
       // The settle deadline's teardown. Giving up on this attempt's upload at that
       // deadline fails the request as a timeout, and a timeout that left the upload
       // running was only half of one: the per-attempt timer is cleared once `send()`
@@ -1807,6 +1800,15 @@ export class BaseHTTPClient {
       // an uncaught exception rather than anything this client can catch. Always a
       // fresh signal (see `_composeSignals`), so nothing has listened on it yet.
       guardAbortListeners(attemptSignal, 'HTTPClient attempt abort listener');
+
+      // Armed once the attempt's signal is built and guarded, so a throw from either
+      // leaves no timer behind.
+      if (timeout > 0) {
+        timeoutID = setTimeout(() => {
+          isTimedOut = true;
+          timeoutController.abort();
+        }, timeout);
+      }
 
       // End an attempt that never reached the adapter - a retry interceptor that
       // cancelled or threw, or request setup that failed. Its timer and start event
