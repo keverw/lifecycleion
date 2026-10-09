@@ -3,10 +3,7 @@ import {
   LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT,
   LIFECYCLE_MANAGER_MESSAGE_GRACEFUL_SHUTDOWN_TIMED_OUT,
 } from '../constants';
-import type {
-  ComponentOperationResult,
-  ComponentStallInfo,
-} from '../types';
+import type { ComponentOperationResult, ComponentStallInfo } from '../types';
 import type { ManagerCore } from './manager-core';
 import type { StopAttempt } from './manager-state';
 import { crashedComponentResult } from './operation-policy';
@@ -366,7 +363,7 @@ export class StopOutcomes {
    * have changed state; the reason says when the graceful phase had
    * already timed out, and `status` carries the stall the crash left. Read guarded: the
    * crash may have come from reading state, and this runs where nothing above is left to
-   * catch, so a status that cannot be read is left out.
+   * catch, so a status that cannot be read is reported and left out.
    */
   public crashedStopResult(
     name: string,
@@ -385,13 +382,13 @@ export class StopOutcomes {
       'operation_crashed',
     );
 
-    try {
-      const status = this.core.manager.getComponentStatus(name);
-      if (status !== undefined) {
-        result.status = status;
-      }
-    } catch {
-      // Left out, as `crashedComponentResult()` leaves it out everywhere else.
+    const status = readComponentStatus(
+      this.core,
+      name,
+      'lifecycle-manager component stop',
+    );
+    if (status !== undefined) {
+      result.status = status;
     }
 
     return result;
