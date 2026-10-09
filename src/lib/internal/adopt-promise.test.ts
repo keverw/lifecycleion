@@ -700,8 +700,8 @@ for (const entry of ['adoptPromise', 'adoptResult'] as const) {
   });
 }
 
-// A species `RangeError` thrown with stack to spare is not the slot check running out of
-// stack, so the value is a native promise and its own `then` is not trusted.
+// Only a `TypeError` means "not a native promise", so a species `RangeError` marks the
+// value as a native promise and its own `then` is not trusted.
 for (const entry of ['adoptPromise', 'adoptResult'] as const) {
   test(`${entry} rejects a re-prototyped promise whose species throws a RangeError rather than trusting its own then`, async () => {
     const promise: object = Promise.resolve(1);
