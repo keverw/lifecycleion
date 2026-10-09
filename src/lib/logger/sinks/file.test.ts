@@ -1288,6 +1288,62 @@ describe('FileSink', () => {
     expect(failure.kind).toBe('format' satisfies SinkFailureKind);
   });
 
+  test('reports a render failure from write() instead of queueing it', async () => {
+    // Queued, an unrenderable entry took a slot from real work and was reported only when
+    // the drain reached it - so evicted at the cap first, it was counted as `'queue_full'`
+    // and the `'format'` report it was owed never fired.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'format-in-write',
+      jsonFormat: true,
+      maxQueueSize: 1,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    // Before the file is open, so nothing drains between these writes.
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'unrenderable',
+      message: UNRENDERABLE_MESSAGE,
+    });
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.kind).toBe('format' satisfies SinkFailureKind);
+    expect(failures[0]?.disposition).toBe('lost');
+    expect(failures[0]?.attempt).toBe(1);
+    expect(sink.getHealth().queueSize).toBe(0);
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'kept',
+      message: 'kept',
+    });
+
+    await sink.flush();
+    await sink.close();
+
+    expect(failures).toHaveLength(1);
+    expect(sink.getHealth().droppedByKind).toEqual({
+      queue_full: 0,
+      write: 0,
+      setup: 0,
+      format: 1,
+      close: 0,
+    });
+
+    const content = await fsPromises.readFile(
+      `${tmpDir.path}/format-in-write-${new Date().toISOString().split('T')[0]}.log`,
+      'utf8',
+    );
+
+    expect(content).toContain('kept');
+  });
+
   test('an async onError that rejects is caught, not left unhandled', async () => {
     // A handler is free to be `async` - the named-pipe docs show one - and a rejected
     // promise sails straight past the `try`/`catch` that guards a throw. Unfollowed, that

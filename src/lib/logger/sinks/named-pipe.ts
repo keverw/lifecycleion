@@ -18,10 +18,7 @@ import {
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { readUnknownMember } from '../../internal/read-member';
 import { sleep } from '../../sleep';
-import {
-  observeRejection,
-  queueMicrotaskSafely,
-} from '../../internal/intrinsics';
+import { observeRejection } from '../../internal/intrinsics';
 import {
   DEFAULT_CLOSE_TIMEOUT_MS,
   MIN_CLOSE_FLUSH_MS,
@@ -38,7 +35,12 @@ import {
   type SinkFailureDisposition,
   type SinkFailureKind,
 } from './internal/sink-failure';
-import { evictQueuedEntries } from './internal/queue-accounting';
+import {
+  abandonQueuedEntries,
+  evictQueuedEntries,
+  ReportOnceLatch,
+} from './internal/queue-accounting';
+import { deferClose } from './internal/deferred-close';
 import { FormatReportScheduler } from './internal/format-report-scheduler';
 
 export type {
@@ -238,7 +240,6 @@ const NO_READER_ERRNO = 'ENXIO';
  * queue cap bounds everything not admitted to it.
  */
 class NonBlockingPipeStream extends Writable {
-  public readonly pending = false;
   public readonly fd: number;
   private retryTimer?: NodeJS.Timeout;
   private cancelWrite?: () => void;
@@ -392,25 +393,6 @@ class NonBlockingPipeStream extends Writable {
 const MAX_REPORTED_OPEN_FAILURES = 8;
 
 /**
- * How long a legacy or externally substituted pending stream may remain before recovery.
- *
- * The production path now promotes an already-open numeric descriptor synchronously, so
- * it does not create a pending pathname open. The stale-stream guard remains defensive
- * for replaced streams and test/instrumentation substitutions that can still put the sink
- * into that state.
- */
-const STALE_OPEN_MS = 6000;
-
-/**
- * How many abandoned opens may be outstanding before no further attempt is made.
- *
- * The numeric-descriptor path does not create such opens. This cap remains paired with the
- * defensive stale-stream machinery above so a substituted pending stream cannot trigger
- * unbounded recovery attempts.
- */
-const MAX_ABANDONED_OPENS = 2;
-
-/**
  * Which failure kind an open that threw should be reported as.
  *
  * `'not_found'` is a claim about the destination - that it is not there - and only
@@ -434,32 +416,14 @@ export class NamedPipeSink implements LogSink {
   private formatter?: (entry: LogEntry) => string;
   private pipeStream?: fs.WriteStream;
   /**
-   * A stream being validated and promoted. The numeric-descriptor path normally occupies
-   * this state only synchronously; keeping it explicit prevents concurrent reconnects and
-   * supports defensive cleanup if stream construction is substituted or interrupted.
-   */
-  private pendingStream?: fs.WriteStream;
-  /**
-   * When {@link pendingStream} was created, so {@link STALE_OPEN_MS} can be measured.
-   */
-  private pendingStreamSince?: number;
-  /**
-   * Opens abandoned as stale and still unaccounted for. See {@link MAX_ABANDONED_OPENS}.
-   */
-  private abandonedOpens = 0;
-  /**
-   * Whether {@link MAX_ABANDONED_OPENS} has already been reported, so it is said once.
-   */
-  private reportedAbandonedOpenCap = false;
-  /**
    * The open failures reported during this outage, so one outage is not reported every
    * second.
    *
    * Every failed open now schedules another attempt - see `scheduleReopen` - which is what
    * makes recovery independent of traffic, and which without this would make a mistyped
    * `pipePath` call the caller's `onError` once a second for the life of the process. The
-   * reporting the sink already does elsewhere works exactly this way: `didReportDrop` for
-   * the queue cap, {@link reportedAbandonedOpenCap} for the open cap.
+   * reporting the sink already does elsewhere works exactly this way: `queueFullReport` for
+   * the queue cap.
    *
    * A set rather than a boolean, so a *different* failure still gets through: a path that
    * goes from missing to present-but-unreadable is a new fact, and a consumer watching this
@@ -485,9 +449,8 @@ export class NamedPipeSink implements LogSink {
   /**
    * Whether {@link MAX_REPORTED_OPEN_FAILURES} has been reported, so it is said once.
    *
-   * Said at all, rather than the sink simply going quiet at the cap, for the reason
-   * {@link reportedAbandonedOpenCap} exists: a sink that has stopped telling you things has
-   * to tell you that.
+   * Said at all, rather than the sink simply going quiet at the cap: a sink that has
+   * stopped telling you things has to tell you that.
    */
   private reportedOpenFailureCap = false;
   /**
@@ -506,9 +469,8 @@ export class NamedPipeSink implements LogSink {
   private minLevel: LogLevel;
   private droppedEntries = 0;
   private readonly droppedByKind = createDroppedEntryCounts();
-  private didReportDrop = false;
-  /** {@link didReportDrop} for drops reported for a diagnostic entry. */
-  private didReportDiagnosticDrop = false;
+  /** Whether the current overflow episode's `'queue_full'` report has gone out. */
+  private readonly queueFullReport = new ReportOnceLatch();
   /** Whether the one post-close loss report has gone out. See {@link requeue}. */
   private didReportPostCloseLoss = false;
   /** Streams whose buffered-byte loss close() has already reported. */
@@ -577,11 +539,9 @@ export class NamedPipeSink implements LogSink {
    * covers all of them from the synchronous instant the attempt starts rather than from
    * across the asynchronous path and descriptor probe before a stream is installed.
    *
-   * That gap was the whole bug. `ensureConnection` refused a second attempt on
-   * `_isReconnecting` and `pendingStream`, but the constructor's `initializePipe()` set
-   * neither until *after* its first await. A `write()` in the same tick as construction
-   * therefore started a duplicate stat/probe sequence and could orphan whichever
-   * descriptor lost the promotion race.
+   * Without it, a `write()` in the same tick as construction would start a duplicate
+   * stat/probe sequence beside the constructor's and could orphan whichever descriptor
+   * lost the promotion race.
    */
   private isOpening = false;
 
@@ -599,13 +559,7 @@ export class NamedPipeSink implements LogSink {
    *
    * See {@link write}. Every such entry is counted; only the first is reported.
    */
-  private reportedCloseRefusal = false;
-  /**
-   * The same for a refused diagnostic entry, whose report goes only to the console:
-   * spending {@link reportedCloseRefusal} on it would leave the application entries
-   * refused after it unreported.
-   */
-  private reportedDiagnosticCloseRefusal = false;
+  private readonly closeRefusalReport = new ReportOnceLatch();
 
   private initPromise: Promise<void>;
   private closing = false;
@@ -672,18 +626,7 @@ export class NamedPipeSink implements LogSink {
 
       // Once, for the reason the abandoned queue reports once: an application still
       // logging through a thirty-second close would otherwise get a callback per line.
-      const isDiagnosticRefusal = isDiagnosticEntry(entry);
-      if (
-        isDiagnosticRefusal
-          ? !this.reportedDiagnosticCloseRefusal
-          : !this.reportedCloseRefusal
-      ) {
-        if (isDiagnosticRefusal) {
-          this.reportedDiagnosticCloseRefusal = true;
-        } else {
-          this.reportedCloseRefusal = true;
-        }
-
+      if (this.closeRefusalReport.claim(entry)) {
         this.handleError(
           'close',
           new Error(
@@ -805,11 +748,9 @@ export class NamedPipeSink implements LogSink {
 
   public async reconnect(): Promise<ReconnectStatus> {
     // The guard every other entry point carries - `write`, `ensureConnection`,
-    // `scheduleReopen`, `writeEntry` - and the only public one that was missing it. A
-    // `reconnect()` after `close()` re-opened the FIFO, and on the sink's ordinary failure
-    // that open never completes: `close()` had already run its `pendingStream` cleanup, so
-    // the fresh descriptor and the libuv threadpool slot behind it were held for the life
-    // of the process, for a sink nothing can write to again.
+    // `scheduleReopen`, `writeEntry`. A closed sink is not one to reopen: a descriptor
+    // opened now would be held for the life of the process by a sink nothing can write
+    // to again.
     if (this.closed || this.closing) {
       return { success: false, reason: 'closed' };
     }
@@ -870,11 +811,9 @@ export class NamedPipeSink implements LogSink {
       // the flush is gated on `destroyed`. A `WriteStream` sets `destroyed` synchronously
       // on a failed write while `pipeStream` is cleared only from the asynchronous
       // `'error'` handler, so a `reconnect()` entered in that window - the ordinary shape,
-      // an `onError` handler reconnecting - left the dead stream installed, opened a
-      // replacement, and the dead stream's deferred `'error'` then read itself as current
-      // off `pipeStream` and cleared `pendingStream` out from under the live open. The
-      // replacement was destroyed by its own `'open'` handler as an orphan and the caller
-      // was told the reconnect failed, with the FIFO left with no writer at all.
+      // an `onError` handler reconnecting - would otherwise leave the dead stream
+      // installed, and its deferred `'error'` would read itself as current and tear down
+      // the replacement.
       if (this.pipeStream) {
         if (!this.pipeStream.destroyed) {
           this.abandonStream(this.pipeStream);
@@ -885,46 +824,8 @@ export class NamedPipeSink implements LogSink {
 
       // Whatever the old stream was waiting to drain is no longer anyone's business.
       this.isAwaitingDrain = false;
-      // The writer is gone even if the cap below prevents opening a replacement.
+      // The writer is gone, whatever the attempt below finds.
       this.isInitialized = false;
-
-      // Nothing new is opened past the cap: a `reconnect()` on a "reader is ready" signal
-      // that fires while the kernel still holds the cap's worth of blocked opens would
-      // otherwise add one more, and this was the one entry point that never asked. The
-      // caller is told why rather than handed a generic failure, since `ReconnectStatus`
-      // is the only place it can read the diagnosis.
-      //
-      // Counted *with* the open this call is about to abandon. Checking the counter alone
-      // first, then abandoning, let the ordinary sequence through: one abandoned open, a
-      // second still pending, `reconnect()` abandons the second - now two - and starts a
-      // third `open(2)`, which is exactly the bound the constant documents. The pending
-      // open is left in place when the cap would be reached, since abandoning it changes
-      // nothing about the kernel's count and the open may yet answer.
-      const openIfAbandoned = this.pendingStream === undefined ? 0 : 1;
-
-      if (this.isAtAbandonedOpenCapAfter(openIfAbandoned, false)) {
-        const error = new Error(
-          `Cannot reopen named pipe at ${this.pipePath}: ${String(MAX_ABANDONED_OPENS)} earlier opens are still blocked`,
-        );
-        // This explicit request reports every time; the automatic cap report
-        // stays deduplicated for the rest of the same outage.
-        this.reportedAbandonedOpenCap = true;
-        this.handleError('setup', error);
-        return {
-          success: false,
-          reason: 'error',
-          error,
-        };
-      }
-
-      // And abandon an open still in flight, which a caller asking to reconnect has
-      // implicitly given up on. Left in place it would make the attempt below a no-op.
-      if (this.pendingStream) {
-        // Through the accounting, not a bare `destroy()`: the open this gives up on is
-        // very likely blocked on a reader that never came, and one abandoned outside the
-        // count is one `MAX_ABANDONED_OPENS` cannot see. See {@link abandonPendingOpen}.
-        this.abandonPendingOpen(this.pendingStream);
-      }
 
       // The deduplication that keeps an automatic retry from calling `onError` once a
       // second is deliberately not applied to an attempt the caller asked for by name. The
@@ -969,11 +870,7 @@ export class NamedPipeSink implements LogSink {
   public close(): Promise<void> {
     this.closing = true;
     // Publish ownership before any close-time callback can re-enter close().
-    this.closePromise ??= new Promise<void>((resolve, reject) => {
-      queueMicrotaskSafely(() => {
-        void this.closeInternal().then(resolve, reject);
-      }, reject);
-    });
+    this.closePromise ??= deferClose(() => this.closeInternal());
     return this.closePromise;
   }
 
@@ -1040,14 +937,13 @@ export class NamedPipeSink implements LogSink {
     while (
       this.writeQueue.length > 0 &&
       !this.hasLiveStream() &&
-      this.pendingStream === undefined &&
       !this.isOpening &&
       Date.now() < reopenGraceUntil &&
       Date.now() - startTime < this.closeTimeoutMS
     ) {
       await this.reopenForCloseDrain(startTime, reopenGraceUntil);
 
-      if (this.hasLiveStream() || this.pendingStream !== undefined) {
+      if (this.hasLiveStream()) {
         break;
       }
 
@@ -1056,20 +952,14 @@ export class NamedPipeSink implements LogSink {
       await sleep(CLOSE_REOPEN_POLL_MS);
     }
 
-    // A substituted pending stream or an in-progress probe counts as work to wait for,
-    // exactly as an active stream does. The close deadline still bounds the wait.
-    // `reopenForCloseDrain` races its init against a deadline and can return with the
-    // open still in flight: `pendingStream` is assigned only after the `stat`, so a
-    // reopen that got as far as opening but not as far as that left `isOpening` true and
-    // `pendingStream` undefined, this test read "no stream to wait for", and `close()`
-    // fell straight to `abandonQueueOnClose()` with ~29.5s of a thirty-second budget
-    // unspent. `ensureConnection` has always tested `isOpening || pendingStream`; these
-    // now agree with it.
+    // An in-progress open counts as work to wait for, exactly as an active stream does.
+    // The close deadline still bounds the wait. `reopenForCloseDrain` races its init
+    // against a deadline and can return with the open still in flight; without
+    // `isOpening` here, `close()` would fall straight to `abandonQueueOnClose()` with most
+    // of its budget unspent. `ensureConnection` tests `isOpening` for the same reason.
     while (
       (this.writeQueue.length > 0 || this.isProcessing) &&
-      (this.pendingStream !== undefined ||
-        this.isOpening ||
-        this.hasLiveStream()) &&
+      (this.isOpening || this.hasLiveStream()) &&
       Date.now() - startTime <= this.closeTimeoutMS
     ) {
       // Asked for explicitly: nothing else drives a pass while this loop is awaiting, and
@@ -1092,16 +982,6 @@ export class NamedPipeSink implements LogSink {
       clearTimeout(this.reopenTimer);
       this.reopenTimer = undefined;
       this.reopenAtMS = undefined;
-    }
-
-    // Defensive compatibility for a legacy or substituted stream left pending. The
-    // production descriptor-backed stream is promoted synchronously and never reaches
-    // this state.
-    if (this.pendingStream) {
-      // Counted like every other abandonment, even here: a `close()` is usually terminal,
-      // but the count is what `MAX_ABANDONED_OPENS` reads and a sink can be closed while
-      // other opens from its own earlier life are still blocked.
-      this.abandonPendingOpen(this.pendingStream);
     }
 
     if (this.pipeStream && !this.pipeStream.destroyed) {
@@ -1206,28 +1086,22 @@ export class NamedPipeSink implements LogSink {
    * counted against a connection that is being torn down anyway.
    */
   private abandonQueueOnClose(): void {
-    const abandoned = this.writeQueue.length;
+    const abandoned = abandonQueuedEntries(this.writeQueue);
 
-    if (abandoned === 0) {
+    if (abandoned.count === 0) {
       return;
     }
 
-    // The oldest abandoned entry, as a sample, as `FileSink` reports it. Every entry in
-    // the queue was lost, so there is no surviving line to confuse this with.
-    const firstAbandoned = (
-      this.writeQueue.find((queued) => !isDiagnosticEntry(queued.entry)) ??
-      this.writeQueue[0]
-    )?.entry;
-
-    this.writeQueue = [];
-    this.countDropped('close', abandoned);
+    this.countDropped('close', abandoned.count);
 
     this.handleError(
       'close',
       new Error(
-        `Closed with ${String(abandoned)} entr${abandoned === 1 ? 'y' : 'ies'} still queued for ${this.pipePath}; they were not written`,
+        `Closed with ${String(abandoned.count)} entr${abandoned.count === 1 ? 'y' : 'ies'} still queued for ${this.pipePath}; they were not written`,
       ),
-      { disposition: 'lost', entry: firstAbandoned },
+      // The oldest abandoned entry, as a sample, as `FileSink` reports it. Every entry in
+      // the queue was lost, so there is no surviving line to confuse this with.
+      { disposition: 'lost', entry: abandoned.entry },
     );
   }
 
@@ -1309,13 +1183,6 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
-    // The same bound every other open honours. A close that reaches this with the cap's
-    // worth of opens still blocked has nothing to gain from a third: the drain loop below
-    // waits on the stream that would land, and none is going to.
-    if (this.isAtAbandonedOpenCap()) {
-      return;
-    }
-
     const attempt = this.initializePipe();
 
     // Held so a failure after the race is not an unhandled rejection, the way `close()`
@@ -1340,10 +1207,14 @@ export class NamedPipeSink implements LogSink {
     const shouldSuppressFailureReport =
       (shouldSuppressRetryReport || isConsoleReportActive()) &&
       !hasOrdinaryWork;
+    // The queue's contents describe an automatic attempt's origin only. An explicit
+    // `reconnect()` (the one caller passing `shouldReportNoReader`) is the caller's own
+    // request, and its failure is owed to `onError` whatever happens to be queued.
     const isDiagnostic =
       (isDiagnosticRetry ||
         isConsoleReportActive() ||
-        (this.writeQueue.length > 0 &&
+        (!shouldReportNoReader &&
+          this.writeQueue.length > 0 &&
           this.writeQueue.every((queued) =>
             isDiagnosticEntry(queued.entry),
           ))) &&
@@ -1580,16 +1451,10 @@ export class NamedPipeSink implements LogSink {
       // Ownership moved to the stream. The `finally` block must not close the same fd.
       probe = undefined;
 
-      this.pendingStream = stream;
-      this.pendingStreamSince = Date.now();
-
       stream.on('error', (err) => {
-        const isDiagnosticFailure = stream.pending
-          ? isDiagnostic
-          : this.diagnosticFailedStreams.has(stream);
-        const shouldSuppressStreamFailure = stream.pending
-          ? shouldSuppressFailureReport
-          : this.consoleFailedStreams.has(stream);
+        const isDiagnosticFailure = this.diagnosticFailedStreams.has(stream);
+        const shouldSuppressStreamFailure =
+          this.consoleFailedStreams.has(stream);
         this.diagnosticFailedStreams.delete(stream);
         this.consoleFailedStreams.delete(stream);
         if (this.closeAbandonedStreams.has(stream)) {
@@ -1602,8 +1467,7 @@ export class NamedPipeSink implements LogSink {
         // working: left ungated, an error arriving a tick after `reconnect()` succeeded
         // marked the fresh connection uninitialized and sent every later entry to the
         // queue.
-        const isCurrent =
-          this.pendingStream === stream || this.pipeStream === stream;
+        const isCurrent = this.pipeStream === stream;
 
         // Already said, by the write callback that knew which line it was. Consumed only
         // when it matches: clearing on any error at all is what let an unrelated one -
@@ -1619,28 +1483,11 @@ export class NamedPipeSink implements LogSink {
         }
 
         if (!wasReported) {
-          if (isCurrent && stream.pending) {
-            // An open that failed, not a write: `createWriteStream` does not throw for
-            // `EACCES`, `EISDIR` or `EMFILE`, it emits here, and this sink's own probe
-            // reports the same failures as `'setup'`. Two things went wrong arriving as
-            // `'write'`. The kind is documented as the one that means an entry is at risk,
-            // and no entry is at risk from a stream that never had a descriptor; and the
-            // report bypassed `reportOpenFailure`, so a persistent post-probe failure - the
-            // `O_NONBLOCK` probe succeeding and the stream open then failing `EMFILE` under
-            // descriptor pressure - called `onError` once per retry, forever, which is the
-            // flood the dedupe and the cap exist to stop.
-            reportOpenFailure(
-              'setup',
-              `Could not open named pipe at ${this.pipePath}: ${describeError(err)}`,
-              err,
-            );
-          } else {
-            this.handleError('write', err, {
-              countsAgainstHealth: isCurrent,
-              isDiagnostic: isDiagnosticFailure,
-              shouldSuppressFailureReport: shouldSuppressStreamFailure,
-            });
-          }
+          this.handleError('write', err, {
+            countsAgainstHealth: isCurrent,
+            isDiagnostic: isDiagnosticFailure,
+            shouldSuppressFailureReport: shouldSuppressStreamFailure,
+          });
         }
         // When it was reported, nothing further is recorded here: the write callback's
         // own `handleError` already set `lastError` and counted the failure. Counting it
@@ -1651,8 +1498,6 @@ export class NamedPipeSink implements LogSink {
           return;
         }
 
-        this.pendingStream = undefined;
-        this.pendingStreamSince = undefined;
         this.pipeStream = undefined;
         // Nothing is going to drain now, so a later stream is not made to wait on a
         // `'drain'` this one will never emit.
@@ -1673,10 +1518,10 @@ export class NamedPipeSink implements LogSink {
         this.ensureConnection(isDiagnosticFailure, shouldSuppressStreamFailure);
 
         // And a backstop, because the call above is refused for the one failure it matters
-        // most for. A stream that errors during promotion can run this while `isOpening` -
-        // and, on every path but the constructor's, `_isReconnecting` - is still set, so
-        // `ensureConnection` returns having scheduled nothing at all. The timer below is
-        // the retry that survives those guards.
+        // most for. A stream that errors before its attempt finishes can run this while
+        // `isOpening` - and, on every path but the constructor's, `_isReconnecting` - is
+        // still set, so `ensureConnection` returns having scheduled nothing at all. The
+        // timer below is the retry that survives those guards.
         //
         // A timer rather than a second direct call, because a timer is the one thing those
         // flags cannot refuse: it fires after the open window has closed and they are down.
@@ -1691,118 +1536,13 @@ export class NamedPipeSink implements LogSink {
         );
       });
 
-      // Kept for externally substituted WriteStreams and older runtime behavior. The
-      // descriptor-backed production stream is promoted synchronously below and does not
-      // emit `open`.
-      stream.on('open', (fd: number) => {
-        // Descriptor-backed streams are promoted immediately below. A substituted stream
-        // may still emit `open`; it is confirmation of the connection already installed,
-        // not a stale stream to destroy.
-        if (this.pipeStream === stream) {
-          return;
-        }
-
-        // Only the stream this sink is still waiting on may be promoted. An open that
-        // completes after `reconnect()` abandoned it belongs to nothing, and installing it
-        // would replace a live connection with one nobody is holding.
-        //
-        // `closed`, not `closing`. A FIFO's write side does not open until a reader arrives,
-        // so on the ordinary `new NamedPipeSink(...)`, one `write()`, `await close()`
-        // sequence this `'open'` fires while `close()` is still awaiting `initPromise` -
-        // during `closing`, by construction. Turning the stream away there left
-        // `pipeStream` undefined, which is exactly the condition the drain loop below
-        // refuses to wait on, so `close()` went straight to `abandonQueueOnClose()` and
-        // reported every queued line lost with a reader attached and consuming. Promoted
-        // instead, so the drain loop has the stream it needs; `close()` ends it afterwards.
-        if (this.closed || this.pendingStream !== stream) {
-          // Cleared when it is this sink's own pending stream being turned away, not only
-          // when it belongs to nobody. Left set, it named a stream that had just been
-          // destroyed, so `ensureConnection` went on seeing an open in flight and refused
-          // every later attempt - and `close()`'s own cleanup had already run.
-          if (this.pendingStream === stream) {
-            this.pendingStream = undefined;
-            this.pendingStreamSince = undefined;
-          }
-
-          try {
-            stream.destroy();
-          } catch {
-            // Nothing further to try for a stream nothing is using.
-          }
-
-          return;
-        }
-
-        // Asked of the descriptor this stream actually holds, not of the path. `fstat` on
-        // an open descriptor cannot be raced by replacing the path: what it describes is
-        // what the writes go to. Synchronous because it is one syscall on an fd already
-        // open, and an await here would reopen the promotion race this handler closes.
-        // Refused on the terms the path check refuses on: reported once per outage under
-        // the same kind, and retried, so a FIFO put back is picked up.
-        let isFIFO = false;
-
-        try {
-          isFIFO = fs.fstatSync(fd).isFIFO();
-        } catch {
-          // Treated as not a pipe: a descriptor that cannot be described is not one to
-          // trust with the log.
-        }
-
-        if (!isFIFO) {
-          this.pendingStream = undefined;
-          this.pendingStreamSince = undefined;
-
-          try {
-            stream.destroy();
-          } catch {
-            // Nothing further to try for a stream this sink refuses to use.
-          }
-
-          reportOpenFailure(
-            'not_a_pipe',
-            `${this.pipePath} was not a named pipe (FIFO) when opened`,
-            undefined,
-          );
-
-          scheduleReopen(REOPEN_COOLDOWN_MS);
-
-          return;
-        }
-
-        this.pendingStream = undefined;
-        this.pendingStreamSince = undefined;
-        this.pipeStream = stream;
-        this.isInitialized = true;
-
-        // A later outage is a new fact and is reported as one. See
-        // {@link reportedOpenFailures}.
-        this.reportedOpenFailures.clear();
-        this.reportedDiagnosticOpenFailures.clear();
-        this.reportedDiagnosticOpenFailureCap = false;
-        this.reportedOpenFailureCap = false;
-
-        // Process any queued writes
-        this.processQueue();
-      });
-
-      // The writable created over an already-open numeric descriptor emits no `open`
-      // event. Promote it now; the descriptor validation above is the same validation the
-      // compatibility event path needs for a substituted pathname stream.
-      if (this.closed || this.pendingStream !== stream) {
-        if (this.pendingStream === stream) {
-          this.pendingStream = undefined;
-          this.pendingStreamSince = undefined;
-        }
-
-        stream.destroy();
-
-        return;
-      }
-
-      this.pendingStream = undefined;
-      this.pendingStreamSince = undefined;
+      // The writable built over an already-open numeric descriptor emits no `open` event,
+      // and the descriptor has already passed the probe and the FIFO check above, so it is
+      // promoted now.
       this.pipeStream = stream;
       this.isInitialized = true;
+      // A later outage is a new fact and is reported as one. See
+      // {@link reportedOpenFailures}.
       this.reportedOpenFailures.clear();
       this.reportedDiagnosticOpenFailures.clear();
       this.reportedDiagnosticOpenFailureCap = false;
@@ -1959,14 +1699,13 @@ export class NamedPipeSink implements LogSink {
     try {
       this.drainQueue();
     } finally {
-      // A drained queue closes the reported episode. `didReportDrop` gates the report so
+      // A drained queue closes the reported episode. `queueFullReport` gates the report so
       // an overflowing queue does not fire a callback per dropped line, but nothing else
       // cleared it: a sink that overflowed during one brief outage, recovered, and
       // overflowed again hours later stayed silent the second time. Reset only on an
       // empty queue, so a pass that stopped short of draining does not re-arm the flood.
       if (this.writeQueue.length === 0) {
-        this.didReportDrop = false;
-        this.didReportDiagnosticDrop = false;
+        this.queueFullReport.reset();
       }
 
       this.isProcessing = false;
@@ -2171,13 +1910,6 @@ export class NamedPipeSink implements LogSink {
    * permission fixed during a quiet minute would otherwise be picked up whenever traffic
    * happened to resume, or never.
    *
-   * One standing exception, and it is deliberate: an open still in flight. Past
-   * {@link MAX_ABANDONED_OPENS}, `ensureConnection` returns at its cap guard and nothing
-   * here re-arms, because the sink has said out loud that it has stopped trying rather
-   * than starve the process of I/O threads. Recovery there waits on one of those opens
-   * returning - and when one does, `abandonPendingOpen`'s `'close'` handler arms this
-   * again, so leaving the cap no more depends on traffic than any other failure does.
-   *
    * Throttled rather than unthrottled, by two things at once: this holds a single timer, and
    * `ensureConnection` applies {@link REOPEN_COOLDOWN_MS} again when it fires. So a pipe
    * that is gone for good costs one `stat` and at most one non-blocking `open` per second,
@@ -2226,147 +1958,6 @@ export class NamedPipeSink implements LogSink {
   }
 
   /**
-   * Let go of an open still in flight, and keep the count of them that says so.
-   *
-   * `destroy()` cannot cancel a blocked `open(2)`: the call sits in the runtime's file-I/O
-   * thread pool until a reader arrives or the process ends, holding a descriptor and a
-   * pool slot, and `'close'` only fires once it finally returns. {@link MAX_ABANDONED_OPENS}
-   * is the bound on how many of those this sink may be holding at once, so every
-   * abandonment has to go through this counter - a bare `pending.destroy()` elsewhere left
-   * the cap blind to opens it was still accumulating, and an app calling `reconnect()` on
-   * a "reader is ready" signal could strand unbounded blocked opens and starve every other
-   * filesystem operation in the process with the cap never engaging.
-   */
-  private abandonPendingOpen(pending: fs.WriteStream): void {
-    this.pendingStream = undefined;
-    this.pendingStreamSince = undefined;
-    this.abandonedOpens++;
-
-    // Decremented if the kernel ever releases it, so a pipe that recovers after a long
-    // outage is not held against the cap forever. `'close'` fires once `destroy()` has
-    // been able to run, which for a blocked open is when that open finally returns.
-    pending.once('close', () => {
-      this.abandonedOpens--;
-
-      // Armed again, because the sink is no longer at the cap: a later outage that reaches
-      // it is a new fact and has to be reported as one.
-      this.reportedAbandonedOpenCap = false;
-
-      // And asked again. At the cap, `ensureConnection` returns before it can arm a
-      // timer, so the one-per-second retry chain that every other failure keeps alive
-      // dies there - and this is the only event that says the cap has been left. Without
-      // it, a quiet process whose reader came back stayed uninitialized until its next
-      // `write()`, which is the traffic dependence `scheduleReopen` exists to remove.
-      // Deferred through the timer rather than opened inline, so the attempt runs on its
-      // own turn with every guard `ensureConnection` applies - including the cooldown -
-      // and never beside an open that is already in flight.
-      if (
-        !this.closed &&
-        !this.closing &&
-        !this.isInitialized &&
-        !this._isReconnecting &&
-        !this.isOpening &&
-        this.pendingStream === undefined
-      ) {
-        this.scheduleReopen(0);
-      }
-    });
-
-    try {
-      pending.destroy();
-    } catch {
-      // Nothing further to try for a stream this sink has already let go of.
-    }
-  }
-
-  /**
-   * Give up on an open that has been in flight too long, so recovery can start again.
-   *
-   * `destroy()` does not cancel the underlying `open(2)`; it only stops this sink from
-   * waiting on a descriptor that is never going to answer. The stream's own `'open'` and
-   * `'error'` handlers already refuse to promote anything that is no longer
-   * `pendingStream`, so abandoning one here is safe whenever it does eventually settle.
-   *
-   * Bounded by {@link MAX_ABANDONED_OPENS}, and reported either way: the failure this
-   * exists for was silent, and a sink that has stopped trying has to say so.
-   */
-  private releaseStalePendingOpen(): void {
-    const pending = this.pendingStream;
-    const since = this.pendingStreamSince;
-
-    if (pending === undefined || since === undefined) {
-      return;
-    }
-
-    if (Date.now() - since < STALE_OPEN_MS) {
-      return;
-    }
-
-    if (this.isAtAbandonedOpenCap()) {
-      return;
-    }
-
-    this.abandonPendingOpen(pending);
-
-    this.handleError(
-      'write',
-      new Error(
-        `Open of named pipe at ${this.pipePath} did not complete within ${String(STALE_OPEN_MS)}ms and was abandoned; retrying`,
-      ),
-      { countsAgainstHealth: false },
-    );
-  }
-
-  /**
-   * Whether {@link MAX_ABANDONED_OPENS} opens are still blocked, saying so once if they are.
-   *
-   * Asked before every open this sink starts, not only before abandoning a stale one. The
-   * cap used to be read in `releaseStalePendingOpen` alone, which only runs while a stale
-   * `pendingStream` exists - and abandoning clears `pendingStream`. So after two real
-   * abandons the next `write()` found no pending open, passed the in-flight guard, and
-   * started a third blocked `open(2)`; `reconnect()` never read the cap at all, and
-   * abandoned whatever was pending on every call. The bound the constant documents - two
-   * slots of the default four-thread pool, and no more - did not hold on the one path it
-   * exists for.
-   *
-   * Said once, not on every `write()` that arrives afterwards: this state persists for as
-   * long as the kernel holds those opens, and a sink already in trouble must not become
-   * its own flood. Re-armed by `abandonPendingOpen` when one of them returns, since the
-   * sink is then trying again and reaching the cap later is a new fact.
-   */
-  private isAtAbandonedOpenCap(): boolean {
-    return this.isAtAbandonedOpenCapAfter(0);
-  }
-
-  /**
-   * {@link isAtAbandonedOpenCap}, counting `pendingAbandons` opens the caller is about to
-   * abandon as though it already had - for `reconnect()`, which gives up the pending open
-   * before it starts its own.
-   */
-  private isAtAbandonedOpenCapAfter(
-    pendingAbandons: number,
-    shouldReport = true,
-  ): boolean {
-    if (this.abandonedOpens + pendingAbandons < MAX_ABANDONED_OPENS) {
-      return false;
-    }
-
-    if (shouldReport && !this.reportedAbandonedOpenCap) {
-      this.reportedAbandonedOpenCap = true;
-
-      this.handleError(
-        'write',
-        new Error(
-          `Gave up reopening named pipe at ${this.pipePath}: ${String(MAX_ABANDONED_OPENS)} opens are still blocked and will not be retried until one of them returns`,
-        ),
-        { countsAgainstHealth: false },
-      );
-    }
-
-    return true;
-  }
-
-  /**
    * Reopen the pipe if it is not usable, at most one attempt at a time.
    *
    * `initializePipe` flushes the queue itself once it succeeds, so recovery needs nothing
@@ -2387,29 +1978,14 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
-    // Before the in-flight guard below, because that guard is what a stuck open turns into
-    // a permanent refusal. See {@link STALE_OPEN_MS}.
-    this.releaseStalePendingOpen();
-
-    // And before starting anything: with the cap's worth of opens still blocked in the
-    // threadpool, one more is the starvation the cap exists to prevent. See
-    // {@link isAtAbandonedOpenCap}.
-    if (this.isAtAbandonedOpenCap()) {
-      return;
-    }
-
     if (
       this.isInitialized ||
       this._isReconnecting ||
-      // An open is already in flight. Starting a second would add a descriptor and a
-      // threadpool slot for an answer the first one is going to give.
-      //
-      // `isOpening` as well as `pendingStream`, because `pendingStream` is only assigned
-      // once the `stat` has come back: the constructor's open is in flight from the
-      // instant it is asked for, and a `write()` in that same tick is the ordinary case,
-      // not an edge one.
-      this.isOpening ||
-      this.pendingStream !== undefined
+      // An open is already in flight, from the instant it is asked for: the
+      // constructor's open included, since a `write()` in that same tick is the ordinary
+      // case, not an edge one. Starting a second would add a descriptor for an answer
+      // the first one is going to give.
+      this.isOpening
     ) {
       return;
     }
@@ -2485,22 +2061,12 @@ export class NamedPipeSink implements LogSink {
     // Gated on an eviction this call made, not on the cumulative count.
     // `droppedEntries` also counts entries given up on by `requeue` after their retries
     // ran out, and those are not an overflow: reading the counter here reported a
-    // `'queue_full'` the queue never had, and set `didReportDrop` - so the real overflow
-    // that followed was suppressed until the queue next drained.
+    // `'queue_full'` the queue never had and latched `queueFullReport` - so the real
+    // overflow that followed was suppressed until the queue next drained.
     // A diagnostic's report goes only to the console, so it has a latch of its own:
     // spending the owner's on it would silence the application entries dropped after it.
-    const isDiagnosticDrop = isDiagnosticEntry(dropped.entry);
-    if (
-      dropped.count === 0 ||
-      (isDiagnosticDrop ? this.didReportDiagnosticDrop : this.didReportDrop)
-    ) {
+    if (dropped.count === 0 || !this.queueFullReport.claim(dropped.entry)) {
       return;
-    }
-
-    if (isDiagnosticDrop) {
-      this.didReportDiagnosticDrop = true;
-    } else {
-      this.didReportDrop = true;
     }
 
     // `'queue_full'` and `'lost'`, as `FileSink` reports the same event. Sent as a

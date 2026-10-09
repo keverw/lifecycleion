@@ -165,41 +165,6 @@ test('each explicit readerless reconnect reports setup details without optional 
   }
 });
 
-test('reconnect refusal at the abandoned-open cap reports its setup failure', async () => {
-  const directory = new TmpDir({ unsafeCleanup: true });
-  await directory.initialize();
-  const failures: SinkFailure[] = [];
-  const sink = new NamedPipeSink({
-    pipePath: `${directory.path}/absent.pipe`,
-    onError: (failure) => {
-      failures.push(failure);
-    },
-  });
-  const state = sink as unknown as {
-    initPromise: Promise<void>;
-    abandonedOpens: number;
-  };
-  await state.initPromise;
-  failures.length = 0;
-  state.abandonedOpens = 2;
-  try {
-    const status = await sink.reconnect();
-    expect(status).toMatchObject({ success: false, reason: 'error' });
-    expect(failures).toHaveLength(1);
-    expect(failures[0]).toMatchObject({
-      kind: 'setup',
-      disposition: 'no_entry',
-    });
-    if (!status.success && status.reason === 'error') {
-      expect(failures[0].error).toBe(status.error);
-    }
-  } finally {
-    state.abandonedOpens = 0;
-    await sink.close();
-    await directory.cleanup();
-  }
-});
-
 test('a NamedPipeSink initialization failure omits entry and attempt properties', async () => {
   const directory = new TmpDir({ unsafeCleanup: true });
   await directory.initialize();

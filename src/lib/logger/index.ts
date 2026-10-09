@@ -2244,9 +2244,21 @@ export class Logger extends EventEmitter {
     // not call the public self-await guard. Its exit continuation does not become a
     // dependency of the sink's return, and therefore runs once cleanup settles. An
     // overridden `close()` that throws synchronously fails cleanup as a rejection would.
-    let closing: Promise<void>;
+    // Any other return is adopted rather than chained: one that returns nothing has
+    // finished closing, and a thenable is followed without calling a `then` it owns. The
+    // logger's own cleanup promise is chained directly, so the exit finishes in the same
+    // turn `await logger.close()` resumes.
+    let closing: Promise<unknown>;
     try {
-      closing = this._closePromise ?? this.close();
+      const result: unknown = this._closePromise ?? this.close();
+      const pending =
+        this._closePromise !== undefined && result === this._closePromise
+          ? this._closePromise
+          : adoptResult(result);
+      closing =
+        pending instanceof UnreadableReturn
+          ? Promise.reject(pending)
+          : (pending ?? Promise.resolve());
     } catch (error) {
       // Preserve the original failure for the report below.
       // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors

@@ -343,3 +343,53 @@ test('a close override that throws synchronously still completes the exit', asyn
     output.mockRestore();
   }
 });
+
+test('a close override that returns a non-promise is treated as already closed', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  class SyncCloseLogger extends Logger {
+    public override close(): any {
+      void super.close();
+    }
+  }
+  const logger = new SyncCloseLogger({ sinks: [], callProcessExit: false });
+  const events = recordExitEvents(logger);
+
+  try {
+    expect(() => logger.exit(1)).not.toThrow();
+    await waitFor(() => completions(events).length > 0);
+
+    expect(completions(events)).toEqual([{ code: 1, endedProcess: false }]);
+    expect(logger.isFinishingExit).toBe(false);
+    expect(output).not.toHaveBeenCalled();
+  } finally {
+    output.mockRestore();
+  }
+});
+
+test('a close override returning a thenable whose then throws on read still completes the exit', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  const logger = new Logger({ sinks: [], callProcessExit: false });
+  const events = recordExitEvents(logger);
+  const close = spyOn(logger, 'close').mockImplementation(
+    () =>
+      ({
+        get then(): never {
+          throw new Error('then unreadable');
+        },
+      }) as unknown as Promise<void>,
+  );
+
+  try {
+    expect(() => logger.exit(3)).not.toThrow();
+    await waitFor(() => completions(events).length > 0);
+
+    expect(completions(events)).toEqual([{ code: 3, endedProcess: false }]);
+    expect(logger.isFinishingExit).toBe(false);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      "Logger cleanup failed before exit: Returned value's then could not be read: then unreadable",
+    ]);
+  } finally {
+    close.mockRestore();
+    output.mockRestore();
+  }
+});

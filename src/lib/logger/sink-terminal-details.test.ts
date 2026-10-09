@@ -49,7 +49,9 @@ for (const doesDiagnosticFail of [false, true]) {
       if (doesDiagnosticFail) {
         expect(text).toContain('secondary destination failed');
         expect(diagnostics).toHaveLength(1);
-        expect(diagnostics[0].message).not.toContain('ENOSPC');
+        // The routed message carries the I/O detail too: other sinks persist it.
+        expect(diagnostics[0].message).toContain('ENOSPC: volume is full');
+        expect(diagnostics[0].message).toContain(directory.path);
         expect(Object.hasOwn(diagnostics[0], 'terminalLine')).toBe(false);
       }
     } finally {

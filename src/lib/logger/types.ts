@@ -149,9 +149,12 @@ export interface LoggerDiagnostic {
    * Guardedly rendered text suitable for the fallback `LogEntry`.
    *
    * Safe to persist. With no `diagnosticSinks` configured this string is written to the
-   * ordinary log sinks, so it names *what* failed and *where* but never interpolates the
-   * thrown value: a `redaction` failure's cause is derived from the secret being masked,
-   * and a message carrying it would route around the masking on the line above it.
+   * ordinary log sinks, so it names *what* failed and *where* but never interpolates a
+   * thrown value derived from logged content: a `redaction` failure's cause is derived
+   * from the secret being masked, and a message carrying it would route around the
+   * masking on the line above it. A sink's I/O failure - a `FileSink` or `NamedPipeSink`
+   * with no `onError` - does carry its error text (path, errno), its target, and what
+   * became of the line; a `'format'` failure's does not.
    *
    * Read {@link LoggerDiagnostic.error} for the cause. It is handed to every
    * `'diagnostic'` listener and every sink implementing `writeDiagnostic`, which is where

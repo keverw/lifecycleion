@@ -857,6 +857,11 @@ logger emits a `'diagnostic'` event and offers the report to the other configure
 diagnostic sinks, or the other regular sinks when no diagnostic sinks are configured.
 The failed sink is excluded. For example, a FileSink whose disk is full can report
 through a ConsoleSink or a remote sink without retrying that diagnostic in the same file.
+A FileSink or NamedPipeSink report's `message` names the sink, the failure kind, the target path and what became of
+the line (`retrying`, `lost`, attempt number), followed by the I/O error's text, for
+example `FileSink setup failed for /var/log/app (retrying): Failed to setup log file: ...`.
+A `'format'` failure's message omits the error text, which may come from entry content;
+read `diagnostic.error` for it.
 
 An explicit `onError` or `onFormatError` remains the sink's chosen destination and takes
 precedence over automatic owner routing. Standalone sinks keep their console fallback.
@@ -1357,7 +1362,8 @@ console.log(debugSink.getMinLevel()); // LogLevel.WARN
 FileSink automatically retries failed writes up to `maxRetries` times (default: 3). The `onError` callback is invoked for each failure:
 
 > **One failure is never retried.** An entry whose line could not be rendered at all is
-> reported once and dropped. The line is rendered when `write()` is called, so that the
+> reported once, from `write()`, and dropped without being queued, as `NamedPipeSink`
+> does. The line is rendered when `write()` is called, so that the
 > params cannot change underneath it, and re-rendering later is exactly what that
 > prevents - so a second attempt could not come out differently. `onError` receives a
 > `FileSinkError` with the message `Failed to format log entry` and the underlying error

@@ -1,6 +1,7 @@
 import type { LogEntry, LogSink } from '../../types';
 import { reportThroughHandler } from '../../../internal/failure-reporter';
 import { reportToConsole } from '../../../internal/report-to-console';
+import { describeError } from '../../../to-error';
 import { reportSinkFailure } from '../../internal/sink-failure-routing';
 
 /**
@@ -183,7 +184,7 @@ export function reportSinkError(
                 kind: 'sink',
                 error: failure.error,
                 context: failure.kind === 'close' ? 'close' : 'write',
-                message: `${options.label} ${failure.kind} failed`,
+                message: describeRoutedFailure(options.label, failure),
                 terminalLine: line,
               })
             ) {
@@ -194,4 +195,25 @@ export function reportSinkError(
     line,
     { handlerName: `${options.label} onError`, onSettled: options.onSettled },
   );
+}
+
+/**
+ * The routed diagnostic's `message`, which the owning logger's other sinks persist.
+ *
+ * Names the target and what became of the line, and for an I/O failure the error's own
+ * text - the sink's wording around a path and errno, which is what an operator acts on.
+ * A `'format'` failure's error comes from a caller's `formatter` or a value in the entry,
+ * so its text stays on `diagnostic.error`, as `LoggerDiagnostic.message` requires.
+ */
+function describeRoutedFailure(label: string, failure: SinkFailure): string {
+  const details = [
+    failure.disposition === 'no_entry' ? undefined : failure.disposition,
+    failure.attempt === undefined
+      ? undefined
+      : `attempt ${String(failure.attempt)}`,
+  ].filter((detail) => detail !== undefined);
+  const head = `${label} ${failure.kind} failed for ${failure.target}${details.length > 0 ? ` (${details.join(', ')})` : ''}`;
+  return failure.kind === 'format'
+    ? head
+    : `${head}: ${describeError(failure.error)}`;
 }

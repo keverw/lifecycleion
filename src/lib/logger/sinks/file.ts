@@ -28,7 +28,12 @@ import {
   type SinkFailureDisposition,
   type SinkFailureKind,
 } from './internal/sink-failure';
-import { evictQueuedEntries } from './internal/queue-accounting';
+import {
+  abandonQueuedEntries,
+  evictQueuedEntries,
+  ReportOnceLatch,
+} from './internal/queue-accounting';
+import { deferClose } from './internal/deferred-close';
 import { FormatReportScheduler } from './internal/format-report-scheduler';
 
 import type { LogEntry, LogSink, LoggerDiagnostic } from '../types';
@@ -36,7 +41,6 @@ import { LogLevel, getLogLevel } from '../types';
 import { diagnosticEntry } from '../internal/diagnostic-entry';
 import { isDiagnosticEntry } from '../internal/sink-failure-routing';
 import { sleep } from '../../sleep';
-import { queueMicrotaskSafely } from '../../internal/intrinsics';
 
 export type {
   SinkErrorHandler,
@@ -289,9 +293,8 @@ export class FileSink implements LogSink {
   private flushBaselineDropped = 0;
   /** The flush in flight, if any; see {@link flush}. Never rejects. */
   private pendingFlush: Promise<void> = Promise.resolve(undefined);
-  private didReportDrop = false;
-  /** {@link didReportDrop} for drops reported for a diagnostic entry. */
-  private didReportDiagnosticDrop = false;
+  /** Whether the current overflow episode's `'queue_full'` report has gone out. */
+  private readonly queueFullReport = new ReportOnceLatch();
   private isInitialized = false;
   private hasFinishedInitialization = false;
   private initPromise?: Promise<void>;
@@ -306,13 +309,7 @@ export class FileSink implements LogSink {
    *
    * See {@link write}. Every such entry is counted; only the first is reported.
    */
-  private reportedCloseRefusal = false;
-  /**
-   * The same for a refused diagnostic entry, whose report goes only to the console:
-   * spending {@link reportedCloseRefusal} on it would leave the application entries
-   * refused after it unreported.
-   */
-  private reportedDiagnosticCloseRefusal = false;
+  private readonly closeRefusalReport = new ReportOnceLatch();
 
   /** The entry {@link processQueue} is waiting on `writeEntry` for, if any. */
   private inFlightEntry?: QueuedEntry;
@@ -426,18 +423,7 @@ export class FileSink implements LogSink {
 
       // Once, for the reason the abandoned queue reports once: an application still
       // logging through a thirty-second close would otherwise get a callback per line.
-      const isDiagnosticRefusal = isDiagnosticEntry(entry);
-      if (
-        isDiagnosticRefusal
-          ? !this.reportedDiagnosticCloseRefusal
-          : !this.reportedCloseRefusal
-      ) {
-        if (isDiagnosticRefusal) {
-          this.reportedDiagnosticCloseRefusal = true;
-        } else {
-          this.reportedCloseRefusal = true;
-        }
-
+      if (this.closeRefusalReport.claim(entry)) {
         this.handleError(
           'close',
           new FileSinkError(
@@ -455,28 +441,16 @@ export class FileSink implements LogSink {
     // the bag `entry.redactedParams` points at, since redaction no longer copies it.
     const rendered = renderOnce(() => this.formatEntry(entry));
 
-    // The recursion fuse. A line that cannot render, logged while the handler is being
-    // called, the deferred report is being delivered, or the console is reporting, is
-    // a report's own line coming back: queued, it would be reported after the guard came down and start
-    // a generation that repeats forever. Counted, and said on the console rather than to
-    // the handler - see `FormatReportScheduler`.
-    if (
-      rendered.formatError !== undefined &&
-      (this.formatReports.isFused ||
-        this.formatReports.isConsoleReportActive ||
-        shouldSuppressFailureReport)
-    ) {
-      const failure = new FileSinkError(
-        'Failed to format log entry',
+    // Reported here rather than queued, as `NamedPipeSink` reports it. A render is
+    // attempted exactly once, so waiting in the queue cannot make this line appear - and
+    // queued, it took a slot from real work, and could be evicted at `maxQueueSize` or
+    // abandoned by `close()` before the `'format'` report it was owed ever fired.
+    if (rendered.formatError !== undefined) {
+      this.reportRenderFailure(
+        entry,
         rendered.formatError,
+        shouldSuppressFailureReport,
       );
-
-      this.countDropped('format');
-      if (!shouldSuppressFailureReport) {
-        this.formatReports.reportToConsole(() =>
-          this.describeWriteFailure(failure),
-        );
-      }
 
       return;
     }
@@ -604,11 +578,7 @@ export class FileSink implements LogSink {
   public close(): Promise<void> {
     this.closing = true;
     // Publish ownership before any close-time callback can re-enter close().
-    this.closePromise ??= new Promise<void>((resolve, reject) => {
-      queueMicrotaskSafely(() => {
-        void this.closeInternal().then(resolve, reject);
-      }, reject);
-    });
+    this.closePromise ??= deferClose(() => this.closeInternal());
     return this.closePromise;
   }
 
@@ -851,28 +821,22 @@ export class FileSink implements LogSink {
    * queue would otherwise fire the callback ten thousand times.
    */
   private abandonQueueOnClose(): void {
-    const abandoned = this.writeQueue.length;
+    const abandoned = abandonQueuedEntries(this.writeQueue);
 
-    if (abandoned === 0) {
+    if (abandoned.count === 0) {
       return;
     }
 
-    const firstAbandoned = (
-      this.writeQueue.find((queued) => !isDiagnosticEntry(queued.entry)) ??
-      this.writeQueue[0]
-    )?.entry;
-
-    this.writeQueue = [];
-    this.countDropped('close', abandoned);
+    this.countDropped('close', abandoned.count);
 
     this.handleError(
       'close',
       new FileSinkError(
-        `Closed with ${String(abandoned)} entr${abandoned === 1 ? 'y' : 'ies'} still queued (closeTimeoutMS=${String(this.closeTimeoutMS)}); they were not written`,
+        `Closed with ${String(abandoned.count)} entr${abandoned.count === 1 ? 'y' : 'ies'} still queued (closeTimeoutMS=${String(this.closeTimeoutMS)}); they were not written`,
       ),
       // The oldest abandoned entry, as a sample. Every entry in the queue was lost, so
       // unlike the cap's report there is no surviving line to confuse this with.
-      { disposition: 'lost', entry: firstAbandoned },
+      { disposition: 'lost', entry: abandoned.entry },
     );
   }
 
@@ -1092,14 +1056,13 @@ export class FileSink implements LogSink {
     } finally {
       this.inFlightEntry = undefined;
 
-      // A drained queue closes the reported episode. `didReportDrop` gates the report so
+      // A drained queue closes the reported episode. `queueFullReport` gates the report so
       // an overflowing queue does not fire a callback per dropped line, but nothing else
       // cleared it: a sink that overflowed during one brief outage, recovered, and
       // overflowed again hours later stayed silent the second time. Reset only on an
       // empty queue, so a pass that stopped short of draining does not re-arm the flood.
       if (this.writeQueue.length === 0) {
-        this.didReportDrop = false;
-        this.didReportDiagnosticDrop = false;
+        this.queueFullReport.reset();
       }
 
       this.isProcessing = false;
@@ -1220,27 +1183,17 @@ export class FileSink implements LogSink {
     // `abandonQueueOnClose` gave up on, and those are not an overflow. A `close()` that
     // times out with a write still in flight left the counter non-zero, and the failing
     // write behind it re-queued its entry - so a queue holding one line under a cap of
-    // 10,000 reported a `'queue_full'`, and set `didReportDrop`, which suppresses every
-    // report until the queue next drains.
+    // 10,000 reported a `'queue_full'` and latched `queueFullReport`, which suppresses
+    // every report until the queue next drains.
     // A diagnostic's report goes only to the console, so it has a latch of its own:
     // spending the owner's on it would silence the application entries dropped after it.
-    const isDiagnosticDrop = isDiagnosticEntry(dropped.entry);
-    if (
-      dropped.count === 0 ||
-      (isDiagnosticDrop ? this.didReportDiagnosticDrop : this.didReportDrop)
-    ) {
+    if (dropped.count === 0 || !this.queueFullReport.claim(dropped.entry)) {
       return;
     }
 
     // Reported once, not once per drop: an overflowing queue drops continuously, and a
     // callback fired per entry would be its own flood on a path already in trouble. The
     // running total stays visible through `getHealth()`.
-    if (isDiagnosticDrop) {
-      this.didReportDiagnosticDrop = true;
-    } else {
-      this.didReportDrop = true;
-    }
-
     this.handleError(
       'queue_full',
       new FileSinkError(
@@ -1291,9 +1244,9 @@ export class FileSink implements LogSink {
    * If stream is broken, it will be recreated on next attempt
    */
   private async writeEntry(queued: QueuedEntry): Promise<void> {
-    // Before the stream is touched: there is no line to write, and this cannot become one
-    // by trying again. Raised as an ordinary write failure so `onError`, `lastError` and
-    // the counters treat it like any other, rather than re-rendering the entry.
+    // `write()` reports a render failure and never queues it, so this is a backstop: an
+    // entry with no line must not reach the stream, and is never re-rendered. Raised as an
+    // ordinary failure so `onError`, `lastError` and the counters still see it.
     if (queued.formatError !== undefined) {
       throw new FileSinkError('Failed to format log entry', queued.formatError);
     }
@@ -1901,6 +1854,64 @@ export class FileSink implements LogSink {
     );
 
     return candidate;
+  }
+
+  /**
+   * `entry` could not be rendered at all, so there is no line to write: counted as a
+   * `'format'` loss and reported once, from `write()`.
+   *
+   * The recursion fuse. A line that cannot render, logged while the handler is being
+   * called, the deferred report is being delivered, or the console is reporting, is a
+   * report's own line coming back: handed to the handler, it would start a generation
+   * that repeats forever. Counted, and said on the console rather than to the handler -
+   * see `FormatReportScheduler`. A forwarded console line is counted and not reported.
+   */
+  private reportRenderFailure(
+    entry: LogEntry,
+    formatError: Error,
+    shouldSuppressFailureReport: boolean,
+  ): void {
+    const failure = new FileSinkError(
+      'Failed to format log entry',
+      formatError,
+    );
+    const line = () => this.describeWriteFailure(failure);
+
+    this.countDropped('format');
+
+    if (
+      this.formatReports.isFused ||
+      this.formatReports.isConsoleReportActive ||
+      shouldSuppressFailureReport
+    ) {
+      if (!shouldSuppressFailureReport) {
+        this.formatReports.reportToConsole(line);
+      }
+
+      return;
+    }
+
+    this.lastError = failure;
+    this.formatReports.schedule((onReported) => {
+      reportSinkError(
+        this,
+        {
+          kind: 'format',
+          error: failure,
+          target: this.currentLogFile ?? this.logDir,
+          entry,
+          attempt: 1,
+          disposition: 'lost',
+        },
+        this.onError,
+        line,
+        {
+          label: 'FileSink',
+          isDiagnostic: isDiagnosticEntry(entry),
+          onSettled: onReported,
+        },
+      );
+    }, line);
   }
 
   /**
