@@ -1510,7 +1510,11 @@ Writes logs to a named pipe (FIFO) for log aggregation. Linux/macOS only.
 
 Both queueing sinks, `FileSink` and `NamedPipeSink`, answer a failed write the same way:
 
-- the entry goes back on the queue and is retried up to `maxRetries` (default 3)
+- the entry goes back on the queue and is retried up to `maxRetries` (default 3).
+  An `onError` handler hears every failed attempt (`'retrying'`, then `'lost'`); without
+  one, only the attempt that loses the line is offered to the owning logger or written to
+  the console, so a failing destination does not produce `maxRetries + 1` diagnostics per
+  line
 - the queue holds up to `maxQueueSize` entries (default 10,000). Pass `-1` to hold
   entries without a queue-size limit
 - over the cap, the **oldest** entry is dropped and counted in

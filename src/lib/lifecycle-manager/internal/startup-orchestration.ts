@@ -861,7 +861,17 @@ export class StartupOrchestration {
     didStartMeetBulkDeadline: boolean,
   ): BatchExit | undefined {
     if (run.hasShutdownBegun()) {
-      if (result.success || result.code === 'component_already_running') {
+      // Every member the branches below would count as this startup's: one that
+      // started or was already running, and one still up after an unexpected stop - a
+      // listener started it again - or after a failed signal attach whose rollback stop
+      // did not take. The snapshot drops whatever is in teardown by now.
+      if (
+        result.success ||
+        result.code === 'component_already_running' ||
+        ((result.code === 'component_unexpected_stop' ||
+          result.code === 'signal_attach_failed') &&
+          this.core.registry.isComponentUp(name))
+      ) {
         run.startedComponents.push(name);
       }
       return { kind: 'result', value: this.abortedByShutdown(run) };

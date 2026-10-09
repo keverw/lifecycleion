@@ -3,10 +3,7 @@ import { observeRejection } from '../../internal/promise-reactions';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { sleep } from '../../sleep';
 import { describeError, toError } from '../../to-error';
-import {
-  LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
-  LIFECYCLE_MANAGER_MESSAGE_UNKNOWN_ERROR,
-} from '../constants';
+import { LIFECYCLE_MANAGER_MESSAGE_UNKNOWN_ERROR } from '../constants';
 import { StartupInterruptedByShutdownError } from '../errors';
 import type {
   ComponentOperationResult,
@@ -656,10 +653,11 @@ export class ShutdownPassRunner {
       // then it may still be running on them.
       const concurrentOwners = new Set<string>();
       const concurrentlyProtectedSkips = new Set<string>();
-      // Stalls the pass found already recorded and leaves as they are - not retried
-      // (`retryStalled: false`), or retried with nothing to run. No new failure, so they
-      // do not halt it; under `haltOnStall` their dependencies stay up while they remain
-      // stalled, since the stop that stalled may still be using them.
+      // Stalls the pass finds recorded - as it begins or when the loop reaches them - and
+      // leaves as they are: not retried (`retryStalled: false`), or retried with nothing
+      // to run. No new failure, so they do not halt it; under `haltOnStall` their
+      // dependencies stay up while they remain stalled, since the stop that stalled may
+      // still be using them.
       const heldStalls = new Set<string>();
       if (shouldHaltOnStall && !shouldRetryStalled) {
         for (const name of stalledComponentNames) {
@@ -808,6 +806,12 @@ export class ShutdownPassRunner {
           ) {
             protectDependencies(name, warningExcluded);
           }
+        }
+        // A stall the pass leaves as it found it holds its dependencies for as long as it
+        // stays stalled, so they are expected to stay up too. One that clears before the
+        // loop ends releases them to be stopped without the warning.
+        for (const name of heldStalls) {
+          protectDependencies(name, warningExcluded);
         }
         // These dependencies are already known to remain available this pass.
         // Do not ask them to drain before deciding to preserve them.
@@ -1011,7 +1015,7 @@ export class ShutdownPassRunner {
             // Use internal method to bypass bulk operation checks.
             // - If running: normal stop flow
             // - If stalled and retryStalled: force-phase retry
-            // - If stalled and no retry: report component_stalled
+            // - If stalled and no retry: left as it is, held under haltOnStall
             // - If already stopped during this shutdown (for example, via
             //   reportUnexpectedStop() during the warning phase), count it as a
             //   successful stop for shutdown accounting
@@ -1036,12 +1040,21 @@ export class ShutdownPassRunner {
               continue;
             }
 
+            // Stalled since the pass began - by a stop it did not own - and not retried:
+            // left as it is, as a stall found when the pass began is. No new failure of
+            // this pass's, so it does not halt it; under haltOnStall its dependencies are
+            // held instead.
+            if (!isRunning && !shouldRetryStalled) {
+              if (shouldHaltOnStall) {
+                heldStalls.add(name);
+              }
+              continue;
+            }
+
             attemptedStopNames.add(name);
             const result: ComponentOperationResult = isRunning
               ? await this.core.componentStop.stopComponentInternal(name)
-              : shouldRetryStalled
-                ? await this.core.componentStop.retryStalledComponent(name)
-                : this.stalledWithoutRetryResult(name);
+              : await this.core.componentStop.retryStalledComponent(name);
 
             if (
               result.code === 'invalid_options' &&
@@ -1538,24 +1551,6 @@ export class ShutdownPassRunner {
           .info('Aborted pending start for shutdown');
       }
     }
-  }
-
-  /**
-   * The result for a stalled component a pass with `retryStalled: false` does not try.
-   * Its status is read guarded: an overridden `getComponentStatus()` that throws must not
-   * crash the pass. Reported, and left out.
-   */
-  private stalledWithoutRetryResult(name: string): ComponentOperationResult {
-    return this.core.stopOutcomes.withStopStatus(
-      name,
-      {
-        success: false,
-        componentName: name,
-        reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
-        code: 'component_stalled',
-      },
-      'lifecycle-manager shutdown pass',
-    );
   }
 
   /**

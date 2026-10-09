@@ -16,6 +16,7 @@ import {
   restoreConsoleError,
 } from '../../internal/console-test-utils';
 import { markDiagnosticEntry } from '../internal/sink-failure-routing';
+import { reportToConsole } from '../../internal/report-to-console';
 
 /**
  * A message the JSON envelope cannot serialize: `JSON.stringify` calls `toJSON` and it
@@ -5099,6 +5100,148 @@ test('reconnect() answers with a status when its own initialization rejects', as
   } finally {
     restoreConsoleError();
     initializePipe.mockRestore();
+    await directory.cleanup();
+  }
+});
+
+test.each([
+  ['with bytes still buffered', 10, 'lost'],
+  ['with nothing buffered', 0, 'no_entry'],
+] as const)(
+  'an end() that throws at close is reported once, %s',
+  async (_label, writableLength, disposition) => {
+    const directory = new TmpDir({ unsafeCleanup: true });
+    await directory.initialize();
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath: `${directory.path}/missing.pipe`,
+      closeTimeoutMS: 20,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+    const state = sink as unknown as {
+      initPromise: Promise<void>;
+      pipeStream: unknown;
+    };
+    const endFailure = new Error('end failed');
+    try {
+      await state.initPromise;
+      failures.length = 0;
+      const failing = {
+        destroyed: false,
+        writableLength,
+        end: () => {
+          throw endFailure;
+        },
+        destroy() {
+          this.destroyed = true;
+        },
+      };
+      state.pipeStream = failing;
+      await sink.close();
+      expect(failures).toHaveLength(1);
+      expect(failures[0]?.kind).toBe('close');
+      expect(failures[0]?.disposition).toBe(disposition);
+      if (disposition === 'lost') {
+        expect(failures[0]?.error.message).toContain('bytes still buffered');
+        expect(failures[0]?.error.cause).toBe(endFailure);
+      } else {
+        expect(failures[0]?.error).toBe(endFailure);
+      }
+    } finally {
+      await sink.close();
+      await directory.cleanup();
+    }
+  },
+);
+
+test('without onError, a failed pipe write reaches the console only once it is lost', async () => {
+  // `FileSink`'s rule: `onError` hears every attempt by contract, but the routed and
+  // console rungs hear only the one that loses the line, so a dead reader does not turn
+  // each line into `maxRetries + 1` diagnostics.
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const captured = muteConsoleError();
+  const sink = new NamedPipeSink({
+    pipePath: `${directory.path}/missing.pipe`,
+    maxRetries: 2,
+  });
+  const state = sink as unknown as {
+    initPromise: Promise<void>;
+    pipeStream: unknown;
+    isInitialized: boolean;
+  };
+  try {
+    await state.initPromise;
+    captured.length = 0;
+    state.pipeStream = {
+      destroyed: false,
+      write: () => {
+        throw new Error('write refused');
+      },
+    };
+    state.isInitialized = true;
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'doomed',
+      message: 'doomed',
+    });
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('write refused');
+    expect(sink.getHealth().consecutiveFailures).toBe(3);
+    expect(sink.getHealth().droppedByKind.write).toBe(1);
+    expect(sink.getHealth().lastError?.message).toBe('write refused');
+  } finally {
+    state.pipeStream = undefined;
+    await sink.close();
+    restoreConsoleError();
+    await directory.cleanup();
+  }
+});
+
+test('a queue_full report suppressed inside a console report leaves the episode report owed', async () => {
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const entry = (message: string): LogEntry => ({
+    timestamp: Date.now(),
+    type: 'info',
+    template: message,
+    message,
+  });
+  const failures: SinkFailure[] = [];
+  const sink = new NamedPipeSink({
+    pipePath: `${directory.path}/missing.pipe`,
+    maxQueueSize: 1,
+    onError: (failure) => {
+      failures.push(failure);
+    },
+  });
+  const state = sink as unknown as { initPromise: Promise<void> };
+  try {
+    await state.initPromise;
+    failures.length = 0;
+    sink.write(entry('queued'));
+    const consoleShim = spyOn(console, 'error').mockImplementation(() => {
+      sink.write(entry('forwarded terminal report'));
+    });
+    try {
+      reportToConsole('terminal failure');
+    } finally {
+      consoleShim.mockRestore();
+    }
+    expect(failures).toEqual([]);
+
+    sink.write(entry('application line'));
+    const overflows = failures.filter(
+      (failure) => failure.kind === 'queue_full',
+    );
+    expect(overflows).toHaveLength(1);
+    expect(overflows[0]?.entry?.message).toBe('forwarded terminal report');
+    expect(sink.getHealth().droppedByKind.queue_full).toBe(2);
+  } finally {
+    await sink.close();
     await directory.cleanup();
   }
 });

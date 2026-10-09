@@ -706,3 +706,54 @@ test.each([
     expect(observed).toEqual([{}]);
   },
 );
+
+test.each([
+  ['Headers', () => new Headers({ 'x-trace': 'abc' })],
+  ['Map', () => new Map([['x-trace', 'abc']])],
+] as const)(
+  'interceptor headers given as a %s are an interceptor_error, not an empty record',
+  async (_kind, makeHeaders) => {
+    // `Object.entries` reads neither one's entries, so accepting it would send the
+    // request with every header the interceptor set silently dropped.
+    let sends = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'mock',
+      send: () => {
+        sends++;
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    };
+    const client = new HTTPClient({ adapter });
+    client.addRequestInterceptor((request) => ({
+      ...request,
+      headers: makeHeaders() as unknown as Record<string, string>,
+    }));
+    const request = client.get('https://example.com/');
+    await request.send();
+
+    expect(request.error?.code).toBe('interceptor_error');
+    expect(sends).toBe(0);
+  },
+);
+
+test('interceptor headers with a null prototype are still accepted', async () => {
+  const sent: Array<Record<string, string | string[]>> = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: (request: AdapterRequest) => {
+      sent.push(request.headers);
+      return Promise.resolve({ status: 200, headers: {}, body: null });
+    },
+  };
+  const client = new HTTPClient({ adapter });
+  client.addRequestInterceptor((request) => {
+    const headers = Object.create(null) as Record<string, string>;
+    headers['X-Trace'] = 'abc';
+    return { ...request, headers };
+  });
+  const response = await client.get('https://example.com/').send();
+
+  expect(response.status).toBe(200);
+  expect(sent).toHaveLength(1);
+  expect(sent[0]['x-trace']).toBe('abc');
+});

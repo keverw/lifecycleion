@@ -30,6 +30,8 @@ export class LateStartRecovery {
     wasForcedFromStall: boolean,
     // The attempt's own check: whether its instance and start token still own the name.
     isSuperseded: () => boolean,
+    // Whether the registration the attempt started is still the one under the name.
+    isSameRegistration: () => boolean,
     failureKind: 'timeout' | 'observation-failed' = 'timeout',
   ): void {
     const settlement = this.core.state.startSettlements.get(claim);
@@ -47,6 +49,10 @@ export class LateStartRecovery {
     // Timeout callers pass the startup race's adopted promise; an observation failure
     // passes a manager-owned promise attached to that same raw startup instead.
     const recovery = (async (): Promise<void> => {
+      // The start token the cleanup runs under: the attempt's own, or that of a newer
+      // attempt that left the component down (`adoptableStartToken()`).
+      let cleanupToken = startAttemptToken;
+      let isCleanupSuperseded = isSuperseded;
       try {
         try {
           await startPromise;
@@ -64,14 +70,35 @@ export class LateStartRecovery {
         const didStopUnexpectedly =
           this.core.state.componentUnexpectedStopHadError.has(name);
 
+        // A retry of the same registration took the name over, and it has ended without
+        // the component up - its own `start()` failed, say. Nothing else will stop what
+        // this late start brought up, so the cleanup runs under that retry's token,
+        // leaving the state the retry left. A retry still in flight or up is left alone.
+        if (isSuperseded()) {
+          const adoptedToken = this.adoptableStartToken(
+            name,
+            isSameRegistration,
+          );
+          if (adoptedToken === undefined) {
+            return;
+          }
+          cleanupToken = adoptedToken;
+          isCleanupSuperseded = (): boolean =>
+            !isSameRegistration() ||
+            this.core.state.componentStartAttemptTokens.get(name) !==
+              adoptedToken;
+        }
+
         // A forced start still owes cleanup if the old stalled stop finished first.
         // So does any start, forced or not, that reported an unexpected stop before its
         // deadline: `start()` fulfilled anyway, and what it brought up is owned by nothing.
-        // The instance and startup token must still belong to this attempt.
+        // The instance and startup token must still belong to this attempt; a retry it
+        // adopted above has had its state checked there.
         if (
-          isSuperseded() ||
           this.core.state.runningComponents.has(name) ||
-          (timeoutState !== 'starting-timed-out' &&
+          timeoutState === undefined ||
+          (cleanupToken === startAttemptToken &&
+            timeoutState !== 'starting-timed-out' &&
             timeoutState !== 'failed' &&
             !(
               failureKind === 'observation-failed' &&
@@ -94,18 +121,20 @@ export class LateStartRecovery {
         // it running briefly so the normal stop path can clean it up.
         // Lock recovery only while cleanup is actually running. An abandoned
         // start may never settle; the attempt token protects a replacement run.
-        this.core.state.pendingBulkStartupCleanup.set(name, startAttemptToken);
+        this.core.state.pendingBulkStartupCleanup.set(name, cleanupToken);
         if (settlement) {
           // Cleanup now holds the registry latch; shutdown joins its stop rather
           // than treating it as startup that has not finished yet.
           settlement.isAwaitingLateStart = false;
         }
         // What the cleanup's stop leaves, applied by `markComponentStopped()` so its
-        // `component:stopped` carries it. Successful cleanup retires any pre-existing
-        // stall from a forced start. A deadline leaves the timeout; an observation
-        // failure or unexpected stop leaves stopped, retaining its failure.
+        // `component:stopped` carries it: the state and error the failed start left -
+        // `starting-timed-out` for a deadline, the state an observation failure or an
+        // unexpected stop put back - so its failure is retained. Successful cleanup
+        // retires any pre-existing stall from a forced start, leaving the timeout for a
+        // deadline and `stopped` for the others.
         this.core.state.lateStartCleanupOutcomes.set(name, {
-          token: startAttemptToken,
+          token: cleanupToken,
           state:
             timeoutState === 'stalled'
               ? didStopUnexpectedly || failureKind === 'observation-failed'
@@ -135,7 +164,7 @@ export class LateStartRecovery {
 
         // Retirement events and logging can replace this registration. Cleanup
         // and its final state belong only to the start that completed late.
-        if (isSuperseded()) {
+        if (isCleanupSuperseded()) {
           return;
         }
         const stopResult =
@@ -171,14 +200,13 @@ export class LateStartRecovery {
           settlement.isAwaitingLateStart = false;
         }
         if (
-          this.core.state.pendingBulkStartupCleanup.get(name) ===
-          startAttemptToken
+          this.core.state.pendingBulkStartupCleanup.get(name) === cleanupToken
         ) {
           this.core.state.pendingBulkStartupCleanup.delete(name);
         }
         if (
           this.core.state.lateStartCleanupOutcomes.get(name)?.token ===
-            startAttemptToken &&
+            cleanupToken &&
           !this.core.state.stalledComponents.has(name)
         ) {
           this.core.state.lateStartCleanupOutcomes.delete(name);
@@ -229,5 +257,45 @@ export class LateStartRecovery {
     }
 
     return false;
+  }
+
+  /**
+   * The start token of the newer attempt that superseded a late start, when that start's
+   * cleanup may run under it: the same registration, with nothing in flight on the name
+   * - no claim, no pending `start()`, no cleanup, and no late-start recovery of the newer
+   * attempt's own - and the component neither up nor stalled. `undefined` when the newer
+   * attempt or a replacement owns the name.
+   */
+  private adoptableStartToken(
+    name: string,
+    isSameRegistration: () => boolean,
+  ): string | undefined {
+    const { state } = this.core;
+    const componentState = state.componentStates.get(name);
+    const token = state.componentStartAttemptTokens.get(name);
+    if (
+      token === undefined ||
+      Array.from(state.startSettlementsByName.get(name) ?? []).some(
+        (settlement) =>
+          settlement.token === token && settlement.recovery !== undefined,
+      )
+    ) {
+      return undefined;
+    }
+    if (
+      !isSameRegistration() ||
+      state.componentClaims.has(name) ||
+      state.runningComponents.has(name) ||
+      state.stalledComponents.has(name) ||
+      state.pendingBulkStartupCleanup.has(name) ||
+      this.core.startSettlements.isRawStartPending(name) ||
+      (componentState !== 'registered' &&
+        componentState !== 'stopped' &&
+        componentState !== 'failed' &&
+        componentState !== 'starting-timed-out')
+    ) {
+      return undefined;
+    }
+    return token;
   }
 }

@@ -9,6 +9,7 @@ import type {
   ComponentSignalResult,
 } from '../types';
 import { isObjectLike } from '../../internal/is-object-like';
+import { isNullish } from '../../internal/is-nullish';
 import { toError, describeError } from '../../to-error';
 import {
   LIFECYCLE_MANAGER_MESSAGE_COMPONENT_NOT_FOUND,
@@ -19,6 +20,8 @@ import {
   toOperationTimerDelayMS,
   settledFailureCode,
   takeSettledFailureCode,
+  settleOperation,
+  crashedHealthCheckResult,
 } from './operation-policy';
 import {
   dispatchAnnouncedHook,
@@ -395,7 +398,14 @@ export async function checkAllHealthOperation(
     if (context.getComponent(name) !== component) {
       return Promise.resolve(notFoundHealthResult(name, Date.now()));
     }
-    return context.checkComponentHealth(name);
+    // Through the public, overridable `checkComponentHealth()`, guarded per entry as
+    // `getAllComponentStatuses()` guards its reads: an override that throws or rejects
+    // is reported and answers that component's entry, not the whole report.
+    return settleOperation(
+      'checkAllHealth',
+      () => context.checkComponentHealth(name),
+      (error, _reason, code) => crashedHealthCheckResult(name, error, code),
+    );
   });
 
   const results = await Promise.all(healthChecks);
@@ -406,8 +416,9 @@ export async function checkAllHealthOperation(
   const hasTimeout = results.some((r) => r.timedOut);
   // Only an entry that failed with an error carries one: a throw, an unreadable hook or
   // timeout, an invalid result. Refusals, timeouts and an unhealthy answer fail with
-  // `error: null`, and no healthy entry carries one.
-  const hasError = results.some((r) => r.error !== null);
+  // `error: null`, and no healthy entry carries one - nor does an override's entry
+  // that leaves `error` undefined.
+  const hasError = results.some((r) => !isNullish(r.error));
   // Any unhealthy entry without an error or a timeout leaves the report degraded.
   const code = hasError
     ? 'error'

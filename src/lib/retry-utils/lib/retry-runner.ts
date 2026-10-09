@@ -7,6 +7,7 @@ import { renderName } from '../../internal/render-name';
 import { isString } from '../../strings';
 import { isPlainObject } from '../../is-plain-object';
 import { isFunction } from '../../is-function';
+import { toError } from '../../to-error';
 import { RetryPolicy } from './retry-policy';
 import { clampTimerDelayMS, toTimerDelayMS } from '../../internal/timer-limits';
 import type {
@@ -686,7 +687,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         code: 'unexpected_error',
         error: new RetryUtilsErrRunnerUnexpectedError(
           methodName,
-          error as Error,
+          toError(error),
         ),
       };
     } finally {

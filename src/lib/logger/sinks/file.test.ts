@@ -4488,3 +4488,44 @@ describe('FileSink - an open failure belongs to its entry', () => {
     }
   });
 });
+
+test('a refusal suppressed inside a console report leaves the one refusal report owed', async () => {
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const makeEntry = (message: string): LogEntry => ({
+    timestamp: Date.now(),
+    type: 'info',
+    template: message,
+    message,
+  });
+  const failures: SinkFailure[] = [];
+  const sink = new FileSink({
+    logDir: directory.path,
+    basename: 'refusal-latch',
+    onError: (failure) => {
+      failures.push(failure);
+    },
+  });
+  try {
+    await sink.close();
+    const consoleShim = spyOn(console, 'error').mockImplementation(() => {
+      sink.write(makeEntry('forwarded terminal report'));
+    });
+    try {
+      reportToConsole('terminal failure');
+    } finally {
+      consoleShim.mockRestore();
+    }
+    expect(failures).toEqual([]);
+
+    sink.write(makeEntry('application line'));
+    sink.write(makeEntry('another application line'));
+    expect(failures.map((failure) => failure.entry?.message)).toEqual([
+      'application line',
+    ]);
+    expect(failures[0]?.kind).toBe('close');
+    expect(sink.getHealth().droppedByKind.close).toBe(3);
+  } finally {
+    await directory.cleanup();
+  }
+});

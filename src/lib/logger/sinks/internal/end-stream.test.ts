@@ -6,7 +6,7 @@ import { MIN_CLOSE_FLUSH_MS } from './queue-policy';
 interface FakeStream {
   destroyed: boolean;
   writableLength: number;
-  end: (callback: () => void) => void;
+  end: (callback: (error?: Error | null) => void) => void;
   destroy: () => void;
 }
 
@@ -107,6 +107,29 @@ test('an end() that throws is reported and the stream abandoned', async () => {
   expect(endErrors).toEqual([failure]);
   expect(bytesLeft).toBe(64);
   expect(events).toEqual(['abandon', 'destroy']);
+});
+
+test('a flush that fails is abandoned, not counted as flushed', async () => {
+  const events: string[] = [];
+  const stream = fakeStream((callback) => {
+    callback(new Error('EPIPE'));
+  }, events);
+  const endErrors: unknown[] = [];
+
+  const bytesLeft = await endStreamWithin(stream, 1000, {
+    shouldUnref: false,
+    onAbandon: (bytes) => {
+      events.push(`abandon ${String(bytes)}`);
+    },
+    onEndError: (error) => {
+      endErrors.push(error);
+    },
+  });
+
+  // The stream's own `'error'` event reports a failed flush, so it is not passed on here.
+  expect(endErrors).toEqual([]);
+  expect(bytesLeft).toBe(64);
+  expect(events).toEqual(['abandon 64', 'destroy']);
 });
 
 test('only a background flush lets its deadline release the process', async () => {

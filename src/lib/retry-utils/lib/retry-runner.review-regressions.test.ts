@@ -40,6 +40,28 @@ test.each(['shouldWaitForCompletion', 'shouldAbortRunning'] as const)(
   },
 );
 
+test('a non-Error thrown by a forceTry option getter is wrapped on originalError', async () => {
+  const runner = new RetryRunner(policy, (report) => {
+    report('success');
+  });
+  const options = Object.defineProperty({}, 'shouldAbortRunning', {
+    get() {
+      // eslint-disable-next-line @typescript-eslint/only-throw-error
+      throw 'unreadable option';
+    },
+  });
+  const result = await runner.forceTry(options);
+
+  expect(result).toMatchObject({
+    status: 'pre_operation_error',
+    code: 'unexpected_error',
+  });
+  const originalError = (result as { error: { originalError: unknown } }).error
+    .originalError;
+  expect(originalError).toBeInstanceOf(Error);
+  expect((originalError as Error).cause).toBe('unreadable option');
+});
+
 test.each(['typo', undefined, null, 0, {}])(
   'invalid runtime report status %j is fatal without a retry',
   async (status) => {

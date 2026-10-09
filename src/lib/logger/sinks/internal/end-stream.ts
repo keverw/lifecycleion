@@ -13,11 +13,18 @@ export interface EndStreamOptions {
    */
   shouldUnref: boolean;
   /**
-   * Told how many bytes the stream still held when the wait gave up, before `destroy()`
-   * fails their write callbacks - so the caller can mark the stream as abandoned first.
+   * Told how many bytes the stream still held when it did not flush - the wait gave up,
+   * `end()` threw, or the flush failed - before `destroy()` fails their write callbacks, so
+   * the caller can mark the stream as abandoned first.
    */
   onAbandon?: (bytesLeft: number) => void;
-  /** A throw from `end()`. The stream is then abandoned as if its flush had timed out. */
+  /**
+   * A throw from `end()`. The stream is then abandoned as if its flush had timed out, and
+   * {@link onAbandon} follows: one failure, for a caller that reports from both to say once.
+   *
+   * Not called for a flush that fails. That failure reaches `end()`'s callback and the
+   * stream's `'error'` event alike, and the event is where the stream's owner reports it.
+   */
   onEndError?: (error: unknown) => void;
 }
 
@@ -36,7 +43,7 @@ export interface EndStreamOptions {
  *
  * Destroyed either way, so a flush that is never going to happen does not hold the
  * descriptor for the life of the process. Resolves with the bytes the stream still held
- * when the wait gave up, `0` when it flushed. Never rejects.
+ * when it did not flush, `0` when it did. Never rejects.
  */
 export async function endStreamWithin(
   stream: Writable,
@@ -48,8 +55,10 @@ export async function endStreamWithin(
   try {
     didFlush = await raceDeadline(
       new Promise<boolean>((resolve) => {
-        stream.end(() => {
-          resolve(true);
+        // Node hands the callback the stream's error when the flush fails. Typed as taking
+        // nothing, but a failed final flush is not a flushed stream.
+        stream.end((error?: Error | null) => {
+          resolve(error === undefined || error === null);
         });
       }),
       Math.max(MIN_CLOSE_FLUSH_MS, timeoutMS),

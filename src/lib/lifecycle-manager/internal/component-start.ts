@@ -133,6 +133,10 @@ interface StartFailure {
 class StartRun {
   public timeoutHandle: NodeJS.Timeout | undefined;
   public startupTimeoutError: ComponentStartTimeoutError | undefined;
+  // The timeout `startupTimeoutError` reports: that of the deadline that won - this
+  // attempt's timer, or the bulk budget left at the claim for a bulk deadline found
+  // expired once `start()` resolved.
+  public startupTimeoutMS: number | undefined;
   // Why this attempt's start signal aborted. Its own record, so the settlement's
   // `interruptStart()` - which outlives a start that never settles - holds only it.
   public readonly abort: StartAbortState = {
@@ -161,6 +165,8 @@ class StartRun {
     public readonly shutdownTokenAtStart: string,
     public readonly timeoutMS: number,
     public readonly useBulkDeadline: boolean,
+    // The bulk startup's budget left at the claim, when it runs under one.
+    public readonly bulkBudgetMS: number | undefined,
     public readonly startAttemptToken: string,
     public readonly settlement: StartSettlement | undefined,
   ) {}
@@ -183,6 +189,10 @@ class StartRun {
  * `core.startSettlements`.
  */
 export class ComponentStart {
+  // The claims of attempts that have announced `component:starting`, until the start
+  // net settles them: a crash the net answers for one owes `component:start-failed`.
+  private readonly announcedStarts = new Set<symbol>();
+
   constructor(private readonly core: ManagerCore) {}
 
   /**
@@ -260,6 +270,7 @@ export class ComponentStart {
         );
       }
     } finally {
+      this.announcedStarts.delete(claim);
       try {
         this.core.claims.release(name, claim);
       } finally {
@@ -339,6 +350,8 @@ export class ComponentStart {
     // holds that claim. An attempt that crashed before claiming, while another start
     // or stop got in across an `await`, must leave that other one's work alone.
     const doesOwnComponent = this.core.claims.owns(name, claim);
+    const err = toError(error);
+    const reason = `Start failed unexpectedly: ${describeError(error)}`;
 
     // A crash after this attempt marked the component running - building its status
     // for the result, say - still fails the start, so it is stopped again: a failed
@@ -363,6 +376,13 @@ export class ComponentStart {
         this.core.state.componentClaims.get(name)?.previousState,
       );
 
+      // Still `starting`, so no failure this attempt recorded was announced: one it
+      // announced as `component:starting` ends in `component:start-failed`, as every
+      // other failed start does, not in nothing.
+      if (this.announcedStarts.has(claim)) {
+        this.core.lifecycleEvents.componentStartFailed(name, err, { reason });
+      }
+
       // The attempt's own `finally` ran while it still held `starting`, so a detach
       // it would have run is still waiting.
       this.core.signals.runDeferredSignalDetach('component startup');
@@ -370,12 +390,7 @@ export class ComponentStart {
 
     reportCallbackError('lifecycle-manager component start', error);
 
-    return crashedComponentResult(
-      name,
-      toError(error),
-      `Start failed unexpectedly: ${describeError(error)}`,
-      'operation_crashed',
-    );
+    return crashedComponentResult(name, err, reason, 'operation_crashed');
   }
 
   /**
@@ -661,7 +676,8 @@ export class ComponentStart {
       ) {
         bulkStartup.onTimeout();
         this.monitorLateStart(run, startPromise);
-        throw this.recordStartupTimeout(run);
+        // The bulk budget, not the component's own timeout, which `start()` beat.
+        throw this.recordStartupTimeout(run, run.bulkBudgetMS ?? run.timeoutMS);
       }
 
       const signalAttachFailure = this.completeStart(run);
@@ -978,6 +994,7 @@ export class ComponentStart {
       // sent through the stop pipeline once `start()` settles rather than coming up after
       // the shutdown.
       this.core.lifecycleEvents.componentStarting(name);
+      this.announcedStarts.add(claim);
 
       const remainingBudget =
         bulkStartup === undefined
@@ -1006,6 +1023,7 @@ export class ComponentStart {
         shutdownTokenAtStart,
         timeoutMS,
         useBulkDeadline,
+        remainingBudget,
         startAttemptToken,
         settlement,
       );
@@ -1299,6 +1317,7 @@ export class ComponentStart {
       claim,
       run.wasForcedFromStall,
       this.supersededCheck(run),
+      this.sameRegistrationCheck(run),
       'observation-failed',
     );
     settlement.abandon();
@@ -1389,7 +1408,7 @@ export class ComponentStart {
     return new Promise<never>((_, reject) => {
       run.timeoutHandle = setTimeout(() => {
         // Settle before notifications: user callbacks cannot swallow the deadline.
-        const timeoutError = this.recordStartupTimeout(run);
+        const timeoutError = this.recordStartupTimeout(run, run.timeoutMS);
         reject(timeoutError);
         // Recorded before any caller code below runs: a shutdown a sink starts
         // with `abortPendingStarts` must find this start already timed out, not
@@ -1439,13 +1458,18 @@ export class ComponentStart {
 
   /**
    * Both ways a deadline can win - this attempt's timer, and a bulk deadline found
-   * expired once `start()` resolved - answer with the same timeout and hand the
-   * still-unowned start to the same late cleanup.
+   * expired once `start()` resolved - answer with the same timeout error, carrying the
+   * winning deadline's `timeoutMS`, and hand the still-unowned start to the same late
+   * cleanup.
    */
-  private recordStartupTimeout(run: StartRun): ComponentStartTimeoutError {
+  private recordStartupTimeout(
+    run: StartRun,
+    timeoutMS: number,
+  ): ComponentStartTimeoutError {
+    run.startupTimeoutMS = timeoutMS;
     run.startupTimeoutError = new ComponentStartTimeoutError({
       componentName: run.name,
-      timeoutMS: run.timeoutMS,
+      timeoutMS,
     });
     return run.startupTimeoutError;
   }
@@ -1465,6 +1489,7 @@ export class ComponentStart {
       run.claim,
       run.wasForcedFromStall,
       this.supersededCheck(run),
+      this.sameRegistrationCheck(run),
     );
   }
 
@@ -1494,6 +1519,20 @@ export class ComponentStart {
         component,
         startAttemptToken,
       );
+  }
+
+  /**
+   * Whether the registration the run started is still the one under its name: the same
+   * instance, not unregistered and registered again since. For late-start recovery,
+   * which may clean up under a newer attempt of that registration.
+   */
+  private sameRegistrationCheck(run: StartRun): () => boolean {
+    const { name } = run;
+    const { component, dependencyGeneration } = run.preparation;
+    return () =>
+      this.core.registry.getComponent(name) === component &&
+      this.core.registryReads.currentGeneration(component) ===
+        dependencyGeneration;
   }
 
   /**
@@ -1947,7 +1986,7 @@ export class ComponentStart {
           });
 
         this.core.lifecycleEvents.componentStartTimeout(name, err, {
-          timeoutMS: run.timeoutMS,
+          timeoutMS: run.startupTimeoutMS ?? run.timeoutMS,
           reason,
         });
       } else {
@@ -1956,11 +1995,21 @@ export class ComponentStart {
         // `registered` - never started - beside the `startedAt` / `stoppedAt` of the
         // run it had. That state is read from this attempt's claim, which it holds unless
         // something released it; `registered` then, with nothing recorded to restore.
+        // A timeout is not kept over this failure: `starting-timed-out` describes the
+        // attempt this one retried, so it goes back to `stopped` for a component that
+        // has stopped before, and to `registered` for one that never has.
+        const previousState = this.core.claims.owns(name, claim)
+          ? this.core.state.componentClaims.get(name)?.previousState
+          : 'registered';
         this.restoreStateAfterFailedStart(
           name,
-          this.core.claims.owns(name, claim)
-            ? this.core.state.componentClaims.get(name)?.previousState
-            : 'registered',
+          previousState === 'starting-timed-out'
+            ? isNullish(
+                this.core.state.componentTimestamps.get(name)?.stoppedAt,
+              )
+              ? 'registered'
+              : 'stopped'
+            : previousState,
         );
 
         if (wasInterruptedByShutdown) {

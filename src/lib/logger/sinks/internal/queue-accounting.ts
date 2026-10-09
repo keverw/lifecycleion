@@ -76,6 +76,19 @@ export class ReportOnceLatch {
     return true;
   }
 
+  /**
+   * Give back a claim whose report did not go out, so the next one for `entry`'s origin
+   * is still made. A report suppressed because a console report was in progress said
+   * nothing, and must not stand in for the one owed after it.
+   */
+  public release(entry: LogEntry | undefined): void {
+    if (isDiagnosticEntry(entry)) {
+      this.hasReportedDiagnostic = false;
+    } else {
+      this.hasReported = false;
+    }
+  }
+
   /** Re-arm both latches, so the next episode is reported again. */
   public reset(): void {
     this.hasReported = false;

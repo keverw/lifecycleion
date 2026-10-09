@@ -124,7 +124,7 @@ export class RestartOperations {
 
   public async restartAllComponentsOperation(
     options: RestartAllOptions | undefined,
-    phases: { shutdownResult?: ShutdownResult },
+    phases: { shutdownResult?: ShutdownResult; startupResult?: StartupResult },
   ): Promise<RestartResult> {
     // A restart arriving during somebody else's shutdown has no stop pass to own, and
     // one arriving during a bulk startup would stop it partway. Refuse either before
@@ -397,6 +397,7 @@ export class RestartOperations {
       } finally {
         revokeRestartDispatch(startupDispatchOptions);
       }
+      phases.startupResult = startupResult;
 
       if (startupDispatch.canceled) {
         return this.restartCanceledByShutdownRequest(shutdownResult);

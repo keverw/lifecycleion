@@ -272,12 +272,15 @@ A component enters "starting-timed-out" when:
 1. `start()` exceeds `startupTimeoutMS`
 2. The manager marks the component `starting-timed-out` and treats it as not running
 
-After an individual component timeout, this state behaves like `registered`: the component can be started again, unregistered normally, and will not be stopped during shutdown because it is not running. The state is cleared automatically on a successful start. Bulk startup deadlines follow the same recovery rules described below.
+After an individual component timeout, this state behaves like `registered`: the component can be started again, unregistered normally, and will not be stopped during shutdown because it is not running. A successful start clears the state, and so does a start whose `start()` fails: that leaves the component `stopped` if it has stopped before and `registered` otherwise, with the new error. Bulk startup deadlines follow the same recovery rules described below.
 
 After a bulk startup deadline, restart and unregistration are allowed even if the
 abandoned `start()` never settles. A late successful start is stopped automatically
-only if its attempt still owns the registered component. A retry or replacement makes
-the old completion stale, so it cannot stop the new run. Once the manager observes a
+if its attempt still owns the registered component, or if a retry of that same
+registration took it over and has since ended with the component down - its own
+`start()` failed, say - with nothing else in flight on it; the cleanup then leaves the
+state and error that retry left. A retry still in flight or running, or a replacement,
+makes the old completion stale, so it cannot stop the new run. Once the manager observes a
 late fulfillment that it owns cleanup for, unregistration is blocked through recovery's
 ownership check and until that cleanup finishes. An individual
 restart may claim the cleanup's stop before it begins and then start a new run;
@@ -872,8 +875,9 @@ without awaiting it (`void manager.stopAllComponents()`) and let `start()` finis
 shutdown can clean it up.
 
 Startup rollback likewise preserves dependencies of independent work and pending late startup recovery, including a required start that timed out. Rollback is best-effort: `startedComponents` reports components left running, and a later shutdown is needed after recovery settles.
-Individual stop/restart and unregister-with-stop refuse running or starting
-dependents unless their explicit override is enabled.
+Individual stop/restart and unregister-with-stop refuse running, starting or stalled
+dependents unless their explicit override is enabled: a stalled dependent's stop may
+still be using the component.
 
 The shutdown process has three phases:
 
@@ -1042,6 +1046,8 @@ interface LifecycleManagerOptions {
   ) => void | Promise<void>;
 }
 ```
+
+`onReloadRequested`, `onInfoRequested` and `onDebugRequested` take `null` or omission as no callback; any other value that is not a function makes the constructor throw a `TypeError`. A `repeatedShutdownRequestPolicy` requires `onForceShutdown` to be a function, and throws the same way without one.
 
 ### Component Registration
 
@@ -1457,7 +1463,7 @@ interface StopAllOptions {
 **Option Details:**
 
 - `retryStalled`: If `true`, attempts to stop components that are currently in the `stalled` state from previous shutdown attempts. If `false`, skips components already marked as stalled (under `haltOnStall: true` their dependencies stay up, as below). **Note:** retry goes directly to the force phase (`onShutdownForce`), not the graceful phase. `stop()` is not called again. The assumption is that graceful already had its chance, and the retry is an escalation. A retry keeps the original stall's start time: a component without `onShutdownForce` attempts nothing new, so it stays stalled under its original record and answers with that stop's result without emitting `component:shutdown-force` or `component:stalled`. A retry that runs `onShutdownForce` emits `component:shutdown-force` describing only that attempt (`gracefulPhaseRan: false`, `gracefulTimedOut: false`). If it succeeds it emits `component:stalled-resolved`; if it fails again it records a fresh force-phase stall: `reason: 'timeout'` when `onShutdownForce` times out again, otherwise `'both'` when the original graceful phase timed out and `'error'` when it did not. Its `component:stalled` carries the new record, which replaces the earlier one rather than ending it: the stall never cleared, so no `component:stalled-resolved` comes between the two, and the one that ends the stall carries the latest record.
-- `haltOnStall`: If `true`, stops processing remaining components after a stop failure or refusal, including invalid configuration. If `false`, continues independent cleanup. Either way, a component another operation is already stopping or starting does not halt the pass: its dependencies are skipped while that work is in flight, and the pass goes back to them once if it has settled by the end of the loop. The pass does not wait for that work. Nor does a stall the pass leaves as it found it - one skipped with `retryStalled: false`, or a retry that attempts nothing because the component has no `onShutdownForce` - halt it: that is no new failure, so the component stays stalled and is reported under `Stalled:`, and the pass goes on to the components after it. Under `haltOnStall: true` that stall's dependencies stay up while it remains stalled - its stalled stop may still be using them - and are reported under `Not attempted:`; unrelated components are stopped. Under `haltOnStall: false` they are stopped like any other. If a concurrent stop stalls before the pass reaches its next component, `haltOnStall: true` halts the remaining stops, including when `retryStalled` is false. Dependencies of any component still running after a failed stop remain protected, including when a getter throws before cleanup starts. The aggregate result stays unsuccessful; validation refusals retain `invalid_options`, also for a component still starting as the pass began, whose stop runs once its `start()` settles. Its `reason` names components the pass never tried to stop under `Not attempted:` - those a `haltOnStall` break never reached, and dependencies left running because a component still up after a failed stop, or a stall the pass left as it was, needs them - apart from the ones whose stop actually failed (`Failed to stop:`).
+- `haltOnStall`: If `true`, stops processing remaining components after a stop failure or refusal, including invalid configuration. If `false`, continues independent cleanup. Either way, a component another operation is already stopping or starting does not halt the pass: its dependencies are skipped while that work is in flight, and the pass goes back to them once if it has settled by the end of the loop. The pass does not wait for that work. Nor does a stall the pass leaves as it found it - one skipped with `retryStalled: false`, whether it was recorded before the pass began or by another stop before the pass reached it, or a retry that attempts nothing because the component has no `onShutdownForce` - halt it: that is no new failure, so the component stays stalled and is reported under `Stalled:`, and the pass goes on to the components after it. Under `haltOnStall: true` that stall's dependencies stay up while it remains stalled - its stalled stop may still be using them - and are reported under `Not attempted:`; unrelated components are stopped. Dependencies of a stall skipped this way as the pass begins are not sent `onShutdownWarning()`. Under `haltOnStall: false` they are stopped like any other. If a concurrent stop the pass found in progress stalls before the pass reaches its next component, `haltOnStall: true` halts the remaining stops, including when `retryStalled` is false. Dependencies of any component still running after a failed stop remain protected, including when a getter throws before cleanup starts. The aggregate result stays unsuccessful; validation refusals retain `invalid_options`, also for a component still starting as the pass began, whose stop runs once its `start()` settles. Its `reason` names components the pass never tried to stop under `Not attempted:` - those a `haltOnStall` break never reached, and dependencies left running because a component still up after a failed stop, or a stall the pass left as it was, needs them - apart from the ones whose stop actually failed (`Failed to stop:`).
 
 **Timeout Behavior:**
 
@@ -2026,6 +2032,8 @@ if (!health.healthy) {
 #### `checkAllHealth()`
 
 Check health of all running components. A running component that is stopping is still checked and answers `stopped`; one being cleaned up after a late-completed timed-out start is left out of the report (see [Component Messaging](#component-messaging)).
+
+Each component is checked through `checkComponentHealth()`, so a subclass override is the one used. An override that throws or rejects for a component is reported on the global `'error'` channel and answers that component's entry with `code: 'operation_crashed'`; the other entries are unaffected.
 
 ```typescript
 checkAllHealth(): Promise<HealthReport>
@@ -3326,7 +3334,7 @@ Each `*-started` event precedes that component's final availability check, which
 
 Event handlers are **fire-and-forget** - they do not block lifecycle operations.
 
-**Event Handler Error Handling:** The LifecycleManager automatically catches errors thrown by event handlers via `safeHandleCallback`, preventing them from breaking lifecycle operations. Errors are dispatched as `ErrorEvent` objects on the standard global `'error'` event channel:
+**Event Handler Error Handling:** The LifecycleManager automatically catches errors thrown by event handlers via `safeHandleCallback`, preventing them from breaking lifecycle operations. A subclass override of `emit()` that throws is contained the same way, reported as `lifecycle-manager emit for <event>`. Errors are dispatched as `ErrorEvent` objects on the standard global `'error'` event channel:
 
 ```typescript
 // Listen for event handler errors

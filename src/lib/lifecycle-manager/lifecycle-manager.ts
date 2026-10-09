@@ -70,7 +70,42 @@ import {
 } from './events';
 import { ProcessSignalManager } from '../process-signal-manager';
 import { createGuardedLoggerService } from './guarded-logger';
-import { toError } from '../to-error';
+import { reportCallbackError } from '../safe-handle-callback';
+
+/**
+ * `getSystemState()`'s answer, from the manager's own state: shared with `getStatus()`
+ * so its snapshot agrees with its own counts whatever a subclass makes the public
+ * getters answer.
+ */
+function systemStateOf(
+  state: LifecycleManagerState,
+  isShuttingDown: boolean,
+): SystemState {
+  if (isShuttingDown) {
+    return 'shutting-down';
+  }
+
+  if (state.isStarting) {
+    return 'starting';
+  }
+
+  if (state.components.length === 0) {
+    return 'no-components';
+  }
+
+  // Check for stalled components (failed to stop)
+  if (state.stalledComponents.size > 0) {
+    return 'stalled';
+  }
+
+  if (state.runningComponents.size === 0) {
+    return 'ready';
+  }
+
+  // All running, or some: a partial set is valid after individual starts and stops,
+  // and something is running.
+  return 'running';
+}
 
 /**
  * LifecycleManager - Comprehensive lifecycle orchestration system
@@ -133,12 +168,14 @@ export class LifecycleManager
   constructor(options: LifecycleManagerOptions & { logger: Logger }) {
     super();
 
-    if (!options.logger) {
+    // Read once: a getter could answer the check and the assignment differently.
+    const rootLogger = options.logger;
+    if (!rootLogger) {
       throw new Error('LifecycleManager requires a root logger');
     }
 
     const name = options.name ?? 'lifecycle-manager';
-    this.rootLogger = options.logger;
+    this.rootLogger = rootLogger;
     // Guarded once, here, rather than at the ~140 call sites that log: the logger is
     // caller-supplied, and a method that throws or rejects would otherwise propagate
     // into whatever lifecycle operation happened to be logging at the time.
@@ -393,33 +430,7 @@ export class LifecycleManager
    * Get overall system state
    */
   public getSystemState(): SystemState {
-    const totalCount = this.getComponentCount();
-    const runningCount = this.getRunningComponentCount();
-
-    if (this.core.shutdownPass.isShuttingDown) {
-      return 'shutting-down';
-    }
-
-    if (this.state.isStarting) {
-      return 'starting';
-    }
-
-    if (totalCount === 0) {
-      return 'no-components';
-    }
-
-    // Check for stalled components (failed to stop)
-    if (this.state.stalledComponents.size > 0) {
-      return 'stalled';
-    }
-
-    if (runningCount === 0) {
-      return 'ready';
-    }
-
-    // All running, or some: a partial set is valid after individual starts and stops,
-    // and something is running.
-    return 'running';
+    return systemStateOf(this.state, this.core.shutdownPass.isShuttingDown);
   }
 
   /**
@@ -446,11 +457,14 @@ export class LifecycleManager
       }
     }
 
+    const isShuttingDown = this.core.shutdownPass.isShuttingDown;
+
     return {
-      systemState: this.getSystemState(),
+      // From the same state as the rest, not through an overridable `getSystemState()`.
+      systemState: systemStateOf(this.state, isShuttingDown),
       isStarted: this.state.isStarted,
       isStarting: this.state.isStarting,
-      isShuttingDown: this.core.shutdownPass.isShuttingDown,
+      isShuttingDown,
       counts: {
         total: registeredNames.length,
         running: this.state.runningComponents.size,
@@ -488,22 +502,33 @@ export class LifecycleManager
    * starts retaining a stall are reported by the stalled APIs instead.
    */
   public getStartTimedOutComponentNames(): string[] {
-    return this.getComponentNames().filter(
-      (name) => this.state.componentStates.get(name) === 'starting-timed-out',
-    );
+    const names: string[] = [];
+    for (const component of this.state.components) {
+      const name = this.core.registry.nameOf(component);
+      if (this.state.componentStates.get(name) === 'starting-timed-out') {
+        names.push(name);
+      }
+    }
+    return names;
   }
 
   /**
    * Get stopped (not running, not stalled) component names
    */
   public getStoppedComponentNames(): string[] {
-    // The manager's own sets, asked directly, so the call allocates nothing beyond the
-    // filtered names.
-    return this.getComponentNames().filter(
-      (name) =>
+    // The registry and the manager's own sets, asked directly, as `getStatus()` asks
+    // them, so the call allocates nothing beyond the filtered names.
+    const names: string[] = [];
+    for (const component of this.state.components) {
+      const name = this.core.registry.nameOf(component);
+      if (
         !this.state.runningComponents.has(name) &&
-        !this.state.stalledComponents.has(name),
-    );
+        !this.state.stalledComponents.has(name)
+      ) {
+        names.push(name);
+      }
+    }
+    return names;
   }
 
   /**
@@ -632,11 +657,15 @@ export class LifecycleManager
   public restartAllComponents(
     options?: RestartAllOptions,
   ): Promise<RestartResult> {
-    // Filled in once the stop phase has answered, so a crash after it still reports the
-    // shutdown that actually happened - the same result `shutdown-completed` and
-    // `getLastShutdownResult()` already carry. Caller options are validated before
-    // stopping; failures from later phase bookkeeping still retain this result.
-    const phases: { shutdownResult?: ShutdownResult } = {};
+    // Filled in as each phase answers, so a crash after it still reports the shutdown
+    // that actually happened - the same result `shutdown-completed` and
+    // `getLastShutdownResult()` already carry - and the startup that ran. Caller options
+    // are validated before stopping; failures from later phase bookkeeping still retain
+    // these results.
+    const phases: {
+      shutdownResult?: ShutdownResult;
+      startupResult?: StartupResult;
+    } = {};
 
     return settleOperation(
       'restartAllComponents',
@@ -644,7 +673,8 @@ export class LifecycleManager
       (error, reason, code) => ({
         shutdownResult:
           phases.shutdownResult ?? crashedShutdownResult(error, reason, code),
-        startupResult: crashedStartupResult(error, reason, code),
+        startupResult:
+          phases.startupResult ?? crashedStartupResult(error, reason, code),
         success: false,
       }),
     );
@@ -976,8 +1006,10 @@ export class LifecycleManager
   }
 
   /**
-   * Where the dispatcher delivers each event: this manager's own `emit()`. Safe delivery
-   * also contains an overridden emitter that throws.
+   * Where the dispatcher delivers each event: this manager's own `emit()`. Its handlers'
+   * failures are contained and reported by `emit()` itself, so a throw here is an
+   * overridden `emit()`'s own: contained too, and reported on the global `'error'`
+   * channel as every other override failure is.
    */
   private deliverEvent<K extends LifecycleManagerEventName>(
     event: K,
@@ -986,11 +1018,7 @@ export class LifecycleManager
     try {
       this.emit(event, data);
     } catch (error) {
-      const err = toError(error);
-
-      this.logger.error('Event handler error: {{error.message}}', {
-        params: { event, error: err },
-      });
+      reportCallbackError(`lifecycle-manager emit for ${event}`, error);
     }
   }
 }

@@ -1,4 +1,5 @@
 import { isNullish } from '../../internal/is-nullish';
+import { isFunction } from '../../is-function';
 import { finiteClampMin } from '../../clamp';
 import {
   assertDurationMS,
@@ -131,10 +132,39 @@ export function resolveManagerConfig(
     repeatedShutdownRequestPolicy: resolveRepeatedShutdownPolicy(
       options.repeatedShutdownRequestPolicy,
     ),
-    onReloadRequested: options.onReloadRequested,
-    onInfoRequested: options.onInfoRequested,
-    onDebugRequested: options.onDebugRequested,
+    onReloadRequested: resolveOptionalCallback(
+      options.onReloadRequested,
+      'onReloadRequested',
+    ),
+    onInfoRequested: resolveOptionalCallback(
+      options.onInfoRequested,
+      'onInfoRequested',
+    ),
+    onDebugRequested: resolveOptionalCallback(
+      options.onDebugRequested,
+      'onDebugRequested',
+    ),
   });
+}
+
+/**
+ * An optional callback option: `null` or omitted means none, as it does for every other
+ * option here. Anything else must be a function, refused now rather than reported the
+ * first time a signal calls it.
+ */
+function resolveOptionalCallback<T>(
+  callback: T | null | undefined,
+  field: string,
+): T | undefined {
+  if (isNullish(callback)) {
+    return undefined;
+  }
+
+  if (!isFunction(callback)) {
+    throw new TypeError(`${field} must be a function`);
+  }
+
+  return callback;
 }
 
 /** The escalation window `withinMS` defaults to. */
@@ -177,6 +207,22 @@ function resolveRepeatedShutdownPolicy(
     countManualRetriesTowardEscalation:
       policy.countManualRetriesTowardEscalation === true,
     hasExplicitArmedAfterFailureMS: !isNullish(requestedArmedAfterFailureMS),
-    onForceShutdown: policy.onForceShutdown,
+    onForceShutdown: requireForceShutdownCallback(policy.onForceShutdown),
   });
+}
+
+/**
+ * The policy's `onForceShutdown`, which it requires: a policy without one could only
+ * report a missing callback at the moment escalation fires.
+ */
+function requireForceShutdownCallback(
+  callback: RepeatedShutdownRequestPolicy['onForceShutdown'],
+): RepeatedShutdownRequestPolicy['onForceShutdown'] {
+  if (!isFunction(callback)) {
+    throw new TypeError(
+      'repeatedShutdownRequestPolicy.onForceShutdown must be a function',
+    );
+  }
+
+  return callback;
 }

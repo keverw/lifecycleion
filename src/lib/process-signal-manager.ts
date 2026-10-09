@@ -356,6 +356,20 @@ export class ProcessSignalManager {
   private didResumeStdin = false;
 
   /**
+   * The `attach()` / `detach()` running now. Caller code runs inside either one - a
+   * `process` 'newListener' or 'removeListener' listener, a stdin 'error' listener a
+   * failed `setRawMode()` emits to - and a nested call on this instance must not
+   * register or remove listeners under the one in progress.
+   */
+  private transition?: 'attach' | 'detach';
+
+  /**
+   * The opposite call last asked for from inside `transition`, run once it returns.
+   * The same call asked for again clears it: the latest request wins.
+   */
+  private requestedTransition?: 'attach' | 'detach';
+
+  /**
    * A raw-mode failure from the keypress setup's own rollback, held rather than reported:
    * that rollback always throws into `attach()`'s catch, whose `restoreStdin` retries
    * the same restore when this instance still owns it. The retry's outcome supersedes
@@ -498,10 +512,16 @@ export class ProcessSignalManager {
    * Idempotent - calling multiple times has no effect.
    */
   public attach(): void {
+    if (this.transition !== undefined) {
+      this.requestTransition('attach');
+      return;
+    }
+
     if (this._isAttached) {
       return;
     }
 
+    this.transition = 'attach';
     try {
       this.listenForShutdownSignals();
       this.listenForReloadSignal();
@@ -520,6 +540,8 @@ export class ProcessSignalManager {
         failures: [firstFailure, ...laterFailures],
         rawModeRestoreFailure,
       } = this.releaseListeners();
+      // A detach asked for from inside is already done; an attach is this failed one.
+      this.endTransition();
       this.reportCleanupFailuresLater([
         ...(firstFailure
           ? [['ProcessSignalManager attach cleanup', firstFailure] as const]
@@ -539,6 +561,8 @@ export class ProcessSignalManager {
       reportCleanupFailures(rawModeRestoreReport(rawModeRestoreFailure));
       throw error;
     }
+
+    this.runRequestedTransition(this.endTransition());
   }
 
   /**
@@ -548,10 +572,16 @@ export class ProcessSignalManager {
    * Idempotent - calling multiple times has no effect.
    */
   public detach(): void {
+    if (this.transition !== undefined) {
+      this.requestTransition('detach');
+      return;
+    }
+
     if (!this._isAttached) {
       return;
     }
 
+    this.transition = 'detach';
     const {
       failures: [firstFailure, ...laterFailures],
       rawModeRestoreFailure,
@@ -561,6 +591,7 @@ export class ProcessSignalManager {
     // This prevents the manager from being stuck in an "attached" state
     // that blocks re-attachment attempts
     this._isAttached = false;
+    const requested = this.endTransition();
 
     const listenerReports = laterFailures.map(
       (failure) => ['ProcessSignalManager listener cleanup', failure] as const,
@@ -582,19 +613,24 @@ export class ProcessSignalManager {
       // failed `attach()` reports it: a caller that exits from its catch -
       // `try { detach() } catch { process.exit(1) }` - never drains the microtask, and a
       // terminal left in raw mode outlives the process.
+      //
+      // An attach asked for from inside this detach is not run: like a listener that
+      // attaches from a report, it would land before a throw that reads as this detach
+      // failing over it. Its caller sees `isAttached` false and can attach again.
       reportCleanupFailures(rawModeRestoreReport(rawModeRestoreFailure));
       this.reportCleanupFailuresLater(listenerReports);
       throw firstFailure.error;
     }
 
-    // Nothing to throw, so nothing to wait for: reported now, as the last thing this
-    // detach does. Deferred, a raw-mode restore failure - the terminal left in raw mode -
-    // was lost to a caller that exits right after `detach()` returns, as a
-    // shutdown-completed listener may: `process.exit()` does not drain microtasks.
-    // Synchronous is safe here because every step is done - listeners removed, stdin
-    // paused, `isAttached` false - so a listener that attaches from the report attaches
-    // over a finished detach, and nothing after it undoes that attach.
+    // Nothing to throw, so nothing to wait for: reported now. Deferred, a raw-mode
+    // restore failure - the terminal left in raw mode - was lost to a caller that exits
+    // right after `detach()` returns, as a shutdown-completed listener may:
+    // `process.exit()` does not drain microtasks. Synchronous is safe here because every
+    // step is done - listeners removed, stdin paused, `isAttached` false - so a listener
+    // that attaches from the report attaches over a finished detach, and nothing after it
+    // undoes that attach. An attach asked for from inside this detach runs after it.
     reportCleanupFailures(reports);
+    this.runRequestedTransition(requested);
   }
 
   /**
@@ -659,6 +695,45 @@ export class ProcessSignalManager {
       this.onDebugRequested
     ) {
       safeHandleCallback(this.debugCallbackName, this.onDebugRequested);
+    }
+  }
+
+  /** Record an attach or detach asked for from inside the one in progress. */
+  private requestTransition(requested: 'attach' | 'detach'): void {
+    this.requestedTransition =
+      requested === this.transition ? undefined : requested;
+  }
+
+  /** End the attach or detach in progress, returning what was asked for inside it. */
+  private endTransition(): 'attach' | 'detach' | undefined {
+    const requested = this.requestedTransition;
+    this.transition = undefined;
+    this.requestedTransition = undefined;
+    return requested;
+  }
+
+  /**
+   * Run an attach or detach asked for from inside the one that just finished. Its caller
+   * already returned, so a failure is reported rather than thrown out of a call that did
+   * what it was asked.
+   */
+  private runRequestedTransition(
+    requested: 'attach' | 'detach' | undefined,
+  ): void {
+    if (requested === undefined) {
+      return;
+    }
+
+    try {
+      if (requested === 'attach') {
+        this.attach();
+      } else {
+        this.detach();
+      }
+    } catch (error) {
+      reportCleanupFailures([
+        [`ProcessSignalManager deferred ${requested}`, { error }],
+      ]);
     }
   }
 
@@ -1001,6 +1076,12 @@ export class ProcessSignalManager {
       if (!process.stdin.isRaw) {
         try {
           process.stdin.setRawMode(true);
+          // Node and Bun emit a failed mode change on stdin as 'error' rather than
+          // throwing it, leaving `isRaw` false: a failure all the same. Only `false` is
+          // checked - a stream that keeps no `isRaw` has nothing to read back.
+          if (process.stdin.isRaw === false) {
+            throw new Error('stdin raw mode was not enabled');
+          }
           // Only record ownership AFTER success - prevents rollback race
           shared.rawModeOwner = this.instanceID;
           shared.rawModeEnabledByManager = true;
@@ -1231,9 +1312,10 @@ export class ProcessSignalManager {
  * Turn raw mode off for the last attached instance that owned it. An attach from inside
  * `setRawMode(false)` - from a caller's stdin 'error' listener, which a failed mode change
  * is emitted to synchronously - may have adopted the raw mode being turned off; turn it
- * back on for that instance rather than clearing its claim. A disable failure throws,
- * leaving ownership for the caller to repair; a re-enable failure is returned, so it is
- * reported as what it is rather than as a failed restore.
+ * back on for that instance rather than clearing its claim. A disable failure - thrown,
+ * or emitted on stdin with raw mode left on - throws, leaving ownership for the caller to
+ * repair; a re-enable failure is returned, so it is reported as what it is rather than
+ * as a failed restore.
  */
 function releaseRawMode(
   shared: ProcessSignalManagerSharedState,
@@ -1257,6 +1339,12 @@ function releaseRawMode(
       return { error, isReEnable: true };
     }
     return undefined;
+  }
+
+  // Node and Bun emit a failed mode change on stdin as 'error' rather than throwing it,
+  // leaving `isRaw` as it was: still raw is a failed restore, not a finished one.
+  if (process.stdin.isTTY && process.stdin.isRaw) {
+    throw new Error('stdin raw mode is still enabled');
   }
 
   // Raw mode was disabled, or was already off and needed no disabling.

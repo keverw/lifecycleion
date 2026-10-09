@@ -480,9 +480,9 @@ export class NamedPipeSink implements LogSink {
    * Lines this sink did not deliver, by reason, and the once-per-episode reports for the
    * refused, evicted and abandoned ones. See {@link LossLedger}.
    */
-  private readonly losses = new LossLedger((kind, message, entry) => {
-    this.handleError(kind, new Error(message), { disposition: 'lost', entry });
-  });
+  private readonly losses = new LossLedger((kind, message, entry) =>
+    this.handleError(kind, new Error(message), { disposition: 'lost', entry }),
+  );
   /** Whether the one post-close loss report has gone out. See {@link requeue}. */
   private didReportPostCloseLoss = false;
   /** Streams whose buffered-byte loss close() has already reported. */
@@ -977,6 +977,12 @@ export class NamedPipeSink implements LogSink {
       // flush. Held open by its timer, since the caller is awaiting this close and the
       // stream's own retries keep nothing alive: unreferenced, a stalled reader let the
       // process exit before the report below went out.
+      //
+      // A throw from `end()` is held for `onAbandon`, which always follows it, so the one
+      // failure is said once: as the cause of the buffered-loss report when there is one,
+      // and on its own otherwise.
+      let endFailure: { error: unknown } | undefined;
+
       await endStreamWithin(
         stream,
         this.closeTimeoutMS - (Date.now() - startTime),
@@ -995,15 +1001,20 @@ export class NamedPipeSink implements LogSink {
                 'close',
                 new Error(
                   `Closed with ${String(bufferedBytes)} bytes still buffered for ${this.pipePath} (closeTimeoutMS=${String(this.closeTimeoutMS)}); the reader did not take them and they were not written`,
+                  endFailure === undefined
+                    ? undefined
+                    : { cause: endFailure.error },
                 ),
                 { disposition: 'lost' },
               );
+            } else if (endFailure !== undefined) {
+              this.handleError('close', endFailure.error);
             }
 
             this.closeAbandonedStreams.add(stream);
           },
           onEndError: (error) => {
-            this.handleError('close', error);
+            endFailure = { error };
           },
         },
       );
@@ -2071,7 +2082,10 @@ export class NamedPipeSink implements LogSink {
             queued.attempts < this.maxRetries &&
             this.hasRetryRoom();
           this.handleError('write', error, {
-            shouldSuppressFailureReport: queued.shouldSuppressFailureReport,
+            shouldSuppressFailureReport: this.shouldSuppressWriteReport(
+              queued,
+              willRetry,
+            ),
             attempt: queued.attempts + 1,
             disposition: willRetry ? 'retrying' : 'lost',
             entry: queued.entry,
@@ -2109,7 +2123,10 @@ export class NamedPipeSink implements LogSink {
         queued.attempts < this.maxRetries &&
         this.hasRetryRoom();
       this.handleError('write', error, {
-        shouldSuppressFailureReport: queued.shouldSuppressFailureReport,
+        shouldSuppressFailureReport: this.shouldSuppressWriteReport(
+          queued,
+          willRetry,
+        ),
         attempt: queued.attempts + 1,
         disposition: willRetry ? 'retrying' : 'lost',
         entry: queued.entry,
@@ -2119,6 +2136,26 @@ export class NamedPipeSink implements LogSink {
       // so the cap inside does not report it a second time.
       this.requeue(queued, !willRetry);
     }
+  }
+
+  /**
+   * Whether a failed write's report stays unsaid, its failure still recorded.
+   *
+   * A forwarded console line never starts another report. And without an `onError`, only
+   * the attempt that loses the line is reported, the rule `FileSink` keeps for the same
+   * reason: the handler hears every attempt by contract, but routed to the owning logger
+   * each `'retrying'` attempt became a diagnostic entry in its other sinks - `maxRetries + 1`
+   * of them for every line a dead reader takes. A retry that later finds no room is
+   * reported `'lost'` by {@link requeue}.
+   */
+  private shouldSuppressWriteReport(
+    queued: QueuedPipeEntry,
+    willRetry: boolean,
+  ): boolean {
+    return (
+      queued.shouldSuppressFailureReport === true ||
+      (willRetry && this.onError === undefined)
+    );
   }
 
   /**
@@ -2287,7 +2324,7 @@ export class NamedPipeSink implements LogSink {
   }
 
   /**
-   * Handle errors
+   * Handle errors. Answers whether the report went out rather than being suppressed.
    */
   private handleError(
     kind: SinkFailureKind,
@@ -2303,7 +2340,7 @@ export class NamedPipeSink implements LogSink {
       /** Called once the handler has settled, `async` or not. See `scheduleFormatReport`. */
       onReported?: () => void;
     },
-  ): void {
+  ): boolean {
     // Normalized rather than trusted: `error` reaches here from Node's stream and
     // filesystem callbacks as well as from `catch` blocks, so it is not guaranteed to be
     // an `Error`, and `onError` declares one.
@@ -2320,7 +2357,7 @@ export class NamedPipeSink implements LogSink {
     }
 
     if (options?.shouldSuppressFailureReport === true) {
-      return;
+      return false;
     }
 
     // The shared rung, so this channel cannot drift from the logger's four. Nothing here
@@ -2330,7 +2367,7 @@ export class NamedPipeSink implements LogSink {
     // raised out of a constructor. The console rung is guarded for the same reason -
     // `console.error` can throw synchronously, and a pipe sink fails at exactly the
     // shutdown-time moments a console is most likely to be replaced or torn down.
-    reportSinkError(
+    return reportSinkError(
       this,
       {
         kind,

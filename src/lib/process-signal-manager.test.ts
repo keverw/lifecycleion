@@ -734,6 +734,57 @@ describe('ProcessSignalManager', () => {
       expect(shutdownCallback).toHaveBeenCalledWith('SIGTERM');
       expect(shutdownCallback.mock.calls.length).toBe(1);
     });
+
+    test('an attach from a process newListener listener inside attach() registers nothing twice', () => {
+      // Caller code runs inside attach() - here a 'newListener' listener - and an attach
+      // from there must not register this instance's listeners again under the first.
+      const before = process.listenerCount('SIGTERM');
+      manager = new ProcessSignalManager({
+        onShutdownRequested: shutdownCallback,
+      });
+      let nestedCalls = 0;
+      const onNewListener = (): void => {
+        nestedCalls += 1;
+        manager.attach();
+      };
+      process.on('newListener', onNewListener);
+
+      try {
+        manager.attach();
+      } finally {
+        process.off('newListener', onNewListener);
+      }
+
+      expect(nestedCalls).toBeGreaterThan(0);
+      expect(manager.isAttached).toBe(true);
+      expect(process.listenerCount('SIGTERM')).toBe(before + 1);
+
+      manager.triggerShutdown('SIGTERM');
+      expect(shutdownCallback).toHaveBeenCalledTimes(1);
+
+      manager.detach();
+      expect(process.listenerCount('SIGTERM')).toBe(before);
+    });
+
+    test('a detach from a process newListener listener inside attach() runs once the attach finishes', () => {
+      const before = process.listenerCount('SIGTERM');
+      manager = new ProcessSignalManager({
+        onShutdownRequested: shutdownCallback,
+      });
+      const onNewListener = (): void => {
+        manager.detach();
+      };
+      process.on('newListener', onNewListener);
+
+      try {
+        manager.attach();
+      } finally {
+        process.off('newListener', onNewListener);
+      }
+
+      expect(manager.isAttached).toBe(false);
+      expect(process.listenerCount('SIGTERM')).toBe(before);
+    });
   });
 
   describe('process signal handling', () => {
@@ -1942,6 +1993,166 @@ describe('ProcessSignalManager', () => {
         if (replacement?.isAttached) {
           replacement.detach();
         }
+        tty.restore();
+      }
+    });
+
+    /**
+     * Route `setRawMode()` failures the way Node and Bun do: emitted on stdin as 'error',
+     * not thrown, with `isRaw` left as it was. `shouldFail` picks the calls that fail.
+     */
+    function emitRawModeFailures(shouldFail: (enableRaw: boolean) => boolean): {
+      restore: () => void;
+    } {
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const mockedSetRawMode = process.stdin.setRawMode;
+      (process.stdin as any).setRawMode = mock((enableRaw: boolean) => {
+        if (shouldFail(enableRaw)) {
+          process.stdin.emit('error', new Error('setRawMode failed'));
+          return process.stdin;
+        }
+
+        return mockedSetRawMode.call(process.stdin, enableRaw);
+      });
+      return {
+        restore: () => {
+          (process.stdin as any).setRawMode = mockedSetRawMode;
+        },
+      };
+    }
+
+    test('a detach whose setRawMode(false) failure is emitted on stdin reports it and keeps ownership for a later instance', () => {
+      // With an 'error' listener on stdin the failure is not thrown, and raw mode is
+      // still on: a failed restore, reported as one, with the claim left for adoption.
+      const tty = mockRawTTY(() => {});
+      let shouldFailDisable = true;
+      const emitted = emitRawModeFailures(
+        (enableRaw) => !enableRaw && shouldFailDisable,
+      );
+      const stdinErrors: Error[] = [];
+      const onStdinError = (error: Error): void => {
+        stdinErrors.push(error);
+      };
+      process.stdin.on('error', onStdinError);
+      const { reports, stop } = captureReports();
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+        manager.detach();
+
+        expect(stdinErrors).toHaveLength(1);
+        expect(reports.map((report) => report.message)).toEqual([
+          'Error in a callback ProcessSignalManager stdin raw mode restore',
+        ]);
+        expect((reports[0]?.cause as Error).message).toBe(
+          'stdin raw mode is still enabled',
+        );
+        expect((process.stdin as any).isRaw).toBe(true);
+        expect(readShared()?.attachedInstances.size).toBe(0);
+        expect(readShared()?.rawModeEnabledByManager).toBe(true);
+        expect(readShared()?.rawModeOwner).not.toBeNull();
+
+        // A later instance adopts the claim and, with a working tty, restores it.
+        shouldFailDisable = false;
+        const later = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        later.attach();
+        later.detach();
+
+        expect((process.stdin as any).isRaw).toBe(false);
+        expect(readShared()?.rawModeOwner).toBeNull();
+        expect(readShared()?.rawModeEnabledByManager).toBe(false);
+        expect(reports).toHaveLength(1);
+      } finally {
+        stop();
+        process.stdin.off('error', onStdinError);
+        emitted.restore();
+        tty.restore();
+      }
+    });
+
+    test('an attach whose setRawMode(true) failure is emitted on stdin fails and claims nothing', () => {
+      const tty = mockRawTTY(() => {});
+      const emitted = emitRawModeFailures((enableRaw) => enableRaw);
+      const onStdinError = (): void => {};
+      process.stdin.on('error', onStdinError);
+      const keypressListeners = process.stdin.listenerCount('keypress');
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+
+        expect(() => manager.attach()).toThrow(
+          'stdin raw mode was not enabled',
+        );
+        expect(manager.isAttached).toBe(false);
+        expect(manager.getStatus().listeningFor.keypresses).toBe(false);
+        expect(process.stdin.listenerCount('keypress')).toBe(keypressListeners);
+        expect((process.stdin as any).isRaw).toBe(false);
+        expect(readShared()?.attachedInstances.size).toBe(0);
+        expect(readShared()?.rawModeOwner).toBeNull();
+        expect(readShared()?.rawModeEnabledByManager).toBe(false);
+      } finally {
+        process.stdin.off('error', onStdinError);
+        emitted.restore();
+        tty.restore();
+      }
+    });
+
+    test("an attach from a stdin 'error' listener during this instance's own detach re-attaches it once the detach finishes", () => {
+      // The failed setRawMode(false) runs the caller's listener inside detach(), while
+      // this instance still reads as attached. Its attach must not be lost to that.
+      const tty = mockRawTTY(() => {});
+      let shouldFailDisable = true;
+      const emitted = emitRawModeFailures(
+        (enableRaw) => !enableRaw && shouldFailDisable,
+      );
+      const onStdinError = (): void => {
+        manager.attach();
+      };
+      process.stdin.on('error', onStdinError);
+      const sigtermListeners = process.listenerCount('SIGTERM');
+      const { reports, stop } = captureReports();
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+        manager.detach();
+
+        expect(manager.isAttached).toBe(true);
+        expect(process.listenerCount('SIGTERM')).toBe(sigtermListeners + 1);
+        expect(readShared()?.attachedInstances.size).toBe(1);
+        expect((process.stdin as any).isRaw).toBe(true);
+        expect(attachedOwner()).not.toBeNull();
+        expect(readShared()?.rawModeEnabledByManager).toBe(true);
+        expect(tty.stdinCalls.at(-1)).toBe('resume');
+        expect(reports.map((report) => report.message)).toEqual([
+          'Error in a callback ProcessSignalManager stdin raw mode restore',
+        ]);
+
+        // The claim it kept is what lets its next detach restore the terminal.
+        shouldFailDisable = false;
+        process.stdin.off('error', onStdinError);
+        manager.detach();
+
+        expect(manager.isAttached).toBe(false);
+        expect(process.listenerCount('SIGTERM')).toBe(sigtermListeners);
+        expect((process.stdin as any).isRaw).toBe(false);
+        expect(readShared()?.rawModeOwner).toBeNull();
+      } finally {
+        stop();
+        process.stdin.off('error', onStdinError);
+        emitted.restore();
         tty.restore();
       }
     });

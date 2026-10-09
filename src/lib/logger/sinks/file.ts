@@ -282,12 +282,12 @@ export class FileSink implements LogSink {
    * Lines this sink did not deliver, by reason, and the once-per-episode reports for the
    * refused, evicted and abandoned ones. See {@link LossLedger}.
    */
-  private readonly losses = new LossLedger((kind, message, entry) => {
+  private readonly losses = new LossLedger((kind, message, entry) =>
     this.handleError(kind, new FileSinkError(message), {
       disposition: 'lost',
       entry,
-    });
-  });
+    }),
+  );
   /**
    * Where the last {@link flush} stopped counting, so the next one starts there.
    *
@@ -1883,6 +1883,8 @@ export class FileSink implements LogSink {
    * the first failure of its backoff run): suppressed because the line that triggered it
    * was a forwarded console report, or sent to the console because it was a diagnostic,
    * that one report was the only one `onError` would ever have had.
+   *
+   * Answers whether the report went out rather than being suppressed.
    */
   private handleError(
     kind: SinkFailureKind,
@@ -1895,13 +1897,13 @@ export class FileSink implements LogSink {
       isDiagnostic?: boolean;
       shouldSuppressFailureReport?: boolean;
     },
-  ): void {
+  ): boolean {
     this.lastError = failure;
     if (options.shouldSuppressFailureReport === true) {
-      return;
+      return false;
     }
 
-    reportSinkError(
+    return reportSinkError(
       this,
       {
         kind,

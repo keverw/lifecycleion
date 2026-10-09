@@ -601,6 +601,10 @@ caller that exits from its `catch` does not lose it. Any failure to remove a lis
 had registered is reported on that channel in a microtask, after the throw has reached the
 caller.
 
+Failing to enable raw mode is a registration failure whether `setRawMode(true)` throws or,
+as Node and Bun do, emits the failure on stdin as `'error'` and leaves raw mode off; the
+emitted case throws `stdin raw mode was not enabled`.
+
 ### `detach(): void`
 
 Detach signal handlers and stop listening for process signals and keyboard events.
@@ -612,8 +616,10 @@ Detach signal handlers and stop listening for process signals and keyboard event
 
 If restoring terminal mode fails, `detach()` still returns normally and reports the
 failure on the global `'error'` channel before it returns, so a caller that exits right
-after `detach()` does not lose it. The shared state remains marked so a future manager
-attachment can adopt ownership and retry restoration when it detaches.
+after `detach()` does not lose it. A `setRawMode(false)` failure emitted on stdin as
+`'error'` rather than thrown, with raw mode left on, is reported the same way. The shared
+state remains marked so a future manager attachment can adopt ownership and retry
+restoration when it detaches.
 
 If removing a signal listener fails, `detach()` still removes the rest and restores the
 terminal, then throws the first removal failure; any further failures are reported on the
@@ -628,6 +634,15 @@ again. Console output nested inside the shim is dropped, but `'error'` listeners
 receive the report. Because that report comes first, an `'error'` listener that calls
 `attach()` from it can leave the manager attached behind the `attach()` or `detach()`
 call that then throws.
+
+Caller code can run inside `attach()` and `detach()`: a `process` `'newListener'` or
+`'removeListener'` listener, or a stdin `'error'` listener a failed `setRawMode()` is
+emitted to. A call on the same instance from there does not act inside the one in
+progress. The same call is a no-op; the opposite call - `detach()` inside `attach()`,
+`attach()` inside `detach()` - runs once the outer call returns, the latest request
+winning, and a failure in it is reported on the `'error'` channel rather than thrown.
+When the outer call throws instead, the request is dropped and `isAttached` reports the
+state the outer call left.
 
 ### Trigger Methods
 

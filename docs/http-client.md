@@ -431,7 +431,7 @@ interface HTTPClientError {
 | `redirect_disabled`     | A redirect response was received but `followRedirects` is `false`                                                                                              |
 | `redirect_loop`         | The configured `maxRedirects` limit was reached                                                                                                                |
 | `request_setup_error`   | Request setup or local orchestration failure before a normal adapter response was produced (e.g. invalid configuration, unsupported body type, unresolved URL) |
-| `adapter_error`         | The adapter threw an unexpected error                                                                                                                          |
+| `adapter_error`         | The adapter threw an unexpected error, or resolved a response the client could not read (the latter is never retried)                                          |
 | `interceptor_error`     | A request interceptor threw, or returned a request that is unreadable or invalid                                                                               |
 | `stream_write_error`    | Writing chunks to the StreamResponseFactory writable failed                                                                                                    |
 | `stream_response_error` | The upstream response stream errored after headers arrived                                                                                                     |
@@ -525,8 +525,9 @@ the returned object, on the header record or on one of its entries is therefore 
 exactly once by that final copy when it succeeds, and a URL that passed validation is the URL the
 request is sent to. If copying fails, the best-effort snapshot for error observers may
 read those values again. Any failure while taking that copy is an `interceptor_error`:
-a `requestURL` that is not a string, `headers` that is not an object, a getter that
-throws, or a header value whose string conversion throws.
+a `requestURL` that is not a string, `headers` that is not a plain object (an array,
+a `Headers` or a `Map` is refused rather than read as empty), a getter that throws, or
+a header value whose string conversion throws.
 
 ### Filter Options
 

@@ -1969,6 +1969,11 @@ export class BaseHTTPClient {
 
       let observedSentRequest: AttemptRequest = sentRequest;
       let responseUploadOutcome: Promise<Error | undefined> | undefined;
+      // Set once `send()` resolves. The server has answered by then, so a throw from
+      // reading or normalizing that answer (a getter, a header value whose conversion
+      // throws, a `Set-Cookie` the jar cannot take) is the adapter's malformed response,
+      // not a transport failure: the catch below reports it without re-sending.
+      let didAdapterResolve = false;
 
       // Dispatch counts as activity, so the settle wait's stall clock starts from the
       // moment this attempt's upload could have begun rather than from a report on some
@@ -2033,6 +2038,7 @@ export class BaseHTTPClient {
           }),
         );
         const { value: rawAdapterResponse } = await adapterPromise;
+        didAdapterResolve = true;
 
         // Observe the upload before any other response getter or normalization can
         // throw. Keep it outside this try so failures still expose the upload outcome.
@@ -2081,12 +2087,18 @@ export class BaseHTTPClient {
         }
         adapterResponse.headers = normalizeAdapterResponseHeaders(headers);
 
-        observedSentRequest = effectiveRequestHeaders
+        // Copied through the same guard the throw path uses: the record only feeds
+        // observers, so a malformed or unreadable one is treated as absent.
+        const observedEffectiveHeaders = snapshotHeaderRecord(
+          effectiveRequestHeaders,
+        );
+
+        observedSentRequest = observedEffectiveHeaders
           ? {
               ...sentRequest,
               headers: mergeObservedHeaders(
                 sentRequest.headers,
-                effectiveRequestHeaders,
+                observedEffectiveHeaders,
               ),
             }
           : sentRequest;
@@ -2640,8 +2652,9 @@ export class BaseHTTPClient {
         const isNonRetryableClientCallbackFailure =
           isNonRetryableClientCallbackError(error);
         const isNonRetryableAdapterFailure =
+          didAdapterResolve ||
           readObjectMember(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG) ===
-          true;
+            true;
 
         if (
           isNonRetryableClientCallbackFailure ||
@@ -3610,8 +3623,8 @@ function readStringMember(
  * one-element array collapsed to its string - so a value whose `toString` answers
  * differently on each call is checked and sent as one string. Names keep their case.
  * Throws on a `requestURL` or `method` that is not a string or `headers` that is not a
- * non-array object, and on any read or conversion that throws; each phase reports that
- * as the interceptor's failure.
+ * plain object (an array, a `Headers` or a `Map` is refused), and on any read or
+ * conversion that throws; each phase reports that as the interceptor's failure.
  */
 function snapshotInterceptedRequest(
   request: InterceptedRequest,
@@ -3635,7 +3648,10 @@ function snapshotInterceptedRequest(
   const candidateHeaders: unknown = headers;
 
   // An array passes `typeof === 'object'`, but `Object.entries` would turn its indices
-  // into header names, so it is refused like any other non-record.
+  // into header names, so it is refused like any other non-record. So is any object
+  // whose prototype is not `Object.prototype` or `null`: a `Headers` or `Map` keeps its
+  // entries off its own properties, and `Object.entries` would answer `{}`, sending the
+  // request with every header the interceptor set silently dropped.
   if (
     typeof candidateHeaders !== 'object' ||
     candidateHeaders === null ||
@@ -3643,6 +3659,14 @@ function snapshotInterceptedRequest(
   ) {
     throw new TypeError(
       `[HTTPClient] Interceptor returned a request whose headers is not an object (got ${candidateHeaders === null ? 'null' : Array.isArray(candidateHeaders) ? 'array' : typeof candidateHeaders}).`,
+    );
+  }
+
+  const headersPrototype = Reflect.getPrototypeOf(candidateHeaders);
+
+  if (headersPrototype !== Object.prototype && headersPrototype !== null) {
+    throw new TypeError(
+      '[HTTPClient] Interceptor returned a request whose headers is not a plain object (got an object with a non-Object prototype, such as Headers or Map).',
     );
   }
 

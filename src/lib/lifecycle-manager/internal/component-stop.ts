@@ -614,7 +614,7 @@ export class ComponentStop {
       if (dependent === name) {
         continue;
       }
-      if (this.core.manager.isComponentRunning(dependent)) {
+      if (this.core.state.runningComponents.has(dependent)) {
         activity.set(component, 'running');
       } else if (
         this.core.state.componentStates.get(dependent) === 'starting'
@@ -623,11 +623,13 @@ export class ComponentStop {
       } else if (this.hasPendingStart(dependent, component)) {
         activity.set(component, 'pending');
       } else if (
-        // Rollback leaves dependencies of unfinished cleanup running: a dependent
-        // whose rollback stop stalled may still be using this component. A stall
-        // from before this startup does not hold back what this startup started.
-        context.rolledBackNames?.has(dependent) === true &&
-        this.core.state.stalledComponents.has(dependent)
+        // A stalled dependent's stop may still be using this component, as a shutdown
+        // pass holds the dependencies of a stall it leaves alone. Rollback holds only
+        // for stalls of its own: a stall from before this startup does not hold back
+        // what this startup started.
+        this.core.state.stalledComponents.has(dependent) &&
+        (context.isStartupRollback !== true ||
+          context.rolledBackNames?.has(dependent) === true)
       ) {
         activity.set(component, 'stalled');
       }
@@ -785,7 +787,7 @@ export class ComponentStop {
     if (
       this.core.registry.getComponent(name) !== undefined &&
       !this.core.state.stalledComponents.has(name) &&
-      !this.core.manager.isComponentRunning(name)
+      !this.core.state.runningComponents.has(name)
     ) {
       return this.core.stopOutcomes.withStopStatus(name, {
         success: false,

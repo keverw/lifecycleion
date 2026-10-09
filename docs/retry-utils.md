@@ -364,7 +364,7 @@ Returns `Promise<RunResult<T>>`:
   - `'terminal_dispatch_in_progress'` - called while the operation's terminal outcome is being published
   - `'unexpected_error'` - an unexpected internal error occurred
 
-> **Note:** apart from invalid `forceTry()` options, which fail as `pre_operation_error` / `unexpected_error` (with a `TypeError` for a non-boolean value, or the getter's own error), `unexpected_error` should not occur in normal use and indicates an internal state inconsistency in the library. If you encounter it otherwise, call `reset()` before trying again and consider reporting a bug.
+> **Note:** apart from invalid `forceTry()` options, which fail as `pre_operation_error` / `unexpected_error`, `unexpected_error` should not occur in normal use and indicates an internal state inconsistency in the library. If you encounter it otherwise, call `reset()` before trying again and consider reporting a bug. Its `error` is always a `RetryUtilsErrRunnerUnexpectedError`; the failure itself is on its `originalError`: for invalid `forceTry()` options, a `TypeError` for a non-boolean value or the error an option getter threw. A thrown value that is not an `Error` is wrapped in one, with the value on `cause`.
 
 ```typescript
 // Start and wait for completion

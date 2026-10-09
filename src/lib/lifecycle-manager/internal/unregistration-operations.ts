@@ -396,6 +396,16 @@ export class UnregistrationOperations {
     }
 
     if (progress.wasStopped) {
+      // Asked first, as the checks below follow caller code: `isComponentRunning()` is
+      // overridable, and an override can replace the registration - which the removal
+      // would then wipe by name - or begin a start or stop of its own.
+      const isRunningAgain = this.core.manager.isComponentRunning(name);
+      const replacedWhileChecking = this.refuseIfReplaced(attempt);
+
+      if (replacedWhileChecking !== undefined) {
+        return replacedWhileChecking;
+      }
+
       // A `component:stopped` listener may also have started it again, or begun another
       // stop. Removing it now would orphan that operation: a start that finished on an
       // unregistered component left whatever it brought up running, owned by nothing.
@@ -407,7 +417,7 @@ export class UnregistrationOperations {
 
       // Or started it again and it is already up: a start that settles within the
       // same turn is past `starting` by now.
-      if (this.core.manager.isComponentRunning(name)) {
+      if (isRunningAgain) {
         this.core.logger
           .entity(name)
           .warn('Component was started again while it was being stopped');

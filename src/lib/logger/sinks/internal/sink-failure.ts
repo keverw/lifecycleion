@@ -1,6 +1,9 @@
 import type { LogEntry, LogSink } from '../../types';
 import { reportThroughHandler } from '../../../internal/failure-reporter';
-import { reportToConsole } from '../../../internal/report-to-console';
+import {
+  isConsoleReportActive,
+  reportToConsole,
+} from '../../../internal/report-to-console';
 import { describeError } from '../../../to-error';
 import { reportSinkFailure } from '../../internal/sink-failure-routing';
 
@@ -166,14 +169,21 @@ export interface SinkFailure {
  */
 export type SinkErrorHandler = (failure: SinkFailure) => void | Promise<void>;
 
-/** Preserve explicit handlers, otherwise offer the failure to every owning logger. */
+/**
+ * Preserve explicit handlers, otherwise offer the failure to every owning logger.
+ *
+ * Answers whether the report went out: `false` when it was suppressed because a console
+ * report was in progress, the check `reportThroughHandler` makes.
+ */
 export function reportSinkError(
   sink: LogSink,
   failure: SinkFailure,
   handler: SinkErrorHandler | undefined,
   line: () => string,
   options: { label: string; isDiagnostic?: boolean; onSettled?: () => void },
-): void {
+): boolean {
+  const didReport = !isConsoleReportActive();
+
   reportThroughHandler(
     options.isDiagnostic === true
       ? undefined
@@ -195,6 +205,8 @@ export function reportSinkError(
     line,
     { handlerName: `${options.label} onError`, onSettled: options.onSettled },
   );
+
+  return didReport;
 }
 
 /**

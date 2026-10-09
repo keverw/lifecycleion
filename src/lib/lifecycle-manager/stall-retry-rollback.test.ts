@@ -140,7 +140,14 @@ describe('LifecycleManager - stall retry and rollback', () => {
     await manager.startComponent('db');
     await manager.startComponent('api');
     await manager.stopComponent('api');
-    expect((await manager.stopComponent('db')).success).toBe(true);
+    // A stalled dependent holds `db` back from an individual stop.
+    expect(
+      (
+        await manager.stopComponent('db', {
+          allowStopWithRunningDependents: true,
+        })
+      ).success,
+    ).toBe(true);
     await manager.registerComponent(new FailsStart(logger, 'z', ['db']));
 
     const result = await manager.startAllComponents({
@@ -630,7 +637,8 @@ describe('LifecycleManager - stall retry and rollback', () => {
     expect(result.stalledComponents?.map((stall) => stall.name)).toEqual([
       'stalls',
     ]);
-    expect(hasReport(reports, 'lifecycle-manager shutdown pass')).toBe(true);
+    // Left as the pass found it, without reading its status.
+    expect(hasReport(reports, 'lifecycle-manager shutdown pass')).toBe(false);
   });
 
   for (const phase of ['graceful', 'force'] as const) {

@@ -16,12 +16,16 @@ import {
  * Every report the ledger makes is about lines that will not arrive, so the sink sends it
  * as `disposition: 'lost'` with `entry` as the sample. The sink owns the error class, the
  * routing and `lastError`; the ledger owns when a report is owed.
+ *
+ * Answers whether the report went out. `false` - suppressed, because a console report was
+ * in progress - gives back a once-only claim, so the report is still made for the next
+ * line lost the same way.
  */
 export type LossReporter = (
   kind: 'close' | 'queue_full',
   message: string,
   entry: LogEntry | undefined,
-) => void;
+) => boolean;
 
 /** `1 entry` or `N entries`, for a loss report's message. */
 export function describeEntryCount(count: number): string {
@@ -79,13 +83,17 @@ export class LossLedger {
    * entry is counted under `'close'`; only the first of each origin is reported, since an
    * application still logging through a thirty-second close would otherwise get a callback
    * per line. The queued entries `close()` abandons are {@link abandon}'s; these are the
-   * ones refused at the door.
+   * ones refused at the door. A report suppressed because a console report was in progress
+   * does not count as that first one.
    */
   public refuseAfterClose(entry: LogEntry, message: () => string): void {
     this.count('close');
 
-    if (this.closeRefusalReport.claim(entry)) {
-      this.report('close', message(), entry);
+    if (
+      this.closeRefusalReport.claim(entry) &&
+      !this.report('close', message(), entry)
+    ) {
+      this.closeRefusalReport.release(entry);
     }
   }
 
@@ -100,7 +108,8 @@ export class LossLedger {
    * trouble. A diagnostic's report goes only to the console, so it is latched separately
    * and cannot silence the report owed for application entries dropped after it. The
    * sample is a dropped entry, never a surviving one, so a handler that writes `'lost'`
-   * lines elsewhere cannot duplicate one still queued.
+   * lines elsewhere cannot duplicate one still queued. A report suppressed because a
+   * console report was in progress does not count as the episode's.
    */
   public evict(
     queue: Array<{ entry: LogEntry }>,
@@ -118,7 +127,9 @@ export class LossLedger {
       return;
     }
 
-    this.report('queue_full', message(limit), dropped.entry);
+    if (!this.report('queue_full', message(limit), dropped.entry)) {
+      this.queueFullReport.release(dropped.entry);
+    }
   }
 
   /**

@@ -20,6 +20,8 @@ function makeLedger(): { ledger: LossLedger; reports: Report[] } {
   const reports: Report[] = [];
   const ledger = new LossLedger((kind, message, lost) => {
     reports.push({ kind, message, entry: lost });
+
+    return true;
   });
 
   return { ledger, reports };
@@ -112,4 +114,33 @@ test('the breakdown is a copy that always sums to the total', () => {
     close: 0,
   });
   expect(ledger.droppedEntries).toBe(3);
+});
+
+test('a suppressed report does not spend the once-only report it was claimed for', () => {
+  const reports: string[] = [];
+  let isSuppressed = true;
+  const ledger = new LossLedger((_kind, message) => {
+    if (isSuppressed) {
+      return false;
+    }
+
+    reports.push(message);
+
+    return true;
+  });
+
+  ledger.refuseAfterClose(entry('inside a console report'), () => 'refused');
+  const queue = [{ entry: entry('a') }, { entry: entry('b') }];
+  ledger.evict(queue, 1, () => 'evicted');
+
+  isSuppressed = false;
+  ledger.refuseAfterClose(entry('after'), () => 'refused after');
+  ledger.refuseAfterClose(entry('later'), () => 'refused later');
+  queue.push({ entry: entry('c') });
+  ledger.evict(queue, 1, () => 'evicted after');
+  queue.push({ entry: entry('d') });
+  ledger.evict(queue, 1, () => 'evicted later');
+
+  expect(reports).toEqual(['refused after', 'evicted after']);
+  expect(ledger.droppedByKind()).toMatchObject({ close: 3, queue_full: 3 });
 });
