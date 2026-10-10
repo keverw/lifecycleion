@@ -4,7 +4,6 @@ import { MAX_TIMER_MS, resolveTimeoutMS } from '../../../internal/timer-limits';
 import {
   DEFAULT_MAX_QUEUE_SIZE,
   DEFAULT_MAX_RETRIES,
-  hasRetryRoom,
   UNLIMITED_QUEUE,
   resolveMaxQueueSize,
   resolveMaxRetries,
@@ -104,14 +103,5 @@ describe('resolveMaxRetries', () => {
   test('floors a usable request', () => {
     expect(resolveMaxRetries(3)).toBe(3);
     expect(resolveMaxRetries(7.9)).toBe(7);
-  });
-});
-
-describe('hasRetryRoom', () => {
-  test('leaves room only below the cap, and always without one', () => {
-    expect(hasRetryRoom([1, 2], 3)).toBe(true);
-    // A retry into a full queue would be evicted at once, so it is no retry.
-    expect(hasRetryRoom([1, 2, 3], 3)).toBe(false);
-    expect(hasRetryRoom([1, 2, 3], undefined)).toBe(true);
   });
 });

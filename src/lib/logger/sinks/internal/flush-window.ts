@@ -1,15 +1,31 @@
 import { raceDeadline } from '../../../internal/race-deadline';
 
 /**
- * What a flush answers: the shape `FileSink.flush()` returns.
+ * What one flush window counted.
  *
  * `entriesWritten` and `entriesFailed` are counted from where the previous flush stopped
  * counting rather than from this call's entry - see {@link FlushWindows} for why.
  */
 export interface FlushWindowResult {
+  /** Nothing lost, nothing left waiting, and the deadline not reached. */
   success: boolean;
+  /**
+   * Entries written since the previous flush returned, or since the sink was made.
+   *
+   * Counted from the last flush rather than from this call's entry, as `entriesFailed`
+   * is: a sink is written to between flushes, not only while one is waiting, so a window
+   * that opened at the call would answer for none of it.
+   */
   entriesWritten: number;
+  /**
+   * Entries lost since the previous flush returned - retries exhausted, evicted at
+   * `maxQueueSize`, or abandoned by `close()`.
+   *
+   * `getHealth().droppedEntries` is the cumulative figure. Successive flushes partition
+   * the losses between them, so each one is reported exactly once.
+   */
   entriesFailed: number;
+  /** Whether the flush ran out of time. */
   timedOut: boolean;
 }
 

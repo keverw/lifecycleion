@@ -1,5 +1,10 @@
 import { expect, test } from 'bun:test';
-import { Backoff } from './reopen-backoff';
+import {
+  Backoff,
+  OPEN_RETRY_BACKOFF,
+  openRetryBackoff,
+  setOpenRetryBackoffForTesting,
+} from './reopen-backoff';
 
 test('a run starts at initialMS and doubles up to maxMS', () => {
   const backoff = new Backoff({ initialMS: 1000, maxMS: 30_000 });
@@ -22,26 +27,12 @@ test('reset starts the next failure on a fresh run', () => {
   expect(backoff.next()).toBe(1000);
 });
 
-test('peek reports the next wait without counting a failure', () => {
-  const backoff = new Backoff({ initialMS: 1000, maxMS: 5000 });
-
-  expect(backoff.peek()).toBe(1000);
-  expect(backoff.peek()).toBe(1000);
-  expect(backoff.isAtRest).toBe(true);
-
-  backoff.next();
-  expect(backoff.peek()).toBe(2000);
-  expect(backoff.next()).toBe(2000);
-});
-
 test('initialMS equal to maxMS is a flat cooldown', () => {
   const backoff = new Backoff({ initialMS: 1000, maxMS: 1000 });
 
-  expect(backoff.peek()).toBe(1000);
   expect(Array.from({ length: 4 }, () => backoff.next())).toEqual([
     1000, 1000, 1000, 1000,
   ]);
-  expect(backoff.peek()).toBe(1000);
 });
 
 test('maxMS caps the first wait as well', () => {
@@ -49,4 +40,22 @@ test('maxMS caps the first wait as well', () => {
 
   expect(backoff.next()).toBe(500);
   expect(backoff.next()).toBe(500);
+});
+
+test('the open backoff is 1 s doubling to a 5 s cap, overridable for tests', () => {
+  const backoff = new Backoff(openRetryBackoff());
+
+  expect(Array.from({ length: 5 }, () => backoff.next())).toEqual([
+    1000, 2000, 4000, 5000, 5000,
+  ]);
+
+  setOpenRetryBackoffForTesting({ initialMS: 10, maxMS: 20 });
+
+  try {
+    expect(openRetryBackoff()).toEqual({ initialMS: 10, maxMS: 20 });
+  } finally {
+    setOpenRetryBackoffForTesting(undefined);
+  }
+
+  expect(openRetryBackoff()).toEqual(OPEN_RETRY_BACKOFF);
 });

@@ -32,11 +32,12 @@ import { endStreamWithin } from './internal/end-stream';
 import { FormatReportScheduler } from './internal/format-report-scheduler';
 import { NonBlockingPipeStream } from './internal/non-blocking-pipe-stream';
 import type { OutageReporter } from './internal/outage-reporter';
+import { openRetryBackoff } from './internal/reopen-backoff';
 import {
   DeliveryEngine,
-  PRE_ENGINE_BEHAVIOR,
   type DeliveryReportOptions,
   type DeliverySlot,
+  type FlushResult,
   type OpenResult,
   type WriteOutcome,
 } from './internal/delivery-engine';
@@ -47,6 +48,7 @@ export type {
   SinkFailureDisposition,
   SinkFailureKind,
 } from './internal/sink-failure';
+export type { FlushResult } from './internal/delivery-engine';
 
 export interface NamedPipeSinkOptions {
   pipePath: string;
@@ -91,8 +93,8 @@ export interface NamedPipeSinkOptions {
   onError?: SinkErrorHandler;
   formatter?: (entry: LogEntry) => string;
   /**
-   * Cap on entries queued while the pipe is unavailable. Defaults to 10,000; pass `-1` to
-   * hold everything with no cap.
+   * Cap on entries held - queued, or handed to the pipe and not yet confirmed. Defaults to
+   * 10,000; pass `-1` to hold everything with no cap.
    *
    * A named pipe with no reader is the ordinary case for this sink - the reader restarts,
    * or has not started yet - and every line logged in the meantime is held. Without a cap
@@ -122,18 +124,16 @@ export interface NamedPipeSinkOptions {
 }
 
 /**
- * What a `NamedPipeSink` will tell you about itself.
- *
- * The shape `FileSink.getHealth()` returns, plus the one thing only this sink has
- * (`isReconnecting`). The two sinks now answer a failure the same way, and there was no
- * reason for only one of them to be able to say how that was going: this sink exposed a
- * single `droppedEntryCount` getter, so a queue growing behind a pipe nobody was reading
- * was invisible until entries started falling off the end of it.
+ * What a `NamedPipeSink` will tell you about itself: the shape `FileSink.getHealth()`
+ * returns. The two sinks answer a failure the same way, and there was no reason for only
+ * one of them to be able to say how that was going: this sink exposed a single
+ * `droppedEntryCount` getter, so a queue growing behind a pipe nobody was reading was
+ * invisible until entries started falling off the end of it.
  */
 export interface NamedPipeSinkHealth {
   /** No failed writes since the last successful one, and the pipe is open. */
   isHealthy: boolean;
-  /** Entries rendered and waiting for the pipe. */
+  /** Entries not yet written or given up on, those in flight included. */
   queueSize: number;
   /**
    * Entries this sink did not deliver - evicted at `maxQueueSize`, out of retries, still
@@ -165,16 +165,6 @@ export type ReconnectStatus =
   | { success: false; reason: 'already_reconnecting' }
   | { success: false; reason: 'closed' }
   | { success: false; reason: 'error'; error: Error };
-
-/**
- * How long the sink waits between automatic reopen attempts.
- *
- * A reopen is a `stat` plus an `open`, and a dead pipe is exactly when the application is
- * logging hardest, so one attempt per entry would answer an outage with a syscall storm.
- * A second is short enough that a reader restarting is picked up promptly and long enough
- * that a pipe which is never coming back costs nothing to keep asking about.
- */
-const REOPEN_COOLDOWN_MS = 1000;
 
 /**
  * The `errno` an `O_NONBLOCK` open for writing gives when the FIFO has no reader.
@@ -227,10 +217,6 @@ export class NamedPipeSink implements LogSink {
    * {@link DeliveryEngine}.
    */
   private readonly engine: DeliveryEngine;
-  /** Whether the one buffered-bytes loss report at close has gone out. See {@link endStreamOnClose}. */
-  private didReportPostCloseLoss = false;
-  /** Streams whose buffered-byte loss close() has already reported. */
-  private readonly closeAbandonedStreams = new WeakSet<fs.WriteStream>();
   /**
    * Failures already reported from a write callback, so the stream's own `'error'` event
    * does not report them a second time.
@@ -309,8 +295,10 @@ export class NamedPipeSink implements LogSink {
       maxQueueSize,
       maxRetries,
       closeTimeoutMS: this.closeTimeoutMS,
-      // Flat: see {@link REOPEN_COOLDOWN_MS}.
-      backoff: { initialMS: REOPEN_COOLDOWN_MS, maxMS: REOPEN_COOLDOWN_MS },
+      // A reopen is a `stat` plus an `open`, and a dead pipe is exactly when the
+      // application is logging hardest, so only this timer asks: the first attempt of an
+      // outage at once, then 1 s doubling to 5 s. See `OPEN_RETRY_BACKOFF`.
+      backoff: openRetryBackoff(),
       messages: {
         queueFull: (limit) =>
           `Pipe queue is full (maxQueueSize=${limit}); dropping the oldest entries`,
@@ -318,10 +306,8 @@ export class NamedPipeSink implements LogSink {
           `Closed with ${describeEntryCount(count)} still queued for ${this.pipePath}; they were not written`,
         refusedAfterClose: () =>
           `Entry logged after close() began for ${this.pipePath}; it was not written, and further ones are counted in droppedEntries without being reported`,
-        failedAfterClose: () =>
-          `Write to ${this.pipePath} failed after the sink was closed; the entry was not written`,
-        notRetained: (attempts) =>
-          `Write to ${this.pipePath} failed after ${String(attempts)} attempts; the entry could not be retained for retry and was not written`,
+        unconfirmed: (attempts) =>
+          `Write to ${this.pipePath} was never confirmed by a stream since replaced, after ${String(attempts)} attempts; the entry was given up on and may not have been written`,
         outageCap: (maxReports) =>
           `Reported ${String(maxReports)} distinct failures opening the named pipe at ${this.pipePath}; further ones are not reported until it opens`,
         reopenFailed: () => 'Failed to initialize pipe connection',
@@ -349,7 +335,6 @@ export class NamedPipeSink implements LogSink {
           },
         ),
       hasHandler: () => this.onError !== undefined,
-      compat: PRE_ENGINE_BEHAVIOR,
     });
 
     // Nothing observes the attempt until `close()` races it or `reconnect()` awaits it;
@@ -459,11 +444,41 @@ export class NamedPipeSink implements LogSink {
    * Refused while closing, and while the current stream still holds writes for the reader
    * (see {@link refuseReconnect}). Waits for an open already in flight rather than racing
    * it. A failed reconnect reports its failure through `onError` every time: the
-   * deduplication that keeps an automatic retry from calling it once a second is
+   * deduplication that keeps an automatic retry from calling it every few seconds is
    * deliberately not applied to an attempt the caller asked for by name.
    */
   public async reconnect(): Promise<ReconnectStatus> {
     return await this.engine.reopenNow();
+  }
+
+  /**
+   * Wait for every queued line to be written, and say what happened since the last flush.
+   *
+   * Resolves when the queue is empty; while the pipe is not open, once an attempt to open
+   * it made after this call has failed - a pipe with no reader fails at once - or at once
+   * when the next attempt falls after the deadline (`success: false`, `timedOut: false`,
+   * the lines still queued in `entriesQueued`); or at the deadline (`timedOut: true`).
+   * Successive flushes partition what was written and lost between them.
+   *
+   * @param requestedTimeoutMS Maximum time to wait in milliseconds (default: 30000ms /
+   *        30s). Null or undefined uses the default. Invalid values reject before a
+   *        flush starts: `NaN` and other non-numbers produce TypeError; negative
+   *        values produce RangeError. `Infinity` is capped
+   *        at the largest timer delay; zero keeps its immediate deadline semantics.
+   */
+  public async flush(
+    requestedTimeoutMS: number | null = DEFAULT_CLOSE_TIMEOUT_MS,
+  ): Promise<FlushResult> {
+    // Read before validating, so the whole call is inside its own budget.
+    const startTime = Date.now();
+    // Validated before joining the flush queue or advancing any counting window.
+    const timeoutMS = resolveTimeoutMS(
+      requestedTimeoutMS,
+      DEFAULT_CLOSE_TIMEOUT_MS,
+      'NamedPipeSink flush timeoutMS',
+    );
+
+    return await this.engine.flush(timeoutMS, startTime);
   }
 
   public close(): Promise<void> {
@@ -589,14 +604,18 @@ export class NamedPipeSink implements LogSink {
   }
 
   /**
-   * End the stream for `close()`, within what is left of the close's budget.
+   * End the stream for `close()`, within what is left of the close's budget: the engine's
+   * `end`.
    *
    * What is left of the *whole* close's budget, not a fresh one, so the open wait, the
    * drain and this flush share one deadline. Bounded and floored as `endStreamWithin`
    * describes: `end()` flushes before it calls back, and a FIFO with no reader cannot
    * flush. Held open by its timer, since the caller is awaiting this close and the
    * stream's own retries keep nothing alive: unreferenced, a stalled reader let the
-   * process exit before the report below went out.
+   * process exit before the engine's report of the writes it failed went out.
+   *
+   * Resolves with the bytes the stream still held, which that report names. A throw from
+   * `end()` is said here, since nothing else knows of it.
    */
   private async endStreamOnClose(timeoutMS: number): Promise<number> {
     if (!this.pipeStream || this.pipeStream.destroyed) {
@@ -605,42 +624,10 @@ export class NamedPipeSink implements LogSink {
 
     const stream = this.pipeStream;
 
-    // A throw from `end()` is held for `onAbandon`, which always follows it, so the one
-    // failure is said once: as the cause of the buffered-loss report when there is one,
-    // and on its own otherwise.
-    let endFailure: { error: unknown } | undefined;
-
     const bytesLeft = await endStreamWithin(stream, timeoutMS, {
       shouldUnref: false,
-      onAbandon: (bufferedBytes) => {
-        // Marked first, so the write callbacks `destroy()` fails are counted as this
-        // close's loss rather than reported one by one, whatever the report below does.
-        this.closeAbandonedStreams.add(stream);
-
-        // Report buffered loss before close resolves: the write callbacks errored by
-        // destroy() can arrive later, after a shutdown handler has already exited.
-        // Callbacks count the entries, but the byte summary is their only report - which
-        // is why it is `'lost'`, where `FileSink`'s is `'no_entry'`: these bytes are lines
-        // the reader did not take, each counted as dropped.
-        if (bufferedBytes > 0 && !this.didReportPostCloseLoss) {
-          this.didReportPostCloseLoss = true;
-
-          this.handleError(
-            'close',
-            new Error(
-              `Closed with ${String(bufferedBytes)} bytes still buffered for ${this.pipePath} (closeTimeoutMS=${String(this.closeTimeoutMS)}); the reader did not take them and they were not written`,
-              endFailure === undefined
-                ? undefined
-                : { cause: endFailure.error },
-            ),
-            { disposition: 'lost' },
-          );
-        } else if (endFailure !== undefined) {
-          this.handleError('close', endFailure.error);
-        }
-      },
       onEndError: (error) => {
-        endFailure = { error };
+        this.handleError('close', error);
       },
     });
 
@@ -698,11 +685,9 @@ export class NamedPipeSink implements LogSink {
     const platform = os.platform();
     if (platform !== 'linux' && platform !== 'darwin') {
       // Through the dedup every other open failure goes through. Called directly, this one
-      // bypassed it and nothing marked the sink unusable, so each `write()` re-entered
-      // `openPipe` once `REOPEN_COOLDOWN_MS` had elapsed and a process logging once a
-      // second called the caller's `onError` once a second, forever - the flood
-      // {@link reportedOpenFailures} exists to prevent, on the one failure that is
-      // certain never to clear: the platform is what it is for the life of the process.
+      // bypassed it, so every reopen attempt called the caller's `onError` again, forever -
+      // the flood {@link reportedOpenFailures} exists to prevent, on the one failure that
+      // is certain never to clear: the platform is what it is for the life of the process.
       reportOpenFailure(
         'unsupported_platform',
         `Named pipes are only supported on Linux and macOS, current platform: ${platform}`,
@@ -821,7 +806,7 @@ export class NamedPipeSink implements LogSink {
         }
         // Automatic probes stay quiet: a pipe waiting for its reader is where this
         // sink starts. Only the explicit reconnect above reports this result;
-        // reporting every timer attempt would fire once a second while a reader is late.
+        // reporting every timer attempt would fire every few seconds while a reader is late.
         //
         // The one thing the blocking open did for free was wait: it promoted the stream and
         // flushed the queue the moment a reader arrived, with no timer and no further
@@ -840,9 +825,9 @@ export class NamedPipeSink implements LogSink {
         // afterwards, which is exactly that order, and they caught it.
         //
         // So: keep asking. The engine holds one unref'd timer at a time and spaces
-        // attempts, which makes this one `stat` and one non-blocking `open` per
-        // {@link REOPEN_COOLDOWN_MS} for as long as the pipe has no reader. That is a real
-        // cost where the blocked open had none, and it is the right side of the trade: the
+        // attempts, backing off to one `stat` and one non-blocking `open` every five
+        // seconds for as long as the pipe has no reader. That is a real cost where the
+        // blocked open had none, and it is the right side of the trade: the
         // blocked open's price was a libuv threadpool thread and a process that would not
         // exit.
         return unavailable;
@@ -913,9 +898,9 @@ export class NamedPipeSink implements LogSink {
       // Retried like every other failure: this is the `stat` failing - the FIFO deleted,
       // or not created yet - and it was once the one failure with no timer behind it at
       // all, so a `rm pipe; mkfifo pipe` during a quiet minute was picked up whenever
-      // traffic happened to resume. Flat rather than backed off, on the same reasoning
-      // {@link REOPEN_COOLDOWN_MS} gives: a pipe being recreated is meant to be picked up
-      // promptly, and the cost of asking is two syscalls.
+      // traffic happened to resume. On the same backoff as every other failure, capped at
+      // five seconds: a pipe being recreated is meant to be picked up promptly, and the
+      // cost of asking is two syscalls.
       reportOpenFailure(
         openFailureKind(error),
         `Could not open named pipe at ${this.pipePath}: ${describeError(error)}`,
@@ -942,7 +927,9 @@ export class NamedPipeSink implements LogSink {
     const shouldSuppressStreamFailure = this.consoleFailedStreams.has(stream);
     this.diagnosticFailedStreams.delete(stream);
     this.consoleFailedStreams.delete(stream);
-    if (this.closeAbandonedStreams.has(stream)) {
+    // `close()` has finished with the queue: a stream it ended failing as it was destroyed
+    // has already been answered for, write by write, before `close()` resolved.
+    if (this.engine.isClosed) {
       return;
     }
     // A stream this sink has already moved on from - ended by `reconnect()`, replaced
@@ -1116,13 +1103,6 @@ export class NamedPipeSink implements LogSink {
         // it, which is noisier than ideal but never silent.
         if (typeof error === 'object') {
           this.suppressedWriteErrors.add(error);
-        }
-
-        // `close()` gave up on this stream and has already reported the bytes it held.
-        if (this.closeAbandonedStreams.has(stream)) {
-          done({ status: 'abandoned' });
-
-          return;
         }
 
         // Never replay a record whose prefix may already have been consumed.

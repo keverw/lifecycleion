@@ -31,16 +31,21 @@ test('a FileSink setup outage holds lines without counting losses or failed writ
   });
   try {
     sink.write(entry('held during setup'));
-    const result = await sink.flush(200);
-    expect(result.entriesFailed).toBe(0);
-    expect(result.timedOut).toBe(true);
+    // The next open attempt falls after this deadline, so the flush answers at once.
+    expect(await sink.flush(200)).toEqual({
+      success: false,
+      entriesWritten: 0,
+      entriesFailed: 0,
+      timedOut: false,
+      entriesQueued: 1,
+    });
     expect(sink.getHealth()).toMatchObject({
       isHealthy: false,
       isInitialized: false,
       consecutiveFailures: 0,
       queueSize: 1,
       droppedEntries: 0,
-      droppedByKind: { setup: 0, write: 0 },
+      droppedByKind: { write: 0, close: 0 },
     });
     expect(
       failures.filter((failure) => failure.attempt !== undefined),
@@ -109,8 +114,10 @@ test('a failed rotation reopen holds the line and clears initialized health unti
     await fs.writeFile(logDir, 'not a directory');
     sink.write(entry('rotation cannot reopen'));
     expect(await sink.flush(200)).toMatchObject({
+      success: false,
       entriesFailed: 0,
-      timedOut: true,
+      timedOut: false,
+      entriesQueued: 1,
     });
     expect(sink.getHealth()).toMatchObject({
       isInitialized: false,

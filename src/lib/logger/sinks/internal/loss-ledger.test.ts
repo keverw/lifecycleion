@@ -109,7 +109,6 @@ test('the breakdown is a copy that always sums to the total', () => {
   expect(ledger.droppedByKind()).toEqual({
     queue_full: 0,
     write: 1,
-    setup: 0,
     format: 2,
     close: 0,
   });

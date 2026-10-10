@@ -1,4 +1,3 @@
-import { raceDeadline } from '../../internal/race-deadline';
 import { isNullish } from '../../internal/is-nullish';
 import fs, { promises as fsPromises } from 'fs';
 import { describeError, toError } from '../../to-error';
@@ -29,26 +28,25 @@ import { FormatReportScheduler } from './internal/format-report-scheduler';
 import { Backoff, openRetryBackoff } from './internal/reopen-backoff';
 import {
   DeliveryEngine,
-  FILE_SINK_PRE_ENGINE_BEHAVIOR,
   type DeliverySlot,
+  type FlushResult,
   type OpenContext,
   type OpenResult,
   type OpenRouting,
   type WriteOutcome,
 } from './internal/delivery-engine';
-import type { FlushWindow } from './internal/flush-window';
 
 import type { LogEntry, LogSink, LoggerDiagnostic } from '../types';
 import { LogLevel, getLogLevel } from '../types';
 import { diagnosticEntry } from '../internal/diagnostic-entry';
 import { isDiagnosticEntry } from '../internal/sink-failure-routing';
-import { sleep } from '../../sleep';
 
 export type {
   SinkErrorHandler,
   SinkFailure,
   SinkFailureKind,
 } from './internal/sink-failure';
+export type { FlushResult } from './internal/delivery-engine';
 
 /**
  * How many names one rotation will try before it accepts a collision.
@@ -163,8 +161,8 @@ export interface FileSinkOptions {
   closeTimeoutMS?: number | null;
   minLevel?: LogLevel;
   /**
-   * Cap on entries waiting to be written. Defaults to 10,000; pass `-1` to hold
-   * everything with no cap.
+   * Cap on entries waiting to be written, the one in flight included. Defaults to 10,000;
+   * pass `-1` to hold everything with no cap.
    *
    * The queue grows whenever writes fail or stall - a full disk, a directory that went
    * away, a slow volume - and every queued entry holds its rendered line *and* the
@@ -198,6 +196,7 @@ export interface FileSinkOptions {
 
 export interface FileSinkHealth {
   isHealthy: boolean;
+  /** Entries not yet written or given up on, the one in flight included. */
   queueSize: number;
   lastError?: Error;
   /**
@@ -208,35 +207,18 @@ export interface FileSinkHealth {
    * so counting it would report a working sink as broken.
    */
   consecutiveFailures: number;
+  /** Whether the log file is open. */
   isInitialized: boolean;
+  /** Whether an automatic reopen of the log file is in flight. */
+  isReconnecting: boolean;
   /**
-   * Entries this sink did not deliver - evicted at `maxQueueSize`, or still queued when
-   * `close()` gave up on them. Always 0 when neither has happened.
+   * Entries this sink did not deliver - evicted at `maxQueueSize`, out of retries, still
+   * queued when `close()` gave up on them, or failed by a write `close()` ended. Always 0
+   * when none of that has happened.
    */
   droppedEntries: number;
   /** `droppedEntries` by reason. See {@link DroppedEntryCounts}. */
   droppedByKind: DroppedEntryCounts;
-}
-
-export interface FlushResult {
-  success: boolean;
-  /**
-   * Entries written since the previous flush returned, or since this sink was made.
-   *
-   * Counted from the last flush rather than from this call's entry, as
-   * {@link FlushResult.entriesFailed} is: a sink is written to between flushes, not only
-   * while one is waiting, so a window that opened at the call would answer for none of it.
-   */
-  entriesWritten: number;
-  /**
-   * Entries lost since the previous flush returned - retries exhausted, evicted at
-   * `maxQueueSize`, or abandoned by `close()`.
-   *
-   * `getHealth().droppedEntries` is the cumulative figure. Successive flushes partition
-   * the losses between them, so each one is reported exactly once.
-   */
-  entriesFailed: number;
-  timedOut: boolean;
 }
 
 /**
@@ -402,11 +384,10 @@ export class FileSink implements LogSink {
         release: () => {
           this.releaseStream();
         },
-        end: (timeoutMS, context) =>
-          this.endStreamOnClose(
-            timeoutMS,
-            context?.hasReportedInFlight === true,
-          ),
+        // On what is left of the *whole* close's budget, held open by its timer: the
+        // caller is awaiting this close, and the engine's report of what the end cost has
+        // to reach it before the process exits.
+        end: (timeoutMS) => this.endCurrentStream(timeoutMS, false),
         onClosed: () => {
           this.closed = true;
 
@@ -438,10 +419,8 @@ export class FileSink implements LogSink {
         // deliver.
         refusedAfterClose: () =>
           `Entry logged after close() began; it was not written, and further ones are counted in droppedEntries without being reported`,
-        failedAfterClose: () =>
-          `Write to ${this.currentLogFile ?? this.logDir} failed after the sink was closed; the entry was not written`,
-        notRetained: (attempts) =>
-          `Write to ${this.currentLogFile ?? this.logDir} failed after ${String(attempts)} attempts; the entry could not be retained for retry and was not written`,
+        unconfirmed: (attempts) =>
+          `Write to ${this.currentLogFile ?? this.logDir} was never confirmed by a stream since replaced, after ${String(attempts)} attempts; the entry was given up on and may not have been written`,
         outageCap: (maxReports) =>
           `Reported ${String(maxReports)} distinct failures setting up the log file in ${this.logDir}; further ones are not reported until it opens`,
         reopenFailed: () => 'Failed to set up the log file',
@@ -485,7 +464,6 @@ export class FileSink implements LogSink {
           },
         ),
       hasHandler: () => this.onError !== undefined,
-      compat: FILE_SINK_PRE_ENGINE_BEHAVIOR,
     });
 
     // Opened asynchronously, by the engine: lines written meanwhile are queued, and sent
@@ -574,14 +552,20 @@ export class FileSink implements LogSink {
       consecutiveFailures: health.consecutiveFailures,
       // This sink's own: whether a stream is open, which a failed write clears at once.
       isInitialized: this.isInitialized,
+      isReconnecting: health.isReconnecting,
       droppedEntries: health.droppedEntries,
       droppedByKind: health.droppedByKind,
     };
   }
 
   /**
-   * Flush all pending writes and wait for completion
-   * Returns statistics about the flush operation
+   * Wait for every queued line to be written, and say what happened since the last flush.
+   *
+   * Resolves when the queue is empty; during an outage, once an attempt to open the file
+   * made after this call has failed, or at once when the next attempt falls after the
+   * deadline (`success: false`, `timedOut: false`, the lines still queued in
+   * `entriesQueued`); or at the deadline (`timedOut: true`). See
+   * {@link DeliveryEngine.flush}.
    * @param requestedTimeoutMS Maximum time to wait in milliseconds (default: 30000ms /
    *        30s). Null or undefined uses the default. Invalid values reject before a
    *        flush starts: `NaN` and other non-numbers produce TypeError; negative
@@ -598,17 +582,12 @@ export class FileSink implements LogSink {
       'FileSink flush timeoutMS',
     );
 
-    // The clock starts here, before the wait below rather than after it: `timeoutMS` is
+    // The clock starts here, before the wait rather than after it: `timeoutMS` is
     // documented as the maximum time this call takes, and an open that never settles is
     // exactly the case a caller sets one for.
     const startTime = Date.now();
 
-    // One flush at a time, each counting from where the last one stopped: see
-    // `FlushWindows`. The clock above is this call's, so a flush that waited behind another
-    // still answers within its own timeout.
-    return await this.engine.flushes.run(timeoutMS, (window) =>
-      this.flushWindow(timeoutMS, startTime, window),
-    );
+    return await this.engine.flush(timeoutMS, startTime);
   }
 
   /**
@@ -619,11 +598,6 @@ export class FileSink implements LogSink {
     // One close however many callers ask, published before any close-time callback can
     // re-enter close().
     return this.engine.close();
-  }
-
-  /** The flush the next one waits behind. See `FlushWindows`. */
-  private get pendingFlush(): Promise<void> {
-    return this.engine.flushes.settled;
   }
 
   /** The most recent open attempt, settled. Never rejects. */
@@ -692,45 +666,6 @@ export class FileSink implements LogSink {
     if (this.logFileStream === stream) {
       this.logFileStream = undefined;
       this.isInitialized = false;
-    }
-
-    return bytesLeft;
-  }
-
-  /**
-   * End the stream for `close()`: the engine's `end`.
-   *
-   * On what is left of the *whole* close's budget, so the open wait, the drain and the
-   * final flush share one deadline. Bounded and floored as `endStreamWithin` describes,
-   * and held open by its timer: the caller is awaiting this close, and the report below
-   * has to reach it before the process exits.
-   *
-   * What the flush timeout gave up on is said before the close resolves - the same report
-   * at the same moment as `NamedPipeSink.close()`. This sink writes one line at a time and
-   * waits for its callback, so the stream's buffer can hold nothing but the write that was
-   * in flight when the drain gave up, and the engine has already reported that one
-   * (`hasReportedInFlight`). This is the backstop for the case the model says cannot
-   * happen: bytes the stream still held at the timeout that no report has named. Skipped
-   * when the in-flight report fired, since it would describe the same bytes twice.
-   *
-   * `'no_entry'` and not counted, unlike `NamedPipeSink`'s `'lost'`: those bytes may still
-   * reach the file, since destroying the stream does not cancel a write already handed to
-   * the filesystem - the same unknown the in-flight report describes.
-   */
-  private async endStreamOnClose(
-    timeoutMS: number,
-    hasReportedInFlight: boolean,
-  ): Promise<number> {
-    const bytesLeft = await this.endCurrentStream(timeoutMS, false);
-
-    if (bytesLeft > 0 && !hasReportedInFlight) {
-      this.handleError(
-        'close',
-        new FileSinkError(
-          `Closed with ${String(bytesLeft)} bytes still buffered for ${this.currentLogFile ?? this.logDir} (closeTimeoutMS=${String(this.closeTimeoutMS)}); whether they reached the file is unknown`,
-        ),
-        { disposition: 'no_entry' },
-      );
     }
 
     return bytesLeft;
@@ -861,45 +796,6 @@ export class FileSink implements LogSink {
         release();
       },
     );
-  }
-
-  /** The body of {@link flush}, run one at a time in `window`; see there. */
-  private async flushWindow(
-    timeoutMS: number,
-    startTime: number,
-    window: FlushWindow,
-  ): Promise<FlushResult> {
-    // `window` counts from where the last flush stopped, and its baselines were read when
-    // this turn began rather than after the wait below, so a loss that lands while an open
-    // is still settling is inside this call's answer rather than deferred to the next one.
-    // See `FlushWindows` for why that is the window a caller is asking about.
-
-    // Wait for an open in flight, bounded by the caller's own budget. A `mkdir` or `open`
-    // hung on an unresponsive mount must not make `flush(1000)` never return at all - the
-    // shape a timeout exists to rule out.
-    const timeoutSentinel = { timedOut: true } as const;
-    const result = await raceDeadline(
-      this.initPromise,
-      // This call's budget includes time spent waiting behind another flush.
-      Math.max(0, timeoutMS - (Date.now() - startTime)),
-      () => timeoutSentinel,
-    );
-
-    if (result === timeoutSentinel) {
-      return window.settle(true);
-    }
-
-    // Wait for the queue to finish processing - lines in flight included - with timeout
-    while (!this.engine.isDrained) {
-      if (Date.now() - startTime > timeoutMS) {
-        // Timeout reached
-        return window.settle(true);
-      }
-
-      await sleep(10);
-    }
-
-    return window.settle(false);
   }
 
   /**

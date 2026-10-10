@@ -53,6 +53,8 @@ A modern, flexible logging library with sink-based architecture, template string
     - [Health Monitoring](#health-monitoring)
     - [Flush Pending Writes](#flush-pending-writes)
   - [NamedPipeSink](#namedpipesink)
+    - [Queueing, Outages and Close](#queueing-outages-and-close)
+    - [Pipe Readers and Reconnecting](#pipe-readers-and-reconnecting)
     - [Failure Shape](#failure-shape)
     - [Error Handling & Reconnection](#error-handling--reconnection)
     - [Custom Formatter](#custom-formatter)
@@ -1304,7 +1306,7 @@ new FileSink({
   maxSizeMB: 10, // Rotate at 10MB (default: 10)
   jsonFormat: true, // Use JSON format (default: false)
   maxRetries: 3, // Retry failed writes (default: 3)
-  maxQueueSize: 10_000, // Entries held while writes fail (default: 10,000; -1 = unlimited)
+  maxQueueSize: 10_000, // Entries held until written, the one in flight included (default: 10,000; -1 = unlimited)
   closeTimeoutMS: 30000, // Timeout for close() in ms (default: 30000)
   minLevel: LogLevel.INFO, // Minimum log level to write (default: INFO)
   onError: ({ kind, error, target, entry, attempt, disposition }) => {
@@ -1416,9 +1418,9 @@ const fileSink = new FileSink({
 });
 ```
 
-Two things to know about `failure.entry`. It is the full `LogEntry`, so it carries `params` as well as `redactedParams`: a handler that serializes the whole failure for paging or a backup sink is serializing the raw values, including any the log line masked. Forward `redactedParams ?? params`, or only `message`, rather than the entry itself. And a handler that logs the failure back through this sink is safe: the sink refuses, and counts in `droppedEntries`, a line from inside a `'format'` report that cannot render either, and reports its failure on the console rather than to the handler, which is what stops a failure carrying an unrenderable `entry` from reporting itself forever. `'format'` reports reach the handler one at a time: while it is working on one - until it settles, `async` or not - one more is held and delivered after it, and any others go to the console. A `'write'` failure is reported on every attempt, so a handler that logs each one through a sink that is also failing multiplies the queue by `maxRetries + 1` per line. The queue cap bounds it, but log elsewhere. That handler can also see one attempt twice: reported `'retrying'`, then, if its own line took the queue's last free slot or it closed the sink, reported again with the same `attempt` as `'lost'`. The later report is the final word.
+Two things to know about `failure.entry`. It is the full `LogEntry`, so it carries `params` as well as `redactedParams`: a handler that serializes the whole failure for paging or a backup sink is serializing the raw values, including any the log line masked. Forward `redactedParams ?? params`, or only `message`, rather than the entry itself. And a handler that logs the failure back through this sink is safe: the sink refuses, and counts in `droppedEntries`, a line from inside a `'format'` report that cannot render either, and reports its failure on the console rather than to the handler, which is what stops a failure carrying an unrenderable `entry` from reporting itself forever. `'format'` reports reach the handler one at a time: while it is working on one - until it settles, `async` or not - one more is held and delivered after it, and any others go to the console. A `'write'` failure is reported on every attempt, so a handler that logs each one through a sink that is also failing multiplies the queue by `maxRetries + 1` per line. The queue cap bounds it, but log elsewhere. A line reported `'retrying'` keeps its place in the queue whatever the handler does - its own lines cannot push it out, and a `close()` it calls takes the line in its drain. If the cap later drops that line, the handler hears a `'queue_full'` / `'lost'` report naming it: the final word.
 
-A log file that cannot be set up (`kind: 'setup'` - the directory or file cannot be created or opened, as with `EACCES`, `EISDIR` or `EMFILE`) is an outage, not a failed write. Lines wait in the queue, bounded by `maxQueueSize`, with their retries unspent, and are written in order once the file opens; during a long outage the oldest are dropped as `queue_full`. The sink retries the open on its own timer - at once, then after 1 s, doubling to 5 s - so it recovers without further log calls, and reports each distinct failure once per outage, with `disposition: 'no_entry'` and no `entry`. A rotation that cannot reopen the file holds its line the same way. A write that fails on an open file is retried at once; one that takes the stream down waits for the reopen. `flush()` during an outage waits within its own timeout and leaves the lines queued. `close()` during an outage keeps trying to open the file for up to 500 ms, then reports the held lines once as abandoned. The timer does not keep the process alive, so a process that exits without `close()` loses the lines it was holding.
+A log file that cannot be set up (`kind: 'setup'` - the directory or file cannot be created or opened, as with `EACCES`, `EISDIR` or `EMFILE`) is an outage, not a failed write: lines are held until the file opens, as described under [Queueing, Outages and Close](#queueing-outages-and-close). A rotation that cannot reopen the file holds its line the same way. A write that fails on an open file is retried at once; one that takes the stream down waits for the reopen.
 
 A close-time `'lost'` or `'no_entry'` still reaches an explicit `onError` callback. Without one, an attached sink uses its owner's diagnostic channel; a closing logger offers the report to diagnostic listeners and uses console when none are present, without writing to closing sinks. A standalone sink reports to console. A `logger.error(...)` inside an explicit handler during `Logger.close()` is dropped (a closed logger's `handleLog` writes nothing) and does not fall through to console, because the handler succeeded. The example uses `console.error` for that reason.
 
@@ -1433,15 +1435,15 @@ const health = fileSink.getHealth();
 console.log(health);
 // {
 //   isHealthy: true,           // false if any consecutive failures
-//   queueSize: 0,              // Number of pending writes
+//   queueSize: 0,              // Lines not yet written, the one in flight included
 //   lastError: undefined,      // Last error that occurred
 //   consecutiveFailures: 0,    // Consecutive failed *writes* since the last success
-//   isInitialized: true,       // Whether sink is ready
+//   isInitialized: true,       // Whether the log file is open
+//   isReconnecting: false,     // Whether an automatic reopen is in flight
 //   droppedEntries: 0,         // Lines this sink did not deliver
 //   droppedByKind: {           // The same lines, by reason - always sums to droppedEntries
 //     queue_full: 0,           //   evicted at maxQueueSize
 //     write: 0,                //   out of retries writing to a destination
-//     setup: 0,                //   always 0: lines are held while a destination cannot be opened
 //     format: 0,               //   could not be rendered at all (a 'fallback' marker is not a drop)
 //     close: 0,                //   refused or abandoned because close() had begun
 //   },
@@ -1485,21 +1487,29 @@ Wait for all pending writes to complete and get statistics:
 const result = await fileSink.flush();
 console.log(result);
 // {
-//   success: true,        // false if any entries failed or timeout
+//   success: true,        // false if any entries failed, were left queued, or timeout
 //   entriesWritten: 42,   // Entries written since the last flush
 //   entriesFailed: 0,     // Entries this sink lost since the last flush - retries
 //                         // exhausted, evicted at maxQueueSize, or abandoned by close()
-//   timedOut: false       // true if flush timed out
+//   timedOut: false,      // true if flush timed out
+//   entriesQueued: 0      // Entries still waiting when the flush returned
 // }
 
 // Custom timeout (10 seconds)
 const result = await fileSink.flush(10000);
 if (result.timedOut) {
   console.warn(
-    `Flush timed out with ${fileSink.getHealth().queueSize} entries still pending`,
+    `Flush timed out with ${result.entriesQueued} entries still pending`,
   );
 }
 ```
+
+During an outage `flush()` does not wait out its whole timeout: once an attempt to open
+the destination made after the call has failed - or at once, when the next attempt
+falls after the deadline - it returns `success: false` and `timedOut: false`, with the
+held lines counted in `entriesQueued`. It never hurries the reopen backoff. A flush
+called while an open is in flight waits for it. `NamedPipeSink.flush()` behaves the same
+way.
 
 An omitted or `null` flush timeout uses 30,000ms. Invalid arguments reject the returned promise
 before a flush is queued or its counters change: negative values produce `RangeError`;
@@ -1512,45 +1522,69 @@ A named-pipe record that fails after a partial low-level write is reported throu
 
 Writes logs to a named pipe (FIFO) for log aggregation. Linux/macOS only.
 
-Both queueing sinks, `FileSink` and `NamedPipeSink`, answer a failed write the same way:
+#### Queueing, Outages and Close
 
-- the entry goes back on the queue and is retried up to `maxRetries` (default 3).
+Both queueing sinks, `FileSink` and `NamedPipeSink`, run on one delivery engine, so they
+queue, retry, reopen, flush and close the same way:
+
+- every line waits in the sink's own queue until its write is confirmed. `maxQueueSize`
+  (default 10,000; `-1` holds entries without a limit) counts every line not yet
+  delivered, including the ones handed to the destination and not yet confirmed, and
+  `getHealth().queueSize` is that same count. Lines stay in the sink's queue rather
+  than in Node's unbounded stream buffer, so the cap and `queueSize` mean what they say
+- a failed write keeps its place and is retried up to `maxRetries` (default 3).
   An `onError` handler hears every failed attempt (`'retrying'`, then `'lost'`); without
   one, only the attempt that loses the line is offered to the owning logger or written to
   the console, so a failing destination does not produce `maxRetries + 1` diagnostics per
   line
-- the queue holds up to `maxQueueSize` entries (default 10,000). Pass `-1` to hold
-  entries without a queue-size limit
-- over the cap, the **oldest** entry is dropped and counted in
-  `getHealth().droppedEntries` and `getHealth().droppedByKind.queue_full`. The first
-  drop of an application entry in each overflow episode is reported through `onError`
-  with `kind: 'queue_full'` and `disposition: 'lost'`. A dropped diagnostic entry is
+- a destination that cannot be opened - a log directory that cannot be created, a pipe
+  with no reader - spends no retries. Lines are held in order and go out once it opens,
+  and the sink reopens it on its own `unref`'d timer: at once, then after 1 s, doubling to
+  5 s, starting over after a successful write. Writes never start an attempt themselves,
+  so a busy log loop during an outage costs nothing extra, and neither sink needs an API
+  call to recover. Each distinct open failure is reported once per outage with
+  `disposition: 'no_entry'` (at most 8, then one notice); a pipe with no reader stays
+  quiet unless `reconnect()` asked. A long outage shows as `queue_full` evictions
+- over the cap, the **oldest** line not yet handed to the destination is dropped and
+  counted in `getHealth().droppedEntries` and `getHealth().droppedByKind.queue_full`; a
+  line in flight is never dropped, since it may already be written. The first drop of an
+  application entry in each overflow episode is reported through `onError` with
+  `kind: 'queue_full'` and `disposition: 'lost'`. A dropped diagnostic entry is
   reported once per episode on the console instead, so it never takes the place of
-  that report. Further overflow reports are suppressed until the queue drains. The callback carries a dropped entry as a sample,
-  not every lost entry. Without an `onError` handler, an attached sink offers the
-  report to its owning logger's diagnostic channel (see
-  [Dynamic Sink Management](#dynamic-sink-management)), and a standalone sink writes it
-  to guarded `console.error`
+  that report. Further overflow reports are suppressed until the queue drains. The
+  callback carries a dropped entry as a sample, not every lost entry - except that a
+  line an `onError` handler was told is `'retrying'` gets a report of its own when it is
+  dropped. Without an `onError` handler, an attached sink offers the report to its owning
+  logger's diagnostic channel (see [Dynamic Sink Management](#dynamic-sink-management)),
+  and a standalone sink writes it to guarded `console.error`
+- delivery across a reconnect is at-least-once. A write still in flight on a connection
+  the sink has replaced holds newer lines back, so the log keeps its order, for up to a
+  second; past that it counts as a spent attempt and is written again. A line can then
+  appear twice; it is never lost to the reconnect
 - `getHealth().droppedEntries` means "lines this sink did not deliver": evicted at the
   cap, out of retries, unrenderable, still queued when `close()` gave up on them, or
-  known to have failed in flight during close. FileSink reports a timed-out stream
-  write with `disposition: 'no_entry'` because delivery is unknown; that uncertain entry
-  is not counted as dropped. NamedPipeSink counts an in-flight record as dropped when
-  its callback confirms failure, including a partial write. `droppedByKind` splits the
-  same total by reason (`queue_full`, `write`, `setup`, `format`, `close`), named as `onError`
-  names them, so health alone says why. A close that abandons a queue
-  reports it once as a `'close'` failure with `disposition: 'lost'` rather than once per
-  entry
-- a destination that cannot be opened spends no retries: lines wait in the queue while the
-  sink reopens it on its own timer, so an outage shows as `queue_full` evictions rather
-  than per-line losses, and neither sink needs an API call to recover
-- one difference: how often each reopens. A FileSink retries a log file it cannot open at
-  once, then after 1 s, doubling to 5 s; a NamedPipeSink reopens its pipe about once a
-  second
+  failed by the final flush at close. `droppedByKind` splits the same total by reason
+  (`queue_full`, `write`, `format`, `close`), named as `onError` names them, so health
+  alone says why
+- `flush(timeoutMS)` waits for the queue to empty and counts what was written and lost
+  since the previous flush; during an outage it returns once an open attempt fails, with
+  the held lines in `entriesQueued` (see [Flush Pending Writes](#flush-pending-writes))
+- `close()` refuses new lines, then drains what the destination takes within
+  `closeTimeoutMS`. With lines queued and nothing open, it first keeps trying to open the
+  destination for up to 500 ms, polled every 50 ms. At the deadline, lines never handed
+  to the destination are reported once as abandoned (`'close'` / `'lost'`, with the
+  oldest as a sample). Writes already handed over are left to the destination's final
+  flush, within what is left of the budget: those that then fail are counted under
+  `close` and reported once as `'lost'`, with how many bytes the destination still held,
+  and those that never answer are reported once as `'no_entry'` - their delivery is
+  unknown - and are not counted. All of it is said before `close()` resolves; a callback
+  arriving afterwards is ignored
+- the reopen timer does not keep the process alive, so a process that exits without
+  `close()` loses the lines it was holding during an outage
 - `minLevel` / `setMinLevel()` / `getMinLevel()` filter by level, defaulting to
   `LogLevel.INFO` as `ConsoleSink` does. A `raw` entry is always written
-- entries stay in the sink's own queue until the destination is genuinely writable, so the
-  cap and `getHealth().queueSize` mean what they say
+
+#### Pipe Readers and Reconnecting
 
 For `NamedPipeSink`, "writable" means the FIFO has actually opened, which does not happen
 until something opens the read end. Until then `getHealth().isInitialized` is `false` and
@@ -1560,7 +1594,7 @@ success, and it reports it immediately: the sink asks whether a reader is there 
 non-blocking open and gets `ENXIO` straight back when there is none. When it succeeds, that
 same descriptor becomes the writable connection. There is no second blocking open in a
 probe-to-stream gap. That is also what keeps a reader-less FIFO from parking a file-I/O
-thread and holding the whole process open. The sink keeps asking on an `unref`'d one-second
+thread and holding the whole process open. The sink keeps asking on its `unref`'d reopen
 timer, so it opens and flushes the queue on its own if a reader turns up later.
 
 `close()` gets one last chance at the pipe. If entries are still queued and the sink has no
@@ -1583,7 +1617,7 @@ const pipeSink = new NamedPipeSink({
   jsonFormat: true,
   minLevel: LogLevel.INFO, // Minimum log level to write (default: INFO)
   maxRetries: 3, // Retry failed writes (default: 3)
-  maxQueueSize: 10_000, // Entries held while the pipe is unusable (default: 10,000; -1 = unlimited)
+  maxQueueSize: 10_000, // Entries held until written, in flight included (default: 10,000; -1 = unlimited)
   closeTimeoutMS: 30000, // Budget shared by all of close(): the init wait, the queue drain, and the final flush (default: 30000)
   onError: ({ kind, error, target }) => {
     console.error(`Pipe ${kind} failed for ${target}:`, error.message);
@@ -1642,22 +1676,19 @@ interface SinkFailure {
 }
 ```
 
-A `close()` that gives up at `closeTimeoutMS` reports differently on the two sinks,
-because they know different things. `FileSink` waits on one write at a time, so the write
-it abandons may already be on disk: reported as `'close'` / `'no_entry'` and not counted
-in `droppedEntries`. That is its only report: if the write fails after `close()` resolves,
-the failure is neither reported again nor counted. An entry still queued, or waiting on a
-rotation, has never reached the stream, so it is included in the queued-entry loss report
-and counted under `close`. Bytes the stream still held when the
-final flush timed out are reported the same way, before `close()` resolves.
-`NamedPipeSink` hands the stream a burst, so what it abandons is whatever is still
-buffered for a reader that did not take it: reported once as `'close'` / `'lost'` before
-`close()` resolves, with each entry counted as its write callback fails. Neither report
-carries an `entry` - the bytes in the stream's buffer are no longer lines the sink can
-name - so a fallback handler learns that lines were lost, and how many from
-`getHealth().droppedEntries`. A separate abandoned-queue report carries its oldest entry
-as a sample. Stream destruction after a buffered-byte report does not generate additional
-per-entry reports or count against write health. Concurrent `close()` calls share the same
+A `close()` that gives up at `closeTimeoutMS` reports the same way on both sinks, on the
+evidence it has. Lines it never handed to the destination - still queued, or waiting on a
+FileSink rotation - are reported once as abandoned (`'close'` / `'lost'`, with the oldest
+as a sample) and counted under `close`. Writes it had handed over are left to the
+destination's final flush: those whose callbacks then report failure are counted under
+`close` and reported once as `'lost'`, naming how many failed and how many bytes the
+stream still held, with one of them as a sample; those that have not answered shortly
+after are reported once as `'no_entry'` without an `entry` and are not counted in
+`droppedEntries`, since a write already handed to the filesystem or the FIFO may well have
+arrived. Every one of these reports goes out before `close()` resolves, and a callback
+arriving afterwards is ignored: the report already sent is that line's only word.
+Concurrent `close()` calls share the same
+drain and teardown.Concurrent `close()` calls share the same
 drain and teardown. Those reports still reach `onError`. That is the sink's
 callback, not `writeDiagnostic`. If this sink is owned by a `Logger` that is itself
 closing, do not log them through that logger, because a closed logger's `handleLog` writes

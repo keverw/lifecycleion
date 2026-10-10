@@ -59,7 +59,7 @@ interface ReportBudget {
  *
  * A queueing sink retries a destination it cannot open on its own timer, which is what
  * makes recovery independent of traffic, and which without this would make a mistyped
- * path call the caller's `onError` once a second for the life of the process. The
+ * path call the caller's `onError` every few seconds for the life of the process. The
  * reporting the sinks already do elsewhere works exactly this way: `queueFullReport` for
  * the queue cap.
  *

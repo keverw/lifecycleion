@@ -57,12 +57,13 @@ export type SinkFailureKind =
  *
  * - `'queue_full'` - evicted at `maxQueueSize` to make room.
  * - `'write'` - out of retries writing to a destination.
- * - `'setup'` - out of retries opening, creating, or rotating a destination.
  * - `'format'` - could not be rendered, so there was never a line to write.
  * - `'close'` - refused or abandoned because `close()` had begun.
+ *
+ * A destination that cannot be opened loses no line by itself: lines wait in the queue
+ * until it opens, and an outage shows up as `'queue_full'` or `'close'`.
  */
-export type DroppedEntryKind =
-  'queue_full' | 'write' | 'setup' | 'format' | 'close';
+export type DroppedEntryKind = 'queue_full' | 'write' | 'format' | 'close';
 
 /**
  * How many lines were lost to each reason. The counts always sum to `droppedEntries`; a
@@ -73,7 +74,7 @@ export type DroppedEntryCounts = Record<DroppedEntryKind, number>;
 
 /** A zeroed {@link DroppedEntryCounts}. */
 export function createDroppedEntryCounts(): DroppedEntryCounts {
-  return { queue_full: 0, write: 0, setup: 0, format: 0, close: 0 };
+  return { queue_full: 0, write: 0, format: 0, close: 0 };
 }
 
 /** What became of the line a failure is about. See {@link SinkFailure.disposition}. */
@@ -146,12 +147,11 @@ export interface SinkFailure {
  *
  * Never called for an ordinary success, and never called more than once for one failure -
  * including a failed write that a stream reports twice, once through the write callback
- * and again as an `'error'` event - with one exception, which this handler causes itself.
- * A failed write is reported `'retrying'` before its retry is committed, so a handler that
- * fills the queue's last slot by logging through the same sink, or closes the sink, leaves
- * the line nowhere to go: it is then reported again, with the same `attempt`, as `'lost'`.
- * The later report is the final word. Without it, a fallback consumer told `'retrying'`
- * would never learn that the line did not arrive.
+ * and again as an `'error'` event. A line reported `'retrying'` keeps its place in the
+ * queue whatever this handler does: lines it logs through the same sink cannot push it
+ * out, and a `close()` it calls takes the line in its drain. Should the queue cap later
+ * drop that line, it is reported again, as `'queue_full'` / `'lost'` with its `entry` -
+ * the final word, so a fallback consumer told `'retrying'` learns that it did not arrive.
  *
  * May be `async`. A handler that throws *or rejects* is reported to the console rather
  * than being allowed to turn one failure into two - see `reportThroughHandler`. Declaring

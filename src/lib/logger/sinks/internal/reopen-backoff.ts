@@ -36,17 +36,12 @@ export class Backoff {
     return this.currentMS === 0;
   }
 
-  /** The wait {@link next} would hand out, without counting a failure. */
-  public peek(): number {
-    return Math.min(
+  /** Count a failure and return how long to wait before the next attempt. */
+  public next(): number {
+    this.currentMS = Math.min(
       this.currentMS === 0 ? this.initialMS : this.currentMS * BACKOFF_FACTOR,
       this.maxMS,
     );
-  }
-
-  /** Count a failure and return how long to wait before the next attempt. */
-  public next(): number {
-    this.currentMS = this.peek();
 
     return this.currentMS;
   }

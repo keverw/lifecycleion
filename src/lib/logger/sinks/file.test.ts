@@ -762,6 +762,7 @@ describe('FileSink', () => {
     const health = sink.getHealth();
     expect(health.isHealthy).toBe(true);
     expect(health.isInitialized).toBe(true);
+    expect(health.isReconnecting).toBe(false);
     expect(health.consecutiveFailures).toBe(0);
     expect(health.queueSize).toBe(0);
 
@@ -1339,7 +1340,6 @@ describe('FileSink', () => {
     expect(sink.getHealth().droppedByKind).toEqual({
       queue_full: 0,
       write: 0,
-      setup: 0,
       format: 1,
       close: 0,
     });
@@ -1860,13 +1860,14 @@ describe('FileSink - bounded queue', () => {
     const sink = new FileSink({ logDir: tmpDir.path, basename: 'flush-valid' });
     await sink.flush();
     const state = sink as unknown as {
-      flushWindow(timeoutMS: number, startTime: number): Promise<unknown>;
+      engine: { flush(timeoutMS: number, startTime: number): Promise<unknown> };
     };
-    const flushWindow = spyOn(state, 'flushWindow').mockResolvedValue({
+    const engineFlush = spyOn(state.engine, 'flush').mockResolvedValue({
       success: true,
       entriesWritten: 0,
       entriesFailed: 0,
       timedOut: false,
+      entriesQueued: 0,
     });
     try {
       for (const [requested, expected] of [
@@ -1878,10 +1879,10 @@ describe('FileSink - bounded queue', () => {
         [3e9, 2_147_483_647],
       ] as const) {
         await sink.flush(requested);
-        expect(flushWindow.mock.calls.at(-1)?.[0]).toBe(expected);
+        expect(engineFlush.mock.calls.at(-1)?.[0]).toBe(expected);
       }
     } finally {
-      flushWindow.mockRestore();
+      engineFlush.mockRestore();
       await sink.close();
     }
   });
@@ -1892,12 +1893,16 @@ describe('FileSink - bounded queue', () => {
       basename: 'flush-invalid',
     });
     await sink.flush();
-    const state = sink as unknown as {
-      pendingFlush: Promise<void>;
-      flushWindow(timeoutMS: number, startTime: number): Promise<unknown>;
-    };
-    const pendingBefore = state.pendingFlush;
-    const flushWindow = spyOn(state, 'flushWindow');
+    const engine = (
+      sink as unknown as {
+        engine: {
+          flushes: { settled: Promise<void> };
+          flush(timeoutMS: number, startTime: number): Promise<unknown>;
+        };
+      }
+    ).engine;
+    const pendingBefore = engine.flushes.settled;
+    const engineFlush = spyOn(engine, 'flush');
     const timer = spyOn(globalThis, 'setTimeout');
     try {
       for (const requested of [
@@ -1919,11 +1924,11 @@ describe('FileSink - bounded queue', () => {
         );
         expect((error as Error).message).toContain('FileSink flush timeoutMS');
       }
-      expect(state.pendingFlush).toBe(pendingBefore);
-      expect(flushWindow).not.toHaveBeenCalled();
+      expect(engine.flushes.settled).toBe(pendingBefore);
+      expect(engineFlush).not.toHaveBeenCalled();
       expect(timer).not.toHaveBeenCalled();
     } finally {
-      flushWindow.mockRestore();
+      engineFlush.mockRestore();
       timer.mockRestore();
       await sink.close();
     }
@@ -2329,7 +2334,6 @@ describe('FileSink - async self-logging onError', () => {
       expect(sink.getHealth().droppedByKind).toEqual({
         queue_full: 0,
         write: 0,
-        setup: 0,
         format: 3,
         close: 0,
       });
@@ -2514,11 +2518,7 @@ describe('FileSink - async self-logging onError', () => {
     expect(byKind.close).toBe(1);
     expect(byKind.write).toBe(0);
     expect(
-      byKind.queue_full +
-        byKind.write +
-        byKind.setup +
-        byKind.format +
-        byKind.close,
+      byKind.queue_full + byKind.write + byKind.format + byKind.close,
     ).toBe(health.droppedEntries);
   });
 });
@@ -2798,6 +2798,7 @@ describe('FileSink - accounting across a rotation', () => {
         entriesWritten: 0,
         entriesFailed: 0,
         timedOut: true,
+        entriesQueued: 0,
       });
       internals.totalWritten++;
     } finally {
@@ -3049,7 +3050,7 @@ describe('FileSink - entries refused at the door', () => {
       (failure) => failure.entry?.message === 'into a destroyed stream',
     );
     expect(lost.map((failure) => failure.kind)).not.toContain('setup');
-    expect(sink.getHealth().droppedByKind.setup).toBe(0);
+    expect(sink.getHealth().droppedByKind.write).toBe(1);
 
     await sink.close();
   });
@@ -3157,12 +3158,11 @@ describe('FileSink - entries refused at the door', () => {
     expect(closeFailures[0]?.disposition).toBe('lost');
   });
 
-  test('a close whose flush times out with bytes still buffered says so before it resolves', async () => {
-    // This sink writes one line at a time and waits for the callback, so the stream's
-    // buffer holds nothing the in-flight report does not already name. The backstop for
-    // the case that model rules out: a stream that still holds bytes when `end()` times
-    // out is reported once, as `'close'` / `'no_entry'`, before `await close()` answers -
-    // the same report at the same moment as `NamedPipeSink`.
+  test('a close whose final flush times out reports the write it still held once, before it resolves', async () => {
+    // This sink writes one line at a time and waits for the callback, so what the stream
+    // still holds when `end()` times out is the write in flight. Its delivery is unknown -
+    // destroying the stream does not cancel a write already handed to the filesystem - so
+    // it is reported once, as `'close'` / `'no_entry'`, and not counted.
     const failures: SinkFailure[] = [];
     const sink = new FileSink({
       logDir: tmpDir.path,
@@ -3175,11 +3175,13 @@ describe('FileSink - entries refused at the door', () => {
 
     await sink.flush();
 
-    // Stand in for a stream on a hung mount: bytes accepted, `end()` never calls back.
+    // Stand in for a stream on a hung mount: the line accepted, neither its callback nor
+    // `end()`'s ever called.
     let destroyed = 0;
     const stuck = {
       destroyed: false,
       writableLength: 4096,
+      write: () => true,
       end: () => {},
       once: () => {},
       on: () => {},
@@ -3191,6 +3193,12 @@ describe('FileSink - entries refused at the door', () => {
     };
 
     (sink as unknown as { logFileStream: unknown }).logFileStream = stuck;
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'stuck',
+      message: 'stuck',
+    });
 
     await sink.close();
 
@@ -3199,10 +3207,13 @@ describe('FileSink - entries refused at the door', () => {
     expect(destroyed).toBe(1);
     expect(closeFailures).toHaveLength(1);
     expect(closeFailures[0]?.disposition).toBe('no_entry');
-    expect(closeFailures[0]?.error.message).toContain(
-      '4096 bytes still buffered',
+    expect(closeFailures[0]?.error.message).toMatch(
+      /write still in flight.*unknown/i,
     );
-    expect(sink.getHealth().droppedEntries).toBe(0);
+    expect(sink.getHealth()).toMatchObject({
+      queueSize: 0,
+      droppedEntries: 0,
+    });
   });
 
   test('a rotation that finds no free archive name says so before it overwrites', async () => {
@@ -3471,8 +3482,11 @@ describe('FileSink - entries written during close', () => {
   );
 
   test.each([false, true])(
-    'reports a failed line lost when retry room is consumed (callback=%p)',
+    'a failed line keeps its place in a full queue (callback=%p)',
     async (shouldFillFromCallback) => {
+      // A line in flight counts against `maxQueueSize` and is never evicted, so the lines
+      // written while it is out - by the caller, or by a handler told it is retrying - are
+      // the ones the cap takes, and the failed line goes out again.
       const failures: SinkFailure[] = [];
       const sink = new FileSink({
         logDir: tmpDir.path,
@@ -3481,7 +3495,7 @@ describe('FileSink - entries written during close', () => {
         onError: (failure) => {
           failures.push(failure);
           if (shouldFillFromCallback && failure.disposition === 'retrying') {
-            sink.write(makeEntry('callback survivor'));
+            sink.write(makeEntry('callback line'));
           }
         },
       });
@@ -3505,35 +3519,30 @@ describe('FileSink - entries written during close', () => {
         await started.promise;
         if (!shouldFillFromCallback) {
           sink.write(makeEntry('evicted while busy'));
-          sink.write(makeEntry('survivor'));
-          // The aggregate overflow report has already fired before the failed retry.
+          sink.write(makeEntry('also evicted'));
+          // One report for the overflow episode.
           expect(failures.filter((f) => f.kind === 'queue_full')).toHaveLength(
             1,
           );
         }
         pending.reject(new Error('write failed'));
         await sink.flush();
-        const finalLoss = failures.filter(
-          (f) => f.disposition === 'lost' && f.entry?.message === 'failed line',
-        );
-        expect(finalLoss).toHaveLength(1);
-        expect(finalLoss[0]?.kind).toBe('write');
-        if (shouldFillFromCallback) {
-          // The documented exception to one report per failure: the handler's own line
-          // took the retry's slot, so the same attempt is reported again as the final word.
-          expect(
-            failures
-              .filter((f) => f.entry?.message === 'failed line')
-              .map((f) => [f.disposition, f.attempt]),
-          ).toEqual([
-            ['retrying', 1],
-            ['lost', 1],
-          ]);
-        }
-        expect(sink.getHealth().droppedByKind.write).toBe(1);
-        expect(sink.getHealth().droppedByKind.queue_full).toBe(
-          shouldFillFromCallback ? 0 : 1,
-        );
+        expect(
+          failures
+            .filter((f) => f.entry?.message === 'failed line')
+            .map((f) => [f.disposition, f.attempt]),
+        ).toEqual([['retrying', 1]]);
+        expect(
+          failures
+            .filter((f) => f.kind === 'queue_full')
+            .map((f) => f.entry?.message),
+        ).toEqual([
+          shouldFillFromCallback ? 'callback line' : 'evicted while busy',
+        ]);
+        expect(sink.getHealth().droppedByKind).toMatchObject({
+          write: 0,
+          queue_full: shouldFillFromCallback ? 1 : 2,
+        });
         expect(attempts).toBe(2);
         expect(sink.getHealth().queueSize).toBe(0);
       } finally {
@@ -3550,7 +3559,7 @@ describe('FileSink - entries written during close', () => {
     // ever going to drain again: `getHealth().queueSize` sat above zero after `await
     // close()` resolved, the line was reported `'retrying'` for `maxRetries` rounds against
     // a sink that could only answer `Cannot write to closed sink`, and only then counted.
-    // `NamedPipeSink.requeue` takes the same view this now does: past the close, the entry
+    // `NamedPipeSink` takes the same view this now does: past the close, the entry
     // is lost.
     const failures: SinkFailure[] = [];
     const sink = new FileSink({
@@ -3668,8 +3677,7 @@ describe('FileSink - entries written during close', () => {
     expect(sink.getHealth().lastError?.message).toContain('still queued');
     // Its pass is over, so the sink no longer holds the entry or its params.
     expect(
-      (sink as unknown as { abandonedInFlightEntry?: unknown })
-        .abandonedInFlightEntry,
+      (sink as unknown as { inFlightEntry?: unknown }).inFlightEntry,
     ).toBeUndefined();
   });
 
@@ -4261,7 +4269,7 @@ test('bytes a rotation abandons are reported as a write loss, not a close', asyn
   }
 });
 
-test('concurrent and reentrant file closes share one teardown and buffered-byte report', async () => {
+test('concurrent and reentrant file closes share one teardown and in-flight report', async () => {
   const directory = new TmpDir({ unsafeCleanup: true });
   await directory.initialize();
   const failures: SinkFailure[] = [];
@@ -4281,6 +4289,7 @@ test('concurrent and reentrant file closes share one teardown and buffered-byte 
     const stuck = {
       destroyed: false,
       writableLength: 10,
+      write: () => true,
       end: () => {
         ends++;
       },
@@ -4292,6 +4301,12 @@ test('concurrent and reentrant file closes share one teardown and buffered-byte 
       },
     };
     (sink as unknown as { logFileStream: unknown }).logFileStream = stuck;
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'stuck',
+      message: 'stuck',
+    });
     const first = sink.close();
     const second = sink.close();
     expect(second).toBe(first);
@@ -4300,7 +4315,7 @@ test('concurrent and reentrant file closes share one teardown and buffered-byte 
     expect(sink.close()).toBe(first);
     expect(ends).toBe(1);
     expect(failures).toHaveLength(1);
-    expect(failures[0]?.error.message).toContain('bytes still buffered');
+    expect(failures[0]?.error.message).toContain('still in flight');
   } finally {
     await sink.close();
     await directory.cleanup();
@@ -4321,7 +4336,8 @@ test('a diagnostic eviction does not silence the overflow report for application
   const sink = new FileSink({
     logDir: directory.path,
     basename: 'diagnostic-overflow',
-    maxQueueSize: 1,
+    // The line in flight takes one place.
+    maxQueueSize: 2,
     onError: (failure) => {
       failures.push(failure);
     },
@@ -4568,6 +4584,7 @@ describe('FileSink - holds lines while its log file cannot be opened', () => {
       entriesWritten: 3,
       entriesFailed: 0,
       timedOut: false,
+      entriesQueued: 0,
     });
 
     const [logFile] = await fsPromises.readdir(`${blocker}/logs`);
@@ -4640,21 +4657,26 @@ describe('FileSink - holds lines while its log file cannot be opened', () => {
     expect(sink.getHealth()).toMatchObject({
       queueSize: 0,
       droppedEntries: 2,
-      droppedByKind: { close: 2, setup: 0, write: 0 },
+      droppedByKind: { close: 2, write: 0 },
     });
   });
 
-  test('flush() during an outage waits within its own timeout and leaves the lines queued', async () => {
+  test('flush() during an outage returns once an open attempt fails, with the lines still queued', async () => {
     const { sink } = await makeUnopenableSink();
 
     sink.write(makeEntry('flushed mid-outage'));
 
-    expect(await sink.flush(100)).toEqual({
+    const startedAt = Date.now();
+
+    expect(await sink.flush(5000)).toEqual({
       success: false,
       entriesWritten: 0,
       entriesFailed: 0,
-      timedOut: true,
+      timedOut: false,
+      entriesQueued: 1,
     });
+    // The next attempt, not the deadline.
+    expect(Date.now() - startedAt).toBeLessThan(1000);
     expect(sink.getHealth().queueSize).toBe(1);
 
     await sink.close();
