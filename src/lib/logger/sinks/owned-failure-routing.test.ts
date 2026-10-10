@@ -159,7 +159,9 @@ test('named-pipe format fallback reaches owner and marked entries stay terminal'
   });
   const lines = muteConsoleError();
   try {
-    await (sink as unknown as { initPromise: Promise<void> }).initPromise;
+    await (
+      sink as unknown as { engine: { readonly openSettled: Promise<void> } }
+    ).engine.openSettled;
     reports.length = 0;
     sink.write(entry());
     expect(reports).toHaveLength(1);
@@ -227,12 +229,14 @@ test.each(['diagnostic', 'console'] as const)(
       closeTimeoutMS: 5,
     });
     const internals = sink as unknown as {
-      initPromise: Promise<void>;
+      engine: {
+        readonly openSettled: Promise<void>;
+        outages: { clear(): void };
+      };
       initializePipe: (
         diagnostic: boolean,
         suppress?: boolean,
       ) => Promise<void>;
-      reportedOpenFailures: Set<string>;
       writeQueue: { entry: LogEntry; shouldSuppressFailureReport?: boolean }[];
     };
     const reports: SinkFailureReport[] = [];
@@ -241,9 +245,9 @@ test.each(['diagnostic', 'console'] as const)(
     });
     const lines = muteConsoleError();
     try {
-      await internals.initPromise;
+      await internals.engine.openSettled;
       reports.length = 0;
-      internals.reportedOpenFailures.clear();
+      internals.engine.outages.clear();
       if (origin === 'console') {
         const consoleShim = spyOn(console, 'error').mockImplementation(() => {
           sink.write(entry('forwarded terminal report'));
@@ -256,7 +260,7 @@ test.each(['diagnostic', 'console'] as const)(
       } else {
         sink.write(markDiagnosticEntry(entry()));
       }
-      await internals.initPromise;
+      await internals.engine.openSettled;
       await internals.initializePipe(
         origin === 'diagnostic',
         origin === 'console',
@@ -293,8 +297,9 @@ test('named-pipe terminal outage reports cannot spend the ordinary report budget
     closeTimeoutMS: 5,
   });
   const internals = sink as unknown as {
-    initPromise: Promise<void>;
     engine: {
+      readonly openSettled: Promise<void>;
+      outages: { clear(): void };
       reportOpenFailure: (
         kind: 'setup',
         message: string,
@@ -302,7 +307,6 @@ test('named-pipe terminal outage reports cannot spend the ordinary report budget
         diagnostic: boolean,
       ) => void;
     };
-    reportedOpenFailures: Set<string>;
   };
   const reports: SinkFailureReport[] = [];
   const release = registerSinkFailureReporter(sink, (report) => {
@@ -310,9 +314,9 @@ test('named-pipe terminal outage reports cannot spend the ordinary report budget
   });
   const lines = muteConsoleError();
   try {
-    await internals.initPromise;
+    await internals.engine.openSettled;
     reports.length = 0;
-    internals.reportedOpenFailures.clear();
+    internals.engine.outages.clear();
     for (let index = 0; index < 100; index++) {
       internals.engine.reportOpenFailure(
         'setup',

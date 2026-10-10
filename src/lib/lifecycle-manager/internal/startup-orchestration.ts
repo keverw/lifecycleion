@@ -94,6 +94,9 @@ type ReconciliationOutcome =
   | { kind: 'result'; value: StartupResult }
   | { kind: 'rollback'; pending: Promise<void>; error: Error };
 
+/** A step's answer now, which reconciliation can give as well. */
+type ResultExit = { readonly kind: 'result'; readonly value: StartupResult };
+
 /**
  * How a step of the batch loop ends the loop: leaving it for the deadline (`break`),
  * answering now, or answering once the rollback the step began settles. The step only
@@ -102,7 +105,7 @@ type ReconciliationOutcome =
  */
 type BatchExit =
   | { readonly kind: 'break' }
-  | { readonly kind: 'result'; readonly value: StartupResult }
+  | ResultExit
   | {
       readonly kind: 'rollback';
       readonly pending: Promise<void>;
@@ -967,13 +970,7 @@ export class StartupOrchestration {
         // elsewhere, as a member answered `component_already_starting` is. A rollback
         // now would leave out what that start brings up, and the dependencies it needs
         // would refuse it, so the pass stops as `partial_state` without rolling back.
-        return this.independentOperationExit(
-          run,
-          name,
-          this.core.state.componentStates.get(name) === 'starting'
-            ? 'startup'
-            : 'stop',
-        );
+        return this.inFlightOperationExit(run, name);
       }
       if (!isOptional) {
         return {
@@ -1038,11 +1035,25 @@ export class StartupOrchestration {
     run: StartupRun,
     name: string,
     operation: 'startup' | 'stop',
-  ): BatchExit {
+  ): ResultExit {
     return this.partialStateExit(
       run,
       `was interrupted by independent component ${operation}`,
       `Component "${name}" has an independent ${operation} in progress`,
+    );
+  }
+
+  /**
+   * {@link independentOperationExit} for a required member that reported an unexpected
+   * stop and is not up again, but has a start or stop a listener began still in flight.
+   */
+  private inFlightOperationExit(run: StartupRun, name: string): ResultExit {
+    return this.independentOperationExit(
+      run,
+      name,
+      this.core.state.componentStates.get(name) === 'starting'
+        ? 'startup'
+        : 'stop',
     );
   }
 
@@ -1051,7 +1062,7 @@ export class StartupOrchestration {
     run: StartupRun,
     abandonReason: string,
     reason: string,
-  ): BatchExit {
+  ): ResultExit {
     run.abandonReason = abandonReason;
     run.detachReason = 'partial bulk startup';
     return {
@@ -1199,6 +1210,11 @@ export class StartupOrchestration {
     // from that point, before any required-stop rollback decision is made.
     if (run.hasShutdownBegun()) {
       return { kind: 'result', value: this.abortOnShutdownSignal(run) };
+    }
+    // A required member whose restart is still in flight is owned elsewhere, as in
+    // the batch loop: the pass ends as `partial_state`, without the rollback.
+    if (reconciled.requiredInFlight !== undefined) {
+      return this.inFlightOperationExit(run, reconciled.requiredInFlight);
     }
     if (reconciled.requiredFailure) {
       return {

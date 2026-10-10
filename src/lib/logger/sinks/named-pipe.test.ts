@@ -171,6 +171,8 @@ async function waitForReaderData(
  * directly, or settles a write by hand, rather than going through `write()` and a stream.
  */
 interface EngineSeam {
+  /** The most recent open attempt, settled. Never rejects. */
+  readonly openSettled: Promise<void>;
   slots: Array<Record<string, unknown>>;
   inFlightCount: number;
   closing: boolean;
@@ -3864,11 +3866,11 @@ describe('NamedPipeSink', () => {
         failures.push(failure);
       },
     });
-    const internals = sink as unknown as { initPromise: Promise<void> };
+    const engine = engineOf(sink);
     muteConsoleError();
 
     try {
-      await internals.initPromise;
+      await engine.openSettled;
       sink.write(
         markDiagnosticEntry({
           timestamp: Date.now(),
@@ -3878,7 +3880,7 @@ describe('NamedPipeSink', () => {
         }),
       );
       // Let the automatic attempt that write started settle on its own.
-      await internals.initPromise;
+      await engine.openSettled;
       failures.length = 0;
 
       const status = await sink.reconnect();
@@ -4578,7 +4580,7 @@ describe('NamedPipeSink', () => {
 
   test('writes an entry queued before the pipe finishes opening', async () => {
     // A FIFO's write side does not open until a reader arrives, so on this sequence the
-    // `'open'` event lands while `close()` is still awaiting `initPromise` - during
+    // `'open'` event lands while `close()` is still awaiting the open attempt - during
     // `closing`. Refusing to promote the stream there left `pipeStream` undefined, which is
     // the one condition the drain loop will not wait on, so the backlog was abandoned with
     // a reader attached and consuming.
@@ -4928,13 +4930,12 @@ test('a reentrant pipe write follows already queued entries during a drain', asy
     onError: () => {},
   });
   const state = sink as unknown as {
-    initPromise: Promise<void>;
     pipeStream: unknown;
     writeEntry: (queued: { entry: LogEntry }) => void;
   };
   const engine = engineOf(sink);
   try {
-    await state.initPromise;
+    await engine.openSettled;
     state.pipeStream = { destroyed: false };
     engine.state = 'connected';
     const messages: string[] = [];
@@ -4976,11 +4977,10 @@ test('concurrent and reentrant pipe closes share one teardown and in-flight repo
     },
   });
   const state = sink as unknown as {
-    initPromise: Promise<void>;
     pipeStream: unknown;
   };
   try {
-    await state.initPromise;
+    await engineOf(sink).openSettled;
     failures.length = 0;
     let ends = 0;
     const stuck = {
@@ -5116,12 +5116,11 @@ test.each([
       },
     });
     const state = sink as unknown as {
-      initPromise: Promise<void>;
       pipeStream: unknown;
     };
     const endFailure = new Error('end failed');
     try {
-      await state.initPromise;
+      await engineOf(sink).openSettled;
       failures.length = 0;
       const failing = {
         destroyed: false,
@@ -5159,12 +5158,11 @@ test('without onError, a failed pipe write reaches the console only once it is l
     maxRetries: 2,
   });
   const state = sink as unknown as {
-    initPromise: Promise<void>;
     pipeStream: unknown;
-    engine: { state: string };
+    engine: { state: string; readonly openSettled: Promise<void> };
   };
   try {
-    await state.initPromise;
+    await state.engine.openSettled;
     captured.length = 0;
     state.pipeStream = {
       destroyed: false,
@@ -5209,9 +5207,8 @@ test('a queue_full report suppressed inside a console report leaves the episode 
       failures.push(failure);
     },
   });
-  const state = sink as unknown as { initPromise: Promise<void> };
   try {
-    await state.initPromise;
+    await engineOf(sink).openSettled;
     failures.length = 0;
     sink.write(entry('queued'));
     const consoleShim = spyOn(console, 'error').mockImplementation(() => {

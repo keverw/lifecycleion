@@ -30,7 +30,6 @@ import { describeEntryCount, describeWriteCount } from './internal/loss-ledger';
 import { endStreamWithin } from './internal/end-stream';
 import { FormatReportScheduler } from './internal/format-report-scheduler';
 import { NonBlockingPipeStream } from './internal/non-blocking-pipe-stream';
-import type { OutageReporter } from './internal/outage-reporter';
 import { openRetryBackoff } from './internal/reopen-backoff';
 import {
   DeliveryEngine,
@@ -447,19 +446,6 @@ export class NamedPipeSink implements LogSink {
     return this.engine.close();
   }
 
-  /** The most recent open attempt, settled. Never rejects. */
-  private get initPromise(): Promise<void> {
-    return this.engine.openSettled;
-  }
-
-  /**
-   * The open failures reported during this outage. See
-   * {@link DeliveryEngine.outages}; kept here under its old name as a seam.
-   */
-  private get reportedOpenFailures(): OutageReporter {
-    return this.engine.outages;
-  }
-
   /**
    * Whether this sink currently holds a stream it can still write through.
    *
@@ -637,7 +623,7 @@ export class NamedPipeSink implements LogSink {
     if (platform !== 'linux' && platform !== 'darwin') {
       // Through the dedup every other open failure goes through. Called directly, this one
       // bypassed it, so every reopen attempt called the caller's `onError` again, forever -
-      // the flood {@link reportedOpenFailures} exists to prevent, on the one failure that
+      // the flood {@link DeliveryEngine.outages} exists to prevent, on the one failure that
       // is certain never to clear: the platform is what it is for the life of the process.
       reportOpenFailure(
         'unsupported_platform',

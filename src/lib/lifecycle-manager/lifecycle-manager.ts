@@ -160,13 +160,6 @@ export class LifecycleManager
    * call can throw or reject at its call site. See {@link createGuardedLoggerService}.
    */
   private readonly logger: LoggerService;
-  /**
-   * The caller's own `Logger`, never wrapped. `enableLoggerExitHook` registers a
-   * `beforeExit` callback on it, and components build their own service loggers from the
-   * instance the caller handed them, so the object identity and behaviour here stay the
-   * caller's.
-   */
-  private readonly rootLogger: Logger;
   /** Typed event emitters, queued through the dispatcher. */
   private readonly lifecycleEvents: LifecycleManagerEvents;
   /** Transition depth and the notification queue, delivered through `deliverEvent()`. */
@@ -187,7 +180,6 @@ export class LifecycleManager
       throw new Error('LifecycleManager requires a root logger');
     }
 
-    this.rootLogger = rootLogger;
     this.config = resolveManagerConfig(options);
     // Guarded once, here, rather than at the ~140 call sites that log: the logger is
     // caller-supplied, and a method that throws or rejects would otherwise propagate
@@ -195,7 +187,7 @@ export class LifecycleManager
     // Its `entity()` cache keeps room for every registered component, so a bulk pass
     // logging each in turn reuses their children.
     this.logger = createGuardedLoggerService(
-      this.rootLogger.service(this.config.name),
+      rootLogger.service(this.config.name),
       {
         entityCacheReserve: () => this.state.components.length,
       },
@@ -209,7 +201,7 @@ export class LifecycleManager
       state: this.state,
       config: this.config,
       logger: this.logger,
-      rootLogger: this.rootLogger,
+      rootLogger,
       lifecycleEvents: this.lifecycleEvents,
       dispatcher: this.eventDispatcher,
       registryReads: new RegistrationReadTracker(() => this.state.components),

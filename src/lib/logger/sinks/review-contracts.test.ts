@@ -155,10 +155,10 @@ test('each explicit readerless reconnect reports setup details without optional 
   });
   try {
     const state = sink as unknown as {
-      initPromise: Promise<void>;
+      engine: { readonly openSettled: Promise<void> };
       initializePipe(): Promise<void>;
     };
-    await state.initPromise;
+    await state.engine.openSettled;
     expect(failures).toEqual([]);
     for (let attempt = 0; attempt < 2; attempt++) {
       expect(await sink.reconnect()).toMatchObject({
@@ -195,7 +195,9 @@ test('a NamedPipeSink initialization failure omits entry and attempt properties'
     },
   });
   try {
-    await (sink as unknown as { initPromise: Promise<void> }).initPromise;
+    await (
+      sink as unknown as { engine: { readonly openSettled: Promise<void> } }
+    ).engine.openSettled;
     expect(failures).toHaveLength(1);
     expect(failures[0].kind).toBe('not_found');
     expect(Object.hasOwn(failures[0], 'entry')).toBe(false);

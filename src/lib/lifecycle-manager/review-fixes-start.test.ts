@@ -261,3 +261,50 @@ test('a per-name current start settlement agrees with the full map', async () =>
     await logger.close();
   }
 });
+
+test('a required member reconciled after a listener began starting it again ends the pass as partial_state', async () => {
+  const { logger, manager } = setup();
+  const a = new Plain(logger, 'a');
+  const b = new Plain(logger, 'b', ['a']);
+  const c = new Plain(logger, 'c');
+  const gate = deferred();
+  let restart: Promise<ComponentOperationResult> | undefined;
+  let starts = 0;
+  b.start = async (): Promise<void> => {
+    starts++;
+    if (starts > 1) {
+      await gate.promise;
+    }
+  };
+  // `b` was counted as started; its stop is met by reconciliation after `c`.
+  c.start = (): Promise<void> => {
+    (
+      b as unknown as { reportUnexpectedStop: () => boolean }
+    ).reportUnexpectedStop();
+    return Promise.resolve();
+  };
+  manager.on('component:unexpected-stop', () => {
+    restart ??= manager.startComponent('b', { allowDuringBulkStartup: true });
+  });
+  await manager.registerComponent(a);
+  await manager.registerComponent(b);
+  await manager.registerComponent(c);
+  try {
+    const result = await manager.startAllComponents();
+    expect(restart).toBeDefined();
+    expect(result).toMatchObject({
+      success: false,
+      code: 'partial_state',
+      startedComponents: ['a', 'c'],
+    });
+    // Not rolled back: the start in flight may need `a`.
+    expect(manager.getRunningComponentNames()).toEqual(['a', 'c']);
+    gate.resolve();
+    expect((await restart)?.success).toBe(true);
+    expect(manager.getRunningComponentNames()).toEqual(['a', 'c', 'b']);
+  } finally {
+    gate.resolve();
+    await manager.stopAllComponents();
+    await logger.close();
+  }
+});

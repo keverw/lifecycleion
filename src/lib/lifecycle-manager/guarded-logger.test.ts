@@ -14,6 +14,7 @@ import { ArraySink } from '../logger/sinks/array';
 import { BaseComponent } from './base-component';
 import { createGuardedLoggerService } from './guarded-logger';
 import { LifecycleManager } from './lifecycle-manager';
+import { coreOf } from './test-helpers';
 
 /** The `void`-returning log methods, in the order the guard declares them. */
 const LOG_METHODS = [
@@ -1114,15 +1115,12 @@ describe('LifecycleManager - a logger that cannot be trusted', () => {
 
     const manager = new LifecycleManager({ logger });
 
-    const internals = manager as unknown as {
-      rootLogger: Logger;
-      logger: LoggerService;
-    };
+    const internals = manager as unknown as { logger: LoggerService };
 
     // `enableLoggerExitHook`, `exit()`, and every component's own logger go through this
     // object, so it has to stay exactly what the caller passed in - same identity, same
     // methods, nothing added.
-    expect(internals.rootLogger).toBe(logger);
+    expect(coreOf(manager).rootLogger).toBe(logger);
     // eslint-disable-next-line @typescript-eslint/unbound-method -- identity again.
     expect(logger.service).toBe(serviceBefore);
     expect(Object.keys(logger)).toEqual(keysBefore);
