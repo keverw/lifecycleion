@@ -1,6 +1,6 @@
 # Plan: one delivery engine for FileSink and NamedPipeSink
 
-Status: in progress on `feat-shared-sink-queue` (stacked on `feat-lifecycle-hardening` / PR #30). Delete this file once the work lands.
+Status: in progress on `feat-lifecycle-hardening` (PR #30). Delete this file once the work lands. Where the "Refinements" section below disagrees with a later section, the refinements win.
 
 ## Goal
 
@@ -12,6 +12,22 @@ Both queueing sinks (`src/lib/logger/sinks/file.ts`, `src/lib/logger/sinks/named
 - **Outages spend no retries.** While the destination cannot be opened (file/dir setup fails, pipe has no reader), lines are held and the engine reopens on its own timer with backoff. Per-line `maxRetries` is spent only on real write failures.
 - **Bounded memory.** `maxQueueSize` counts every line in the queue, in flight or not. When full, the oldest line that is **not** in flight is evicted as `queue_full` (once per overflow episode, as today).
 - **Outages are reported once** per distinct failure per episode (the pipe's existing `reportedOpenFailures` rule: cap 8 plus a notice, separate ordinary and diagnostic budgets), not once per line.
+
+## Refinements (from the keep-in-queue design pass)
+
+- **Queue slots.** Each slot is `{ sequence, line, entry, attempts, shouldSuppressFailureReport, state: 'queued' | 'in_flight', committed, token }`. `token` is a fresh object per dispatch; a callback whose token is stale, or whose slot has left the queue, is ignored. `committed` (set by the adapter's `onCommitted()` just before the bytes are handed to the stream) replaces `inFlightEntry`, `activeStreamWriteEntry` and `abandonedInFlightEntry`.
+- **Dispatch.** The pump walks from the head and dispatches `queued` slots in order, stopping at `min(maxInFlight, maxQueueSize)`, on backpressure, or when the destination is not usable. Success removes the slot (fast path at the head). A retryable failure with attempts left puts the slot back to `queued` in place; otherwise it is removed and reported `'lost'`. `'unavailable'` puts it back to `queued` with attempts unchanged.
+- **No retry-room refusal.** A retrying slot never gave up its place, so `hasRetryRoom`, the post-`onError` room re-check and `requeue()` go away. Overflow is handled only by eviction.
+- **Eviction** takes the oldest `queued` slot, never an in-flight one (it may already be written). `evictQueuedEntries` gains a predicate. An evicted slot that was already reported `'retrying'` to an explicit `onError` also gets its own `'queue_full'`/`'lost'` report carrying its entry, so every `'retrying'` gets a final word; owners and console keep the once-per-episode report.
+- **Generation barrier.** Each connection gets a generation number. Dispatch on a new connection waits until slots still in flight on an older connection have settled, so a late failure from an old stream cannot be overtaken by newer lines. Bounded by `ORPHAN_SETTLE_MS` = 1000; after that an orphaned slot counts as a spent attempt and its late callback is ignored. This can duplicate a line but never loses one: delivery across reconnects is at-least-once (document it).
+- **Close, evidence-based.** At the deadline, `queued` slots and uncommitted in-flight slots are abandoned as `'close'`/`'lost'` (once, with a sample). Committed slots are left to `adapter.end(remaining, ref'd, ≥ MIN_CLOSE_FLUSH_MS)`, then the engine waits one macrotask (`setImmediate`) for the callbacks destroy triggers: successes count as written; failures are counted `'close'` with one `'close'`/`'lost'` report (including the pipe's leftover bytes); slots still unsettled get one `'close'`/`'no_entry'` ("N writes in flight; delivery unknown"), uncounted, released, late callbacks ignored. This replaces the `inFlightAtAbandon` adapter flag, `closeAbandonedStreams` and `didReportPostCloseLoss`.
+- **Late callbacks after close resolved are ignored**; the report sent before close resolved is their only word.
+- **Partial pipe write**: the slot is removed at once, counted `'write'`, reported `'write'`/`'lost'` with `bytesWritten`; never replayed.
+- **`flush-window.ts`**: the `pendingFlush` chain and baselines move out of FileSink into a shared module (done in step A, since step 0 was already under way).
+- **Backoff cap stays 5 s** (not 30 s): a shorter cap recovers faster after an outage, which means fewer held lines lost to `queue_full`, at the cost of one open attempt every 5 s during a long outage.
+- **From step 0.** `Backoff` (`reopen-backoff.ts`) has `next()`, `peek()`, `reset()`, `isAtRest`; `next()` starts at `initialMS`, so the engine attempts immediately on a new episode and only then uses `next()` (no zero-start mode). `peek()` and `lastReopenAttempt` go away once the engine timer owns reopening. `OutageReporter` (`outage-reporter.ts`) receives only `isDiagnostic`; console suppression (`shouldSuppressFailureReport` → `lastError` only, no budget spent) is checked by the caller before reporting. There is one reopen timer: when it fires, routing (diagnostic/suppressed) comes from the queue's contents (the pipe's existing "ordinary work queued" rule), not from flags remembered per request. Keep `reportedOpenFailures`/`reportOpenFailure` on NamedPipeSink as thin delegates so `owned-failure-routing.test.ts` keeps working.
+- **Test seams.** Expose a narrow `engine` member on each sink plus a test-only backoff override, so tests are not slowed by real backoff waits.
+- **Steps A and B stay invisible**: the slot/dispatch structure lands with each port, but any refinement here that would change an existing test assertion (in-flight slots in `queueSize` and the cap, dropping retry-room refusal, per-entry eviction reports, the evidence-based close rule, ignoring late callbacks) is kept behind today's behavior and switched on in step D, with its docs and changelog.
 
 ## Current behavior (summary)
 
