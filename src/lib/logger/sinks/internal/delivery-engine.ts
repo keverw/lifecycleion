@@ -150,24 +150,7 @@ export interface OpenRouting {
 export type WriteOutcome =
   | { status: 'written' }
   /** `isRetryable: false` for a write that may have delivered part of the line. */
-  | {
-      status: 'failed';
-      error: unknown;
-      isRetryable: boolean;
-      /**
-       * What the write failed as, when it was not the write itself: FileSink sets its
-       * destination up inside a write, so a write can fail as `'setup'`, or as `'close'`
-       * when the sink closed under it. Read only with {@link DeliveryCompat.inlineSetup};
-       * omitted means `'write'`.
-       */
-      kind?: SinkFailureKind;
-      /**
-       * Called once the line is kept for another attempt, before anything sends it: where
-       * FileSink starts the pause it takes before retrying a failed setup. Step B of
-       * `plans/shared-sink-queue.md` only; removed with {@link DeliveryCompat.inlineSetup}.
-       */
-      onRetry?: () => void;
-    }
+  | { status: 'failed'; error: unknown; isRetryable: boolean }
   /** Not attempted: the destination went away before the line was handed to it. */
   | { status: 'unavailable' }
   /**
@@ -336,19 +319,6 @@ export interface DeliveryCompat {
    */
   honorsLateCallbacks?: boolean;
   /**
-   * FileSink only, and temporary: removed in step C of `plans/shared-sink-queue.md`, when
-   * FileSink's `open()` takes over its setup.
-   *
-   * The destination is set up inside each write, so a write can fail as something other
-   * than a write: a failure is reported and counted under the outcome's `kind` (a line
-   * lost after the sink closed under a write failure counts as `'close'`); a line whose
-   * retry a handler's own lines or `close()` took away is reported `'lost'` with the same
-   * failure, rather than a message of the engine's; the outcome's `onRetry` runs once the
-   * line is kept; and a retry during `close()` goes out at once rather than on close's
-   * next poll. Off: every write failure is a `'write'`.
-   */
-  inlineSetup?: boolean;
-  /**
    * FileSink only, and temporary: removed in step D, which turns on the evidence-based
    * close for both sinks.
    *
@@ -374,14 +344,15 @@ export const PRE_ENGINE_BEHAVIOR: DeliveryCompat = {
   honorsLateCallbacks: true,
 };
 
-/** {@link PRE_ENGINE_BEHAVIOR} plus FileSink's own: how FileSink behaved before. */
-export const FILE_SINK_PRE_ENGINE_BEHAVIOR: Required<DeliveryCompat> = {
+/**
+ * The switches FileSink still keeps: {@link PRE_ENGINE_BEHAVIOR}'s, less the two that
+ * concern an unreachable destination - FileSink's lines are held through a setup outage
+ * and reopened on the timer, as the engine's own rules say - plus its close rule.
+ */
+export const FILE_SINK_PRE_ENGINE_BEHAVIOR: DeliveryCompat = {
   countsQueuedOnly: true,
   refusesRetryWithoutRoom: true,
-  reopensOnDemand: true,
-  unavailableSpendsAttempt: true,
   honorsLateCallbacks: true,
-  inlineSetup: true,
   drainsInFlight: true,
 };
 
@@ -584,7 +555,6 @@ export class DeliveryEngine {
       reopensOnDemand: false,
       unavailableSpendsAttempt: false,
       honorsLateCallbacks: false,
-      inlineSetup: false,
       drainsInFlight: false,
       ...options.compat,
     };
@@ -708,7 +678,7 @@ export class DeliveryEngine {
 
     try {
       while (
-        !this.closed &&
+        this.state === 'connected' &&
         !this.isPassStopped &&
         !this.awaitingDrain &&
         this.adapter.isUsable() &&
@@ -1294,7 +1264,6 @@ export class DeliveryEngine {
     isCurrent: boolean,
     isSynchronous: boolean,
   ): void {
-    const kind = this.compat.inlineSetup ? (outcome.kind ?? 'write') : 'write';
     const willRetry =
       !this.closed &&
       outcome.isRetryable &&
@@ -1312,8 +1281,8 @@ export class DeliveryEngine {
       // Out of attempts, closed, or - for a write that may have delivered part of the line -
       // never to be replayed. Gone from the queue and counted before anyone is told.
       this.removeSlot(slot);
-      this.losses.count(this.lossKindFor(kind));
-      this.report(kind, outcome.error, {
+      this.losses.count('write');
+      this.report('write', outcome.error, {
         ...report,
         shouldSuppressFailureReport: this.shouldSuppressWriteReport(
           slot,
@@ -1328,7 +1297,7 @@ export class DeliveryEngine {
     // Reported before the retry is committed, the slot still marked in flight with its
     // token cleared: nothing can settle it twice, and nothing a handler does can evict it.
     const shouldSuppress = this.shouldSuppressWriteReport(slot, true);
-    const didReport = this.report(kind, outcome.error, {
+    const didReport = this.report('write', outcome.error, {
       ...report,
       shouldSuppressFailureReport: shouldSuppress,
       disposition: 'retrying',
@@ -1347,11 +1316,7 @@ export class DeliveryEngine {
 
     // Re-checked now the handler has returned: it may have filled the queue or closed the
     // sink, and the line is then reported again as `'lost'` - the final word.
-    this.retryOrGiveUp(
-      slot,
-      this.compat.inlineSetup ? { kind, error: outcome.error } : undefined,
-      outcome.onRetry,
-    );
+    this.retryOrGiveUp(slot);
   }
 
   /**
@@ -1361,26 +1326,12 @@ export class DeliveryEngine {
    * be attempted at all - reported nothing, so a line given up on here is reported here,
    * with a message that says what is known: synthesized rather than re-reporting
    * `lastError`, which may be an unrelated earlier failure and would name the wrong cause.
-   * With {@link DeliveryCompat.inlineSetup} the `'retrying'` report's own `failure` is
-   * said again instead.
-   *
-   * `onRetry` runs once the line is kept, before anything can send it again.
    */
-  private retryOrGiveUp(
-    slot: DeliverySlot,
-    failure?: { kind: SinkFailureKind; error: unknown },
-    onRetry?: () => void,
-  ): void {
+  private retryOrGiveUp(slot: DeliverySlot): void {
     const isGivenUp =
       this.closed ||
       slot.attempts >= this.options.maxRetries ||
       (this.compat.refusesRetryWithoutRoom && !this.hasRetryRoom());
-
-    if (isGivenUp && failure !== undefined) {
-      this.giveUpAfterRetrying(slot, failure);
-
-      return;
-    }
 
     if (this.closed) {
       this.giveUpAfterClose(slot);
@@ -1411,46 +1362,7 @@ export class DeliveryEngine {
     slot.attempts++;
     this.leaveFlight(slot);
     this.enforceQueueLimit();
-    onRetry?.();
     this.afterFailedWrite();
-  }
-
-  /**
-   * A line reported `'retrying'` that cannot be kept after all: the handler filled the
-   * queue or the sink closed. Reported again, with the same failure and attempt, as
-   * `'lost'` - the final word. See {@link DeliveryCompat.inlineSetup}.
-   */
-  private giveUpAfterRetrying(
-    slot: DeliverySlot,
-    failure: { kind: SinkFailureKind; error: unknown },
-  ): void {
-    this.removeSlot(slot);
-    this.losses.count(this.lossKindFor(failure.kind));
-    this.report(failure.kind, failure.error, {
-      attempt: slot.attempts + 1,
-      entry: slot.entry,
-      disposition: 'lost',
-      shouldSuppressFailureReport: this.shouldSuppressWriteReport(slot, false),
-      // Counted once already, by the `'retrying'` report of this same failure.
-      countsAgainstHealth: false,
-    });
-  }
-
-  /**
-   * Which loss a failed line is counted under. Always `'write'`, unless
-   * {@link DeliveryCompat.inlineSetup} says a write can fail as something else: then the
-   * kind it failed as, and a write failure once the sink has closed is a closing loss.
-   */
-  private lossKindFor(kind: SinkFailureKind): DroppedEntryKind {
-    if (!this.compat.inlineSetup) {
-      return 'write';
-    }
-
-    if (kind === 'format' || kind === 'close' || kind === 'setup') {
-      return kind;
-    }
-
-    return this.closed ? 'close' : 'write';
   }
 
   /**
@@ -1482,9 +1394,7 @@ export class DeliveryEngine {
    * in a queue nothing was draining.
    */
   private afterFailedWrite(): void {
-    // With `inlineSetup`, close's drain is the sink's own pass, which goes straight on to
-    // the retry rather than waiting for close to poll.
-    if (this.closed || (this.closing && !this.compat.inlineSetup)) {
+    if (this.closed || this.closing) {
       return;
     }
 

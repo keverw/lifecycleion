@@ -56,3 +56,36 @@ export class Backoff {
     this.currentMS = 0;
   }
 }
+
+/**
+ * How a queueing sink spaces its automatic attempts to open a destination it cannot reach:
+ * the first attempt of an outage is made at once, then one after a second, doubling to
+ * five.
+ *
+ * Capped at five seconds rather than longer because the cap is also how long a recovered
+ * destination can sit unused: lines held meanwhile are bounded by `maxQueueSize`, so a
+ * shorter cap loses fewer of them to `'queue_full'`, and an attempt every five seconds
+ * against a destination that is not coming back costs a `stat` and an `open`.
+ */
+export const OPEN_RETRY_BACKOFF: Readonly<BackoffOptions> = {
+  initialMS: 1000,
+  maxMS: 5000,
+};
+
+let openRetryOverride: BackoffOptions | undefined;
+
+/** The open backoff a sink is constructed with: {@link OPEN_RETRY_BACKOFF}. */
+export function openRetryBackoff(): BackoffOptions {
+  return openRetryOverride ?? { ...OPEN_RETRY_BACKOFF };
+}
+
+/**
+ * Test seam: sinks constructed while this is set space their open attempts by `options`
+ * rather than {@link OPEN_RETRY_BACKOFF}, so a test of an outage does not wait real
+ * seconds. Pass `undefined` to restore the default.
+ */
+export function setOpenRetryBackoffForTesting(
+  options: BackoffOptions | undefined,
+): void {
+  openRetryOverride = options;
+}

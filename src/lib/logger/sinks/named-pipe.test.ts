@@ -5230,7 +5230,7 @@ test('without onError, a failed pipe write reaches the console only once it is l
   const state = sink as unknown as {
     initPromise: Promise<void>;
     pipeStream: unknown;
-    isInitialized: boolean;
+    engine: { state: string };
   };
   try {
     await state.initPromise;
@@ -5241,7 +5241,7 @@ test('without onError, a failed pipe write reaches the console only once it is l
         throw new Error('write refused');
       },
     };
-    state.isInitialized = true;
+    state.engine.state = 'connected';
     sink.write({
       timestamp: Date.now(),
       type: 'info',

@@ -18,6 +18,7 @@ import {
   muteConsoleError,
   restoreConsoleError,
 } from '../../internal/console-test-utils';
+import { setOpenRetryBackoffForTesting } from './internal/reopen-backoff';
 
 function entry(message = 'ordinary'): LogEntry {
   return { timestamp: Date.now(), type: 'info', message, template: message };
@@ -343,22 +344,13 @@ test('named-pipe terminal outage reports cannot spend the ordinary report budget
   }
 });
 
-test('file pending-open errors retain diagnostic origin only until independent work', async () => {
+test('file open failures stay diagnostic only while nothing but diagnostics is queued', async () => {
   const directory = await fs.mkdtemp(
     join(tmpdir(), 'lifecycle-file-open-origin-'),
   );
-  const sink = new FileSink({
-    logDir: directory,
-    basename: 'test',
-    maxRetries: 0,
-  });
-  await sink.flush();
-  (sink as unknown as { destroyStream: () => void }).destroyStream();
-  let owners = 0;
-  const release = registerSinkFailureReporter(sink, () => {
-    owners++;
-  });
-  const lines = muteConsoleError();
+  // Every open fails, and the timer stays out of the way: the attempts below are made by
+  // hand, so each one's routing is read from what is queued at that moment.
+  setOpenRetryBackoffForTesting({ initialMS: 60_000, maxMS: 60_000 });
   const create = spyOn(nodeFS, 'createWriteStream').mockImplementation(() => {
     class FailingOpen extends EventEmitter {
       public pending = true;
@@ -374,13 +366,40 @@ test('file pending-open errors retain diagnostic origin only until independent w
     queueMicrotask(() => stream.emit('error', new Error('open failed')));
     return stream as unknown as WriteStream;
   });
+  const sink = new FileSink({
+    logDir: directory,
+    basename: 'test',
+    maxRetries: 0,
+  });
+  setOpenRetryBackoffForTesting(undefined);
+  let owners = 0;
+  const release = registerSinkFailureReporter(sink, () => {
+    owners++;
+  });
+  const lines = muteConsoleError();
+  const internals = sink as unknown as {
+    initPromise: Promise<void>;
+    engine: { outages: { clear(): void } };
+    openFile(context: object): Promise<unknown>;
+  };
+  const attempt = (): Promise<unknown> =>
+    internals.openFile({
+      isExplicit: false,
+      isClosing: false,
+      isDiagnosticRetry: false,
+      shouldSuppressRetryReport: false,
+    });
   try {
+    await internals.initPromise;
+    owners = 0;
+    lines.length = 0;
+    internals.engine.outages.clear();
     sink.write(markDiagnosticEntry(entry('diagnostic')));
-    await sink.flush(1000);
+    await attempt();
     expect(owners).toBe(0);
     expect(lines.length).toBeGreaterThan(0);
     sink.write(entry('independent work'));
-    await sink.flush(1000);
+    await attempt();
     expect(owners).toBeGreaterThan(0);
   } finally {
     create.mockRestore();

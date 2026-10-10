@@ -12,7 +12,7 @@ import {
   type OpenResult,
   type WriteOutcome,
 } from './delivery-engine';
-import type { SinkFailure, SinkFailureKind } from './sink-failure';
+import type { SinkFailure } from './sink-failure';
 import { markDiagnosticEntry } from '../../internal/sink-failure-routing';
 import type { LogEntry } from '../../types';
 
@@ -184,18 +184,14 @@ class FakeDestination implements DestinationAdapter {
   }
 
   /** Fail the oldest pending write. */
-  public fail(
-    error: Error = new Error('EPIPE'),
-    isRetryable = true,
-    extra: { kind?: SinkFailureKind; onRetry?: () => void } = {},
-  ): void {
+  public fail(error: Error = new Error('EPIPE'), isRetryable = true): void {
     const pending = this.writes.shift();
 
     if (pending === undefined) {
       throw new Error('no write pending');
     }
 
-    pending.done({ status: 'failed', error, isRetryable, ...extra });
+    pending.done({ status: 'failed', error, isRetryable });
   }
 
   /** The lines handed over and not yet settled, oldest first. */
@@ -957,7 +953,7 @@ describe('DeliveryEngine hostile handlers', () => {
   });
 });
 
-describe('DeliveryEngine (FileSink pre-engine behavior)', () => {
+describe('DeliveryEngine (FileSink compat)', () => {
   /** FileSink's shape: one line at a time, each waiting for its own outcome. */
   const oneAtATime = (): FakeDestination => {
     const destination = new FakeDestination();
@@ -967,89 +963,35 @@ describe('DeliveryEngine (FileSink pre-engine behavior)', () => {
     return destination;
   };
 
-  test('a write that failed as setup is reported and counted under setup, and runs onRetry when kept', async () => {
+  test('a line that finds no destination goes back unattempted, and the timer reopens', async () => {
     const destination = oneAtATime();
     const { engine, reports, write } = await started(
       makeEngine({
         compat: FILE_SINK_PRE_ENGINE_BEHAVIOR,
         destination,
-        maxRetries: 1,
+        maxRetries: 0,
       }),
     );
-    let retries = 0;
-    const onRetry = (): void => {
-      retries++;
-      // Runs before anything sends the line again.
-      expect(destination.pendingLines()).toEqual([]);
-    };
 
     write('a');
-    destination.fail(new Error('mkdir failed'), true, {
-      kind: 'setup',
-      onRetry,
-    });
+    destination.isOpen = false;
+    destination.writes.shift()?.done({ status: 'unavailable' });
 
-    expect(retries).toBe(1);
-    expect(destination.pendingLines()).toEqual(['a']);
-
-    destination.fail(new Error('mkdir failed'), true, {
-      kind: 'setup',
-      onRetry,
-    });
-
-    expect(retries).toBe(1);
-    expect(
-      reports.map((failure) => [
-        failure.kind,
-        failure.disposition,
-        failure.attempt,
-      ]),
-    ).toEqual([
-      ['setup', 'retrying', 1],
-      ['setup', 'lost', 2],
-    ]);
+    // Nothing reported for the line and nothing spent: with no retries left it would
+    // otherwise have been lost.
+    expect(reports).toEqual([]);
     expect(engine.getHealth()).toMatchObject({
-      consecutiveFailures: 0,
-      droppedEntries: 1,
-      droppedByKind: { setup: 1, write: 0 },
+      queueSize: 1,
+      droppedEntries: 0,
+      isInitialized: false,
     });
-  });
 
-  test('a handler that fills the queue during a retrying report hears the same failure again as lost', async () => {
-    const harness = makeEngine({
-      compat: FILE_SINK_PRE_ENGINE_BEHAVIOR,
-      destination: oneAtATime(),
-      maxQueueSize: 1,
-      onError: (failure, { write }) => {
-        if (failure.disposition === 'retrying') {
-          write('filler');
-        }
-      },
-    });
-    const failure = new Error('mkdir failed');
+    await until(() => destination.pendingLines().length === 1);
+    destination.succeed();
 
-    await started(harness);
-    harness.write('a');
-    harness.destination.fail(failure, true, { kind: 'setup' });
-
-    expect(
-      harness.reports.map((report) => [
-        report.kind,
-        report.entry?.message,
-        report.disposition,
-        report.attempt,
-      ]),
-    ).toEqual([
-      ['setup', 'a', 'retrying', 1],
-      ['setup', 'a', 'lost', 1],
-    ]);
-    expect(harness.reports[1].error).toBe(failure);
-    // The handler's own line goes out once the failed one has left.
-    expect(harness.destination.pendingLines()).toEqual(['filler']);
-    expect(harness.engine.getHealth()).toMatchObject({
-      consecutiveFailures: 0,
-      droppedByKind: { setup: 1, write: 0 },
-    });
+    expect(destination.releases).toBe(1);
+    expect(destination.delivered).toEqual(['a']);
+    expect(engine.getHealth().queueSize).toBe(0);
   });
 
   test('a write failure is counted once against health, even when said twice', async () => {
@@ -1076,26 +1018,6 @@ describe('DeliveryEngine (FileSink pre-engine behavior)', () => {
       consecutiveFailures: 1,
       droppedByKind: { write: 1 },
     });
-  });
-
-  test('a retry during close goes out at once rather than on the next poll', async () => {
-    const destination = oneAtATime();
-    const { engine, write } = await started(
-      makeEngine({ compat: FILE_SINK_PRE_ENGINE_BEHAVIOR, destination }),
-    );
-
-    write('a');
-
-    const closing = engine.close();
-
-    destination.fail();
-
-    expect(destination.pendingLines()).toEqual(['a']);
-
-    destination.succeed();
-    await closing;
-
-    expect(destination.delivered).toEqual(['a']);
   });
 
   test('close waits for a write in flight as it waits for the queue', async () => {
@@ -1148,7 +1070,7 @@ describe('DeliveryEngine (FileSink pre-engine behavior)', () => {
     expect(destination.endContexts).toEqual([{ hasReportedInFlight: false }]);
 
     // Its pass resuming into the closed sink says nothing more.
-    destination.fail(new Error('closed'), true, { kind: 'close' });
+    destination.fail(new Error('closed'));
 
     expect(reports).toHaveLength(1);
     expect(engine.getHealth()).toMatchObject({

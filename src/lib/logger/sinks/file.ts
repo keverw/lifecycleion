@@ -3,14 +3,12 @@ import { isNullish } from '../../internal/is-nullish';
 import fs, { promises as fsPromises } from 'fs';
 import { describeError, toError } from '../../to-error';
 import { renderOnce, type RenderedLine } from './internal/rendered-line';
-import {
-  isConsoleReportActive,
-  reportToConsole,
-} from '../../internal/report-to-console';
+import { isConsoleReportActive } from '../../internal/report-to-console';
 import { renderJSONLine } from './internal/render-json-line';
 import { renderTextEntry } from './internal/render-text-line';
 import {
   DEFAULT_CLOSE_TIMEOUT_MS,
+  MIN_CLOSE_FLUSH_MS,
   resolveMaxQueueSize,
   resolveMaxRetries,
 } from './internal/queue-policy';
@@ -28,12 +26,14 @@ import {
 import { describeEntryCount } from './internal/loss-ledger';
 import { endStreamWithin } from './internal/end-stream';
 import { FormatReportScheduler } from './internal/format-report-scheduler';
-import { Backoff } from './internal/reopen-backoff';
+import { Backoff, openRetryBackoff } from './internal/reopen-backoff';
 import {
   DeliveryEngine,
   FILE_SINK_PRE_ENGINE_BEHAVIOR,
   type DeliverySlot,
+  type OpenContext,
   type OpenResult,
+  type OpenRouting,
   type WriteOutcome,
 } from './internal/delivery-engine';
 import type { FlushWindow } from './internal/flush-window';
@@ -67,30 +67,14 @@ const ROTATION_RETRY_INITIAL_MS = 1000;
 const ROTATION_RETRY_MAX_MS = 30_000;
 
 /**
- * How long a line waits before retrying a log file that could not be set up.
- *
- * A setup is a `mkdir`, an `access`, possibly a `writeFile`, and an `open`. Retried
- * back-to-back, the retries buy no time for anything to recover - an `EMFILE`, a
- * permission being fixed, a mount coming back - and a burst of lines against an
- * unwritable `logDir` runs that whole sequence, and `onError`, `maxRetries + 1` times per
- * line as fast as the disk will refuse it. A tenth of a second spaces one line's attempts
- * across `maxRetries` tenths (300 ms under the default), which holds a dead destination to
- * roughly a dozen setup attempts a second, while a destination that comes back holds the
- * queue up for at most one interval. Flat rather than backed off, so the delay a line can
- * add is exactly `maxRetries` times this. Shorter than `NamedPipeSink`'s one-second reopen
- * cooldown because this one is paid per line, by a queue that waits behind it.
- */
-const SETUP_RETRY_DELAY_MS = 100;
-
-/**
  * The rotation threshold this sink will honour, in megabytes.
  *
  * The sibling of `resolveMaxQueueSize` and `resolveMaxRetries`, and here for a sharper
  * reason than tidiness: a threshold of zero or less makes a *freshly opened, empty* file
  * satisfy `currentLogSize >= maxSizeBytes`, so `setupLogFile` rotates it, reopens, and
  * finds the new empty file over the limit as well. That loop never yields to anything
- * that could stop it - `initPromise` never settles, so `flush()` hangs and `close()` can
- * only time out - and every pass reserves a fresh collision-free archive name, so it
+ * that could stop it - the open never settles, so `flush()` hangs and `close()` can only
+ * time out - and every pass reserves a fresh collision-free archive name, so it
  * fills the log directory as fast as the disk will take files.
  *
  * `Infinity` is left alone: it is the honest spelling of "never rotate on size". Zero or
@@ -139,7 +123,7 @@ function resolveBasename(requested: string): string {
  * Whether a name carries a C0 control character or `DEL`.
  *
  * A `NUL` is the one that matters: on a path it reaches `fs`, Node refuses it with
- * `ERR_INVALID_ARG_VALUE` - asynchronously, from `initialize()`, after the constructor
+ * `ERR_INVALID_ARG_VALUE` - asynchronously, from the first open, after the constructor
  * that promised to refuse a bad name has already returned. The rest are refused with it
  * because a log file whose name holds a newline or an escape sequence is a name nothing
  * lists or greps cleanly, and a config typo is the only way one arrives.
@@ -258,8 +242,9 @@ export interface FlushResult {
 /**
  * Error handler class for FileSink.
  *
- * `kind` is set where a failure is raised for the delivery engine to classify, and read by
- * `failureKindFor`; an error without one is a failed write.
+ * `kind` is set where a write is raised as something other than a failed write, and read
+ * by `dispatchEntry`: `'format'` for a line that can never be written, `'setup'` for one
+ * that found no file to write to and was never attempted.
  */
 class FileSinkError extends Error {
   constructor(
@@ -270,6 +255,14 @@ class FileSinkError extends Error {
     super(message);
     this.name = 'FileSinkError';
   }
+}
+
+/**
+ * The rejection for a line that found no stream to write to: raised as `'setup'`, so
+ * `dispatchEntry` hands it back to the engine unattempted rather than as a failed write.
+ */
+function noStreamError(): FileSinkError {
+  return new FileSinkError('No log file stream available', undefined, 'setup');
 }
 
 /**
@@ -295,9 +288,9 @@ interface QueuedEntry extends RenderedLine {
 /**
  * FileSink writes logs to files with automatic rotation based on size and date
  *
- * The queue, retries, reporting, flush windows and close belong to a
- * {@link DeliveryEngine}; this class is the file: options, rendering, the setup and
- * rotation each write goes through, and pairing a failed write's two reports.
+ * The queue, retries, reopening, reporting, flush windows and close belong to a
+ * {@link DeliveryEngine}; this class is the file: options, rendering, opening the log
+ * file, the rotation each write goes through, and pairing a failed write's two reports.
  */
 export class FileSink implements LogSink {
   private logDir: string;
@@ -315,8 +308,6 @@ export class FileSink implements LogSink {
    */
   private readonly engine: DeliveryEngine;
   private isInitialized = false;
-  private hasFinishedInitialization = false;
-  private initPromise?: Promise<void>;
   /** Spaces failed archive renames: {@link ROTATION_RETRY_INITIAL_MS} doubling to the max. */
   private readonly rotationBackoff = new Backoff({
     initialMS: ROTATION_RETRY_INITIAL_MS,
@@ -324,7 +315,11 @@ export class FileSink implements LogSink {
   });
   private nextRotationAttemptAt = 0;
 
-  /** The entry the engine is waiting on `writeEntry` for, if any. */
+  /**
+   * The entry the engine is waiting on `writeEntry` for, if any: what routes a rotation's
+   * failed reopen, and what keeps a rotation's gap between streams from reading as a lost
+   * connection.
+   */
   private inFlightEntry?: QueuedEntry;
   /** The entry actually handed to stream.write(), excluding setup and rotation. */
   private activeStreamWriteEntry?: QueuedEntry;
@@ -344,26 +339,6 @@ export class FileSink implements LogSink {
    * remembering one cannot keep it alive.
    */
   private readonly suppressedWriteErrors = new WeakSet<object>();
-
-  /**
-   * An open that failed while {@link inFlightEntry} was waiting on it, left by the stream's
-   * `'error'` handler for `writeEntry` to raise as that entry's `'setup'` failure.
-   *
-   * Reporting it from the handler too would print a console line for every attempt at
-   * every entry, outside the rule the engine keeps for the console: only the attempt that
-   * loses the line. Kept with that entry, so a pass that ends before raising it -
-   * `close()` winning, say - cannot hand it to a later entry.
-   */
-  private pendingOpenFailure?: { entry: QueuedEntry; failure: FileSinkError };
-
-  /**
-   * The pause the queue is taking before it retries a failed setup, if any; see
-   * {@link waitBeforeSetupRetry}. Ending it resumes the queue.
-   *
-   * Step B of `plans/shared-sink-queue.md` only: step C moves setup into the engine's
-   * `open()`, retried on the engine's own timer, and deletes this.
-   */
-  private setupRetryWait?: { timer: NodeJS.Timeout };
 
   private closing = false;
   /** Set by the engine the moment `close()` stops draining. */
@@ -412,22 +387,21 @@ export class FileSink implements LogSink {
         // One line at a time, each waiting for its callback before the next goes out.
         maxInFlight: 1,
         target: () => this.currentLogFile ?? this.logDir,
-        open: () => this.openFile(),
-        // Not before the constructor's setup has run, and not while a failed setup waits
-        // to be retried.
-        isUsable: () =>
-          this.hasFinishedInitialization && this.setupRetryWait === undefined,
-        // Every write sets the file up if it has to, so there is always somewhere to
-        // drain to.
-        hasConnection: () => true,
+        open: (context) => this.openFile(context),
+        isUsable: () => this.logFileStream !== undefined,
+        // A write in flight holds the connection even between streams: a rotation ends one
+        // stream and opens the next inside the write, and `close()` must wait for it rather
+        // than read the gap as a destination gone.
+        hasConnection: () =>
+          this.logFileStream !== undefined || this.inFlightEntry !== undefined,
         write: (slot, _context, done, onCommitted) => {
           this.dispatchEntry(slot, done, onCommitted);
         },
         // Nothing to wait on: each write waits for its own callback.
         onDrain: () => false,
-        // Never asked while the open always succeeds; a stream opened after `close()` is
-        // torn down by `setupLogFile` itself.
-        release: () => undefined,
+        release: () => {
+          this.releaseStream();
+        },
         end: (timeoutMS, context) =>
           this.endStreamOnClose(
             timeoutMS,
@@ -448,8 +422,9 @@ export class FileSink implements LogSink {
       maxQueueSize,
       maxRetries,
       closeTimeoutMS: this.closeTimeoutMS,
-      // Unused until step C: the open always succeeds, so nothing is ever reopened.
-      backoff: { initialMS: 1000, maxMS: 1000 },
+      // The first attempt of an outage at once, then 1 s doubling to 5 s: see
+      // `OPEN_RETRY_BACKOFF`.
+      backoff: openRetryBackoff(),
       messages: {
         queueFull: (limit) =>
           `Log queue is full (maxQueueSize=${limit}); dropping the oldest entries`,
@@ -513,14 +488,9 @@ export class FileSink implements LogSink {
       compat: FILE_SINK_PRE_ENGINE_BEHAVIOR,
     });
 
-    // Initialize asynchronously: the engine's first open is this sink's `initialize`.
+    // Opened asynchronously, by the engine: lines written meanwhile are queued, and sent
+    // once the file is open.
     this.engine.start();
-    this.initPromise = this.engine.openSettled.then(() => {
-      this.hasFinishedInitialization = true;
-      // One observer drains the startup backlog, including after setup failed.
-      // Later writes retry setup through the engine without observing init again.
-      this.processQueue();
-    });
   }
 
   public write(entry: LogEntry): void {
@@ -541,8 +511,8 @@ export class FileSink implements LogSink {
       return;
     }
 
-    // Rendered here rather than on the write path, which runs after `setupLogFile` and
-    // `rotateIfNeeded` have been awaited: by then the caller has had the chance to mutate
+    // Rendered here rather than on the write path, which runs after the file has opened and
+    // `rotateIfNeeded` has been awaited: by then the caller has had the chance to mutate
     // the bag `entry.redactedParams` points at, since redaction no longer copies it.
     const rendered = renderOnce(() => this.formatEntry(entry));
 
@@ -602,7 +572,7 @@ export class FileSink implements LogSink {
       queueSize: health.queueSize,
       lastError: health.lastError,
       consecutiveFailures: health.consecutiveFailures,
-      // This sink's own: the engine's open always succeeds, while the file may not have.
+      // This sink's own: whether a stream is open, which a failed write clears at once.
       isInitialized: this.isInitialized,
       droppedEntries: health.droppedEntries,
       droppedByKind: health.droppedByKind,
@@ -629,7 +599,7 @@ export class FileSink implements LogSink {
     );
 
     // The clock starts here, before the wait below rather than after it: `timeoutMS` is
-    // documented as the maximum time this call takes, and an init that never settles is
+    // documented as the maximum time this call takes, and an open that never settles is
     // exactly the case a caller sets one for.
     const startTime = Date.now();
 
@@ -648,16 +618,17 @@ export class FileSink implements LogSink {
     this.closing = true;
     // One close however many callers ask, published before any close-time callback can
     // re-enter close().
-    const closing = this.engine.close();
-    // A setup retry paused for a destination to recover would spend the close's budget
-    // on that recovery. Resumed now, the drain retries on the closing rules instead.
-    this.endSetupRetryWait();
-    return closing;
+    return this.engine.close();
   }
 
   /** The flush the next one waits behind. See `FlushWindows`. */
   private get pendingFlush(): Promise<void> {
     return this.engine.flushes.settled;
+  }
+
+  /** The most recent open attempt, settled. Never rejects. */
+  private get initPromise(): Promise<void> {
+    return this.engine.openSettled;
   }
 
   /**
@@ -729,7 +700,7 @@ export class FileSink implements LogSink {
   /**
    * End the stream for `close()`: the engine's `end`.
    *
-   * On what is left of the *whole* close's budget, so the init wait, the drain and the
+   * On what is left of the *whole* close's budget, so the open wait, the drain and the
    * final flush share one deadline. Bounded and floored as `endStreamWithin` describes,
    * and held open by its timer: the caller is awaiting this close, and the report below
    * has to reach it before the process exits.
@@ -766,37 +737,61 @@ export class FileSink implements LogSink {
   }
 
   /**
-   * The engine's `open`: the constructor's setup.
+   * Open the log file: the engine's `open`, made at construction and then on the engine's
+   * own timer for as long as the file cannot be opened.
    *
-   * Step B of `plans/shared-sink-queue.md`: every write still sets the file up if it has
-   * to, so this always answers `'open'`, and a failure here is only said up front - see
-   * {@link initialize}. Step C makes this the real open, retried on the engine's own timer.
-   *
-   * `initialize` reports its own failures and is built never to reject, but `close()` and
-   * `flush()` wait on it and queued writes resume afterwards. Contained here rather than
-   * trusted at each wait. Left raw, a rejection from a future change would reject
-   * `close()`, a shutdown step that must not raise, or - caught by the engine - stop the
-   * queue until a reopen this sink does not make. Reported, not swallowed, since it would
-   * be a bug.
+   * A failure is reported once per distinct failure per outage (see
+   * {@link DeliveryEngine.reportOpenFailure}), routed by what is queued: a directory that
+   * cannot be created, a path that is a directory, `EACCES`, `EMFILE`. It spends no line's
+   * attempts - the lines wait in the queue, bounded by `maxQueueSize`, and go out once an
+   * attempt succeeds. Never rejects: what `setupLogFile` throws is the attempt's answer.
    */
-  private async openFile(): Promise<OpenResult> {
-    try {
-      await this.initialize();
-    } catch (error) {
-      reportToConsole(
-        `FileSink initialization failed unexpectedly: ${describeError(error)}`,
-      );
+  private async openFile(context: OpenContext): Promise<OpenResult> {
+    // A stream still in hand is the connection: there is nothing to reopen.
+    if (this.logFileStream !== undefined && !this.logFileStream.destroyed) {
+      return { status: 'open' };
     }
 
-    return { status: 'open' };
+    try {
+      await this.setupLogFile();
+    } catch (error) {
+      this.reportSetupFailure(error, this.engine.openRouting(context));
+
+      return { status: 'unavailable' };
+    }
+
+    // No stream and nothing thrown: `close()` finished while this was opening, or a
+    // rotation the open ran could not reopen the file and has said so.
+    return this.logFileStream === undefined
+      ? { status: 'unavailable' }
+      : { status: 'open' };
+  }
+
+  /**
+   * Say that the log file could not be set up, as an outage rather than a line's failure:
+   * `'setup'`, `'no_entry'`, once per distinct failure until the file opens again.
+   *
+   * The message names the underlying error, whose text names the path (`ENOTDIR: not a
+   * directory, mkdir '/var/log/app'`), so two different failures during one outage - a
+   * directory missing, then present but unwritable - are both said.
+   */
+  private reportSetupFailure(error: unknown, routing: OpenRouting): void {
+    this.engine.reportOpenFailure(
+      'setup',
+      `Failed to setup log file: ${describeError(error)}`,
+      error,
+      routing.isDiagnostic,
+      routing.shouldSuppressFailureReport,
+    );
   }
 
   /**
    * Hand one line to {@link writeEntry}: the engine's `write`.
    *
-   * The write is confirmed when `writeEntry` settles, after any setup and rotation it had
-   * to do, and its failure is classified here (see {@link failureKindFor}) for the engine
-   * to report, count and retry.
+   * The write is confirmed when `writeEntry` settles, after any rotation it had to do. A
+   * line that found no file to write to was never attempted, and goes back to the engine
+   * as `'unavailable'` with its attempts unspent; anything else that rejects is a failed
+   * write for the engine to report, count and retry.
    */
   private dispatchEntry(
     slot: DeliverySlot,
@@ -847,74 +842,25 @@ export class FileSink implements LogSink {
         // skipping `onError`, the re-queue and the failure counters, and escaping as an
         // unhandled rejection that left every queued entry behind it stalled.
         const failure = toError(error);
-        const kind = this.failureKindFor(failure);
+        const kind =
+          failure instanceof FileSinkError ? failure.kind : undefined;
 
-        done({
-          status: 'failed',
-          error: failure,
-          kind,
-          // A render that failed is never retried: the line is not re-rendered by design
-          // (see `QueuedEntry.formatError`), so every attempt would raise the same failure
-          // and call `onError` again for one entry that can never be written.
-          isRetryable: kind !== 'format',
-          // A destination that could not be opened gets time to recover before the next
-          // attempt: see `SETUP_RETRY_DELAY_MS`. Not once `close()` has begun, since it
-          // ends the pause anyway. The entry waits in the queue rather than in flight, so a
-          // `close()` that gives up meanwhile abandons it with the rest of the queue.
-          onRetry: () => {
-            if (kind === 'setup' && !this.closing) {
-              this.waitBeforeSetupRetry();
-            }
-          },
-        });
+        done(
+          kind === 'setup'
+            ? { status: 'unavailable' }
+            : {
+                status: 'failed',
+                error: failure,
+                // A render that failed is never retried: the line is not re-rendered by
+                // design (see `QueuedEntry.formatError`), so every attempt would raise the
+                // same failure and call `onError` again for one entry that can never be
+                // written.
+                isRetryable: kind !== 'format',
+              },
+        );
         release();
       },
     );
-  }
-
-  /**
-   * Send what is queued, oldest first: the startup drain, and the queue resuming after a
-   * setup retry's pause. See {@link DeliveryEngine.pump}.
-   */
-  private processQueue(): void {
-    this.engine.pump();
-  }
-
-  /**
-   * Hold the queue {@link SETUP_RETRY_DELAY_MS} before the next setup attempt, or until
-   * `close()` ends the wait.
-   *
-   * One at a time, since only the line in flight can fail and nothing goes out while this
-   * holds. The timer is unreferenced, as a rotation's flush deadline is: a pause between
-   * attempts at a file this cannot open is no reason for the process to stay alive.
-   * `flush()` does not end it - a flush is not a shutdown, and one that retried at once
-   * would bring back the storm for anything flushing on an interval - so a flush waits it
-   * out within its own timeout.
-   *
-   * Step B of `plans/shared-sink-queue.md` only; deleted in step C.
-   */
-  private waitBeforeSetupRetry(): void {
-    const timer = setTimeout(() => {
-      this.endSetupRetryWait();
-    }, SETUP_RETRY_DELAY_MS);
-    timer.unref?.();
-
-    this.setupRetryWait = { timer };
-  }
-
-  /**
-   * End the pause {@link waitBeforeSetupRetry} is taking, if any, clear its timer, and
-   * resume the queue.
-   */
-  private endSetupRetryWait(): void {
-    const wait = this.setupRetryWait;
-    if (wait === undefined) {
-      return;
-    }
-
-    this.setupRetryWait = undefined;
-    clearTimeout(wait.timer);
-    this.processQueue();
   }
 
   /** The body of {@link flush}, run one at a time in `window`; see there. */
@@ -924,30 +870,26 @@ export class FileSink implements LogSink {
     window: FlushWindow,
   ): Promise<FlushResult> {
     // `window` counts from where the last flush stopped, and its baselines were read when
-    // this turn began rather than after the wait below, so a loss that lands while the
-    // init is still settling is inside this call's answer rather than deferred to the next
-    // one. See `FlushWindows` for why that is the window a caller is asking about.
+    // this turn began rather than after the wait below, so a loss that lands while an open
+    // is still settling is inside this call's answer rather than deferred to the next one.
+    // See `FlushWindows` for why that is the window a caller is asking about.
 
-    // Wait for initialization, bounded by the caller's own budget. `close()` has always
-    // raced this wait against its timeout; `flush()` awaited it outright, so a `mkdir` or
-    // `stat` hung on an unresponsive mount made `flush(1000)` never return at all - the
+    // Wait for an open in flight, bounded by the caller's own budget. A `mkdir` or `open`
+    // hung on an unresponsive mount must not make `flush(1000)` never return at all - the
     // shape a timeout exists to rule out.
-    if (this.initPromise) {
-      const initPromise = this.initPromise;
-      const timeoutSentinel = { timedOut: true } as const;
-      const result = await raceDeadline(
-        initPromise,
-        // This call's budget includes time spent waiting behind another flush.
-        Math.max(0, timeoutMS - (Date.now() - startTime)),
-        () => timeoutSentinel,
-      );
-      if (result === timeoutSentinel) {
-        return window.settle(true);
-      }
+    const timeoutSentinel = { timedOut: true } as const;
+    const result = await raceDeadline(
+      this.initPromise,
+      // This call's budget includes time spent waiting behind another flush.
+      Math.max(0, timeoutMS - (Date.now() - startTime)),
+      () => timeoutSentinel,
+    );
+
+    if (result === timeoutSentinel) {
+      return window.settle(true);
     }
 
-    // Wait for the queue to finish processing - lines in flight, and a line paused before
-    // its setup retry, included - with timeout
+    // Wait for the queue to finish processing - lines in flight included - with timeout
     while (!this.engine.isDrained) {
       if (Date.now() - startTime > timeoutMS) {
         // Timeout reached
@@ -958,76 +900,6 @@ export class FileSink implements LogSink {
     }
 
     return window.settle(false);
-  }
-
-  /**
-   * Initialize the file sink asynchronously
-   */
-  private async initialize(): Promise<void> {
-    const shouldSuppressFailureReport = isConsoleReportActive();
-    try {
-      // Create log directory if it doesn't exist
-      await fsPromises.mkdir(this.logDir, { recursive: true });
-
-      // Initialize log file. `setupLogFile` owns `isInitialized`, and setting it again here
-      // undid the one thing that flag's identity check exists to protect: `createWriteStream`
-      // reports a path it cannot open - `EISDIR`, `EACCES`, `EMFILE` - as an event, typically
-      // while `setupLogFile` is suspended in `stat`, so the `'error'` handler destroyed the
-      // stream and cleared the flag and this line then put it straight back. `getHealth()`
-      // answered `{ isInitialized: true, isHealthy: true }` for a sink holding no descriptor
-      // at all, which is the state the handler had just finished reporting. A setup that
-      // returns without marking the flag - a `close()` that landed mid-open, or a stream a
-      // rotation has since replaced - means exactly that, and is left alone.
-      await this.setupLogFile();
-    } catch (error) {
-      // `close()` may stop waiting for initialization before the filesystem operation
-      // itself settles. Once closing has begun, do not claim that a failed setup is still
-      // being retried after the sink has promised to shut down.
-      if (this.closing || this.closed) {
-        return;
-      }
-
-      // Said, not swallowed. Entries do stay queued and `writeEntry` retries `setupLogFile`
-      // later, so nothing is lost here - but a constructor-time `EACCES` or `EISDIR` left
-      // no trace at all until some later write happened to hit the missing stream, and a
-      // sink that can never open its file looked identical to one that simply had nothing
-      // to write yet. `NamedPipeSink` reports its setup failures up front; this now does
-      // too.
-      // `setupLogFile` already raises a `FileSinkError` that names the file, so wrapping
-      // one produced `Failed to setup log file: Failed to setup log file: ...`. Only what
-      // arrives as something else - `mkdir`'s raw `ENOTDIR`, `EACCES` - is wrapped.
-      const failure =
-        error instanceof FileSinkError
-          ? error
-          : new FileSinkError(
-              `Failed to setup log file: ${describeError(error)}`,
-              toError(error),
-              'setup',
-            );
-
-      // Setup belongs to no particular line, and the queue still holds every entry: a
-      // later write retries this, so nothing here is lost. Each line that then fails
-      // setup is reported on its own, `'retrying'` or `'lost'`.
-      this.handleError('setup', failure, {
-        disposition: 'no_entry',
-        shouldSuppressFailureReport,
-      });
-    }
-  }
-
-  /**
-   * Which kind of failure a thrown error describes: the `kind` its throw site set, or
-   * `'write'` for anything raised without one.
-   *
-   * An entry `close()` finished under is raised as `'close'`, not `'write'`: the
-   * destination was fine and the sink was shut down out from under a pass still in flight
-   * (see the second `closed` check in `writeEntry`), and `NamedPipeSink` counts the
-   * identical event as `'close'`.
-   */
-  private failureKindFor(error: Error): SinkFailureKind {
-    return error instanceof FileSinkError && error.kind !== undefined
-      ? error.kind
-      : 'write';
   }
 
   /**
@@ -1047,39 +919,19 @@ export class FileSink implements LogSink {
     }
 
     if (this.closed) {
-      throw new FileSinkError(
-        'Cannot write to closed sink',
-        undefined,
-        'close',
-      );
+      throw new FileSinkError('Cannot write to closed sink');
     }
 
+    // The stream went away after the engine handed this line over. Never attempted, so it
+    // goes back to the queue with its attempts unspent, for the reopen to carry.
     if (!this.logFileStream) {
-      await this.setupLogFile();
-    }
-
-    // Setup may return without a stream when close finishes while it is suspended.
-    if (this.closed) {
-      throw new FileSinkError(
-        'Cannot write to closed sink',
-        undefined,
-        'close',
-      );
-    }
-
-    // Setup that returns without a stream failed to open one: the `'error'` handler left
-    // the reason for this entry when it had one.
-    if (!this.logFileStream) {
-      throw (
-        this.takeOpenFailure(queued) ??
-        new FileSinkError('No log file stream available', undefined, 'setup')
-      );
+      throw noStreamError();
     }
 
     // Check rotation before writing (handles date change and size limit)
     await this.rotateIfNeeded();
 
-    // Asked again, after `setupLogFile` and `rotateIfNeeded`. `close()` bounds its drain
+    // Asked again, after `rotateIfNeeded`. `close()` bounds its drain
     // loop and returns while a pass that started before the deadline is still suspended in
     // one of those, so the check at the top of this method is not the last word: that pass
     // resumed and wrote a line to disk *after* `await close()` had already resolved and
@@ -1087,11 +939,7 @@ export class FileSink implements LogSink {
     // counted and reported like any other line this sink did not deliver, rather than
     // landing in a file nobody is expecting to grow any more.
     if (this.closed) {
-      throw new FileSinkError(
-        'Cannot write to closed sink',
-        undefined,
-        'close',
-      );
+      throw new FileSinkError('Cannot write to closed sink');
     }
 
     // Always the line rendered in `write`. A render that threw has already been raised
@@ -1122,11 +970,7 @@ export class FileSink implements LogSink {
     // rotation that notices the close returns without changing the stream, so do not let
     // this older write continue into a sink that has already reported itself closed.
     if (this.closed) {
-      throw new FileSinkError(
-        'Cannot write to closed sink',
-        undefined,
-        'close',
-      );
+      throw new FileSinkError('Cannot write to closed sink');
     }
 
     // Write to file
@@ -1134,21 +978,15 @@ export class FileSink implements LogSink {
       // Rejected, not resolved. The stream can disappear *after* the check above: its
       // `'error'` handler calls `destroyStream` on a `nextTick`, which lands while this
       // method is suspended in `rotateIfNeeded` or `rotateFile` - both awaited after that
-      // check. Resolving here reported the loss as a successful write, so the queue
-      // cleared `consecutiveFailures` and counted the line written, `flush`
-      // answered `{ entriesWritten: 0, entriesFailed: 0, success: true }`, `getHealth` stayed
-      // healthy with `droppedEntries: 0`, and `onError` never fired for a line that was
-      // never written. Failing here instead routes it through the ordinary write-failure
-      // path, which retries it and, if that runs out, reports it.
+      // check - and a rotation whose reopen failed leaves none. Resolving here reported the
+      // loss as a successful write, so the queue counted the line written and `onError`
+      // never fired for a line that was never written. The line was not attempted, so it
+      // goes back to the queue for the reopen to carry.
       if (!this.logFileStream) {
-        return reject(
-          this.takeOpenFailure(queued) ??
-            new FileSinkError('No log file stream available'),
-        );
+        return reject(noStreamError());
       }
 
       const writingTo = this.logFileStream;
-      const writingToFile = this.currentLogFile ?? this.logDir;
 
       this.activeStreamWriteEntry = queued;
       queued.onCommitted?.();
@@ -1157,20 +995,6 @@ export class FileSink implements LogSink {
           this.activeStreamWriteEntry = undefined;
         }
         if (err) {
-          // A stream that never opened failed its open, not this write: `EISDIR` or
-          // `EACCES` from `createWriteStream` reaches a buffered write's callback before
-          // the `'error'` event, and the teardown below sends that event down its
-          // not-current branch, so this is the only place left to classify it. Raised as
-          // `'setup'`, so the line is reported and counted as a destination that could not
-          // be opened, and is not charged to `consecutiveFailures` as a failed write.
-          // Read before the teardown, which can release the descriptor of a stream that
-          // did open. `pending` alone cannot tell: a stream that opened and was then
-          // destroyed has no descriptor either, and a write reaching it fails with
-          // `ERR_STREAM_DESTROYED` - a write failure.
-          const didNeverOpen =
-            writingTo.pending &&
-            (err as NodeJS.ErrnoException).code !== 'ERR_STREAM_DESTROYED';
-
           // The event is told to keep quiet about this particular error; it still tears
           // the stream down, which is the half it does know about. A non-object is not
           // trackable and is simply not suppressed: the event then reports it, which is
@@ -1193,15 +1017,7 @@ export class FileSink implements LogSink {
             }
           }
 
-          reject(
-            didNeverOpen
-              ? new FileSinkError(
-                  `Failed to setup log file: ${writingToFile}`,
-                  err,
-                  'setup',
-                )
-              : new FileSinkError('Error writing to log file', err),
-          );
+          reject(new FileSinkError('Error writing to log file', err));
         } else {
           // The same identity guard as the error branch. Charged unconditionally, a
           // callback belonging to a stream a rotation had since replaced added its bytes
@@ -1238,28 +1054,27 @@ export class FileSink implements LogSink {
   }
 
   /**
-   * Setup the log file
+   * Open the log file for today: create the directory and the file if they are missing,
+   * open a stream on it and wait for the descriptor, and rotate it if it is already over
+   * the size limit.
+   *
+   * Throws what stopped it - `mkdir`'s `ENOTDIR` or `EACCES`, the open's `EISDIR` or
+   * `EMFILE` - for the caller to report as an outage. The stream is installed only once it
+   * has opened, so a stream this sink holds always has a descriptor, and a failure it
+   * reports later is a failed write.
    */
   private async setupLogFile(shouldSkipRotation = false): Promise<void> {
-    const isDiagnosticSetup = isDiagnosticEntry(this.inFlightEntry?.entry);
-    const shouldSuppressSetupReport =
-      isConsoleReportActive() ||
-      this.inFlightEntry?.shouldSuppressFailureReport === true;
-    // Nothing to open for a sink that is already closed. `close()` bounds its drain loop,
-    // so a `writeEntry` suspended in here - a slow `mkdir` on a network mount is enough -
-    // resumed *after* that loop gave up, after the stream `close()` found had been
-    // destroyed and after `close()` itself resolved. It then opened a fresh descriptor
+    // Nothing to open for a sink that is already closed. `close()` bounds its own wait for
+    // an open, so an attempt suspended in here - a slow `mkdir` on a network mount is
+    // enough - can resume *after* `close()` resolved. It then opened a fresh descriptor
     // nothing would ever close and set `isInitialized` back to `true`, so `getHealth()`
     // reported a closed sink as initialized - the state `close()` clears the flag to
     // prevent. Checked again below for the same reason: every await here is a place
     // `close()` can run.
     //
-    // `closed` only, not `closing`. `close()` raises `closing` *before* the drain loop that
-    // is the whole point of waiting, and that loop's writes come through here whenever the
-    // first entry arrives before the constructor's `initialize()` has opened anything -
-    // `new FileSink(...)`, one `write()`, `await close()`. Refusing during the drain phase
-    // meant that sink created no file at all and reported the entry lost after exhausting
-    // its retries, where the same sequence wrote it before. The descriptor a drain-phase
+    // `closed` only, not `closing`. `close()` raises `closing` *before* the drain it exists
+    // to run, and opens the file for that drain when lines are queued and nothing is open
+    // yet - `new FileSink(...)`, one `write()`, `await close()`. The descriptor a drain-phase
     // open creates is still the one `close()` ends afterwards, since `endCurrentStream`
     // reads whatever stream is current when it runs.
     if (this.closed) {
@@ -1269,198 +1084,188 @@ export class FileSink implements LogSink {
     const currentDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
     const currentLogFile = `${this.logDir}/${this.basename}-${currentDate}.log`;
 
+    await fsPromises.mkdir(this.logDir, { recursive: true });
+
+    // Explicitly create the file if it doesn't exist to avoid race conditions
+    // This ensures the file exists on disk before we try to read it in tests
     try {
-      await fsPromises.mkdir(this.logDir, { recursive: true });
+      await fsPromises.access(currentLogFile);
+    } catch {
+      // File doesn't exist, create it
+      await fsPromises.writeFile(currentLogFile, '', { flag: 'a' });
+    }
 
-      // Explicitly create the file if it doesn't exist to avoid race conditions
-      // This ensures the file exists on disk before we try to read it in tests
-      try {
-        await fsPromises.access(currentLogFile);
-      } catch {
-        // File doesn't exist, create it
-        await fsPromises.writeFile(currentLogFile, '', { flag: 'a' });
-      }
+    if (this.closed) {
+      return;
+    }
 
-      if (this.closed) {
-        return;
-      }
+    const stream = fs.createWriteStream(currentLogFile, { flags: 'a' });
 
-      this.pendingOpenFailure = undefined;
-      const stream = fs.createWriteStream(currentLogFile, { flags: 'a' });
+    // Attached before anything awaits, so no error the stream emits is ever unhandled.
+    stream.on('error', (streamError: unknown) => {
+      this.handleStreamError(stream, streamError);
+    });
 
-      this.logFileStream = stream;
-      this.currentLogFile = currentLogFile;
+    // `createWriteStream` returns a stream for a path it cannot open and fails afterwards,
+    // as an event: waited for here, so that failure is this open's, not a write's.
+    await new Promise<void>((resolve, reject) => {
+      const onOpen = (): void => {
+        stream.off('error', onError);
+        resolve();
+      };
+      const onError = (error: unknown): void => {
+        stream.off('open', onOpen);
+        reject(toError(error));
+      };
 
-      stream.on('error', (streamError: unknown) => {
-        // The stream that failed, not whatever is current. A rotation replaces this
-        // stream, and the one it replaced can still deliver its error afterwards -
-        // ungated, that late error destroyed the *live* stream, failing whatever write
-        // was in flight on it and forcing a needless reopen. A stream nobody is holding
-        // is simply torn down.
-        if (this.logFileStream !== stream) {
-          try {
-            stream.destroy();
-          } catch {
-            // Nothing further to try for a stream nothing is using.
-          }
+      stream.once('open', onOpen);
+      stream.once('error', onError);
+    });
 
-          // An open that never completed still leaves the sink uninitialized, even when
-          // nobody is holding the stream any more. A queued write reaching `stream.write()`
-          // first runs `destroyStream()` from its own callback, so the `'error'` event that
-          // follows arrives here rather than at the branch below that clears the flag: with
-          // a log path that is a directory, twenty consecutive failed writes and not one
-          // successful open still answered `{ isInitialized: true }`. Only when nothing has
-          // taken this stream's place - a rotation replaces it with a live one, and that
-          // sink is initialized.
-          if (stream.pending && this.logFileStream === undefined) {
-            this.isInitialized = false;
-          }
+    this.logFileStream = stream;
+    this.currentLogFile = currentLogFile;
 
-          return;
-        }
+    // Get current file size
+    try {
+      const stats = await fsPromises.stat(currentLogFile);
+      this.currentLogSize = stats.size;
+    } catch {
+      this.currentLogSize = 0;
+    }
 
-        this.destroyStream();
+    // Rotate if already at size limit
+    const maxSizeBytes = this.maxSizeMB * 1024 * 1024;
+    if (!shouldSkipRotation && this.currentLogSize >= maxSizeBytes) {
+      await this.rotateFile();
+    }
 
-        // Already said, by the write callback that knew which line it was and whether it
-        // was coming back. Consumed only when it matches, so an unrelated error cannot
-        // unsuppress the report still waiting for its own event.
-        if (
-          typeof streamError === 'object' &&
-          streamError !== null &&
-          this.suppressedWriteErrors.has(streamError)
-        ) {
-          this.suppressedWriteErrors.delete(streamError);
+    // Closed while the size was being read, so this stream has already outlived the
+    // teardown that would have ended it. Torn down here rather than left for nobody: the
+    // descriptor is the leak, and `isInitialized` must not go back up behind a `close()`
+    // that cleared it.
+    //
+    // `closed` only, for the reason the guard at the top of this method is: a stream
+    // opened while `close()` is still draining is the stream those queued entries are
+    // written through, and destroying it here left them with nowhere to go.
+    if (this.closed) {
+      this.destroyStream();
 
-          return;
-        }
+      return;
+    }
 
-        // Reported, not only torn down. This handler recorded nothing at all, so an async
-        // failure with no write in flight to pair it with - the disk filling, the file
-        // removed underneath the descriptor, an open that failed - left `getHealth()`
-        // answering `isHealthy: true` with a stale `lastError` and `onError` never fired,
-        // where `NamedPipeSink` reports every such failure. A write that was in flight
-        // still reports through its own rejection, which is the report suppressed above;
-        // this covers the failure that has no line to attach to.
-        //
-        // `'setup'` while the stream is still opening, `'write'` once it has a descriptor -
-        // the classification `NamedPipeSink` settled on. `createWriteStream` does not throw
-        // for `EACCES`, `EISDIR` or `EMFILE`, it emits, and `'write'` is documented as the
-        // one kind that means an entry is at risk: a destination that could never be opened
-        // is about no entry at all.
-        const kind: SinkFailureKind = stream.pending ? 'setup' : 'write';
-
-        const failure = new FileSinkError(
-          stream.pending
-            ? `Failed to setup log file: ${currentLogFile}`
-            : 'Log file stream failed',
-          toError(streamError),
-          kind,
-        );
-
-        // Only a failure of a stream that had a descriptor says anything about this
-        // sink's ability to write - counted against health by the report below; an open
-        // that never completed is `isInitialized`'s business, exactly as `NamedPipeSink`
-        // treats it.
-        if (kind !== 'write') {
-          // An open that never completed leaves the sink uninitialized, whatever
-          // `setupLogFile` marked on its way out: `createWriteStream` returns a stream for
-          // a path it cannot open and fails afterwards, so the flag was set and
-          // `getHealth()` answered `isHealthy: true` for a sink with no descriptor at all.
-          // The next `writeEntry` calls `setupLogFile` again and sets it back when the
-          // open really does succeed.
-          this.isInitialized = false;
-
-          // An entry is waiting on this open, and `writeEntry` raises the failure as that
-          // entry's: see `pendingOpenFailure`.
-          if (this.inFlightEntry !== undefined) {
-            this.pendingOpenFailure = { entry: this.inFlightEntry, failure };
-
-            return;
-          }
-        }
-
-        // No `entry`: the stream failed on its own, not while carrying a line this sink
-        // can name. Anything queued is retried on the reopened stream and reported on its
-        // own terms if that fails. Routed by the entry in flight all the same: unlike a
-        // rotation, a stream failure is not latched, so one from a forwarded console
-        // line that reached the console again would come back as another such line.
-        this.handleError(kind, failure, {
-          disposition: 'no_entry',
-          countsAgainstHealth: kind === 'write',
-          shouldSuppressFailureReport:
-            (stream.pending
-              ? shouldSuppressSetupReport
-              : this.activeStreamWriteEntry?.shouldSuppressFailureReport ===
-                true) ||
-            this.inFlightEntry?.shouldSuppressFailureReport === true,
-          isDiagnostic: stream.pending
-            ? isDiagnosticSetup
-            : isDiagnosticEntry(this.activeStreamWriteEntry?.entry),
-        });
-      });
-
-      // Get current file size
-      try {
-        const stats = await fsPromises.stat(currentLogFile);
-        this.currentLogSize = stats.size;
-      } catch {
-        this.currentLogSize = 0;
-      }
-
-      // Rotate if already at size limit
-      const maxSizeBytes = this.maxSizeMB * 1024 * 1024;
-      if (!shouldSkipRotation && this.currentLogSize >= maxSizeBytes) {
-        await this.rotateFile();
-      }
-
-      // Closed while the size was being read, so this stream has already outlived the
-      // teardown that would have ended it. Torn down here rather than left for nobody: the
-      // descriptor is the leak, and `isInitialized` must not go back up behind a `close()`
-      // that cleared it.
-      //
-      // `closed` only, for the reason the guards at the top of this method are: a stream
-      // opened while `close()` is still draining is the stream those queued entries are
-      // written through, and destroying it here left them with nowhere to go.
-      if (this.closed) {
-        this.destroyStream();
-
-        return;
-      }
-
-      // Marked here rather than only in `initialize()`, which runs once from the
-      // constructor and swallows what it catches. A sink whose directory was not there yet
-      // recovers lazily - `writeEntry` calls this again and writes successfully from then
-      // on - but nothing ever set the flag, so `getHealth()` answered
-      // `{ isHealthy: false, isInitialized: false }` forever while every line was landing
-      // on disk. An operator watching health saw a permanently broken sink that was fine.
-      //
-      // Only for the stream this call opened, the identity check `NamedPipeSink` makes for
-      // the same reason. `createWriteStream` returns a stream for a path it cannot open and
-      // reports afterwards, typically while this is suspended in `stat` or `rotateFile`, and
-      // the `'error'` handler above clears the flag for exactly that case - setting it
-      // unconditionally here put it straight back, so `getHealth()` answered
-      // `{ isInitialized: true, isHealthy: true }` for a sink holding no descriptor at all.
-      // A rotation replaces the stream and its own `setupLogFile` has already marked the
-      // one that succeeded, so there is nothing for this to say about a stream it no longer
-      // holds either.
-      if (this.logFileStream === stream) {
-        this.isInitialized = true;
-      }
-    } catch (error) {
-      throw new FileSinkError(
-        `Failed to setup log file: ${currentLogFile}`,
-        toError(error),
-        'setup',
-      );
+    // Only for the stream this call opened. A failure reported while this was suspended in
+    // `stat` or `rotateFile` has already torn it down, and a rotation replaces it and marks
+    // its own; there is nothing for this to say about a stream it no longer holds.
+    if (this.logFileStream === stream) {
+      this.isInitialized = true;
     }
   }
 
-  /** The open failure left for `queued`, if any, consumed by reading it. */
-  private takeOpenFailure(queued: QueuedEntry): FileSinkError | undefined {
-    const pending = this.pendingOpenFailure;
-    this.pendingOpenFailure = undefined;
+  /**
+   * A stream this sink opened reported an error.
+   *
+   * Reported unless its write callback already said it (see {@link suppressedWriteErrors}),
+   * and - when it is the stream in hand - the end of that connection, which the engine
+   * recovers from on its own timer.
+   */
+  private handleStreamError(
+    stream: fs.WriteStream,
+    streamError: unknown,
+  ): void {
+    // The stream that failed, not whatever is current. A rotation replaces this stream, and
+    // the one it replaced can still deliver its error afterwards - ungated, that late error
+    // destroyed the *live* stream, failing whatever write was in flight on it and forcing a
+    // needless reopen. A stream nobody is holding, or one whose open failed, is simply torn
+    // down: an open's failure is the open's to report.
+    if (this.logFileStream !== stream) {
+      try {
+        stream.destroy();
+      } catch {
+        // Nothing further to try for a stream nothing is using.
+      }
 
-    return pending?.entry === queued ? pending.failure : undefined;
+      return;
+    }
+
+    this.destroyStream();
+
+    // Already said, by the write callback that knew which line it was and whether it was
+    // coming back. Consumed only when it matches, so an unrelated error cannot unsuppress
+    // the report still waiting for its own event. The callback's failed write takes the
+    // connection down with it.
+    if (
+      typeof streamError === 'object' &&
+      streamError !== null &&
+      this.suppressedWriteErrors.has(streamError)
+    ) {
+      this.suppressedWriteErrors.delete(streamError);
+
+      return;
+    }
+
+    // Reported, not only torn down: an async failure with no write in flight to pair it
+    // with - the disk filling, the file removed underneath the descriptor - must not leave
+    // `getHealth()` answering `isHealthy: true` with a stale `lastError` and `onError`
+    // never fired. A write that was in flight still reports through its own rejection,
+    // which is the report suppressed above; this covers the failure that has no line to
+    // attach to, and counts against health, since the stream had a descriptor.
+    //
+    // No `entry`: the stream failed on its own, not while carrying a line this sink can
+    // name. Anything queued is retried on the reopened stream and reported on its own terms
+    // if that fails. Routed by the entry in flight all the same: unlike a rotation, a
+    // stream failure is not latched, so one from a forwarded console line that reached the
+    // console again would come back as another such line.
+    const failure = new FileSinkError(
+      `Log file stream failed: ${this.currentLogFile ?? this.logDir}`,
+      toError(streamError),
+    );
+    const shouldSuppressFailureReport =
+      this.activeStreamWriteEntry?.shouldSuppressFailureReport === true ||
+      this.inFlightEntry?.shouldSuppressFailureReport === true;
+    const isDiagnostic = isDiagnosticEntry(this.activeStreamWriteEntry?.entry);
+
+    this.engine.connectionLost(
+      {
+        isDiagnosticRetry: isDiagnostic,
+        shouldSuppressRetryReport: shouldSuppressFailureReport,
+      },
+      () => {
+        this.handleError('write', failure, {
+          disposition: 'no_entry',
+          countsAgainstHealth: true,
+          shouldSuppressFailureReport,
+          isDiagnostic,
+        });
+      },
+    );
+  }
+
+  /**
+   * Reopen the log file after a rotation ended the stream, reporting a failure as an
+   * outage rather than throwing it into the write that rotated.
+   *
+   * The write then finds no stream and goes back to the queue unattempted, and the engine
+   * reopens on its own timer. Routed as the engine routes its own reopen: by the line in
+   * flight, unless ordinary work is queued behind it.
+   */
+  private async reopenAfterRotation(shouldSkipRotation = false): Promise<void> {
+    try {
+      await this.setupLogFile(shouldSkipRotation);
+    } catch (error) {
+      if (this.closed) {
+        return;
+      }
+
+      this.reportSetupFailure(
+        error,
+        this.engine.openRouting({
+          isDiagnosticRetry: isDiagnosticEntry(this.inFlightEntry?.entry),
+          shouldSuppressRetryReport:
+            isConsoleReportActive() ||
+            this.inFlightEntry?.shouldSuppressFailureReport === true,
+        }),
+      );
+    }
   }
 
   /**
@@ -1476,6 +1281,26 @@ export class FileSink implements LogSink {
         this.logFileStream = undefined;
         this.isInitialized = false;
       }
+    }
+  }
+
+  /**
+   * Let go of the current stream without waiting: the engine's `release`. Flushed if it
+   * can be, within {@link MIN_CLOSE_FLUSH_MS}, and destroyed if it cannot, on an
+   * unreferenced timer - letting go is never a reason for the process to stay alive.
+   */
+  private releaseStream(): void {
+    const stream = this.logFileStream;
+
+    if (stream === undefined) {
+      return;
+    }
+
+    this.logFileStream = undefined;
+    this.isInitialized = false;
+
+    if (!stream.destroyed) {
+      void endStreamWithin(stream, MIN_CLOSE_FLUSH_MS, { shouldUnref: true });
     }
   }
 
@@ -1521,7 +1346,7 @@ export class FileSink implements LogSink {
         this.currentLogFile ?? this.logDir,
       );
 
-      await this.setupLogFile();
+      await this.reopenAfterRotation();
 
       return;
     }
@@ -1591,7 +1416,7 @@ export class FileSink implements LogSink {
     if (this.closing) {
       // Rotation already ended the stream. Reopen it so close can drain the
       // accepted entry without rotating the file during shutdown.
-      await this.setupLogFile();
+      await this.reopenAfterRotation();
       return;
     }
 
@@ -1613,9 +1438,9 @@ export class FileSink implements LogSink {
 
       // The current file may still be writable when archiving is not. Reopen it
       // without immediately trying to rotate its unchanged size again; otherwise
-      // every queued entry fails setup (or reopening recurses indefinitely).
-      // A later write after the backoff will retry; recovery needs no restart.
-      await this.setupLogFile(true);
+      // reopening recurses indefinitely. A later write after the backoff will retry;
+      // recovery needs no restart.
+      await this.reopenAfterRotation(true);
       return;
     }
 
@@ -1623,7 +1448,7 @@ export class FileSink implements LogSink {
     this.nextRotationAttemptAt = 0;
 
     // Setup new file (queue processing will resume after this)
-    await this.setupLogFile();
+    await this.reopenAfterRotation();
   }
 
   /**

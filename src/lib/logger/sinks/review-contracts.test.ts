@@ -4,6 +4,7 @@ import { promises as fs } from 'node:fs';
 import { FileSink } from './file';
 import { NamedPipeSink } from './named-pipe';
 import type { SinkFailure } from './internal/sink-failure';
+import { setOpenRetryBackoffForTesting } from './internal/reopen-backoff';
 import type { LogEntry } from '../types';
 import { TmpDir } from '../../tmp-dir';
 
@@ -14,7 +15,7 @@ const entry = (message: string): LogEntry => ({
   template: message,
 });
 
-test('exhausted FileSink setup retries count lost entries without counting failed writes', async () => {
+test('a FileSink setup outage holds lines without counting losses or failed writes', async () => {
   const directory = new TmpDir({ unsafeCleanup: true });
   await directory.initialize();
   const logDir = `${directory.path}/ordinary-file`;
@@ -29,45 +30,50 @@ test('exhausted FileSink setup retries count lost entries without counting faile
     },
   });
   try {
-    sink.write(entry('lost during setup'));
-    const result = await sink.flush();
-    expect(result.entriesFailed).toBe(1);
-    expect(result.timedOut).toBe(false);
+    sink.write(entry('held during setup'));
+    const result = await sink.flush(200);
+    expect(result.entriesFailed).toBe(0);
+    expect(result.timedOut).toBe(true);
     expect(sink.getHealth()).toMatchObject({
       isHealthy: false,
       isInitialized: false,
       consecutiveFailures: 0,
-      droppedEntries: 1,
-      droppedByKind: { setup: 1, write: 0 },
+      queueSize: 1,
+      droppedEntries: 0,
+      droppedByKind: { setup: 0, write: 0 },
     });
     expect(
       failures.filter((failure) => failure.attempt !== undefined),
-    ).toHaveLength(2);
-    expect(failures.every((failure) => failure.kind === 'setup')).toBe(true);
+    ).toHaveLength(0);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({
+      kind: 'setup',
+      disposition: 'no_entry',
+    });
   } finally {
     await sink.close();
     await directory.cleanup();
   }
 });
 
-test('a FileSink startup burst schedules one drain and preserves every queued entry', async () => {
+test('a FileSink startup burst waits on one open and preserves every queued entry', async () => {
   const directory = new TmpDir({ unsafeCleanup: true });
   await directory.initialize();
+  const open = spyOn(
+    FileSink.prototype as unknown as { openFile(): Promise<unknown> },
+    'openFile',
+  );
   const sink = new FileSink({
     logDir: directory.path,
     basename: 'startup',
     jsonFormat: true,
   });
-  const drain = spyOn(
-    sink as unknown as { processQueue(): Promise<void> },
-    'processQueue',
-  );
   try {
     for (let index = 0; index < 100; index++) {
       sink.write(entry(`line ${String(index)}`));
     }
     expect((await sink.flush()).entriesWritten).toBe(100);
-    expect(drain).toHaveBeenCalledTimes(1);
+    expect(open).toHaveBeenCalledTimes(1);
     const [filename] = await fs.readdir(directory.path);
     const text = await fs.readFile(`${directory.path}/${filename}`, 'utf8');
     const lines = text.trim().split('\n');
@@ -75,17 +81,18 @@ test('a FileSink startup burst schedules one drain and preserves every queued en
     expect(JSON.parse(lines[0]).message).toBe('line 0');
     expect(JSON.parse(lines[99]).message).toBe('line 99');
   } finally {
-    drain.mockRestore();
+    open.mockRestore();
     await sink.close();
     await directory.cleanup();
   }
 });
 
-test('a failed rotation reopen clears initialized health until the destination recovers', async () => {
+test('a failed rotation reopen holds the line and clears initialized health until the destination recovers', async () => {
   const directory = new TmpDir({ unsafeCleanup: true });
   await directory.initialize();
   const logDir = `${directory.path}/logs`;
   const oldDir = `${directory.path}/old-logs`;
+  setOpenRetryBackoffForTesting({ initialMS: 20, maxMS: 50 });
   const sink = new FileSink({
     logDir,
     basename: 'rotation',
@@ -93,6 +100,7 @@ test('a failed rotation reopen clears initialized health until the destination r
     maxRetries: 0,
     onError: () => {},
   });
+  setOpenRetryBackoffForTesting(undefined);
   try {
     sink.write(entry('first'));
     expect((await sink.flush()).entriesWritten).toBe(1);
@@ -100,17 +108,21 @@ test('a failed rotation reopen clears initialized health until the destination r
     await fs.rename(logDir, oldDir);
     await fs.writeFile(logDir, 'not a directory');
     sink.write(entry('rotation cannot reopen'));
-    expect((await sink.flush()).entriesFailed).toBe(1);
+    expect(await sink.flush(200)).toMatchObject({
+      entriesFailed: 0,
+      timedOut: true,
+    });
     expect(sink.getHealth()).toMatchObject({
       isInitialized: false,
       isHealthy: false,
       consecutiveFailures: 0,
-      droppedByKind: { setup: 1 },
+      queueSize: 1,
+      droppedEntries: 0,
     });
     await fs.unlink(logDir);
     await fs.rename(oldDir, logDir);
     sink.write(entry('recovered'));
-    expect((await sink.flush()).entriesWritten).toBe(1);
+    expect((await sink.flush()).entriesWritten).toBe(2);
     expect(sink.getHealth()).toMatchObject({
       isInitialized: true,
       isHealthy: true,
