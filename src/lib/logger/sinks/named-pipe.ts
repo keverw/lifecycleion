@@ -22,12 +22,11 @@ import {
 import { resolveTimeoutMS } from '../../internal/timer-limits';
 import {
   reportSinkError,
-  type DroppedEntryCounts,
   type SinkErrorHandler,
   type SinkFailureDisposition,
   type SinkFailureKind,
 } from './internal/sink-failure';
-import { describeEntryCount } from './internal/loss-ledger';
+import { describeEntryCount, describeWriteCount } from './internal/loss-ledger';
 import { endStreamWithin } from './internal/end-stream';
 import { FormatReportScheduler } from './internal/format-report-scheduler';
 import { NonBlockingPipeStream } from './internal/non-blocking-pipe-stream';
@@ -35,10 +34,11 @@ import type { OutageReporter } from './internal/outage-reporter';
 import { openRetryBackoff } from './internal/reopen-backoff';
 import {
   DeliveryEngine,
-  type DeliveryReportOptions,
   type DeliverySlot,
   type FlushResult,
   type OpenResult,
+  type QueueingSinkHealth,
+  type ReopenStatus,
   type WriteOutcome,
 } from './internal/delivery-engine';
 
@@ -125,51 +125,18 @@ export interface NamedPipeSinkOptions {
 
 /**
  * What a `NamedPipeSink` will tell you about itself: the shape `FileSink.getHealth()`
- * returns. The two sinks answer a failure the same way, and there was no reason for only
- * one of them to be able to say how that was going: this sink exposed a single
- * `droppedEntryCount` getter, so a queue growing behind a pipe nobody was reading was
- * invisible until entries started falling off the end of it.
+ * returns, so a consumer can watch both queueing sinks the same way. See
+ * {@link QueueingSinkHealth}.
  */
-export interface NamedPipeSinkHealth {
-  /** No failed writes since the last successful one, and the pipe is open. */
-  isHealthy: boolean;
-  /** Entries not yet written or given up on, those in flight included. */
-  queueSize: number;
-  /**
-   * Entries this sink did not deliver - evicted at `maxQueueSize`, out of retries, still
-   * queued when `close()` gave up on them, or failed by a write that was already in flight
-   * when `close()` finished.
-   *
-   * The same meaning as `FileSinkHealth.droppedEntries`.
-   */
-  droppedEntries: number;
-  /** `droppedEntries` by reason. See {@link DroppedEntryCounts}. */
-  droppedByKind: DroppedEntryCounts;
-  /** Whether the pipe is currently open for writing. */
-  isInitialized: boolean;
-  /** Whether a reconnect - manual or automatic - is in flight. */
-  isReconnecting: boolean;
-  /** The most recent failure of any kind, including a `formatter` that threw. */
-  lastError?: Error;
-  /**
-   * Failed writes since the last successful one.
-   *
-   * Write failures only: a `FORMAT` failure still produced a line and left the pipe
-   * healthy, so counting it would report a sink that is working perfectly as broken.
-   */
-  consecutiveFailures: number;
-}
+export type NamedPipeSinkHealth = QueueingSinkHealth;
 
-export type ReconnectStatus =
-  | { success: true }
-  | { success: false; reason: 'already_reconnecting' }
-  | { success: false; reason: 'closed' }
-  | { success: false; reason: 'error'; error: Error };
+/** What `reconnect()` answers. See {@link ReopenStatus}. */
+export type ReconnectStatus = ReopenStatus;
 
 /**
  * The `errno` an `O_NONBLOCK` open for writing gives when the FIFO has no reader.
  *
- * POSIX is explicit about this one, and it is the whole reason the probe in `openPipe`
+ * POSIX is explicit about this one, and it is the whole reason the probe in `initializePipe`
  * works: `open()` with `O_WRONLY | O_NONBLOCK` on a FIFO "shall return -1 and set errno to
  * `[ENXIO]`" when no process has that FIFO open for reading. Linux and macOS - the only
  * two platforms this sink runs on at all - both implement it as written, so there is no
@@ -191,11 +158,6 @@ function openFailureKind(error: unknown): SinkFailureKind {
   return code === 'ENOENT' ? 'not_found' : 'setup';
 }
 
-/** `1 write` or `N writes`, for a close report's message. */
-function describeWriteCount(count: number): string {
-  return `${String(count)} write${count === 1 ? '' : 's'}`;
-}
-
 /**
  * NamedPipeSink writes logs to a named pipe (FIFO)
  * Only supported on Linux and macOS
@@ -209,7 +171,7 @@ export class NamedPipeSink implements LogSink {
   private jsonFormat: boolean;
   private onError?: SinkErrorHandler;
   private formatter?: (entry: LogEntry) => string;
-  private pipeStream?: fs.WriteStream;
+  private pipeStream?: NonBlockingPipeStream;
   private minLevel: LogLevel;
   private readonly closeTimeoutMS: number;
   /**
@@ -599,7 +561,7 @@ export class NamedPipeSink implements LogSink {
    * callback cannot fire on a FIFO that cannot flush, and the caller does not wait for it.
    * The timer is unreferenced: this must not be a reason the process stays alive.
    */
-  private abandonStream(stream: fs.WriteStream): void {
+  private abandonStream(stream: NonBlockingPipeStream): void {
     void endStreamWithin(stream, MIN_CLOSE_FLUSH_MS, { shouldUnref: true });
   }
 
@@ -627,7 +589,7 @@ export class NamedPipeSink implements LogSink {
     const bytesLeft = await endStreamWithin(stream, timeoutMS, {
       shouldUnref: false,
       onEndError: (error) => {
-        this.handleError('close', error);
+        this.engine.report('close', error);
       },
     });
 
@@ -653,31 +615,20 @@ export class NamedPipeSink implements LogSink {
       shouldSuppressRetryReport,
       isExplicit: shouldReportNoReader,
     });
-
-    return await this.openPipe(
-      routing.isDiagnostic,
-      routing.shouldSuppressFailureReport,
-      shouldReportNoReader,
-    );
-  }
-
-  private async openPipe(
-    isDiagnostic = false,
-    shouldSuppressFailureReport = false,
-    shouldReportNoReader = false,
-  ): Promise<OpenResult> {
-    // This closure retains the attempt's origin through awaits.
+    // Reported once per distinct failure per outage rather than once per attempt; see
+    // {@link DeliveryEngine.outages}. This closure retains the attempt's routing through
+    // awaits.
     const reportOpenFailure = (
       kind: SinkFailureKind,
       message: string,
       cause: unknown,
     ): void => {
-      this.reportOpenFailure(
+      this.engine.reportOpenFailure(
         kind,
         message,
         cause,
-        isDiagnostic,
-        shouldSuppressFailureReport,
+        routing.isDiagnostic,
+        routing.shouldSuppressFailureReport,
       );
     };
     const unavailable: OpenResult = { status: 'unavailable' };
@@ -869,9 +820,7 @@ export class NamedPipeSink implements LogSink {
         return unavailable;
       }
 
-      const stream = new NonBlockingPipeStream(
-        probe,
-      ) as unknown as fs.WriteStream;
+      const stream = new NonBlockingPipeStream(probe);
 
       // Ownership moved to the stream. The `finally` block must not close the same fd.
       probe = undefined;
@@ -922,7 +871,7 @@ export class NamedPipeSink implements LogSink {
    * and - when it is the stream in hand - the end of that connection, which the engine
    * recovers from.
    */
-  private handleStreamError(stream: fs.WriteStream, err: Error): void {
+  private handleStreamError(stream: NonBlockingPipeStream, err: Error): void {
     const isDiagnosticFailure = this.diagnosticFailedStreams.has(stream);
     const shouldSuppressStreamFailure = this.consoleFailedStreams.has(stream);
     this.diagnosticFailedStreams.delete(stream);
@@ -958,7 +907,7 @@ export class NamedPipeSink implements LogSink {
     // failed write read as two in `getHealth()` until a later success reset the tally.
     const report = (): void => {
       if (!wasReported) {
-        this.handleError('write', err, {
+        this.engine.report('write', err, {
           countsAgainstHealth: isCurrent,
           isDiagnostic: isDiagnosticFailure,
           shouldSuppressFailureReport: shouldSuppressStreamFailure,
@@ -986,32 +935,6 @@ export class NamedPipeSink implements LogSink {
         shouldSuppressRetryReport: shouldSuppressStreamFailure,
       },
       report,
-    );
-  }
-
-  /**
-   * Report a failed open, once per distinct failure per outage rather than once per
-   * attempt.
-   *
-   * See {@link reportedOpenFailures}. The retry behind every failed open is what makes this
-   * necessary: without it a path that is never coming back is a callback a second, forever,
-   * from a sink whose whole job on this path is to wait quietly and keep trying.
-   */
-  private reportOpenFailure(
-    kind: SinkFailureKind,
-    message: string,
-    cause: unknown,
-    isDiagnostic = false,
-    shouldSuppressFailureReport = false,
-  ): void {
-    // Keyed on the kind as well as the text: both callers here build the same
-    // `Could not open named pipe at <path>: ` prefix. See {@link OutageReporter}.
-    this.engine.reportOpenFailure(
-      kind,
-      message,
-      cause,
-      isDiagnostic,
-      shouldSuppressFailureReport,
     );
   }
 
@@ -1106,9 +1029,7 @@ export class NamedPipeSink implements LogSink {
         }
 
         // Never replay a record whose prefix may already have been consumed.
-        const wasPartiallyWritten =
-          stream instanceof NonBlockingPipeStream &&
-          stream.consumePartialWriteFailure(error);
+        const wasPartiallyWritten = stream.consumePartialWriteFailure(error);
 
         done({ status: 'failed', error, isRetryable: !wasPartiallyWritten });
 
@@ -1323,22 +1244,10 @@ export class NamedPipeSink implements LogSink {
   ): void {
     this.formatReports.schedule(
       (onReported) => {
-        this.handleError('format', failure, { ...options, onReported });
+        this.engine.report('format', failure, { ...options, onReported });
       },
       () => this.describeFailure('format', failure),
     );
-  }
-
-  /**
-   * Handle errors. Answers whether the report went out rather than being suppressed. See
-   * {@link DeliveryEngine.report}.
-   */
-  private handleError(
-    kind: SinkFailureKind,
-    error: unknown,
-    options?: DeliveryReportOptions,
-  ): boolean {
-    return this.engine.report(kind, error, options);
   }
 
   /** The console line for a failure, the one a report falls back to. */

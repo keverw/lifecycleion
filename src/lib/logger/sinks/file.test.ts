@@ -3794,7 +3794,7 @@ describe('FileSink - entries written during close', () => {
     await sink.flush();
 
     const internals = sink as unknown as {
-      closed: boolean;
+      engine: { state: string };
       currentLogSize: number;
       maxSizeMB: number;
       rotateFile: () => Promise<void>;
@@ -3808,9 +3808,11 @@ describe('FileSink - entries written during close', () => {
 
     internals.currentLogSize = 1;
     internals.maxSizeMB = 0;
+    const stateBeforeClose = internals.engine.state;
+
     internals.rotateFile = () => {
       // The state visible when a real close wins while rotateFile() is suspended.
-      internals.closed = true;
+      internals.engine.state = 'closed';
 
       return Promise.resolve();
     };
@@ -3841,7 +3843,7 @@ describe('FileSink - entries written during close', () => {
     );
 
     // Let the ordinary close path release the real stream used by this focused probe.
-    internals.closed = false;
+    internals.engine.state = stateBeforeClose;
     await sink.close();
   });
 
@@ -3875,7 +3877,7 @@ describe('FileSink - entries written during close', () => {
       };
 
     const internals = sink as unknown as {
-      closing: boolean;
+      engine: { closing: boolean };
       rotateIfNeeded: () => Promise<void>;
       logFileStream: unknown;
     };
@@ -3886,7 +3888,7 @@ describe('FileSink - entries written during close', () => {
     // after it is refused at the door.
     const streamBeforeClose = internals.logFileStream;
 
-    internals.closing = true;
+    internals.engine.closing = true;
 
     await internals.rotateIfNeeded();
 
@@ -3897,7 +3899,7 @@ describe('FileSink - entries written during close', () => {
 
     // And the guard is the only thing holding it back: the same call outside a close does
     // rotate, so this test cannot pass by the date change going unnoticed.
-    internals.closing = false;
+    internals.engine.closing = false;
 
     await internals.rotateIfNeeded();
 
@@ -4264,6 +4266,84 @@ test('bytes a rotation abandons are reported as a write loss, not a close', asyn
     expect(failures[0]?.disposition).toBe('no_entry');
     expect(failures[0]?.error.message).toContain('Rotation abandoned 42 bytes');
   } finally {
+    await sink.close();
+    await directory.cleanup();
+  }
+});
+
+test('a log file opened over a stream already installed lets the older one go', async () => {
+  // A reopen after a stream error can install a stream while a rotation is between
+  // streams; the rotation's own reopen then installed over it, and nothing - not even
+  // `close()` - ever ended the first.
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const sink = new FileSink({
+    logDir: directory.path,
+    basename: 'install-race',
+  });
+  try {
+    await sink.flush();
+    const internals = sink as unknown as {
+      logFileStream?: { writableEnded: boolean; destroyed: boolean };
+      setupLogFile(shouldSkipRotation?: boolean): Promise<void>;
+    };
+    const older = internals.logFileStream;
+
+    await internals.setupLogFile(true);
+
+    expect(internals.logFileStream).toBeDefined();
+    expect(internals.logFileStream).not.toBe(older);
+    expect(older?.writableEnded === true || older?.destroyed === true).toBe(
+      true,
+    );
+    expect(sink.getHealth().isInitialized).toBe(true);
+  } finally {
+    await sink.close();
+    await directory.cleanup();
+  }
+});
+
+test('a stream failure between streams is routed by the diagnostic line in flight', async () => {
+  // During a rotation the line is in flight but not yet handed to a stream, so the
+  // routing has to come from the entry in flight, as the suppression flag's already did.
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const failures: SinkFailure[] = [];
+  const sink = new FileSink({
+    logDir: directory.path,
+    basename: 'diagnostic-in-flight',
+    onError: (failure) => {
+      failures.push(failure);
+    },
+  });
+  const lines = muteConsoleError();
+  const internals = sink as unknown as {
+    inFlightEntry?: unknown;
+    logFileStream?: { emit: (event: string, error: Error) => void };
+  };
+  try {
+    await sink.flush();
+    internals.inFlightEntry = {
+      entry: markDiagnosticEntry({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'diagnostic',
+        message: 'diagnostic',
+      }),
+      attempts: 0,
+      formatted: 'diagnostic\n',
+      formatError: undefined,
+    };
+    internals.logFileStream?.emit('error', new Error('EIO: simulated'));
+
+    // A diagnostic's failure goes to the console, never to the handler.
+    expect(failures).toEqual([]);
+    expect(lines.some((line) => line.includes('Log file stream failed'))).toBe(
+      true,
+    );
+  } finally {
+    internals.inFlightEntry = undefined;
+    restoreConsoleError();
     await sink.close();
     await directory.cleanup();
   }

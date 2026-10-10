@@ -196,7 +196,7 @@ Resets the policy to its initial state, clearing all errors and attempt tracking
 | `mostCommonError`        | `unknown`              | Most frequent error (grouped by reference equality and message string), or `null` if no errors have occurred |
 | `lastError`              | `unknown`              | Most recent error, or `null` if no errors have been recorded                                                 |
 
-> **Note:** `mostCommonError` uses two strategies to determine frequency - reference equality (`===`) and message-string grouping - and returns whichever finds the highest count. Reference equality catches reused error objects (including those with unstable or dynamic messages). Message grouping uses the `.message` property for `Error` instances and objects, nested `.error.message` for wrapped errors, or `String()` conversion as a fallback, so distinct objects with the same message are counted together. The first instance encountered for the winning group is returned. In case of ties across strategies, the first error encountered with the maximum count is returned.
+> **Note:** `mostCommonError` uses two strategies to determine frequency - reference equality (`===`) and message-string grouping - and returns whichever finds the highest count. Reference equality catches reused error objects (including those with unstable or dynamic messages). Message grouping uses the `.message` property for `Error` instances and objects, nested `.error.message` for wrapped errors, or `String()` conversion as a fallback, so distinct objects with the same message are counted together. The first instance encountered for the winning group is returned. Ties favor reference equality: a message group is returned only when its count is strictly higher than every reference count, and within each strategy the tied error or group encountered first wins.
 
 ### Example
 
@@ -242,7 +242,9 @@ new RetryRunner<T>(
 )
 ```
 
-> **Note:** The `operation` function can be synchronous or asynchronous (returning `void` or `Promise<void>`). Both are fully supported.
+> **Note:** The `operation` function can be synchronous or asynchronous (returning `void` or `Promise<void>`). Both are fully supported. It is called with `this` undefined.
+
+Throws what `new RetryPolicy(policy)` throws for invalid policy options, and a `TypeError` when `operation` is not a function.
 
 ### Runner States
 
@@ -496,7 +498,7 @@ On pre-operation error: `{ status: 'pre_operation_error', code, error }` with co
 
 - `'already_completed'` - operation already finished (call `reset()` first)
 - `'force_try_superseded'` - an abort listener requested cancel/reset after this non-waiting force request
-- `'force_try_in_progress'` - a forced attempt with `shouldAbortRunning: true` is already running
+- `'force_try_in_progress'` - `shouldAbortRunning: true` was requested while a forced attempt (with or without `shouldAbortRunning`) is already running
 - `'lock_error'` - concurrent operation call detected
 - `'terminal_dispatch_in_progress'` - called while the operation's terminal outcome is being published
 - `'unexpected_error'` - invalid options (a non-boolean value, or a getter that throws), or an unexpected internal error

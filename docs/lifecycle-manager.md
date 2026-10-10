@@ -365,7 +365,7 @@ Once stalled, a component remains registered but:
 - `startAllComponents()` will fail unless you pass `ignoreStalledComponents: true` (which skips stalled components during bulk startup)
 - `startComponent(name)` will fail unless you pass `forceStalled: true` (which calls `start()` regardless of stalled state)
 
-To recover: unregister the component, retry via `stopAllComponents({ retryStalled: true })` (this escalates to the force phase and does not re-run `stop()`), start non-stalled components via `startAllComponents({ ignoreStalledComponents: true })`, or force start an individual stalled component via `startComponent(name, { forceStalled: true })`. Force starting is only appropriate for components whose `start()` implementation rejects or otherwise protects against any still-running shutdown work from the previous run.
+To recover: unregister the component with `unregisterComponent(name, { stopIfRunning: false })` (the default `stopIfRunning: true` refuses a stalled component with `code: 'stop_failed'`, `stopFailureReason: 'stalled'`), retry via `stopAllComponents({ retryStalled: true })` (this escalates to the force phase and does not re-run `stop()`), start non-stalled components via `startAllComponents({ ignoreStalledComponents: true })`, or force start an individual stalled component via `startComponent(name, { forceStalled: true })`. Force starting is only appropriate for components whose `start()` implementation rejects or otherwise protects against any still-running shutdown work from the previous run.
 
 A successful forced start retires the old stall: it emits `component:stalled-resolved`
 with `reason: 'forced-start'`, then `component:started`. If shutdown begins while the
@@ -1050,7 +1050,7 @@ interface LifecycleManagerOptions {
 }
 ```
 
-`onReloadRequested`, `onInfoRequested` and `onDebugRequested` take `null` or omission as no callback; any other value that is not a function makes the constructor throw a `TypeError`. A [`repeatedShutdownRequestPolicy`](#repeated-shutdown-request-policy) requires `onForceShutdown` to be a function, and throws the same way without one.
+`name` takes `null` or omission as `'lifecycle-manager'`; any other value that is not a non-empty string makes the constructor throw a `TypeError`. `onReloadRequested`, `onInfoRequested` and `onDebugRequested` take `null` or omission as no callback; any other value that is not a function makes the constructor throw a `TypeError`. A [`repeatedShutdownRequestPolicy`](#repeated-shutdown-request-policy) requires `onForceShutdown` to be a function, and throws the same way without one.
 
 ### Component Registration
 
@@ -1206,9 +1206,9 @@ interface UnregisterOptions {
 - `forceStop` only applies when `stopIfRunning` is true (passes through to `stopComponent` as `allowStopWithRunningDependents`).
 - A stop that refuses before it runs `stop()` is answered with the unregister's own code for that refusal rather than `stop_failed`: running dependents without `forceStop` give `component_running`, a start or stop that owns the component `component_starting` / `component_stopping`, a bulk startup or shutdown `bulk_operation_in_progress`, and an invalid timeout `invalid_options`. The component stays registered, in the state it was in.
 - If a component is stalled and `stopIfRunning` is true, unregister is blocked.
-- While a start or stop is in flight, unregister is refused with `component_starting` / `component_stopping`: the operation writes its outcome when it settles, so the component has to be left registered until then. This is checked again after unregister's own stop, since a `component:stopped` listener may have started the component again; one that is already back up is refused with `component_running`.
+- While a start or stop is in flight, unregister is refused with `component_starting` / `component_stopping`: the operation writes its outcome when it settles, so the component has to be left registered until then. This is checked again just before the removal, on every path: after unregister's own stop, since a `component:stopped` listener may have started the component again - one that is already back up is refused with `component_running` - and on a component with nothing to stop, since an `isComponentRunning()` override may have begun a start or stop.
 - The registration itself is rechecked immediately before anything is removed, on every path. Reading `stopIfRunning` and `forceStop` off the options object runs caller code, so a getter can unregister the component and register a replacement under the same name before the removal begins. The call then reports `component_not_found`, and the replacement keeps the name and its state. If the getter instead started a bulk startup or shutdown without replacing the component, the usual refusals are checked first, in this order: a start or stop in flight (`component_starting` / `component_stopping`), a stalled component with `stopIfRunning` true (`stop_failed`), and a running component with `stopIfRunning: false` (`component_running`). Otherwise the call reports `bulk_operation_in_progress` before stopping or removing anything.
-- Successfully unregistering a component automatically clears its `lifecycle` reference (setting it to `undefined`) and marks it as unregistered, which allows the same component instance to be registered again (either with the same manager or with a different one).
+- Successfully unregistering a component automatically clears its `lifecycle` reference (setting it to `undefined`) and marks it as unregistered, which allows the same component instance to be registered again (either with the same manager or with a different one). If an overridden `_markUnregistered()` throws, the manager clears both itself - unless the override registered the instance again first, which its new `lifecycle` reference shows; that registration is left alone.
 - `wasStopped` is `true` only for a stop this call made. A component that was already stopped, or that something else stopped before this call's stop ran (an unexpected stop reported meanwhile), is removed with `wasStopped: false`.
 - `component:unregistered` is queued as the component is removed, before its own unregister hooks run, so a registration of the name that one of them makes is announced after it. A failure after the removal is answered `operation_crashed` with a `reason` beginning `Component was unregistered, but`; the component stays unregistered and the event is still emitted.
 
@@ -2038,7 +2038,7 @@ if (!health.healthy) {
 
 Check health of all running components. A running component that is stopping is still checked and answers `stopped`; one being cleaned up after a late-completed timed-out start is left out of the report (see [Component Messaging](#component-messaging)).
 
-Each component is checked through `checkComponentHealth()`, so a subclass override is the one used. An override that throws or rejects for a component is reported on the global `'error'` channel and answers that component's entry with `code: 'operation_crashed'`; the other entries are unaffected.
+Each component is checked through `checkComponentHealth()`, so a subclass override is the one used. An override that throws or rejects for a component, or answers something that is not an object, is reported on the global `'error'` channel and answers that component's entry with `code: 'operation_crashed'`; the other entries are unaffected. The fields of an override's answer are read once, the same way - a getter that throws fails only that entry - and the report holds a copy of them, with `healthy` and `timedOut` true only when the override answered the literal `true`.
 
 ```typescript
 checkAllHealth(): Promise<HealthReport>
@@ -2121,7 +2121,7 @@ interface GetValueOptions {
 }
 ```
 
-`getValue()` is synchronous and never throws. A component's own `getValue()` handler that throws returns `code: 'error'`. `componentFound` and `componentRunning` describe the component as of the last check before its handler was called, as for messages. An unexpected failure in the lookup itself returns `code: 'operation_crashed'`, carries the thrown value on `error`, and is reported on the global `'error'` channel.
+`getValue()` is synchronous and never throws. A component's own `getValue()` handler that throws returns `code: 'error'`, as does one that answers something other than a `ComponentValueResult` - a non-object, a promise or other thenable (the handler must answer synchronously), or a result whose `found` is not a boolean. `componentFound` and `componentRunning` describe the component as of the last check before its handler was called, as for messages. An unexpected failure in the lookup itself returns `code: 'operation_crashed'`, carries the thrown value on `error`, and is reported on the global `'error'` channel.
 
 ### Signal Integration
 
@@ -2665,7 +2665,9 @@ if (lifecycle.isComponentRunning('cache')) {
 
 Get detailed status for a specific component. Returns `undefined` if component not found.
 
-The manager reads the `status` on its results and events, and each entry of `getAllComponentStatuses()`, through this method, so a subclass override is the one used. If an override throws, the throw is reported on the global `'error'` channel and the result or event leaves `status` out (`getAllComponentStatuses()` leaves that entry out); the operation itself is not affected.
+The manager reads the `status` on its results and events, and each entry of `getAllComponentStatuses()`, through this method, so a subclass override is the one used. The exception is a `stopComponent()` refused before it ran anything - `component_stalled`, `component_not_running`, `component_already_stopping` or `component_already_starting` - whose `status` is the manager's own record of the component, read without calling this method, so a refused stop runs no caller code. If an override throws, the throw is reported on the global `'error'` channel and the result or event leaves `status` out (`getAllComponentStatuses()` leaves that entry out); the operation itself is not affected.
+
+Starts, restarts and the startup preflight read whether a component is running, and how many components are registered or running, from the manager's own state: for them, overriding `isComponentRunning()`, `getComponentCount()`, `getRunningComponentCount()` or `getComponentNames()` changes what callers of those methods see, not what the manager does.
 
 ```typescript
 const status = lifecycle.getComponentStatus('web-server');
@@ -2830,7 +2832,7 @@ Get names of components in `starting-timed-out` state.
 
 **`getLastShutdownResult(): ShutdownResult | null`**
 
-Get the result of the last `stopAllComponents()` call. Returns `null` if no shutdown has occurred yet, or once a later bulk startup (`startAllComponents()`, or the startup phase of `restartAllComponents()`) has begun: it is cleared when that startup claims the startup latch and passes its signal-attach and shutdown checks, whether or not the startup then succeeds. A startup refused before that point leaves it in place.
+Get the result of the last shutdown pass the manager ran, however it began: `stopAllComponents()`, a shutdown signal, a `logger.exit()` under [`enableLoggerExitHook()`](#enableloggerexithook), or the stop phase of `restartAllComponents()`. A request refused because a pass is already running does not replace it. Returns `null` if no shutdown has occurred yet, or once a later bulk startup (`startAllComponents()`, or the startup phase of `restartAllComponents()`) has begun: it is cleared when that startup claims the startup latch and passes its signal-attach and shutdown checks, whether or not the startup then succeeds. A startup refused before that point leaves it in place.
 
 ```typescript
 const lastShutdown = lifecycle.getLastShutdownResult();
@@ -3436,7 +3438,7 @@ inspect their `error` for the named option. The array-only `broadcastMessage()` 
 has no aggregate error field, so its refusal is logged as a warning instead. The table
 above describes unexpected failures, including ordinary exceptions thrown by getters.
 
-Branch on `code` as usual; `operation_crashed` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around. Every call uses the same pair of codes. `error` means a method you wrote ran and failed: a component's `start()`, `stop()`, `onShutdownForce()`, `healthCheck()`, `onMessage()` or `getValue()` threw, rejected, or (for `healthCheck()`) returned a malformed result, or a custom `onReloadRequested` / `onInfoRequested` / `onDebugRequested` callback threw or rejected. That is an ordinary failure of that code, not of the manager. `operation_crashed` means something that should never throw did: the manager itself, or a property getter on a component - a handler such as `onMessage`, a timeout such as `healthCheckTimeoutMS`, or `getName()`. A `getDependencies()` that throws refuses its registration with `operation_crashed`, but once registered it fails only that component's own start, with `missing_dependency`. An array whose `length` is not a whole number from 0 to 10,000 is treated the same way, before any entry is read - the dependency-list counterpart of `broadcastMessage()`'s 100,000-name `componentNames` bound - and `validateDependencies()` lists it under `invalidDependencyLists`.
+Branch on `code` as usual; `operation_crashed` is never an expected outcome, so treat it as a bug to report rather than a condition to retry around. Every call uses the same pair of codes. `error` means a method you wrote ran and failed: a component's `start()`, `stop()`, `onShutdownForce()`, `healthCheck()`, `onMessage()` or `getValue()` threw, rejected, or (for `healthCheck()` and `getValue()`) returned a malformed result, or a custom `onReloadRequested` / `onInfoRequested` / `onDebugRequested` callback threw or rejected. That is an ordinary failure of that code, not of the manager. `operation_crashed` means something that should never throw did: the manager itself, or a property getter on a component - a handler such as `onMessage`, a timeout such as `healthCheckTimeoutMS`, or `getName()`. A `getDependencies()` that throws refuses its registration with `operation_crashed`, but once registered it fails only that component's own start, with `missing_dependency`. An array whose `length` is not a whole number from 0 to 10,000 is treated the same way, before any entry is read - the dependency-list counterpart of `broadcastMessage()`'s 100,000-name `componentNames` bound - and `validateDependencies()` lists it under `invalidDependencyLists`.
 
 A stop that crashes still records the component as stalled, so it can be retried or unregistered. Its result carries `status`, whose `stallInfo` describes that stall, and its `reason` says so when the graceful phase had already timed out first. Its `component:stalled` event uses `component_shutdown_timeout` when it crashed while still in the graceful phase after that phase timed out, and `operation_crashed` otherwise - including a crash in the force phase after a graceful timeout (`reason: 'both'`).
 
@@ -3610,9 +3612,10 @@ if (shutdownResult.stalledComponents.length > 0) {
   // If not, the component stalls again immediately.
   await lifecycle.stopAllComponents({ retryStalled: true });
 
-  // Option 1: Unregister stalled components
+  // Option 1: Unregister stalled components (stopIfRunning: false - the default
+  // refuses a stalled component, as it would have to stop it first)
   for (const stalled of shutdownResult.stalledComponents) {
-    await lifecycle.unregisterComponent(stalled.name);
+    await lifecycle.unregisterComponent(stalled.name, { stopIfRunning: false });
   }
 
   // Option 2: Start non-stalled components while skipping stalled ones

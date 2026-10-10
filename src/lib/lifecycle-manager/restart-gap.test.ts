@@ -9,7 +9,8 @@ import type {
   StartupOptions,
   StartupResult,
 } from './types';
-import { claimReports } from './test-helpers';
+import { refusedStartupResult } from './internal/operation-policy';
+import { claimReports, coreOf } from './test-helpers';
 
 class Counted extends BaseComponent {
   public starts = 0;
@@ -69,7 +70,8 @@ test.each(['cancel', 'throw', 'refuse'] as const)(
     await manager.startAllComponents();
     let registration: Promise<RegisterComponentResult> | undefined;
     let stop: Promise<unknown> | undefined;
-    const getCount = manager.getComponentCount.bind(manager);
+    const preflight = coreOf(manager).startupPreflight;
+    const preflightStartup = preflight.preflightStartup.bind(preflight);
     manager.once('lifecycle-manager:shutdown-completed', () => {
       queueMicrotask(() => {
         registration = manager.registerComponent(late, { autoStart: true });
@@ -77,18 +79,23 @@ test.each(['cancel', 'throw', 'refuse'] as const)(
           stop = manager.stopAllComponents();
         }
         if (mode === 'throw') {
-          manager.getComponentCount = () => {
+          preflight.preflightStartup = () => {
             throw new Error('gap failure');
           };
         }
         if (mode === 'refuse') {
-          manager.getComponentCount = () => 0;
+          preflight.preflightStartup = () =>
+            refusedStartupResult(
+              'no_components_registered',
+              'No components registered',
+              0,
+            );
         }
       });
     });
     const { reports, release } = claimReports();
     const result = await manager.restartAllComponents().finally(() => {
-      manager.getComponentCount = getCount;
+      preflight.preflightStartup = preflightStartup;
       release();
     });
     expect(reports.length).toBe(mode === 'throw' ? 1 : 0);

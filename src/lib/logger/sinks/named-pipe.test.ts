@@ -1093,8 +1093,8 @@ describe('NamedPipeSink', () => {
   });
 
   test('reports an unsupported platform once rather than once per attempt', async () => {
-    // Every other open failure goes through `reportOpenFailure`, which says a thing once
-    // per outage. This one called `handleError` directly and marked nothing, so every
+    // Every other open failure goes through the engine's `reportOpenFailure`, which says a
+    // thing once per outage. This one was reported directly and marked nothing, so every
     // reopen attempt called `onError` again, forever - on the one failure that is certain
     // never to clear.
     const pipePath = `${tmpDir.path}/unsupported-platform.pipe`;
@@ -1113,10 +1113,12 @@ describe('NamedPipeSink', () => {
         },
       });
 
-      const privateSink = sink as unknown as { openPipe: () => Promise<void> };
+      const privateSink = sink as unknown as {
+        initializePipe: () => Promise<void>;
+      };
 
       for (let attempt = 0; attempt < 5; attempt++) {
-        await privateSink.openPipe();
+        await privateSink.initializePipe();
       }
 
       await sink.close();
@@ -1134,7 +1136,7 @@ describe('NamedPipeSink', () => {
   test('reconnect() waits for an open already in flight rather than racing it', async () => {
     // `reconnect()` guarded on `closed`, `closing` and `_isReconnecting`, none of which the
     // constructor's `initializePipe()` sets - only `isOpening` does. A `reconnect()` issued
-    // while the constructor's open was still pending therefore ran a second `openPipe`
+    // while the constructor's open was still pending therefore ran a second open
     // against the same FIFO: two probes, and one descriptor orphaned when their
     // promotions raced.
     const pipePath = `${tmpDir.path}/reconnect-races-open.pipe`;
@@ -1152,9 +1154,9 @@ describe('NamedPipeSink', () => {
       string,
       unknown
     >;
-    const realOpenPipe = prototype.openPipe;
+    const realOpenPipe = prototype.initializePipe;
 
-    prototype.openPipe = async function stalledOpenPipe(): Promise<void> {
+    prototype.initializePipe = async function stalledOpenPipe(): Promise<void> {
       concurrentOpens++;
       maxConcurrentOpens = Math.max(maxConcurrentOpens, concurrentOpens);
 
@@ -1182,7 +1184,7 @@ describe('NamedPipeSink', () => {
 
       await sink.close();
     } finally {
-      prototype.openPipe = realOpenPipe;
+      prototype.initializePipe = realOpenPipe;
     }
   });
 

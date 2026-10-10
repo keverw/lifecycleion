@@ -311,9 +311,10 @@ export class UnregistrationOperations {
    */
   private answerStop(
     attempt: UnregisterAttempt,
-    stopResult: ComponentOperationResult,
+    result: ComponentOperationResult,
   ): UnregisterComponentResult | undefined {
     const { name, progress } = attempt;
+    const stopResult = snapshotStopResult(result);
 
     // Before reading any state by name: the stop's `await` ran caller code, and a
     // replacement registered under the name would answer for this component - a
@@ -396,9 +397,10 @@ export class UnregistrationOperations {
 
   /**
    * The refusals between the stop, or the decision that there was nothing to stop, and
-   * the removal: a replacement, a start or stop a `component:stopped` listener began,
-   * and a bulk operation that took the registry meanwhile. `didRunStop` is whether this
-   * unregister asked for a stop, whether or not that stop is what stopped it.
+   * the removal: a replacement, a start or stop caller code began - a `component:stopped`
+   * listener, or an `isComponentRunning()` override - and a bulk operation that took
+   * the registry meanwhile. `didRunStop` is whether this unregister asked for a stop,
+   * whether or not that stop is what stopped it.
    */
   private refuseAfterStop(
     attempt: UnregisterAttempt,
@@ -414,45 +416,51 @@ export class UnregistrationOperations {
       return replacedAfterStop;
     }
 
+    let isRunningAgain = false;
+
     if (didRunStop) {
       // Asked first, as the checks below follow caller code: `isComponentRunning()` is
       // overridable, and an override can replace the registration - which the removal
       // would then wipe by name - or begin a start or stop of its own.
-      const isRunningAgain = this.core.manager.isComponentRunning(name);
+      isRunningAgain = this.core.manager.isComponentRunning(name);
       const replacedWhileChecking = this.refuseIfReplaced(attempt);
 
       if (replacedWhileChecking !== undefined) {
         return replacedWhileChecking;
       }
+    }
 
-      // A `component:stopped` listener may also have started it again, or begun another
-      // stop. Removing it now would orphan that operation: a start that finished on an
-      // unregistered component left whatever it brought up running, owned by nothing.
-      const inFlightAfterStop = this.refuseUnregisterWhileInFlight(
-        name,
-        progress.wasStopped,
-      );
+    // On every path, as each has run caller code since the last in-flight check: a
+    // `component:stopped` listener and the `isComponentRunning()` override just above
+    // after a stop, and on the path with nothing to stop, that override's call in
+    // `unregisterComponentOperation()`. Either may have started the component again or
+    // begun another stop. Removing it now would orphan that operation: a start that
+    // finished on an unregistered component left whatever it brought up running, owned
+    // by nothing.
+    const inFlightAfterStop = this.refuseUnregisterWhileInFlight(
+      name,
+      progress.wasStopped,
+    );
 
-      if (inFlightAfterStop !== null) {
-        return inFlightAfterStop;
-      }
+    if (inFlightAfterStop !== null) {
+      return inFlightAfterStop;
+    }
 
-      // Or started it again and it is already up: a start that settles within the
-      // same turn is past `starting` by now.
-      if (isRunningAgain) {
-        this.core.logger
-          .entity(name)
-          .warn('Component was started again while it was being stopped');
+    // Or started it again after the stop, and it is already up: a start that settles
+    // within the same turn is past `starting` by now.
+    if (isRunningAgain) {
+      this.core.logger
+        .entity(name)
+        .warn('Component was started again while it was being stopped');
 
-        return {
-          success: false,
-          componentName: name,
-          reason: 'Component was started again while it was being stopped',
-          code: 'component_running',
-          wasStopped: progress.wasStopped,
-          wasRegistered: true,
-        };
-      }
+      return {
+        success: false,
+        componentName: name,
+        reason: 'Component was started again while it was being stopped',
+        code: 'component_running',
+        wasStopped: progress.wasStopped,
+        wasRegistered: true,
+      };
     }
 
     // Checked again here rather than only at the top of `unregisterComponentOperation()`:
@@ -676,22 +684,32 @@ function unregisterCodeForRefusedStop(
  * Tell a component it is no longer registered. Its own `_markUnregistered()` first, so
  * an override that extends it still runs; if that throws, the two fields it would have
  * cleared are cleared directly, so the instance never goes on believing it is
- * registered and having its next registration refused as `duplicate_instance`.
+ * registered and having its next registration refused as `duplicate_instance` - unless
+ * the override registered it again first, which the `lifecycle` handle it then holds
+ * shows: that registration, with this manager or another, is not this one's to undo.
  */
 export function markComponentUnregistered(
   component: BaseComponent,
   label: string,
 ): void {
+  const fields = component as unknown as {
+    _isRegistered: boolean;
+    lifecycle?: ComponentLifecycleRef;
+  };
+  let lifecycleBefore: ComponentLifecycleRef | undefined;
+
   try {
+    lifecycleBefore = fields.lifecycle;
     component._markUnregistered();
   } catch (unmarkError) {
     reportCallbackError(`${label} _markUnregistered`, unmarkError);
 
     try {
-      const fields = component as unknown as {
-        _isRegistered: boolean;
-        lifecycle?: ComponentLifecycleRef;
-      };
+      const lifecycleNow = fields.lifecycle;
+
+      if (lifecycleNow !== undefined && lifecycleNow !== lifecycleBefore) {
+        return;
+      }
 
       fields._isRegistered = false;
       fields.lifecycle = undefined;
@@ -699,4 +717,44 @@ export function markComponentUnregistered(
       reportCallbackError(label, clearError);
     }
   }
+}
+
+/** What {@link snapshotStopResult} read of a stop's answer. */
+interface StopResultSnapshot {
+  readonly success: boolean;
+  readonly code: ComponentOperationFailureCode | undefined;
+  readonly reason: string | undefined;
+  readonly error: Error | undefined;
+}
+
+/**
+ * The fields an unregister reads of its stop's answer, each read once: `stopComponent()`
+ * is overridable, so its answer is caller data - a getter could answer each read
+ * differently, and a non-object has no fields at all. A non-object answers as a stop
+ * that failed without saying why; a getter that throws reaches the unregister's safety
+ * net, as any crash of the operation does.
+ */
+function snapshotStopResult(result: unknown): StopResultSnapshot {
+  if (typeof result !== 'object' || result === null) {
+    return {
+      success: false,
+      code: undefined,
+      reason: undefined,
+      error: undefined,
+    };
+  }
+
+  const {
+    success: isSuccess,
+    code,
+    reason,
+    error,
+  } = result as ComponentOperationResult;
+
+  return {
+    success: isSuccess === true,
+    code,
+    reason: typeof reason === 'string' ? reason : undefined,
+    error,
+  };
 }

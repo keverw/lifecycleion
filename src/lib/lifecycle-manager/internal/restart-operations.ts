@@ -505,7 +505,7 @@ export class RestartOperations {
     );
     if (
       !isCurrentSnapshot ||
-      !this.core.manager.isComponentRunning(name) ||
+      !this.core.state.runningComponents.has(name) ||
       this.core.claims.isInFlight(name)
     ) {
       if (!isCurrentSnapshot) {
@@ -954,7 +954,7 @@ export class RestartOperations {
         timeoutMS,
         ownsLateStartCleanup: doesOwnLateStartCleanup,
       });
-      const stopNeed = this.restartStopNeed(name, currentStarts);
+      const stopNeed = this.restartStopNeed(name, currentStarts.get(name));
       if (stopNeed !== undefined) {
         this.validateRestartStopBudgets(name, component, stopNeed);
         validatedStops.set(name, stopNeed);
@@ -999,9 +999,9 @@ export class RestartOperations {
    */
   private restartStopNeed(
     name: string,
-    currentStarts: ReadonlyMap<string, StartSettlement>,
+    // The name's current start settlement, if any (`currentStartSettlements()`).
+    settlement: StartSettlement | undefined,
   ): RestartStopNeed | undefined {
-    const settlement = currentStarts.get(name);
     const isStartInFlight =
       (this.core.state.componentStates.get(name) === 'starting' ||
         settlement !== undefined) &&
@@ -1062,15 +1062,18 @@ export class RestartOperations {
   ): void {
     for (;;) {
       let didValidate = false;
-      // Read once per round, and again only after a validation: its timeout getters are
-      // caller code, which can start or settle a start.
-      let currentStarts = this.core.startSettlements.currentStartSettlements();
       for (const component of [...this.core.state.components]) {
         const name = this.core.registry.nameOf(component);
         if (restartSnapshots.get(name)?.component !== component) {
           continue;
         }
-        const stopNeed = this.restartStopNeed(name, currentStarts);
+        // Read live for this name alone: a validation's timeout getters are caller
+        // code, which can start or settle a start, and rebuilding every name's current
+        // start after each one made this quadratic.
+        const stopNeed = this.restartStopNeed(
+          name,
+          this.core.startSettlements.currentStartSettlementOf(name),
+        );
         const validated = validatedStops.get(name);
         if (
           stopNeed === undefined ||
@@ -1082,7 +1085,6 @@ export class RestartOperations {
         this.validateRestartStopBudgets(name, component, stopNeed);
         validatedStops.set(name, stopNeed);
         didValidate = true;
-        currentStarts = this.core.startSettlements.currentStartSettlements();
       }
       if (!didValidate) {
         return;

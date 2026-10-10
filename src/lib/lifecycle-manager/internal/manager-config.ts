@@ -47,6 +47,7 @@ export interface RepeatedShutdownPolicyConfig {
  * here changes after construction.
  */
 export interface ManagerConfig {
+  /** The service name the manager's log lines are scoped to. */
   readonly name: string;
   readonly shutdownWarningTimeoutMS: number;
   readonly messageTimeoutMS: number;
@@ -64,8 +65,8 @@ export interface ManagerConfig {
 
 /**
  * Validate and default the constructor's options, reading each one once, in this
- * order. `name` is resolved by the constructor first, which builds the service logger
- * from it before any of these is validated.
+ * order: `name` first, which the constructor builds its service logger from once every
+ * option is validated.
  *
  * Invalid configuration is refused before registering signal/exit hooks. Constructor
  * failures are synchronous and have no lifecycle result net to classify, so they use
@@ -73,9 +74,9 @@ export interface ManagerConfig {
  * component getter, and its validation error must not become this manager's refusal.
  */
 export function resolveManagerConfig(
-  name: string,
   options: LifecycleManagerOptions,
 ): ManagerConfig {
+  const name = resolveManagerName(options.name);
   // Warning timeouts retain their documented negative opt-out; other durations do not
   // have a negative sentinel. Null and undefined select a configured default.
   const requestedWarningTimeout = options.shutdownWarningTimeoutMS;
@@ -145,6 +146,23 @@ export function resolveManagerConfig(
       'onDebugRequested',
     ),
   });
+}
+
+/**
+ * The manager's name: `null` or omitted means the default, as it does for every other
+ * option here. Anything else must be a non-empty string - it scopes every log line the
+ * manager writes - refused now rather than handed to the caller's logger.
+ */
+function resolveManagerName(name: string | null | undefined): string {
+  if (isNullish(name)) {
+    return 'lifecycle-manager';
+  }
+
+  if (typeof name !== 'string' || name === '') {
+    throw new TypeError('name must be a non-empty string');
+  }
+
+  return name;
 }
 
 /**

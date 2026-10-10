@@ -998,6 +998,13 @@ export class ShutdownPassRunner {
               return true;
             }
 
+            // Already stopped during this shutdown - see below: nothing to protect, and
+            // no stop to log.
+            if (this.core.state.componentStates.get(name) === 'stopped') {
+              stoppedComponents.add(name);
+              continue;
+            }
+
             // An earlier dependency stop can let raw startup settle and begin its
             // automatic cleanup. The override no longer permits releasing that
             // cleanup's remaining dependencies, even though the initial join did.
@@ -1140,19 +1147,23 @@ export class ShutdownPassRunner {
         // The loop does not wait for a concurrent stop. One that has settled by the end
         // of the loop no longer needs the dependencies skipped on its account: go back
         // to them once, in the same order, rather than leave them running.
+        let isHalted = await runStopLoop(stopOrder);
         if (
-          !(await runStopLoop(stopOrder)) &&
+          !isHalted &&
           !hasTimedOut &&
           ([...concurrentOwners, ...concurrentlyProtectedSkips].some(
             hasSettled,
           ) ||
             [...heldStalls].some(isHeldStallReleased))
         ) {
-          await runStopLoop(
+          isHalted = await runStopLoop(
             stopOrder.filter((name) => concurrentlyProtectedSkips.has(name)),
           );
         }
-        if (!hasTimedOut) {
+        // A halted pass is over, as a timed-out one is: joining the starts still pending
+        // would only hold its answer back - with no deadline, until a raw `start()`
+        // settles. A start still unfinished is reported in progress below.
+        if (!isHalted && !hasTimedOut) {
           await joinStarts();
         }
       };

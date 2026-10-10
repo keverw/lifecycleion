@@ -795,40 +795,21 @@ export class RegistrationOperations {
     let startupOrder: string[];
     // The cycle check before the hooks ordered only the reserved entry; hooks may have
     // committed more components. Merge their validated reads into this report snapshot
-    // without invoking more caller code during publication.
+    // without invoking more caller code during publication. Every committed entry
+    // receives metadata before publication; if that invariant ever breaks, the report is
+    // unavailable rather than an empty list's plausible but unjustified order.
     try {
-      const reportReads = new Map<BaseComponent, DependencyRead>();
-      let hasCompleteReportReads = true;
-      for (const entry of this.core.state.components) {
-        const read =
-          entry === component
-            ? candidateRead
-            : this.core.registry.currentReadOf(
-                entry,
-                attempt.registryRead.reads,
-              );
-        // Every committed entry receives metadata before publication. If
-        // this invariant ever breaks, the report is unavailable: inventing
-        // an empty list would report a plausible but unjustified order.
-        if (read === undefined) {
-          hasCompleteReportReads = false;
-          break;
-        }
-        reportReads.set(entry, read);
-      }
-      startupOrder = hasCompleteReportReads
-        ? this.core.startupOrdering.getStartupOrderInternal(
-            this.core.state.components,
-            undefined,
-            reportReads,
-          )
-        : [];
+      startupOrder = this.orderFromReadLists(attempt.registryRead.reads, {
+        component,
+        read: candidateRead,
+      });
     } catch {
       // This diagnostic cannot undo publication, regardless of why its
       // order is unavailable. Snapshots observed at different times can disagree even though
       // every registration passed its own cycle check. This is a report,
       // not a failed commit: use an unavailable order rather than throw
-      // after publication or re-enter caller getters to manufacture one.
+      // after publication or re-enter caller getters to manufacture one. Not logged
+      // either: a log line runs the caller's sinks, inside this publication.
       startupOrder = [];
     }
     committed.startupOrder = startupOrder;
@@ -1202,6 +1183,40 @@ export class RegistrationOperations {
     });
   }
 
+  /**
+   * The startup order a registration reports, ordered from dependency lists already
+   * read - `dependencySnapshot`, `candidate`'s own read for its component, or a
+   * component's committed list - so it runs no caller code. `[]` unless every registered
+   * component has one: ordering a component without its list as though it had no
+   * dependencies reports an order that is not the startup order. Throws if ordering the
+   * lists does; each caller answers that its own way.
+   */
+  private orderFromReadLists(
+    dependencySnapshot: ReadonlyMap<BaseComponent, DependencyRead>,
+    candidate?: { component: BaseComponent; read: DependencyRead },
+  ): string[] {
+    const components = this.core.state.components;
+    const reportReads = new Map<BaseComponent, DependencyRead>();
+
+    for (const component of components) {
+      const read =
+        candidate !== undefined && component === candidate.component
+          ? candidate.read
+          : this.core.registry.currentReadOf(component, dependencySnapshot);
+
+      if (read === undefined) {
+        return [];
+      }
+      reportReads.set(component, read);
+    }
+
+    return this.core.startupOrdering.getStartupOrderInternal(
+      components,
+      undefined,
+      reportReads,
+    );
+  }
+
   private buildInsertResultFailure(input: {
     componentName: string;
     position: InsertPosition | (string & {});
@@ -1229,28 +1244,8 @@ export class RegistrationOperations {
       // that is not the startup order - on the result and on `registration-rejected`
       // alike. A component its hooks registered before a rollback has the list its own
       // commit validated, as the committed report reads it (`recordCommittedReport()`).
-      const reportReads = new Map<BaseComponent, DependencyRead>();
-      let hasCompleteReportReads = input.hasReadRegistry;
-      for (const component of this.core.state.components) {
-        const read = hasCompleteReportReads
-          ? this.core.registry.currentReadOf(
-              component,
-              input.dependencySnapshot,
-            )
-          : undefined;
-        if (read === undefined) {
-          hasCompleteReportReads = false;
-          break;
-        }
-        reportReads.set(component, read);
-      }
-
-      startupOrder = hasCompleteReportReads
-        ? this.core.startupOrdering.getStartupOrderInternal(
-            undefined,
-            undefined,
-            reportReads,
-          )
+      startupOrder = input.hasReadRegistry
+        ? this.orderFromReadLists(input.dependencySnapshot)
         : [];
     } catch (error) {
       // Defensive: This should never happen in normal operation since we validate
@@ -1624,7 +1619,9 @@ export class RegistrationOperations {
    * unfinished start is the requester, exactly as a synchronous request from inside
    * `start()` is: the pass does not join a start that may be awaiting it. Unlike the
    * synchronous check, this still holds once the hook has yielded, which no
-   * runtime-neutral check of the caller can recognise.
+   * runtime-neutral check of the caller can recognise - and it holds until the request
+   * settles, since `stopAllComponents()` and `restartAllComponents()` are overridable,
+   * and an override may await before it reaches the pass.
    */
   private requestedBy<T>(
     component: BaseComponent,
@@ -1639,23 +1636,33 @@ export class RegistrationOperations {
         (this.core.state.componentClaims.get(settlement.name)?.claim === claim
           ? this.core.registry.getComponent(settlement.name)
           : undefined);
-      if (
-        startingComponent === component &&
-        isStartUnfinished(settlement) &&
-        !this.core.state.invokingStarts.has(settlement)
-      ) {
+      if (startingComponent === component && isStartUnfinished(settlement)) {
         requesting.push(settlement);
         this.core.state.invokingStarts.add(settlement);
       }
     }
-    try {
-      // The pass captures its requesters synchronously, before its first await.
-      return request();
-    } finally {
+    const release = (): void => {
       for (const settlement of requesting) {
         this.core.state.invokingStarts.delete(settlement);
       }
+    };
+    let pending: Promise<T>;
+    try {
+      pending = request();
+    } catch (error) {
+      release();
+      throw error;
     }
+    // The pass captures its requesters synchronously, before its first await, but it
+    // may begin only after the override's own awaits: held until the request settles.
+    // Watched through a promise of its own, so the caller gets `request()`'s answer
+    // itself, at the time it would have; one that is not a promise settles it at once.
+    if (requesting.length > 0) {
+      void new Promise<unknown>((resolve) => {
+        resolve(pending);
+      }).then(release, release);
+    }
+    return pending;
   }
 }
 

@@ -319,9 +319,12 @@ export interface QueueingSinkHealth {
   isInitialized: boolean;
   /** Whether a reopen - manual or automatic - is in flight. */
   isReconnecting: boolean;
-  /** The most recent failure of any kind. */
+  /** The most recent failure of any kind, including a `formatter` that threw. */
   lastError?: Error;
-  /** Failed writes since the last successful one. */
+  /**
+   * Failed writes since the last successful one. Write failures only: a `'format'`
+   * failure says nothing about whether the destination can be written to.
+   */
   consecutiveFailures: number;
 }
 
@@ -411,12 +414,26 @@ export class DeliveryEngine {
   private readonly options: DeliveryEngineOptions;
   /** Spaces automatic reopen attempts; see {@link ensureConnection}. */
   private readonly backoff: Backoff;
+  /**
+   * Whether this outage has had its immediate attempt. Cleared with the backoff, by a
+   * successful write or an explicit reopen: a destination that opens and then fails every
+   * write is still in the same outage, and must not be reopened at once after each one.
+   */
+  private hasReopenedAtOnce = false;
 
   /**
    * Every line not yet delivered or given up on, oldest first, each with the line already
-   * rendered. Slots in flight keep their place.
+   * rendered, from {@link head} on. Slots in flight keep their place.
    */
   private slots: DeliverySlot[] = [];
+  /**
+   * Where the queue starts in {@link slots}. A confirmed line at the front leaves by
+   * advancing this rather than shifting the array, so draining a backlog stays linear; the
+   * array is compacted once the dead prefix outgrows the live queue, or the queue empties.
+   */
+  private head = 0;
+  /** No queued (not in flight) slot sits before this index: where {@link firstQueued} looks. */
+  private queuedFrom = 0;
   /** Slots in {@link slots} marked `in_flight`. */
   private inFlightCount = 0;
   /**
@@ -527,7 +544,7 @@ export class DeliveryEngine {
 
   /** Whether nothing is queued or in flight, and no dispatch pass is running. */
   public get isDrained(): boolean {
-    return this.slots.length === 0 && !this.isPumping;
+    return this.queueSize === 0 && !this.isPumping;
   }
 
   /**
@@ -535,7 +552,7 @@ export class DeliveryEngine {
    * since a line in flight is held in memory exactly as a queued one is.
    */
   public get queueSize(): number {
-    return this.slots.length;
+    return this.slots.length - this.head;
   }
 
   /**
@@ -619,7 +636,7 @@ export class DeliveryEngine {
     } finally {
       // A drained queue - nothing queued or in flight - closes the reported overflow
       // episode, so a sink that overflows again hours later says so again.
-      if (this.slots.length === 0) {
+      if (this.queueSize === 0) {
         this.losses.endOverflowEpisode();
       }
 
@@ -640,7 +657,7 @@ export class DeliveryEngine {
   public openRouting(
     request: OpenRequest & { isExplicit?: boolean },
   ): OpenRouting {
-    const queued = this.slots;
+    const queued = this.compactSlots();
     const hasOrdinaryWork = queued.some(
       (slot) =>
         !isDiagnosticEntry(slot.entry) && !slot.shouldSuppressFailureReport,
@@ -691,8 +708,9 @@ export class DeliveryEngine {
    * Start recovering a lost connection, unless recovery is already under way.
    *
    * Only one attempt may be in flight, because two concurrent opens could each obtain a
-   * handle and one would be orphaned. A new outage - the backoff at rest - opens at once;
-   * one already under way waits out the backoff on the timer. Nothing else starts an
+   * handle and one would be orphaned. A new outage opens at once (see
+   * {@link claimImmediateReopen}); one already under way waits out the backoff on the
+   * timer. Nothing else starts an
    * attempt: the timer alone drives recovery from there.
    */
   public ensureConnection(request: OpenRequest = {}): void {
@@ -709,7 +727,7 @@ export class DeliveryEngine {
       return;
     }
 
-    if (this.backoff.isAtRest) {
+    if (this.claimImmediateReopen()) {
       void this.startOpen('automatic', request);
     } else {
       this.armReopen(this.backoff.next());
@@ -773,6 +791,13 @@ export class DeliveryEngine {
         if (this.closed || this.closing) {
           return { success: false, reason: 'closed' };
         }
+
+        // That attempt connected: this call's answer is already in hand, and dropping a
+        // connection that has just opened would only risk it. (Widened: the await above
+        // moved the state on from the `'opening'` this branch was entered with.)
+        if ((this.state as ConnectionState) === 'connected') {
+          return { success: true };
+        }
       }
 
       const refusal = this.adapter.checkReopen?.();
@@ -786,7 +811,7 @@ export class DeliveryEngine {
 
       this.dropConnection();
       this.outages.clear();
-      this.backoff.reset();
+      this.resetBackoff();
 
       await this.startOpen('explicit', {});
 
@@ -948,14 +973,22 @@ export class DeliveryEngine {
   }
 
   private firstQueued(): DeliverySlot | undefined {
-    if (this.slots.length === this.inFlightCount) {
+    if (this.queueSize === this.inFlightCount) {
       return undefined;
     }
 
-    // The slots ahead of the first queued one are writes in flight, which the destination
-    // bounds - a stream's buffer - so this walk stays short.
-    for (const slot of this.slots) {
+    // Resumed from where the last search stopped: the slots before it are in flight, so a
+    // pass dispatching a run of lines walks past each of them once rather than every time.
+    for (
+      let index = Math.max(this.head, this.queuedFrom);
+      index < this.slots.length;
+      index++
+    ) {
+      const slot = this.slots[index];
+
       if (slot.state !== 'in_flight') {
+        this.queuedFrom = index;
+
         return slot;
       }
     }
@@ -1091,11 +1124,12 @@ export class DeliveryEngine {
         this.removeSlot(slot);
         this.totalWritten++;
 
+        // A late answer from a replaced connection says nothing about the outage the
+        // current one may be in.
         if (isCurrent) {
           this.consecutiveFailures = 0;
+          this.resetBackoff();
         }
-
-        this.backoff.reset();
 
         return;
       }
@@ -1109,7 +1143,7 @@ export class DeliveryEngine {
 
         if (!this.closing && this.state === 'connected') {
           this.dropConnection();
-          this.armReopen(this.backoff.next());
+          this.scheduleReopen();
         }
 
         return;
@@ -1161,6 +1195,11 @@ export class DeliveryEngine {
         disposition: 'lost',
       });
 
+      // The write failed whether or not the line comes back, so a connection it left
+      // unusable is let go and reopened here too: nothing else would, when the
+      // destination tore itself down without an error event.
+      this.afterFailedWrite();
+
       return;
     }
 
@@ -1202,12 +1241,13 @@ export class DeliveryEngine {
   }
 
   /**
-   * Drive recovery after a write failed and its line went back in the queue.
+   * Drive recovery after a write failed, whether its line went back in the queue or was
+   * given up on.
    *
    * Not while closing: `close()` drives its own drain every pass and has decided this sink
-   * is not opening anything new. Otherwise the line goes out through the connection in
+   * is not opening anything new. Otherwise the queue goes out through the connection in
    * hand, or - when the failure left it unusable - the connection is let go and the timer
-   * reopens it after the backoff.
+   * reopens it: at once for the first attempt of an outage, then after the backoff.
    */
   private afterFailedWrite(): void {
     if (this.closed || this.closing) {
@@ -1227,7 +1267,37 @@ export class DeliveryEngine {
     }
 
     this.dropConnection();
-    this.armReopen(this.backoff.next());
+    this.scheduleReopen();
+  }
+
+  /**
+   * Arm the reopen timer after a lost connection: due at once for the first attempt of an
+   * outage, as {@link ensureConnection} makes it, then after the backoff. On the timer even
+   * when due at once, so the attempt starts outside the write outcome that asked for it.
+   */
+  private scheduleReopen(): void {
+    this.armReopen(this.claimImmediateReopen() ? 0 : this.backoff.next());
+  }
+
+  /**
+   * Whether the next automatic attempt is the outage's first, made at once - claiming it,
+   * so a destination that opens and then fails every write waits out the backoff from
+   * then on.
+   */
+  private claimImmediateReopen(): boolean {
+    if (!this.backoff.isAtRest || this.hasReopenedAtOnce) {
+      return false;
+    }
+
+    this.hasReopenedAtOnce = true;
+
+    return true;
+  }
+
+  /** The destination worked, or the caller asked by name: the next outage starts afresh. */
+  private resetBackoff(): void {
+    this.backoff.reset();
+    this.hasReopenedAtOnce = false;
   }
 
   private shouldSuppressWriteReport(
@@ -1243,8 +1313,16 @@ export class DeliveryEngine {
 
   /** Clear a slot's in-flight mark, leaving it queued where it stands. */
   private leaveFlight(slot: DeliverySlot): void {
+    if (this.clearFlight(slot)) {
+      // Queued again somewhere behind where the search for a queued slot had got to.
+      this.queuedFrom = this.head;
+    }
+  }
+
+  /** The in-flight bookkeeping for a slot leaving flight. Answers whether it was in flight. */
+  private clearFlight(slot: DeliverySlot): boolean {
     if (slot.state !== 'in_flight') {
-      return;
+      return false;
     }
 
     slot.state = 'queued';
@@ -1256,19 +1334,52 @@ export class DeliveryEngine {
     ) {
       this.staleInFlight--;
     }
+
+    return true;
   }
 
   /** Take a slot out of the queue for good. */
   private removeSlot(slot: DeliverySlot): void {
-    this.leaveFlight(slot);
+    this.clearFlight(slot);
     slot.token = undefined;
 
-    // Outcomes arrive in write order, so the slot is almost always at the head.
-    const index = this.slots[0] === slot ? 0 : this.slots.indexOf(slot);
+    // Outcomes arrive in write order, so the slot is almost always at the head, and leaves
+    // by the head advancing past it.
+    if (this.slots[this.head] === slot) {
+      this.head++;
+
+      if (this.head === this.slots.length) {
+        this.slots = [];
+        this.head = 0;
+        this.queuedFrom = 0;
+      } else if (this.head * 2 >= this.slots.length) {
+        this.compactSlots();
+      }
+
+      return;
+    }
+
+    const index = this.slots.indexOf(slot, this.head);
 
     if (index >= 0) {
       this.slots.splice(index, 1);
+      // The slots after it moved up by one.
+      this.queuedFrom = this.head;
     }
+  }
+
+  /**
+   * The queue as an array of exactly its live slots, for the paths that hand it on or
+   * search it whole. Linear, and only where the work it feeds is linear anyway.
+   */
+  private compactSlots(): DeliverySlot[] {
+    if (this.head > 0) {
+      this.slots = this.slots.slice(this.head);
+      this.queuedFrom = Math.max(0, this.queuedFrom - this.head);
+      this.head = 0;
+    }
+
+    return this.slots;
   }
 
   /**
@@ -1281,10 +1392,16 @@ export class DeliveryEngine {
    */
   private enforceQueueLimit(): void {
     const limit = this.options.maxQueueSize;
+
+    // Every enqueue comes through here, so a queue within its cap allocates nothing.
+    if (limit === undefined || this.queueSize <= limit) {
+      return;
+    }
+
     const owed: DeliverySlot[] = [];
 
     const sampled = this.losses.evict(
-      this.slots,
+      this.compactSlots(),
       limit,
       (cap) => this.options.messages.queueFull(cap),
       {
@@ -1298,6 +1415,9 @@ export class DeliveryEngine {
       },
     );
 
+    // Evicting moved the slots that stayed.
+    this.queuedFrom = 0;
+
     // A line an explicit `onError` was told is `'retrying'` gets its own final word, unless
     // the episode's report - which covers owners and the console - already carried it.
     for (const slot of owed) {
@@ -1307,7 +1427,7 @@ export class DeliveryEngine {
 
       this.report(
         'queue_full',
-        this.createError(this.options.messages.queueFull(limit ?? 0)),
+        this.createError(this.options.messages.queueFull(limit)),
         { disposition: 'lost', entry: slot.entry },
       );
     }
@@ -1483,16 +1603,6 @@ export class DeliveryEngine {
    * diagnostics, is suppressed, as the failure that queued them would have been.
    */
   private onReopenTimer(): void {
-    const queued = this.slots;
-    const request: OpenRequest = {
-      shouldSuppressRetryReport:
-        queued.some((slot) => slot.shouldSuppressFailureReport) &&
-        queued.every(
-          (slot) =>
-            slot.shouldSuppressFailureReport || isDiagnosticEntry(slot.entry),
-        ),
-    };
-
     if (
       this.closing ||
       this.closed ||
@@ -1502,6 +1612,16 @@ export class DeliveryEngine {
     ) {
       return;
     }
+
+    const queued = this.compactSlots();
+    const request: OpenRequest = {
+      shouldSuppressRetryReport:
+        queued.some((slot) => slot.shouldSuppressFailureReport) &&
+        queued.every(
+          (slot) =>
+            slot.shouldSuppressFailureReport || isDiagnosticEntry(slot.entry),
+        ),
+    };
 
     void this.startOpen('automatic', request);
   }
@@ -1539,7 +1659,7 @@ export class DeliveryEngine {
 
     this.staleInFlight = 0;
 
-    for (const slot of [...this.slots]) {
+    for (const slot of [...this.compactSlots()]) {
       if (
         slot.state !== 'in_flight' ||
         slot.token === undefined ||
@@ -1688,7 +1808,7 @@ export class DeliveryEngine {
    * that is being torn down anyway.
    */
   private abandonOnClose(isAbandoned: (slot: DeliverySlot) => boolean): void {
-    const abandoned = new Set(this.slots.filter(isAbandoned));
+    const abandoned = new Set(this.compactSlots().filter(isAbandoned));
 
     // Their outcomes, should any still arrive, no longer have a slot to settle.
     for (const slot of abandoned) {
@@ -1697,10 +1817,11 @@ export class DeliveryEngine {
     }
 
     this.losses.abandon(
-      this.slots,
+      this.compactSlots(),
       (count) => this.options.messages.abandoned(count),
       (slot) => abandoned.has(slot),
     );
+    this.queuedFrom = 0;
   }
 
   /**
@@ -1758,7 +1879,7 @@ export class DeliveryEngine {
       );
     }
 
-    const unsettled = this.slots.filter(isUnsettled);
+    const unsettled = this.compactSlots().filter(isUnsettled);
 
     for (const slot of unsettled) {
       this.removeSlot(slot);
@@ -1775,7 +1896,7 @@ export class DeliveryEngine {
   }
 
   private hasUnsettledWrites(): boolean {
-    return this.slots.some(isUnsettled);
+    return this.compactSlots().some(isUnsettled);
   }
 
   private settleWhileClosing(

@@ -42,18 +42,11 @@ export function createStopPhaseObserver(
   ) => void;
 } {
   let isObserved = false;
-  const report = (
-    error: unknown,
-    message: string,
-    level: 'warn' | 'error' = 'warn',
-  ): void => {
-    reportError(error, message, level);
-  };
 
   return {
     reportForeground: (error, message, level) => {
       if (!isObserved) {
-        report(error, message, level);
+        reportError(error, message, level ?? 'warn');
       }
     },
     observe: (promise, message, options) => {
@@ -89,14 +82,14 @@ export function createStopPhaseObserver(
           // unreported.
           terminalLabel = 'Late stop failure could not be reported';
           try {
-            report(
+            reportError(
               error,
               selected?.message ?? message,
               // The selector exists to choose the level - it may downgrade an abandoned
               // hook to a warning - so without its answer nothing justifies downgrading:
-              // `error`. With no selector at all, the reporter's default.
+              // `error`. With no selector at all, the default `warn`.
               selected?.level ??
-                (selectionFailure !== undefined ? 'error' : undefined),
+                (selectionFailure !== undefined ? 'error' : 'warn'),
             );
           } catch (reportingError) {
             // Only one error can be thrown on: the report's own failure, under the label
@@ -113,12 +106,13 @@ export function createStopPhaseObserver(
       );
       observeRejection(observed, (error: unknown) => {
         try {
-          report(error, terminalLabel);
+          reportError(error, terminalLabel, 'warn');
         } finally {
           if (deferredSelectionFailure !== undefined) {
-            report(
+            reportError(
               deferredSelectionFailure.error,
               'Late stop report selection failed',
+              'warn',
             );
           }
         }

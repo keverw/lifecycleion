@@ -85,7 +85,7 @@ type CallbackResult<T = unknown> =
 ```
 
 - `success: true` - callback completed without throwing, and `value` holds the return value
-- `success: false` - callback threw or was not a function, and `error` holds the failure
+- `success: false` - callback threw, its returned promise rejected, it returned a value whose `then` getter threw, or it was not a function, and `error` holds the failure (for the unreadable `then`, an `Error` whose `cause` is what the getter threw)
 
 Checking `result.success` narrows the type, so neither field needs a non-null assertion afterwards. `T` cannot be inferred from the callback (it is typed `unknown`) and defaults to `unknown`; supply it explicitly when you know what the callback returns.
 

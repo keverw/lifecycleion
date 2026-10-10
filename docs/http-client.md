@@ -516,18 +516,20 @@ client.addRequestInterceptor((request) => {
 the chain runs, later interceptor filters may read `method`, `requestURL`, and `body`
 from earlier interceptor results, including when those filters do not match. When
 the chain finishes, the client copies `requestURL`, `method`, `headers` and `body` into a
-request object of its own. Header entries are copied at that point: a single
-value is converted to a string, an array stays an array with each element
-converted to a string, and a one-element array becomes that element's string.
+request object of its own. The method's ASCII letters are uppercased, so a `post` is
+treated as `POST` by the retry and redirect rules. Header entries are copied at that
+point: a single value is converted to a string, an array stays an array with each
+element converted to a string, and a one-element array becomes that element's string.
 Every later check and use (URL validation, the browser-restricted header check,
 cookie-jar lookup, dispatch) reads that copy. A getter on
 the returned object, on the header record or on one of its entries is therefore consulted
 exactly once by that final copy when it succeeds, and a URL that passed validation is the URL the
 request is sent to. If copying fails, the best-effort snapshot for error observers may
 read those values again. Any failure while taking that copy is an `interceptor_error`:
-a `requestURL` that is not a string, `headers` that is not a plain object (an array,
-a `Headers` or a `Map` is refused rather than read as empty), a getter that throws, or
-a header value whose string conversion throws.
+a `requestURL` or `method` that is not a string, `headers` that is not a plain object
+(an array, a `Headers` or a `Map` is refused rather than read as empty; a plain object
+from another realm, such as a `vm` context, is accepted), a getter that throws, or a
+header value whose string conversion throws.
 
 ### Filter Options
 

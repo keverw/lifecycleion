@@ -25,7 +25,7 @@ import {
 } from './operation-policy';
 import {
   dispatchAnnouncedHook,
-  isComponentEnterable,
+  isComponentEnterableNow,
   isComponentSelectedRunningMember,
   readHookThenRecheck,
   unavailableComponentCode,
@@ -65,19 +65,21 @@ const HEALTH_CHECK_TIMEOUT_RESULT: ComponentHealthResult = Object.freeze({
  * rule (see `isComponentEnterable()`), labelled as every refusal is (see
  * `unavailableComponentCode()`). `isCurrent` is the caller's, as `readAvailability()`
  * takes it: whether the checked instance is still the one registered under `name`.
+ * It is asked after the rule, whose overridable `isComponentRunning()` can replace
+ * that instance (see `isComponentEnterableNow()`).
  */
 function healthRefusal(
   context: ComponentAccessContext,
   name: string,
-  isCurrent: boolean,
+  isCurrent: () => boolean,
 ): HealthRefusalCode | undefined {
-  if (
-    isCurrent &&
-    isComponentEnterable(context, name, context.componentStates.get(name))
-  ) {
+  const isEnterable = isComponentEnterableNow(context, name);
+  const isStillCurrent = isCurrent();
+
+  if (isStillCurrent && isEnterable) {
     return undefined;
   }
-  return unavailableComponentCode(context, name, isCurrent);
+  return unavailableComponentCode(context, name, isStillCurrent);
 }
 
 const HEALTH_REFUSAL_MESSAGES: Record<HealthRefusalCode, string> = {
@@ -127,10 +129,15 @@ export async function checkComponentHealthOperation(
     code,
   });
   const recheck = () =>
-    healthRefusal(context, name, context.getComponent(name) === component);
+    healthRefusal(
+      context,
+      name,
+      () => context.getComponent(name) === component,
+    );
 
-  // `component` was just looked up by `name`, with no caller code since: still current.
-  const initialRefusal = healthRefusal(context, name, true);
+  // `component` was just looked up by `name`. Only the rule's override has run since,
+  // and a replacement it makes is refused by the recheck after the hook is read.
+  const initialRefusal = healthRefusal(context, name, () => true);
   if (initialRefusal !== undefined) {
     return refused(initialRefusal);
   }
@@ -375,6 +382,44 @@ export async function checkComponentHealthOperation(
   }
 }
 
+/**
+ * A copy of a `checkComponentHealth()` answer, each field read once: the method is
+ * overridable, so its answer is caller data whose getters could throw - or answer
+ * differently - each time the report read them. A non-object throws, as a getter does,
+ * for the caller's per-entry net to answer.
+ */
+function snapshotHealthCheckResult(result: unknown): HealthCheckResult {
+  if (typeof result !== 'object' || result === null) {
+    throw new TypeError(
+      'checkComponentHealth() did not return a HealthCheckResult',
+    );
+  }
+
+  const {
+    name,
+    healthy: isHealthy,
+    message,
+    details,
+    checkedAt,
+    durationMS,
+    error,
+    timedOut: isTimedOut,
+    code,
+  } = result as HealthCheckResult;
+
+  return {
+    name,
+    healthy: isHealthy === true,
+    ...(message !== undefined ? { message } : {}),
+    ...(details !== undefined ? { details } : {}),
+    checkedAt,
+    durationMS,
+    error,
+    timedOut: isTimedOut === true,
+    code,
+  };
+}
+
 export async function checkAllHealthOperation(
   context: ComponentAccessContext,
 ): Promise<HealthReport> {
@@ -399,11 +444,14 @@ export async function checkAllHealthOperation(
       return Promise.resolve(notFoundHealthResult(name, Date.now()));
     }
     // Through the public, overridable `checkComponentHealth()`, guarded per entry as
-    // `getAllComponentStatuses()` guards its reads: an override that throws or rejects
-    // is reported and answers that component's entry, not the whole report.
+    // `getAllComponentStatuses()` guards its reads: an override that throws or rejects,
+    // or answers something that is not a result, is reported and answers that
+    // component's entry, not the whole report. Its fields are read once, inside the
+    // same net, so the report below reads only the copy.
     return settleOperation(
       'checkAllHealth',
-      () => context.checkComponentHealth(name),
+      async () =>
+        snapshotHealthCheckResult(await context.checkComponentHealth(name)),
       (error, _reason, code) => crashedHealthCheckResult(name, error, code),
     );
   });
@@ -446,11 +494,11 @@ export async function runSignalBroadcast(
 
   const canDispatch = (component: BaseComponent): boolean => {
     const name = context.nameOf(component);
+    // The rule first: its overridable `isComponentRunning()` can replace the component
+    // (see `isComponentEnterableNow()`).
+    const isEnterable = isComponentEnterableNow(context, name);
 
-    return (
-      context.getComponent(name) === component &&
-      isComponentEnterable(context, name, context.componentStates.get(name))
-    );
+    return context.getComponent(name) === component && isEnterable;
   };
   const targets = context.components.filter(canDispatch);
 

@@ -33,6 +33,11 @@ export function describeEntryCount(count: number): string {
   return `${String(count)} entr${count === 1 ? 'y' : 'ies'}`;
 }
 
+/** `1 write` or `N writes`, for a close report's message. */
+export function describeWriteCount(count: number): string {
+  return `${String(count)} write${count === 1 ? '' : 's'}`;
+}
+
 /**
  * The lines a queueing sink did not deliver, counted by reason and reported without a
  * flood.

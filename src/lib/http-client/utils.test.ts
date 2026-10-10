@@ -20,6 +20,7 @@ import {
   serializeBody,
   stripCrossOriginURLCredentials,
 } from './utils';
+import { materializeRequestHeaders } from './internal/header-utils';
 
 const originalXMLHttpRequest = (globalThis as Record<string, unknown>)
   .XMLHttpRequest;
@@ -410,6 +411,37 @@ describe('mergeObservedHeaders', () => {
     ).toEqual({
       accept: ['text/plain'],
     });
+  });
+
+  test('coerces scalars to strings and skips undefined values', () => {
+    expect(
+      mergeObservedHeaders({
+        'Content-Type': 'application/json',
+        'X-Count': 3,
+        'X-Skip': undefined,
+      }),
+    ).toEqual({
+      'content-type': 'application/json',
+      'x-count': '3',
+    });
+  });
+
+  test('a __proto__ header stays an own key through materialization', () => {
+    const source = JSON.parse('{"__proto__": ["a", "b"]}') as Record<
+      string,
+      string[]
+    >;
+    const normalized = mergeObservedHeaders(source);
+    const materialized = materializeRequestHeaders(normalized);
+
+    expect(Object.getPrototypeOf(normalized)).toBe(Object.prototype);
+    expect(
+      Object.getOwnPropertyDescriptor(normalized, '__proto__')?.value,
+    ).toEqual(['a', 'b']);
+    expect(Object.getPrototypeOf(materialized)).toBe(Object.prototype);
+    expect(
+      Object.getOwnPropertyDescriptor(materialized, '__proto__')?.value,
+    ).toBe('a, b');
   });
 });
 

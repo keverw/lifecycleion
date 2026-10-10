@@ -27,6 +27,7 @@ import {
 import type {
   ComponentOperationResult,
   ComponentState,
+  ComponentStatus,
   StartComponentOptions,
 } from '../types';
 import type { DependencyRead } from './dependency-policy';
@@ -440,11 +441,7 @@ export class ComponentStart {
         componentName: name,
         code: 'component_already_stopping',
         reason: LIFECYCLE_MANAGER_MESSAGE_TIMED_OUT_STARTUP_CLEANUP,
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager component start',
-        ),
+        status: this.statusOf(name),
       };
     }
     // ALWAYS reject during shutdown (never bypass this check)
@@ -521,11 +518,7 @@ export class ComponentStart {
         componentName: name,
         reason: LIFECYCLE_MANAGER_MESSAGE_COMPONENT_STALLED,
         code: 'component_stalled',
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager component start',
-        ),
+        status: this.statusOf(name),
       };
     }
 
@@ -540,11 +533,7 @@ export class ComponentStart {
         componentName: name,
         reason: 'Component already starting',
         code: 'component_already_starting',
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager component start',
-        ),
+        status: this.statusOf(name),
       };
     }
 
@@ -554,26 +543,20 @@ export class ComponentStart {
         componentName: name,
         reason: `Component is already ${currentState}`,
         code: 'component_already_stopping',
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager component start',
-        ),
+        status: this.statusOf(name),
       };
     }
 
-    // Check if already running
-    if (this.core.manager.isComponentRunning(name)) {
+    // Check if already running: internal state, as the stop checks read it - the
+    // overridable `isComponentRunning()` is caller code, and this runs right before
+    // the claim.
+    if (this.core.state.runningComponents.has(name)) {
       return {
         success: false,
         componentName: name,
         reason: 'Component already running',
         code: 'component_already_running',
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager component start',
-        ),
+        status: this.statusOf(name),
       };
     }
 
@@ -710,11 +693,7 @@ export class ComponentStart {
       const startedResult: ComponentOperationResult = {
         success: true,
         componentName: name,
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager component start',
-        ),
+        status: this.statusOf(name),
       };
       run.detachTrigger = 'completed component startup';
       return startedResult;
@@ -816,11 +795,7 @@ export class ComponentStart {
         reason: `Could not read the dependencies declared by "${name}": ${describeError(err)}`,
         code: 'missing_dependency',
         error: err,
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager component start',
-        ),
+        status: this.statusOf(name),
       };
     }
 
@@ -1092,11 +1067,7 @@ export class ComponentStart {
           componentName: name,
           reason: `Missing dependency "${dependencyName}"`,
           code: 'missing_dependency',
-          status: readComponentStatus(
-            this.core,
-            name,
-            'lifecycle-manager component start',
-          ),
+          status: this.statusOf(name),
         };
       }
 
@@ -1130,11 +1101,7 @@ export class ComponentStart {
         componentName: name,
         reason: `Dependency "${dependencyName}" is not running`,
         code: 'dependency_not_running',
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager component start',
-        ),
+        status: this.statusOf(name),
       };
     }
 
@@ -1514,7 +1481,7 @@ export class ComponentStart {
    * unregistered after stopping. Asked at each boundary caller code may have crossed.
    */
   private isStartSuperseded(run: StartRun): boolean {
-    return !this.core.startSettlements.isCurrentStartAttempt(
+    return this.isAttemptSuperseded(
       run.name,
       run.preparation.component,
       run.startAttemptToken,
@@ -1528,12 +1495,32 @@ export class ComponentStart {
   private supersededCheck(run: StartRun): () => boolean {
     const { name, startAttemptToken } = run;
     const { component } = run.preparation;
-    return () =>
-      !this.core.startSettlements.isCurrentStartAttempt(
-        name,
-        component,
-        startAttemptToken,
-      );
+    return () => this.isAttemptSuperseded(name, component, startAttemptToken);
+  }
+
+  /** The predicate both of the above share. */
+  private isAttemptSuperseded(
+    name: string,
+    component: BaseComponent,
+    startAttemptToken: string,
+  ): boolean {
+    return !this.core.startSettlements.isCurrentStartAttempt(
+      name,
+      component,
+      startAttemptToken,
+    );
+  }
+
+  /**
+   * The component's status for a result or an event, through the overridable
+   * `getComponentStatus()`, guarded (`readComponentStatus()`).
+   */
+  private statusOf(name: string): ComponentStatus | undefined {
+    return readComponentStatus(
+      this.core,
+      name,
+      'lifecycle-manager component start',
+    );
   }
 
   /**
@@ -1583,11 +1570,7 @@ export class ComponentStart {
         componentName: name,
         reason: this.supersededReason(run),
         code: 'component_unexpected_stop',
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager component start',
-        ),
+        status: this.statusOf(name),
       };
     }
 
@@ -1616,11 +1599,7 @@ export class ComponentStart {
         reason: describeError(error),
         code: 'component_unexpected_stop',
         error,
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager component start',
-        ),
+        status: this.statusOf(name),
       };
     }
 
@@ -1644,14 +1623,7 @@ export class ComponentStart {
       // failed signal attach rolls it back: observers see an ordinary start followed by
       // a stop. Without it, `component:stopping` / `component:stopped` arrived for
       // a component whose `component:starting` never ended in `started`.
-      this.core.lifecycleEvents.componentStarted(
-        name,
-        readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager component start',
-        ),
-      );
+      this.core.lifecycleEvents.componentStarted(name, this.statusOf(name));
     });
     run.detachTrigger = 'interrupted component startup';
     // The pass this stop is for, read before the log below runs caller code.
@@ -1693,11 +1665,7 @@ export class ComponentStart {
           : `${shutdownReason}; stopping it again failed: ${stopResult.reason ?? 'unknown reason'}`,
       code: 'shutdown_in_progress',
       error: stopResult?.error,
-      status: readComponentStatus(
-        this.core,
-        name,
-        'lifecycle-manager component start',
-      ),
+      status: this.statusOf(name),
     };
   }
 
@@ -1720,11 +1688,7 @@ export class ComponentStart {
       this.markStartRunning(name, run.preparation.flags.forceStalled);
 
       this.core.logger.entity(name).success('Component started');
-      const status = readComponentStatus(
-        this.core,
-        name,
-        'lifecycle-manager component start',
-      );
+      const status = this.statusOf(name);
       this.core.lifecycleEvents.componentStarted(name, status);
     });
     // `attachSignalsOnStart` attaches once a component is actually up, not before. A
@@ -1829,11 +1793,7 @@ export class ComponentStart {
             // the start net runs follows a `started` rather than a bare `starting`.
             this.core.lifecycleEvents.componentStarted(
               name,
-              readComponentStatus(
-                this.core,
-                name,
-                'lifecycle-manager component start',
-              ),
+              this.statusOf(name),
             );
           });
         } catch {
@@ -1923,11 +1883,7 @@ export class ComponentStart {
         error:
           unexpectedStopError ||
           new Error(`Component "${name}" stopped unexpectedly during startup`),
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager component start',
-        ),
+        status: this.statusOf(name),
       };
     }
 
@@ -2055,11 +2011,7 @@ export class ComponentStart {
           : reason,
         code,
         error: err,
-        status: readComponentStatus(
-          this.core,
-          name,
-          'lifecycle-manager component start',
-        ),
+        status: this.statusOf(name),
       };
     });
   }

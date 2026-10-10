@@ -1,7 +1,9 @@
-import { expect, test } from 'bun:test';
-import type { ArraySink } from '../logger/sinks/array';
-import type { ComponentStallInfo } from './types';
-import { deferred, Plain, setup, Stalls } from './test-helpers';
+import { describe, expect, test } from 'bun:test';
+import { Logger } from '../logger';
+import { ArraySink } from '../logger/sinks/array';
+import { LifecycleManager } from './lifecycle-manager';
+import type { ComponentStallInfo, ForceShutdownContext } from './types';
+import { deferred, Plain, sendSignal, setup, Stalls } from './test-helpers';
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
@@ -207,4 +209,134 @@ test('a timed-out pass logs its deadline once, not again when its stop loop ends
     await manager.stopAllComponents();
     await logger.close();
   }
+});
+
+describe('haltOnStall', () => {
+  test('a halted pass answers without waiting for an unrelated pending start', async () => {
+    const { logger, manager } = setup();
+    const bad = new Stalls(logger, 'bad');
+    const slow = new Plain(logger, 'slow');
+    const startGate = deferred();
+    slow.start = (): Promise<void> => startGate.promise;
+    // No startup deadline: only the start itself can end it.
+    Object.defineProperty(slow, 'startupTimeoutMS', { value: 0 });
+    await manager.registerComponent(bad);
+    await manager.registerComponent(slow);
+    await manager.startComponent('bad');
+    const starting = manager.startComponent('slow');
+
+    try {
+      // No shutdown deadline either: joining the start after the halt waited for it.
+      const result = await Promise.race([
+        manager.stopAllComponents({ timeoutMS: 0 }),
+        sleep(1000).then(() => 'hung' as const),
+      ]);
+
+      expect(result).not.toBe('hung');
+      if (result === 'hung') {
+        return;
+      }
+      expect(result.success).toBe(false);
+      expect(result.timedOut).toBeUndefined();
+      expect(result.stalledComponents.map((stall) => stall.name)).toEqual([
+        'bad',
+      ]);
+      expect(result.reason).toContain('Stalled: bad');
+      // The start is still unfinished, and reported so.
+      expect(result.reason).toContain(
+        'Shutdown is still in progress for: slow',
+      );
+    } finally {
+      startGate.resolve();
+      await starting;
+    }
+  });
+});
+
+describe('repeated shutdown escalation', () => {
+  test('an armed press is reported as armed when a signal:shutdown listener starts the retry', async () => {
+    const forced: ForceShutdownContext[] = [];
+    const { logger, manager } = setup({
+      repeatedShutdownRequestPolicy: {
+        forceAfterCount: 1,
+        withinMS: 10_000,
+        armedAfterFailureMS: 10_000,
+        onForceShutdown: (context) => {
+          forced.push(context);
+        },
+      },
+    });
+    await manager.registerComponent(new Stalls(logger, 'bad'));
+    await manager.startAllComponents();
+
+    let completed = new Promise<void>((resolve) => {
+      manager.once('lifecycle-manager:shutdown-completed', () => resolve());
+    });
+    sendSignal(manager, 'SIGTERM');
+    await completed;
+    expect(manager.getShutdownEscalationStatus().isArmed).toBe(true);
+
+    const signals: unknown[] = [];
+    let retry: Promise<unknown> | undefined;
+    manager.on('signal:shutdown', (payload) => {
+      signals.push(payload);
+      retry ??= manager.stopAllComponents();
+    });
+    completed = new Promise<void>((resolve) => {
+      manager.once('lifecycle-manager:shutdown-completed', () => resolve());
+    });
+    sendSignal(manager, 'SIGTERM');
+    await completed;
+    await retry;
+
+    expect(forced).toHaveLength(1);
+    expect(forced[0]).toMatchObject({
+      requestCount: 1,
+      isShuttingDown: false,
+      wasArmedAfterFailure: true,
+    });
+    expect(signals).toEqual([
+      { method: 'SIGTERM', isAlreadyShuttingDown: false },
+    ]);
+  });
+});
+
+describe('shutdown stop loop', () => {
+  test('a component already stopped when the loop reaches it is counted without a stop log', async () => {
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const manager = new LifecycleManager({
+      logger,
+      shutdownWarningTimeoutMS: -1,
+    });
+    const a = new Plain(logger, 'a');
+    const b = new Plain(logger, 'b', ['a']);
+    // `b` stops first, and reports `a` as having stopped on its own.
+    b.stop = (): Promise<void> => {
+      (
+        a as unknown as { reportUnexpectedStop: (error?: Error) => boolean }
+      ).reportUnexpectedStop();
+      return Promise.resolve();
+    };
+    await manager.registerComponent(a);
+    await manager.registerComponent(b);
+    await manager.startAllComponents();
+
+    const result = await manager.stopAllComponents();
+
+    expect(result.success).toBe(true);
+    expect([...result.stoppedComponents].sort()).toEqual(['a', 'b']);
+    expect(
+      sink.logs.filter(
+        (entry) =>
+          entry.entityName === 'a' && entry.message === 'Stopping component',
+      ),
+    ).toEqual([]);
+    expect(
+      sink.logs.some(
+        (entry) =>
+          entry.entityName === 'b' && entry.message === 'Stopping component',
+      ),
+    ).toBe(true);
+  });
 });

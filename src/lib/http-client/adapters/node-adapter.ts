@@ -28,9 +28,8 @@ import {
 } from '../internal/multipart';
 import { writeRequestBodyChunked } from '../internal/request-body-writer';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
-import { normalizeNodeRequestHeaders } from './node-adapter-utils';
 import { materializeRequestHeaders } from '../internal/header-utils';
-import { resolveDetectedRedirectURL } from '../utils';
+import { mergeObservedHeaders, resolveDetectedRedirectURL } from '../utils';
 import { defineEntry } from '../../internal/define-entry';
 // Shared error normalization preserves Error instances and wraps other thrown values.
 // Non-Error values receive a "Non-error value thrown: <description>" message, with the
@@ -652,6 +651,8 @@ export class NodeAdapter implements HTTPAdapter {
             status: number;
             headers: Record<string, string | string[]>;
             writable: WritableLike;
+            /** Fire the factory's stream signal, so its cleanup listeners run. */
+            abortStream: () => void;
           }
         | undefined;
       let activeBufferedResponse:
@@ -1284,8 +1285,10 @@ export class NodeAdapter implements HTTPAdapter {
             abortResponseStream = abortStream;
 
             // Propagate external cancellation (user abort, timeout) into the
-            // factory's signal so cleanup listeners fire in all terminal cases.
-            // Tracked so it comes off once the request has settled; see
+            // factory's signal. While the factory is setting up or its writable is
+            // streaming, the request's own abort listener fires the signal itself: it
+            // settles the request, which takes this relay off within the same abort
+            // dispatch. Tracked so it comes off once the request has settled; see
             // `releaseAbortListeners`.
             if (request.signal) {
               const signal = request.signal;
@@ -1462,6 +1465,7 @@ export class NodeAdapter implements HTTPAdapter {
               status,
               headers,
               writable,
+              abortStream,
             };
 
             const totalBytes =
@@ -1576,7 +1580,12 @@ export class NodeAdapter implements HTTPAdapter {
             });
           });
 
-          res.on('error', (err: Error) => {
+          // The body failed after the headers arrived: resolve with the real status as
+          // a stream error. The first of `'error'`, `'aborted'` and `'close'` answers.
+          const settleBufferedStreamError = (
+            message: string,
+            cause?: Error,
+          ): void => {
             if (!activeBufferedResponse) {
               return;
             }
@@ -1588,42 +1597,22 @@ export class NodeAdapter implements HTTPAdapter {
               body: null,
               isStreamError: true,
               streamErrorCode: 'stream_response_error',
-              errorCause: makeResponseStreamError('Response stream error', err),
+              errorCause: makeResponseStreamError(message, cause),
             });
+          };
+
+          res.on('error', (err: Error) => {
+            settleBufferedStreamError('Response stream error', err);
           });
 
           res.on('aborted', () => {
-            if (!activeBufferedResponse) {
-              return;
-            }
-
-            activeBufferedResponse = undefined;
-            settleResponse({
-              status,
-              headers,
-              body: null,
-              isStreamError: true,
-              streamErrorCode: 'stream_response_error',
-              errorCause: makeResponseStreamError('Response stream aborted'),
-            });
+            settleBufferedStreamError('Response stream aborted');
           });
 
           res.on('close', () => {
-            if (!activeBufferedResponse) {
-              return;
-            }
-
-            activeBufferedResponse = undefined;
-            settleResponse({
-              status,
-              headers,
-              body: null,
-              isStreamError: true,
-              streamErrorCode: 'stream_response_error',
-              errorCause: makeResponseStreamError(
-                'Response stream closed before completion',
-              ),
-            });
+            settleBufferedStreamError(
+              'Response stream closed before completion',
+            );
           });
         })();
         observeTaskFailure(responseTask, (error: unknown) => {
@@ -1792,23 +1781,24 @@ export class NodeAdapter implements HTTPAdapter {
           // Notify a pending factory first, while its cleanup still has ownership.
           pendingStreamSetup?.abort();
           if (activeResponseStream) {
-            const { status, headers, writable } = activeResponseStream;
+            const { status, headers, writable, abortStream } =
+              activeResponseStream;
             activeResponseStream = undefined;
             destroyWritableQuietly(writable);
+            // Fired here rather than left to the relay, for the reason the pending
+            // factory is notified above: `failRequest` takes the relay off within this
+            // dispatch. Waiting for `streamResponseBody` to report back instead hung on
+            // a destroyed writable that never calls its `end` callback, and the
+            // factory's cleanup never ran.
+            abortStream();
             // Guarded, as its writable sibling one line up already is, and for the
             // reason the stall watchdog's destroy is: this whole listener runs from an
             // `AbortSignal` event, where a throw is an uncaught exception rather than a
             // rejection into this request's promise - and a socket torn down by the same
             // abort can answer `ERR_SOCKET_CLOSED` from `destroy()` on some runtimes.
             destroyRequestQuietly(req);
-
-            const error = new Error(
-              'Request aborted during response streaming',
-            );
-            error.name = 'AbortError';
             failRequest(
-              markResponseStreamAbortError(
-                error,
+              makeResponseStreamAbortError(
                 req,
                 request.headers,
                 status,
@@ -1822,14 +1812,8 @@ export class NodeAdapter implements HTTPAdapter {
             const { status, headers } = activeBufferedResponse;
             activeBufferedResponse = undefined;
             destroyRequestQuietly(req);
-
-            const error = new Error(
-              'Request aborted during response streaming',
-            );
-            error.name = 'AbortError';
             failRequest(
-              markResponseStreamAbortError(
-                error,
+              makeResponseStreamAbortError(
                 req,
                 request.headers,
                 status,
@@ -1996,12 +1980,11 @@ export class NodeAdapter implements HTTPAdapter {
  * two-second pause truncated an 8 MiB upload at 6.8 MiB and handed the caller the early
  * status as a clean success.
  *
- * Five seconds is past any such pause on a connection that is still alive, and it is what
- * the pending-writable absorber in this file already waits before deciding nobody claimed
- * an error. What is left is a bound rather than a promise: a receiver that stops reading
- * for longer than this while still intending to read gets a truncated body, and the far
- * more common shape - a proxy that has answered and will never read again - costs one idle
- * socket for five seconds instead of one held to that server's timeout.
+ * Five seconds is past any such pause on a connection that is still alive. What is left
+ * is a bound rather than a promise: a receiver that stops reading for longer than this
+ * while still intending to read gets a truncated body, and the far more common shape - a
+ * proxy that has answered and will never read again - costs one idle socket for five
+ * seconds instead of one held to that server's timeout.
  */
 const UPLOAD_STALL_GRACE_MS = 5_000;
 
@@ -2711,8 +2694,12 @@ function ignoreWritableError(): void {
  * the headers from the abort listener - and those run as emitter or `AbortSignal`
  * callbacks, where a throw is an uncaught exception rather than a rejection, and the
  * request never settles. Read here, inside `send()`'s own promise, a member that throws
- * fails this send instead. `headers` is copied for the same reason: its entries are read
- * again each time the effective request headers are snapshotted.
+ * fails this send instead. `headers` is copied for the same reason, as the effective
+ * request headers report it - names lowercased, each value converted to a string (an
+ * array copied, its elements converted), an `undefined` value dropped: its entries are
+ * read again each time the effective request headers are snapshotted, so a `toString`
+ * that throws must throw now, and an array the caller changes after `send()` must not
+ * change what is reported as sent.
  *
  * `streamResponse` is called on the caller's request rather than on this copy, so a
  * factory that is a method reading `this` - a class-instance request - sees the object it
@@ -2736,7 +2723,7 @@ function snapshotAdapterRequest(request: AdapterRequest): AdapterRequest {
   return {
     requestURL,
     method,
-    headers: { ...headers },
+    headers: mergeObservedHeaders(headers),
     body,
     signal,
     onUploadProgress,
@@ -2923,12 +2910,9 @@ function snapshotEffectiveRequestHeaders(
   req: http.ClientRequest,
   fallbackHeaders: Record<string, string | string[]>,
 ): Record<string, string | string[]> {
-  return normalizeNodeRequestHeaders({
-    // Start with the client-level attempt headers, then overlay any adapter-side
-    // mutations (for example multipart Content-Type/Content-Length).
-    ...fallbackHeaders,
-    ...req.getHeaders(),
-  });
+  // Start with the client-level attempt headers, then overlay any adapter-side
+  // mutations (for example multipart Content-Type/Content-Length).
+  return mergeObservedHeaders(fallbackHeaders, req.getHeaders());
 }
 
 function resolveAdapterResponse(
@@ -3287,13 +3271,20 @@ function readErrorMessage(error: Error): string | undefined {
     : undefined;
 }
 
-function markResponseStreamAbortError(
-  error: Error,
+/**
+ * The `AbortError` for a caller abort or timeout that lands while a response body is
+ * still arriving, tagged with what the client needs to report it: the response's status
+ * and headers, and the effective request headers.
+ */
+function makeResponseStreamAbortError(
   req: http.ClientRequest,
   fallbackHeaders: Record<string, string | string[]>,
   status: number,
   headers: Record<string, string | string[]>,
 ): Error {
+  const error = new Error('Request aborted during response streaming');
+  error.name = 'AbortError';
+
   const tagged = error as Error &
     Partial<Record<typeof RESPONSE_STREAM_ABORT_FLAG, boolean>> & {
       effectiveRequestHeaders?: Record<string, string | string[]>;

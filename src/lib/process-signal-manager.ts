@@ -162,6 +162,26 @@ function resolveCallbackNameOption(
 }
 
 /**
+ * An `on*Requested` option: `undefined` when null or undefined (no handler), and a
+ * `TypeError` when it is not a function, so a value that cannot be called fails at
+ * construction rather than installing listeners whose dispatch can never run it.
+ */
+function resolveCallbackOption<T extends (...args: never[]) => unknown>(
+  requested: unknown,
+  label: string,
+): T | undefined {
+  if (isNullish(requested)) {
+    return undefined;
+  }
+  if (typeof requested !== 'function') {
+    throw new TypeError(
+      `${label} must be a function, got: ${typeof requested}`,
+    );
+  }
+  return requested as T;
+}
+
+/**
  * Status information about what the manager is attached to
  */
 export interface ProcessSignalManagerStatus {
@@ -396,10 +416,22 @@ export class ProcessSignalManager {
     // Generate unique ID for this instance to track it in the activeInstances Set
     this.instanceID = ulid();
 
-    this.onShutdownRequested = options.onShutdownRequested;
-    this.onReloadRequested = options.onReloadRequested;
-    this.onInfoRequested = options.onInfoRequested;
-    this.onDebugRequested = options.onDebugRequested;
+    this.onShutdownRequested = resolveCallbackOption(
+      options.onShutdownRequested,
+      'onShutdownRequested',
+    );
+    this.onReloadRequested = resolveCallbackOption(
+      options.onReloadRequested,
+      'onReloadRequested',
+    );
+    this.onInfoRequested = resolveCallbackOption(
+      options.onInfoRequested,
+      'onInfoRequested',
+    );
+    this.onDebugRequested = resolveCallbackOption(
+      options.onDebugRequested,
+      'onDebugRequested',
+    );
     this.shutdownCallbackName = resolveCallbackNameOption(
       options.shutdownCallbackName,
       'onShutdownRequested',

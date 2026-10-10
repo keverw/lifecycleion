@@ -138,6 +138,40 @@ export interface RepeatedShutdownRequestState {
 }
 
 /**
+ * The starts running caller code that may ask for a bulk stop or restart, which a
+ * shutdown pass that begins meanwhile must not join: `start()` itself while it runs,
+ * and a request through the component's `lifecycle` handle until that request settles.
+ * The two overlap - `start()` can make the request and return before it settles - so
+ * each mark is added and deleted on its own, and a start stays in the set until its
+ * last mark is deleted. Iterates each marked start once.
+ */
+export class InvokingStarts implements Iterable<StartSettlement> {
+  private readonly marks = new Map<StartSettlement, number>();
+
+  public add(settlement: StartSettlement): void {
+    this.marks.set(settlement, (this.marks.get(settlement) ?? 0) + 1);
+  }
+
+  public delete(settlement: StartSettlement): void {
+    const count = this.marks.get(settlement);
+
+    if (count === undefined || count <= 1) {
+      this.marks.delete(settlement);
+    } else {
+      this.marks.set(settlement, count - 1);
+    }
+  }
+
+  public has(settlement: StartSettlement): boolean {
+    return this.marks.has(settlement);
+  }
+
+  public [Symbol.iterator](): Iterator<StartSettlement> {
+    return this.marks.keys();
+  }
+}
+
+/**
  * Everything `LifecycleManager` changes after construction: the registry, per-component
  * status and attempt bookkeeping, the startup and shutdown latches, escalation, and
  * signal integration.
@@ -202,7 +236,7 @@ export class LifecycleManagerState {
     string,
     Set<StartSettlement>
   >();
-  public readonly invokingStarts = new Set<StartSettlement>();
+  public readonly invokingStarts = new InvokingStarts();
   // The shutdown pass that most recently began, when it asked to abort pending starts
   // (`abortPendingStarts`), keyed by its `shutdownToken`. A start whose caller code began
   // that pass after the start claimed its component - before it could be interrupted -

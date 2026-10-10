@@ -27,6 +27,14 @@ import {
 } from './operation-policy';
 import { takeRestartStartupDispatch } from './restart-dispatch';
 
+/** A failed result's error, or one standing in for a result that carried none. */
+function failureError(result: ComponentOperationResult): Error {
+  return (
+    result.error ||
+    new Error(result.reason || LIFECYCLE_MANAGER_MESSAGE_UNKNOWN_ERROR)
+  );
+}
+
 /**
  * One bulk startup that has taken the latch and begun: what it has started, skipped and
  * given up on, its deadline, the record it publishes as `activeBulkStartup`, and the
@@ -181,8 +189,9 @@ export class StartupOrchestration {
     if (preflight) {
       return preflight;
     }
-    // The preflight reads the registry through the manager's count and name getters,
-    // which a subclass can override - and one can start a bulk operation of its own.
+    // The preflight reads internal state, and lets a startup go ahead without logging,
+    // so no caller code ran in it. Checked again all the same: the latch is not taken
+    // yet, and nothing here should depend on that staying true.
     const becameActiveDuringPreflight =
       this.core.startupPreflight.refuseActiveBulkStartup(startTime);
     if (becameActiveDuringPreflight) {
@@ -909,19 +918,13 @@ export class StartupOrchestration {
         result.code === 'component_already_starting' ? 'startup' : 'stop';
       const isLateTimeoutCleanup =
         result.reason === LIFECYCLE_MANAGER_MESSAGE_TIMED_OUT_STARTUP_CLEANUP;
-      run.abandonReason = isLateTimeoutCleanup
-        ? 'was interrupted by timed-out startup cleanup'
-        : `was interrupted by independent component ${operation}`;
-      run.detachReason = 'partial bulk startup';
-      return {
-        kind: 'result',
-        value: this.failedStartup(run, {
-          code: 'partial_state',
-          reason: isLateTimeoutCleanup
-            ? `Component "${name}": ${LIFECYCLE_MANAGER_MESSAGE_TIMED_OUT_STARTUP_CLEANUP}`
-            : `Component "${name}" has an independent ${operation} in progress`,
-        }),
-      };
+      return isLateTimeoutCleanup
+        ? this.partialStateExit(
+            run,
+            'was interrupted by timed-out startup cleanup',
+            `Component "${name}": ${LIFECYCLE_MANAGER_MESSAGE_TIMED_OUT_STARTUP_CLEANUP}`,
+          )
+        : this.independentOperationExit(run, name, operation);
     } else if (result.code === 'shutdown_in_progress') {
       // A shutdown pass that began answered above, and owns the teardown. Refused
       // without one - a logger exit in progress - nothing else will stop what this
@@ -959,6 +962,18 @@ export class StartupOrchestration {
       // callbacks above, which can report it stopped again.
       if (this.core.registry.isComponentUp(name)) {
         run.startedComponents.push(name);
+      } else if (!isOptional && this.core.claims.isInFlight(name)) {
+        // Not up, but a start or stop a listener began on it is still in flight: owned
+        // elsewhere, as a member answered `component_already_starting` is. A rollback
+        // now would leave out what that start brings up, and the dependencies it needs
+        // would refuse it, so the pass stops as `partial_state` without rolling back.
+        return this.independentOperationExit(
+          run,
+          name,
+          this.core.state.componentStates.get(name) === 'starting'
+            ? 'startup'
+            : 'stop',
+        );
       }
       if (!isOptional) {
         return {
@@ -998,11 +1013,7 @@ export class StartupOrchestration {
             'Required component failed to start, rolling back: {{error.message}}',
             {
               params: {
-                error:
-                  result.error ||
-                  new Error(
-                    result.reason || LIFECYCLE_MANAGER_MESSAGE_UNKNOWN_ERROR,
-                  ),
+                error: failureError(result),
               },
             },
           );
@@ -1018,6 +1029,37 @@ export class StartupOrchestration {
     return undefined;
   }
 
+  /**
+   * The exit for a batch member an independent start or stop owns mid-pass: the pass
+   * stops as `partial_state`, neither taking that operation over nor rolling back what
+   * it started, which that operation may depend on.
+   */
+  private independentOperationExit(
+    run: StartupRun,
+    name: string,
+    operation: 'startup' | 'stop',
+  ): BatchExit {
+    return this.partialStateExit(
+      run,
+      `was interrupted by independent component ${operation}`,
+      `Component "${name}" has an independent ${operation} in progress`,
+    );
+  }
+
+  /** A `partial_state` exit from the batch loop, without rollback. */
+  private partialStateExit(
+    run: StartupRun,
+    abandonReason: string,
+    reason: string,
+  ): BatchExit {
+    run.abandonReason = abandonReason;
+    run.detachReason = 'partial bulk startup';
+    return {
+      kind: 'result',
+      value: this.failedStartup(run, { code: 'partial_state', reason }),
+    };
+  }
+
   /** An optional batch member that failed to start: announced, marked, and recorded. */
   private recordOptionalStartFailure(
     run: StartupRun,
@@ -1026,9 +1068,7 @@ export class StartupOrchestration {
   ): void {
     // Built once, so the log, the event and the result name the same error
     // - one standing in for a result that carried none, too.
-    const failure =
-      result.error ||
-      new Error(result.reason || LIFECYCLE_MANAGER_MESSAGE_UNKNOWN_ERROR);
+    const failure = failureError(result);
     this.core.logger
       .entity(name)
       .warn(
@@ -1429,11 +1469,7 @@ export class StartupOrchestration {
             'Failed to stop component during rollback, continuing: {{error.message}}',
             {
               params: {
-                error:
-                  result.error ||
-                  new Error(
-                    result.reason || LIFECYCLE_MANAGER_MESSAGE_UNKNOWN_ERROR,
-                  ),
+                error: failureError(result),
               },
             },
           );

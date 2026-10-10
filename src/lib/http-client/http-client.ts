@@ -136,21 +136,8 @@ export class BaseHTTPClient {
     // Read every documented field exactly once, then validate and keep that snapshot.
     // A getter can answer differently on each read, so validating one read and storing
     // another let a value the checks never saw through - e.g. followRedirects: true on
-    // the XHR adapter. Keep this list exhaustive as options grow.
-    const snapshot = {
-      adapter: config.adapter,
-      baseURL: config.baseURL,
-      defaultHeaders: config.defaultHeaders,
-      timeout: config.timeout,
-      cookieJar: config.cookieJar,
-      retryPolicy: config.retryPolicy,
-      retryNonIdempotentMethods: config.retryNonIdempotentMethods,
-      includeRequestID: config.includeRequestID,
-      includeAttemptHeader: config.includeAttemptHeader,
-      userAgent: config.userAgent,
-      followRedirects: config.followRedirects,
-      maxRedirects: config.maxRedirects,
-    } satisfies Record<keyof HTTPClientConfig, unknown>;
+    // the XHR adapter. See `snapshotClientConfigFields`.
+    const snapshot = snapshotClientConfigFields(config);
 
     this._clientID = generateID('ulid');
     this._adapter = snapshot.adapter ?? new FetchAdapter();
@@ -361,21 +348,10 @@ export class BaseHTTPClient {
     // Undefined overrides inherit; explicit null retains each option's policy
     // (notably cookieJar: null disables the jar, while a null timeout inherits).
     // Capture every documented field through its original receiver, regardless of
-    // enumerability or prototype placement. Keep this list exhaustive as options grow.
+    // enumerability or prototype placement. See `snapshotClientConfigFields`.
     const snapshot = {
-      adapter: overrides.adapter,
-      baseURL: overrides.baseURL,
-      defaultHeaders: overrides.defaultHeaders,
+      ...snapshotClientConfigFields(overrides),
       defaultHeadersStrategy: overrides.defaultHeadersStrategy,
-      timeout: overrides.timeout,
-      cookieJar: overrides.cookieJar,
-      retryPolicy: overrides.retryPolicy,
-      retryNonIdempotentMethods: overrides.retryNonIdempotentMethods,
-      includeRequestID: overrides.includeRequestID,
-      includeAttemptHeader: overrides.includeAttemptHeader,
-      userAgent: overrides.userAgent,
-      followRedirects: overrides.followRedirects,
-      maxRedirects: overrides.maxRedirects,
     } satisfies Record<keyof SubClientConfig, unknown>;
     const {
       followRedirects: shouldFollowRedirectsOverride,
@@ -1974,6 +1950,9 @@ export class BaseHTTPClient {
       // throws, a `Set-Cookie` the jar cannot take) is the adapter's malformed response,
       // not a transport failure: the catch below reports it without re-sending.
       let didAdapterResolve = false;
+      // The status that answer carried, so `onAttemptEnd` reports it rather than `0` when
+      // a throw after `send()` resolved ends the attempt.
+      let answeredStatus = 0;
 
       // Dispatch counts as activity, so the settle wait's stall clock starts from the
       // moment this attempt's upload could have begun rather than from a report on some
@@ -2084,6 +2063,9 @@ export class BaseHTTPClient {
               Reflect.get(rawAdapterResponse, key),
             );
           }
+        }
+        if (typeof adapterResponse.status === 'number') {
+          answeredStatus = adapterResponse.status;
         }
         adapterResponse.headers = normalizeAdapterResponseHeaders(headers);
 
@@ -2664,7 +2646,7 @@ export class BaseHTTPClient {
             willRetry: false,
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
-            status: 0,
+            status: answeredStatus,
           });
 
           const isStreamFactoryError =
@@ -3622,6 +3604,8 @@ function readStringMember(
  * single value converted to a string, an array's elements each converted, and a
  * one-element array collapsed to its string - so a value whose `toString` answers
  * differently on each call is checked and sent as one string. Names keep their case.
+ * The method is uppercased, so a `post` is the `POST` the retry and redirect rules
+ * check for rather than a method none of them recognize.
  * Throws on a `requestURL` or `method` that is not a string or `headers` that is not a
  * plain object (an array, a `Headers` or a `Map` is refused), and on any read or
  * conversion that throws; each phase reports that as the interceptor's failure.
@@ -3645,13 +3629,20 @@ function snapshotInterceptedRequest(
     );
   }
 
+  // ASCII letters only: `toUpperCase` would also turn `poſt` into `POST`.
+  const normalizedMethod = candidateMethod.replace(/[a-z]/g, (letter) =>
+    letter.toUpperCase(),
+  ) as HTTPMethod;
+
   const candidateHeaders: unknown = headers;
 
   // An array passes `typeof === 'object'`, but `Object.entries` would turn its indices
   // into header names, so it is refused like any other non-record. So is any object
-  // whose prototype is not `Object.prototype` or `null`: a `Headers` or `Map` keeps its
-  // entries off its own properties, and `Object.entries` would answer `{}`, sending the
-  // request with every header the interceptor set silently dropped.
+  // whose prototype is not a root prototype - `Object.prototype`, another realm's (a
+  // `vm` context's plain object), or `null`: a `Headers` or `Map` keeps its entries off
+  // its own properties, and `Object.entries` would answer `{}`, sending the request with
+  // every header the interceptor set silently dropped. Their prototypes inherit from
+  // `Object.prototype` in whichever realm made them, so they are never a root.
   if (
     typeof candidateHeaders !== 'object' ||
     candidateHeaders === null ||
@@ -3664,7 +3655,11 @@ function snapshotInterceptedRequest(
 
   const headersPrototype = Reflect.getPrototypeOf(candidateHeaders);
 
-  if (headersPrototype !== Object.prototype && headersPrototype !== null) {
+  if (
+    headersPrototype !== null &&
+    headersPrototype !== Object.prototype &&
+    Reflect.getPrototypeOf(headersPrototype) !== null
+  ) {
     throw new TypeError(
       '[HTTPClient] Interceptor returned a request whose headers is not a plain object (got an object with a non-Object prototype, such as Headers or Map).',
     );
@@ -3680,7 +3675,35 @@ function snapshotInterceptedRequest(
     );
   }
 
-  return { requestURL, method, headers: headersSnapshot, body };
+  return {
+    requestURL,
+    method: normalizedMethod,
+    headers: headersSnapshot,
+    body,
+  };
+}
+
+/**
+ * Read every documented {@link HTTPClientConfig} field once, through its original
+ * receiver, regardless of enumerability or prototype placement. Shared by the
+ * constructor and `_buildSubClientConfig`; the `satisfies` keeps it exhaustive as
+ * options grow.
+ */
+function snapshotClientConfigFields(config: Partial<HTTPClientConfig>) {
+  return {
+    adapter: config.adapter,
+    baseURL: config.baseURL,
+    defaultHeaders: config.defaultHeaders,
+    timeout: config.timeout,
+    cookieJar: config.cookieJar,
+    retryPolicy: config.retryPolicy,
+    retryNonIdempotentMethods: config.retryNonIdempotentMethods,
+    includeRequestID: config.includeRequestID,
+    includeAttemptHeader: config.includeAttemptHeader,
+    userAgent: config.userAgent,
+    followRedirects: config.followRedirects,
+    maxRedirects: config.maxRedirects,
+  } satisfies Record<keyof HTTPClientConfig, unknown>;
 }
 
 function buildObservedAttemptBodies(rawBody: unknown): ObservedAttemptBodies {

@@ -47,6 +47,9 @@ function readAvailability(
   allowStopped: boolean,
   allowStalled: boolean,
 ) {
+  // The overridable `isComponentRunning()` first, and everything after it: it is caller
+  // code that can stop or replace the component (see `isComponentEnterableNow()`).
+  const isRunningMember = context.isComponentRunning(componentName);
   const isCurrent = context.getComponent(componentName) === component;
   // Neither override permits entering a provider the shared rule blocks - startup or
   // teardown owning it (see `isHookEntryBlocked()`); they only admit a stopped or
@@ -58,7 +61,7 @@ function readAvailability(
   const isRunning =
     isCurrent &&
     !isUnavailable &&
-    isComponentRunningMember(context, componentName, state);
+    isComponentRunningMember(isRunningMember, state);
   const isStalled = context.stalledComponents.has(componentName);
   // Labelled as `checkComponentHealth()` labels its refusals (see
   // `unavailableComponentCode()`): by the stall, not by availability, so the same

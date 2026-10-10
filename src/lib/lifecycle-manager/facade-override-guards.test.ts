@@ -93,7 +93,6 @@ describe('status getters read the manager state, not other overridable getters',
   });
 
   test('getSystemState() and getStatus() ignore overridden counts, and getStatus() an overridden getSystemState()', async () => {
-    // Armed only once started: startup's own preflight asks the public counts.
     let isLying = false;
     class Lying extends LifecycleManager {
       public override getComponentCount(): number {

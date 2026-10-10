@@ -22,7 +22,7 @@ import {
   type SinkFailureDisposition,
   type SinkFailureKind,
 } from './internal/sink-failure';
-import { describeEntryCount } from './internal/loss-ledger';
+import { describeEntryCount, describeWriteCount } from './internal/loss-ledger';
 import { endStreamWithin } from './internal/end-stream';
 import { FormatReportScheduler } from './internal/format-report-scheduler';
 import { Backoff, openRetryBackoff } from './internal/reopen-backoff';
@@ -59,6 +59,11 @@ const MAX_ROTATION_NAME_ATTEMPTS = 100;
 
 /** Megabytes a log file grows to before it is rotated, where the caller named nothing. */
 const DEFAULT_MAX_SIZE_MB = 10;
+
+/** Today's date as the log file names it: `YYYY-MM-DD`, in UTC. */
+function utcDateStamp(): string {
+  return new Date().toISOString().slice(0, 10);
+}
 
 /** Failed archive renames retry on later writes, with bounded exponential backoff. */
 const ROTATION_RETRY_INITIAL_MS = 1000;
@@ -212,9 +217,9 @@ export interface FileSinkHealth {
   /** Whether an automatic reopen of the log file is in flight. */
   isReconnecting: boolean;
   /**
-   * Entries this sink did not deliver - evicted at `maxQueueSize`, out of retries, still
-   * queued when `close()` gave up on them, or failed by a write `close()` ended. Always 0
-   * when none of that has happened.
+   * Entries this sink did not deliver - unrenderable, evicted at `maxQueueSize`, out of
+   * retries, logged after `close()` began, still queued when `close()` gave up on them,
+   * or failed by a write `close()` ended. Always 0 when none of that has happened.
    */
   droppedEntries: number;
   /** `droppedEntries` by reason. See {@link DroppedEntryCounts}. */
@@ -306,25 +311,6 @@ export class FileSink implements LogSink {
   /** The entry actually handed to stream.write(), excluding setup and rotation. */
   private activeStreamWriteEntry?: QueuedEntry;
 
-  /**
-   * Errors a write callback has already reported, so the stream's `'error'` event does not
-   * report them again.
-   *
-   * The same pairing `NamedPipeSink` keeps, and for the same reason: a stream delivers one
-   * failed write through both channels, and they know different halves of it. The callback
-   * knows which line it was and whether it is coming back; the event knows only that the
-   * stream is gone. Reported by both, a consumer got two entries for one failure, the
-   * second contradicting the first about the line's fate.
-   *
-   * Keyed on the error itself rather than a single slot, so an unrelated failure arriving
-   * in between cannot consume the entry that was waiting for its own event. Weak, so
-   * remembering one cannot keep it alive.
-   */
-  private readonly suppressedWriteErrors = new WeakSet<object>();
-
-  private closing = false;
-  /** Set by the engine the moment `close()` stops draining. */
-  private closed = false;
   private closeTimeoutMS: number;
 
   /**
@@ -388,15 +374,9 @@ export class FileSink implements LogSink {
         // caller is awaiting this close, and the engine's report of what the end cost has
         // to reach it before the process exits.
         end: (timeoutMS) => this.endCurrentStream(timeoutMS, false),
+        // Closed is not initialized, so not healthy either: the same answer
+        // `NamedPipeSink.close()` gives.
         onClosed: () => {
-          this.closed = true;
-
-          // `isHealthy` is `consecutiveFailures === 0 && isInitialized`, computed
-          // identically in both sinks, so a file sink that closed cleanly went on reporting
-          // itself healthy to anything polling `getHealth()` - with no stream, and
-          // `write()` discarding every line at the `closing || closed` guard without even
-          // counting it as dropped. Closed is not healthy, the same answer
-          // `NamedPipeSink.close()` gives.
           this.isInitialized = false;
         },
       },
@@ -443,7 +423,7 @@ export class FileSink implements LogSink {
         inFlightUnknown: (count) =>
           `Closed with ${count === 1 ? 'a write' : `${String(count)} writes`} still in flight (closeTimeoutMS=${String(this.closeTimeoutMS)}); whether ${count === 1 ? 'it' : 'they'} reached the file is unknown`,
         lostAtClose: (count, bytesLeft) =>
-          `Closed with ${String(count)} write${count === 1 ? '' : 's'} failing as ${this.currentLogFile ?? this.logDir} was closed (${String(bytesLeft)} bytes still buffered); they were not written`,
+          `Closed with ${describeWriteCount(count)} failing as ${this.currentLogFile ?? this.logDir} was closed (${String(bytesLeft)} bytes still buffered); they were not written`,
       },
       createError: (message) => new FileSinkError(message),
       report: (failure, routing) =>
@@ -481,7 +461,7 @@ export class FileSink implements LogSink {
       }
     }
 
-    if (this.closing || this.closed) {
+    if (this.closing) {
       // Counted and said, not discarded quietly: `close()` waits up to `closeTimeoutMS`,
       // and a line logged in that window is one this sink did not deliver.
       this.engine.refuseAfterClose(entry);
@@ -541,12 +521,9 @@ export class FileSink implements LogSink {
     const health = this.engine.getHealth();
 
     return {
-      // Not while closing, either. `close()` clears `isInitialized` only once its drain has
-      // finished, so for the whole of that drain - up to `closeTimeoutMS` - a sink that
-      // was discarding every new `write()` at the `closing` guard still answered healthy
-      // to anything polling it. The same answer `NamedPipeSink` gives.
-      isHealthy:
-        health.consecutiveFailures === 0 && this.isInitialized && !this.closing,
+      // The engine's answer - no failed writes, connected, not closing - and a stream in
+      // hand, which a failed write takes away before the engine hears of it.
+      isHealthy: health.isHealthy && this.isInitialized,
       queueSize: health.queueSize,
       lastError: health.lastError,
       consecutiveFailures: health.consecutiveFailures,
@@ -594,7 +571,6 @@ export class FileSink implements LogSink {
    * Close the log file and wait for all pending writes
    */
   public close(): Promise<void> {
-    this.closing = true;
     // One close however many callers ask, published before any close-time callback can
     // re-enter close().
     return this.engine.close();
@@ -603,6 +579,26 @@ export class FileSink implements LogSink {
   /** The most recent open attempt, settled. Never rejects. */
   private get initPromise(): Promise<void> {
     return this.engine.openSettled;
+  }
+
+  /** `close()` has begun, or finished: see {@link DeliveryEngine.isClosing}. */
+  private get closing(): boolean {
+    return this.engine.isClosing;
+  }
+
+  /** `close()` has stopped draining and finished with the queue. */
+  private get closed(): boolean {
+    return this.engine.isClosed;
+  }
+
+  /** The log file for today's UTC date, or for `date`. */
+  private logFilePath(date = utcDateStamp()): string {
+    return `${this.logDir}/${this.basename}-${date}.log`;
+  }
+
+  /** The rotation threshold in bytes. */
+  private get maxSizeBytes(): number {
+    return this.maxSizeMB * 1024 * 1024;
   }
 
   /**
@@ -854,10 +850,9 @@ export class FileSink implements LogSink {
     // five of them empty. Written to the current file instead, overshooting the limit by
     // the one line that cannot be split, which is what an unsplittable entry costs either
     // way.
-    const maxSizeBytes = this.maxSizeMB * 1024 * 1024;
     if (
       this.currentLogSize > 0 &&
-      this.currentLogSize + messageBytes > maxSizeBytes
+      this.currentLogSize + messageBytes > this.maxSizeBytes
     ) {
       await this.rotateFile();
     }
@@ -891,14 +886,10 @@ export class FileSink implements LogSink {
           this.activeStreamWriteEntry = undefined;
         }
         if (err) {
-          // The event is told to keep quiet about this particular error; it still tears
-          // the stream down, which is the half it does know about. A non-object is not
-          // trackable and is simply not suppressed: the event then reports it, which is
-          // noisier than ideal but never silent.
-          if (typeof err === 'object') {
-            this.suppressedWriteErrors.add(err);
-          }
-
+          // Torn down here, so the stream's own `'error'` event, which follows this
+          // callback, finds a stream no longer in hand and reports nothing: this
+          // rejection, which knows the line and whether it is coming back, is the report.
+          //
           // The stream that failed, not whatever is current - the identity guard the
           // `'error'` handler carries, for the same hazard. A callback belonging to a
           // stream a rotation has since replaced tore down the healthy replacement and
@@ -977,8 +968,7 @@ export class FileSink implements LogSink {
       return;
     }
 
-    const currentDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
-    const currentLogFile = `${this.logDir}/${this.basename}-${currentDate}.log`;
+    const currentLogFile = this.logFilePath();
 
     await fsPromises.mkdir(this.logDir, { recursive: true });
 
@@ -1018,6 +1008,13 @@ export class FileSink implements LogSink {
       stream.once('error', onError);
     });
 
+    // Let go of, not overwritten: a stream installed while this one was opening - a
+    // reopen after a stream error, racing a rotation's own - would otherwise keep its
+    // descriptor for the life of the process, since nothing else holds it to end.
+    if (this.logFileStream !== undefined) {
+      this.releaseStream();
+    }
+
     this.logFileStream = stream;
     this.currentLogFile = currentLogFile;
 
@@ -1030,8 +1027,7 @@ export class FileSink implements LogSink {
     }
 
     // Rotate if already at size limit
-    const maxSizeBytes = this.maxSizeMB * 1024 * 1024;
-    if (!shouldSkipRotation && this.currentLogSize >= maxSizeBytes) {
+    if (!shouldSkipRotation && this.currentLogSize >= this.maxSizeBytes) {
       await this.rotateFile();
     }
 
@@ -1060,9 +1056,9 @@ export class FileSink implements LogSink {
   /**
    * A stream this sink opened reported an error.
    *
-   * Reported unless its write callback already said it (see {@link suppressedWriteErrors}),
-   * and - when it is the stream in hand - the end of that connection, which the engine
-   * recovers from on its own timer.
+   * When it is the stream in hand, reported as the end of that connection, which the
+   * engine recovers from on its own timer. A failed write's callback has already torn its
+   * stream down and reported through its rejection, so its event never gets this far.
    */
   private handleStreamError(
     stream: fs.WriteStream,
@@ -1085,26 +1081,12 @@ export class FileSink implements LogSink {
 
     this.destroyStream();
 
-    // Already said, by the write callback that knew which line it was and whether it was
-    // coming back. Consumed only when it matches, so an unrelated error cannot unsuppress
-    // the report still waiting for its own event. The callback's failed write takes the
-    // connection down with it.
-    if (
-      typeof streamError === 'object' &&
-      streamError !== null &&
-      this.suppressedWriteErrors.has(streamError)
-    ) {
-      this.suppressedWriteErrors.delete(streamError);
-
-      return;
-    }
-
     // Reported, not only torn down: an async failure with no write in flight to pair it
     // with - the disk filling, the file removed underneath the descriptor - must not leave
     // `getHealth()` answering `isHealthy: true` with a stale `lastError` and `onError`
-    // never fired. A write that was in flight still reports through its own rejection,
-    // which is the report suppressed above; this covers the failure that has no line to
-    // attach to, and counts against health, since the stream had a descriptor.
+    // never fired. A failed write reports through its own rejection; this covers the
+    // failure that has no line to attach to, and counts against health, since the stream
+    // had a descriptor.
     //
     // No `entry`: the stream failed on its own, not while carrying a line this sink can
     // name. Anything queued is retried on the reopened stream and reported on its own terms
@@ -1118,7 +1100,9 @@ export class FileSink implements LogSink {
     const shouldSuppressFailureReport =
       this.activeStreamWriteEntry?.shouldSuppressFailureReport === true ||
       this.inFlightEntry?.shouldSuppressFailureReport === true;
-    const isDiagnostic = isDiagnosticEntry(this.activeStreamWriteEntry?.entry);
+    const isDiagnostic = isDiagnosticEntry(
+      this.activeStreamWriteEntry?.entry ?? this.inFlightEntry?.entry,
+    );
 
     this.engine.connectionLost(
       {
@@ -1208,11 +1192,8 @@ export class FileSink implements LogSink {
       return;
     }
 
-    const currentDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
-    const expectedFile = `${this.logDir}/${this.basename}-${currentDate}.log`;
-
     // Date changed - setup new file
-    if (this.currentLogFile !== expectedFile) {
+    if (this.currentLogFile !== this.logFilePath()) {
       // Guarded exactly as `rotateFile()` is, and for both of its reasons. This branch
       // awaits `endCurrentStream(this.closeTimeoutMS)` - a *fresh* full-length wait, begun
       // from inside a close that is already keeping its own budget, so a UTC midnight
@@ -1222,36 +1203,34 @@ export class FileSink implements LogSink {
       // entry in hand goes to the day the sink was already writing, which is the right
       // trade at shutdown: a log line in the previous day's file, rather than a close that
       // overshoots its bound or a stream that outlives it.
-      if (this.closing || this.closed) {
+      if (this.closing) {
         return;
       }
 
-      // Ended first, exactly as `rotateFile()` ends it. `setupLogFile()` overwrites
-      // `logFileStream` with no teardown, so the stream this replaces was left open and
-      // unreachable: one `WriteStream` and one file descriptor leaked per UTC midnight for
-      // the life of the process, and whatever sat in its buffer was never flushed - not by
-      // `close()`, which only ends the stream that is current by then.
-      //
-      // Bounded, like every other flush this sink waits on: see `endCurrentStream`. What
-      // the bound gave up on is reported rather than dropped: see
-      // `reportRotationFlushLoss`.
-      const bytesLeft = await this.endCurrentStream(this.closeTimeoutMS, true);
-
-      this.reportRotationFlushLoss(
-        bytesLeft,
-        this.currentLogFile ?? this.logDir,
-      );
-
+      // Ended first, exactly as `rotateFile()` ends it, so whatever sat in its buffer is
+      // flushed to the day it was written for.
+      await this.endStreamForRotation();
       await this.reopenAfterRotation();
 
       return;
     }
 
     // Size limit reached
-    const maxSizeBytes = this.maxSizeMB * 1024 * 1024;
-    if (this.currentLogSize >= maxSizeBytes) {
+    if (this.currentLogSize >= this.maxSizeBytes) {
       await this.rotateFile();
     }
+  }
+
+  /**
+   * End the current stream for a rotation, bounded (see {@link endCurrentStream}), and
+   * report what the bound gave up on rather than dropping it (see
+   * {@link reportRotationFlushLoss}). Called before any rename moves the file, so the report
+   * names the file the bytes were written for.
+   */
+  private async endStreamForRotation(): Promise<void> {
+    const bytesLeft = await this.endCurrentStream(this.closeTimeoutMS, true);
+
+    this.reportRotationFlushLoss(bytesLeft, this.currentLogFile ?? this.logDir);
   }
 
   /**
@@ -1270,7 +1249,7 @@ export class FileSink implements LogSink {
     // resumes and renames the live log to an archive while the `setupLogFile` that would
     // reopen it early-returns because the sink is closed. Whatever was tailing the current
     // day's file watched it disappear after shutdown had already completed.
-    if (this.closing || this.closed) {
+    if (this.closing) {
       return;
     }
 
@@ -1280,13 +1259,9 @@ export class FileSink implements LogSink {
       return;
     }
 
-    const currentDate = new Date().toISOString().slice(0, 10); // YYYY-MM-DD (UTC)
+    const currentDate = utcDateStamp();
 
-    // Close current stream, bounded: see `endCurrentStream`. Read before the rename below
-    // moves the file, so the report names the file the bytes were written for.
-    const bytesLeft = await this.endCurrentStream(this.closeTimeoutMS, true);
-
-    this.reportRotationFlushLoss(bytesLeft, this.currentLogFile);
+    await this.endStreamForRotation();
 
     // Rename with timestamp, disambiguated when one second holds more than one rotation.
     //

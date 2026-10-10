@@ -757,3 +757,86 @@ test('interceptor headers with a null prototype are still accepted', async () =>
   expect(sent).toHaveLength(1);
   expect(sent[0]['x-trace']).toBe('abc');
 });
+
+test('interceptor headers from another realm are accepted as a plain object', async () => {
+  const { runInNewContext } = await import('node:vm');
+  const sent: Array<Record<string, string | string[]>> = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: (request: AdapterRequest) => {
+      sent.push(request.headers);
+      return Promise.resolve({ status: 200, headers: {}, body: null });
+    },
+  };
+  const client = new HTTPClient({ adapter });
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    headers: runInNewContext('({ "X-Trace": "abc" })') as Record<
+      string,
+      string
+    >,
+  }));
+  const response = await client.get('https://example.com/').send();
+
+  expect(response.status).toBe(200);
+  expect(sent).toHaveLength(1);
+  expect(sent[0]['x-trace']).toBe('abc');
+});
+
+test('a lowercase interceptor method is normalized, so a POST is not replayed on 503', async () => {
+  const methods: string[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: (request: AdapterRequest) => {
+      methods.push(request.method);
+      return Promise.resolve({ status: 503, headers: {}, body: null });
+    },
+  };
+  const client = new HTTPClient({
+    adapter,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+  });
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    method: 'post' as AdapterRequest['method'],
+  }));
+  const response = await client.get('https://example.com/').send();
+
+  expect(response.status).toBe(503);
+  expect(methods).toEqual(['POST']);
+});
+
+test('a throw after the adapter answered reports the real status to onAttemptEnd', async () => {
+  // The jar refusing the response's `Set-Cookie` ends the attempt as an adapter_error,
+  // but the server did answer, and the attempt's status says so.
+  const jar = new CookieJar();
+  const refusal = spyOn(jar, 'processResponseHeaders').mockImplementation(
+    () => {
+      throw new Error('jar refused');
+    },
+  );
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: () =>
+      Promise.resolve({
+        status: 201,
+        headers: { 'set-cookie': ['a=b'] },
+        body: null,
+      }),
+  };
+  const ends: AttemptEndEvent[] = [];
+  try {
+    const request = new HTTPClient({ adapter, cookieJar: jar })
+      .get('https://example.com/')
+      .onAttemptEnd((event) => {
+        ends.push(event);
+      });
+    await request.send();
+
+    expect(request.error?.code).toBe('adapter_error');
+    expect(ends).toHaveLength(1);
+    expect(ends[0].status).toBe(201);
+  } finally {
+    refusal.mockRestore();
+  }
+});

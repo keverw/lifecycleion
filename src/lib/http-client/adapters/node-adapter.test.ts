@@ -182,6 +182,105 @@ test.each(['abort', 'close'] as const)(
   },
 );
 
+test('an abort while a streamed writable is finishing fires the factory signal', async () => {
+  // The body has fully arrived and the adapter is waiting on `end`'s callback, which this
+  // writable never calls. The abort settles the request, which takes the signal relay off
+  // within the same dispatch, so the abort listener has to fire the stream signal itself.
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Length': '4' });
+    res.end('body');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('No test address');
+  }
+  const controller = new AbortController();
+  const ending = Promise.withResolvers<void>();
+  let streamSignal: AbortSignal | undefined;
+  const writable: WritableLike = {
+    write: (_chunk, callback) => {
+      callback?.(null);
+      return true;
+    },
+    end: () => {
+      ending.resolve();
+    },
+    on() {
+      return this;
+    },
+    once() {
+      return this;
+    },
+    destroy: () => {},
+  };
+  const pending = new NodeAdapter()
+    .send(
+      makeAdapterRequest(`http://127.0.0.1:${String(address.port)}/`, {
+        signal: controller.signal,
+        streamResponse: (_info, context) => {
+          streamSignal = context.signal;
+          return writable;
+        },
+      }),
+    )
+    .then(
+      (result) => result,
+      (error: unknown) => error,
+    );
+  try {
+    await ending.promise;
+    controller.abort();
+    const result = await pending;
+    expect((result as Error).name).toBe('AbortError');
+    expect(streamSignal?.aborted).toBe(true);
+  } finally {
+    controller.abort();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('request header values are converted once, when send() is called', async () => {
+  // Converted again at settle time, inside a response callback, a `toString` that throws
+  // was an uncaught exception and the send never settled.
+  const server = http.createServer((_req, res) => {
+    res.end('ok');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('No test address');
+  }
+  let conversions = 0;
+  const value = {
+    toString(): string {
+      conversions++;
+      if (conversions > 1) {
+        throw new Error('converted twice');
+      }
+      return 'once';
+    },
+  };
+  const accept = ['text/plain'];
+  try {
+    const pending = new NodeAdapter().send(
+      makeAdapterRequest(`http://127.0.0.1:${String(address.port)}/`, {
+        headers: { 'x-value': value as unknown as string, accept },
+      }),
+    );
+    accept.push('application/json');
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(conversions).toBe(1);
+    expect(res.effectiveRequestHeaders?.['x-value']).toBe('once');
+    expect(res.effectiveRequestHeaders?.accept).toBe('text/plain');
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
 class MockClientRequest extends EventEmitter {
   public destroyed = false;
   public headers: Record<string, string> = {};

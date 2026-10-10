@@ -371,6 +371,14 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     super();
 
     this.policy = new RetryPolicy(policy);
+
+    // Refused here, like an invalid policy, rather than every attempt's call throwing a
+    // `TypeError` that is retried through the whole budget.
+    if (!isFunction(operation)) {
+      throw new TypeError(
+        `RetryRunner operation must be a function, got: ${typeof operation}`,
+      );
+    }
     this.operation = operation;
 
     // Handle options
@@ -749,7 +757,10 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     shouldWaitForCompletion: boolean,
   ): RunResult<T> | Promise<RunResult<T>> {
     return this.dispatchUnderLock('run', () => {
-      assertWaitOption('run', shouldWaitForCompletion);
+      assertBooleanOption(
+        'run() shouldWaitForCompletion',
+        shouldWaitForCompletion,
+      );
       // check if in a disallowed state for this operation
       const checkDisallowedStates = this.checkForDisallowedPerOperationStates(
         'run',
@@ -786,7 +797,10 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     shouldWaitForCompletion: boolean,
   ): RunResult<T> | Promise<RunResult<T>> {
     return this.dispatchUnderLock('resume', () => {
-      assertWaitOption('resume', shouldWaitForCompletion);
+      assertBooleanOption(
+        'resume() shouldWaitForCompletion',
+        shouldWaitForCompletion,
+      );
       // check if in a disallowed state for this operation
       const checkDisallowedStates = this.checkForDisallowedPerOperationStates(
         'resume',
@@ -814,14 +828,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     return this.dispatchUnderLock('forceTry', () => {
       const shouldWaitForCompletion = options?.shouldWaitForCompletion;
       const shouldAbortRunning = options?.shouldAbortRunning;
-      if (
-        (shouldWaitForCompletion !== undefined &&
-          typeof shouldWaitForCompletion !== 'boolean') ||
-        (shouldAbortRunning !== undefined &&
-          typeof shouldAbortRunning !== 'boolean')
-      ) {
-        throw new TypeError('forceTry options must be booleans when provided');
-      }
+      assertBooleanOption(
+        'forceTry() shouldWaitForCompletion',
+        shouldWaitForCompletion,
+      );
+      assertBooleanOption('forceTry() shouldAbortRunning', shouldAbortRunning);
       const refusal = this.checkForDisallowedPerOperationStates('forceTry', [
         'completed',
       ]);
@@ -1536,7 +1547,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       let unreadableReturn: UnreadableReturn | undefined;
 
       try {
-        const result = this.operation(reportResult, context.signal);
+        // Called without the runner as `this`, so the operation cannot reach its internals.
+        const result = Reflect.apply(this.operation, undefined, [
+          reportResult,
+          context.signal,
+        ]) as unknown;
 
         // Adopted, not awaited as it is: a native promise whose own `then` is not a
         // function fails `isPromise()`, so its rejection would never be awaited and would
@@ -1602,14 +1617,12 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 }
 
 /**
- * Refuse a `shouldWaitForCompletion` that is not a boolean, as `forceTry()` refuses its
- * options: thrown inside `dispatchUnderLock`, so it resolves as `unexpected_error` before
- * any state is inspected or work is started, rather than truthiness deciding a `'yes'`.
+ * Refuse a `run()`/`resume()`/`forceTry()` option that is provided but not a boolean:
+ * thrown inside `dispatchUnderLock`, so it resolves as `unexpected_error` before any state
+ * is inspected or work is started, rather than truthiness deciding a `'yes'`.
  */
-function assertWaitOption(method: 'run' | 'resume', value: unknown): void {
-  if (typeof value !== 'boolean') {
-    throw new TypeError(
-      `${method}() shouldWaitForCompletion must be a boolean when provided`,
-    );
+function assertBooleanOption(label: string, value: unknown): void {
+  if (value !== undefined && typeof value !== 'boolean') {
+    throw new TypeError(`${label} must be a boolean when provided`);
   }
 }

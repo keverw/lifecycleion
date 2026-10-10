@@ -106,7 +106,8 @@ export class ShutdownEscalation {
    *    open): count the request toward the escalation window, emit
    *    `signal:shutdown` with `isAlreadyShuttingDown: false`, then start a
    *    new `stopAllComponents()` run to retry - unless the force handler or a
-   *    listener already started one, which is then this request's pass.
+   *    listener already started one, which is then this request's pass (one the
+   *    force handler started is announced with `isAlreadyShuttingDown: true`).
    *
    * 3. **Armed post-failure expired** (armed window opened but has since
    *    elapsed): expire the stale state, treat the request as a fresh
@@ -153,10 +154,15 @@ export class ShutdownEscalation {
         // cleared the window a moment later regardless.
         const consumedArmedUntil = this.consumeRepeatedShutdownArmedWindow();
 
-        this.emitSignalShutdownForNewRequest(method);
-        didEmitShutdownSignal = true;
         shouldSeedRepeatedShutdownState = false;
+        // Counted before the emit: a `signal:shutdown` listener that starts a pass would
+        // otherwise have this press reach `onForceShutdown` as one landing on that pass,
+        // not as the armed retry it is. A pass the force handler starts is announced below.
         this.handleRepeatedShutdownRequest(method, consumedArmedUntil);
+        if (!this.core.shutdownPass.isShuttingDown) {
+          this.emitSignalShutdownForNewRequest(method);
+          didEmitShutdownSignal = true;
+        }
       } else if (this.core.shutdownPass.isShuttingDown) {
         // Expiring a lapsed window logs through caller sinks, which can start a
         // shutdown here; the expiry notification stays queued until this transition

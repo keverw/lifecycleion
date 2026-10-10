@@ -335,3 +335,26 @@ test('a throw while setting up an attempt ends the operation as an unexpected fa
     process.off('unhandledRejection', onUnhandled);
   }
 });
+
+// An operation that is not a function was accepted, and every attempt's call threw a
+// `TypeError` that was retried through the whole budget. Refused when constructed.
+test('an operation that is not a function is a TypeError at construction', () => {
+  for (const value of [undefined, null, 'operation', 42, {}] as unknown[]) {
+    expect(() => new RetryRunner(policy, value as () => void)).toThrow(
+      'RetryRunner operation must be a function',
+    );
+  }
+});
+
+test('the operation is not called with the runner as this', async () => {
+  let wasCalledWithoutThis = false;
+  const runner = new RetryRunner(policy, function (
+    this: unknown,
+    report: ReportResult<unknown>,
+  ) {
+    wasCalledWithoutThis = this === undefined;
+    report('success');
+  });
+  expect(await runner.run(true)).toMatchObject({ status: 'attempt_success' });
+  expect(wasCalledWithoutThis).toBe(true);
+});

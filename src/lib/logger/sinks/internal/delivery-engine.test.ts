@@ -683,6 +683,30 @@ describe('DeliveryEngine', () => {
     await engine.close();
   });
 
+  test('a late success from a replaced connection does not reset the backoff', async () => {
+    const { engine, destination, write } = await started(makeEngine());
+    const backoff = (engine as unknown as { backoff: { isAtRest: boolean } })
+      .backoff;
+
+    write('a');
+
+    // The connection goes with `a` still unanswered, and the next one opens only after a
+    // failed attempt, so the outage's backoff is running when `a`'s answer arrives.
+    destination.openAnswers = [{ status: 'unavailable' }];
+    const stale = destination.writes.shift();
+
+    destination.isOpen = false;
+    engine.connectionLost();
+    await until(() => engine.getHealth().isInitialized);
+
+    expect(backoff.isAtRest).toBe(false);
+
+    stale?.done({ status: 'written' });
+
+    expect(backoff.isAtRest).toBe(false);
+    await engine.close();
+  });
+
   test('a successful write resets the backoff; a successful open does not', async () => {
     const { engine, destination, write } = await started(makeEngine());
     const backoff = (engine as unknown as { backoff: { isAtRest: boolean } })
@@ -788,6 +812,27 @@ describe('DeliveryEngine', () => {
       expect.objectContaining({ kind: 'setup', disposition: 'no_entry' }),
     ]);
     expect(engine.getHealth().isHealthy).toBe(true);
+  });
+
+  test('reopenNow answers the open it waited for when that one connected', async () => {
+    const destination = new FakeDestination();
+    destination.openAnswers = ['pending'];
+    const { engine, reports } = makeEngine({ destination });
+
+    engine.start();
+
+    // A pipe adapter refuses to replace a stream holding writes; the one just opened does.
+    destination.refusal = new Error('pending writes');
+
+    const reopening = engine.reopenNow();
+
+    destination.answerOpen({ status: 'open' });
+
+    expect(await reopening).toEqual({ success: true });
+    expect(destination.opens).toHaveLength(1);
+    expect(destination.releases).toBe(0);
+    expect(reports).toEqual([]);
+    await engine.close();
   });
 
   test('reopenNow waits for an open in flight rather than racing it', async () => {
@@ -1017,6 +1062,75 @@ describe('DeliveryEngine (one write at a time)', () => {
     expect(destination.releases).toBe(1);
     expect(destination.delivered).toEqual(['a']);
     expect(engine.getHealth().queueSize).toBe(0);
+  });
+
+  test('a write given up on that left the destination unusable still reopens it', async () => {
+    // FileSink's write callback destroys its stream itself, with no error event, so
+    // nothing but the failed write can say the connection is gone.
+    const destination = oneAtATime();
+    const { engine, reports, write } = await started(
+      makeEngine({ destination, maxRetries: 0 }),
+    );
+    const opensBefore = destination.opens.length;
+
+    write('a');
+    write('b');
+    destination.isOpen = false;
+    destination.fail(new Error('ENOSPC'));
+
+    expect(reports.map((failure) => failure.disposition)).toEqual(['lost']);
+    expect(destination.releases).toBe(1);
+
+    await until(() => destination.pendingLines().length === 1);
+    destination.succeed();
+
+    expect(destination.opens.length).toBe(opensBefore + 1);
+    expect(destination.delivered).toEqual(['b']);
+    expect(engine.getHealth()).toMatchObject({
+      queueSize: 0,
+      isInitialized: true,
+    });
+    expect(await engine.flush(1000)).toMatchObject({
+      timedOut: false,
+      entriesQueued: 0,
+    });
+  });
+
+  test('the first reopen after a failed write is at once, later ones back off', async () => {
+    const destination = oneAtATime();
+    const { engine, write } = await started(
+      makeEngine({ destination, maxRetries: 3 }),
+    );
+    const openedAt: number[] = [];
+
+    destination.onOpen = () => {
+      openedAt.push(Date.now());
+    };
+
+    write('a');
+
+    const failedAt = Date.now();
+
+    destination.isOpen = false;
+    destination.fail();
+
+    // Due at once, not after the backoff's first step (20 ms here).
+    const reopenAtMS = (engine as unknown as { reopenAtMS?: number })
+      .reopenAtMS;
+
+    expect(reopenAtMS).toBeDefined();
+    expect((reopenAtMS ?? Infinity) - failedAt).toBeLessThan(10);
+    await until(() => destination.pendingLines().length === 1);
+
+    // The reopened destination fails the write again: the same outage, so the backoff.
+    destination.isOpen = false;
+    destination.fail();
+    await until(() => destination.pendingLines().length === 1);
+
+    expect(openedAt[1] - openedAt[0]).toBeGreaterThanOrEqual(15);
+
+    destination.succeed();
+    await engine.close();
   });
 
   test('close waits for a write in flight as it waits for the queue', async () => {

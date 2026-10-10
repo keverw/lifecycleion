@@ -1067,7 +1067,7 @@ export class ComponentStop {
           // deadline's abort listener resolved - is recorded by the reaction that
           // settles adoption, where the stop settled, so the graceful result's caller
           // finds it before escalating. The deadline observer `armGracefulDeadline()`
-          // installs records it too, a reaction later, and reconciles it.
+          // installs reconciles it a reaction later.
           onSettled: (didFulfill) => {
             if (didFulfill && run.timeoutError !== undefined) {
               preparation.lateResolution = stopAttemptToken;
@@ -1184,14 +1184,14 @@ export class ComponentStop {
             : 'Graceful shutdown threw error: {{error.message}}',
         level: 'warn',
       }),
-      onResolved: () => {
-        preparation.lateResolution = stopAttemptToken;
+      // `lateResolution` is already recorded by then: adoption's `onSettled` runs before
+      // any reaction to the stop, and this observer exists only once the deadline fired.
+      onResolved: () =>
         this.core.stopOutcomes.handleLateStopResolution(
           name,
           stopAttemptToken,
           'graceful',
-        );
-      },
+        ),
     });
   }
 

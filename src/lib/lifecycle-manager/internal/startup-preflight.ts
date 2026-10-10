@@ -72,8 +72,10 @@ export class StartupPreflight {
     startTime: number,
     shouldIgnoreStalledComponents: boolean,
   ): StartupResult | undefined {
-    const totalCount = this.core.manager.getComponentCount();
-    const runningCount = this.core.manager.getRunningComponentCount();
+    // Internal state, not the overridable count getters: the preflight decides from what
+    // the rest of the startup reads, and runs no caller code before it logs.
+    const totalCount = this.core.state.components.length;
+    const runningCount = this.core.state.runningComponents.size;
 
     if (totalCount === 0) {
       this.core.logger.warn('Cannot start all components: none registered');
@@ -112,20 +114,18 @@ export class StartupPreflight {
     // is. A late start's cleanup marks its component running only so it can be stopped,
     // so it is on its way down too.
     const stillStartingNames: string[] = [];
-    const stillStoppingNames = this.core.manager
-      .getComponentNames()
-      .filter((name) => {
-        const state = this.core.state.componentStates.get(name);
-        if (state === 'starting') {
-          stillStartingNames.push(name);
-        }
+    const stillStoppingNames = this.registeredNames().filter((name) => {
+      const state = this.core.state.componentStates.get(name);
+      if (state === 'starting') {
+        stillStartingNames.push(name);
+      }
 
-        return (
-          state === 'stopping' ||
-          state === 'force-stopping' ||
-          this.core.state.pendingBulkStartupCleanup.has(name)
-        );
-      });
+      return (
+        state === 'stopping' ||
+        state === 'force-stopping' ||
+        this.core.state.pendingBulkStartupCleanup.has(name)
+      );
+    });
 
     if (stillStoppingNames.length > 0) {
       this.core.logger.warn('Cannot start: components are still stopping', {
@@ -194,17 +194,13 @@ export class StartupPreflight {
     // and one whose components are all stalled is left to the startup itself to skip.
     if (
       runningCount > 0 &&
-      runningCount ===
-        totalCount - stalledToSkip(this.core.manager.getComponentNames()).length
+      runningCount === totalCount - stalledToSkip(this.registeredNames()).length
     ) {
       this.core.logger.info('All components already running');
       // The sink can begin teardown or change registrations. Decide from the same
       // post-log snapshot we return, rather than the count captured before it ran: the
-      // registry's names, read once, for every part of it - not the overridable
-      // `getComponentNames()`, whose answer the count check could disagree with.
-      const names = this.core.state.components.map((component) =>
-        this.core.registry.nameOf(component),
-      );
+      // registry's names, read once, for every part of it.
+      const names = this.registeredNames();
       const startedComponents = this.core.startup.runningStartupSnapshot(names);
       const skippedDueToStall = stalledToSkip(names);
       const isStillAllRunning =
@@ -231,9 +227,9 @@ export class StartupPreflight {
 
     // Partial state - reject to avoid inconsistent startup
     if (runningCount > 0) {
-      // `refuseActiveBulkStartup()` refused both latches, and since then only the
-      // manager's count and name getters have run - which a subclass can override, so
-      // one may have taken a latch. The reads after the log check both latches again.
+      // `refuseActiveBulkStartup()` refused both latches right before this preflight,
+      // which reads internal state only; the log below is caller code, and a sink may
+      // take a latch. The reads after the log check both latches again.
       this.core.logger.error(
         `Cannot start: ${runningCount}/${totalCount} components already running. ` +
           `Call stopAllComponents() first to ensure clean state.`,
@@ -275,5 +271,12 @@ export class StartupPreflight {
     }
 
     return undefined;
+  }
+
+  /** The registry's names, read from internal state rather than `getComponentNames()`. */
+  private registeredNames(): string[] {
+    return this.core.state.components.map((component) =>
+      this.core.registry.nameOf(component),
+    );
   }
 }

@@ -595,30 +595,27 @@ test('a response-task recovery that answers and then throws reports only what we
 
 test('a response task that fails after an early-ack stream setup was answered reports without settling the upload', async () => {
   // The response closing during an async factory's setup answers the request as a
-  // stream failure while the body is still going out. The factory then rejects on its aborted
-  // signal, and tagging that rejection reads the request headers again - where a
-  // caller-supplied value that now refuses `toString` throws out of the task. The
-  // request was already answered, so that failure goes to the host channel and nowhere
-  // else: not into `requestBodySettled`, which belongs to the writer still running, and
-  // not into an early release of the abort listener that writer still needs.
-  const refusal = new Error('header value refused toString');
+  // stream failure while the body is still going out. The factory then rejects on its
+  // aborted signal, and tagging that rejection reads the request's headers again - where
+  // a `getHeaders` that now refuses throws out of the task. The request was already
+  // answered, so that failure goes to the host channel and nowhere else: not into
+  // `requestBodySettled`, which belongs to the writer still running, and not into an
+  // early release of the abort listener that writer still needs.
+  const refusal = new Error('getHeaders refused');
   const writeFailure = new Error('socket reset mid-upload');
   let isHeaderRefusing = false;
-  const traceHeader = {
-    toString(): string {
-      if (isHeaderRefusing) {
-        throw refusal;
-      }
-      return 'trace-1';
-    },
-  };
   let failPendingWrite: ((error: Error) => void) | undefined;
   let respond: ((res: http.IncomingMessage) => void) | undefined;
   const req = Object.assign(new EventEmitter(), {
     destroyed: false,
     writableEnded: false,
     setHeader() {},
-    getHeaders: () => ({}),
+    getHeaders: () => {
+      if (isHeaderRefusing) {
+        throw refusal;
+      }
+      return {};
+    },
     write(_data: unknown, callback?: (error: Error | null) => void) {
       failPendingWrite = (error) => callback?.(error);
       return true;
@@ -649,7 +646,7 @@ test('a response task that fails after an early-ack stream setup was answered re
     const pending = new NodeAdapter().send({
       requestURL: 'http://example.test/upload',
       method: 'POST',
-      headers: { 'x-trace': traceHeader as unknown as string },
+      headers: { 'x-trace': 'trace-1' },
       body: 'payload',
       signal: {
         aborted: false,

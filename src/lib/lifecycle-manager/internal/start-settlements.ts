@@ -128,6 +128,26 @@ export class StartSettlements {
   }
 
   /**
+   * `currentStartSettlements().get(name)`, read for `name` alone: the last of its
+   * settlements, in publication order, that holds its claim or is its current attempt.
+   */
+  public currentStartSettlementOf(name: string): StartSettlement | undefined {
+    const heldClaim = this.core.state.componentClaims.get(name)?.claim;
+    let current: StartSettlement | undefined;
+    for (const settlement of this.core.state.startSettlementsByName.get(name) ??
+      []) {
+      if (
+        (heldClaim !== undefined &&
+          this.core.state.startSettlements.get(heldClaim) === settlement) ||
+        this.isCurrentStartAttempt(name, settlement.component, settlement.token)
+      ) {
+        current = settlement;
+      }
+    }
+    return current;
+  }
+
+  /**
    * Whether `component` is still the instance registered under `name` and
    * `startAttemptToken` the start attempt last issued for it: the attempt, or the
    * settlement that recorded both, still describes the name's current start. Shared by

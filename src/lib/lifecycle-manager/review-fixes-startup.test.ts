@@ -1,5 +1,4 @@
 import { describe, test, expect } from 'bun:test';
-import { LifecycleManager } from './lifecycle-manager';
 import {
   claimReports,
   coreOf,
@@ -8,7 +7,7 @@ import {
   Plain,
   setup,
 } from './test-helpers';
-import type { ComponentOperationResult, StartupResult } from './types';
+import type { ComponentOperationResult } from './types';
 import { LIFECYCLE_MANAGER_MESSAGE_PROCESS_EXITING } from './constants';
 
 describe('bulk startup review fixes', () => {
@@ -43,46 +42,6 @@ describe('bulk startup review fixes', () => {
       // The rollback reached the component the listener brought back up.
       expect(manager.isComponentRunning('a')).toBe(false);
       expect(manager.isComponentRunning('b')).toBe(false);
-    } finally {
-      await manager.stopAllComponents();
-      await logger.close();
-    }
-  });
-
-  test('a startup begun from an overridden name getter during preflight is the only one', async () => {
-    let nested: Promise<StartupResult> | undefined;
-    let hasStartedNested = false;
-    // The first read starts a startup of its own and answers with no names, so the
-    // outer preflight finds nothing still starting and goes ahead.
-    class Reentrant extends LifecycleManager {
-      public override getComponentNames(): string[] {
-        if (!hasStartedNested && this.getComponentCount() > 0) {
-          hasStartedNested = true;
-          nested = this.startAllComponents();
-          return [];
-        }
-        return super.getComponentNames();
-      }
-    }
-    const { logger } = setup();
-    const manager = new Reentrant({ logger, shutdownWarningTimeoutMS: -1 });
-    const a = new Plain(logger, 'a');
-    let starts = 0;
-    a.start = (): Promise<void> => {
-      starts++;
-      return Promise.resolve();
-    };
-    await manager.registerComponent(a);
-
-    try {
-      const outer = await manager.startAllComponents();
-      expect(outer).toMatchObject({
-        success: false,
-        code: 'already_in_progress',
-      });
-      expect((await nested)?.success).toBe(true);
-      expect(starts).toBe(1);
-      expect(manager.isComponentRunning('a')).toBe(true);
     } finally {
       await manager.stopAllComponents();
       await logger.close();

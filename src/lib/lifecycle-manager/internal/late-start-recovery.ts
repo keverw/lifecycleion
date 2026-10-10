@@ -2,6 +2,7 @@ import { observeRejection } from '../../internal/promise-reactions';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { toError } from '../../to-error';
 import type { ManagerCore } from './manager-core';
+import type { StartSettlement } from './manager-state';
 
 /**
  * Late-start recovery: a start the manager stopped waiting for - its deadline passed,
@@ -14,6 +15,11 @@ import type { ManagerCore } from './manager-core';
  * pass and a signal detach both consult.
  */
 export class LateStartRecovery {
+  // The settlements whose late start came up and whose recovery began cleaning it up: an
+  // older late start waiting on one of them (`pendingRetry()`) leaves the component to
+  // that cleanup.
+  private readonly cleanedUpLateStarts = new WeakSet<StartSettlement>();
+
   constructor(private readonly core: ManagerCore) {}
 
   /**
@@ -63,8 +69,8 @@ export class LateStartRecovery {
         // An abort listener can settle start() inside the timeout callback. Let the
         // timed-out start's catch record its state before beginning late cleanup.
         await Promise.resolve(undefined);
-        const timeoutState = this.core.state.componentStates.get(name);
-        const timeoutError = this.core.state.componentErrors.get(name) ?? null;
+        let timeoutState = this.core.state.componentStates.get(name);
+        let timeoutError = this.core.state.componentErrors.get(name) ?? null;
         // A start - forced or not - that reported an unexpected stop before its deadline
         // ended as that stop, not as a timeout. Read before cleanup's own stop clears it.
         const didStopUnexpectedly =
@@ -73,14 +79,24 @@ export class LateStartRecovery {
         // A retry of the same registration took the name over, and it has ended without
         // the component up - its own `start()` failed, say. Nothing else will stop what
         // this late start brought up, so the cleanup runs under that retry's token,
-        // leaving the state the retry left. A retry still in flight or up is left alone.
+        // leaving the state the retry left. A retry still in flight - its attempt, or its
+        // own late-start recovery - is waited out and the decision made again once it
+        // ends. A retry that came up - even late, its own cleanup stopping the component
+        // - or a replacement, is left alone.
         if (isSuperseded()) {
-          const adoptedToken = this.adoptableStartToken(
-            name,
-            isSameRegistration,
-          );
-          if (adoptedToken === undefined) {
-            return;
+          let adoptedToken = this.adoptableStartToken(name, isSameRegistration);
+          while (adoptedToken === undefined) {
+            const retry = this.pendingRetry(name, isSameRegistration);
+            if (retry === undefined) {
+              return;
+            }
+            await (retry.didSettle ? retry.rawStartDone : retry.promise);
+            if (this.cleanedUpLateStarts.has(retry)) {
+              return;
+            }
+            adoptedToken = this.adoptableStartToken(name, isSameRegistration);
+            timeoutState = this.core.state.componentStates.get(name);
+            timeoutError = this.core.state.componentErrors.get(name) ?? null;
           }
           cleanupToken = adoptedToken;
           isCleanupSuperseded = (): boolean =>
@@ -126,6 +142,7 @@ export class LateStartRecovery {
           // Cleanup now holds the registry latch; shutdown joins its stop rather
           // than treating it as startup that has not finished yet.
           settlement.isAwaitingLateStart = false;
+          this.cleanedUpLateStarts.add(settlement);
         }
         // What the cleanup's stop leaves, applied by `markComponentStopped()` so its
         // `component:stopped` carries it: the state and error the failed start left -
@@ -297,5 +314,40 @@ export class LateStartRecovery {
       return undefined;
     }
     return token;
+  }
+
+  /**
+   * The settlement a late start that `adoptableStartToken()` turned away waits on before
+   * deciding again: the newer attempt of the same registration that holds the name - its
+   * claim, or the start token it last issued - while that attempt, with any late-start
+   * recovery of its own (`promise`), or its raw start (`rawStartDone`), has not ended.
+   * `undefined` when there is nothing of that registration's to wait for: the component
+   * is up or stalled, a stop holds the name, or it was unregistered or replaced.
+   */
+  private pendingRetry(
+    name: string,
+    isSameRegistration: () => boolean,
+  ): StartSettlement | undefined {
+    const { state } = this.core;
+    if (
+      !isSameRegistration() ||
+      state.runningComponents.has(name) ||
+      state.stalledComponents.has(name)
+    ) {
+      return undefined;
+    }
+    const claim = state.componentClaims.get(name)?.claim;
+    const token = state.componentStartAttemptTokens.get(name);
+    for (const settlement of state.startSettlementsByName.get(name) ?? []) {
+      if (
+        ((claim !== undefined &&
+          state.startSettlements.get(claim) === settlement) ||
+          (token !== undefined && settlement.token === token)) &&
+        (!settlement.didSettle || settlement.rawStartPending)
+      ) {
+        return settlement;
+      }
+    }
+    return undefined;
   }
 }

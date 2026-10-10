@@ -294,12 +294,14 @@ test('named-pipe terminal outage reports cannot spend the ordinary report budget
   });
   const internals = sink as unknown as {
     initPromise: Promise<void>;
-    reportOpenFailure: (
-      kind: 'setup',
-      message: string,
-      cause: unknown,
-      diagnostic: boolean,
-    ) => void;
+    engine: {
+      reportOpenFailure: (
+        kind: 'setup',
+        message: string,
+        cause: unknown,
+        diagnostic: boolean,
+      ) => void;
+    };
     reportedOpenFailures: Set<string>;
   };
   const reports: SinkFailureReport[] = [];
@@ -312,7 +314,7 @@ test('named-pipe terminal outage reports cannot spend the ordinary report budget
     reports.length = 0;
     internals.reportedOpenFailures.clear();
     for (let index = 0; index < 100; index++) {
-      internals.reportOpenFailure(
+      internals.engine.reportOpenFailure(
         'setup',
         `terminal failure ${index}`,
         undefined,
@@ -321,7 +323,7 @@ test('named-pipe terminal outage reports cannot spend the ordinary report budget
     }
     expect(reports).toHaveLength(0);
     expect(lines.length).toBeLessThan(100);
-    internals.reportOpenFailure(
+    internals.engine.reportOpenFailure(
       'setup',
       'independent failure',
       undefined,
@@ -329,7 +331,7 @@ test('named-pipe terminal outage reports cannot spend the ordinary report budget
     );
     expect(reports).toHaveLength(1);
     expect(reports[0].error.message).toBe('independent failure');
-    internals.reportOpenFailure(
+    internals.engine.reportOpenFailure(
       'setup',
       'independent failure',
       undefined,

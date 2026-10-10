@@ -67,14 +67,15 @@ export function isComponentSelectedRunningMember(
 /**
  * Whether the component is running, by membership and by state: the half of
  * {@link isComponentEnterable} that is not {@link isHookEntryBlocked}, for a caller that
- * has already evaluated the block itself. `state` is the caller's own read, as there.
+ * has already evaluated the block itself. `isRunning` is the caller's answer from the
+ * overridable `isComponentRunning()`, and `state` its own read, made after that answer
+ * (see {@link isComponentEnterableNow}).
  */
 export function isComponentRunningMember(
-  context: Pick<ComponentAccessContext, 'isComponentRunning'>,
-  name: string,
+  isRunning: boolean,
   state: ComponentState | undefined,
 ): boolean {
-  return context.isComponentRunning(name) && state === 'running';
+  return isRunning && state === 'running';
 }
 
 /**
@@ -83,7 +84,9 @@ export function isComponentRunningMember(
  * (the instance still registered under `name`) is each caller's own check.
  *
  * `state` is required, not defaulted: a caller whose own read found no state passes
- * `undefined`, and that is the answer - a default would read the state again.
+ * `undefined`, and that is the answer - a default would read the state again. The
+ * membership is asked here, after that read; a recheck, which has no read of its own,
+ * uses {@link isComponentEnterableNow} instead.
  */
 export function isComponentEnterable(
   context: HookEntryContext &
@@ -92,7 +95,28 @@ export function isComponentEnterable(
   state: ComponentState | undefined,
 ): boolean {
   return (
-    isComponentRunningMember(context, name, state) &&
+    isComponentRunningMember(context.isComponentRunning(name), state) &&
+    !isHookEntryBlocked(context, name, state)
+  );
+}
+
+/**
+ * {@link isComponentEnterable}, reading in the order a recheck needs: the overridable
+ * `isComponentRunning()` first, then the state. The override is caller code - it can
+ * stop, start or replace the component - so a state read before it would judge the
+ * component as it was rather than as the override left it. For the same reason a
+ * caller reads the registration identity after this, not before.
+ */
+export function isComponentEnterableNow(
+  context: HookEntryContext &
+    Pick<ComponentAccessContext, 'isComponentRunning'>,
+  name: string,
+): boolean {
+  const isRunning = context.isComponentRunning(name);
+  const state = context.componentStates.get(name);
+
+  return (
+    isComponentRunningMember(isRunning, state) &&
     !isHookEntryBlocked(context, name, state)
   );
 }

@@ -108,6 +108,27 @@ function systemStateOf(
 }
 
 /**
+ * Whether a registered name counts as stopped - neither running nor stalled - for the
+ * stopped count and names and `getStatus()` alike.
+ */
+function isStoppedName(state: LifecycleManagerState, name: string): boolean {
+  return (
+    !state.runningComponents.has(name) && !state.stalledComponents.has(name)
+  );
+}
+
+/**
+ * Whether a registered name is in `starting-timed-out`, for the start-timed-out count
+ * and names and `getStatus()` alike.
+ */
+function isStartTimedOutName(
+  state: LifecycleManagerState,
+  name: string,
+): boolean {
+  return state.componentStates.get(name) === 'starting-timed-out';
+}
+
+/**
  * LifecycleManager - Comprehensive lifecycle orchestration system
  *
  * Manages startup, shutdown, and runtime control of application components.
@@ -146,14 +167,6 @@ export class LifecycleManager
    * caller's.
    */
   private readonly rootLogger: Logger;
-  /** Registration generations and bounded reads of the live registry. */
-  private readonly registrationReads = new RegistrationReadTracker(
-    () => this.state.components,
-  );
-  /** Guarded dependency and optional-status reads, named by the registry. */
-  private readonly componentMetadata = new ComponentMetadataReader(
-    (component) => this.core.registry.nameOf(component),
-  );
   /** Typed event emitters, queued through the dispatcher. */
   private readonly lifecycleEvents: LifecycleManagerEvents;
   /** Transition depth and the notification queue, delivered through `deliverEvent()`. */
@@ -174,17 +187,19 @@ export class LifecycleManager
       throw new Error('LifecycleManager requires a root logger');
     }
 
-    const name = options.name ?? 'lifecycle-manager';
     this.rootLogger = rootLogger;
+    this.config = resolveManagerConfig(options);
     // Guarded once, here, rather than at the ~140 call sites that log: the logger is
     // caller-supplied, and a method that throws or rejects would otherwise propagate
     // into whatever lifecycle operation happened to be logging at the time.
     // Its `entity()` cache keeps room for every registered component, so a bulk pass
     // logging each in turn reuses their children.
-    this.logger = createGuardedLoggerService(this.rootLogger.service(name), {
-      entityCacheReserve: () => this.state.components.length,
-    });
-    this.config = resolveManagerConfig(name, options);
+    this.logger = createGuardedLoggerService(
+      this.rootLogger.service(this.config.name),
+      {
+        entityCacheReserve: () => this.state.components.length,
+      },
+    );
     this.lifecycleEvents = new LifecycleManagerEvents((event, data) => {
       this.eventDispatcher.emit(event, data);
     });
@@ -197,8 +212,10 @@ export class LifecycleManager
       rootLogger: this.rootLogger,
       lifecycleEvents: this.lifecycleEvents,
       dispatcher: this.eventDispatcher,
-      registryReads: this.registrationReads,
-      componentMetadata: this.componentMetadata,
+      registryReads: new RegistrationReadTracker(() => this.state.components),
+      componentMetadata: new ComponentMetadataReader((component) =>
+        this.core.registry.nameOf(component),
+      ),
       componentAccess: this.componentAccess,
       createProcessSignalManager: (signalOptions) =>
         new ProcessSignalManager(signalOptions),
@@ -261,11 +278,13 @@ export class LifecycleManager
    * @param options - Unregister options (stopIfRunning defaults to true)
    *
    * Notes:
-   * - Stopped or stalled components can be unregistered directly
+   * - Stopped components can be unregistered directly
    * - Running components are stopped first by default (stopIfRunning: true)
    * - Set stopIfRunning: false to require manual stop before unregister
    * - If stopIfRunning is true and stop fails, unregister is aborted
    * - If stopIfRunning is true and the component is stalled, unregister is aborted
+   *   (`stop_failed`, `stopFailureReason: 'stalled'`); pass stopIfRunning: false to
+   *   unregister a stalled component without stopping it
    * @returns The outcome: `success`, a `code` on failure, and `wasStopped` / `wasRegistered`
    */
   public unregisterComponent(
@@ -381,10 +400,7 @@ export class LifecycleManager
     let count = 0;
     for (const component of this.state.components) {
       const name = this.core.registry.nameOf(component);
-      if (
-        !this.state.runningComponents.has(name) &&
-        !this.state.stalledComponents.has(name)
-      ) {
+      if (isStoppedName(this.state, name)) {
         count++;
       }
     }
@@ -399,7 +415,7 @@ export class LifecycleManager
     let count = 0;
     for (const component of this.state.components) {
       const name = this.core.registry.nameOf(component);
-      if (this.state.componentStates.get(name) === 'starting-timed-out') {
+      if (isStartTimedOutName(this.state, name)) {
         count++;
       }
     }
@@ -457,13 +473,10 @@ export class LifecycleManager
     for (const component of this.state.components) {
       const name = this.core.registry.nameOf(component);
       registeredNames.push(name);
-      if (
-        !this.state.runningComponents.has(name) &&
-        !this.state.stalledComponents.has(name)
-      ) {
+      if (isStoppedName(this.state, name)) {
         stoppedNames.push(name);
       }
-      if (this.state.componentStates.get(name) === 'starting-timed-out') {
+      if (isStartTimedOutName(this.state, name)) {
         startTimedOutNames.push(name);
       }
     }
@@ -516,7 +529,7 @@ export class LifecycleManager
     const names: string[] = [];
     for (const component of this.state.components) {
       const name = this.core.registry.nameOf(component);
-      if (this.state.componentStates.get(name) === 'starting-timed-out') {
+      if (isStartTimedOutName(this.state, name)) {
         names.push(name);
       }
     }
@@ -532,10 +545,7 @@ export class LifecycleManager
     const names: string[] = [];
     for (const component of this.state.components) {
       const name = this.core.registry.nameOf(component);
-      if (
-        !this.state.runningComponents.has(name) &&
-        !this.state.stalledComponents.has(name)
-      ) {
+      if (isStoppedName(this.state, name)) {
         names.push(name);
       }
     }

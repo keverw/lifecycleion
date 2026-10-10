@@ -3299,6 +3299,35 @@ describe('callback name options', () => {
   });
 });
 
+describe('callback options', () => {
+  const OPTION_NAMES = [
+    'onShutdownRequested',
+    'onReloadRequested',
+    'onInfoRequested',
+    'onDebugRequested',
+  ] as const;
+
+  // A truthy value that is not a function was stored as a registered handler: attach()
+  // installed its signal listeners (taking over Ctrl+C) and every dispatch reported a
+  // failed callback instead of running one. Refused when constructed.
+  for (const option of OPTION_NAMES) {
+    test(`${option} that is not a function is a TypeError at construction`, () => {
+      for (const value of ['shutdown', 42, {}, true, Symbol('cb')]) {
+        expect(
+          () => new ProcessSignalManager({ [option]: value as never }),
+        ).toThrow(`${option} must be a function`);
+      }
+    });
+
+    test(`${option} that is null or undefined registers no handler`, () => {
+      for (const value of [null, undefined]) {
+        const manager = new ProcessSignalManager({ [option]: value as never });
+        expect(Object.values(manager.getStatus().handlers)).not.toContain(true);
+      }
+    });
+  }
+});
+
 describe('keypress events whose key is not a readable object', () => {
   const hostileKey = {
     get name(): string {
