@@ -19,15 +19,43 @@ test('overflow samples ordinary lost work instead of a preceding diagnostic', ()
   const lost = entry('lost application entry');
   const kept = { entry: entry('surviving application entry') };
   const queue = [{ entry: diagnostic }, { entry: lost }, kept];
-  expect(evictQueuedEntries(queue, 1)).toEqual({ count: 2, entry: lost });
+  expect(evictQueuedEntries(queue, 1)).toEqual({
+    count: 2,
+    entry: lost,
+    start: 0,
+  });
   expect(queue).toEqual([kept]);
-  expect(evictQueuedEntries(queue, 1)).toEqual({ count: 0 });
+  expect(evictQueuedEntries(queue, 1)).toEqual({ count: 0, start: 0 });
 });
 
 test('overflow containing only diagnostics retains its terminal-report provenance', () => {
   const diagnostic = markDiagnosticEntry(entry('diagnostic'));
   const queue = [{ entry: diagnostic }, { entry: entry('kept') }];
-  expect(evictQueuedEntries(queue, 1)).toEqual({ count: 1, entry: diagnostic });
+  expect(evictQueuedEntries(queue, 1)).toEqual({
+    count: 1,
+    entry: diagnostic,
+    start: 0,
+  });
+});
+
+test('with a start, eviction near the front advances it instead of moving the queue', () => {
+  const dead = { entry: entry('dead'), isInFlight: false };
+  const inFlight = { entry: entry('in flight'), isInFlight: true };
+  const oldest = { entry: entry('oldest queued'), isInFlight: false };
+  const rest = Array.from({ length: 6 }, (_, index) => ({
+    entry: entry(`queued ${String(index)}`),
+    isInFlight: false,
+  }));
+  const queue = [dead, inFlight, oldest, ...rest];
+  const result = evictQueuedEntries(queue, 7, {
+    start: 1,
+    isEvictable: (item) => !item.isInFlight,
+  });
+
+  // Only the line in flight moved up, into the place `oldest` left.
+  expect(result).toEqual({ count: 1, entry: oldest.entry, start: 2 });
+  expect(queue).toHaveLength(9);
+  expect(queue.slice(result.start)).toEqual([inFlight, ...rest]);
 });
 
 test('an abandoned queue is emptied in place and sampled by ordinary work first', () => {

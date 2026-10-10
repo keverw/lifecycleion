@@ -337,7 +337,7 @@ describe('DeliveryEngine', () => {
     write('b');
 
     // The connection drops: both writes fail, as a destroyed stream fails them, and the
-    // adapter reports the connection gone.
+    // adapter reports the connection gone. Only `a` ended it: `b` was buffered behind it.
     destination.isOpen = false;
     destination.fail();
     destination.fail();
@@ -348,16 +348,45 @@ describe('DeliveryEngine', () => {
     expect(destination.pendingLines()).toEqual(['a', 'b', 'c']);
     expect(
       reports.map((failure) => [failure.entry?.message, failure.disposition]),
-    ).toEqual([
-      ['a', 'retrying'],
-      ['b', 'retrying'],
-    ]);
-    expect(reports.every((failure) => failure.attempt === 1)).toBe(true);
+    ).toEqual([['a', 'retrying']]);
+    expect(reports[0].attempt).toBe(1);
 
     destination.succeed(3);
 
     expect(destination.delivered).toEqual(['a', 'b', 'c']);
     expect(engine.getHealth().droppedEntries).toBe(0);
+  });
+
+  test('only the write that ended a connection spends an attempt, not those buffered behind it', async () => {
+    const { engine, destination, reports, write } = await started(
+      makeEngine({ maxRetries: 0 }),
+    );
+
+    write('a');
+    write('b');
+    write('c');
+
+    // The reader restarts: the first write fails, and the stream fails the two buffered
+    // behind it with the same error once the connection is already gone.
+    const error = new Error('EPIPE');
+
+    destination.isOpen = false;
+    destination.fail(error);
+    destination.fail(error);
+    destination.fail(error);
+
+    expect(
+      reports.map((failure) => [failure.entry?.message, failure.disposition]),
+    ).toEqual([['a', 'lost']]);
+
+    await until(() => destination.pendingLines().length === 2);
+    destination.succeed(2);
+
+    expect(destination.delivered).toEqual(['b', 'c']);
+    expect(engine.getHealth()).toMatchObject({
+      queueSize: 0,
+      droppedEntries: 1,
+    });
   });
 
   test('retries a line up to maxRetries, then reports it lost once', async () => {
@@ -411,8 +440,8 @@ describe('DeliveryEngine', () => {
     destination.fail(new Error('late EPIPE'));
 
     expect(destination.pendingLines()).toEqual(['a', 'b']);
-    // A late failure belongs to the connection that is gone.
-    expect(reports[0]).toMatchObject({ disposition: 'retrying' });
+    // A late failure belongs to the connection that is gone: held, nothing spent or said.
+    expect(reports).toEqual([]);
     expect(engine.getHealth().consecutiveFailures).toBe(0);
 
     destination.succeed(2);
@@ -597,6 +626,58 @@ describe('DeliveryEngine', () => {
     expect(
       destination.opens.filter((context) => context.isClosing).length,
     ).toBeGreaterThan(1);
+  });
+
+  test('close reopens a connection lost mid-drain rather than abandoning the backlog', async () => {
+    const { engine, destination, reports, write } = await started(
+      makeEngine({ closeTimeoutMS: 2000 }),
+    );
+
+    write('a');
+    write('b');
+
+    const closing = engine.close();
+
+    await tick(20);
+    // The reader restarts under the drain: both writes fail, and nothing is connected.
+    destination.isOpen = false;
+    destination.fail();
+    destination.fail();
+    await until(() => destination.pendingLines().length === 2);
+    destination.succeed(2);
+    await closing;
+
+    expect(destination.delivered).toEqual(['a', 'b']);
+    expect(reports.filter((failure) => failure.kind === 'close')).toEqual([]);
+    expect(engine.getHealth().droppedEntries).toBe(0);
+    expect(
+      destination.opens.filter((context) => context.isClosing).length,
+    ).toBeGreaterThan(0);
+  });
+
+  test('close does not wait out its budget on its own reopen that hangs past the grace', async () => {
+    const destination = new FakeDestination();
+    destination.defaultOpen = { status: 'unavailable' };
+    const { engine, reports, write } = await started(
+      makeEngine({ destination, closeTimeoutMS: 3000 }),
+    );
+
+    write('a');
+    destination.openAnswers = ['pending'];
+
+    const startedAt = Date.now();
+
+    await engine.close();
+
+    // The grace window (500 ms), not the 3 s budget.
+    expect(Date.now() - startedAt).toBeLessThan(1500);
+    expect(reports.filter((failure) => failure.kind === 'close')).toHaveLength(
+      1,
+    );
+    destination.answerOpen({ status: 'open' });
+    await engine.openSettled;
+    // What opened after close finished is let go.
+    expect(destination.releases).toBe(1);
   });
 
   test('lines refused after close are counted, and reported once', async () => {
@@ -993,6 +1074,37 @@ describe('DeliveryEngine hostile handlers', () => {
     ).toEqual(['a', 'first']);
   });
 
+  test('a handler that writes during the overflow report sees the eviction already made', async () => {
+    const destination = new FakeDestination();
+    destination.openAnswers = ['pending'];
+    let hasWritten = false;
+    const harness = makeEngine({
+      destination,
+      maxQueueSize: 2,
+      onError: (failure, { write }) => {
+        if (failure.kind === 'queue_full' && !hasWritten) {
+          hasWritten = true;
+          write('d');
+        }
+      },
+    });
+    harness.engine.start();
+    harness.write('a');
+    harness.write('b');
+    // Evicts `a`; the report's handler queues `d`, which evicts `b`.
+    harness.write('c');
+
+    expect(harness.engine.getHealth()).toMatchObject({
+      queueSize: 2,
+      droppedByKind: { queue_full: 2 },
+    });
+
+    destination.answerOpen({ status: 'open' });
+    await harness.engine.openSettled;
+
+    expect(destination.pendingLines()).toEqual(['c', 'd']);
+  });
+
   test('diagnostic lines route their open failures as diagnostics', async () => {
     const destination = new FakeDestination();
     destination.defaultOpen = { status: 'unavailable' };
@@ -1019,6 +1131,56 @@ describe('DeliveryEngine hostile handlers', () => {
     expect(engine.openRouting({ isDiagnosticRetry: true })).toEqual({
       isDiagnostic: false,
       shouldSuppressFailureReport: false,
+    });
+    await engine.close();
+  });
+});
+
+describe('DeliveryEngine reopen routing', () => {
+  test('a reopen after a failed line given up on is routed by that line', async () => {
+    const { engine, destination } = await started(
+      makeEngine({ maxRetries: 0 }),
+    );
+
+    engine.enqueue({
+      line: 'diagnostic',
+      entry: markDiagnosticEntry(entry('diagnostic')),
+      shouldSuppressFailureReport: true,
+    });
+    destination.isOpen = false;
+    destination.fail();
+
+    // The line is gone from the queue, so only the failure can say how to route.
+    expect(engine.getHealth().queueSize).toBe(0);
+    await until(() => destination.opens.length === 2);
+    expect(destination.opens[1]).toMatchObject({
+      isDiagnosticRetry: true,
+      shouldSuppressRetryReport: true,
+    });
+    await engine.close();
+  });
+
+  test('an ordinary failure on the same reopen keeps it ordinary', async () => {
+    const { engine, destination, write } = await started(
+      makeEngine({ maxRetries: 0 }),
+    );
+
+    engine.enqueue({
+      line: 'diagnostic',
+      entry: markDiagnosticEntry(entry('diagnostic')),
+      shouldSuppressFailureReport: true,
+    });
+    write('ordinary');
+    destination.isOpen = false;
+    destination.fail();
+    // The second failure - one that may have delivered part of its line, so it is not
+    // held - arrives while the reopen the first armed is still pending.
+    destination.fail(new Error('partial'), false);
+
+    await until(() => destination.opens.length === 2);
+    expect(destination.opens[1]).toMatchObject({
+      isDiagnosticRetry: false,
+      shouldSuppressRetryReport: false,
     });
     await engine.close();
   });
@@ -1131,6 +1293,29 @@ describe('DeliveryEngine (one write at a time)', () => {
 
     destination.succeed();
     await engine.close();
+  });
+
+  test('a released orphan keeps its place under maxInFlight until it answers', async () => {
+    const destination = oneAtATime();
+    const { engine, write } = await started(makeEngine({ destination }));
+
+    write('a');
+    destination.isOpen = false;
+    engine.connectionLost();
+    await engine.openSettled;
+    write('b');
+    await tick(ORPHAN_SETTLE_MS + 40);
+
+    // Released, but the old write is still running: nothing goes out beside it.
+    expect(destination.pendingLines()).toEqual(['a']);
+
+    // Its late answer is ignored, and frees the place: `a` goes out again, then `b`.
+    destination.succeed();
+    expect(destination.pendingLines()).toEqual(['a']);
+    destination.succeed();
+    destination.succeed();
+    expect(destination.delivered).toEqual(['a', 'a', 'b']);
+    expect(engine.getHealth().queueSize).toBe(0);
   });
 
   test('close waits for a write in flight as it waits for the queue', async () => {

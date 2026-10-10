@@ -1032,9 +1032,10 @@ describe('LifecycleManager - shutdown during restartComponent()', () => {
     const restart = manager.restartComponent('gated');
     await component.stopping.promise;
 
-    // The pass finds the restart's stop still in flight and ends before it settles.
-    const shutdown = await manager.stopAllComponents();
-    expect(shutdown.success).toBe(false);
+    // The pass finds the restart's stop still in flight, waits for it, and reaches its
+    // deadline before it settles.
+    const shutdown = await manager.stopAllComponents({ timeoutMS: 20 });
+    expect(shutdown.code).toBe('shutdown_timeout');
     expect(manager.getStatus().isShuttingDown).toBe(false);
 
     component.releaseStop();
@@ -1060,8 +1061,9 @@ describe('LifecycleManager - shutdown refused by a concurrent restart during res
     const restart = manager.restartComponent('gated');
     await gated.stopping.promise;
 
-    // The bulk restart's pass parks on `other` first, in reverse registration order.
-    const restartAll = manager.restartAllComponents();
+    // The bulk restart's pass parks on `other` first, in reverse registration order,
+    // then waits for the restart's stop of `gated` until its deadline.
+    const restartAll = manager.restartAllComponents({ shutdownTimeoutMS: 50 });
     await other.stopping.promise;
 
     // Refused, but recorded on the running restart pass as a request to stay down.

@@ -92,10 +92,12 @@ export abstract class BaseComponent {
   public readonly signalTimeoutMS: number;
 
   /**
-   * Whether this component cleans up after its own timed-out start. When `false` (the
-   * default), a `start()` that passes its `startupTimeoutMS` and then completes anyway
-   * is stopped by the manager with `stop()`. When `true`, the manager leaves that late
-   * start to the component. A bulk startup deadline cleans up regardless.
+   * Whether this component cleans up after its own late start. When `false` (the
+   * default), a `start()` whose signal the manager aborted when it gave up on it - its
+   * `startupTimeoutMS`, a bulk startup deadline, a shutdown's `abortPendingStarts` cue,
+   * or a promise it cannot observe - and that then completes anyway is stopped by the
+   * manager with `stop()`. When `true`, the manager leaves that late start to the
+   * component.
    */
   public readonly ownsLateStartCleanup: boolean;
 
@@ -241,9 +243,10 @@ export abstract class BaseComponent {
    * `signal` is fresh for each start attempt. The manager aborts it when it stops
    * waiting on this call while it is still pending - its `startupTimeoutMS` or a
    * `startAllComponents()` deadline passed - with the `ComponentStartTimeoutError`
-   * the start's result carries as `signal.reason`. It is never aborted because
-   * `start()` resolved or threw, nor by a stop. A shutdown pass aborts it only with
-   * `abortPendingStarts`, as the pass begins, with a
+   * the start's result carries as `signal.reason`, or when it cannot observe the
+   * promise `start()` returned, with a `ComponentStartObservationError`. It is never
+   * aborted because `start()` resolved or threw, nor by a stop. A shutdown pass aborts
+   * it only with `abortPendingStarts`, as the pass begins, with a
    * `StartupInterruptedByShutdownError` as `signal.reason` - a cue: the pass still
    * waits for this call. A rejection after it that is linked to the abort - the reason
    * itself, an `AbortError`, or an error carrying either on its `cause` chain - is
@@ -254,9 +257,12 @@ export abstract class BaseComponent {
    * dependencies the manager keeps up for this start. It is scoped to this start, not
    * to the run it begins. Declaring `start()` without the parameter is fine.
    *
-   * A timed-out `start()` that completes anyway is stopped by the manager with `stop()`,
-   * unless the component sets `ownsLateStartCleanup: true` and undoes it itself - for
-   * example `if (signal.aborted) { await this.teardown(); }` once its work finishes.
+   * If the manager gives up on this start it aborts the signal, whatever the reason; a
+   * `start()` that completes anyway is then stopped by the manager with `stop()`, unless
+   * the component sets `ownsLateStartCleanup: true` and undoes it itself. Clean up from
+   * an `'abort'` listener, or with `if (signal.aborted) { await this.teardown(); }` once
+   * the work finishes; a `start()` that completes synchronously before returning has
+   * already run that check, so it uses a listener.
    *
    * An `'abort'` listener added through `signal.addEventListener()`, or `signal.onabort`,
    * that throws (or rejects) is reported on the global `'error'` channel as

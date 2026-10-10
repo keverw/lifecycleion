@@ -1,5 +1,5 @@
 import { describe, test, expect } from 'bun:test';
-import { RequestInterceptorManager } from './interceptors';
+import { RequestInterceptorManager, isInterceptorCancel } from './interceptors';
 import type {
   InterceptedRequest,
   RequestPhase,
@@ -442,5 +442,43 @@ describe('RequestInterceptorManager', () => {
     ]);
     expect(receivedContexts[0].requestID).toBe('req-123');
     expect(receivedContexts[0].attemptNumber).toBe(2);
+  });
+});
+
+describe('isInterceptorCancel', () => {
+  test('a request carrying cancel: false is passed on, not treated as a cancel', async () => {
+    const mgr = new RequestInterceptorManager();
+    mgr.add((request) => ({ ...request, cancel: false }) as InterceptedRequest);
+    const result = await mgr.snapshot()(
+      makeRequest(),
+      { type: 'initial' },
+      makeContext(),
+    );
+
+    expect(isInterceptorCancel(result)).toBe(false);
+  });
+
+  test('cancels returned by the chain are recognized', async () => {
+    const mgr = new RequestInterceptorManager();
+    mgr.add(() => ({ cancel: true as const, reason: 'nope' }));
+    const result = await mgr.snapshot()(
+      makeRequest(),
+      { type: 'initial' },
+      makeContext(),
+    );
+
+    expect(isInterceptorCancel(result)).toBe(true);
+    expect(result).toEqual({ cancel: true, reason: 'nope' });
+
+    const nullMgr = new RequestInterceptorManager();
+    nullMgr.add(() => null);
+    const nullResult = await nullMgr.snapshot()(
+      makeRequest(),
+      { type: 'initial' },
+      makeContext(),
+    );
+
+    expect(isInterceptorCancel(nullResult)).toBe(true);
+    expect(nullResult).toEqual({ cancel: true });
   });
 });

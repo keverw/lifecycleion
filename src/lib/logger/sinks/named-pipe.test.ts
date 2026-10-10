@@ -445,10 +445,18 @@ describe('NamedPipeSink', () => {
           (queued) => queued.entry.message === 'partial-record',
         ),
       ).toBe(false);
+      // Buffered behind the failed write, and failed with it after the connection was
+      // already lost: held as an outage holds it, with no attempt spent and no report.
       expect(
-        failures.find((failure) => failure.entry?.message === 'buffered-record')
-          ?.disposition,
-      ).toBe('retrying');
+        failures.find(
+          (failure) => failure.entry?.message === 'buffered-record',
+        ),
+      ).toBeUndefined();
+      expect(
+        internals.engine.slots.find(
+          (queued) => queued.entry.message === 'buffered-record',
+        ),
+      ).toMatchObject({ attempts: 0, state: 'queued' });
       const received = Buffer.alloc(100);
       expect(fs.readSync(reader, received, 0, received.length, null)).toBe(8);
     } finally {
@@ -456,6 +464,84 @@ describe('NamedPipeSink', () => {
       drainSpy?.mockRestore();
       await sink.close();
       fs.closeSync(reader);
+    }
+  });
+
+  test('a reader restart spends a retry only on the write that failed, not on those buffered behind it', async () => {
+    const pipePath = `${tmpDir.path}/buffered-behind-failure.pipe`;
+    await createNamedPipe(pipePath);
+    const reader = startPipeReader(pipePath);
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      maxRetries: 0,
+      closeTimeoutMS: 500,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+    let writeSpy: { mockRestore(): void } | undefined;
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+      const descriptor = (sink as unknown as { pipeStream: { fd: number } })
+        .pipeStream.fd;
+      const write = fs.write;
+      let calls = 0;
+      writeSpy = spyOn(fs, 'write').mockImplementation(((
+        fd: number,
+        buffer: Buffer,
+        offset: number,
+        length: number,
+        position: null,
+        callback: (
+          error: NodeJS.ErrnoException | null,
+          written: number,
+          buffer: Buffer,
+        ) => void,
+      ) => {
+        // Only the first write fails: the reopened stream may be given the same
+        // descriptor number.
+        if (fd !== descriptor || ++calls > 1) {
+          return write(fd, buffer, offset, length, position, callback);
+        }
+        // Long enough for the lines after it to wait in the stream's buffer.
+        setTimeout(() => {
+          callback(
+            Object.assign(new Error('broken pipe'), { code: 'EPIPE' }),
+            0,
+            buffer,
+          );
+        }, 20);
+      }) as typeof fs.write);
+      for (const message of ['failed-line', 'buffered-1', 'buffered-2']) {
+        sink.write({
+          timestamp: Date.now(),
+          type: 'info',
+          template: message,
+          message,
+        });
+      }
+
+      const flushed = await sink.flush(2000);
+
+      expect(flushed).toMatchObject({ timedOut: false, entriesQueued: 0 });
+      expect(
+        failures
+          .filter((failure) => failure.kind === 'write')
+          .map((failure) => [failure.entry?.message, failure.disposition]),
+      ).toEqual([['failed-line', 'lost']]);
+      expect(sink.getHealth().droppedEntries).toBe(1);
+      const received = await waitForReaderData(
+        reader,
+        (text) => text.includes('buffered-1') && text.includes('buffered-2'),
+      );
+      expect(received).toContain('buffered-1');
+      expect(received).toContain('buffered-2');
+      expect(received).not.toContain('failed-line');
+    } finally {
+      writeSpy?.mockRestore();
+      await sink.close();
+      reader.stop();
     }
   });
 
@@ -1714,9 +1800,7 @@ describe('NamedPipeSink', () => {
       });
     }
 
-    expect(
-      (sink as unknown as { engine: { slots: unknown[] } }).engine.slots.length,
-    ).toBe(10_000);
+    expect(sink.getHealth().queueSize).toBe(10_000);
     expect(sink.getHealth().droppedEntries).toBe(50);
 
     await sink.close();
@@ -2945,8 +3029,10 @@ describe('NamedPipeSink', () => {
 
       const health = sink.getHealth();
 
-      // Reported - the line is still owed - but charged to nobody's health.
-      expect(failures.some((entry) => entry.kind === 'write')).toBe(true);
+      // Not the failure that ended its connection: held and sent again on the live one,
+      // with no attempt spent, nothing reported, and nobody's health charged.
+      expect(failures.some((entry) => entry.kind === 'write')).toBe(false);
+      expect(health.queueSize).toBe(0);
       expect(health.consecutiveFailures).toBe(0);
       expect(health.isHealthy).toBe(true);
     } finally {

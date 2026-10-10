@@ -98,7 +98,8 @@ export class UnexpectedStops {
    * Drain the unexpected stops recorded during a bulk startup for the components it
    * counted as started, through {@link noteUnexpectedStopDuringStartup}: what is left
    * started, the first required component that stopped, if any, and the first required
-   * one that is not up again but has a start or stop a listener began still in flight.
+   * one that is not up again but has a start or stop a listener began still in flight -
+   * which is not also counted as the stopped one.
    */
   public consumeUnexpectedStopsDuringStartup(
     startedComponents: string[],
@@ -151,19 +152,20 @@ export class UnexpectedStops {
           error,
           failedOptionalComponents,
         );
-        if (!isOptional) {
-          requiredFailure ??= { name, error };
-        }
         // Up again by now - a listener on its stop started it again before this report
         // was consumed - it is still this startup's to report and to roll back. Asked
         // after the callbacks above, which can report it stopped again. Not up, but with
         // a start or stop a listener began still in flight, a required one is owned
         // elsewhere: the caller ends the pass without the rollback, which would leave
-        // out what that start brings up.
+        // out what that start brings up - unless another required one failed.
         if (this.core.registry.isComponentUp(name)) {
           remainingStartedComponents.push(name);
         } else if (!isOptional && this.core.claims.isInFlight(name)) {
           requiredInFlight ??= name;
+          continue;
+        }
+        if (!isOptional) {
+          requiredFailure ??= { name, error };
         }
       }
     } while (

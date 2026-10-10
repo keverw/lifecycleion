@@ -3300,6 +3300,35 @@ describe('Logger diagnostic channel', () => {
     expect(diagnostics[0]?.kind).toBe('event-handler');
   });
 
+  test('reports a failing handler of a symbol event as a diagnostic', async () => {
+    const consoleError = spyOn(console, 'error').mockImplementation(() => {});
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    const diagnostics: LoggerDiagnostic[] = [];
+    const symbolEvent = Symbol('custom') as unknown as string;
+
+    logger.on<LoggerDiagnostic>('diagnostic', (diagnostic) => {
+      diagnostics.push(diagnostic);
+    });
+    logger.on(symbolEvent, () => {
+      throw new Error('symbol handler failed');
+    });
+
+    try {
+      expect(() => logger.emit(symbolEvent)).not.toThrow();
+      await Promise.resolve();
+
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]?.kind).toBe('event-handler');
+      expect(diagnostics[0]?.event).toBe('Symbol(custom)');
+      expect(diagnostics[0]?.message).toBe(
+        'Error in a logger event handler for Symbol(custom): symbol handler failed',
+      );
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
+  });
+
   test('preserves the original diagnostic when its only listener throws', async () => {
     const consoleError = spyOn(console, 'error').mockImplementation(() => {});
     const logger = new Logger({ sinks: [], callProcessExit: false });

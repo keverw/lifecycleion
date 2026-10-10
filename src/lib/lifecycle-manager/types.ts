@@ -37,13 +37,14 @@ export interface ComponentOptions {
   signalTimeoutMS?: number | null;
 
   /**
-   * Whether the component cleans up after its own timed-out start (default: false).
-   * When `start()` passes its own `startupTimeoutMS` and then completes anyway, the
-   * manager calls `stop()` on it automatically - unless this is `true`, in which case
-   * the component is trusted to undo that late start itself (typically by checking
-   * `signal.aborted` once `start()`'s work finishes). A start that a
-   * `startAllComponents()` / `restartAllComponents()` deadline abandons is cleaned up
-   * by the manager regardless. Must be a boolean.
+   * Whether the component cleans up after its own late start (default: false). If the
+   * manager gives up on a start it aborts the start signal - its `startupTimeoutMS`, a
+   * `startAllComponents()` / `restartAllComponents()` deadline, a shutdown's
+   * `abortPendingStarts` cue, or a `start()` promise it cannot observe - and a `start()`
+   * that completes anyway is stopped by the manager with `stop()`, unless this is
+   * `true`: the component then undoes that late start itself, from an `'abort'`
+   * listener or a `signal.aborted` check once `start()`'s work finishes (a listener for
+   * a `start()` that completes synchronously before returning). Must be a boolean.
    */
   ownsLateStartCleanup?: boolean | null;
 }
@@ -423,7 +424,11 @@ export interface StopAllOptions {
    * returns `cleanup_incomplete` and releases its latch, preserving dependencies.
    * Cleanup already underway is still joined. Already timed-out unresolved starts
    * and synchronous self-requesting start hooks are not joined; their dependencies
-   * stay protected unless allowStopWithPendingStarts is explicitly enabled.
+   * stay protected unless allowStopWithPendingStarts is explicitly enabled. Neither is a
+   * start requesting through its component's own `lifecycle` handle, even after it has
+   * yielded. A start() that yields and then awaits the manager's own stopAllComponents()
+   * cannot be recognised as the requester: the pass joins it, so that wait lasts until
+   * this deadline - or, when this is zero, until the start's own startup timeout, if any.
    */
   timeoutMS?: number | null;
   /** Retry stalled components during stopAllComponents (default: true) */
@@ -431,7 +436,10 @@ export interface StopAllOptions {
   /**
    * Stop processing further components after a stop failure or refusal (default: true).
    * A component a concurrent stop or start already owns is not a failure: the pass
-   * skips it and its dependencies and continues with unrelated components.
+   * skips it and its dependencies and continues with unrelated components. It then
+   * waits, within timeoutMS, for such a stop still in flight, and stops those
+   * dependencies once it has settled - unless the component requested the pass through
+   * its own `lifecycle` handle, when that stop may be awaiting the pass.
    */
   haltOnStall?: boolean;
   /**
@@ -1454,7 +1462,10 @@ export interface LifecycleManagerOptions {
   /** Global timeout for startup in ms (default: 60000, 0 = disabled) */
   startupTimeoutMS?: number | null;
 
-  /** Default stopAllComponents options used by signal and logger hooks */
+  /**
+   * Defaults for every stopAllComponents() pass - manual calls as well as signal and
+   * logger hooks. A call's own options override them field by field.
+   */
   shutdownOptions?: StopAllOptions;
 
   /** Global warning phase timeout in ms (default: 500, 0 = fire-and-forget, <0 = skip) */

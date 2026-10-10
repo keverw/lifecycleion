@@ -437,6 +437,8 @@ interface HTTPClientError {
 | `stream_response_error` | The upstream response stream errored after headers arrived                                                                                                     |
 | `stream_setup_error`    | The StreamResponseFactory threw an error during setup, or returned something other than a writable, `null`, or a cancel object                                 |
 
+When `adapter_error` comes from a response the client could not read, the server did answer, so the response keeps the status that answer carried (the same status `onAttemptEnd` reports) and its headers once they were normalized, with `isFailed: true`, `isNetworkError: false` and a `null` body, as a stream error keeps its real status. Treat `isFailed` and the error code as authoritative, not the status. The status is `0` when the response object's own fields could not be read, and the headers are empty when they were what failed.
+
 ## Request Interceptors
 
 Each run of an interceptor or response/error observer chain snapshots its

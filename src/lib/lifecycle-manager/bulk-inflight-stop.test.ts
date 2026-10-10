@@ -10,6 +10,7 @@ import {
   setup,
   Stalls,
 } from './test-helpers';
+import { waitFor } from './test-components';
 
 test.each([false, true])(
   'follow-up automatic signal-attachment cleanup returns partial state without rollback (optional: %s)',
@@ -308,8 +309,9 @@ test('the dependencies of a component whose own stop failed and left it running 
 });
 
 // Stops everything while a concurrent stop of `cache` is still running, so every one of
-// its `count` dependencies is skipped on its account and still marked stopping at the
-// end of the pass. Returns how often the pass read the dependencies of `cache`.
+// its `count` dependencies is skipped on its account and still marked stopping when the
+// pass's deadline ends its wait for that stop. Returns how often the pass read the
+// dependencies of `cache`.
 async function countOwnerDependencyReads(count: number): Promise<number> {
   const logger = new Logger({
     sinks: [new ArraySink()],
@@ -337,15 +339,14 @@ async function countOwnerDependencyReads(count: number): Promise<number> {
     return readDependencies();
   };
   const result = await manager.stopAllComponents({
-    timeoutMS: 0,
+    timeoutMS: 50,
     haltOnStall: false,
   });
   const passReads = reads;
 
   expect(result).toMatchObject({
     success: false,
-    code: 'cleanup_incomplete',
-    reason: `Shutdown is still in progress for: cache, ${[...names].reverse().join(', ')}`,
+    code: 'shutdown_timeout',
   });
   cacheGate.resolve();
   expect((await cacheStop).success).toBe(true);
@@ -414,8 +415,9 @@ test("a failed owner's dependencies are re-read at each check, not cached for th
 });
 
 // Stops everything while a concurrent stop of `cache` is still running, so `database` is
-// skipped on its account, then reaches `count` unrelated components. Returns how often
-// the pass read the dependencies of `database`.
+// skipped on its account, then reaches `count` unrelated components; the pass's deadline
+// ends its wait for that stop. Returns how often the pass read the dependencies of
+// `database`.
 async function countSharedDependencyReads(count: number): Promise<number> {
   const logger = new Logger({
     sinks: [new ArraySink()],
@@ -444,7 +446,7 @@ async function countSharedDependencyReads(count: number): Promise<number> {
     reads++;
     return readDependencies();
   };
-  await manager.stopAllComponents({ timeoutMS: 0, haltOnStall: false });
+  await manager.stopAllComponents({ timeoutMS: 50, haltOnStall: false });
   const passReads = reads;
 
   expect(manager.getComponentStatus('database')?.state).toBe('running');
@@ -522,16 +524,16 @@ test('a concurrent stop does not halt the pass before unrelated components', asy
 
   const bStop = manager.stopComponent('b');
   // Default `haltOnStall: true`.
-  const result = await manager.stopAllComponents({ timeoutMS: 0 });
+  const shutdown = manager.stopAllComponents({ timeoutMS: 0 });
 
-  expect(result).toMatchObject({
-    success: false,
-    code: 'cleanup_incomplete',
-    reason: 'Shutdown is still in progress for: b',
-  });
-  expect(manager.getComponentStatus('a')?.state).toBe('stopped');
+  // `a` is stopped while the pass waits for the concurrent stop of `b`.
+  expect(
+    await waitFor(() => manager.getComponentStatus('a')?.state === 'stopped'),
+  ).toBe(true);
+  expect(manager.getComponentStatus('b')?.state).toBe('stopping');
   bGate.resolve();
   expect((await bStop).success).toBe(true);
+  expect(await shutdown).toMatchObject({ success: true });
 });
 
 test('the dependencies held up by a failed stop are reported as not attempted, not as failed stops', async () => {

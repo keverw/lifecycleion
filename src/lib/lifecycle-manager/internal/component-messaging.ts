@@ -451,9 +451,13 @@ export async function broadcastMessageInternal(
       // replacement under the same name - with `includeStopped`, even one that never
       // started - which was never selected. The selected target is gone: reported as a
       // target unregistered mid-broadcast is, and the replacement is not sent to.
+      // Checked after the eligibility read: an `isComponentRunning()` override can
+      // make that replacement too, and nothing runs between this check and the send's
+      // own lookup by name.
+      const eligibilitySkipCode = skipCodeFor(name);
       const skipCode =
         context.getComponent(name) === component
-          ? skipCodeFor(name)
+          ? eligibilitySkipCode
           : ('stopped' as const);
 
       if (skipCode !== undefined) {

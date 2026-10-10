@@ -77,11 +77,12 @@ test('Node and Bun shut down deep startup and concurrent-stop dependency graphs'
         : manager.startComponent(top.getName());
       const { reports, release } = claimReports();
       try {
+        // A pass waits for a pending start, or a concurrent stop, until its deadline.
         const result = await manager.stopAllComponents({
-          timeoutMS: mode === 'pending' ? 100 : 0,
+          timeoutMS: mode === 'override' ? 0 : 100,
           allowStopWithPendingStarts: mode === 'override',
         });
-        assert.equal(result.code, mode === 'pending' ? 'shutdown_timeout' : 'cleanup_incomplete');
+        assert.equal(result.code, mode === 'override' ? 'cleanup_incomplete' : 'shutdown_timeout');
         assert.equal(stopped.has('independent'), true);
         assert.equal(stopped.has('c0'), mode === 'override');
         assert.equal(stopped.has(top.getName()), false);

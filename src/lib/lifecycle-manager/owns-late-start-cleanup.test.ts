@@ -2,6 +2,10 @@ import { expect, test } from 'bun:test';
 import type { Logger } from '../logger';
 import { sleep } from '../sleep';
 import { BaseComponent } from './base-component';
+import {
+  ComponentStartObservationError,
+  StartupInterruptedByShutdownError,
+} from './errors';
 import type { ComponentOptions } from './types';
 import { claimReports, deferred, setup } from './test-helpers';
 
@@ -87,7 +91,7 @@ test('with it, a timed-out start that completes late is left to the component', 
   expect(manager.getComponentStatus('late')?.state).toBe('starting-timed-out');
 });
 
-test('a bulk startup deadline cleans up a late start regardless', async () => {
+test('a bulk startup deadline leaves its late start to the component too', async () => {
   const { logger, manager } = setup();
   const component = new LateStart(logger, {
     ownsLateStartCleanup: true,
@@ -102,7 +106,69 @@ test('a bulk startup deadline cleans up a late start regardless', async () => {
   component.gate.resolve();
   await sleep(10);
 
-  expect(component.stops).toBe(1);
+  expect(component.stops).toBe(0);
+  expect(manager.isComponentRunning('late')).toBe(false);
+  expect(manager.getComponentStatus('late')?.state).toBe('starting-timed-out');
+});
+
+test.each([false, true])(
+  'a start a shutdown cue aborted that comes up anyway is stopped by the manager only when it does not own its cleanup (%p)',
+  async (doesOwnCleanup) => {
+    const { logger, manager } = setup();
+    const component = new LateStart(logger, {
+      ownsLateStartCleanup: doesOwnCleanup,
+      startupTimeoutMS: 0,
+    });
+    await manager.registerComponent(component);
+
+    const starting = manager.startComponent('late');
+    await sleep(0);
+    const shutdown = manager.stopAllComponents({ abortPendingStarts: true });
+    expect(component.signals[0].reason).toBeInstanceOf(
+      StartupInterruptedByShutdownError,
+    );
+    component.gate.resolve();
+
+    expect((await starting).code).toBe('shutdown_in_progress');
+    expect((await shutdown).success).toBe(true);
+    expect(component.stops).toBe(doesOwnCleanup ? 0 : 1);
+    expect(manager.isComponentRunning('late')).toBe(false);
+    expect(manager.getComponentStatus('late')?.state).toBe(
+      doesOwnCleanup ? 'registered' : 'stopped',
+    );
+  },
+);
+
+test('a start whose promise cannot be observed is left to the component too', async () => {
+  const { logger, manager } = setup();
+  class Unobservable extends LateStart {
+    public override start(signal: AbortSignal): Promise<void> {
+      const promise = super.start(signal);
+      // Adoption reads `constructor` once; the second read, observing it, throws.
+      let reads = 0;
+      void Object.defineProperty(promise, 'constructor', {
+        get(): PromiseConstructor {
+          if (++reads === 2) {
+            throw new Error('unobservable');
+          }
+          return Promise;
+        },
+      });
+      return promise;
+    }
+  }
+  const component = new Unobservable(logger, { ownsLateStartCleanup: true });
+  await manager.registerComponent(component);
+
+  expect((await manager.startComponent('late')).success).toBe(false);
+  expect(component.signals[0].aborted).toBe(true);
+  expect(component.signals[0].reason).toBeInstanceOf(
+    ComponentStartObservationError,
+  );
+  component.gate.resolve();
+  await sleep(10);
+
+  expect(component.stops).toBe(0);
   expect(manager.isComponentRunning('late')).toBe(false);
 });
 

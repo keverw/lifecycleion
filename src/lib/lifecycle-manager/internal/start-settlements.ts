@@ -25,6 +25,7 @@ export class StartSettlements {
   ): { settlement: StartSettlement; finishSettlement: () => void } {
     let resolveSettlement!: () => void;
     let resolveRawStart!: () => void;
+    let resolveRawStartSettled!: () => void;
     let abandon!: () => void;
     const finishSettlement = (): void => {
       settlement.didSettle = true;
@@ -56,8 +57,13 @@ export class StartSettlements {
       }),
       settleRawStart: () => {
         settlement.rawStartPending = false;
+        this.core.state.supersededRawStarts.delete(settlement);
         resolveRawStart();
+        resolveRawStartSettled();
       },
+      rawStartSettled: new Promise<void>((resolve) => {
+        resolveRawStartSettled = resolve;
+      }),
       promise: new Promise<void>((resolve) => {
         resolveSettlement = resolve;
       }),
@@ -75,6 +81,10 @@ export class StartSettlements {
    * A settlement with no token yet is left alone: its attempt has published but not
    * claimed - still in `prepareStart()`, whose component code started this one - so it
    * tracks no raw start to end, and needs its settlement once it claims after this.
+   *
+   * One whose `start()` is still running - the component reported an unexpected stop
+   * from inside it, and a listener started it again - is kept in `supersededRawStarts`
+   * until that call settles, so a shutdown's `abortPendingStarts` cue still reaches it.
    */
   public recordStartAttempt(
     name: string,
@@ -85,6 +95,9 @@ export class StartSettlements {
     for (const other of this.core.state.startSettlementsByName.get(name) ??
       []) {
       if (other.token !== undefined) {
+        if (other.rawStartPending) {
+          this.core.state.supersededRawStarts.add(other);
+        }
         other.finish();
       }
     }
@@ -174,6 +187,11 @@ export class StartSettlements {
     for (const settlement of this.core.state.startSettlementsByName.get(name) ??
       []) {
       settlement.finish();
+    }
+    for (const settlement of this.core.state.supersededRawStarts) {
+      if (settlement.name === name) {
+        this.core.state.supersededRawStarts.delete(settlement);
+      }
     }
   }
 

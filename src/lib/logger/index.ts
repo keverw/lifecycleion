@@ -19,6 +19,7 @@ import { MAX_RENDER_LENGTH } from '../internal/render-budget';
 import { adoptResult, UnreadableReturn } from '../internal/adopt-promise';
 import { describeError, isErrorValue, toError } from '../to-error';
 import { readMember, readUnknownMember } from '../internal/read-member';
+import { renderName } from '../internal/render-name';
 import {
   isConsoleReportActive,
   reportToConsole,
@@ -1579,9 +1580,12 @@ export class Logger extends EventEmitter {
     // string, and reading `.message` off that directly would throw a `TypeError` out of
     // the log call that emitted the event.
     const cause = toError(error);
+    // Rendered as the base class does: a JavaScript caller can emit a symbol, which a
+    // template literal would throw on.
+    const eventName = renderName(event, '<unnamed event>');
 
     const failure = new Error(
-      `Error in a logger event handler for ${event}: ${describeError(cause)}`,
+      `Error in a logger event handler for ${eventName}: ${describeError(cause)}`,
       { cause },
     );
 
@@ -1606,7 +1610,7 @@ export class Logger extends EventEmitter {
       kind: 'event-handler',
       error: failure,
       message: failure.message,
-      event,
+      event: eventName,
     });
   }
 

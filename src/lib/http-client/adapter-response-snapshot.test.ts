@@ -130,7 +130,10 @@ test.each(['missing headers', 'throwing headers', 'throwing body'] as const)(
       .put('https://example.com/')
       .text('x')
       .send();
-    expect(response.status).toBe(0);
+    // The status was read before the headers failed to normalize, so it is reported;
+    // a getter that throws while the response's own fields are read leaves nothing.
+    expect(response.status).toBe(mode === 'missing headers' ? 200 : 0);
+    expect(response.isFailed).toBe(true);
     expect((await response.requestBodySettled)?.cause).toBe(uploadError);
     expect(uploadReads).toBe(1);
   },
@@ -165,7 +168,11 @@ test.each(['missing headers', 'unstorable set-cookie'] as const)(
     const response = await request.send();
 
     expect(sends).toBe(1);
-    expect(response.status).toBe(0);
+    // The answer's status is kept, as a stream error keeps it; `isFailed` and the
+    // error code are what say the response could not be used.
+    expect(response.status).toBe(200);
+    expect(response.isFailed).toBe(true);
+    expect(response.isNetworkError).toBe(false);
     expect(request.error?.code).toBe('adapter_error');
     expect(request.attemptCount).toBe(1);
   },

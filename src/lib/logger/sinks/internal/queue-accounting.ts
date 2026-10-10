@@ -12,8 +12,22 @@ import type { LogEntry } from '../../types';
 export interface EvictOptions<T> {
   /** Whether an entry may be evicted. Others keep their place. Defaults to every entry. */
   isEvictable?: (item: T) => boolean;
-  /** How many entries count against `limit`. Defaults to `queue.length`. */
+  /** How many entries count against `limit`. Defaults to the entries from `start` on. */
   occupancy?: number;
+  /**
+   * Where the live queue starts in `queue`, for a caller that leaves a dead prefix in place
+   * rather than shifting it out. Given, an entry nearer the front than the back is evicted
+   * by moving the live entries before it up one place - only those passed over, the lines
+   * in flight - and the start past it, so evicting at the front of a full queue does not
+   * move the whole of it; the caller reads the new start from the result. Omitted, the
+   * queue is kept with no dead prefix.
+   */
+  start?: number;
+  /**
+   * Told where the live queue starts once eviction is done, before the caller reports
+   * anything about it: a report reaches caller code that may queue more.
+   */
+  onSettled?: (start: number) => void;
   /** Told about each evicted entry, oldest first, after it has left the queue. */
   onEvicted?: (item: T) => void;
 }
@@ -23,27 +37,37 @@ export function evictQueuedEntries<T extends { entry: LogEntry }>(
   queue: T[],
   limit: number,
   options: EvictOptions<T> = {},
-): { count: number; entry?: LogEntry } {
+): { count: number; entry?: LogEntry; start: number } {
   const isEvictable = options.isEvictable;
-  let occupancy = options.occupancy ?? queue.length;
+  let start = options.start ?? 0;
+  let occupancy = options.occupancy ?? queue.length - start;
   let count = 0;
   let entry: LogEntry | undefined;
   // Where the search for the next evictable entry resumes: everything before it was
   // passed over, and passing over an entry never makes it evictable later in this call.
-  let index = 0;
+  let index = start;
   while (occupancy > limit) {
-    let dropped: T | undefined;
-    if (isEvictable === undefined) {
-      dropped = queue.shift();
+    while (
+      isEvictable !== undefined &&
+      index < queue.length &&
+      !isEvictable(queue[index])
+    ) {
+      index++;
+    }
+    if (index >= queue.length) {
+      // Over the cap with nothing that may go: everything left is in flight.
+      break;
+    }
+    const dropped: T | undefined = queue[index];
+    if (options.start !== undefined && index - start < queue.length - index) {
+      // Nearer the front: what was passed over moves up one place, and the start past it.
+      queue.copyWithin(start + 1, start, index);
+      start++;
+      index++;
+    } else if (index === 0) {
+      queue.shift();
     } else {
-      while (index < queue.length && !isEvictable(queue[index])) {
-        index++;
-      }
-      if (index >= queue.length) {
-        // Over the cap with nothing that may go: everything left is in flight.
-        break;
-      }
-      dropped = queue.splice(index, 1)[0];
+      queue.splice(index, 1);
     }
     // Prefer ordinary work so a diagnostic at the head of a mixed queue cannot
     // suppress the owner's report about application entries lost in the same batch.
@@ -59,7 +83,8 @@ export function evictQueuedEntries<T extends { entry: LogEntry }>(
     occupancy--;
     count++;
   }
-  return { count, ...(entry === undefined ? {} : { entry }) };
+  options.onSettled?.(start);
+  return { count, ...(entry === undefined ? {} : { entry }), start };
 }
 
 /**

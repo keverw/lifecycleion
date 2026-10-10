@@ -308,3 +308,70 @@ test('a required member reconciled after a listener began starting it again ends
     await logger.close();
   }
 });
+
+// Reconciliation scans in startup order: `d` either before `b` or, depending on it,
+// after it.
+test.each([
+  ['before', [] as string[], ['a', 'd', 'b']],
+  ['after', ['b'], ['a', 'b', 'd']],
+])(
+  'a required stop reconciled %s a member a listener is starting again still rolls back',
+  async (_order, dDependencies, startupOrder) => {
+    const { logger, manager } = setup();
+    const a = new Plain(logger, 'a');
+    const d = new Plain(logger, 'd', dDependencies);
+    const b = new Plain(logger, 'b', ['a']);
+    const c = new Plain(logger, 'c', ['b', 'd']);
+    const gate = deferred();
+    const failure = new Error('d went away');
+    let restart: Promise<ComponentOperationResult> | undefined;
+    let starts = 0;
+    b.start = async (): Promise<void> => {
+      starts++;
+      if (starts > 1) {
+        await gate.promise;
+      }
+    };
+    // `d` and `b` were counted as started; both stops are met by one reconciliation.
+    c.start = (): Promise<void> => {
+      (
+        d as unknown as { reportUnexpectedStop: (error: Error) => boolean }
+      ).reportUnexpectedStop(failure);
+      (
+        b as unknown as { reportUnexpectedStop: () => boolean }
+      ).reportUnexpectedStop();
+      return Promise.resolve();
+    };
+    manager.on('component:unexpected-stop', (data) => {
+      if ((data as { name: string }).name === 'b') {
+        restart ??= manager.startComponent('b', {
+          allowDuringBulkStartup: true,
+        });
+      }
+    });
+    await manager.registerComponent(a);
+    await manager.registerComponent(d);
+    await manager.registerComponent(b);
+    await manager.registerComponent(c);
+    expect(manager.getStartupOrder()).toMatchObject({
+      startupOrder: [...startupOrder, 'c'],
+    });
+    try {
+      const result = await manager.startAllComponents();
+      expect(restart).toBeDefined();
+      // `d`'s failure is not dropped for `b`'s start in flight.
+      expect(result).toMatchObject({
+        success: false,
+        code: 'component_unexpected_stop',
+        error: failure,
+      });
+      // Rolled back, except `a`: the start in flight keeps its dependency protection.
+      expect(manager.getRunningComponentNames()).toEqual(['a']);
+    } finally {
+      gate.resolve();
+      await restart;
+      await manager.stopAllComponents();
+      await logger.close();
+    }
+  },
+);

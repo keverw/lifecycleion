@@ -27,8 +27,14 @@ export interface StartSettlement {
    * timeout, while its `start()` may still be running.
    */
   readonly rawStartDone: Promise<void>;
-  /** Clears `rawStartPending` and resolves `rawStartDone`. */
+  /** Clears `rawStartPending` and resolves `rawStartDone` and `rawStartSettled`. */
   readonly settleRawStart: () => void;
+  /**
+   * Resolves once `start()` itself has settled - unlike `rawStartDone`, not when the
+   * manager releases this settlement. What a shutdown pass waits on for a superseded
+   * start it aborted (`supersededRawStarts`).
+   */
+  readonly rawStartSettled: Promise<void>;
   recovery?: Promise<void>;
   isAwaitingLateStart?: boolean;
   /** An observation failure must not let unregister orphan raw startup or its cleanup. */
@@ -237,6 +243,15 @@ export class LifecycleManagerState {
     Set<StartSettlement>
   >();
   public readonly invokingStarts = new InvokingStarts();
+  // Components with a bulk stop or restart request outstanding through their own
+  // `lifecycle` handle, each with how many (`requestedBy()`): a stop of one may be
+  // awaiting the pass that request began, so that pass does not wait for it.
+  public readonly requestingComponents = new Map<BaseComponent, number>();
+  // Settlements a newer attempt released (`recordStartAttempt()`) while their `start()`
+  // was still running: no longer the name's start, so not counted as a pending raw start,
+  // but still reachable for a shutdown's `abortPendingStarts` cue. Each leaves once its
+  // `start()` settles or its registration is released.
+  public readonly supersededRawStarts = new Set<StartSettlement>();
   // The shutdown pass that most recently began, when it asked to abort pending starts
   // (`abortPendingStarts`), keyed by its `shutdownToken`. A start whose caller code began
   // that pass after the start claimed its component - before it could be interrupted -

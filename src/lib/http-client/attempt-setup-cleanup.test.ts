@@ -806,9 +806,9 @@ test('a lowercase interceptor method is normalized, so a POST is not replayed on
   expect(methods).toEqual(['POST']);
 });
 
-test('a throw after the adapter answered reports the real status to onAttemptEnd', async () => {
+test('a throw after the adapter answered reports the real status to onAttemptEnd and the response', async () => {
   // The jar refusing the response's `Set-Cookie` ends the attempt as an adapter_error,
-  // but the server did answer, and the attempt's status says so.
+  // but the server did answer, and the attempt's status and the final response say so.
   const jar = new CookieJar();
   const refusal = spyOn(jar, 'processResponseHeaders').mockImplementation(
     () => {
@@ -831,11 +831,14 @@ test('a throw after the adapter answered reports the real status to onAttemptEnd
       .onAttemptEnd((event) => {
         ends.push(event);
       });
-    await request.send();
+    const response = await request.send();
 
     expect(request.error?.code).toBe('adapter_error');
     expect(ends).toHaveLength(1);
     expect(ends[0].status).toBe(201);
+    expect(response.status).toBe(201);
+    expect(response.headers['set-cookie']).toEqual(['a=b']);
+    expect(response.isFailed).toBe(true);
   } finally {
     refusal.mockRestore();
   }

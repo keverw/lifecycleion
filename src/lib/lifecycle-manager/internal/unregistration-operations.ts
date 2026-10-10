@@ -314,7 +314,7 @@ export class UnregistrationOperations {
     result: ComponentOperationResult,
   ): UnregisterComponentResult | undefined {
     const { name, progress } = attempt;
-    const stopResult = snapshotStopResult(result);
+    const stopResult = snapshotOperationResult(result);
 
     // Before reading any state by name: the stop's `await` ran caller code, and a
     // replacement registered under the name would answer for this component - a
@@ -329,9 +329,10 @@ export class UnregistrationOperations {
 
     // If stop fails and leaves the component stalled, do NOT unregister.
     // Caller expectation: success with stopIfRunning implies the component is stopped and unregistered.
-    const stateAfterStopAttempt = this.core.state.componentStates.get(name);
+    // The override first, then the state it may have changed.
     const isRunningAfterStopAttempt =
       this.core.manager.isComponentRunning(name);
+    const stateAfterStopAttempt = this.core.state.componentStates.get(name);
 
     const isSafelyStopped =
       stopResult.success ||
@@ -698,8 +699,14 @@ export function markComponentUnregistered(
   };
   let lifecycleBefore: ComponentLifecycleRef | undefined;
 
+  // Its own guard: a `lifecycle` getter that throws must not skip `_markUnregistered()`.
   try {
     lifecycleBefore = fields.lifecycle;
+  } catch (readError) {
+    reportCallbackError(label, readError);
+  }
+
+  try {
     component._markUnregistered();
   } catch (unmarkError) {
     reportCallbackError(`${label} _markUnregistered`, unmarkError);
@@ -719,8 +726,8 @@ export function markComponentUnregistered(
   }
 }
 
-/** What {@link snapshotStopResult} read of a stop's answer. */
-interface StopResultSnapshot {
+/** What {@link snapshotOperationResult} read of a stop's or start's answer. */
+export interface OperationResultSnapshot {
   readonly success: boolean;
   readonly code: ComponentOperationFailureCode | undefined;
   readonly reason: string | undefined;
@@ -728,13 +735,15 @@ interface StopResultSnapshot {
 }
 
 /**
- * The fields an unregister reads of its stop's answer, each read once: `stopComponent()`
- * is overridable, so its answer is caller data - a getter could answer each read
- * differently, and a non-object has no fields at all. A non-object answers as a stop
- * that failed without saying why; a getter that throws reaches the unregister's safety
- * net, as any crash of the operation does.
+ * The fields an unregister or restart reads of its stop's or start's answer, each read
+ * once: `stopComponent()` and `startComponent()` are overridable, so their answers are
+ * caller data - a getter could answer each read differently, and a non-object has no
+ * fields at all. A non-object answers as an operation that failed without saying why;
+ * a getter that throws reaches the operation's safety net, as any crash of it does.
  */
-function snapshotStopResult(result: unknown): StopResultSnapshot {
+export function snapshotOperationResult(
+  result: unknown,
+): OperationResultSnapshot {
   if (typeof result !== 'object' || result === null) {
     return {
       success: false,

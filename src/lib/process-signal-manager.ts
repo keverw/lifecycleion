@@ -257,7 +257,8 @@ export interface ProcessSignalManagerOptions {
    * - Process signals: SIGINT, SIGTERM, SIGTRAP
    * - Keyboard: Ctrl+C, Escape
    */
-  onShutdownRequested?: (method: ShutdownSignal) => void | Promise<void>;
+  onShutdownRequested?:
+    ((method: ShutdownSignal) => void | Promise<void>) | null;
 
   /**
    * Optional callback invoked when reload is requested.
@@ -266,7 +267,7 @@ export interface ProcessSignalManagerOptions {
    * - Process signal: SIGHUP
    * - Keyboard: R key press (case-insensitive)
    */
-  onReloadRequested?: () => void | Promise<unknown>;
+  onReloadRequested?: (() => void | Promise<unknown>) | null;
 
   /**
    * Optional callback invoked when info/stats are requested.
@@ -277,7 +278,7 @@ export interface ProcessSignalManagerOptions {
    *
    * Common uses: Print stats, health check, show metrics
    */
-  onInfoRequested?: () => void | Promise<unknown>;
+  onInfoRequested?: (() => void | Promise<unknown>) | null;
 
   /**
    * Optional callback invoked when debug mode is toggled or verbose info is requested.
@@ -288,31 +289,31 @@ export interface ProcessSignalManagerOptions {
    *
    * Common uses: Toggle debug mode, dump full state, enable verbose logging
    */
-  onDebugRequested?: () => void | Promise<unknown>;
+  onDebugRequested?: (() => void | Promise<unknown>) | null;
 
   /**
    * Custom name for the shutdown callback used in error reporting.
    * @default 'onShutdownRequested'
    */
-  shutdownCallbackName?: string;
+  shutdownCallbackName?: string | null;
 
   /**
    * Custom name for the reload callback used in error reporting.
    * @default 'onReloadRequested'
    */
-  reloadCallbackName?: string;
+  reloadCallbackName?: string | null;
 
   /**
    * Custom name for the info callback used in error reporting.
    * @default 'onInfoRequested'
    */
-  infoCallbackName?: string;
+  infoCallbackName?: string | null;
 
   /**
    * Custom name for the debug callback used in error reporting.
    * @default 'onDebugRequested'
    */
-  debugCallbackName?: string;
+  debugCallbackName?: string | null;
 
   /**
    * Throttle interval in milliseconds for keyboard events (leading-edge rate limiting).

@@ -622,3 +622,83 @@ test('a nested start from getDependencies() leaves the outer attempt abortable b
   expect(await shutdown).toMatchObject({ success: true });
   expect(manager.getRunningComponentNames()).toEqual([]);
 });
+
+// The first start reports an unexpected stop from inside `start()` and keeps running; a
+// listener starts the component again, and that start comes up.
+async function withSupersededStart(
+  firstStart: (signal: AbortSignal, worker: Starts) => Promise<void>,
+): Promise<{
+  logger: Logger;
+  manager: LifecycleManager;
+  worker: Starts;
+  first: Promise<unknown>;
+}> {
+  const { logger, manager } = setup();
+  const worker = new Starts(logger, 'worker', [], 0);
+  let restart: Promise<unknown> | undefined;
+  worker.onStart = (signal): Promise<void> | undefined => {
+    if (worker.signals.length > 1) {
+      return undefined;
+    }
+    (
+      worker as unknown as { reportUnexpectedStop: () => boolean }
+    ).reportUnexpectedStop();
+    return firstStart(signal, worker);
+  };
+  manager.on('component:unexpected-stop', () => {
+    restart ??= manager.startComponent('worker');
+  });
+  await manager.registerComponent(worker);
+  const first = manager.startComponent('worker');
+  await sleep(0);
+  expect(await restart).toMatchObject({ success: true });
+  return { logger, manager, worker, first };
+}
+
+test('abortPendingStarts aborts a superseded start still running, and waits for it before stopping the newer run', async () => {
+  const { logger, manager, worker, first } =
+    await withSupersededStart(honorsSignal);
+  try {
+    const result = await manager.stopAllComponents({
+      timeoutMS: 1000,
+      abortPendingStarts: true,
+    });
+
+    expect(worker.signals[0].reason).toBeInstanceOf(
+      StartupInterruptedByShutdownError,
+    );
+    expect(worker.signals[1].aborted).toBe(false);
+    // The superseded `start()` settled on its cue before the newer run was stopped.
+    expect(worker.order).toEqual(['abort', 'stop']);
+    expect(result).toMatchObject({
+      success: true,
+      stoppedComponents: ['worker'],
+    });
+    expect((await first) as { code?: string }).toMatchObject({
+      code: 'component_unexpected_stop',
+    });
+  } finally {
+    await logger.close();
+  }
+});
+
+test('a superseded start that ignores the cue keeps the pass short of success', async () => {
+  const { logger, manager, worker, first } = await withSupersededStart(
+    (_signal, starts) => starts.gate.promise,
+  );
+  try {
+    const result = await manager.stopAllComponents({
+      timeoutMS: 50,
+      abortPendingStarts: true,
+    });
+
+    expect(worker.signals[0].aborted).toBe(true);
+    expect(result.success).toBe(false);
+    expect(worker.stops).toBe(0);
+  } finally {
+    worker.gate.resolve();
+    await first;
+    await manager.stopAllComponents();
+    await logger.close();
+  }
+});

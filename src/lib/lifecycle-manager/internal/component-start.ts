@@ -638,6 +638,18 @@ export class ComponentStart {
           throw error;
         }
       }
+      // A shutdown's cue aborted the signal of a start that came up anyway, and the
+      // component owns its late-start cleanup: it undoes that start itself, so this is
+      // answered as a start that gave up on the cue, never marked running and stopped.
+      const { shutdownReason } = run.abort;
+      if (
+        run.abort.cause === 'shutdown' &&
+        shutdownReason !== undefined &&
+        run.preparation.doesOwnLateStartCleanup
+      ) {
+        run.didStartHookFail = true;
+        throw shutdownReason;
+      }
       run.didStartResolve = true;
 
       // The startup deadline no longer applies once start() has settled.
@@ -1164,7 +1176,11 @@ export class ComponentStart {
     // that abort.
     const startAbort = createHookAbortController(name, 'start');
     settlement.interruptStart = (reason): boolean => {
-      if (abort.cause !== undefined || !settlement.rawStartPending) {
+      if (
+        abort.cause !== undefined ||
+        (!settlement.rawStartPending &&
+          !this.core.state.supersededRawStarts.has(settlement))
+      ) {
         return false;
       }
       abort.cause = 'shutdown';
@@ -1256,8 +1272,9 @@ export class ComponentStart {
 
   /**
    * A `start()` whose promise could not be observed: handed to late-start recovery through
-   * a manager-owned promise, the wait on it abandoned and its signal aborted. The caller
-   * then fails the start with the observation failure.
+   * a manager-owned promise - unless the component owns its late-start cleanup - the wait
+   * on it abandoned and its signal aborted. The caller then fails the start with the
+   * observation failure.
    */
   private recoverStartObservation(
     run: StartRun,
@@ -1293,16 +1310,20 @@ export class ComponentStart {
         // The public result carries the original observation failure.
       }
     });
-    this.core.lateStartRecovery.monitorLateStartupCompletion(
-      name,
-      recoveryStart,
-      run.startAttemptToken,
-      claim,
-      run.wasForcedFromStall,
-      this.supersededCheck(run),
-      this.sameRegistrationCheck(run),
-      'observation-failed',
-    );
+    // A component that owns its late-start cleanup undoes a late success itself, as for
+    // every other start whose signal the manager aborts.
+    if (!run.preparation.doesOwnLateStartCleanup) {
+      this.core.lateStartRecovery.monitorLateStartupCompletion(
+        name,
+        recoveryStart,
+        run.startAttemptToken,
+        claim,
+        run.wasForcedFromStall,
+        this.supersededCheck(run),
+        this.sameRegistrationCheck(run),
+        'observation-failed',
+      );
+    }
     settlement.abandon();
     // The manager has stopped waiting, just as on timeout. Notify the hook
     // even when a broken constructor prevented arming the startup race. Its cause
@@ -1413,9 +1434,9 @@ export class ComponentStart {
         if (run.useBulkDeadline) {
           bulkStartup?.onTimeout();
         }
-        // A component that owns its late-start cleanup undoes a late success of
-        // its own timed-out start itself; a bulk deadline cleans up regardless.
-        if (run.useBulkDeadline || !run.preparation.doesOwnLateStartCleanup) {
+        // A component that owns its late-start cleanup undoes a late success of a
+        // start whose signal aborted itself - its own deadline or a bulk one.
+        if (!run.preparation.doesOwnLateStartCleanup) {
           this.monitorLateStart(run, startPromise);
           // Only this timer path abandons an unresolved start. The other
           // monitor call handles an already fulfilled start and must join cleanup.

@@ -1617,7 +1617,9 @@ export class RegistrationOperations {
   /**
    * A bulk stop or restart requested through a component's own `lifecycle` handle. Its
    * unfinished start is the requester, exactly as a synchronous request from inside
-   * `start()` is: the pass does not join a start that may be awaiting it. Unlike the
+   * `start()` is: the pass does not join a start that may be awaiting it. So is the
+   * component itself (`requestingComponents`): the pass does not wait for a stop of it
+   * that another caller has in flight, which may be awaiting the pass too. Unlike the
    * synchronous check, this still holds once the hook has yielded, which no
    * runtime-neutral check of the caller can recognise - and it holds until the request
    * settles, since `stopAllComponents()` and `restartAllComponents()` are overridable,
@@ -1641,9 +1643,20 @@ export class RegistrationOperations {
         this.core.state.invokingStarts.add(settlement);
       }
     }
+    const { requestingComponents } = this.core.state;
+    requestingComponents.set(
+      component,
+      (requestingComponents.get(component) ?? 0) + 1,
+    );
     const release = (): void => {
       for (const settlement of requesting) {
         this.core.state.invokingStarts.delete(settlement);
+      }
+      const count = (requestingComponents.get(component) ?? 1) - 1;
+      if (count > 0) {
+        requestingComponents.set(component, count);
+      } else {
+        requestingComponents.delete(component);
       }
     };
     let pending: Promise<T>;
@@ -1657,11 +1670,9 @@ export class RegistrationOperations {
     // may begin only after the override's own awaits: held until the request settles.
     // Watched through a promise of its own, so the caller gets `request()`'s answer
     // itself, at the time it would have; one that is not a promise settles it at once.
-    if (requesting.length > 0) {
-      void new Promise<unknown>((resolve) => {
-        resolve(pending);
-      }).then(release, release);
-    }
+    void new Promise<unknown>((resolve) => {
+      resolve(pending);
+    }).then(release, release);
     return pending;
   }
 }

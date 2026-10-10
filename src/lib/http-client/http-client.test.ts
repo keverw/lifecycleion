@@ -9291,3 +9291,82 @@ test('a wrapped upload failure stays fulfilled when Error.prototype.name is nonw
     Object.defineProperty(Error.prototype, 'name', original);
   }
 });
+
+test('a throwing effectiveRequestHeaders getter on an answered response is treated as absent', async () => {
+  let sends = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () => {
+      sends++;
+      const raw = { status: 200, headers: {}, body: null };
+      Object.defineProperty(raw, 'effectiveRequestHeaders', {
+        enumerable: true,
+        get() {
+          throw new Error('wire record unreadable');
+        },
+      });
+      return Promise.resolve(raw as AdapterResponse);
+    },
+  };
+  const request = new HTTPClient({ adapter }).get('https://example.com/');
+  const response = await request.send();
+
+  expect(sends).toBe(1);
+  expect(response.status).toBe(200);
+  expect(request.error).toBeNull();
+});
+
+test('a retryable answer whose body cannot be decoded ends its attempt once', async () => {
+  // Building the retry's response decodes the body. A body that is not bytes throws
+  // there, before `onAttemptEnd` announces a retry, so the attempt is reported once, as
+  // not retrying.
+  let sends = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: () => {
+      sends++;
+      return Promise.resolve({
+        status: 503,
+        headers: { 'content-type': 'text/plain' },
+        body: 'busy' as unknown as Uint8Array,
+      });
+    },
+  };
+  const ends: Array<{ willRetry: boolean; status: number }> = [];
+  const request = new HTTPClient({
+    adapter,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+  })
+    .get('https://example.com/')
+    .onAttemptEnd((event) => {
+      ends.push({ willRetry: event.willRetry, status: event.status });
+    });
+  await request.send();
+
+  expect(sends).toBe(1);
+  expect(ends).toEqual([{ willRetry: false, status: 503 }]);
+  expect(request.error?.code).toBe('adapter_error');
+});
+
+test('an interceptor request carrying cancel: false is sent, not cancelled', async () => {
+  const sent: string[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'mock',
+    send: (request: AdapterRequest) => {
+      sent.push(request.requestURL);
+      return Promise.resolve({ status: 200, headers: {}, body: null });
+    },
+  };
+  const client = new HTTPClient({ adapter });
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    requestURL: 'https://example.com/rewritten',
+    cancel: false,
+  }));
+  const request = client.get('https://example.com/');
+  const response = await request.send();
+
+  expect(response.isCancelled).toBe(false);
+  expect(response.status).toBe(200);
+  expect(sent).toEqual(['https://example.com/rewritten']);
+});

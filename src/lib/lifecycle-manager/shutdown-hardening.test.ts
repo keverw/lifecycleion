@@ -543,8 +543,8 @@ describe('LifecycleManager - manual shutdown escalation', () => {
     const nestedResults = await Promise.all(nestedStops);
     expect(nestedResults).toHaveLength(1);
     expect(nestedResults[0]?.success).toBe(false);
-    expect(nestedResults[0]?.code).not.toBe('already_in_progress');
-    expect(nestedResults[0]?.reason).toContain('hanging');
+    // It waited for the stop the failed pass left in flight until its deadline.
+    expect(nestedResults[0]?.code).toBe('shutdown_timeout');
     expect(manager.getShutdownEscalationStatus().requestCount).toBe(1);
   });
 });

@@ -15,6 +15,7 @@ import {
   setup,
   Stalls,
 } from './test-helpers';
+import { waitFor } from './test-components';
 import type { ForceShutdownContext } from './types';
 import { LIFECYCLE_MANAGER_MESSAGE_FORCE_SHUTDOWN_TIMED_OUT } from './constants';
 
@@ -1191,8 +1192,12 @@ describe('LifecycleManager - review regressions', () => {
     const { reports, release } = claimReports();
     let result;
 
+    // The pass waits for that stop, so it is let go once the loop has read them.
+    const shutdown = manager.stopAllComponents({ haltOnStall: false });
     try {
-      result = await manager.stopAllComponents({ haltOnStall: false });
+      await waitFor(() => hasReport(reports, 'shutdown dependencies of api'));
+      stopGate.resolve();
+      result = await shutdown;
     } finally {
       stopGate.resolve();
       await apiStop;

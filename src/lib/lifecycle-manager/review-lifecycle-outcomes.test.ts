@@ -209,14 +209,24 @@ test.each([0, 10])(
     const timer = setTimeout(() => {
       didTimerRun = true;
     }, 0);
+    const shutdown = manager.stopAllComponents({ timeoutMS });
     try {
-      const result = await manager.stopAllComponents({ timeoutMS });
-      expect(didTimerRun).toBe(true);
-      expect(result.code).toBe(
-        timeoutMS === 0 ? 'cleanup_incomplete' : 'shutdown_timeout',
-      );
-      expect(result.stoppedComponents).toEqual([]);
-      expect(manager.isComponentRunning('c0')).toBe(true);
+      if (timeoutMS === 0) {
+        // No deadline: the pass waits for the concurrent stop, its dependencies still
+        // up, and then stops them.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(didTimerRun).toBe(true);
+        expect(manager.isComponentRunning('c0')).toBe(true);
+        gate.resolve();
+        expect((await shutdown).success).toBe(true);
+        expect(manager.isComponentRunning('c0')).toBe(false);
+      } else {
+        const result = await shutdown;
+        expect(didTimerRun).toBe(true);
+        expect(result.code).toBe('shutdown_timeout');
+        expect(result.stoppedComponents).toEqual([]);
+        expect(manager.isComponentRunning('c0')).toBe(true);
+      }
     } finally {
       clearTimeout(timer);
       gate.resolve();

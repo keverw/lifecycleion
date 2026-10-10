@@ -32,6 +32,7 @@ import {
   FailingStopComponent,
   HealthyComponent,
   UnhealthyComponent,
+  waitFor,
 } from './test-components';
 
 // cspell:ignore Renamable Reloadable Unregistration unregistration
@@ -10782,15 +10783,12 @@ describe('LifecycleManager - Signal Integration', () => {
         expect(messageCalls).toBe(0);
         expect(healthCalls).toBe(0);
 
+        // A second pass is allowed, and waits for the stop still in flight.
         const secondShutdown = await lifecycle.stopAllComponents();
-        expect(secondShutdown.success).toBe(false);
-        expect(secondShutdown.reason).toContain('still in progress for: slow');
-        expect(lifecycle.getComponentStatus('slow')?.state).toBe(phase);
+        expect(secondShutdown.success).toBe(true);
+        expect(lifecycle.getComponentStatus('slow')?.state).toBe('stopped');
         expect(warningCalls).toBe(1);
 
-        await sleep(170);
-
-        expect(lifecycle.getComponentStatus('slow')?.state).toBe('stopped');
         expect((await lifecycle.startAllComponents()).success).toBe(true);
         await lifecycle.stopAllComponents();
       },
@@ -13400,7 +13398,7 @@ test('late startup clears its deadline before shutdown cleanup', async () => {
   }
 });
 
-test('bulk shutdown leaves dependencies running while a concurrent stop owns their dependent', async () => {
+test('bulk shutdown leaves dependencies running until a concurrent stop of their dependent settles', async () => {
   const logger = new Logger({ sinks: [], callProcessExit: false });
   const manager = new LifecycleManager({ logger });
   const pending = Promise.withResolvers<void>();
@@ -13427,16 +13425,17 @@ test('bulk shutdown leaves dependencies running while a concurrent stop owns the
   );
   await manager.startAllComponents();
   const individualStop = manager.stopComponent('dependent');
+  const shutdown = manager.stopAllComponents();
   try {
-    const result = await manager.stopAllComponents();
-    expect(result.success).toBe(false);
+    // The pass waits for the concurrent stop, keeping its dependency up meanwhile.
+    await sleep(20);
     expect(stops).toEqual(['dependent-start']);
     expect(manager.isComponentRunning('dependency')).toBe(true);
   } finally {
     pending.resolve();
     await individualStop;
-    await manager.stopAllComponents();
   }
+  expect((await shutdown).success).toBe(true);
   expect(stops).toEqual(['dependent-start', 'dependent-end', 'dependency']);
 });
 
@@ -13471,17 +13470,18 @@ test('review regression: bulk shutdown continues unrelated stops while protectin
   );
   await manager.startAllComponents();
   const individualStop = manager.stopComponent('dependent');
+  const shutdown = manager.stopAllComponents({ haltOnStall: false });
   try {
-    const result = await manager.stopAllComponents({ haltOnStall: false });
-    expect(result.success).toBe(false);
+    // Unrelated stops go ahead while the pass waits for the concurrent stop.
+    expect(await waitFor(() => stops.includes('unrelated'))).toBe(true);
     expect(stops).toEqual(['dependent-start', 'unrelated']);
     expect(manager.isComponentRunning('dependency')).toBe(true);
     expect(manager.isComponentRunning('base')).toBe(true);
   } finally {
     pending.resolve();
     await individualStop;
-    await manager.stopAllComponents();
   }
+  expect((await shutdown).success).toBe(true);
   expect(stops).toEqual([
     'dependent-start',
     'unrelated',

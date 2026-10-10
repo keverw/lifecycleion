@@ -388,6 +388,12 @@ export class ShutdownPassRunner {
     // Capture the synchronous caller before warning hooks or any await. A start
     // requesting shutdown may await this pass, so the pass must not join it.
     const requestingStarts = new Set(this.core.state.invokingStarts);
+    // Likewise a component that requested it through its own `lifecycle` handle: a stop
+    // of it in flight elsewhere may be awaiting this pass, so the pass does not wait for
+    // that stop.
+    const requestingComponents = new Set(
+      this.core.state.requestingComponents.keys(),
+    );
     const startTime = Date.now();
     const {
       timeoutMS: effectiveTimeout,
@@ -423,6 +429,10 @@ export class ShutdownPassRunner {
     let stopCandidateNames: readonly string[] | null = null;
     // Components still starting when the pass began; see where it is filled in.
     let startingAtPassStart: readonly string[] = [];
+    // Superseded starts still running that this pass aborted (`abortPendingStarts`): the
+    // pass waits for them as for the starts it joins, and reports one still running as
+    // in progress. Out here for the final accounting.
+    let interruptedSupersededStarts: readonly StartSettlement[] = [];
     // For each of those not also running as the pass began: its stop attempt at that
     // moment. A start that fails on its own puts back the state it replaced - `stopped`,
     // for a component started again after a stop - and that is not a stop by this pass.
@@ -592,6 +602,9 @@ export class ShutdownPassRunner {
       }
 
       const protectedDependencies = new Set<string>();
+      // Starts the join left unfinished, whose dependencies it keeps up: see
+      // `refreshProtectedDependencies()`.
+      const joinProtectedStarts = new Set<string>();
       // Contained for the reason the warning phase contains its reads: a
       // `getDependencies()` that throws must not end the pass. Its dependencies are then
       // unknown and go unprotected - the same as a component that declares none.
@@ -631,10 +644,7 @@ export class ShutdownPassRunner {
         }
         return false;
       };
-      const protectDependencies = (
-        name: string,
-        target = protectedDependencies,
-      ): void => {
+      const protectDependencies = (name: string, target: Set<string>): void => {
         walkDependencies(name, (dependency) => {
           if (target.has(dependency)) {
             return 'skip';
@@ -677,7 +687,7 @@ export class ShutdownPassRunner {
       // Walked fresh on every check, not cached for the loop: dependency getters are live
       // caller code, and a stop or a logger sink between two checks can change what an
       // owner - or anything down its chain - depends on (see
-      // `protectActiveStartupDependencies()`). One walk is shared by every owner within a
+      // `refreshProtectedDependencies()`). One walk is shared by every owner within a
       // check: a component's dependencies are read at most once per check, whether it is
       // reached as an owner, as a skip, or down another owner's chain, and the walk ends
       // as soon as it reaches `name`.
@@ -758,16 +768,16 @@ export class ShutdownPassRunner {
 
       // Dependency getters are live caller code. Re-read at each stop boundary,
       // including after logging; a stable startup state does not imply stable dependencies.
-      const protectActiveStartupDependencies = (): void => {
-        if (!allowStopWithPendingStarts) {
-          return;
-        }
-        // Previously protected names are not a traversal cache: an intermediate
-        // dependency may now depend on another component. Walk a fresh graph at
-        // this checkpoint, then retain both old and newly discovered protection.
+      // Recomputed from the current state rather than accumulated: a start whose
+      // cleanup or stall has since settled no longer holds its dependencies, and the
+      // loop goes on to stop them. Before the join only the override protects them -
+      // without it the loop joins the starts first - and after it, the starts the join
+      // left unfinished do too.
+      const refreshProtectedDependencies = (): void => {
         const currentProtection = new Set<string>();
         for (const name of startingAtPassStart) {
           if (
+            (allowStopWithPendingStarts || joinProtectedStarts.has(name)) &&
             !canReleaseStartupDependencies(name) &&
             (isStartStillInProgress(name) ||
               this.core.state.stalledComponents.has(name))
@@ -775,6 +785,7 @@ export class ShutdownPassRunner {
             protectDependencies(name, currentProtection);
           }
         }
+        protectedDependencies.clear();
         for (const name of currentProtection) {
           protectedDependencies.add(name);
         }
@@ -785,7 +796,7 @@ export class ShutdownPassRunner {
         // First, before the warning phase and any wait: the sooner a start learns of the
         // shutdown, the sooner it can settle and release what the pass is holding up.
         if (shouldAbortPendingStarts) {
-          this.interruptPendingStarts(
+          interruptedSupersededStarts = this.interruptPendingStarts(
             startingAtPassStart,
             currentStarts,
             requestingStarts,
@@ -892,11 +903,33 @@ export class ShutdownPassRunner {
               this.core.state.stalledComponents.has(name)
             ) {
               if (!canReleaseStartupDependencies(name)) {
-                protectDependencies(name);
+                joinProtectedStarts.add(name);
               }
               // The override releases dependencies, not ownership or accounting of
               // unfinished startup. Existing late-completion handling remains responsible.
               stoppingComponents.add(name);
+            }
+          }
+          refreshProtectedDependencies();
+        };
+
+        // A superseded start of `name` - of every name when none is given - that this
+        // pass aborted and that is still running: waited for, as the starts it joins
+        // are, so a stop does not run beside it on the same instance. Not with the
+        // override, which stops without waiting for pending starts.
+        const joinSupersededStarts = async (name?: string): Promise<void> => {
+          if (allowStopWithPendingStarts) {
+            return;
+          }
+          for (const settlement of interruptedSupersededStarts) {
+            if (
+              (name === undefined || settlement.name === name) &&
+              this.core.state.supersededRawStarts.has(settlement)
+            ) {
+              await settlement.rawStartSettled;
+              if (hasTimedOut) {
+                return;
+              }
             }
           }
         };
@@ -912,7 +945,7 @@ export class ShutdownPassRunner {
         // Whether `name` must stay up for now: a dependency of startup work, or of a
         // concurrent owner still in progress. Recorded as still in progress if so.
         const isSkippedForProtection = (name: string): boolean => {
-          protectActiveStartupDependencies();
+          refreshProtectedDependencies();
           if (protectedDependencies.has(name)) {
             stoppingComponents.add(name);
             return true;
@@ -972,6 +1005,7 @@ export class ShutdownPassRunner {
             ) {
               continue;
             }
+            await joinSupersededStarts(name);
             if (hasTimedOut) {
               return true;
             }
@@ -1144,10 +1178,35 @@ export class ShutdownPassRunner {
           return false;
         };
 
-        // The loop does not wait for a concurrent stop. One that has settled by the end
-        // of the loop no longer needs the dependencies skipped on its account: go back
-        // to them once, in the same order, rather than leave them running.
+        // The loop does not wait for a concurrent stop, so unrelated stops are not held
+        // up by it. Once the loop ends, a stop another caller still has in flight is
+        // waited for, within the pass's deadline: the dependencies skipped on its account
+        // are this pass's to stop once it settles - unless its component requested this
+        // pass through its own `lifecycle` handle, when that stop may be awaiting the
+        // pass. A start owned elsewhere is not waited for here; the join handles the
+        // starts the pass began with.
         let isHalted = await runStopLoop(stopOrder);
+        while (!isHalted && !hasTimedOut) {
+          const stopping = [...concurrentOwners].filter((owner) => {
+            const state = this.core.state.componentStates.get(owner);
+            const component = this.core.registry.getComponent(owner);
+            return (
+              (state === 'stopping' || state === 'force-stopping') &&
+              (component === undefined || !requestingComponents.has(component))
+            );
+          });
+          if (stopping.length === 0) {
+            break;
+          }
+          const settlements = stopping
+            .map((owner) => this.core.componentStop.settledStops(owner))
+            .filter((settlement) => settlement !== undefined);
+          // Every claim of `stopping` is taken under the stop net, so a settlement is
+          // always there; a short sleep covers one that is not rather than spinning.
+          await (settlements.length > 0 ? Promise.all(settlements) : sleep(5));
+        }
+        // One that has settled no longer needs the dependencies skipped on its account:
+        // go back to them once, in the same order, rather than leave them running.
         if (
           !isHalted &&
           !hasTimedOut &&
@@ -1165,6 +1224,7 @@ export class ShutdownPassRunner {
         // settles. A start still unfinished is reported in progress below.
         if (!isHalted && !hasTimedOut) {
           await joinStarts();
+          await joinSupersededStarts();
         }
       };
 
@@ -1248,6 +1308,11 @@ export class ShutdownPassRunner {
         // observability state remains starting-timed-out.
         if (!finalStalledNames.has(name) && isStartStillInProgress(name)) {
           stoppingComponents.add(name);
+        }
+      }
+      for (const settlement of interruptedSupersededStarts) {
+        if (this.core.state.supersededRawStarts.has(settlement)) {
+          stoppingComponents.add(settlement.name);
         }
       }
 
@@ -1533,35 +1598,52 @@ export class ShutdownPassRunner {
    * may be awaiting the pass - as is one whose `start()` has settled or whose own
    * deadline already aborted its signal (`interruptStart()` checks both). Each settlement is asked in turn; abort listeners are the component's
    * code and may change the others, which each check again for itself.
+   *
+   * A start a newer attempt of the same registration superseded while its `start()` was
+   * still running (`supersededRawStarts`) is aborted too. Answers those it aborted, for
+   * the pass to wait on.
    */
   private interruptPendingStarts(
     names: readonly string[],
     currentStarts: ReadonlyMap<string, StartSettlement>,
     requestingStarts: ReadonlySet<StartSettlement>,
     method: ShutdownMethod,
-  ): void {
+  ): StartSettlement[] {
+    const interrupt = (settlement: StartSettlement): boolean => {
+      if (
+        settlement.interruptStart?.(
+          new StartupInterruptedByShutdownError({
+            componentName: settlement.name,
+            method,
+          }),
+        ) === true
+      ) {
+        this.core.logger
+          .entity(settlement.name)
+          .info('Aborted pending start for shutdown');
+        return true;
+      }
+      return false;
+    };
     for (const name of names) {
       const settlement = currentStarts.get(name);
       if (
-        settlement?.interruptStart === undefined ||
+        settlement === undefined ||
         requestingStarts.has(settlement) ||
         !settlement.rawStartPending
       ) {
         continue;
       }
-      if (
-        settlement.interruptStart(
-          new StartupInterruptedByShutdownError({
-            componentName: name,
-            method,
-          }),
-        )
-      ) {
-        this.core.logger
-          .entity(name)
-          .info('Aborted pending start for shutdown');
-      }
+      interrupt(settlement);
     }
+    // A snapshot: abort listeners can supersede or settle starts as this runs.
+    return [...this.core.state.supersededRawStarts].filter(
+      (settlement) =>
+        this.core.registry.getComponent(settlement.name) ===
+          settlement.component &&
+        !requestingStarts.has(settlement) &&
+        interrupt(settlement),
+    );
   }
 
   /**

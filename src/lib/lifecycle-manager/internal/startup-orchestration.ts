@@ -1211,17 +1211,19 @@ export class StartupOrchestration {
     if (run.hasShutdownBegun()) {
       return { kind: 'result', value: this.abortOnShutdownSignal(run) };
     }
-    // A required member whose restart is still in flight is owned elsewhere, as in
-    // the batch loop: the pass ends as `partial_state`, without the rollback.
-    if (reconciled.requiredInFlight !== undefined) {
-      return this.inFlightOperationExit(run, reconciled.requiredInFlight);
-    }
+    // A required member that stopped wins over one with a start in flight: its
+    // failure is reported and rolled back.
     if (reconciled.requiredFailure) {
       return {
         kind: 'rollback',
         pending: this.rollBackOnce(run, run.startedComponents),
         error: reconciled.requiredFailure.error,
       };
+    }
+    // A required member whose restart is still in flight is owned elsewhere, as in
+    // the batch loop: the pass ends as `partial_state`, without the rollback.
+    if (reconciled.requiredInFlight !== undefined) {
+      return this.inFlightOperationExit(run, reconciled.requiredInFlight);
     }
     // Only rollback is awaited; even a shutdown refusal must release its latch
     // without an extra microtask. With no outcome, callers must not yield between

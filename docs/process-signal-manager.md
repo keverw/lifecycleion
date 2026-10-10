@@ -450,37 +450,37 @@ Creates a new ProcessSignalManager instance.
 **Parameters:**
 
 - `options`: Configuration object with the following properties:
-  - `onShutdownRequested?`: `(method: ShutdownSignal) => void | Promise<void>` **(optional)**
+  - `onShutdownRequested?`: `((method: ShutdownSignal) => void | Promise<void>) | null` **(optional)**
     - Callback invoked when a shutdown signal is received
     - `method` will be one of: `'SIGINT'`, `'SIGTERM'`, or `'SIGTRAP'`
     - `null` means no handler; a value that is not a function throws a `TypeError` from the constructor
-  - `onReloadRequested?`: `() => void | Promise<unknown>` **(optional)**
+  - `onReloadRequested?`: `(() => void | Promise<unknown>) | null` **(optional)**
     - Callback invoked when reload is requested
     - Triggered by: SIGHUP signal or R key press (case-insensitive)
     - `null` means no handler; a value that is not a function throws a `TypeError` from the constructor
-  - `onInfoRequested?`: `() => void | Promise<unknown>` **(optional)**
+  - `onInfoRequested?`: `(() => void | Promise<unknown>) | null` **(optional)**
     - Callback invoked when info/stats are requested
     - Triggered by: SIGUSR1 signal or I key press (case-insensitive)
     - Common uses: Print stats, health checks, show metrics
     - `null` means no handler; a value that is not a function throws a `TypeError` from the constructor
-  - `onDebugRequested?`: `() => void | Promise<unknown>` **(optional)**
+  - `onDebugRequested?`: `(() => void | Promise<unknown>) | null` **(optional)**
     - Callback invoked when debug mode toggle is requested
     - Triggered by: SIGUSR2 signal or D key press (case-insensitive)
     - Common uses: Toggle debug mode, dump full state, enable verbose logging
     - `null` means no handler; a value that is not a function throws a `TypeError` from the constructor
-  - `shutdownCallbackName?`: `string` **(optional)**
+  - `shutdownCallbackName?`: `string | null` **(optional)**
     - Custom name for the shutdown callback used in error reporting
     - Default: `'onShutdownRequested'` (also used for `null`)
     - A value that is not a string throws a `TypeError` from the constructor
-  - `reloadCallbackName?`: `string` **(optional)**
+  - `reloadCallbackName?`: `string | null` **(optional)**
     - Custom name for the reload callback used in error reporting
     - Default: `'onReloadRequested'` (also used for `null`)
     - A value that is not a string throws a `TypeError` from the constructor
-  - `infoCallbackName?`: `string` **(optional)**
+  - `infoCallbackName?`: `string | null` **(optional)**
     - Custom name for the info callback used in error reporting
     - Default: `'onInfoRequested'` (also used for `null`)
     - A value that is not a string throws a `TypeError` from the constructor
-  - `debugCallbackName?`: `string` **(optional)**
+  - `debugCallbackName?`: `string | null` **(optional)**
     - Custom name for the debug callback used in error reporting
     - Default: `'onDebugRequested'` (also used for `null`)
     - A value that is not a string throws a `TypeError` from the constructor

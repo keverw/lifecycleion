@@ -78,16 +78,40 @@ async function runInterceptors(
 
     // null is shorthand for { cancel: true } with no reason
     if (result === null) {
-      return { cancel: true };
+      return makeInterceptorCancel(undefined);
     }
 
-    // Interceptor signalled cancellation with optional reason
+    // Interceptor signalled cancellation with optional reason. Only `cancel: true`
+    // cancels: a request carrying `cancel: false` is passed on as a request.
     if (result && 'cancel' in result && result.cancel === true) {
-      return result;
+      return makeInterceptorCancel(result.reason);
     }
 
     current = result as InterceptedRequest;
   }
 
   return current;
+}
+
+/**
+ * The cancels a chain has returned. Each is the chain's own object rather than the
+ * interceptor's, so telling one from a request reads nothing the caller supplied: a
+ * request whose `cancel` key is `false`, or whose getter answers differently on a
+ * second read, cannot be taken for a cancel once the chain has passed it on.
+ */
+const interceptorCancels = new WeakSet<object>();
+
+function makeInterceptorCancel(reason: string | undefined): InterceptorCancel {
+  const cancel: InterceptorCancel =
+    reason !== undefined ? { cancel: true, reason } : { cancel: true };
+  interceptorCancels.add(cancel);
+
+  return cancel;
+}
+
+/** Whether an {@link InterceptorChain} result is a cancel rather than a request. */
+export function isInterceptorCancel(
+  result: InterceptedRequest | InterceptorCancel,
+): result is InterceptorCancel {
+  return interceptorCancels.has(result);
 }

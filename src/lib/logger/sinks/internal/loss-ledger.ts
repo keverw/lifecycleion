@@ -121,7 +121,9 @@ export class LossLedger {
    * {@link EvictOptions}.
    *
    * Answers the entry the episode's report carried, when this call made that report, so a
-   * caller that owes some evicted entries a word of their own does not say it twice.
+   * caller that owes some evicted entries a word of their own does not say it twice. A
+   * caller that passed `options.start` hears where the live queue now starts through
+   * `options.onSettled`, before that report.
    */
   public evict<T extends { entry: LogEntry }>(
     queue: T[],
@@ -130,7 +132,10 @@ export class LossLedger {
     options?: EvictOptions<T>,
   ): LogEntry | undefined {
     // Every enqueue comes through here, so a queue within its cap allocates nothing.
-    if (limit === undefined || (options?.occupancy ?? queue.length) <= limit) {
+    if (
+      limit === undefined ||
+      (options?.occupancy ?? queue.length - (options?.start ?? 0)) <= limit
+    ) {
       return undefined;
     }
 

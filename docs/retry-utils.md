@@ -349,7 +349,7 @@ Starts the operation with retries. Defaults to `shouldWaitForCompletion = false`
 
 Returns `Promise<RunResult<T>>`:
 
-- If `shouldWaitForCompletion` is `false` (default): resolves immediately with `{ status: 'running' }`. This reports that the operation was started, not how it ends: an `operation-started` listener that calls `cancel()` or `reset()` still leaves this result `{ status: 'running' }`, and `waitForCompletion()` reports `{ status: 'canceled' }`. The same holds for `resume()` and `forceTry()` (which still includes `reattached: false`).
+- If `shouldWaitForCompletion` is `false` (default): resolves immediately with `{ status: 'running' }`. This reports that the operation was started, not how it ends: an `operation-started` listener that calls `cancel()` or `reset()` still leaves this result `{ status: 'running' }`. `waitForCompletion()` then reports `{ status: 'canceled' }` after `cancel()`, or `{ status: 'not_started', code: 'not_running' }` after `reset()`, which returns the runner to its initial state. The same holds for `resume()` and `forceTry()` (which still includes `reattached: false`).
 - If `shouldWaitForCompletion` is `true`: resolves when the operation finishes with one of:
   - `{ status: 'attempt_success', data?: T }` - succeeded
   - `{ status: 'attempts_exhausted', error? }` - retry budget exhausted (`error` is from the final attempt; a forced attempt that reports `skip` may omit it)

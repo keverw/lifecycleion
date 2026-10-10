@@ -370,6 +370,23 @@ function isUnsettled(slot: DeliverySlot): boolean {
   return slot.state === 'in_flight' && slot.token !== undefined;
 }
 
+/**
+ * Two requests for one reopen. A hint holds only when both carry it: a diagnostic or
+ * forwarded failure asking alongside an ordinary one does not get to quiet the attempt.
+ */
+function mergeOpenRequests(
+  armed: OpenRequest | undefined,
+  request: OpenRequest,
+): OpenRequest {
+  return {
+    isDiagnosticRetry:
+      armed?.isDiagnosticRetry === true && request.isDiagnosticRetry === true,
+    shouldSuppressRetryReport:
+      armed?.shouldSuppressRetryReport === true &&
+      request.shouldSuppressRetryReport === true,
+  };
+}
+
 /** One macrotask: where the callbacks a destination's teardown triggers arrive. */
 function nextMacrotask(): Promise<void> {
   return new Promise<void>((resolve) => {
@@ -441,6 +458,13 @@ export class DeliveryEngine {
    * dispatch on the current one until they settle. See {@link ORPHAN_SETTLE_MS}.
    */
   private staleInFlight = 0;
+  /**
+   * Writes {@link releaseOrphans} stopped waiting for that have not answered yet, for an
+   * adapter with a finite `maxInFlight`. Their lines went back to the queue, but the
+   * adapter is still running them: they count against its `maxInFlight` until they answer,
+   * so a one-at-a-time destination never has two writes going at once.
+   */
+  private readonly releasedWrites = new Set<object>();
   private orphanTimer?: ReturnType<typeof setTimeout>;
   private nextSequence = 0;
 
@@ -496,6 +520,12 @@ export class DeliveryEngine {
   private reopenTimer?: ReturnType<typeof setTimeout>;
   /** When {@link reopenTimer} is due, so a sooner request can displace a later one. */
   private reopenAtMS?: number;
+  /**
+   * What asked for {@link reopenTimer}, beyond what the queue says: the failed line that
+   * took the connection away may be gone from the queue by the time the timer fires. See
+   * {@link onReopenTimer}.
+   */
+  private reopenRequest?: OpenRequest;
 
   private lastError?: Error;
   private consecutiveFailures = 0;
@@ -721,16 +751,23 @@ export class DeliveryEngine {
     if (
       this.state === 'connected' ||
       this.state === 'opening' ||
-      this.isReconnecting ||
-      this.reopenTimer !== undefined
+      this.isReconnecting
     ) {
+      return;
+    }
+
+    // Already armed - by the failed write that took the connection, which is told before
+    // the stream's own error event: this request's routing goes with it.
+    if (this.reopenTimer !== undefined) {
+      this.reopenRequest = mergeOpenRequests(this.reopenRequest, request);
+
       return;
     }
 
     if (this.claimImmediateReopen()) {
       void this.startOpen('automatic', request);
     } else {
-      this.armReopen(this.backoff.next());
+      this.armReopen(this.backoff.next(), request);
     }
   }
 
@@ -1006,7 +1043,10 @@ export class DeliveryEngine {
       this.options.maxQueueSize ?? Infinity,
     );
 
-    return this.inFlightCount >= maxInFlight;
+    return (
+      this.inFlightCount >= maxInFlight ||
+      this.inFlightCount + this.releasedWrites.size >= this.adapter.maxInFlight
+    );
   }
 
   /** Hand one queued slot to the adapter, marked in flight where it stands. */
@@ -1030,6 +1070,14 @@ export class DeliveryEngine {
         slot,
         { isClosing: this.closing },
         (outcome) => {
+          // A write released as an orphan answering at last: its outcome was already given
+          // up on, and all it does now is free its place under `maxInFlight`.
+          if (this.releasedWrites.delete(token)) {
+            this.pump();
+
+            return;
+          }
+
           this.settle(slot, token, outcome);
         },
         () => {
@@ -1149,6 +1197,20 @@ export class DeliveryEngine {
         return;
       }
       case 'failed': {
+        // A write failing on a connection already lost or replaced is not the failure
+        // that ended it: the line was buffered behind that one, and a stream fails every
+        // buffered write with the same error. Held as an outage holds it - its attempts
+        // unspent, nothing reported - unless it may have delivered part of the line.
+        if (!isCurrent && outcome.isRetryable) {
+          this.leaveFlight(slot);
+          this.enforceQueueLimit();
+          // A connection that replaced the lost one takes it from here; nothing else
+          // would drive a pass when this failure lifted no barrier.
+          this.pump();
+
+          return;
+        }
+
         this.applyFailure(slot, outcome, isCurrent, isSynchronous);
 
         return;
@@ -1173,6 +1235,12 @@ export class DeliveryEngine {
   ): void {
     const willRetry =
       outcome.isRetryable && slot.attempts < this.options.maxRetries;
+    // The reopen this failure may ask for is routed by the line that failed, which a line
+    // given up on no longer leaves in the queue for the timer to read.
+    const reopenRequest: OpenRequest = {
+      isDiagnosticRetry: isDiagnosticEntry(slot.entry),
+      shouldSuppressRetryReport: slot.shouldSuppressFailureReport,
+    };
     const report = {
       attempt: slot.attempts + 1,
       entry: slot.entry,
@@ -1198,7 +1266,7 @@ export class DeliveryEngine {
       // The write failed whether or not the line comes back, so a connection it left
       // unusable is let go and reopened here too: nothing else would, when the
       // destination tore itself down without an error event.
-      this.afterFailedWrite();
+      this.afterFailedWrite(reopenRequest);
 
       return;
     }
@@ -1226,35 +1294,45 @@ export class DeliveryEngine {
     // The line keeps its place whatever the handler did: it is in flight until this
     // returns, so its own lines cannot evict it, and a `close()` it called takes the line
     // in its drain.
-    this.keepForRetry(slot);
+    this.keepForRetry(slot, reopenRequest);
   }
 
   /**
    * Put a failed line back in its place for another attempt, and carry on. Queued again,
    * it can be evicted like any other queued line, should the queue be over its cap.
    */
-  private keepForRetry(slot: DeliverySlot): void {
+  private keepForRetry(slot: DeliverySlot, reopenRequest: OpenRequest): void {
     slot.attempts++;
     this.leaveFlight(slot);
     this.enforceQueueLimit();
-    this.afterFailedWrite();
+    this.afterFailedWrite(reopenRequest);
   }
 
   /**
    * Drive recovery after a write failed, whether its line went back in the queue or was
    * given up on.
    *
-   * Not while closing: `close()` drives its own drain every pass and has decided this sink
-   * is not opening anything new. Otherwise the queue goes out through the connection in
-   * hand, or - when the failure left it unusable - the connection is let go and the timer
-   * reopens it: at once for the first attempt of an outage, then after the backoff.
+   * Not while closing: `close()` drives its own drain every pass, and makes its own bounded
+   * attempts to reopen a connection lost while it drains. Otherwise the queue goes out
+   * through the connection in hand, or - when the failure left it unusable - the connection
+   * is let go and the timer reopens it: at once for the first attempt of an outage, then
+   * after the backoff.
    */
-  private afterFailedWrite(): void {
+  private afterFailedWrite(reopenRequest: OpenRequest): void {
     if (this.closed || this.closing) {
       return;
     }
 
     if (this.state !== 'connected') {
+      // A later failure from the connection already let go still has a say in how the
+      // reopen armed for it is routed.
+      if (this.reopenTimer !== undefined) {
+        this.reopenRequest = mergeOpenRequests(
+          this.reopenRequest,
+          reopenRequest,
+        );
+      }
+
       return;
     }
 
@@ -1267,7 +1345,7 @@ export class DeliveryEngine {
     }
 
     this.dropConnection();
-    this.scheduleReopen();
+    this.scheduleReopen(reopenRequest);
   }
 
   /**
@@ -1275,8 +1353,11 @@ export class DeliveryEngine {
    * outage, as {@link ensureConnection} makes it, then after the backoff. On the timer even
    * when due at once, so the attempt starts outside the write outcome that asked for it.
    */
-  private scheduleReopen(): void {
-    this.armReopen(this.claimImmediateReopen() ? 0 : this.backoff.next());
+  private scheduleReopen(request: OpenRequest = {}): void {
+    this.armReopen(
+      this.claimImmediateReopen() ? 0 : this.backoff.next(),
+      request,
+    );
   }
 
   /**
@@ -1400,13 +1481,29 @@ export class DeliveryEngine {
 
     const owed: DeliverySlot[] = [];
 
+    // Not compacted first: at the cap every enqueue evicts, and the oldest queued line sits
+    // at the head, or just behind the lines in flight. Evicting it advances the head.
     const sampled = this.losses.evict(
-      this.compactSlots(),
+      this.slots,
       limit,
       (cap) => this.options.messages.queueFull(cap),
       {
         isEvictable: (slot) => slot.state !== 'in_flight',
         occupancy: this.queueSize,
+        start: this.head,
+        // Before the episode's report, whose handler may write to this sink.
+        onSettled: (start) => {
+          this.head = start;
+
+          // Evicting moved the slots that stayed.
+          this.queuedFrom = this.head;
+
+          // The dead prefix is let go once it outgrows the live queue, as `removeSlot`
+          // does.
+          if (this.head * 2 >= this.slots.length) {
+            this.compactSlots();
+          }
+        },
         onEvicted: (slot) => {
           if (slot.hasReportedRetrying === true) {
             owed.push(slot);
@@ -1414,9 +1511,6 @@ export class DeliveryEngine {
         },
       },
     );
-
-    // Evicting moved the slots that stayed.
-    this.queuedFrom = 0;
 
     // A line an explicit `onError` was told is `'retrying'` gets its own final word, unless
     // the episode's report - which covers owners and the console - already carried it.
@@ -1558,10 +1652,15 @@ export class DeliveryEngine {
    * Try again after `delayMS`. One timer at a time, `unref`'d, and the *soonest*: a later,
    * longer request never displaces a sooner recovery attempt.
    */
-  private armReopen(delayMS: number): void {
+  private armReopen(delayMS: number, request: OpenRequest = {}): void {
     if (this.closing || this.closed) {
       return;
     }
+
+    this.reopenRequest =
+      this.reopenTimer === undefined
+        ? request
+        : mergeOpenRequests(this.reopenRequest, request);
 
     if (this.reopenTimer !== undefined) {
       if (
@@ -1578,9 +1677,12 @@ export class DeliveryEngine {
     this.reopenAtMS = Date.now() + delayMS;
 
     const timer = setTimeout(() => {
+      const armedFor = this.reopenRequest;
+
       this.reopenTimer = undefined;
       this.reopenAtMS = undefined;
-      this.onReopenTimer();
+      this.reopenRequest = undefined;
+      this.onReopenTimer(armedFor);
     }, delayMS);
 
     // So a pending attempt cannot hold the process open.
@@ -1594,15 +1696,17 @@ export class DeliveryEngine {
       clearTimeout(this.reopenTimer);
       this.reopenTimer = undefined;
       this.reopenAtMS = undefined;
+      this.reopenRequest = undefined;
     }
   }
 
   /**
-   * The reopen timer fired. Its routing comes from what is queued now rather than from
-   * whatever asked for it: a queue holding only lines forwarded from a console report, and
-   * diagnostics, is suppressed, as the failure that queued them would have been.
+   * The reopen timer fired. Its routing comes from what is queued now, and from what asked
+   * for it: a queue holding only lines forwarded from a console report, and diagnostics, is
+   * suppressed, as the failure that queued them would have been, and so is one emptied by
+   * giving such a line up. Ordinary work queued outranks either; see {@link openRouting}.
    */
-  private onReopenTimer(): void {
+  private onReopenTimer(armedFor: OpenRequest = {}): void {
     if (
       this.closing ||
       this.closed ||
@@ -1615,12 +1719,14 @@ export class DeliveryEngine {
 
     const queued = this.compactSlots();
     const request: OpenRequest = {
+      isDiagnosticRetry: armedFor.isDiagnosticRetry === true,
       shouldSuppressRetryReport:
-        queued.some((slot) => slot.shouldSuppressFailureReport) &&
-        queued.every(
-          (slot) =>
-            slot.shouldSuppressFailureReport || isDiagnosticEntry(slot.entry),
-        ),
+        armedFor.shouldSuppressRetryReport === true ||
+        (queued.some((slot) => slot.shouldSuppressFailureReport) &&
+          queued.every(
+            (slot) =>
+              slot.shouldSuppressFailureReport || isDiagnosticEntry(slot.entry),
+          )),
     };
 
     void this.startOpen('automatic', request);
@@ -1651,6 +1757,8 @@ export class DeliveryEngine {
    * Stop waiting for writes still in flight on a replaced connection: each counts as a
    * spent attempt and goes back to the queue - possibly to be written twice, never lost -
    * and its late callback is ignored. One out of attempts is given up on and said once.
+   * Under a finite `maxInFlight` it keeps its place there until it answers: see
+   * {@link releasedWrites}.
    */
   private releaseOrphans(generation: number | undefined): void {
     if (this.connectionGeneration !== generation || this.staleInFlight === 0) {
@@ -1666,6 +1774,10 @@ export class DeliveryEngine {
         slot.generation === generation
       ) {
         continue;
+      }
+
+      if (Number.isFinite(this.adapter.maxInFlight)) {
+        this.releasedWrites.add(slot.token);
       }
 
       slot.token = undefined;
@@ -1727,36 +1839,46 @@ export class DeliveryEngine {
     // write while the adapter learns of it only from the asynchronous error event, and a
     // `close()` entered in that window - an `onError` handler calling `sink.close()` -
     // would otherwise skip this loop and abandon the backlog without one attempt.
-    const reopenGraceUntil =
+    let reopenGraceUntil =
       Date.now() + Math.min(CLOSE_REOPEN_GRACE_MS, timeoutMS);
 
-    while (
-      this.queueSize > 0 &&
-      !this.adapter.hasConnection() &&
-      this.state !== 'opening' &&
-      Date.now() < reopenGraceUntil &&
-      Date.now() - startTime < timeoutMS
-    ) {
-      await this.reopenForClose(startTime, reopenGraceUntil);
+    await this.reopenWithinGrace(startTime, reopenGraceUntil);
 
+    // Whether the destination has been in hand since the last grace window: what tells a
+    // connection lost mid-drain - a reader restarting under a close with a backlog - from
+    // one that never came back.
+    let hasHadConnection = false;
+
+    // Drain what the destination can still take before giving up on it - a line in flight
+    // included, since its write may still fail and need another attempt. The deadline
+    // bounds the wait.
+    while (!this.isDrained && Date.now() - startTime <= timeoutMS) {
       if (this.adapter.hasConnection()) {
+        hasHadConnection = true;
+      } else if (this.state === 'opening' && Date.now() < reopenGraceUntil) {
+        // An open in progress counts as work to wait for, within the grace window it was
+        // made in: past it, an open that hangs must not hold the close for its whole
+        // budget.
+      } else if (hasHadConnection) {
+        // Lost mid-drain: the same bounded grace the close began with, from now, rather
+        // than abandoning a backlog a destination back moments later would have taken.
+        // Once per connection held, so a destination that does not come back ends it.
+        hasHadConnection = false;
+
+        if (this.state === 'connected') {
+          this.dropConnection();
+        }
+
+        reopenGraceUntil =
+          Date.now() +
+          Math.min(CLOSE_REOPEN_GRACE_MS, timeoutMS - (Date.now() - startTime));
+        await this.reopenWithinGrace(startTime, reopenGraceUntil);
+
+        continue;
+      } else {
         break;
       }
 
-      // Spaced out, so a destination that never comes back costs a handful of attempts
-      // across the window rather than a spin.
-      await sleep(CLOSE_REOPEN_POLL_MS);
-    }
-
-    // Drain what the destination can still take before giving up on it - a line in flight
-    // included, since its write may still fail and need another attempt. An open in
-    // progress counts as work to wait for, exactly as a live connection does; the deadline
-    // still bounds the wait.
-    while (
-      !this.isDrained &&
-      (this.state === 'opening' || this.adapter.hasConnection()) &&
-      Date.now() - startTime <= timeoutMS
-    ) {
       // Asked for explicitly: nothing else drives a pass while this loop is awaiting, and
       // the queue may have been left parked by a failed write rather than by backpressure.
       this.pump();
@@ -1775,6 +1897,33 @@ export class DeliveryEngine {
     const remainingMS = (): number => timeoutMS - (Date.now() - startTime);
 
     await this.closeOnEvidence(remainingMS);
+  }
+
+  /**
+   * Keep asking for the destination, until `graceUntil`, while a close has a backlog and
+   * nothing to write it with. Spaced by {@link CLOSE_REOPEN_POLL_MS}.
+   */
+  private async reopenWithinGrace(
+    startTime: number,
+    graceUntil: number,
+  ): Promise<void> {
+    while (
+      this.queueSize > 0 &&
+      !this.adapter.hasConnection() &&
+      this.state !== 'opening' &&
+      Date.now() < graceUntil &&
+      Date.now() - startTime < this.options.closeTimeoutMS
+    ) {
+      await this.reopenForClose(startTime, graceUntil);
+
+      if (this.adapter.hasConnection()) {
+        break;
+      }
+
+      // Spaced out, so a destination that never comes back costs a handful of attempts
+      // across the window rather than a spin.
+      await sleep(CLOSE_REOPEN_POLL_MS);
+    }
   }
 
   /**

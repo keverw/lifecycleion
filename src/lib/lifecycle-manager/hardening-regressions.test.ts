@@ -116,7 +116,8 @@ describe('LifecycleManager hardening regressions', () => {
           stops++;
         }
       }
-      // A bulk deadline cleans up a late start even for a component that owns it.
+      // A bulk deadline's late start is cleaned up by the manager unless the component
+      // owns that cleanup.
       const component = new Component(logger, {
         name: 'hung',
         startupTimeoutMS: 0,
@@ -157,7 +158,7 @@ describe('LifecycleManager hardening regressions', () => {
         await sleep(20);
       }
       if (recovery === 'cleanup') {
-        expect(stops).toBe(1);
+        expect(stops).toBe(doesOwnCleanup ? 0 : 1);
         expect(manager.isComponentRunning('hung')).toBe(false);
         expect((await manager.startComponent('hung')).success).toBe(true);
       } else {

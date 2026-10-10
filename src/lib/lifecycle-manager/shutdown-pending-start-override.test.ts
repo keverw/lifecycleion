@@ -176,7 +176,9 @@ test('pending-start override does not bypass an independently stopping dependent
   await manager.startAllComponents();
   const stopping = manager.stopComponent('service');
   try {
+    // The pass waits for that stop until its deadline, keeping `database` up.
     const result = await manager.stopAllComponents({
+      timeoutMS: 50,
       allowStopWithPendingStarts: true,
       haltOnStall: false,
     });

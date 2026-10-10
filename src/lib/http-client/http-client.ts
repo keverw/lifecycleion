@@ -12,7 +12,7 @@ import { assertNoBrowserRestrictedHeaders } from './internal/header-utils';
 import { RequestTracker } from './request-tracker';
 import type { RequestInfo } from './request-tracker';
 import { HTTPRequestBuilder } from './http-request-builder';
-import { RequestInterceptorManager } from './interceptors';
+import { RequestInterceptorManager, isInterceptorCancel } from './interceptors';
 import {
   ResponseObserverManager,
   ErrorObserverManager,
@@ -97,6 +97,12 @@ import {
 } from '../internal/adopt-promise';
 
 type RemoveFn = () => void;
+
+/** Status and headers of an answer whose reading then failed. */
+interface AnsweredResponse {
+  status: number;
+  headers: Record<string, string | string[]>;
+}
 
 interface InternalClientState {
   tracker?: RequestTracker;
@@ -649,7 +655,7 @@ export class BaseHTTPClient {
 
           interceptResult = initialRun.result;
 
-          if (!('cancel' in interceptResult)) {
+          if (!isInterceptorCancel(interceptResult)) {
             // Taken for the rest of the phase through `snapshotInterceptedRequest`. A
             // failure below reports from what the chain returned while the snapshot is
             // being taken - a getter that throws there is still reported best-effort -
@@ -713,7 +719,7 @@ export class BaseHTTPClient {
           return response;
         }
 
-        if ('cancel' in interceptResult) {
+        if (isInterceptorCancel(interceptResult)) {
           const cancelledResponse = this._buildResponse<T>({
             adapterResponse: null,
             requestID,
@@ -1094,7 +1100,7 @@ export class BaseHTTPClient {
                   attemptNumber: lastAttemptNumber + 1,
                 },
               ));
-              if (!('cancel' in redirectIntercept)) {
+              if (!isInterceptorCancel(redirectIntercept)) {
                 // Snapshotted as the initial phase does; see there. Even with no
                 // interceptor registered: this request's headers come from the adapter's
                 // record of what it sent, not from `mergeHeaders`, so the snapshot is
@@ -1148,7 +1154,7 @@ export class BaseHTTPClient {
               break;
             }
 
-            if ('cancel' in redirectIntercept) {
+            if (isInterceptorCancel(redirectIntercept)) {
               const cancelledRequestURL = redirectRequest.requestURL;
               observerRequest = this._bestEffortAttemptRequestFromPending(
                 redirectRequest,
@@ -1316,6 +1322,9 @@ export class BaseHTTPClient {
             // which the branches above reach with `adapterResponse: null` and so
             // cannot read for themselves.
             ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
+            ...(attemptResult.answeredResponse
+              ? { answeredResponse: attemptResult.answeredResponse }
+              : {}),
             ...(attemptResult.isNetworkErrorOverride === false ||
             attemptResult.errorCode === 'request_setup_error' ||
             attemptResult.errorCode === 'interceptor_error' ||
@@ -1588,6 +1597,13 @@ export class BaseHTTPClient {
      * failures, so the code alone cannot say the request never failed on the network.
      */
     isNetworkErrorOverride?: boolean;
+    /**
+     * What a response that could not be read did carry, for the `adapter_error` that
+     * ends an attempt whose `send()` had resolved. `adapterResponse` stays null - the
+     * redirect and retry checks never act on an unreadable answer - and the final
+     * response reports this status and headers, as `onAttemptEnd` reports the status.
+     */
+    answeredResponse?: AnsweredResponse;
     cancelReason?: string;
     /**
      * Tears down the attempt that produced `adapterResponse`, as a per-attempt timeout
@@ -1863,7 +1879,7 @@ export class BaseHTTPClient {
 
           retryIntercept = retryRun.result;
 
-          if (!('cancel' in retryIntercept)) {
+          if (!isInterceptorCancel(retryIntercept)) {
             // Snapshotted as the initial phase in `_execute` does, and skipped on the
             // same condition; see there.
             failedRetryRequest = retryIntercept;
@@ -1885,7 +1901,7 @@ export class BaseHTTPClient {
           });
         }
 
-        if ('cancel' in retryIntercept) {
+        if (isInterceptorCancel(retryIntercept)) {
           return endBeforeDispatch(baseRequest, {
             wasCancelled: true,
             ...(retryIntercept.reason !== undefined
@@ -1947,12 +1963,17 @@ export class BaseHTTPClient {
       let responseUploadOutcome: Promise<Error | undefined> | undefined;
       // Set once `send()` resolves. The server has answered by then, so a throw from
       // reading or normalizing that answer (a getter, a header value whose conversion
-      // throws, a `Set-Cookie` the jar cannot take) is the adapter's malformed response,
-      // not a transport failure: the catch below reports it without re-sending.
+      // throws, a `Set-Cookie` the jar cannot take, a body that cannot be decoded) is the
+      // adapter's malformed response, not a transport failure: the catch below reports it
+      // without re-sending. The rest of the attempt after `send()` is the client's own
+      // code, and the caller's observers and attempt hooks are contained where they run,
+      // so classifying every later throw this way does not catch caller failures too.
       let didAdapterResolve = false;
-      // The status that answer carried, so `onAttemptEnd` reports it rather than `0` when
-      // a throw after `send()` resolved ends the attempt.
+      // The status that answer carried, so `onAttemptEnd` and the final response report
+      // it rather than `0` when a throw after `send()` resolved ends the attempt, and its
+      // headers once they have been normalized.
       let answeredStatus = 0;
+      let answeredHeaders: Record<string, string | string[]> = {};
 
       // Dispatch counts as activity, so the settle wait's stall clock starts from the
       // moment this attempt's upload could have begun rather than from a report on some
@@ -2033,8 +2054,14 @@ export class BaseHTTPClient {
           responseUploadOutcome = adoptRequestBodySettled(rawUploadOutcome);
         }
         const headers = rawAdapterResponse.headers;
-        const effectiveRequestHeaders =
-          rawAdapterResponse.effectiveRequestHeaders;
+        // Advisory as well, and read under the same rule: it only feeds observers (see
+        // `snapshotHeaderRecord` below), so a throwing accessor means absent.
+        let effectiveRequestHeaders: unknown;
+        try {
+          effectiveRequestHeaders = rawAdapterResponse.effectiveRequestHeaders;
+        } catch {
+          effectiveRequestHeaders = undefined;
+        }
         // Copy enumerable fields with their original receiver, excluding the three
         // fields already read. A spread would invoke the upload getter twice.
         const adapterResponse = {
@@ -2068,6 +2095,7 @@ export class BaseHTTPClient {
           answeredStatus = adapterResponse.status;
         }
         adapterResponse.headers = normalizeAdapterResponseHeaders(headers);
+        answeredHeaders = adapterResponse.headers;
 
         // Copied through the same guard the throw path uses: the record only feeds
         // observers, so a malformed or unreadable one is treated as absent.
@@ -2176,6 +2204,22 @@ export class BaseHTTPClient {
           );
           const nextRetryAt = shouldRetry ? Date.now() + delayMS : undefined;
 
+          // Built before the retry is committed or announced: decoding a malformed body
+          // can throw, and the catch below then ends this attempt as an adapter_error,
+          // reported to `onAttemptEnd` once rather than first as retrying and then not.
+          const retryHTTPResponse = shouldRetry
+            ? this._buildResponse({
+                adapterResponse,
+                requestID,
+                wasCancelled: false,
+                wasTimeout: false,
+                adapterType: this._adapter.getType(),
+                initialURL,
+                requestURL: sentRequest.requestURL,
+                redirectHistory,
+              })
+            : undefined;
+
           if (shouldRetry) {
             callbacks.setNextRetryDelayMS(delayMS);
             callbacks.setNextRetryAt(nextRetryAt ?? null);
@@ -2189,18 +2233,7 @@ export class BaseHTTPClient {
             status: adapterResponse.status,
           });
 
-          if (shouldRetry) {
-            const retryHTTPResponse = this._buildResponse({
-              adapterResponse,
-              requestID,
-              wasCancelled: false,
-              wasTimeout: false,
-              adapterType: this._adapter.getType(),
-              initialURL,
-              requestURL: sentRequest.requestURL,
-              redirectHistory,
-            });
-
+          if (retryHTTPResponse) {
             await this._runResponseObservers(
               retryHTTPResponse,
               observedSentRequest,
@@ -2669,6 +2702,14 @@ export class BaseHTTPClient {
             ...(isNonRetryableAdapterFailure
               ? { isNetworkErrorOverride: false }
               : {}),
+            ...(didAdapterResolve
+              ? {
+                  answeredResponse: {
+                    status: answeredStatus,
+                    headers: answeredHeaders,
+                  },
+                }
+              : {}),
             errorCode: isNonRetryableAdapterFailure
               ? 'adapter_error'
               : isStreamFactoryError
@@ -2868,6 +2909,11 @@ export class BaseHTTPClient {
      * error by the attempt runner; see {@link REQUEST_BODY_SETTLED_KEY}.
      */
     requestBodySettled?: Promise<Error | undefined>;
+    /**
+     * Reported on the no-response branch when the adapter had answered but its answer
+     * could not be read. See the attempt result's own `answeredResponse`.
+     */
+    answeredResponse?: AnsweredResponse;
   }): HTTPResponse<T> {
     const {
       adapterResponse,
@@ -2880,6 +2926,7 @@ export class BaseHTTPClient {
       redirectHistory,
       isNetworkErrorOverride,
       requestBodySettled,
+      answeredResponse,
     } = params;
 
     const wasRedirectFollowed = redirectHistory.length > 0;
@@ -2901,8 +2948,8 @@ export class BaseHTTPClient {
 
     if (!adapterResponse) {
       return {
-        status: 0,
-        headers: {},
+        status: answeredResponse?.status ?? 0,
+        headers: answeredResponse?.headers ?? {},
         body: null as unknown as T,
         contentType: 'binary',
         isJSON: false,
@@ -3209,7 +3256,7 @@ export class BaseHTTPClient {
     if (parentChain) {
       current = await parentChain(request, phase, context);
 
-      if ('cancel' in current) {
+      if (isInterceptorCancel(current)) {
         return { result: current, isIntercepted: true };
       }
     }

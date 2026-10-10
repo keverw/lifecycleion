@@ -82,7 +82,9 @@ export class LateStartRecovery {
         // leaving the state the retry left. A retry still in flight - its attempt, or its
         // own late-start recovery - is waited out and the decision made again once it
         // ends. A retry that came up - even late, its own cleanup stopping the component
-        // - or a replacement, is left alone.
+        // - or a replacement, is left alone. A retry whose `start()` never settles is
+        // waited on for as long: `stop()` never runs beside a pending `start()` of the
+        // same instance, and a shutdown reports that start as `cleanup_incomplete`.
         if (isSuperseded()) {
           let adoptedToken = this.adoptableStartToken(name, isSameRegistration);
           while (adoptedToken === undefined) {

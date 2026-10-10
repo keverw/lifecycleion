@@ -1518,7 +1518,7 @@ deadline, and Infinity or oversized values use the maximum timer delay (2,147,48
 
 ### NamedPipeSink
 
-A named-pipe record that fails after a partial low-level write is reported through `onError` with `disposition: 'lost'`, counted in `droppedEntries`, and not automatically retried. Its error carries `bytesWritten` and the underlying failure as `cause`. Never-started buffered records retain the normal retry policy. A FIFO cannot retract bytes already consumed or guarantee exactly-once records across reader failures, so consumers must tolerate truncated records and resynchronize their framing. A fallback for a partial record should use a separate destination.
+A named-pipe record that fails after a partial low-level write is reported through `onError` with `disposition: 'lost'`, counted in `droppedEntries`, and not automatically retried. Its error carries `bytesWritten` and the underlying failure as `cause`. Records buffered behind a failed write, which the stream fails with the same error once the connection is gone, are held like any outage: they spend no retry, produce no `'retrying'` report, and are written after the reconnect. A FIFO cannot retract bytes already consumed or guarantee exactly-once records across reader failures, so consumers must tolerate truncated records and resynchronize their framing. A fallback for a partial record should use a separate destination.
 
 Writes logs to a named pipe (FIFO) for log aggregation. Linux/macOS only.
 
@@ -1532,7 +1532,9 @@ queue, retry, reopen, flush and close the same way:
   delivered, including the ones handed to the destination and not yet confirmed, and
   `getHealth().queueSize` is that same count. Lines stay in the sink's queue rather
   than in Node's unbounded stream buffer, so the cap and `queueSize` mean what they say
-- a failed write keeps its place and is retried up to `maxRetries` (default 3).
+- a failed write keeps its place and is retried up to `maxRetries` (default 3). Only
+  the write that failed on a live connection spends an attempt: one that fails after its
+  connection was already lost or replaced is held like an outage.
   An `onError` handler hears every failed attempt (`'retrying'`, then `'lost'`); without
   one, only the attempt that loses the line is offered to the owning logger or written to
   the console, so a failing destination does not produce `maxRetries + 1` diagnostics per
@@ -2153,8 +2155,9 @@ redaction failure's cause is derived from the value being masked. A getter throw
 `cannot read <secret>` would otherwise route around the masking on the line above it.
 
 Sink and event-handler diagnostic messages can include the underlying error text. They
-are not automatically redacted. Default reports originating inside built-in sinks use
-generic messages; their underlying errors remain available on `LoggerDiagnostic.error`.
+are not automatically redacted. ArraySink's default reports use generic messages, while
+FileSink and NamedPipeSink reports append the I/O error's text (a `'format'` failure's
+omits it); the underlying errors remain available on `LoggerDiagnostic.error`.
 
 `LoggerDiagnostic.error` still carries that cause in full, and every `'diagnostic'`
 listener and `writeDiagnostic()` sink receives it. It can contain data that caller-owned

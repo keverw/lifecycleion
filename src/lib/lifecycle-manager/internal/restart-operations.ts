@@ -38,6 +38,7 @@ import {
   type RestartStopDispatch,
 } from './restart-dispatch';
 import { readComponentStatus } from './read-status';
+import { snapshotOperationResult } from './unregistration-operations';
 
 /** Everything restart preparation reads from the caller, validated before any stop. */
 interface RestartPreparation {
@@ -389,26 +390,39 @@ export class RestartOperations {
         taken: false,
       };
       const startupDispatchOptions = restartDispatchOptions(startupDispatch);
-      let startupResult: StartupResult;
+      let startupAnswer: unknown;
       try {
-        startupResult = await this.core.manager.startAllComponents(
+        startupAnswer = await this.core.manager.startAllComponents(
           startupDispatchOptions,
         );
       } finally {
         revokeRestartDispatch(startupDispatchOptions);
       }
+      // `startAllComponents()` is overridable, so its answer is caller data: one that is
+      // not an object answers as a startup that failed without saying why.
+      const startupResult: StartupResult =
+        typeof startupAnswer === 'object' && startupAnswer !== null
+          ? (startupAnswer as StartupResult)
+          : {
+              success: false,
+              startedComponents: [],
+              failedOptionalComponents: [],
+              skippedDueToDependency: [],
+            };
       phases.startupResult = startupResult;
 
       if (startupDispatch.canceled) {
         return this.restartCanceledByShutdownRequest(shutdownResult);
       }
 
-      const isSuccess = shutdownResult.success && startupResult.success;
+      // Read once: a getter could answer each read differently.
+      const isStartupSuccess = startupResult.success === true;
+      const isSuccess = shutdownResult.success && isStartupSuccess;
 
       this.core.logger[isSuccess ? 'success' : 'warn']('Restart completed', {
         params: {
           shutdownSuccess: shutdownResult.success,
-          startupSuccess: startupResult.success,
+          startupSuccess: isStartupSuccess,
         },
       });
 
@@ -468,6 +482,10 @@ export class RestartOperations {
       return preconditions;
     }
     const { component } = preconditions;
+    // With the component, before the dependents check runs other components'
+    // `getDependencies()`: one can unregister this instance and register it again, and
+    // a generation read after that would approve the new registration.
+    const generation = this.core.registryReads.currentGeneration(component);
     // Track this call's claim, rather than comparing the name's shared stop token:
     // an option getter can start a nested stop and then fail before this one claims.
     const stopContext: IndividualStopContext = {
@@ -486,7 +504,7 @@ export class RestartOperations {
     }
     const startSnapshot: RestartStartSnapshot = {
       component,
-      generation: this.core.registryReads.currentGeneration(component),
+      generation,
       timeoutMS: toOperationTimerDelayMS(
         component.startupTimeoutMS,
         `${name}.startupTimeoutMS`,
@@ -567,20 +585,28 @@ export class RestartOperations {
       revokeRestartDispatch(stopDispatchOptions);
     }
 
-    if (!stopResult.success) {
+    // Read once: an override's answer is caller data (see `snapshotOperationResult()`).
+    const stopSnapshot = snapshotOperationResult(stopResult);
+    if (!stopSnapshot.success) {
       // Once this restart took a stop claim, even a later refusal or validation
       // error describes an attempted stop. Only pre-claim failures pass through. A stop
       // an override ran without this restart's options cannot say whether it claimed,
-      // so its failure is answered as an attempted stop.
-      if (stopDispatch.taken && !stopContext.claimed) {
+      // so its failure is answered as an attempted stop, as is a non-object answer,
+      // which has no refusal to pass through.
+      if (
+        stopDispatch.taken &&
+        !stopContext.claimed &&
+        typeof stopResult === 'object' &&
+        stopResult !== null
+      ) {
         return stopResult;
       }
       return {
         success: false,
         componentName: name,
-        reason: `Failed to stop: ${stopResult.reason}`,
+        reason: `Failed to stop: ${stopSnapshot.reason ?? 'no reason given'}`,
         code: 'restart_stop_failed',
-        error: stopResult.error,
+        error: stopSnapshot.error,
       };
     }
 
@@ -631,13 +657,14 @@ export class RestartOperations {
       return this.skippedRestartStartResult(name, true);
     }
 
-    if (!startResult.success) {
+    const startSnapshotResult = snapshotOperationResult(startResult);
+    if (!startSnapshotResult.success) {
       return {
         success: false,
         componentName: name,
-        reason: `Failed to start: ${startResult.reason}`,
+        reason: `Failed to start: ${startSnapshotResult.reason ?? 'no reason given'}`,
         code: 'restart_start_failed',
-        error: startResult.error,
+        error: startSnapshotResult.error,
       };
     }
 

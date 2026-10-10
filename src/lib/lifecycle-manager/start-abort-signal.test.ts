@@ -127,7 +127,7 @@ test('a start that honors the signal settles, and the next attempt gets an unabo
 test('the signal is aborted when the startAllComponents() deadline abandons the start', async () => {
   const { logger, manager } = setup();
   const a = new Records(logger, 'a', 10_000);
-  // Owns its late cleanup, which a bulk deadline overrides.
+  // Owns its late cleanup, a bulk deadline's as much as its own timeout's.
   Object.defineProperty(a, 'ownsLateStartCleanup', { value: true });
   const gate = deferred();
   a.onStart = () => gate.promise;
@@ -144,10 +144,10 @@ test('the signal is aborted when the startAllComponents() deadline abandons the 
   expect(a.signals[0].reason).toBeInstanceOf(ComponentStartTimeoutError);
   expect(a.order).toEqual(['abort']);
 
-  // Bulk deadlines still clean up a late success, whether or not the component owns it.
+  // The component undoes the late success itself: the manager does not stop it.
   gate.resolve();
   await sleep(20);
-  expect(a.stops).toBe(1);
+  expect(a.stops).toBe(0);
   expect(manager.getComponentStatus('a')?.state).toBe('starting-timed-out');
 });
 
