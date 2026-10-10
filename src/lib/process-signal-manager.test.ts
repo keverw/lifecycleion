@@ -785,6 +785,61 @@ describe('ProcessSignalManager', () => {
       expect(manager.isAttached).toBe(false);
       expect(process.listenerCount('SIGTERM')).toBe(before);
     });
+
+    test('a deferred detach that fails is reported, not thrown out of the attach that ran it', () => {
+      // The attach did what it was asked and has returned to its caller by the time the
+      // detach asked for inside it runs, so that detach's failure is reported instead.
+      const before = process.listeners('SIGTERM');
+      manager = new ProcessSignalManager({
+        onShutdownRequested: shutdownCallback,
+      });
+      const removalError = new Error('off failed');
+      const originalOff = process.off.bind(process);
+      let hasRefused = false;
+      const offSpy = spyOn(process, 'off').mockImplementation(((
+        event: string,
+        listener: (...args: unknown[]) => void,
+      ) => {
+        if (event === 'SIGTERM' && !hasRefused) {
+          hasRefused = true;
+          throw removalError;
+        }
+        originalOff(event, listener);
+        return process;
+      }) as typeof process.off);
+      const onNewListener = (): void => {
+        manager.detach();
+      };
+      const reports: unknown[] = [];
+      const onGlobalError = (event: Event): void => {
+        reports.push((event as ErrorEvent).error);
+        event.preventDefault();
+      };
+      globalThis.addEventListener('error', onGlobalError);
+      process.on('newListener', onNewListener);
+
+      try {
+        expect(() => manager.attach()).not.toThrow();
+      } finally {
+        process.off('newListener', onNewListener);
+        globalThis.removeEventListener('error', onGlobalError);
+        offSpy.mockRestore();
+        // The listener whose removal was refused is still on `process`.
+        for (const listener of process.listeners('SIGTERM')) {
+          if (!before.includes(listener)) {
+            process.off('SIGTERM', listener);
+          }
+        }
+      }
+
+      expect(hasRefused).toBe(true);
+      expect(manager.isAttached).toBe(false);
+      expect(reports).toHaveLength(1);
+      expect((reports[0] as Error).message).toContain(
+        'ProcessSignalManager deferred detach',
+      );
+      expect((reports[0] as Error).cause).toBe(removalError);
+    });
   });
 
   describe('process signal handling', () => {

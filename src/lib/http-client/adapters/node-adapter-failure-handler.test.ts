@@ -592,3 +592,136 @@ test('a response-task recovery that answers and then throws reports only what we
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+test('a response task that fails after an early-ack stream setup was answered reports without settling the upload', async () => {
+  // The response closing during an async factory's setup answers the request as a
+  // stream failure while the body is still going out. The factory then rejects on its aborted
+  // signal, and tagging that rejection reads the request headers again - where a
+  // caller-supplied value that now refuses `toString` throws out of the task. The
+  // request was already answered, so that failure goes to the host channel and nowhere
+  // else: not into `requestBodySettled`, which belongs to the writer still running, and
+  // not into an early release of the abort listener that writer still needs.
+  const refusal = new Error('header value refused toString');
+  const writeFailure = new Error('socket reset mid-upload');
+  let isHeaderRefusing = false;
+  const traceHeader = {
+    toString(): string {
+      if (isHeaderRefusing) {
+        throw refusal;
+      }
+      return 'trace-1';
+    },
+  };
+  let failPendingWrite: ((error: Error) => void) | undefined;
+  let respond: ((res: http.IncomingMessage) => void) | undefined;
+  const req = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    writableEnded: false,
+    setHeader() {},
+    getHeaders: () => ({}),
+    write(_data: unknown, callback?: (error: Error | null) => void) {
+      failPendingWrite = (error) => callback?.(error);
+      return true;
+    },
+    end() {
+      this.writableEnded = true;
+    },
+    destroy() {
+      this.destroyed = true;
+      return this;
+    },
+  });
+  const requestSpy = spyOn(http, 'request').mockImplementation(((
+    _options: unknown,
+    callback: (res: http.IncomingMessage) => void,
+  ) => {
+    respond = callback;
+    return req as unknown as http.ClientRequest;
+  }) as unknown as typeof http.request);
+  const abortListeners = new Set<unknown>();
+  const reports: unknown[] = [];
+  const onError = (event: Event): void => {
+    reports.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onError);
+  try {
+    const pending = new NodeAdapter().send({
+      requestURL: 'http://example.test/upload',
+      method: 'POST',
+      headers: { 'x-trace': traceHeader as unknown as string },
+      body: 'payload',
+      signal: {
+        aborted: false,
+        addEventListener(_type: string, listener: unknown) {
+          abortListeners.add(listener);
+        },
+        removeEventListener(_type: string, listener: unknown) {
+          abortListeners.delete(listener);
+        },
+      } as unknown as AbortSignal,
+      streamResponse: (_info, context) =>
+        // A sink that is still opening, and gives up when its signal fires.
+        new Promise<WritableLike>((_resolve, reject) => {
+          context.signal.addEventListener('abort', () => {
+            reject(new Error('sink open aborted'));
+          });
+        }),
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(failPendingWrite).toBeDefined();
+
+    const res = Object.assign(new EventEmitter(), {
+      statusCode: 200,
+      headers: { 'content-length': '2' },
+      complete: false,
+    });
+    respond?.(res as unknown as http.IncomingMessage);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Answers the request synchronously, without reaching the writer; the factory's
+    // rejection is handled on a later microtask, by which point the header refuses.
+    res.emit('aborted');
+    isHeaderRefusing = true;
+
+    const response = await pending;
+    expect(response.status).toBe(200);
+    expect(response.isStreamError).toBe(true);
+    expect(response.errorCause?.message).toBe(
+      'Response stream closed during setup',
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(reports).toHaveLength(1);
+    expect((reports[0] as Error).message).toBe(
+      'Error in a callback NodeAdapter response task',
+    );
+    expect((reports[0] as Error).cause).toBe(refusal);
+
+    // The writer is still running, so its outcome is open and the abort listener stays.
+    const bodySettled = response.requestBodySettled?.then((value) => ({
+      value,
+    }));
+    expect(
+      await Promise.race([
+        bodySettled,
+        new Promise((resolve) => setTimeout(() => resolve('pending'), 0)),
+      ]),
+    ).toBe('pending');
+    expect(abortListeners.size).toBeGreaterThan(0);
+
+    isHeaderRefusing = false;
+    failPendingWrite?.(writeFailure);
+
+    expect(await bodySettled).toEqual({ value: writeFailure });
+    expect(abortListeners.size).toBe(0);
+    expect(reports).toHaveLength(2);
+    expect(reports[1]).toBe(writeFailure);
+  } finally {
+    isHeaderRefusing = false;
+    globalThis.removeEventListener('error', onError);
+    requestSpy.mockRestore();
+  }
+});

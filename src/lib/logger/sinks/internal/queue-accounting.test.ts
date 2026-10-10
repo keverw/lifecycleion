@@ -56,3 +56,18 @@ test('a report latch claims once per origin until reset', () => {
   expect(latch.claim(undefined)).toBe(true);
   expect(latch.claim(diagnostic)).toBe(true);
 });
+
+test('a released claim re-arms only its own origin', () => {
+  const latch = new ReportOnceLatch();
+  const diagnostic = markDiagnosticEntry(entry('diagnostic'));
+  expect(latch.claim(diagnostic)).toBe(true);
+  expect(latch.claim(entry('ordinary'))).toBe(true);
+
+  latch.release(diagnostic);
+  expect(latch.claim(undefined)).toBe(false);
+  expect(latch.claim(diagnostic)).toBe(true);
+
+  latch.release(entry('ordinary'));
+  expect(latch.claim(diagnostic)).toBe(false);
+  expect(latch.claim(undefined)).toBe(true);
+});
