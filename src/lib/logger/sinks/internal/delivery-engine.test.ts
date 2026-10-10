@@ -1,16 +1,18 @@
 import { describe, expect, test } from 'bun:test';
 import {
   DeliveryEngine,
+  FILE_SINK_PRE_ENGINE_BEHAVIOR,
   ORPHAN_SETTLE_MS,
   PRE_ENGINE_BEHAVIOR,
   type DeliveryCompat,
   type DeliverySlot,
   type DestinationAdapter,
+  type EndContext,
   type OpenContext,
   type OpenResult,
   type WriteOutcome,
 } from './delivery-engine';
-import type { SinkFailure } from './sink-failure';
+import type { SinkFailure, SinkFailureKind } from './sink-failure';
 import { markDiagnosticEntry } from '../../internal/sink-failure-routing';
 import type { LogEntry } from '../../types';
 
@@ -51,7 +53,7 @@ interface PendingWrite {
  */
 class FakeDestination implements DestinationAdapter {
   public readonly label = 'FakeSink';
-  public readonly maxInFlight = Infinity;
+  public readonly maxInFlight: number = Infinity;
   public isOpen = false;
   /** Answers for the next opens, in order; `'pending'` waits for {@link answerOpen}. */
   public openAnswers: Array<OpenResult | 'pending'> = [];
@@ -64,6 +66,11 @@ class FakeDestination implements DestinationAdapter {
   public readonly drainWaiters: Array<() => void> = [];
   public releases = 0;
   public readonly ends: number[] = [];
+  public readonly endContexts: Array<EndContext | undefined> = [];
+  /** Whether `write()` hands the line over at once, or leaves it uncommitted. */
+  public commitsOnWrite = true;
+  /** How many times the engine said close stopped draining. */
+  public closedCalls = 0;
   /** Whether `end()` fails the writes still pending, as destroying a stream does. */
   public doesEndFailPending = false;
   public refusal?: Error;
@@ -115,7 +122,10 @@ class FakeDestination implements DestinationAdapter {
     done: (outcome: WriteOutcome) => void,
     onCommitted: () => void,
   ): boolean {
-    onCommitted();
+    if (this.commitsOnWrite) {
+      onCommitted();
+    }
+
     this.writes.push({ slot, done });
     this.onWrite?.(slot);
 
@@ -137,8 +147,13 @@ class FakeDestination implements DestinationAdapter {
     this.isOpen = false;
   }
 
-  public end(timeoutMS: number): Promise<number> {
+  public onClosed(): void {
+    this.closedCalls++;
+  }
+
+  public end(timeoutMS: number, context?: EndContext): Promise<number> {
     this.ends.push(timeoutMS);
+    this.endContexts.push(context);
     this.isOpen = false;
 
     if (this.doesEndFailPending) {
@@ -169,14 +184,18 @@ class FakeDestination implements DestinationAdapter {
   }
 
   /** Fail the oldest pending write. */
-  public fail(error: Error = new Error('EPIPE'), isRetryable = true): void {
+  public fail(
+    error: Error = new Error('EPIPE'),
+    isRetryable = true,
+    extra: { kind?: SinkFailureKind; onRetry?: () => void } = {},
+  ): void {
     const pending = this.writes.shift();
 
     if (pending === undefined) {
       throw new Error('no write pending');
     }
 
-    pending.done({ status: 'failed', error, isRetryable });
+    pending.done({ status: 'failed', error, isRetryable, ...extra });
   }
 
   /** The lines handed over and not yet settled, oldest first. */
@@ -226,6 +245,7 @@ function makeEngine(
     maxQueueSize?: number;
     maxRetries?: number;
     closeTimeoutMS?: number;
+    createError?: (message: string) => Error;
     /** Handed the harness, so a handler can act on the engine it is reporting for. */
     onError?: (failure: SinkFailure, harness: Harness) => void;
     destination?: FakeDestination;
@@ -252,6 +272,7 @@ function makeEngine(
       lostAtClose: (count, bytesLeft) =>
         `${String(count)} lost at close (${String(bytesLeft)} bytes)`,
     },
+    createError: options.createError,
     report: (failure) => {
       reports.push(failure);
       options.onError?.(failure, harness);
@@ -558,8 +579,10 @@ describe.each(MODES)('DeliveryEngine (%s)', (_label, compat) => {
   test('close abandons what it cannot send, reported once with the oldest line', async () => {
     const destination = new FakeDestination();
     destination.defaultOpen = { status: 'unavailable' };
+    // Room in the grace window for several of its 50 ms polls, so a timer delayed by a
+    // busy event loop still leaves time for a second attempt.
     const { engine, reports, write } = await started(
-      makeEngine({ compat, destination, closeTimeoutMS: 100 }),
+      makeEngine({ compat, destination, closeTimeoutMS: 300 }),
     );
 
     write('a');
@@ -931,5 +954,366 @@ describe('DeliveryEngine hostile handlers', () => {
       shouldSuppressFailureReport: false,
     });
     await engine.close();
+  });
+});
+
+describe('DeliveryEngine (FileSink pre-engine behavior)', () => {
+  /** FileSink's shape: one line at a time, each waiting for its own outcome. */
+  const oneAtATime = (): FakeDestination => {
+    const destination = new FakeDestination();
+
+    (destination as { maxInFlight: number }).maxInFlight = 1;
+
+    return destination;
+  };
+
+  test('a write that failed as setup is reported and counted under setup, and runs onRetry when kept', async () => {
+    const destination = oneAtATime();
+    const { engine, reports, write } = await started(
+      makeEngine({
+        compat: FILE_SINK_PRE_ENGINE_BEHAVIOR,
+        destination,
+        maxRetries: 1,
+      }),
+    );
+    let retries = 0;
+    const onRetry = (): void => {
+      retries++;
+      // Runs before anything sends the line again.
+      expect(destination.pendingLines()).toEqual([]);
+    };
+
+    write('a');
+    destination.fail(new Error('mkdir failed'), true, {
+      kind: 'setup',
+      onRetry,
+    });
+
+    expect(retries).toBe(1);
+    expect(destination.pendingLines()).toEqual(['a']);
+
+    destination.fail(new Error('mkdir failed'), true, {
+      kind: 'setup',
+      onRetry,
+    });
+
+    expect(retries).toBe(1);
+    expect(
+      reports.map((failure) => [
+        failure.kind,
+        failure.disposition,
+        failure.attempt,
+      ]),
+    ).toEqual([
+      ['setup', 'retrying', 1],
+      ['setup', 'lost', 2],
+    ]);
+    expect(engine.getHealth()).toMatchObject({
+      consecutiveFailures: 0,
+      droppedEntries: 1,
+      droppedByKind: { setup: 1, write: 0 },
+    });
+  });
+
+  test('a handler that fills the queue during a retrying report hears the same failure again as lost', async () => {
+    const harness = makeEngine({
+      compat: FILE_SINK_PRE_ENGINE_BEHAVIOR,
+      destination: oneAtATime(),
+      maxQueueSize: 1,
+      onError: (failure, { write }) => {
+        if (failure.disposition === 'retrying') {
+          write('filler');
+        }
+      },
+    });
+    const failure = new Error('mkdir failed');
+
+    await started(harness);
+    harness.write('a');
+    harness.destination.fail(failure, true, { kind: 'setup' });
+
+    expect(
+      harness.reports.map((report) => [
+        report.kind,
+        report.entry?.message,
+        report.disposition,
+        report.attempt,
+      ]),
+    ).toEqual([
+      ['setup', 'a', 'retrying', 1],
+      ['setup', 'a', 'lost', 1],
+    ]);
+    expect(harness.reports[1].error).toBe(failure);
+    // The handler's own line goes out once the failed one has left.
+    expect(harness.destination.pendingLines()).toEqual(['filler']);
+    expect(harness.engine.getHealth()).toMatchObject({
+      consecutiveFailures: 0,
+      droppedByKind: { setup: 1, write: 0 },
+    });
+  });
+
+  test('a write failure is counted once against health, even when said twice', async () => {
+    const harness = makeEngine({
+      compat: FILE_SINK_PRE_ENGINE_BEHAVIOR,
+      destination: oneAtATime(),
+      maxQueueSize: 1,
+      onError: (failure, { write }) => {
+        if (failure.disposition === 'retrying') {
+          write('filler');
+        }
+      },
+    });
+
+    await started(harness);
+    harness.write('a');
+    harness.destination.fail(new Error('EIO'));
+
+    expect(harness.reports.map((report) => report.disposition)).toEqual([
+      'retrying',
+      'lost',
+    ]);
+    expect(harness.engine.getHealth()).toMatchObject({
+      consecutiveFailures: 1,
+      droppedByKind: { write: 1 },
+    });
+  });
+
+  test('a retry during close goes out at once rather than on the next poll', async () => {
+    const destination = oneAtATime();
+    const { engine, write } = await started(
+      makeEngine({ compat: FILE_SINK_PRE_ENGINE_BEHAVIOR, destination }),
+    );
+
+    write('a');
+
+    const closing = engine.close();
+
+    destination.fail();
+
+    expect(destination.pendingLines()).toEqual(['a']);
+
+    destination.succeed();
+    await closing;
+
+    expect(destination.delivered).toEqual(['a']);
+  });
+
+  test('close waits for a write in flight as it waits for the queue', async () => {
+    const destination = oneAtATime();
+    const { engine, reports, write } = await started(
+      makeEngine({ compat: FILE_SINK_PRE_ENGINE_BEHAVIOR, destination }),
+    );
+    let isClosed = false;
+
+    write('a');
+    void engine.close().then(() => {
+      isClosed = true;
+    });
+    await tick(30);
+
+    expect(isClosed).toBe(false);
+
+    destination.succeed();
+    await until(() => isClosed);
+
+    expect(reports).toEqual([]);
+    expect(destination.endContexts).toEqual([{ hasReportedInFlight: false }]);
+  });
+
+  test('at the deadline, a write never handed over is abandoned with the queue', async () => {
+    const destination = oneAtATime();
+
+    destination.commitsOnWrite = false;
+
+    const { engine, reports, write } = await started(
+      makeEngine({
+        compat: FILE_SINK_PRE_ENGINE_BEHAVIOR,
+        destination,
+        closeTimeoutMS: 30,
+      }),
+    );
+
+    write('a');
+    write('b');
+    await engine.close();
+
+    expect(
+      reports.map((failure) => [
+        failure.kind,
+        failure.disposition,
+        failure.entry?.message,
+        failure.error.message,
+      ]),
+    ).toEqual([['close', 'lost', 'a', 'abandoned 2']]);
+    expect(destination.endContexts).toEqual([{ hasReportedInFlight: false }]);
+
+    // Its pass resuming into the closed sink says nothing more.
+    destination.fail(new Error('closed'), true, { kind: 'close' });
+
+    expect(reports).toHaveLength(1);
+    expect(engine.getHealth()).toMatchObject({
+      queueSize: 0,
+      droppedEntries: 2,
+      droppedByKind: { close: 2 },
+    });
+  });
+
+  test.each(['fails', 'succeeds'] as const)(
+    'at the deadline, a write handed over is reported once as unknown, and its late answer %s quietly',
+    async (lateAnswer) => {
+      const destination = oneAtATime();
+      const { engine, reports, write } = await started(
+        makeEngine({
+          compat: FILE_SINK_PRE_ENGINE_BEHAVIOR,
+          destination,
+          closeTimeoutMS: 30,
+        }),
+      );
+
+      write('a');
+      write('b');
+      await engine.close();
+
+      expect(
+        reports.map((failure) => [
+          failure.kind,
+          failure.disposition,
+          failure.entry?.message,
+          failure.error.message,
+        ]),
+      ).toEqual([
+        ['close', 'lost', 'b', 'abandoned 1'],
+        ['close', 'no_entry', undefined, '1 in flight, unknown'],
+      ]);
+      expect(destination.endContexts).toEqual([{ hasReportedInFlight: true }]);
+
+      if (lateAnswer === 'fails') {
+        destination.fail(new Error('late EIO'));
+      } else {
+        destination.succeed();
+      }
+
+      expect(reports).toHaveLength(2);
+      expect(engine.getHealth().lastError?.message).toBe(
+        '1 in flight, unknown',
+      );
+      expect(await engine.flush(100)).toMatchObject({
+        entriesWritten: lateAnswer === 'succeeds' ? 1 : 0,
+        entriesFailed: 1,
+      });
+    },
+  );
+
+  test('an overflow episode stays open while a line is still in flight', async () => {
+    const destination = oneAtATime();
+    const { reports, write } = await started(
+      makeEngine({
+        compat: FILE_SINK_PRE_ENGINE_BEHAVIOR,
+        destination,
+        maxQueueSize: 1,
+      }),
+    );
+
+    write('a');
+    write('b');
+    write('c');
+    // `c` goes out; nothing is queued, but the episode is not over until it settles.
+    destination.succeed();
+    write('d');
+    write('e');
+
+    expect(
+      reports
+        .filter((failure) => failure.kind === 'queue_full')
+        .map((failure) => failure.entry?.message),
+    ).toEqual(['b']);
+
+    destination.succeed(2);
+    write('f');
+    write('g');
+    write('h');
+
+    expect(
+      reports
+        .filter((failure) => failure.kind === 'queue_full')
+        .map((failure) => failure.entry?.message),
+    ).toEqual(['b', 'g']);
+  });
+
+  test('the adapter hears close has stopped draining before anything is reported', async () => {
+    const destination = oneAtATime();
+
+    destination.commitsOnWrite = false;
+
+    const closedAtReport: number[] = [];
+    const harness = makeEngine({
+      compat: FILE_SINK_PRE_ENGINE_BEHAVIOR,
+      destination,
+      closeTimeoutMS: 20,
+      onError: () => {
+        closedAtReport.push(destination.closedCalls);
+      },
+    });
+
+    await started(harness);
+    harness.write('a');
+    await harness.engine.close();
+
+    expect(closedAtReport).toEqual([1]);
+  });
+});
+
+describe('DeliveryEngine reporting hooks', () => {
+  class SinkError extends Error {
+    public override readonly name = 'SinkError';
+  }
+
+  test("composed reports carry the sink's error class", async () => {
+    const harness = await started(
+      makeEngine({
+        maxQueueSize: 1,
+        createError: (message) => new SinkError(message),
+      }),
+    );
+
+    harness.destination.canContinue = false;
+    harness.write('a');
+    harness.write('b');
+    harness.write('c');
+
+    expect(harness.reports).toHaveLength(1);
+    expect(harness.reports[0].error).toBeInstanceOf(SinkError);
+    expect(harness.reports[0].error.message).toBe('full at 1');
+  });
+
+  test('a report can name its own target, and recordError reports nothing', async () => {
+    const { engine, reports } = await started(makeEngine());
+    const recorded = new Error('recorded only');
+
+    engine.report('setup', new Error('archive'), { target: '/archive.log' });
+    engine.recordError(recorded);
+
+    expect(reports.map((failure) => failure.target)).toEqual(['/archive.log']);
+    expect(engine.getHealth().lastError).toBe(recorded);
+  });
+
+  test('isDrained covers lines in flight, and flush windows expose their tail', async () => {
+    const { engine, destination, write } = await started(makeEngine());
+    const before = engine.flushes.settled;
+
+    expect(engine.isDrained).toBe(true);
+
+    write('a');
+
+    expect(engine.isDrained).toBe(false);
+
+    const flushing = engine.flush(1000);
+
+    expect(engine.flushes.settled).not.toBe(before);
+
+    destination.succeed();
+    await flushing;
+
+    expect(engine.isDrained).toBe(true);
   });
 });

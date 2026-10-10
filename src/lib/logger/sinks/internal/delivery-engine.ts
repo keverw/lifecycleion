@@ -150,7 +150,24 @@ export interface OpenRouting {
 export type WriteOutcome =
   | { status: 'written' }
   /** `isRetryable: false` for a write that may have delivered part of the line. */
-  | { status: 'failed'; error: unknown; isRetryable: boolean }
+  | {
+      status: 'failed';
+      error: unknown;
+      isRetryable: boolean;
+      /**
+       * What the write failed as, when it was not the write itself: FileSink sets its
+       * destination up inside a write, so a write can fail as `'setup'`, or as `'close'`
+       * when the sink closed under it. Read only with {@link DeliveryCompat.inlineSetup};
+       * omitted means `'write'`.
+       */
+      kind?: SinkFailureKind;
+      /**
+       * Called once the line is kept for another attempt, before anything sends it: where
+       * FileSink starts the pause it takes before retrying a failed setup. Step B of
+       * `plans/shared-sink-queue.md` only; removed with {@link DeliveryCompat.inlineSetup}.
+       */
+      onRetry?: () => void;
+    }
   /** Not attempted: the destination went away before the line was handed to it. */
   | { status: 'unavailable' }
   /**
@@ -208,7 +225,23 @@ export interface DestinationAdapter {
    * End the destination for `close()`, within `timeoutMS` (never less than the final-flush
    * minimum), reporting what it held if it could not flush. Resolves with the bytes left.
    */
-  end(timeoutMS: number): Promise<number>;
+  end(timeoutMS: number, context?: EndContext): Promise<number>;
+  /**
+   * Told the moment `close()` stops draining, before it gives up on anything or reports
+   * it, so the adapter's own view of the sink is closed by the time a report reaches a
+   * handler.
+   */
+  onClosed?(): void;
+}
+
+/** What {@link DestinationAdapter.end} is told about the close that is ending it. */
+export interface EndContext {
+  /**
+   * Whether `close()` has already reported a write in flight whose delivery is unknown,
+   * so the bytes the destination still holds are already named. See
+   * {@link DeliveryCompat.drainsInFlight}.
+   */
+  hasReportedInFlight: boolean;
 }
 
 /** Options for {@link DeliveryEngine.report}: the shape the sinks' `handleError` takes. */
@@ -217,6 +250,8 @@ export interface DeliveryReportOptions {
   isDiagnostic?: boolean;
   /** `false` for a failure that belongs to a connection the sink has already replaced. */
   countsAgainstHealth?: boolean;
+  /** What the failure names as its `target`, when not the adapter's current one. */
+  target?: string;
   attempt?: number;
   disposition?: SinkFailureDisposition;
   /** The line this failure is about, when the sink still has it. */
@@ -300,15 +335,54 @@ export interface DeliveryCompat {
    * ignored.
    */
   honorsLateCallbacks?: boolean;
+  /**
+   * FileSink only, and temporary: removed in step C of `plans/shared-sink-queue.md`, when
+   * FileSink's `open()` takes over its setup.
+   *
+   * The destination is set up inside each write, so a write can fail as something other
+   * than a write: a failure is reported and counted under the outcome's `kind` (a line
+   * lost after the sink closed under a write failure counts as `'close'`); a line whose
+   * retry a handler's own lines or `close()` took away is reported `'lost'` with the same
+   * failure, rather than a message of the engine's; the outcome's `onRetry` runs once the
+   * line is kept; and a retry during `close()` goes out at once rather than on close's
+   * next poll. Off: every write failure is a `'write'`.
+   */
+  inlineSetup?: boolean;
+  /**
+   * FileSink only, and temporary: removed in step D, which turns on the evidence-based
+   * close for both sinks.
+   *
+   * A line in flight is still work: `close()` waits for it as it waits for the queue, and
+   * an overflow episode ends only once nothing is queued or in flight. At the deadline a
+   * line in flight that was never handed over is abandoned with the queue; one that was is
+   * reported once as `'close'`/`'no_entry'` - its delivery unknown, so uncounted - and
+   * `end()` is told so. Its late success still counts as written; its late failure is
+   * ignored. Overrides {@link honorsLateCallbacks} at close.
+   */
+  drainsInFlight?: boolean;
 }
 
-/** Every {@link DeliveryCompat} switch on: the behavior queueing sinks had before. */
-export const PRE_ENGINE_BEHAVIOR: Required<DeliveryCompat> = {
+/**
+ * Every shared {@link DeliveryCompat} switch on: the behavior queueing sinks had before.
+ * The FileSink-only ones are in {@link FILE_SINK_PRE_ENGINE_BEHAVIOR}.
+ */
+export const PRE_ENGINE_BEHAVIOR: DeliveryCompat = {
   countsQueuedOnly: true,
   refusesRetryWithoutRoom: true,
   reopensOnDemand: true,
   unavailableSpendsAttempt: true,
   honorsLateCallbacks: true,
+};
+
+/** {@link PRE_ENGINE_BEHAVIOR} plus FileSink's own: how FileSink behaved before. */
+export const FILE_SINK_PRE_ENGINE_BEHAVIOR: Required<DeliveryCompat> = {
+  countsQueuedOnly: true,
+  refusesRetryWithoutRoom: true,
+  reopensOnDemand: true,
+  unavailableSpendsAttempt: true,
+  honorsLateCallbacks: true,
+  inlineSetup: true,
+  drainsInFlight: true,
 };
 
 export interface DeliveryEngineOptions {
@@ -320,6 +394,11 @@ export interface DeliveryEngineOptions {
   /** Spacing of automatic reopen attempts. */
   backoff: BackoffOptions;
   messages: DeliveryMessages;
+  /**
+   * The error a report the engine composes carries, built from the sink's own message, so
+   * a sink with its own error class reports in it. Defaults to `Error`.
+   */
+  createError?: (message: string) => Error;
   report: DeliveryReporter;
   /** Whether the sink has an explicit `onError`, read at report time. */
   hasHandler: () => boolean;
@@ -406,13 +485,17 @@ export class DeliveryEngine {
    * explicit reopen, which is an attempt the caller asked for and is owed an answer to.
    */
   public readonly outages: OutageReporter;
+  /**
+   * The chained flush windows {@link flush} counts in. Public for a sink that runs its own
+   * flush body in the same windows, so its counts partition with this one's.
+   */
+  public readonly flushes: FlushWindows;
 
   private readonly adapter: DestinationAdapter;
   private readonly options: DeliveryEngineOptions;
   private readonly compat: Required<DeliveryCompat>;
   /** Spaces automatic reopen attempts; see {@link ensureConnection}. */
   private readonly backoff: Backoff;
-  private readonly flushes: FlushWindows;
 
   /**
    * Every line not yet delivered or given up on, oldest first, each with the line already
@@ -501,11 +584,16 @@ export class DeliveryEngine {
       reopensOnDemand: false,
       unavailableSpendsAttempt: false,
       honorsLateCallbacks: false,
+      inlineSetup: false,
+      drainsInFlight: false,
       ...options.compat,
     };
     this.backoff = new Backoff(options.backoff);
     this.losses = new LossLedger((kind, message, entry) =>
-      this.report(kind, new Error(message), { disposition: 'lost', entry }),
+      this.report(kind, this.createError(message), {
+        disposition: 'lost',
+        entry,
+      }),
     );
     this.outages = new OutageReporter({
       report: (kind, error, isDiagnostic) => {
@@ -536,6 +624,11 @@ export class DeliveryEngine {
 
   private get closed(): boolean {
     return this.state === 'closed';
+  }
+
+  /** Whether nothing is queued or in flight, and no dispatch pass is running. */
+  public get isDrained(): boolean {
+    return this.slots.length === 0 && !this.isPumping;
   }
 
   /**
@@ -631,8 +724,11 @@ export class DeliveryEngine {
       }
     } finally {
       // A drained queue closes the reported overflow episode, so a sink that overflows
-      // again hours later says so again.
-      if (this.queueSize === 0) {
+      // again hours later says so again. See {@link DeliveryCompat.drainsInFlight} for
+      // whether a line in flight still holds it open.
+      if (
+        (this.compat.drainsInFlight ? this.slots.length : this.queueSize) === 0
+      ) {
         this.losses.endOverflowEpisode();
       }
 
@@ -876,7 +972,7 @@ export class DeliveryEngine {
       {
         kind,
         error: failure,
-        target: this.adapter.target(),
+        target: options?.target ?? this.adapter.target(),
         ...(options?.entry === undefined ? {} : { entry: options.entry }),
         ...(options?.attempt === undefined ? {} : { attempt: options.attempt }),
         disposition: options?.disposition ?? 'no_entry',
@@ -887,6 +983,14 @@ export class DeliveryEngine {
         onSettled: options?.onReported,
       },
     );
+  }
+
+  /**
+   * Record `error` as the most recent failure without reporting it: for a failure the sink
+   * reports by its own route, or one it has already reported once.
+   */
+  public recordError(error: Error): void {
+    this.lastError = error;
   }
 
   /** The base health every queueing sink reports. */
@@ -921,7 +1025,7 @@ export class DeliveryEngine {
       const firstAttempt = this.openAttemptsStarted + 1;
 
       for (;;) {
-        if (this.slots.length === 0 && !this.isPumping) {
+        if (this.isDrained) {
           return window.settle(false);
         }
 
@@ -960,6 +1064,10 @@ export class DeliveryEngine {
     this.closePromise ??= deferClose(() => this.closeInternal());
 
     return this.closePromise;
+  }
+
+  private createError(message: string): Error {
+    return this.options.createError?.(message) ?? new Error(message);
   }
 
   private firstQueued(): DeliverySlot | undefined {
@@ -1103,6 +1211,19 @@ export class DeliveryEngine {
     const isCurrent =
       isSynchronous || slot.generation === this.connectionGeneration;
 
+    // `close()` already answered for a line still in flight when it gave up - abandoned
+    // with the queue, or reported as unknown - so a failure arriving now has nothing left
+    // to say. A late success is still a line written.
+    if (
+      this.compat.drainsInFlight &&
+      this.closed &&
+      outcome.status !== 'written'
+    ) {
+      this.removeSlot(slot);
+
+      return;
+    }
+
     switch (outcome.status) {
       case 'written': {
         this.removeSlot(slot);
@@ -1169,10 +1290,11 @@ export class DeliveryEngine {
    */
   private applyFailure(
     slot: DeliverySlot,
-    outcome: { error: unknown; isRetryable: boolean },
+    outcome: Extract<WriteOutcome, { status: 'failed' }>,
     isCurrent: boolean,
     isSynchronous: boolean,
   ): void {
+    const kind = this.compat.inlineSetup ? (outcome.kind ?? 'write') : 'write';
     const willRetry =
       !this.closed &&
       outcome.isRetryable &&
@@ -1190,8 +1312,8 @@ export class DeliveryEngine {
       // Out of attempts, closed, or - for a write that may have delivered part of the line -
       // never to be replayed. Gone from the queue and counted before anyone is told.
       this.removeSlot(slot);
-      this.losses.count('write');
-      this.report('write', outcome.error, {
+      this.losses.count(this.lossKindFor(kind));
+      this.report(kind, outcome.error, {
         ...report,
         shouldSuppressFailureReport: this.shouldSuppressWriteReport(
           slot,
@@ -1206,7 +1328,7 @@ export class DeliveryEngine {
     // Reported before the retry is committed, the slot still marked in flight with its
     // token cleared: nothing can settle it twice, and nothing a handler does can evict it.
     const shouldSuppress = this.shouldSuppressWriteReport(slot, true);
-    const didReport = this.report('write', outcome.error, {
+    const didReport = this.report(kind, outcome.error, {
       ...report,
       shouldSuppressFailureReport: shouldSuppress,
       disposition: 'retrying',
@@ -1225,7 +1347,11 @@ export class DeliveryEngine {
 
     // Re-checked now the handler has returned: it may have filled the queue or closed the
     // sink, and the line is then reported again as `'lost'` - the final word.
-    this.retryOrGiveUp(slot);
+    this.retryOrGiveUp(
+      slot,
+      this.compat.inlineSetup ? { kind, error: outcome.error } : undefined,
+      outcome.onRetry,
+    );
   }
 
   /**
@@ -1235,23 +1361,39 @@ export class DeliveryEngine {
    * be attempted at all - reported nothing, so a line given up on here is reported here,
    * with a message that says what is known: synthesized rather than re-reporting
    * `lastError`, which may be an unrelated earlier failure and would name the wrong cause.
+   * With {@link DeliveryCompat.inlineSetup} the `'retrying'` report's own `failure` is
+   * said again instead.
+   *
+   * `onRetry` runs once the line is kept, before anything can send it again.
    */
-  private retryOrGiveUp(slot: DeliverySlot): void {
+  private retryOrGiveUp(
+    slot: DeliverySlot,
+    failure?: { kind: SinkFailureKind; error: unknown },
+    onRetry?: () => void,
+  ): void {
+    const isGivenUp =
+      this.closed ||
+      slot.attempts >= this.options.maxRetries ||
+      (this.compat.refusesRetryWithoutRoom && !this.hasRetryRoom());
+
+    if (isGivenUp && failure !== undefined) {
+      this.giveUpAfterRetrying(slot, failure);
+
+      return;
+    }
+
     if (this.closed) {
       this.giveUpAfterClose(slot);
 
       return;
     }
 
-    if (
-      slot.attempts >= this.options.maxRetries ||
-      (this.compat.refusesRetryWithoutRoom && !this.hasRetryRoom())
-    ) {
+    if (isGivenUp) {
       this.removeSlot(slot);
       this.losses.count('write');
       this.report(
         'write',
-        new Error(this.options.messages.notRetained(slot.attempts + 1)),
+        this.createError(this.options.messages.notRetained(slot.attempts + 1)),
         {
           attempt: slot.attempts + 1,
           disposition: 'lost',
@@ -1269,7 +1411,46 @@ export class DeliveryEngine {
     slot.attempts++;
     this.leaveFlight(slot);
     this.enforceQueueLimit();
+    onRetry?.();
     this.afterFailedWrite();
+  }
+
+  /**
+   * A line reported `'retrying'` that cannot be kept after all: the handler filled the
+   * queue or the sink closed. Reported again, with the same failure and attempt, as
+   * `'lost'` - the final word. See {@link DeliveryCompat.inlineSetup}.
+   */
+  private giveUpAfterRetrying(
+    slot: DeliverySlot,
+    failure: { kind: SinkFailureKind; error: unknown },
+  ): void {
+    this.removeSlot(slot);
+    this.losses.count(this.lossKindFor(failure.kind));
+    this.report(failure.kind, failure.error, {
+      attempt: slot.attempts + 1,
+      entry: slot.entry,
+      disposition: 'lost',
+      shouldSuppressFailureReport: this.shouldSuppressWriteReport(slot, false),
+      // Counted once already, by the `'retrying'` report of this same failure.
+      countsAgainstHealth: false,
+    });
+  }
+
+  /**
+   * Which loss a failed line is counted under. Always `'write'`, unless
+   * {@link DeliveryCompat.inlineSetup} says a write can fail as something else: then the
+   * kind it failed as, and a write failure once the sink has closed is a closing loss.
+   */
+  private lossKindFor(kind: SinkFailureKind): DroppedEntryKind {
+    if (!this.compat.inlineSetup) {
+      return 'write';
+    }
+
+    if (kind === 'format' || kind === 'close' || kind === 'setup') {
+      return kind;
+    }
+
+    return this.closed ? 'close' : 'write';
   }
 
   /**
@@ -1280,11 +1461,15 @@ export class DeliveryEngine {
   private giveUpAfterClose(slot: DeliverySlot): void {
     this.removeSlot(slot);
     this.losses.count('close');
-    this.report('close', new Error(this.options.messages.failedAfterClose()), {
-      disposition: 'lost',
-      entry: slot.entry,
-      shouldSuppressFailureReport: slot.shouldSuppressFailureReport,
-    });
+    this.report(
+      'close',
+      this.createError(this.options.messages.failedAfterClose()),
+      {
+        disposition: 'lost',
+        entry: slot.entry,
+        shouldSuppressFailureReport: slot.shouldSuppressFailureReport,
+      },
+    );
   }
 
   /**
@@ -1297,7 +1482,9 @@ export class DeliveryEngine {
    * in a queue nothing was draining.
    */
   private afterFailedWrite(): void {
-    if (this.closing || this.closed) {
+    // With `inlineSetup`, close's drain is the sink's own pass, which goes straight on to
+    // the retry rather than waiting for close to poll.
+    if (this.closed || (this.closing && !this.compat.inlineSetup)) {
       return;
     }
 
@@ -1410,7 +1597,7 @@ export class DeliveryEngine {
 
       this.report(
         'queue_full',
-        new Error(this.options.messages.queueFull(limit ?? 0)),
+        this.createError(this.options.messages.queueFull(limit ?? 0)),
         { disposition: 'lost', entry: slot.entry },
       );
     }
@@ -1719,9 +1906,15 @@ export class DeliveryEngine {
 
     // Drain what the destination can still take before giving up on it. An open in
     // progress counts as work to wait for, exactly as a live connection does; the
-    // deadline still bounds the wait.
+    // deadline still bounds the wait. See {@link DeliveryCompat.drainsInFlight} for
+    // whether a line in flight is still work.
+    const hasWork = (): boolean =>
+      this.compat.drainsInFlight
+        ? !this.isDrained
+        : this.queueSize > 0 || this.isPumping;
+
     while (
-      (this.queueSize > 0 || this.isPumping) &&
+      hasWork() &&
       (this.state === 'opening' || this.adapter.hasConnection()) &&
       Date.now() - startTime <= timeoutMS
     ) {
@@ -1736,10 +1929,17 @@ export class DeliveryEngine {
     this.state = 'closed';
     this.clearReopenTimer();
     this.clearOrphanTimer();
+    this.adapter.onClosed?.();
 
     // What is left of the *whole* close's budget, so the open wait, the drain and the final
     // flush share one deadline.
     const remainingMS = (): number => timeoutMS - (Date.now() - startTime);
+
+    if (this.compat.drainsInFlight) {
+      await this.closeLeavingInFlight(remainingMS);
+
+      return;
+    }
 
     if (this.compat.honorsLateCallbacks) {
       this.abandonOnClose((slot) => slot.state !== 'in_flight');
@@ -1799,6 +1999,42 @@ export class DeliveryEngine {
   }
 
   /**
+   * The close rule with {@link DeliveryCompat.drainsInFlight}: give up on everything not
+   * yet handed over, and say once that a write that was is unknown.
+   *
+   * The line handed over may well arrive - a filesystem write cannot be called back - so it
+   * is not counted, and `'no_entry'`, since it is neither lost nor coming back. Its late
+   * success counts as written; its late failure is ignored, this being its only report.
+   */
+  private async closeLeavingInFlight(remainingMS: () => number): Promise<void> {
+    const handedOver = new Set(
+      this.slots.filter(
+        (slot) =>
+          slot.state === 'in_flight' &&
+          slot.committed &&
+          slot.token !== undefined,
+      ),
+    );
+
+    // Never handed over, so certainly not written: lost with the queue, and the oldest of
+    // them is the report's sample.
+    this.abandonOnClose((slot) => !handedOver.has(slot));
+
+    if (handedOver.size > 0) {
+      this.report(
+        'close',
+        this.createError(
+          this.options.messages.inFlightUnknown(handedOver.size),
+        ),
+      );
+    }
+
+    await this.adapter.end(remainingMS(), {
+      hasReportedInFlight: handedOver.size > 0,
+    });
+  }
+
+  /**
    * The close rule without {@link DeliveryCompat.honorsLateCallbacks}: settle the writes
    * in flight on evidence before resolving.
    *
@@ -1838,7 +2074,7 @@ export class DeliveryEngine {
       this.losses.count('close', settlement.failed.length);
       this.report(
         'close',
-        new Error(
+        this.createError(
           this.options.messages.lostAtClose(
             settlement.failed.length,
             bytesLeft,
@@ -1859,7 +2095,9 @@ export class DeliveryEngine {
     if (unsettled.length > 0) {
       this.report(
         'close',
-        new Error(this.options.messages.inFlightUnknown(unsettled.length)),
+        this.createError(
+          this.options.messages.inFlightUnknown(unsettled.length),
+        ),
       );
     }
   }

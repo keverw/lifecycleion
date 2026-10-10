@@ -72,6 +72,11 @@ export class FlushWindows {
 
   constructor(private readonly totals: () => FlushTotals) {}
 
+  /** The last flush queued, settled: what the next one waits behind. Never rejects. */
+  public get settled(): Promise<void> {
+    return this.pending;
+  }
+
   /**
    * Run `body` once every earlier flush has settled.
    *

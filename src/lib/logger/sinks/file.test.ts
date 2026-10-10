@@ -2020,8 +2020,8 @@ describe('FileSink - bounded queue', () => {
 
     // Nothing drains the queue from here, so `close()` waits out its timeout and leaves
     // these behind - which is what a stalled volume does to it for real.
-    (sink as unknown as { processQueue: () => Promise<void> }).processQueue =
-      () => Promise.resolve();
+    (sink as unknown as { engine: { pump: () => void } }).engine.pump = () =>
+      undefined;
 
     for (let index = 0; index < 3; index++) {
       sink.write(makeEntry(`abandoned-${String(index)}`));
@@ -2073,8 +2073,8 @@ describe('FileSink - bounded queue', () => {
     (sink as unknown as { droppedEntries: number }).droppedEntries = 3;
 
     // Nothing drains the queue, so these sit under the cap.
-    (sink as unknown as { processQueue: () => Promise<void> }).processQueue =
-      () => Promise.resolve();
+    (sink as unknown as { engine: { pump: () => void } }).engine.pump = () =>
+      undefined;
 
     for (let index = 0; index < 4; index++) {
       sink.write(makeEntry(`under-cap-${String(index)}`));
@@ -2772,11 +2772,12 @@ describe('FileSink - accounting across a rotation', () => {
       basename: 'queued-timeout',
     });
     await sink.flush();
-    const internals = sink as unknown as {
-      isProcessing: boolean;
-      totalEntriesWritten: number;
-    };
-    internals.isProcessing = true;
+    const internals = (
+      sink as unknown as {
+        engine: { isPumping: boolean; totalWritten: number };
+      }
+    ).engine;
+    internals.isPumping = true;
     const first = sink.flush(1000);
     try {
       const result = await Promise.race([
@@ -2794,9 +2795,9 @@ describe('FileSink - accounting across a rotation', () => {
         entriesFailed: 0,
         timedOut: true,
       });
-      internals.totalEntriesWritten++;
+      internals.totalWritten++;
     } finally {
-      internals.isProcessing = false;
+      internals.isPumping = false;
     }
     expect((await first).entriesWritten).toBe(1);
     expect((await sink.flush()).entriesWritten).toBe(0);
