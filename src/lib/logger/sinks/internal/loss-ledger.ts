@@ -3,6 +3,7 @@ import {
   abandonQueuedEntries,
   evictQueuedEntries,
   ReportOnceLatch,
+  type EvictOptions,
 } from './queue-accounting';
 import {
   createDroppedEntryCounts,
@@ -110,27 +111,38 @@ export class LossLedger {
    * sample is a dropped entry, never a surviving one, so a handler that writes `'lost'`
    * lines elsewhere cannot duplicate one still queued. A report suppressed because a
    * console report was in progress does not count as the episode's.
+   *
+   * `options` narrows which entries may go and how full the queue counts as; see
+   * {@link EvictOptions}.
+   *
+   * Answers the entry the episode's report carried, when this call made that report, so a
+   * caller that owes some evicted entries a word of their own does not say it twice.
    */
-  public evict(
-    queue: Array<{ entry: LogEntry }>,
+  public evict<T extends { entry: LogEntry }>(
+    queue: T[],
     limit: number | undefined,
     message: (limit: number) => string,
-  ): void {
+    options?: EvictOptions<T>,
+  ): LogEntry | undefined {
     // Every enqueue comes through here, so a queue within its cap allocates nothing.
-    if (limit === undefined || queue.length <= limit) {
-      return;
+    if (limit === undefined || (options?.occupancy ?? queue.length) <= limit) {
+      return undefined;
     }
 
-    const dropped = evictQueuedEntries(queue, limit);
+    const dropped = evictQueuedEntries(queue, limit, options);
     this.count('queue_full', dropped.count);
 
     if (dropped.count === 0 || !this.queueFullReport.claim(dropped.entry)) {
-      return;
+      return undefined;
     }
 
     if (!this.report('queue_full', message(limit), dropped.entry)) {
       this.queueFullReport.release(dropped.entry);
+
+      return undefined;
     }
+
+    return dropped.entry;
   }
 
   /**
@@ -150,12 +162,15 @@ export class LossLedger {
    * abandons a full queue would otherwise fire the callback ten thousand times on the way
    * out of the process. Every entry in the queue was lost, so there is no surviving line to
    * confuse the sample with.
+   *
+   * `isAbandoned` limits it to some entries; see {@link abandonQueuedEntries}.
    */
-  public abandon(
-    queue: Array<{ entry: LogEntry }>,
+  public abandon<T extends { entry: LogEntry }>(
+    queue: T[],
     message: (count: number) => string,
+    isAbandoned?: (item: T) => boolean,
   ): void {
-    const abandoned = abandonQueuedEntries(queue);
+    const abandoned = abandonQueuedEntries(queue, isAbandoned);
 
     if (abandoned.count === 0) {
       return;

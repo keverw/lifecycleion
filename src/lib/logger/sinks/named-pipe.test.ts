@@ -159,6 +159,69 @@ async function waitForReaderData(
   return reader.data.join('');
 }
 
+/**
+ * The delivery engine's internals a test reaches for when it parks a line in the queue
+ * directly, or settles a write by hand, rather than going through `write()` and a stream.
+ */
+interface EngineSeam {
+  slots: Array<Record<string, unknown>>;
+  inFlightCount: number;
+  closing: boolean;
+  state: string;
+  dispatch: (slot: Record<string, unknown>) => void;
+  settle: (
+    slot: Record<string, unknown>,
+    token: object,
+    outcome: { status: string },
+  ) => void;
+  pump: () => void;
+}
+
+function engineOf(sink: NamedPipeSink): EngineSeam {
+  return (sink as unknown as { engine: EngineSeam }).engine;
+}
+
+/** A queue slot in the engine's shape, queued unless said otherwise. */
+function queueSlot(fields: {
+  line?: string;
+  entry?: LogEntry;
+  attempts?: number;
+  sequence?: number;
+}): Record<string, unknown> {
+  return {
+    sequence: 0,
+    line: '',
+    attempts: 0,
+    shouldSuppressFailureReport: false,
+    state: 'queued',
+    committed: false,
+    ...fields,
+  };
+}
+
+/**
+ * Park `slot` as a write in flight on a connection the engine has already left behind,
+ * and answer the token its outcome must carry - the state a write callback that arrives
+ * late is settled from.
+ */
+function parkInFlight(
+  engine: EngineSeam,
+  slot: Record<string, unknown>,
+): object {
+  const token = {};
+
+  Object.assign(slot, {
+    state: 'in_flight',
+    committed: true,
+    token,
+    generation: -1,
+  });
+  engine.slots.push(slot);
+  engine.inFlightCount++;
+
+  return token;
+}
+
 describe('NamedPipeSink', () => {
   test.each([1, 3])(
     'retries failed FIFO writes in order with maxRetries=%d',
@@ -311,8 +374,10 @@ describe('NamedPipeSink', () => {
       expect(await waitForOpenPipe(sink)).toBe(true);
       const internals = sink as unknown as {
         pipeStream: { fd: number };
-        processQueue: () => void;
-        writeQueue: Array<{ entry: LogEntry }>;
+        engine: {
+          pump: () => void;
+          slots: Array<{ entry: LogEntry }>;
+        };
       };
       const descriptor = internals.pipeStream.fd;
       const write = fs.write;
@@ -356,7 +421,7 @@ describe('NamedPipeSink', () => {
         template: 'buffered-record',
         message: 'buffered-record',
       });
-      drainSpy = spyOn(internals, 'processQueue').mockImplementation(() => {});
+      drainSpy = spyOn(internals.engine, 'pump').mockImplementation(() => {});
       await new Promise((resolve) => setTimeout(resolve, 30));
       const partial = failures.find(
         (failure) => failure.entry?.message === 'partial-record',
@@ -367,7 +432,7 @@ describe('NamedPipeSink', () => {
       ).toBe(8);
       expect(sink.getHealth().droppedEntries).toBe(1);
       expect(
-        internals.writeQueue.some(
+        internals.engine.slots.some(
           (queued) => queued.entry.message === 'partial-record',
         ),
       ).toBe(false);
@@ -950,7 +1015,7 @@ describe('NamedPipeSink', () => {
     if (privateSink.pipeStream) {
       privateSink.pipeStream.destroy();
       privateSink.pipeStream = undefined;
-      privateSink.isInitialized = false;
+      privateSink.engine.state = 'cooling_down';
     }
 
     // Stop old reader
@@ -1130,7 +1195,7 @@ describe('NamedPipeSink', () => {
 
     // Manually set reconnecting flag to test the already_reconnecting path
     const privateSink = sink as any;
-    privateSink._isReconnecting = true;
+    privateSink.engine.isReconnecting = true;
 
     // Try to reconnect while flag is set
     const reconnectResult = await sink.reconnect();
@@ -1258,13 +1323,17 @@ describe('NamedPipeSink', () => {
         pipePath: `${tmpDir.path}/rejected-init.pipe`,
         closeTimeoutMS: 1000,
       });
+      const engine = (
+        sink as unknown as {
+          engine: { openPromise: Promise<void>; closed: boolean };
+        }
+      ).engine;
       // The shape `reconnect()` leaves: the raw attempt, not an observed copy.
-      (sink as unknown as { initPromise: Promise<void> }).initPromise =
-        Promise.reject(new Error('open blew up'));
+      engine.openPromise = Promise.reject(new Error('open blew up'));
 
       expect(await sink.close()).toBeUndefined();
       expect(sink.getHealth().isHealthy).toBe(false);
-      expect((sink as unknown as { closed: boolean }).closed).toBe(true);
+      expect(engine.closed).toBe(true);
     } finally {
       initialize.mockRestore();
     }
@@ -1316,15 +1385,14 @@ describe('NamedPipeSink', () => {
 
     // The state an `EPIPE` leaves behind: failures counted against a stream that is gone.
     const privateSink = sink as unknown as {
-      consecutiveFailures: number;
       pipeStream?: { destroy: () => void };
-      isInitialized: boolean;
+      engine: { consecutiveFailures: number; state: string };
     };
 
-    privateSink.consecutiveFailures = 2;
+    privateSink.engine.consecutiveFailures = 2;
     privateSink.pipeStream?.destroy();
     privateSink.pipeStream = undefined;
-    privateSink.isInitialized = false;
+    privateSink.engine.state = 'cooling_down';
 
     expect(sink.getHealth().isHealthy).toBe(false);
 
@@ -1531,7 +1599,8 @@ describe('NamedPipeSink', () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     (sink as unknown as { pipeStream: undefined }).pipeStream = undefined;
-    (sink as unknown as { isInitialized: boolean }).isInitialized = false;
+    (sink as unknown as { engine: { state: string } }).engine.state =
+      'cooling_down';
 
     sink.write(entryFor('during-outage'));
 
@@ -1570,9 +1639,12 @@ describe('NamedPipeSink', () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     (sink as unknown as { pipeStream: undefined }).pipeStream = undefined;
-    (sink as unknown as { isInitialized: boolean }).isInitialized = false;
+    (sink as unknown as { engine: { state: string } }).engine.state =
+      'cooling_down';
     // The constructor's own open counts as the last attempt, so clear the cooldown.
-    (sink as unknown as { lastReopenAttempt: number }).lastReopenAttempt = 0;
+    (
+      sink as unknown as { engine: { lastReopenAttempt: number } }
+    ).engine.lastReopenAttempt = 0;
 
     sink.write({
       timestamp: Date.now(),
@@ -1611,13 +1683,15 @@ describe('NamedPipeSink', () => {
     // reopen against a pipe nobody is reading leaves an `open` pending for as long as the
     // test process lives - holding a libuv threadpool slot, four of which is every file
     // operation the suite has. Recovery is covered by its own tests above, with a reader.
-    (sink as unknown as { ensureConnection: () => void }).ensureConnection =
-      () => {
-        // Intentionally empty.
-      };
+    (
+      sink as unknown as { engine: { ensureConnection: () => void } }
+    ).engine.ensureConnection = () => {
+      // Intentionally empty.
+    };
 
     // Never initialized - nothing is reading and nothing opened it - so every entry queues.
-    (sink as unknown as { isInitialized: boolean }).isInitialized = false;
+    (sink as unknown as { engine: { state: string } }).engine.state =
+      'cooling_down';
 
     for (let i = 0; i < 10_050; i++) {
       sink.write({
@@ -1629,7 +1703,7 @@ describe('NamedPipeSink', () => {
     }
 
     expect(
-      (sink as unknown as { writeQueue: unknown[] }).writeQueue.length,
+      (sink as unknown as { engine: { slots: unknown[] } }).engine.slots.length,
     ).toBe(10_000);
     expect(sink.getHealth().droppedEntries).toBe(50);
 
@@ -1651,12 +1725,14 @@ describe('NamedPipeSink', () => {
     // reopen against a pipe nobody is reading leaves an `open` pending for as long as the
     // test process lives - holding a libuv threadpool slot, four of which is every file
     // operation the suite has. Recovery is covered by its own tests above, with a reader.
-    (sink as unknown as { ensureConnection: () => void }).ensureConnection =
-      () => {
-        // Intentionally empty.
-      };
+    (
+      sink as unknown as { engine: { ensureConnection: () => void } }
+    ).engine.ensureConnection = () => {
+      // Intentionally empty.
+    };
 
-    (sink as unknown as { isInitialized: boolean }).isInitialized = false;
+    (sink as unknown as { engine: { state: string } }).engine.state =
+      'cooling_down';
 
     for (let i = 0; i < 10_050; i++) {
       sink.write({
@@ -1668,7 +1744,7 @@ describe('NamedPipeSink', () => {
     }
 
     expect(
-      (sink as unknown as { writeQueue: unknown[] }).writeQueue.length,
+      (sink as unknown as { engine: { slots: unknown[] } }).engine.slots.length,
     ).toBe(10_050);
     expect(sink.getHealth().droppedEntries).toBe(0);
 
@@ -1698,7 +1774,8 @@ describe('NamedPipeSink', () => {
 
     // Force the state a stream failure leaves behind, then queue behind it.
     (sink as unknown as { pipeStream: undefined }).pipeStream = undefined;
-    (sink as unknown as { isInitialized: boolean }).isInitialized = false;
+    (sink as unknown as { engine: { state: string } }).engine.state =
+      'cooling_down';
 
     for (let index = 0; index < 3; index++) {
       sink.write({
@@ -2128,27 +2205,22 @@ describe('NamedPipeSink', () => {
     try {
       expect(await waitForOpenPipe(sink)).toBe(true);
 
-      const privateSink = sink as unknown as {
-        requeue: (queued: {
-          formatted: string | undefined;
-          formatError: Error | undefined;
-          entry: LogEntry;
-          attempts: number;
-        }) => void;
-      };
-
-      // Exactly what a late callback from a replaced stream does: the sink is connected,
-      // and an entry it had already taken off the queue comes back.
-      privateSink.requeue({
-        formatted: 'late-callback-from-a-replaced-stream\n',
-        formatError: undefined,
+      const engine = engineOf(sink);
+      const late = queueSlot({
+        line: 'late-callback-from-a-replaced-stream\n',
         entry: {
           timestamp: Date.now(),
           type: 'info',
           template: 'late',
           message: 'late',
         },
-        attempts: 0,
+        sequence: -1,
+      });
+
+      // Exactly what a late callback from a replaced stream does: the sink is connected,
+      // and an entry whose write went to the old stream comes back unwritten.
+      engine.settle(late, parkInFlight(engine, late), {
+        status: 'unavailable',
       });
 
       await new Promise((resolve) => setTimeout(resolve, 200));
@@ -2624,10 +2696,11 @@ describe('NamedPipeSink', () => {
     try {
       expect(await waitForOpenPipe(sink)).toBe(true);
 
-      (sink as unknown as { ensureConnection: () => void }).ensureConnection =
-        () => {
-          // Intentionally empty: recovery is not what this test is about.
-        };
+      (
+        sink as unknown as { engine: { ensureConnection: () => void } }
+      ).engine.ensureConnection = () => {
+        // Intentionally empty: recovery is not what this test is about.
+      };
 
       const live = (sink as unknown as { pipeStream: fs.WriteStream })
         .pipeStream;
@@ -2688,25 +2761,26 @@ describe('NamedPipeSink', () => {
     try {
       expect(await waitForOpenPipe(sink)).toBe(true);
 
-      (sink as unknown as { ensureConnection: () => void }).ensureConnection =
-        () => {
-          // Recovery is not what this test is about; the entry has already run out of
-          // attempts by the time this would be reached.
-        };
+      (
+        sink as unknown as { engine: { ensureConnection: () => void } }
+      ).engine.ensureConnection = () => {
+        // Recovery is not what this test is about; the entry has already run out of
+        // attempts by the time this would be reached.
+      };
 
       const live = (sink as unknown as { pipeStream: fs.WriteStream })
         .pipeStream;
 
       live.destroy();
 
-      // Driven straight at `writeEntry`, because that is the whole race: `drainQueue`
-      // would refuse to shift while the stream is destroyed, and the entry only reaches
-      // this branch when the stream dies *after* that check.
-      (
-        sink as unknown as {
-          writeEntry: (queued: { formatted: string; attempts: number }) => void;
-        }
-      ).writeEntry({ formatted: 'orphan\n', attempts: 0 });
+      // Dispatched straight at the destroyed stream, because that is the whole race: the
+      // engine's pass would refuse to dispatch while the stream is destroyed, and the entry
+      // only reaches this branch when the stream dies *after* that check.
+      const engine = engineOf(sink);
+      const orphan = queueSlot({ line: 'orphan\n' });
+
+      engine.slots.push(orphan);
+      engine.dispatch(orphan);
 
       expect(sink.getHealth().droppedEntries).toBe(1);
       expect(failures).toHaveLength(1);
@@ -2747,10 +2821,11 @@ describe('NamedPipeSink', () => {
     try {
       expect(await waitForOpenPipe(sink)).toBe(true);
 
-      (sink as unknown as { ensureConnection: () => void }).ensureConnection =
-        () => {
-          // Recovery is not what this test is about.
-        };
+      (
+        sink as unknown as { engine: { ensureConnection: () => void } }
+      ).engine.ensureConnection = () => {
+        // Recovery is not what this test is about.
+      };
 
       const live = (sink as unknown as { pipeStream: fs.WriteStream })
         .pipeStream;
@@ -2901,11 +2976,12 @@ describe('NamedPipeSink', () => {
     try {
       expect(await waitForOpenPipe(sink)).toBe(true);
 
-      (sink as unknown as { ensureConnection: () => void }).ensureConnection =
-        () => {
-          // Recovery would reopen the pipe and drain the queue; this test is about what
-          // the queue reports while it cannot.
-        };
+      (
+        sink as unknown as { engine: { ensureConnection: () => void } }
+      ).engine.ensureConnection = () => {
+        // Recovery would reopen the pipe and drain the queue; this test is about what
+        // the queue reports while it cannot.
+      };
 
       const live = (sink as unknown as { pipeStream: fs.WriteStream })
         .pipeStream;
@@ -2939,7 +3015,8 @@ describe('NamedPipeSink', () => {
       expect(sink.getHealth().droppedEntries).toBe(1);
 
       // Nothing to write to, so everything below waits in the managed queue.
-      (sink as unknown as { isInitialized: boolean }).isInitialized = false;
+      (sink as unknown as { engine: { state: string } }).engine.state =
+        'cooling_down';
 
       for (let index = 0; index < 3; index++) {
         sink.write({
@@ -3072,17 +3149,15 @@ describe('NamedPipeSink', () => {
       expect(await waitForOpenPipe(sink)).toBe(true);
 
       const internals = sink as unknown as {
-        writeQueue: { formatted: string; attempts: number }[];
         pipeStream?: { write: (...args: unknown[]) => boolean };
       };
 
       // Parked directly, because this is about the drain loop's own writes: entries handed
       // to `write()` while the pipe is healthy go straight out.
       for (let index = 0; index < 3; index++) {
-        internals.writeQueue.push({
-          formatted: `drain-${String(index)}\n`,
-          attempts: 0,
-        });
+        engineOf(sink).slots.push(
+          queueSlot({ line: `drain-${String(index)}\n`, sequence: index }),
+        );
       }
 
       // The reader going away mid-shutdown, which is exactly when this happens for real.
@@ -3284,24 +3359,24 @@ describe('NamedPipeSink', () => {
         0,
       );
 
-      const internals = sink as unknown as {
-        requeue: (queued: {
-          formatted: string;
-          entry: LogEntry;
-          attempts: number;
-        }) => void;
-      };
+      const engine = engineOf(sink);
 
+      // Each a write in flight when close finished, whose stream turned out to be gone
+      // before the line could be handed to it.
       for (let index = 0; index < 3; index++) {
-        internals.requeue({
-          formatted: `late-${String(index)}\n`,
+        const late = queueSlot({
+          line: `late-${String(index)}\n`,
           entry: {
             timestamp: Date.now(),
             type: 'info',
             template: `late-${String(index)}`,
             message: `late-${String(index)}`,
           },
-          attempts: 0,
+          sequence: index,
+        });
+
+        engine.settle(late, parkInFlight(engine, late), {
+          status: 'unavailable',
         });
       }
 
@@ -3432,11 +3507,10 @@ describe('NamedPipeSink', () => {
       expect(await waitForOpenPipe(sink)).toBe(true);
 
       const internals = sink as unknown as {
-        writeQueue: { formatted: string; attempts: number }[];
         pipeStream?: { write: (...args: unknown[]) => boolean };
       };
 
-      internals.writeQueue.push({ formatted: 'retried\n', attempts: 0 });
+      engineOf(sink).slots.push(queueSlot({ line: 'retried\n' }));
 
       const stream = internals.pipeStream;
 
@@ -4824,15 +4898,7 @@ test('a failed pipe write retains its position ahead of newer queued entries', a
   const sink = new NamedPipeSink({
     pipePath: '/tmp/lifecycleion-order-test.pipe',
   });
-  const state = sink as unknown as {
-    closing: boolean;
-    writeQueue: Array<{ entry: LogEntry; attempts: number; sequence: number }>;
-    requeue: (entry: {
-      entry: LogEntry;
-      attempts: number;
-      sequence: number;
-    }) => void;
-  };
+  const engine = engineOf(sink);
   const older: LogEntry = {
     message: 'older',
     template: 'older',
@@ -4845,16 +4911,18 @@ test('a failed pipe write retains its position ahead of newer queued entries', a
     type: 'info',
     timestamp: Date.now(),
   };
-  state.closing = true;
-  state.writeQueue.push({ entry: newer, attempts: 0, sequence: 1 });
-  state.requeue({ entry: older, attempts: 0, sequence: 0 });
-  expect(state.writeQueue.map(({ entry }) => entry.message)).toEqual([
+  engine.closing = true;
+  const olderSlot = queueSlot({ entry: older, sequence: 0 });
+  const token = parkInFlight(engine, olderSlot);
+  engine.slots.push(queueSlot({ entry: newer, sequence: 1 }));
+  engine.settle(olderSlot, token, { status: 'unavailable' });
+  expect(engine.slots.map((slot) => (slot.entry as LogEntry).message)).toEqual([
     'older',
     'newer',
   ]);
-  expect(state.writeQueue[0].attempts).toBe(1);
-  state.writeQueue.length = 0;
-  state.closing = false;
+  expect(engine.slots[0].attempts).toBe(1);
+  engine.slots.length = 0;
+  engine.closing = false;
   await sink.close();
 });
 
@@ -4868,7 +4936,7 @@ test.each(['callback', 'throw', 'reentrant'] as const)(
       onError: (failure) => {
         failures.push(failure);
         if (mode === 'reentrant' && failure.disposition === 'retrying') {
-          state.writeQueue.push(newer);
+          engine.slots.push(newer);
         }
       },
     });
@@ -4878,17 +4946,19 @@ test.each(['callback', 'throw', 'reentrant'] as const)(
       type: 'info',
       timestamp: Date.now(),
     };
-    const newer = {
+    const newer = queueSlot({
       entry: { ...entry, message: 'newer' },
-      attempts: 0,
       sequence: 1,
-    };
+    });
     const state = sink as any;
-    state.closing = true;
+    const engine = engineOf(sink);
+    engine.closing = true;
     // The overflow report has already gone out for this episode.
-    state.losses.queueFullReport.claim(undefined);
+    state.engine.losses.queueFullReport.claim(undefined);
+    const failed = queueSlot({ entry, sequence: 0, line: 'failed' });
+    engine.slots.push(failed);
     if (mode !== 'reentrant') {
-      state.writeQueue.push(newer);
+      engine.slots.push(newer);
     }
     state.pipeStream = {
       destroyed: false,
@@ -4901,23 +4971,18 @@ test.each(['callback', 'throw', 'reentrant'] as const)(
       },
     };
     try {
-      state.writeEntry({
-        entry,
-        attempts: 0,
-        sequence: 0,
-        formatted: 'failed',
-      });
+      engine.dispatch(failed);
       expect(
         failures
           .filter((failure) => failure.disposition === 'lost')
           .map((failure) => failure.entry),
       ).toEqual([entry]);
-      expect(state.writeQueue).toEqual([newer]);
+      expect(engine.slots).toEqual([newer]);
       expect(sink.getHealth().droppedEntries).toBe(1);
     } finally {
       state.pipeStream = undefined;
-      state.writeQueue.length = 0;
-      state.closing = false;
+      engine.slots.length = 0;
+      engine.closing = false;
       await sink.close();
     }
   },
@@ -4939,20 +5004,13 @@ test('a reentrant pipe write follows already queued entries during a drain', asy
   const state = sink as unknown as {
     initPromise: Promise<void>;
     pipeStream: unknown;
-    isInitialized: boolean;
     writeEntry: (queued: { entry: LogEntry }) => void;
-    writeQueue: Array<{
-      entry: LogEntry;
-      formatted: string;
-      attempts: number;
-      sequence: number;
-    }>;
-    processQueue: () => void;
   };
+  const engine = engineOf(sink);
   try {
     await state.initPromise;
     state.pipeStream = { destroyed: false };
-    state.isInitialized = true;
+    engine.state = 'connected';
     const messages: string[] = [];
     state.writeEntry = (queued) => {
       messages.push(queued.entry.message);
@@ -4960,15 +5018,17 @@ test('a reentrant pipe write follows already queued entries during a drain', asy
         sink.write(entry('third'));
       }
     };
-    state.writeQueue.push(
-      { entry: entry('first'), formatted: 'first', attempts: 0, sequence: 0 },
-      { entry: entry('second'), formatted: 'second', attempts: 0, sequence: 1 },
+    engine.slots.push(
+      queueSlot({ entry: entry('first'), line: 'first', sequence: 0 }),
+      queueSlot({ entry: entry('second'), line: 'second', sequence: 1 }),
     );
-    state.processQueue();
+    engine.pump();
     expect(messages).toEqual(['first', 'second', 'third']);
   } finally {
     state.pipeStream = undefined;
-    state.writeQueue = [];
+    // The stand-in writes above never settle; forget them.
+    engine.slots = [];
+    engine.inFlightCount = 0;
     await sink.close();
     await directory.cleanup();
   }
@@ -5048,7 +5108,7 @@ test('an initialization that rejects is reported, and reconnect and close still 
       onError: () => {},
     });
     await new Promise((resolve) => setTimeout(resolve, 10));
-    (sink as unknown as { isOpening: boolean }).isOpening = true;
+    engineOf(sink).state = 'opening';
     const status = await sink.reconnect();
     expect(status.success).toBe(false);
     await sink.close();

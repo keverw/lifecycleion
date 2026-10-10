@@ -210,13 +210,11 @@ test('a queued pipe write retains console origin after the console call returns'
   });
   initialize.mockRestore();
   const internals = sink as unknown as {
-    isProcessing: boolean;
-    isInitialized: boolean;
     pipeStream: unknown;
-    processQueue(): void;
+    engine: { isPumping: boolean; state: string; pump(): void };
   };
-  internals.isInitialized = true;
-  internals.isProcessing = true;
+  internals.engine.state = 'connected';
+  internals.engine.isPumping = true;
   internals.pipeStream = {
     destroyed: false,
     write() {
@@ -227,8 +225,8 @@ test('a queued pipe write retains console origin after the console call returns'
   try {
     reportToConsole('original');
     expect(sink.getHealth().queueSize).toBe(1);
-    internals.isProcessing = false;
-    internals.processQueue();
+    internals.engine.isPumping = false;
+    internals.engine.pump();
     await nextTurn();
     expect(consoleBridge.calls()).toBe(1);
     expect(reports).toBe(0);
@@ -279,7 +277,7 @@ test('a rejected NamedPipeSink formatter born in a console fallback cannot resta
   });
   initialize.mockRestore();
   const connect = spyOn(
-    sink as unknown as { ensureConnection(): void },
+    (sink as unknown as { engine: { ensureConnection(): void } }).engine,
     'ensureConnection',
   ).mockImplementation(() => {});
   const consoleBridge = forwardConsole(() => sink.write(entry('forwarded')));
