@@ -2,7 +2,6 @@ import { raceDeadline } from '../../internal/race-deadline';
 import * as fs from 'fs';
 import { promises as fsPromises } from 'fs';
 import * as os from 'os';
-import { Writable } from 'stream';
 import type { LogEntry, LogSink, LoggerDiagnostic } from '../types';
 import { LogLevel, getLogLevel } from '../types';
 import { diagnosticEntry } from '../internal/diagnostic-entry';
@@ -38,6 +37,9 @@ import { describeEntryCount, LossLedger } from './internal/loss-ledger';
 import { endStreamWithin } from './internal/end-stream';
 import { deferClose } from './internal/deferred-close';
 import { FormatReportScheduler } from './internal/format-report-scheduler';
+import { NonBlockingPipeStream } from './internal/non-blocking-pipe-stream';
+import { OutageReporter } from './internal/outage-reporter';
+import { Backoff } from './internal/reopen-backoff';
 
 export type {
   SinkErrorHandler,
@@ -227,168 +229,6 @@ const REOPEN_COOLDOWN_MS = 1000;
 const NO_READER_ERRNO = 'ENXIO';
 
 /**
- * A Writable over the probe's non-blocking descriptor.
- *
- * Node's WriteStream assumes a blocking file descriptor. Bun currently mishandles the
- * `EAGAIN` a non-blocking FIFO returns under pressure, so the handoff needs a tiny stream
- * that treats it as backpressure and retries without holding a libuv worker or the event
- * loop open. The Writable high-water mark still bounds its own buffer; NamedPipeSink's
- * queue cap bounds everything not admitted to it.
- */
-class NonBlockingPipeStream extends Writable {
-  public readonly fd: number;
-  private retryTimer?: NodeJS.Timeout;
-  private cancelWrite?: () => void;
-  private writeInFlight = false;
-  private closeAfterWrite?: () => void;
-  private partialWriteFailures = new WeakSet<Error>();
-
-  constructor(descriptor: number) {
-    super({ highWaterMark: 16 * 1024, autoDestroy: true, emitClose: true });
-    this.fd = descriptor;
-  }
-
-  public consumePartialWriteFailure(error: Error): boolean {
-    // Writable also passes the same error to buffered, never-started writes.
-    // Only the first callback belongs to the partially delivered record.
-    return this.partialWriteFailures.delete(error);
-  }
-
-  public override _write(
-    chunk: Buffer | string,
-    encoding: BufferEncoding,
-    callback: (error?: Error | null) => void,
-  ): void {
-    const buffer = Buffer.isBuffer(chunk)
-      ? chunk
-      : Buffer.from(chunk, encoding);
-    let offset = 0;
-    let isSettled = false;
-
-    const finish = (error?: Error | null): void => {
-      if (isSettled) {
-        return;
-      }
-
-      isSettled = true;
-      this.cancelWrite = undefined;
-
-      if (this.retryTimer !== undefined) {
-        clearTimeout(this.retryTimer);
-        this.retryTimer = undefined;
-      }
-
-      if (error && offset > 0) {
-        const partialError = new Error(
-          'Named pipe record was only partially written',
-          { cause: error },
-        );
-        Object.defineProperty(partialError, 'bytesWritten', {
-          value: offset,
-          enumerable: true,
-        });
-        this.partialWriteFailures.add(partialError);
-        callback(partialError);
-      } else {
-        callback(error);
-      }
-    };
-
-    const writeRemaining = (): void => {
-      if (this.destroyed) {
-        finish(new Error('Named pipe stream was destroyed'));
-
-        return;
-      }
-
-      this.writeInFlight = true;
-      fs.write(
-        this.fd,
-        buffer,
-        offset,
-        buffer.length - offset,
-        null,
-        (error, written) => {
-          this.writeInFlight = false;
-          if (this.destroyed) {
-            if (error === null) {
-              offset += written;
-            }
-            if (error === null && offset === buffer.length) {
-              finish();
-            } else {
-              this.cancelWrite?.();
-            }
-            this.closeAfterWrite?.();
-            this.closeAfterWrite = undefined;
-            return;
-          }
-          const code = error?.code;
-
-          if (code === 'EAGAIN' || code === 'EWOULDBLOCK') {
-            this.retryTimer = setTimeout(writeRemaining, 10);
-            this.retryTimer.unref?.();
-
-            return;
-          }
-
-          if (error !== null) {
-            finish(error);
-
-            return;
-          }
-
-          offset += written;
-
-          if (offset < buffer.length) {
-            writeRemaining();
-
-            return;
-          }
-
-          finish();
-        },
-      );
-    };
-
-    this.cancelWrite = () =>
-      finish(new Error('Named pipe stream was destroyed'));
-    writeRemaining();
-  }
-
-  public override _destroy(
-    error: Error | null,
-    callback: (error?: Error | null) => void,
-  ): void {
-    const close = (): void => {
-      this.cancelWrite?.();
-      fs.close(this.fd, (closeError) => callback(error ?? closeError));
-    };
-    // A queued fs.write owns the descriptor until its callback runs.
-    if (this.writeInFlight) {
-      this.closeAfterWrite = close;
-    } else {
-      close();
-    }
-  }
-}
-
-/**
- * How many distinct open failures are reported before one outage has said enough.
- *
- * The set in {@link NamedPipeSink.reportedOpenFailures} is what bounds reporting, and in
- * practice it bounds it at three or four: three kinds, and a small number of `errno`s each.
- * This is the guard for the case where that assumption does not hold - a message that
- * varies for reasons the sink cannot see - which without a cap is a set that grows for as
- * long as the outage does, on the one path whose whole job is to survive a long outage
- * quietly.
- *
- * Eight, so the realistic ceiling is never the one reached, and the sink says when it is
- * rather than falling silent.
- */
-const MAX_REPORTED_OPEN_FAILURES = 8;
-
-/**
  * Which failure kind an open that threw should be reported as.
  *
  * `'not_found'` is a claim about the destination - that it is not there - and only
@@ -427,42 +267,25 @@ export class NamedPipeSink implements LogSink {
   private pipeStream?: fs.WriteStream;
   /**
    * The open failures reported during this outage, so one outage is not reported every
-   * second.
+   * second. See {@link OutageReporter} for the rule: once per distinct failure per outage,
+   * capped with one notice, with separate ordinary and diagnostic budgets.
    *
    * Every failed open now schedules another attempt - see `scheduleReopen` - which is what
    * makes recovery independent of traffic, and which without this would make a mistyped
-   * `pipePath` call the caller's `onError` once a second for the life of the process. The
-   * reporting the sink already does elsewhere works exactly this way: `queueFullReport` for
-   * the queue cap.
-   *
-   * A set rather than a boolean, so a *different* failure still gets through: a path that
-   * goes from missing to present-but-unreadable is a new fact, and a consumer watching this
-   * channel is entitled to it. Keyed on the kind as well as the message, since the two
-   * messages share a prefix. Every open failure participates - `not_found`, `not_a_pipe`
-   * and `setup`.
-   *
-   * A set rather than just the last one, which is the stricter of the two and the reason
-   * this is a hard ceiling. Remembering only the previous failure reports on every
-   * *change*, so a path genuinely flapping between two states - a deploy script creating
-   * and removing it - is a report per transition, which at one attempt a second is the
-   * flood again by another route. Remembering all of them means a state already reported
-   * this outage stays quiet however many times it comes back, and one outage costs at most
-   * {@link MAX_REPORTED_OPEN_FAILURES} callbacks however long it lasts or how it thrashes.
+   * `pipePath` call the caller's `onError` once a second for the life of the process. Every
+   * open failure participates - `not_found`, `not_a_pipe`, `setup` and
+   * `unsupported_platform`.
    *
    * Cleared when the pipe opens, so the next outage speaks up again, and cleared by
    * `reconnect()`, which is an attempt the caller asked for and is owed an answer to.
    */
-  private readonly reportedOpenFailures = new Set<string>();
-  // Terminal diagnostic failures cannot spend the ordinary outage report budget.
-  private readonly reportedDiagnosticOpenFailures = new Set<string>();
-  private reportedDiagnosticOpenFailureCap = false;
-  /**
-   * Whether {@link MAX_REPORTED_OPEN_FAILURES} has been reported, so it is said once.
-   *
-   * Said at all, rather than the sink simply going quiet at the cap: a sink that has
-   * stopped telling you things has to tell you that.
-   */
-  private reportedOpenFailureCap = false;
+  private readonly reportedOpenFailures = new OutageReporter({
+    report: (kind, error, isDiagnostic) => {
+      this.handleError(kind, error, { isDiagnostic });
+    },
+    describeCap: (maxReports) =>
+      `Reported ${String(maxReports)} distinct failures opening the named pipe at ${this.pipePath}; further ones are not reported until it opens`,
+  });
   /**
    * Entries waiting for the pipe, each with the line already rendered.
    *
@@ -533,6 +356,15 @@ export class NamedPipeSink implements LogSink {
    * attempt per {@link REOPEN_COOLDOWN_MS} is enough to recover promptly without that.
    */
   private lastReopenAttempt = 0;
+  /**
+   * How long to wait before the next automatic reopen. Flat at {@link REOPEN_COOLDOWN_MS}:
+   * every failed open schedules its retry from here, and `ensureConnection` spaces attempts
+   * by the same figure.
+   */
+  private readonly reopenBackoff = new Backoff({
+    initialMS: REOPEN_COOLDOWN_MS,
+    maxMS: REOPEN_COOLDOWN_MS,
+  });
   /**
    * A reopen deferred until the cooldown has elapsed, if one is pending.
    *
@@ -818,9 +650,6 @@ export class NamedPipeSink implements LogSink {
       // has nowhere else to read the diagnosis, since `ReconnectStatus.error` is a generic
       // `Failed to initialize pipe connection` rather than the underlying failure.
       this.reportedOpenFailures.clear();
-      this.reportedDiagnosticOpenFailures.clear();
-      this.reportedDiagnosticOpenFailureCap = false;
-      this.reportedOpenFailureCap = false;
 
       this.initPromise = containInitFailure(
         this.initializePipe(false, false, true),
@@ -1226,7 +1055,7 @@ export class NamedPipeSink implements LogSink {
           undefined,
         );
 
-        scheduleReopen(REOPEN_COOLDOWN_MS);
+        scheduleReopen(this.reopenBackoff.next());
 
         return;
       }
@@ -1275,7 +1104,7 @@ export class NamedPipeSink implements LogSink {
         // later `write()` happened along - and a permission fixed, or descriptor pressure
         // relieved, a minute later is exactly the kind of thing a quiet process never
         // notices.
-        scheduleReopen(REOPEN_COOLDOWN_MS);
+        scheduleReopen(this.reopenBackoff.next());
 
         return;
       }
@@ -1314,7 +1143,7 @@ export class NamedPipeSink implements LogSink {
         // reader. That is a real cost where the blocked open had none, and it is the right
         // side of the trade: the blocked open's price was a libuv threadpool thread and a
         // process that would not exit.
-        scheduleReopen(REOPEN_COOLDOWN_MS);
+        scheduleReopen(this.reopenBackoff.next());
 
         return;
       }
@@ -1351,7 +1180,7 @@ export class NamedPipeSink implements LogSink {
           `${this.pipePath} was not a named pipe (FIFO) when opened`,
           undefined,
         );
-        scheduleReopen(REOPEN_COOLDOWN_MS);
+        scheduleReopen(this.reopenBackoff.next());
 
         return;
       }
@@ -1442,7 +1271,7 @@ export class NamedPipeSink implements LogSink {
         // no-op when the call above already did the work, since by then there is either a
         // connection or an open in flight.
         this.scheduleReopen(
-          REOPEN_COOLDOWN_MS,
+          this.reopenBackoff.next(),
           isDiagnosticFailure,
           shouldSuppressStreamFailure,
         );
@@ -1456,9 +1285,6 @@ export class NamedPipeSink implements LogSink {
       // A later outage is a new fact and is reported as one. See
       // {@link reportedOpenFailures}.
       this.reportedOpenFailures.clear();
-      this.reportedDiagnosticOpenFailures.clear();
-      this.reportedDiagnosticOpenFailureCap = false;
-      this.reportedOpenFailureCap = false;
       this.processQueue();
     } catch (error) {
       // Classified rather than assumed. This block is reached by the `stat` failing and
@@ -1483,7 +1309,7 @@ export class NamedPipeSink implements LogSink {
       // costs one `stat` a second and nothing else. Flat rather than backed off, on the
       // same reasoning {@link REOPEN_COOLDOWN_MS} gives: a pipe being recreated is meant to
       // be picked up promptly, and the cost of asking is two syscalls.
-      scheduleReopen(REOPEN_COOLDOWN_MS);
+      scheduleReopen(this.reopenBackoff.next());
     } finally {
       // Released on every path that did not transfer the numeric descriptor to the active
       // writable.
@@ -1515,50 +1341,9 @@ export class NamedPipeSink implements LogSink {
       return;
     }
 
-    // Keyed on the kind as well as the text. The two are not redundant: both callers here
-    // build the same `Could not open named pipe at <path>: ` prefix, so two failures that
-    // rendered alike would otherwise be one - and the second would be swallowed while
-    // carrying a *different* kind, which is the one thing a consumer switching on `kind`
-    // cannot afford to miss.
-    const key = `${kind}\u0000${message}`;
-    const reportedFailures = isDiagnostic
-      ? this.reportedDiagnosticOpenFailures
-      : this.reportedOpenFailures;
-
-    // Already said this outage. Not "already said last time": see
-    // {@link reportedOpenFailures} for why a path that flaps between two states must not
-    // report on every transition.
-    if (reportedFailures.has(key)) {
-      return;
-    }
-
-    if (reportedFailures.size >= MAX_REPORTED_OPEN_FAILURES) {
-      if (
-        !(isDiagnostic
-          ? this.reportedDiagnosticOpenFailureCap
-          : this.reportedOpenFailureCap)
-      ) {
-        if (isDiagnostic) {
-          this.reportedDiagnosticOpenFailureCap = true;
-        } else {
-          this.reportedOpenFailureCap = true;
-        }
-
-        this.handleError(
-          'setup',
-          new Error(
-            `Reported ${String(MAX_REPORTED_OPEN_FAILURES)} distinct failures opening the named pipe at ${this.pipePath}; further ones are not reported until it opens`,
-          ),
-          { isDiagnostic },
-        );
-      }
-
-      return;
-    }
-
-    reportedFailures.add(key);
-
-    this.handleError(kind, new Error(message, { cause }), { isDiagnostic });
+    // Keyed on the kind as well as the text: both callers here build the same
+    // `Could not open named pipe at <path>: ` prefix. See {@link OutageReporter}.
+    this.reportedOpenFailures.reportFailure(kind, message, cause, isDiagnostic);
   }
 
   /**
@@ -1895,14 +1680,16 @@ export class NamedPipeSink implements LogSink {
     const now = Date.now();
     const sinceLastAttempt = now - this.lastReopenAttempt;
 
-    if (sinceLastAttempt < REOPEN_COOLDOWN_MS) {
+    const cooldownMS = this.reopenBackoff.peek();
+
+    if (sinceLastAttempt < cooldownMS) {
       // Deferred rather than dropped. The cooldown is there to keep a dead pipe from
       // becoming a syscall storm, not to make recovery wait for the next log call: an
       // entry requeued by a failed write would otherwise sit until unrelated traffic
       // arrived, and a process that has just lost its log pipe may have nothing else to
       // say.
       this.scheduleReopen(
-        REOPEN_COOLDOWN_MS - sinceLastAttempt,
+        cooldownMS - sinceLastAttempt,
         isDiagnostic,
         shouldSuppressFailureReport,
       );

@@ -30,6 +30,7 @@ import { describeEntryCount, LossLedger } from './internal/loss-ledger';
 import { endStreamWithin } from './internal/end-stream';
 import { deferClose } from './internal/deferred-close';
 import { FormatReportScheduler } from './internal/format-report-scheduler';
+import { Backoff } from './internal/reopen-backoff';
 
 import type { LogEntry, LogSink, LoggerDiagnostic } from '../types';
 import { LogLevel, getLogLevel } from '../types';
@@ -322,7 +323,11 @@ export class FileSink implements LogSink {
   private isProcessing = false;
   private lastError?: Error;
   private consecutiveFailures = 0;
-  private rotationRetryDelayMS = 0;
+  /** Spaces failed archive renames: {@link ROTATION_RETRY_INITIAL_MS} doubling to the max. */
+  private readonly rotationBackoff = new Backoff({
+    initialMS: ROTATION_RETRY_INITIAL_MS,
+    maxMS: ROTATION_RETRY_MAX_MS,
+  });
   private nextRotationAttemptAt = 0;
   private totalEntriesWritten = 0;
 
@@ -1763,14 +1768,8 @@ export class FileSink implements LogSink {
         `Error rotating log file from ${this.currentLogFile} to ${rotatedFile}`,
         toError(error),
       );
-      const shouldReport = this.rotationRetryDelayMS === 0;
-      this.rotationRetryDelayMS = Math.min(
-        this.rotationRetryDelayMS === 0
-          ? ROTATION_RETRY_INITIAL_MS
-          : this.rotationRetryDelayMS * 2,
-        ROTATION_RETRY_MAX_MS,
-      );
-      this.nextRotationAttemptAt = Date.now() + this.rotationRetryDelayMS;
+      const shouldReport = this.rotationBackoff.isAtRest;
+      this.nextRotationAttemptAt = Date.now() + this.rotationBackoff.next();
       // Recorded on every failure, reported on the first of a backoff run.
       if (shouldReport) {
         this.handleError('setup', failure, { disposition: 'no_entry' });
@@ -1786,7 +1785,7 @@ export class FileSink implements LogSink {
       return;
     }
 
-    this.rotationRetryDelayMS = 0;
+    this.rotationBackoff.reset();
     this.nextRotationAttemptAt = 0;
 
     // Setup new file (queue processing will resume after this)
