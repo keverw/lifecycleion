@@ -56,9 +56,36 @@ function sharedConsoleState(): ConsoleReportState {
   return state;
 }
 
+/**
+ * Stop sharing: keep a state of this copy's own from now on. The descriptor check cannot
+ * tell a Proxy from a plain object, so a shared state whose flag then throws when read or
+ * written lands here instead of throwing out of the console rung.
+ */
+function useOwnConsoleState(): ConsoleReportState {
+  const own: ConsoleReportState = { active: false };
+  sharedState = own;
+  return own;
+}
+
+function isActive(): boolean {
+  try {
+    return sharedConsoleState().active === true;
+  } catch {
+    return useOwnConsoleState().active;
+  }
+}
+
+function setActive(isActiveNow: boolean): void {
+  try {
+    sharedConsoleState().active = isActiveNow;
+  } catch {
+    useOwnConsoleState().active = isActiveNow;
+  }
+}
+
 /** Capture this when queuing work so its failures cannot feed a console report back. */
 export function isConsoleReportActive(): boolean {
-  return sharedConsoleState().active;
+  return isActive();
 }
 
 /**
@@ -115,14 +142,13 @@ export function isConsoleReportActive(): boolean {
  *             `Error` inspected rather than stringified can still hand one over.
  */
 export function reportToConsole(...args: unknown[]): void {
-  const shared = sharedConsoleState();
-  if (shared.active) {
+  if (isActive()) {
     return;
   }
 
   // Include the property read: a console shim can log from its getter as well as its
   // function body. Queued reporters must also capture this state when work is created.
-  shared.active = true;
+  setActive(true);
 
   try {
     // eslint-disable-next-line no-console -- this function is the console rung itself
@@ -132,6 +158,6 @@ export function reportToConsole(...args: unknown[]): void {
     // missing `console`, a replaced `error` that is not a function, and a console that
     // throws on write all land here, and all of them are quieter than the alternative.
   } finally {
-    shared.active = false;
+    setActive(false);
   }
 }

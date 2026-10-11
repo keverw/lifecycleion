@@ -110,6 +110,45 @@ describe('reportToConsole', () => {
     }
   });
 
+  test('a shared state whose flag throws behind a valid descriptor falls back to its own', async () => {
+    const key = Symbol.for('lifecycleion.reportToConsole.v1');
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    // A Proxy answers the descriptor check like a plain object, then throws on access.
+    const squatter = new Proxy(
+      { active: false },
+      {
+        get() {
+          throw new Error('flag unavailable');
+        },
+        set() {
+          throw new Error('flag unavailable');
+        },
+      },
+    );
+    Object.defineProperty(globalThis, key, {
+      configurable: true,
+      writable: true,
+      value: squatter,
+    });
+    try {
+      const copy = await importConsoleReportCopy('proxy-state');
+      const captured = muteConsoleError();
+      expect(() => copy.isConsoleReportActive()).not.toThrow();
+      expect(() => {
+        copy.reportToConsole('first failure');
+        copy.reportToConsole('later failure');
+      }).not.toThrow();
+      expect(captured).toEqual(['first failure', 'later failure']);
+      expect(copy.isConsoleReportActive()).toBe(false);
+    } finally {
+      if (descriptor === undefined) {
+        Reflect.deleteProperty(globalThis, key);
+      } else {
+        Object.defineProperty(globalThis, key, descriptor);
+      }
+    }
+  });
+
   test('a global that refuses the shared slot is tried once, and re-entry is still bounded', async () => {
     // `Object.preventExtensions(globalThis)` cannot be undone, so it runs in a process of
     // its own. Every check after the refused install reads this copy's own state.
