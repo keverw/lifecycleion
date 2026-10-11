@@ -1,6 +1,6 @@
 import { describe, expect, test, beforeEach } from 'bun:test';
 import { MockAdapter } from './mock-adapter';
-import type { MockFormData } from './mock-adapter';
+import type { MockAdapterConfig, MockFormData } from './mock-adapter';
 import { HTTPClient } from '../http-client';
 import { CookieJar } from '../cookie-jar';
 import type {
@@ -10,6 +10,7 @@ import type {
   HTTPAdapter,
 } from '../types';
 import type { Cookie } from '../cookie-jar';
+import { hostileRejections } from '../../internal/hostile-promise-test-utils';
 
 function makeCookie(
   overrides: Partial<Cookie> & { name: string; value: string },
@@ -358,6 +359,35 @@ describe('MockAdapter via HTTPClient', () => {
     expect(captured?.files.avatar.name).toBe('avatar.png');
   });
 
+  test('FormData and cookie names of __proto__ stay own keys', async () => {
+    let captured: MockFormData | undefined;
+    let capturedCookies: Record<string, string> = {};
+
+    adapter.routes.post('/upload', (req) => {
+      captured = req.body as MockFormData | undefined;
+      capturedCookies = req.cookies;
+      return { status: 200 };
+    });
+
+    const fd = new FormData();
+    fd.append('__proto__', 'field');
+    fd.append('__proto__', new File(['img'], 'avatar.png'));
+    await client
+      .post('/upload')
+      .headers({ cookie: '__proto__=c' })
+      .formData(fd)
+      .send();
+
+    expect(Object.getPrototypeOf(captured?.files)).toBe(Object.prototype);
+    expect(Object.hasOwn(captured?.files ?? {}, '__proto__')).toBe(true);
+    expect(
+      Object.getOwnPropertyDescriptor(captured?.fields, '__proto__')?.value,
+    ).toBe('field');
+    expect(
+      Object.getOwnPropertyDescriptor(capturedCookies, '__proto__')?.value,
+    ).toBe('c');
+  });
+
   // --- cookies ---
 
   test('CookieJar cookies are visible in req.headers.cookie and req.cookies', async () => {
@@ -494,6 +524,247 @@ describe('MockAdapter via HTTPClient', () => {
     const start = Date.now();
     await slowClient.get('/item').send();
     expect(Date.now() - start).toBeGreaterThanOrEqual(40);
+  });
+
+  test.each([null, undefined])(
+    'nullish response delay %s inherits the adapter default',
+    async (delay) => {
+      let defaultReads = 0;
+      const nullableAdapter = new MockAdapter({
+        get defaultDelay() {
+          defaultReads++;
+          return 0;
+        },
+      });
+      nullableAdapter.routes.get('/test', () => ({ status: 200, delay }));
+      defaultReads = 0;
+      expect((await nullableAdapter.send(makeAdapterRequest())).status).toBe(
+        200,
+      );
+      expect(defaultReads).toBe(1);
+    },
+  );
+
+  test('null adapter default delay uses zero', async () => {
+    const nullableAdapter = new MockAdapter({ defaultDelay: null });
+    nullableAdapter.routes.get('/test', () => ({ status: 200, delay: null }));
+    expect((await nullableAdapter.send(makeAdapterRequest())).status).toBe(200);
+  });
+
+  test('invalid default and response delays fail clearly', async () => {
+    for (const [index, value] of [
+      NaN,
+      -1,
+      '50' as unknown as number,
+    ].entries()) {
+      expect(() => new MockAdapter({ defaultDelay: value })).toThrow();
+      const path = `/invalid-delay-${index}`;
+      adapter.routes.get(path, () => ({ status: 200, delay: value }));
+      const request = client.get(path);
+      const response = await request.send();
+      expect(response.isFailed).toBe(true);
+      expect(request.error?.code).toBe('adapter_error');
+    }
+  });
+
+  test.each([NaN, -1, '50'])(
+    'invalid response delay %s never retries route side effects',
+    async (delay) => {
+      let calls = 0;
+      adapter.routes.get('/invalid-delay-retry', () => {
+        calls++;
+        return { status: 200, delay: delay as number };
+      });
+      const request = client.get('/invalid-delay-retry').retryPolicy({
+        strategy: 'fixed',
+        maxRetryAttempts: 3,
+        delayMS: 1,
+      });
+      const response = await request.send();
+      expect(calls).toBe(1);
+      expect(request.attemptCount).toBe(1);
+      expect(response.isFailed).toBe(true);
+      // A configuration error, not a transport failure.
+      expect(response.status).toBe(0);
+      expect(response.isNetworkError).toBe(false);
+      expect(request.error?.code).toBe('adapter_error');
+      expect(request.error?.isRetriesExhausted).toBe(false);
+      expect(request.error?.cause).toBeInstanceOf(
+        delay === -1 ? RangeError : TypeError,
+      );
+      expect(request.error?.cause?.message).toContain(
+        'MockAdapter response delay',
+      );
+    },
+  );
+
+  test('a response delay getter throwing a caller TypeError retains ordinary adapter retry behavior', async () => {
+    const error = new TypeError('caller delay getter failed');
+    let calls = 0;
+    adapter.routes.get('/throwing-delay-getter', () => {
+      calls++;
+      return {
+        status: 200,
+        get delay(): never {
+          throw error;
+        },
+      };
+    });
+    const request = client.get('/throwing-delay-getter').retryPolicy({
+      strategy: 'fixed',
+      maxRetryAttempts: 1,
+      delayMS: 1,
+    });
+    await request.send();
+    expect(calls).toBe(2);
+    expect(request.error?.code).toBe('adapter_error');
+    expect(request.error?.cause).toBe(error);
+    expect(request.error?.isRetriesExhausted).toBe(true);
+  });
+
+  test('inherited error handlers retain the original config receiver', async () => {
+    class Config {
+      #status = 418;
+
+      public onHandlerError() {
+        return { status: this.#status };
+      }
+    }
+    const inheritedAdapter = new MockAdapter(new Config());
+    inheritedAdapter.routes.get('/test', () => {
+      throw new Error('route failed');
+    });
+    const response = await inheritedAdapter.send(makeAdapterRequest());
+    expect(response.status).toBe(418);
+  });
+
+  test('error handler updates on the original config remain live', async () => {
+    const config: MockAdapterConfig = {
+      onHandlerError: () => ({ status: 418 }),
+    };
+    const liveAdapter = new MockAdapter(config);
+    liveAdapter.routes.get('/test', () => {
+      throw new Error('route failed');
+    });
+    expect((await liveAdapter.send(makeAdapterRequest())).status).toBe(418);
+    config.onHandlerError = () => ({ status: 409 });
+    expect((await liveAdapter.send(makeAdapterRequest())).status).toBe(409);
+    delete config.onHandlerError;
+    expect((await liveAdapter.send(makeAdapterRequest())).status).toBe(500);
+  });
+
+  test('error handler getters are read once per failure and preserve their receiver', async () => {
+    let reads = 0;
+    const config = {
+      status: 418,
+      get onHandlerError() {
+        reads++;
+        if (reads > 1) {
+          throw new Error('error handler read twice');
+        }
+        return function (this: { status: number }) {
+          return { status: this.status };
+        };
+      },
+    };
+    const getterAdapter = new MockAdapter(config);
+    expect(reads).toBe(0);
+    getterAdapter.routes.get('/test', () => {
+      throw new Error('route failed');
+    });
+    expect((await getterAdapter.send(makeAdapterRequest())).status).toBe(418);
+    expect(reads).toBe(1);
+    reads = 0;
+    config.status = 409;
+    expect((await getterAdapter.send(makeAdapterRequest())).status).toBe(409);
+    expect(reads).toBe(1);
+  });
+
+  test('default delay updates on the original config remain live', async () => {
+    const config = { defaultDelay: 0 };
+    const liveAdapter = new MockAdapter(config);
+    liveAdapter.routes.get('/test', () => ({ status: 200 }));
+    config.defaultDelay = 50;
+    const start = Date.now();
+    await liveAdapter.send(makeAdapterRequest());
+    expect(Date.now() - start).toBeGreaterThanOrEqual(40);
+  });
+
+  test.each([NaN, -1, '50'])(
+    'an updated invalid default delay %s fails without retrying the route',
+    async (defaultDelay) => {
+      const config = { defaultDelay: 0 };
+      const liveAdapter = new MockAdapter(config);
+      let calls = 0;
+      liveAdapter.routes.get('/test', () => {
+        calls++;
+        return { status: 200 };
+      });
+      config.defaultDelay = defaultDelay as number;
+      const request = makeClient(liveAdapter).get('/test').retryPolicy({
+        strategy: 'fixed',
+        maxRetryAttempts: 3,
+        delayMS: 1,
+      });
+      const response = await request.send();
+      expect(response.isFailed).toBe(true);
+      expect(response.isNetworkError).toBe(false);
+      expect(calls).toBe(1);
+      expect(request.error?.code).toBe('adapter_error');
+      expect(request.error?.isRetriesExhausted).toBe(false);
+      expect(request.error?.cause).toBeInstanceOf(
+        defaultDelay === -1 ? RangeError : TypeError,
+      );
+      // The route set no delay; the live default is what was invalid.
+      expect(request.error?.cause?.message).toContain(
+        'MockAdapter defaultDelay',
+      );
+      expect(request.error?.cause?.message).not.toContain('response delay');
+    },
+  );
+
+  test('default delay is read once at construction and once per use', async () => {
+    let reads = 0;
+    const config = {
+      get defaultDelay(): number {
+        reads++;
+        return reads <= 2 ? 0 : NaN;
+      },
+    };
+    const oneReadAdapter = new MockAdapter(config);
+    expect(reads).toBe(1);
+    oneReadAdapter.routes.get('/once', () => ({ status: 200 }));
+    const result = await makeClient(oneReadAdapter).get('/once').send();
+    expect(result.status).toBe(200);
+    expect(reads).toBe(2);
+    const failure = await oneReadAdapter
+      .send(makeAdapterRequest({ requestURL: '/once' }))
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(TypeError);
+    expect(reads).toBe(3);
+    oneReadAdapter.routes.get('/override', () => ({ status: 200, delay: 0 }));
+    expect(
+      (
+        await oneReadAdapter.send(
+          makeAdapterRequest({ requestURL: '/override' }),
+        )
+      ).status,
+    ).toBe(200);
+    expect(reads).toBe(3);
+  });
+
+  test('route response delay is read once before scheduling', async () => {
+    let reads = 0;
+    adapter.routes.get('/delay-once', () => ({
+      status: 200,
+      get delay() {
+        reads++;
+        return reads === 1 ? 0 : NaN;
+      },
+    }));
+    const response = await client.get('/delay-once').send();
+    expect(response.status).toBe(200);
+    expect(reads).toBe(1);
   });
 
   // --- redirects ---
@@ -828,6 +1099,49 @@ describe('MockAdapter.send() — low-level contract', () => {
     expect(onHandlerErrorCalls).toBe(0);
   });
 
+  test('removes its abort listener when the signal throws reading `aborted` after the listener is attached', async () => {
+    // Pending until released: a handler that settles detaches the listener on its own,
+    // so only one still running shows whether the failed read left it attached.
+    let releaseHandler!: () => void;
+    const handlerGate = new Promise<void>((resolve) => {
+      releaseHandler = resolve;
+    });
+    adapter.routes.get('/item', async () => {
+      await handlerGate;
+      return { status: 200 };
+    });
+
+    // Readable until the adapter's wait attaches its listener, then throws: the
+    // post-attach `aborted` check is the read that fails.
+    const listeners = new Set<unknown>();
+    const readFailure = new Error('aborted read failed');
+    const signal = {
+      get aborted(): boolean {
+        if (listeners.size > 0) {
+          throw readFailure;
+        }
+
+        return false;
+      },
+      addEventListener: (_type: string, listener: unknown) => {
+        listeners.add(listener);
+      },
+      removeEventListener: (_type: string, listener: unknown) => {
+        listeners.delete(listener);
+      },
+    } as unknown as AbortSignal;
+
+    // The failed wait is reported as the handler's failure, so the adapter's default 500.
+    const res = await adapter.send(
+      makeAdapterRequest({ requestURL: '/item', signal }),
+    );
+
+    expect(res.status).toBe(500);
+    expect(listeners.size).toBe(0);
+
+    releaseHandler();
+  });
+
   test('handles path-only URL without host', async () => {
     adapter.routes.get('/items', () => ({ status: 200 }));
 
@@ -895,23 +1209,38 @@ describe('MockAdapter.send() — low-level contract', () => {
     expect(res.status).toBe(500);
   });
 
-  test('awaitAbortable normalizes non-Error handler rejection to Error', async () => {
-    adapter.routes.get('/fail-string', () => {
-      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
-      return Promise.reject('plain string rejection');
-    });
-
-    const controller = new AbortController();
-
-    const res = await adapter.send(
-      makeAdapterRequest({
-        requestURL: '/fail-string',
-        signal: controller.signal,
-      }),
-    );
-
-    expect(res.status).toBe(500);
-  });
+  test.each([false, true])(
+    'preserves handler rejection reasons with signal=%s',
+    async (hasSignal) => {
+      for (const reason of [
+        'plain string rejection',
+        undefined,
+        { code: 'handler failure' },
+        new Error('handler failure'),
+      ]) {
+        const seen: unknown[] = [];
+        const errorAdapter = new MockAdapter({
+          onHandlerError: (_request, error) => {
+            seen.push(error);
+            return { status: 418 };
+          },
+        });
+        errorAdapter.routes.get('/fail', () => {
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+          return Promise.reject(reason);
+        });
+        const response = await errorAdapter.send(
+          makeAdapterRequest({
+            requestURL: '/fail',
+            signal: hasSignal ? new AbortController().signal : undefined,
+          }),
+        );
+        expect(response.status).toBe(418);
+        expect(seen).toHaveLength(1);
+        expect(seen[0]).toBe(reason);
+      }
+    },
+  );
 
   test('awaitAbortable settles when rejection inspection traps throw', async () => {
     const hostile = new Proxy(Object.create(null) as object, {
@@ -1772,3 +2101,127 @@ describe('retrySuppressedReason', () => {
     expect(reasons).toEqual([undefined]);
   });
 });
+
+describe('MockAdapter - a handler returning a hostile rejected promise', () => {
+  test.each(
+    hostileRejections.flatMap(([label, make]) => [
+      [`${label}, no signal`, make, false] as const,
+      [`${label}, with a signal`, make, true] as const,
+    ]),
+  )(
+    'one with %s fails the request instead of hanging',
+    async (_label, make, hasSignal) => {
+      const adapter = new MockAdapter();
+      adapter.routes.get('/hostile', () => make(new Error('handler rejected')));
+
+      const response = await Promise.race([
+        adapter.send(
+          makeAdapterRequest({
+            requestURL: '/hostile',
+            ...(hasSignal ? { signal: new AbortController().signal } : {}),
+          }),
+        ),
+        new Promise<'hung'>((resolve) => {
+          setTimeout(() => {
+            resolve('hung');
+          }, 200);
+        }),
+      ]);
+
+      expect(response).not.toBe('hung');
+      expect((response as { status: number }).status).toBe(500);
+    },
+  );
+});
+
+for (const source of ['handler', 'error handler'] as const) {
+  for (const hasSignal of [false, true]) {
+    test(`a ${source} response is not re-adopted with signal=${String(hasSignal)}`, async () => {
+      let reads = 0;
+      const response = {
+        status: 200,
+        body: { ok: true },
+        get then(): undefined {
+          if (++reads > 1) {
+            throw new Error('mock response adopted twice');
+          }
+          return undefined;
+        },
+      };
+      const adapter = new MockAdapter(
+        source === 'error handler'
+          ? { onHandlerError: () => response }
+          : undefined,
+      );
+      adapter.routes.get('/single-adoption', () => {
+        if (source === 'error handler') {
+          throw new Error('route failed');
+        }
+        return response;
+      });
+      const result = await adapter.send({
+        requestURL: 'http://mock.test/single-adoption',
+        method: 'GET',
+        headers: {},
+        signal: hasSignal ? new AbortController().signal : undefined,
+      });
+      expect(result.status).toBe(200);
+      expect(reads).toBe(1);
+    });
+  }
+}
+
+for (const source of ['handler', 'error handler'] as const) {
+  for (const isDelayed of [false, true]) {
+    test(`observes rejection after synchronous abort in ${source}, delayed=${String(isDelayed)}`, async () => {
+      // A subprocess detects unhandled rejections without relying on the test
+      // runner's own rejection listeners or attaching a competing observer.
+      const script = `
+        import { MockAdapter } from ${JSON.stringify(`${import.meta.dir}/mock-adapter.ts`)};
+        const watchdog = setTimeout(() => process.exit(42), 1000);
+        const unhandled = [];
+        process.on('unhandledRejection', (reason) => unhandled.push(String(reason)));
+        const controller = new AbortController();
+        let errorCalls = 0;
+        const abortAndReject = () => {
+          controller.abort();
+          return ${isDelayed ? "new Promise((_, reject) => setTimeout(() => reject(new Error('abandoned failure')), 0))" : "Promise.reject(new Error('abandoned failure'))"};
+        };
+        const adapter = new MockAdapter({
+          onHandlerError() {
+            errorCalls++;
+            return ${source === 'error handler' ? 'abortAndReject()' : '{ status: 500 }'};
+          },
+        });
+        adapter.routes.get('/abort', () => {
+          ${source === 'error handler' ? "throw new Error('route failure');" : 'return abortAndReject();'}
+        });
+        let outcome;
+        try {
+          await adapter.send({ requestURL: '/abort', method: 'GET', headers: {}, signal: controller.signal });
+          outcome = 'resolved';
+        } catch (error) {
+          outcome = error.name;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        clearTimeout(watchdog);
+        process.stdout.write(JSON.stringify({ outcome, errorCalls, unhandled }));
+      `;
+      const child = Bun.spawn([process.execPath, '--eval', script], {
+        stdout: 'pipe',
+        stderr: 'pipe',
+      });
+      const [stdout, stderr, code] = await Promise.all([
+        new Response(child.stdout).text(),
+        new Response(child.stderr).text(),
+        child.exited,
+      ]);
+      expect({ code, stderr }).toEqual({ code: 0, stderr: '' });
+      expect(JSON.parse(stdout)).toEqual({
+        outcome: 'AbortError',
+        errorCalls: source === 'error handler' ? 1 : 0,
+        unhandled: [],
+      });
+    });
+  }
+}

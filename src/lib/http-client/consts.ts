@@ -1,4 +1,5 @@
-import { MAX_TIMER_MS } from '../internal/timer-limits';
+import { isNullish } from '../internal/is-nullish';
+import { assertDurationMS, clampTimerDelayMS } from '../internal/timer-limits';
 import type { HTTPMethod } from './types';
 
 /**
@@ -70,25 +71,36 @@ export const DEFAULT_TIMEOUT_MS = 30_000;
 export { MAX_TIMER_MS } from '../internal/timer-limits';
 
 /**
+ * Reject a request timeout that {@link resolveRequestTimeoutMS} would refuse, without
+ * resolving it. Builders validate when the value is set but keep nullish as-is, so it
+ * still inherits the client value at dispatch. One check keeps both sites agreeing on
+ * what is invalid and on the error's label.
+ */
+export function validateRequestTimeoutMS(
+  requested: unknown,
+): asserts requested is number | null | undefined {
+  if (!isNullish(requested)) {
+    assertDurationMS(requested, 'HTTP request timeout');
+  }
+}
+
+/**
  * The per-attempt timeout a request will actually run under.
  *
- * `HTTPClientConfig.timeout` and `HTTPRequestOptions.timeout` both document `<= 0` as
- * "disable the per-attempt timer", and that reading is kept. What used to be taken
- * literally is everything else a `number` can be: `NaN` - `Number(process.env.UNSET)` -
- * passed both the `> 0` check that arms the timer and the `<= 0` check that disables the
- * upload-settle wait, so the attempt ran with no timer while the wait re-armed a `NaN`
- * timer every millisecond and could never expire; `Infinity` did the same to the wait and
- * fired the attempt timer after 1 ms. `NaN` and a non-number now take the default.
- * `Infinity` is what a caller writes to mean "no timeout", and that is what `0` already
- * means, so it disables the timer rather than being bounded at a number nobody chose. A
- * finite value past {@link MAX_TIMER_MS} is clamped there, the closest wait a timer can
- * keep.
+ * Null and undefined select the configured default. `<= 0` disables the per-attempt
+ * timer, as `HTTPClientConfig.timeout` and `HTTPRequestOptions.timeout` document, and so
+ * does `Infinity`, which is what a caller writes to mean "no timeout". A finite value past
+ * {@link MAX_TIMER_MS} is clamped there, the closest wait a timer can keep. `NaN` and any
+ * non-nullish value that is not a number fail clearly: `NaN` - `Number(process.env.UNSET)`
+ * - fits neither "armed" nor "disabled", and would leave the attempt without a timer while
+ * the upload-settle wait could never expire.
  */
 export function resolveRequestTimeoutMS(
   requested: unknown,
   defaultMS: number = DEFAULT_TIMEOUT_MS,
 ): number {
-  if (typeof requested !== 'number' || Number.isNaN(requested)) {
+  validateRequestTimeoutMS(requested);
+  if (isNullish(requested)) {
     return defaultMS;
   }
 
@@ -96,7 +108,7 @@ export function resolveRequestTimeoutMS(
     return 0;
   }
 
-  return Math.min(requested, MAX_TIMER_MS);
+  return clampTimerDelayMS(requested);
 }
 
 export const DEFAULT_REQUEST_ID_HEADER = 'x-local-client-request-id';
@@ -107,6 +119,10 @@ export const DEFAULT_USER_AGENT = 'lifecycleion-http-client';
 
 export const NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG =
   '_lifecycleion_non_retryable_http_client_callback_error';
+
+/** Terminal adapter configuration failures retain adapter_error classification. */
+export const NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG =
+  '_lifecycleion_non_retryable_http_adapter_error';
 
 export const STREAM_FACTORY_ERROR_FLAG = '_lifecycleion_stream_factory_error';
 

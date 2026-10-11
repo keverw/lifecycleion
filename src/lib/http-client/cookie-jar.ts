@@ -583,16 +583,15 @@ export class CookieJar {
    * Restores a jar from serialized JSON.
    *
    * `setCookie` refuses a cookie with a missing or invalid domain and says so by returning
-   * `false`. This threw that answer away and returned `void`, so a persisted jar could come
-   * back short with nothing to say it had - and every other mutator on this class
-   * (`clear`, `clearExpiredCookies`, `setCookie`) reports what it did.
+   * `false`. A restore reports those refusals through its count, as every other mutator on
+   * this class (`clear`, `clearExpiredCookies`, `setCookie`) reports what it did, so a
+   * persisted jar that comes back short says so.
    *
    * The payload is read in full before the jar is touched, and each cookie is copied
-   * rather than taken. This used to `clear()` first and mutate `expires` in place, so a
-   * payload with no `cookies`, a `null` entry, or a frozen cookie threw *after* the jar
-   * was already empty - the one order in which a failed restore also loses what was
-   * there - and a caller's own array of cookies came back with `Date` objects written
-   * into it.
+   * rather than taken. A payload with no `cookies` or a `null` entry therefore throws
+   * while the jar still holds what it had, rather than after emptying it. Frozen entries
+   * are accepted because each entry is copied before modification, and a caller's own
+   * array of cookies never has `Date` objects written into it.
    *
    * A restore *replaces*: once the payload has been read, the jar is emptied and refilled
    * with whatever `setCookie` accepts. A well-formed payload whose cookies are all refused
@@ -601,21 +600,21 @@ export class CookieJar {
    * jar untouched. Snapshot with `toJSON()` first if a short restore should be rolled back.
    *
    * A cookie whose `expires` cannot be read as a date is refused the same way a cookie
-   * with a bad domain is: left out of the jar and out of the count. It used to be
-   * restored with `new Date('garbage')` - an `Invalid Date`, which is truthy, so
-   * `isExpired` compared `now` against `NaN`, found it never greater, and the cookie
-   * was sent for the life of the jar and never purged. One corrupt date in a persisted
-   * jar made an immortal cookie. Refused rather than restored as a session cookie,
+   * with a bad domain is: left out of the jar and out of the count. Restored as
+   * `new Date('garbage')` it would be an `Invalid Date`, which is truthy, so `isExpired`
+   * would compare `now` against `NaN`, never find it greater, and send the cookie for the
+   * life of the jar without ever purging it - one corrupt date in a persisted jar would
+   * make an immortal cookie. Refused rather than restored as a session cookie,
    * because a cookie that was persisted with an expiry was not a session cookie, and
    * the header parser drops an unreadable `Expires` attribute for the same reason.
    * `null` - what `JSON.stringify` writes for an `Invalid Date` - and `undefined` mean
    * no expiry, as they do on a live cookie.
    *
    * The same refusal covers the other half of the expiry model: a `maxAge` or a
-   * `createdAt` that is not a finite number - a string, `NaN`, an object - made
+   * `createdAt` that is not a finite number - a string, `NaN`, an object - would make
    * `createdAt + maxAge * 1000` come out `NaN` and the cookie just as immortal, and
    * `isExpired` prefers `maxAge` over `expires`, so a sound `expires` beside a corrupt
-   * `maxAge` did not save it. `setCookie` refuses those the way it refuses a bad domain.
+   * `maxAge` would not save it. `setCookie` refuses those the way it refuses a bad domain.
    * A `null` `maxAge` or `createdAt` reads as absent, as a `null` `expires` does.
    *
    * @returns How many cookies were restored. Compare against `data.cookies.length` to learn
