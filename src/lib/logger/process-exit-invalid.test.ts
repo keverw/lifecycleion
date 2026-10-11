@@ -1556,6 +1556,74 @@ test('a code kept by a simulated request is normalized when the exit commits as 
   }
 });
 
+test('an exit a console shim makes during the commit report is judged against the code being committed', async () => {
+  const lines: string[] = [];
+  let logger!: Logger;
+  const output = spyOn(console, 'error').mockImplementation(
+    (...args: unknown[]) => {
+      const line = String(args[0]);
+      lines.push(line);
+      // A shim forwarding the commit's report back: a failure behind the committing one.
+      if (line.includes('is invalid for a real exit')) {
+        logger.exit(2);
+      }
+    },
+  );
+  const actualExit = Object.getOwnPropertyDescriptor(process, 'exit');
+  try {
+    const calls: number[] = [];
+    const stub = ((code?: number) => {
+      calls.push(code ?? 0);
+    }) as typeof process.exit;
+    let proceed!: () => void;
+    logger = new Logger({
+      sinks: [],
+      callProcessExit: true,
+      beforeExitCallback: () =>
+        new Promise((resolve) => {
+          proceed = () => resolve({ action: 'proceed' });
+        }),
+    });
+    // Simulated when requested, so 256 is kept; real when it commits, so the commit
+    // normalizes it and reports that.
+    (process as { exit?: unknown }).exit = undefined;
+    logger.exit(256);
+    process.exit = stub;
+    proceed();
+    await logger.close();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Committed as 1, so the shim's exit(2) changes nothing and is not judged against a
+    // code 0 that never applied - which would use up the once-per-logger report.
+    expect(logger.exitCode).toBe(1);
+    expect(calls).toEqual([1]);
+
+    // The stub returned, so the next exit runs: it commits 0, and a failure made after
+    // that commit is lost - the report is still there for it.
+    let isSecondExit = false;
+    logger.on<{ eventType: string }>('logger', ({ eventType }) => {
+      if (isSecondExit && eventType === 'exit-process') {
+        logger.exit(1);
+      }
+    });
+    isSecondExit = true;
+    logger.exit(0);
+    proceed();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(calls).toEqual([1, 0]);
+    expect(lines).toEqual([
+      'Logger exit code 256 is invalid for a real exit; exiting with code 1',
+      'Logger exit(1) ignored: the logger is already exiting with code 0',
+    ]);
+  } finally {
+    if (actualExit !== undefined) {
+      Object.defineProperty(process, 'exit', actualExit);
+    }
+    output.mockRestore();
+  }
+});
+
 test('replacement reports are bounded to one line per exit plus a settled-code summary', async () => {
   const output = spyOn(console, 'error').mockImplementation(() => {});
   try {

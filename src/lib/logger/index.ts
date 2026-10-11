@@ -2234,28 +2234,31 @@ export class Logger extends EventEmitter {
     this._pendingExit = undefined;
     this._isFinishingExit = true;
     this._hasScheduledProcessExit = this.endsProcessOnExit;
-    let exitCode = pendingExit.code;
-    // Replacements past the first were counted rather than reported (see
-    // `recordExitRequest`); say once what they settled on, so the bound costs no answer.
-    if (pendingExit.suppressedReplacements > 0) {
-      reportToConsole(
-        `Logger exit code settled on ${String(exitCode)} after ${String(pendingExit.suppressedReplacements)} further replacement${pendingExit.suppressedReplacements === 1 ? '' : 's'} not reported`,
-      );
-    }
     // Each request was normalized in the mode that held when it was made, but the mode
     // that counts is the one this commit runs in. A code kept by a simulated request -
     // `exit(256)` while `process.exit` was absent - would otherwise reach a real
     // `process.exit()` here and wrap to 0 at the OS boundary: a failure exiting as
-    // success. A real commit happens at most once per logger, so this report is bounded
-    // by that alone.
-    if (this._hasScheduledProcessExit && this.isInvalidExitCode(exitCode)) {
-      reportToConsole(
-        `Logger exit code ${String(exitCode)} is invalid for a real exit; exiting with code 1`,
-      );
-      exitCode = 1;
-    }
+    // success. A real commit happens at most once per logger, so its report below is
+    // bounded by that alone.
+    const isInvalidForRealExit =
+      this._hasScheduledProcessExit && this.isInvalidExitCode(pendingExit.code);
+    const exitCode = isInvalidForRealExit ? 1 : pendingExit.code;
+    // Published before any console report below: a console shim may call `exit()` from
+    // one, and `ignoreAfterCommit` judges that request against the code committed here.
     this._didExit = true;
     this._exitCode = exitCode;
+    // Replacements past the first were counted rather than reported (see
+    // `recordExitRequest`); say once what they settled on, so the bound costs no answer.
+    if (pendingExit.suppressedReplacements > 0) {
+      reportToConsole(
+        `Logger exit code settled on ${String(pendingExit.code)} after ${String(pendingExit.suppressedReplacements)} further replacement${pendingExit.suppressedReplacements === 1 ? '' : 's'} not reported`,
+      );
+    }
+    if (isInvalidForRealExit) {
+      reportToConsole(
+        `Logger exit code ${String(pendingExit.code)} is invalid for a real exit; exiting with code 1`,
+      );
+    }
 
     // Nor are these listeners; see `withoutActiveSinkClose`. From here the exit is
     // committed, so nothing may throw past `finishExit` below: a throw would leave
