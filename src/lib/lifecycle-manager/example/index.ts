@@ -23,9 +23,12 @@ class DatabaseComponent extends BaseComponent {
     super(logger, { name: 'database' });
   }
 
-  public async start() {
+  // `signal` aborts if the manager gives up on this start (startupTimeoutMS passed).
+  // Real code would pass it to the driver's connect call; here it is checked between steps.
+  public async start(signal: AbortSignal) {
     this.logger.info('Connecting to database...');
     await sleep(500);
+    signal.throwIfAborted();
     this.connected = true;
     this.logger.success('Database connected');
   }
@@ -182,7 +185,7 @@ async function main() {
 
   // Note: With enableLoggerExitHook enabled, fatal errors will also trigger graceful shutdown:
   // logger.error('Database connection lost', { exitCode: 1 });
-  // This would gracefully stop all components before exiting with code 1
+  // This requests shutdown; the demo exits according to the shutdown result.
 }
 
 main().catch((error: unknown) => {

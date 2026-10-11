@@ -201,6 +201,8 @@ export default [
           varsIgnorePattern: '^_',
         },
       ],
+      // Async forwarding must not re-assimilate owned promises through a live then.
+      '@typescript-eslint/return-await': ['error', 'always'],
       // TypeScript specific rules
       '@typescript-eslint/no-explicit-any': 'warn',
       '@typescript-eslint/explicit-function-return-type': 'off',
