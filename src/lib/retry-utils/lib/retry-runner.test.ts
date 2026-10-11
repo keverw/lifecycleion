@@ -20,6 +20,7 @@ import {
   RetryUtilsErrRunnerNotRunning,
 } from './retry-utils-errors';
 import { MAX_TIMER_MS } from '../../internal/timer-limits';
+import { hostileRejections } from '../../internal/hostile-promise-test-utils';
 
 interface CustomResult {
   message: string;
@@ -74,8 +75,25 @@ describe('RetryRunner', () => {
     runner.overrideGraceCancelPeriodMS(500);
     expect(runner.graceCancelPeriodMS).toBe(500);
 
-    runner.overrideGraceCancelPeriodMS(-1);
-    expect(runner.graceCancelPeriodMS).toBe(1000);
+    expect(() => runner.overrideGraceCancelPeriodMS(-1)).toThrow(RangeError);
+    expect(runner.graceCancelPeriodMS).toBe(500);
+
+    expect(() => runner.overrideGraceCancelPeriodMS(Number.NaN)).toThrow(
+      TypeError,
+    );
+    expect(() =>
+      runner.overrideGraceCancelPeriodMS('500' as unknown as number),
+    ).toThrow(TypeError);
+
+    for (const value of [null, undefined]) {
+      expect(() =>
+        runner.overrideGraceCancelPeriodMS(value as unknown as number),
+      ).toThrow(TypeError);
+      expect(runner.graceCancelPeriodMS).toBe(500);
+    }
+
+    runner.overrideGraceCancelPeriodMS(Infinity);
+    expect(runner.graceCancelPeriodMS).toBe(MAX_TIMER_MS);
 
     runner.overrideGraceCancelPeriodMS(3e9);
     expect(runner.graceCancelPeriodMS).toBe(MAX_TIMER_MS);
@@ -1088,3 +1106,428 @@ describe('RetryRunner', () => {
     });
   });
 });
+
+describe('RetryRunner - an operation returning a hostile rejected promise', () => {
+  test.each(hostileRejections)(
+    'one with %s fails the attempt',
+    async (_label, make) => {
+      // The failure is reported; kept out of the run output.
+      muteConsoleError();
+      const runner = new RetryRunner(
+        { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 1 },
+        () => make(new Error('operation rejected')),
+      );
+
+      try {
+        const outcome = await Promise.race([
+          runner.run(true).then(() => 'settled'),
+          sleep(200).then(() => 'hung'),
+        ]);
+
+        expect(outcome).toBe('settled');
+        expect(runner.lastError).toBeInstanceOf(Error);
+        expect((runner.lastError as Error).message).toBe('operation rejected');
+      } finally {
+        restoreConsoleError();
+      }
+    },
+  );
+});
+
+test('operation thenable uses its first then read and observes rejection', async () => {
+  muteConsoleError();
+  let reads = 0;
+  let attempts = 0;
+  const failure = new Error('operation failed');
+  const runner = new RetryRunner(
+    { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 1 },
+    () => {
+      attempts++;
+      let resultReads = 0;
+      return {
+        get then() {
+          reads++;
+          if (++resultReads > 1) {
+            return undefined;
+          }
+          return (
+            _resolve: unknown,
+            reject: (reason: unknown) => void,
+          ): void => {
+            reject(failure);
+          };
+        },
+      } as unknown as Promise<void>;
+    },
+  );
+  try {
+    const outcome = await Promise.race([
+      runner.run(true).then(() => 'settled'),
+      sleep(200).then(() => 'hung'),
+    ]);
+    expect(outcome).toBe('settled');
+    expect(reads).toBe(attempts);
+    expect(runner.lastError).toBe(failure);
+  } finally {
+    restoreConsoleError();
+  }
+});
+
+test('waiting for completion does not retain the dispatch lock', async () => {
+  const gate = Promise.withResolvers<void>();
+  const runner = new RetryRunner(
+    { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 0 },
+    async (report) => {
+      await gate.promise;
+      report('success');
+    },
+  );
+  const pending = runner.run(true);
+  try {
+    // An indiscriminate return-await inside run's try/finally would hold the lock
+    // for the whole attempt and wrongly refuse this legitimate attachment.
+    expect(await runner.forceTry({ shouldWaitForCompletion: false })).toEqual({
+      status: 'running',
+      reattached: true,
+    });
+  } finally {
+    gate.resolve();
+    await pending;
+  }
+});
+
+test('operation then getter failure preserves its original error identity', async () => {
+  class FatalError extends Error {
+    public readonly code = 'FATAL';
+  }
+  const failure = new FatalError('cannot read operation then');
+  const handledErrors: unknown[] = [];
+  const runner = new RetryRunner(
+    { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 0 },
+    () =>
+      ({
+        get then() {
+          throw failure;
+        },
+      }) as unknown as Promise<void>,
+    { onAttemptHandled: (info) => handledErrors.push(info.error) },
+  );
+
+  const result = await runner.run(true);
+
+  expect(result.status).toBe('attempts_exhausted');
+  expect('error' in result && result.error).toBe(failure);
+  expect(runner.lastError).toBe(failure);
+  expect(handledErrors.length).toBeGreaterThan(0);
+  for (const error of handledErrors) {
+    expect(error).toBe(failure);
+  }
+});
+
+test.each(['error', 'fatal'] as const)(
+  'operation then getter rethrow of reported %s is not a second outcome',
+  async (status) => {
+    const captured = muteConsoleError();
+    const events: unknown[] = [];
+    const onGlobalError = (event: unknown): void => {
+      events.push(event);
+    };
+    globalThis.addEventListener?.('error', onGlobalError);
+
+    try {
+      const failure = new Error('already reported');
+      const runner = new RetryRunner(
+        { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 0 },
+        (reportResult) => {
+          if (status === 'fatal') {
+            reportResult('fatal', failure);
+          } else {
+            reportResult('error', failure);
+          }
+          return {
+            get then() {
+              throw failure;
+            },
+          } as unknown as Promise<void>;
+        },
+      );
+
+      const result = await runner.run(true);
+      await sleep(10);
+
+      expect(result.status).toBe(
+        status === 'fatal' ? 'attempt_fatal' : 'attempts_exhausted',
+      );
+      expect(runner.lastError).toBe(failure);
+      expect(captured).toEqual([]);
+      expect(events).toEqual([]);
+    } finally {
+      globalThis.removeEventListener?.('error', onGlobalError);
+      restoreConsoleError();
+    }
+  },
+);
+
+test('an unreadable then after a settled attempt is reported as a return-contract failure, not a throw', async () => {
+  const getterError = new Error('then getter failed');
+  const reports: unknown[] = [];
+  const onGlobalError = (event: Event): void => {
+    reports.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onGlobalError);
+
+  try {
+    const runner = new RetryRunner(
+      { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 0 },
+      (reportResult) => {
+        reportResult('success', 'done');
+        return {
+          get then() {
+            throw getterError;
+          },
+        } as unknown as Promise<void>;
+      },
+    );
+
+    const result = await runner.run(true);
+    await sleep(10);
+
+    expect(result).toEqual({ status: 'attempt_success', data: 'done' });
+    expect(runner.runnerState).toBe('completed');
+    expect(reports).toHaveLength(1);
+
+    const report = reports[0] as Error;
+    expect(report.message).toContain('returned an unreadable then');
+    expect(report.message).not.toContain('threw');
+
+    const cause = report.cause as Error;
+    expect(cause.message).toContain(
+      'RetryRunner operation returned a value whose then could not be read',
+    );
+    expect(cause.cause).toBe(getterError);
+  } finally {
+    globalThis.removeEventListener('error', onGlobalError);
+  }
+});
+
+test('runner options are each read exactly once', async () => {
+  const reads: Record<string, number> = {};
+  const calls: string[] = [];
+  // Each getter hands out a usable value the first time only, so a second read would
+  // see a non-function (or a non-string label) the first check never did.
+  const once = <V>(name: string, value: V): (() => V | undefined) => {
+    return () => {
+      reads[name] = (reads[name] ?? 0) + 1;
+      return reads[name] === 1 ? value : undefined;
+    };
+  };
+  const options = {};
+  for (const [name, value] of [
+    ['operationLabel', 'labelled'],
+    ['onOperationStarted', () => calls.push('operation-started')],
+    ['onOperationEnded', () => calls.push('operation-ended')],
+    ['onAttemptStarted', () => calls.push('attempt-started')],
+    ['onAttemptHandled', () => calls.push('attempt-handled')],
+  ] as const) {
+    Object.defineProperty(options, name, {
+      get: once(name, value),
+      enumerable: true,
+    });
+  }
+
+  const reports: unknown[] = [];
+  const onGlobalError = (event: Event): void => {
+    reports.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onGlobalError);
+
+  try {
+    const runner = new RetryRunner(
+      { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 0 },
+      (reportResult) => {
+        reportResult('success');
+      },
+      options,
+    );
+
+    expect(await runner.run(true)).toEqual({ status: 'attempt_success' });
+    expect(runner.operationLabel).toBe('labelled');
+    expect(reads).toEqual({
+      operationLabel: 1,
+      onOperationStarted: 1,
+      onOperationEnded: 1,
+      onAttemptStarted: 1,
+      onAttemptHandled: 1,
+    });
+    expect(calls).toEqual([
+      'operation-started',
+      'attempt-started',
+      'attempt-handled',
+      'operation-ended',
+    ]);
+    expect(reports).toEqual([]);
+  } finally {
+    globalThis.removeEventListener('error', onGlobalError);
+  }
+});
+
+for (const failingDependency of ['random', 'timer'] as const) {
+  test(`a throwing retry ${failingDependency} settles the operation as fatal`, async () => {
+    const failure = new Error(`broken ${failingDependency}`);
+    const runner = new RetryRunner(
+      {
+        strategy: 'exponential',
+        maxRetryAttempts: 3,
+        minTimeoutMS: 1,
+        maxTimeoutMS: 100,
+        factor: 2,
+        dispersion: 0.2,
+      },
+      (report) => report('error', new Error('attempt failed')),
+    );
+    const random = Math.random;
+    const timer = globalThis.setTimeout;
+    let pending: ReturnType<typeof runner.run>;
+    try {
+      if (failingDependency === 'random') {
+        Math.random = (): never => {
+          throw failure;
+        };
+      } else {
+        globalThis.setTimeout = (() => {
+          throw failure;
+        }) as unknown as typeof setTimeout;
+      }
+      pending = runner.run(true);
+    } finally {
+      Math.random = random;
+      globalThis.setTimeout = timer;
+    }
+    const result = await Promise.race([pending, sleep(100).then(() => 'hung')]);
+    expect(result).toEqual({
+      status: 'attempt_fatal',
+      code: 'unexpected_error',
+      error: failure,
+    });
+    expect(runner.runnerState).toBe('fatal-error');
+    expect(runner.isAttemptRunning).toBe(false);
+    expect(runner.isRetryPending).toBe(false);
+  });
+}
+
+function collectRetryCallbackReports(callbackName: string): {
+  reports: Error[];
+  release: () => void;
+} {
+  const reports: Error[] = [];
+  const onGlobalError = (event: Event): void => {
+    const reported = (event as ErrorEvent).error as Error;
+    if (reported.message === `Error in a callback ${callbackName}`) {
+      reports.push(reported);
+      event.preventDefault();
+    }
+  };
+  globalThis.addEventListener('error', onGlobalError);
+  return {
+    reports,
+    release: () => globalThis.removeEventListener('error', onGlobalError),
+  };
+}
+
+test('a cancellation timer that throws forces cancellation and settles existing waiters', async () => {
+  const { reports, release } = collectRetryCallbackReports(
+    'RetryRunner cancellation timer',
+  );
+  try {
+    const failure = new Error('cancel timer failed');
+    const runner = new RetryRunner(
+      { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 1 },
+      () => {},
+    );
+    const completion = runner.run(true);
+    const timer = globalThis.setTimeout;
+    let cancellation: ReturnType<typeof runner.cancel>;
+    try {
+      globalThis.setTimeout = (() => {
+        throw failure;
+      }) as unknown as typeof setTimeout;
+      cancellation = runner.cancel();
+    } finally {
+      globalThis.setTimeout = timer;
+    }
+    expect(await cancellation).toBe('forced');
+    expect(await completion).toEqual({ status: 'canceled' });
+    expect(runner.runnerState).toBe('stopped');
+    expect(runner.isAttemptRunning).toBe(false);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.cause).toBe(failure);
+  } finally {
+    release();
+  }
+});
+
+for (const replacement of ['forceTry', 'cancel'] as const) {
+  test(`a retry policy throw after ${replacement} preserves the newer outcome`, async () => {
+    const { reports, release } = collectRetryCallbackReports(
+      'RetryRunner retry scheduling',
+    );
+    try {
+      const failure = new Error('policy threw after reentry');
+      let reportFirst: ReportResult<string> | undefined;
+      let attempts = 0;
+      const runner = new RetryRunner<string>(
+        {
+          strategy: 'exponential',
+          maxRetryAttempts: 3,
+          minTimeoutMS: 1,
+          maxTimeoutMS: 100,
+          factor: 2,
+          dispersion: 0.2,
+        },
+        (report) => {
+          attempts++;
+          if (attempts === 1) {
+            reportFirst = report;
+          } else {
+            report('success', 'replacement');
+          }
+        },
+      );
+      const completion = runner.run(true);
+      const random = Math.random;
+      let replacementCall: Promise<unknown> | undefined;
+      try {
+        Math.random = () => {
+          replacementCall =
+            replacement === 'forceTry' ? runner.forceTry() : runner.cancel();
+          throw failure;
+        };
+        if (reportFirst === undefined) {
+          throw new Error('first attempt did not start');
+        }
+        reportFirst('error', new Error('attempt failed'));
+      } finally {
+        Math.random = random;
+      }
+      const outcome = await Promise.race([
+        completion,
+        sleep(100).then(() => 'hung'),
+      ]);
+      expect(outcome).toEqual(
+        replacement === 'forceTry'
+          ? { status: 'attempt_success', data: 'replacement' }
+          : { status: 'canceled' },
+      );
+      await replacementCall;
+      expect(runner.runnerState).toBe(
+        replacement === 'forceTry' ? 'completed' : 'stopped',
+      );
+      expect(reports).toHaveLength(1);
+      expect(reports[0]?.cause).toBe(failure);
+    } finally {
+      release();
+    }
+  });
+}
