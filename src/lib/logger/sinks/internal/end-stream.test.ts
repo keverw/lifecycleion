@@ -35,21 +35,30 @@ afterEach(() => {
   globalThis.setTimeout = originalSetTimeout;
 });
 
-/** Record whether each deadline timer is still referenced once it has been armed. */
-function recordTimerRefs(): boolean[] {
+/**
+ * Record whether each timer `start` creates synchronously keeps the process alive. Only
+ * that window is recorded, so a timer another test left running cannot land in the list.
+ */
+function recordTimerRefs(start: () => Promise<unknown>): Promise<boolean[]> {
   const refs: boolean[] = [];
+  let isRecording = true;
 
   globalThis.setTimeout = ((...args: Parameters<typeof originalSetTimeout>) => {
     const timer = originalSetTimeout(...args);
 
-    queueMicrotask(() => {
-      refs.push(timer.hasRef());
-    });
+    if (isRecording) {
+      queueMicrotask(() => {
+        refs.push(timer.hasRef());
+      });
+    }
 
     return timer;
   }) as typeof setTimeout;
 
-  return refs;
+  const started = start();
+  isRecording = false;
+
+  return started.then(() => refs);
 }
 
 test('a stream that flushes reports nothing left and is released', async () => {
@@ -121,18 +130,20 @@ test('a flush that fails is abandoned, not counted as flushed', async () => {
 });
 
 test('only a background flush lets its deadline release the process', async () => {
-  const refs = recordTimerRefs();
-
-  await endStreamWithin(
-    fakeStream(() => {}),
-    0,
-    { shouldUnref: false },
+  const awaited = await recordTimerRefs(() =>
+    endStreamWithin(
+      fakeStream(() => {}),
+      0,
+      { shouldUnref: false },
+    ),
   );
-  await endStreamWithin(
-    fakeStream(() => {}),
-    0,
-    { shouldUnref: true },
+  const background = await recordTimerRefs(() =>
+    endStreamWithin(
+      fakeStream(() => {}),
+      0,
+      { shouldUnref: true },
+    ),
   );
 
-  expect(refs).toEqual([true, false]);
+  expect([...awaited, ...background]).toEqual([true, false]);
 });

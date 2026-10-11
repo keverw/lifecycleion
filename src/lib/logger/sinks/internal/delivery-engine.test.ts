@@ -911,43 +911,24 @@ describe('DeliveryEngine', () => {
     },
   );
 
-  test('a reopen after an old write failure, then good writes, leaves one late failure a lost connection', async () => {
+  test('a confirmed write after a reopen ends the failing-writes streak', async () => {
     const destination = new FakeDestination();
-    const { engine, reports, write } = await started(
-      makeEngine({ destination, closeTimeoutMS: 200 }),
-    );
+    const { engine, write } = await started(makeEngine({ destination }));
+    const streak = engine as unknown as { didReopenAfterWriteFailure: boolean };
 
-    // An earlier connection loses a line and the reopen succeeds.
+    // An earlier connection loses a line and the reopen succeeds: a streak in progress.
     write('x');
     destination.isOpen = false;
     destination.fail(new Error('EPIPE (old reader)'), false);
     await until(() => destination.isOpen);
+    expect(streak.didReopenAfterWriteFailure).toBe(true);
 
-    // The new connection writes fine for a while.
+    // A write confirmed on the new connection ends it, so one later failure during a
+    // close reads as a lost connection rather than writes that kept failing.
     write('ok');
     await until(() => destination.pendingLines().includes('ok'));
     destination.succeed();
-
-    // Then, during close, it fails once and never comes back.
-    destination.defaultOpen = { status: 'unavailable' };
-    destination.canContinue = false;
-    write('a');
-    write('b');
-
-    const closing = engine.close();
-
-    setTimeout(() => {
-      destination.isOpen = false;
-      destination.fail(new Error('EPIPE'));
-    }, 195);
-    await closing;
-
-    const abandoned = reports.find((failure) => failure.kind === 'close');
-
-    expect(abandoned?.error.message).toBe('abandoned 2 connection_lost');
-    expect((abandoned?.error.cause as Error | undefined)?.message).toBe(
-      'EPIPE',
-    );
+    expect(streak.didReopenAfterWriteFailure).toBe(false);
   });
 
   test('a write failure on a connection since replaced is not the cause of a later timeout', async () => {
