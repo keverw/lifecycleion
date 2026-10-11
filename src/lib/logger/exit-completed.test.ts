@@ -155,10 +155,9 @@ test('a real exit emits exit-completed with endedProcess: true right before proc
         order.push(
           `exit-completed(${String(event.code)}, ${String(event.endedProcess)})`,
         );
-        // Ignored: this exit has already scheduled process.exit(). Reported whatever
-        // code it committed.
+        // Ignored: this exit has already scheduled process.exit(). Not reported: the
+        // process exits with a failure either way.
         logger.exit(7);
-        logger.exit(8);
       }
     });
 
@@ -169,9 +168,7 @@ test('a real exit emits exit-completed with endedProcess: true right before proc
     expect(order).toEqual(['exit-completed(3, true)', 'process.exit(3)']);
     expect(exitCalled).toBe(1);
     expect(logger.exitCode).toBe(3);
-    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
-      'Logger exit(7) ignored: the logger is already exiting with code 3',
-    ]);
+    expect(output).not.toHaveBeenCalled();
   } finally {
     exit.mockRestore();
     output.mockRestore();

@@ -182,6 +182,35 @@ test('a stuck state another copy already replaced is dropped, not replaced again
   expect(copy.isHeld()).toBe(true);
 });
 
+test('a state whose flag throws after another copy replaced it is dropped, not replaced again', () => {
+  const key = testKey();
+  const copy = slot(key);
+  const healthy: TestState = { held: true };
+  // Valid by its descriptor; reading its flag throws - by then another copy has
+  // replaced it in the slot, and holds the healthy state.
+  const outdated = new Proxy(
+    { held: false },
+    {
+      get() {
+        Object.defineProperty(globalThis, key, {
+          configurable: true,
+          writable: true,
+          value: healthy,
+        });
+        throw new Error('flag unavailable');
+      },
+    },
+  );
+  Object.defineProperty(globalThis, key, {
+    configurable: true,
+    writable: true,
+    value: outdated,
+  });
+
+  expect(copy.isHeld()).toBe(true);
+  expect(slotValue(key)).toBe(healthy);
+});
+
 test('a definition that throws is not remembered as a refusal', () => {
   const key = testKey();
   const copy = slot(key);

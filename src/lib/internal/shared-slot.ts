@@ -74,7 +74,15 @@ export class SharedSlot<T extends object> {
     try {
       return this.options.isHeld(state);
     } catch {
-      return this.options.isHeld(this.replace());
+      this.replaceIfInSlot(state);
+    }
+
+    try {
+      return this.options.isHeld(this.current());
+    } catch {
+      // Only for a slot that went hostile again between two statements: no report is
+      // running that this copy can see.
+      return false;
     }
   }
 
@@ -112,7 +120,15 @@ export class SharedSlot<T extends object> {
       // Refused: a state that can never be freed, as an ignored write is.
     }
 
-    // This copy's own state cannot refuse.
+    this.replaceIfInSlot(state);
+  }
+
+  /**
+   * Replace `state`, which proved unusable, if the slot still holds it. One another copy
+   * has already replaced is dropped, rather than replacing the healthy state now in its
+   * place. This copy's own state is never unusable.
+   */
+  private replaceIfInSlot(state: T): void {
     if (state === this.local) {
       return;
     }
