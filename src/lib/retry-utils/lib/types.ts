@@ -1,20 +1,25 @@
 export type RetryPolicyOptions =
   RetryPolicyOptionsStrategyFixed | RetryPolicyOptionsStrategyExponential;
 
-export type RetryPolicyValidated = Required<RetryPolicyOptions>;
+type RequiredNonNullable<T> = { [K in keyof T]-?: NonNullable<T[K]> };
+
+export type RetryPolicyValidated = RequiredNonNullable<RetryPolicyOptions>;
 
 export interface RetryPolicyOptionsStrategyFixed {
   strategy: 'fixed';
   maxRetryAttempts?: number;
-  delayMS?: number;
+  /** Null or undefined uses the default delay. */
+  delayMS?: number | null;
 }
 
 export interface RetryPolicyOptionsStrategyExponential {
   strategy: 'exponential';
   maxRetryAttempts?: number;
   factor?: number;
-  minTimeoutMS?: number;
-  maxTimeoutMS?: number;
+  /** Null or undefined uses the default minimum delay. */
+  minTimeoutMS?: number | null;
+  /** Null or undefined uses the default maximum delay. */
+  maxTimeoutMS?: number | null;
   dispersion?: number;
 }
 
@@ -45,9 +50,11 @@ export type RunnerErrorCode =
   | 'attempts_exhausted'
   | 'cancel_pending'
   | 'force_try_in_progress'
+  | 'force_try_superseded'
   | 'fatally_failed'
   | 'lock_error'
   | 'not_paused'
   | 'not_running'
   | 'retry_canceled'
+  | 'terminal_dispatch_in_progress'
   | 'unexpected_error';

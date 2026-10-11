@@ -76,8 +76,8 @@ Retries a fixed number of times with a fixed delay between attempts.
 ```typescript
 {
   strategy: 'fixed';
-  maxRetryAttempts?: number; // Max retries allowed (excludes initial attempt). Default: 10, Min: 1, floored to integer
-  delayMS?: number; // Delay between retries. Default: 1000ms, Min: 1
+  maxRetryAttempts?: number; // Max retries allowed (excludes initial attempt). Default: 10, Min: 1 (0 still allows one retry), floored to integer; NaN or non-number throws
+  delayMS?: number | null; // Delay between retries. Default (omitted or null): 1000ms. 0 becomes 1ms; Infinity uses the timer ceiling; negative, NaN or non-number throws
 }
 ```
 
@@ -88,11 +88,11 @@ Uses exponential backoff with jitter to calculate delays between retry attempts.
 ```typescript
 {
   strategy: 'exponential';
-  maxRetryAttempts?: number; // Max retries allowed (excludes initial attempt). Default: 10, Min: 1, floored to integer
-  factor?: number; // Multiplier for exponential growth. Default: 1.5, Min: 1
-  minTimeoutMS?: number; // Shortest delay between retries. Default: 1000ms, Min: 1
-  maxTimeoutMS?: number; // Longest delay between retries. Default: 30000ms, Min: 1
-  dispersion?: number; // Randomness added to delays (0 to 1 inclusive, e.g. 0.1 = 10%). Default: 0.1
+  maxRetryAttempts?: number; // Max retries allowed (excludes initial attempt). Default: 10, Min: 1 (0 still allows one retry), floored to integer; NaN or non-number throws
+  factor?: number; // Multiplier for exponential growth. Default: 1.5, Min: 1; NaN or non-number throws
+  minTimeoutMS?: number | null; // Shortest delay between retries. Default (omitted or null): 1000ms. 0 becomes 1ms; Infinity uses the timer ceiling; negative, NaN or non-number throws
+  maxTimeoutMS?: number | null; // Longest delay between retries. Default (omitted or null): 30000ms. 0 becomes 1ms; Infinity uses the timer ceiling; negative, NaN or non-number throws
+  dispersion?: number; // Randomness added to delays (0 to 1 inclusive, e.g. 0.1 = 10%). Default: 0.1, clamped to [0, 1]; NaN or non-number throws
 }
 ```
 
@@ -105,9 +105,21 @@ randomOffset = (Math.random() * 2 - 1) * (delay * dispersion);
 finalDelay = clamp(delay + randomOffset, minTimeoutMS, maxTimeoutMS);
 ```
 
-> All numeric options are clamped to their documented ranges. Values outside the allowed range are silently adjusted. `maxRetryAttempts` is additionally floored to an integer after clamping. Additionally, if `maxTimeoutMS < minTimeoutMS`, the values are automatically swapped to ensure `maxTimeoutMS >= minTimeoutMS`.
+> Retry durations use their defaults when omitted, `null`, or `undefined`. Explicit `NaN` or
+> non-number `delayMS`, `minTimeoutMS`, or `maxTimeoutMS` values throw `TypeError` at
+> construction, and negative ones throw `RangeError` - they are not clamped. Zero keeps the
+> existing 1 ms minimum; positive `Infinity` selects the timer ceiling.
+> `maxRetryAttempts`, `factor` and `dispersion` also throw `TypeError` for an explicit
+> `NaN` or non-number value (no coercion: `'3'` throws too, and so does `null`); only
+> omitted or `undefined` uses the default. Past that check `maxRetryAttempts` and
+> `factor` are each clamped to a minimum of `1` and accept `Infinity`, so
+> `maxRetryAttempts: 0` (or a negative count) still allows one retry - there is no
+> "no retries" value; skip the retry utilities for that. `maxRetryAttempts` is
+> additionally floored to an integer after clamping. `dispersion` is clamped to
+> `[0, 1]`, so `-Infinity` reads as `0` and `Infinity` as `1`. If
+> `maxTimeoutMS < minTimeoutMS`, the values are swapped.
 
-> **Delays are capped at 2,147,483,647 ms (about 24.8 days).** `delayMS`, `minTimeoutMS` and `maxTimeoutMS` are each bounded there, and so is every delay computed from them. `setTimeout` keeps its delay in a signed 32-bit integer and reads anything larger as `1` ms, so an uncapped `delayMS: 3e9` would read as "wait 34 days" and retry roughly every millisecond instead. `NaN` falls back to the documented default and `Infinity` is refused for the same reason. `maxRetryAttempts` is not a duration and `Infinity` remains a supported value there.
+> **Delays are capped at 2,147,483,647 ms (about 24.8 days).** `delayMS`, `minTimeoutMS` and `maxTimeoutMS` are each bounded there, and so is every delay computed from them. `setTimeout` keeps its delay in a signed 32-bit integer and reads anything larger as `1` ms, so an uncapped `delayMS: 3e9` would read as "wait 34 days" and retry roughly every millisecond instead. `maxRetryAttempts` is not a duration and `Infinity` remains a supported value there.
 
 ## RetryPolicy
 
@@ -119,7 +131,8 @@ The `RetryPolicy` class provides low-level control over retry behavior. It track
 new RetryPolicy(options: RetryPolicyOptions)
 ```
 
-Throws `RetryUtilsErrPolicyConfigInvalidStrategy` if an invalid strategy is provided.
+Throws `RetryUtilsErrPolicyConfigInvalidStrategy` for an invalid strategy, and
+`TypeError` or `RangeError` for invalid explicit retry durations.
 
 ### Methods
 
@@ -183,7 +196,7 @@ Resets the policy to its initial state, clearing all errors and attempt tracking
 | `mostCommonError`        | `unknown`              | Most frequent error (grouped by reference equality and message string), or `null` if no errors have occurred |
 | `lastError`              | `unknown`              | Most recent error, or `null` if no errors have been recorded                                                 |
 
-> **Note:** `mostCommonError` uses two strategies to determine frequency - reference equality (`===`) and message-string grouping - and returns whichever finds the highest count. Reference equality catches reused error objects (including those with unstable or dynamic messages). Message grouping uses the `.message` property for `Error` instances and objects, nested `.error.message` for wrapped errors, or `String()` conversion as a fallback, so distinct objects with the same message are counted together. The first instance encountered for the winning group is returned. In case of ties across strategies, the first error encountered with the maximum count is returned.
+> **Note:** `mostCommonError` uses two strategies to determine frequency - reference equality (`===`) and message-string grouping - and returns whichever finds the highest count. Reference equality catches reused error objects (including those with unstable or dynamic messages). Message grouping uses the `.message` property for `Error` instances and objects, nested `.error.message` for wrapped errors, or `String()` conversion as a fallback, so distinct objects with the same message are counted together. The first instance encountered for the winning group is returned. Ties favor reference equality: a message group is returned only when its count is strictly higher than every reference count, and within each strategy the tied error or group encountered first wins.
 
 ### Example
 
@@ -229,7 +242,9 @@ new RetryRunner<T>(
 )
 ```
 
-> **Note:** The `operation` function can be synchronous or asynchronous (returning `void` or `Promise<void>`). Both are fully supported.
+> **Note:** The `operation` function can be synchronous or asynchronous (returning `void` or `Promise<void>`). Both are fully supported. It is called with `this` undefined.
+
+Throws what `new RetryPolicy(policy)` throws for invalid policy options, and a `TypeError` when `operation` is not a function.
 
 ### Runner States
 
@@ -266,11 +281,15 @@ type ReportResult<T> = {
 - **`'skip'`** - Skip this attempt (e.g., when device knows it's offline for sure). Does not count against the retry budget, and does not increment `attempts` or `retryCount`. The `value` is available as `data` in the `attempt-handled` event payload. A retry is still scheduled using the policy delay, but since the skip does not advance the error count, the delay is the same as it would have been before the skip (i.e., exponential backoff does not advance). However, if prior `'error'` results have already exhausted the retry budget, a `'skip'` will still result in `'exhausted'` because the policy's retry count has already reached its limit.
   - **Note:** After the very first skip, `attempts` will be `1` because the initial attempt is considered taken as soon as the operation starts, even if it was skipped. Subsequent skips do not increase `attempts` or `retryCount`.
 
+> An unrecognized runtime status ends the attempt as a fatal `TypeError`, with the reported value (when there is one) on its `cause`; it never schedules a retry.
+
 > **CRITICAL:** `reportResult` **MUST** be called exactly once per attempt. If your operation completes without calling `reportResult` and without throwing an error, the attempt will hang indefinitely (it will wait forever, blocking any retry logic). The only exception is throwing an error, which is automatically treated as `reportResult('error', thrownError)`. A genuine second or late call is ignored by the runner and reported on the global `'error'` channel. An aborted attempt may still acknowledge cancellation with `reportResult('skip', ...)` without producing that report.
 
 > **Important:** When `cancel()` is called, the operation receives an abort signal via the `signal` parameter. If the operation doesn't call `reportResult` within the `graceCancelPeriodMS` (default 1000ms, configurable via `overrideGraceCancelPeriodMS()`), the cancellation is forced. Always check `signal.aborted` in long-running operations to respond to cancellation requests.
 >
 > **Note:** If cancellation is forced, the runner will emit `attempt-handled` with a `'skip'` status and `wasCanceled: true` for the in-flight attempt before emitting `operation-ended`.
+>
+> **Abort listeners:** Listeners the operation adds to `signal` - with `addEventListener('abort', ...)` (a function or a `handleEvent` object) or `onabort` - run inside `cancel()` and `forceTry({ shouldAbortRunning: true })`. One that throws, or an `async` one that rejects, is reported on the global `'error'` channel as `Error in a callback RetryRunner operation abort listener`, with the thrown value on `cause`; the listeners after it still run, and the abort proceeds.
 
 ```typescript
 const operation = async (reportResult, signal) => {
@@ -289,7 +308,12 @@ const operation = async (reportResult, signal) => {
 };
 ```
 
-> **Tip:** When `signal.aborted` is true, and acknowledged, use `reportResult('skip')` rather than `'error'`. The operation result resolves with `'canceled'` status regardless of what you report, but `'error'` still records the value into the `errors` array. Using `'skip'` keeps `errors`, `mostCommonError`, and `lastError` clean for actual failures. Note that the `attempt-handled` event still reflects the status you passed to `reportResult` (not `'canceled'`), but includes `wasCanceled: true` so you can detect that cancellation was in progress.
+> **Tip:** When `signal.aborted` is true and you acknowledge it, report `'skip'` rather than `'error'`. What happens to the report depends on what aborted the attempt:
+>
+> - **`cancel()`:** a `'skip'` or `'error'` report ends the operation `'stopped'`: the operation result is `{ status: 'canceled' }` and pending `cancel()` calls resolve `'canceled'`. `'error'` also records its value into `errors`, `mostCommonError`, and `lastError`, while `'skip'` keeps them clean for actual failures. A `'success'` or `'fatal'` report still wins over the pending cancellation: the operation ends `'completed'` (`attempt_success`) or `'fatal-error'` (`attempt_fatal`), and pending `cancel()` calls resolve `'not-running'` (see [`cancel()`](#cancel)). Once the grace period has forced the cancellation, a late report of any status is discarded.
+> - **`forceTry({ shouldAbortRunning: true })`:** a report made after the replacement attempt has started - `'skip'` or any other status - is discarded, without the global `'error'` report a late report from an attempt that was not aborted produces. A report an abort listener makes synchronously, inside the abort, is still the attempt's outcome (see [`forceTry()`](#forcetryoptions)).
+>
+> The `attempt-handled` event for a report made while cancellation is pending reflects the status you passed to `reportResult`, and includes `wasCanceled: true` so you can detect that cancellation was in progress.
 
 ### Properties
 
@@ -309,7 +333,7 @@ const operation = async (reportResult, signal) => {
 | `isRetryPending`         | `boolean`              | Whether a retry is currently scheduled                                                                                                                                                                                                                |
 | `isOperationRunning`     | `boolean`              | Whether the operation is running or stopping                                                                                                                                                                                                          |
 | `isAttemptRunning`       | `boolean`              | Whether an individual attempt is in progress                                                                                                                                                                                                          |
-| `canForceTry`            | `boolean`              | Whether `forceTry()` can be called in the current state                                                                                                                                                                                               |
+| `canForceTry`            | `boolean`              | Whether `forceTry()` would be accepted now: `false` once `completed`, during terminal publication, or while another call dispatches. Accepted can mean attaching to the in-flight attempt, even while `'stopping'` (see `forceTry()`)                 |
 | `wasLastAttemptForced`   | `boolean`              | Whether the last attempt was triggered by `forceTry()`                                                                                                                                                                                                |
 | `retryTimeRemaining`     | `number`               | MS until next retry, or `-1` if none pending                                                                                                                                                                                                          |
 | `timeTakenMS`            | `number`               | Total operation time (includes all retries and delays). Resets when calling `run()`, `resume()`, or `forceTry()` from terminal states. Does NOT reset when `forceTry()` accelerates a pending retry. Freezes when operation ends. `-1` if not started |
@@ -321,15 +345,15 @@ const operation = async (reportResult, signal) => {
 
 #### `run(shouldWaitForCompletion?: boolean)`
 
-Starts the operation with retries. Defaults to `shouldWaitForCompletion = false`.
+Starts the operation with retries. Defaults to `shouldWaitForCompletion = false`. Only a boolean or `undefined` is accepted; any other value resolves as `pre_operation_error` / `unexpected_error` without starting work.
 
 Returns `Promise<RunResult<T>>`:
 
-- If `shouldWaitForCompletion` is `false` (default): resolves immediately with `{ status: 'running' }`.
+- If `shouldWaitForCompletion` is `false` (default): resolves immediately with `{ status: 'running' }`. This reports that the operation was started, not how it ends: an `operation-started` listener that calls `cancel()` or `reset()` still leaves this result `{ status: 'running' }`. `waitForCompletion()` then reports `{ status: 'canceled' }` after `cancel()`, or `{ status: 'not_started', code: 'not_running' }` after `reset()`, which returns the runner to its initial state. The same holds for `resume()` and `forceTry()` (which still includes `reattached: false`).
 - If `shouldWaitForCompletion` is `true`: resolves when the operation finishes with one of:
   - `{ status: 'attempt_success', data?: T }` - succeeded
-  - `{ status: 'attempts_exhausted', error? }` - all retries failed (`error` is from the final attempt)
-  - `{ status: 'attempt_fatal', error? }` - fatal error, no retry
+  - `{ status: 'attempts_exhausted', error? }` - retry budget exhausted (`error` is from the final attempt; a forced attempt that reports `skip` may omit it)
+  - `{ status: 'attempt_fatal', error?, code? }` - fatal error, no retry; `code: 'unexpected_error'` identifies a failure while setting up an attempt, evaluating the retry policy or installing its timer
   - `{ status: 'canceled' }` - canceled during execution
 - On pre-operation error: `{ status: 'pre_operation_error', code, error }` with codes:
   - `'already_running'` - operation is already in progress
@@ -339,9 +363,10 @@ Returns `Promise<RunResult<T>>`:
   - `'fatally_failed'` - last attempt was fatal (use `forceTry()` or `reset()`)
   - `'attempts_exhausted'` - all retries used (use `forceTry()` or `reset()`)
   - `'lock_error'` - concurrent operation call detected
-  - `'unexpected_error'` - an unexpected internal error occurred
+  - `'terminal_dispatch_in_progress'` - called while the operation's terminal outcome is being published
+  - `'unexpected_error'` - `shouldWaitForCompletion` is not a boolean, or an unexpected internal error occurred
 
-> **Note:** `unexpected_error` should not occur in normal use and indicates an internal state inconsistency in the library. If you encounter this, call `reset()` before trying again and consider reporting a bug.
+> **Note:** apart from invalid arguments to `run()`, `resume()` or `forceTry()`, which fail as `pre_operation_error` / `unexpected_error`, `unexpected_error` should not occur in normal use and indicates an internal state inconsistency in the library. If you encounter it otherwise, call `reset()` before trying again and consider reporting a bug. Its `error` is always a `RetryUtilsErrRunnerUnexpectedError`; the failure itself is on its `originalError`: for an invalid argument, a `TypeError` for a non-boolean value or the error a `forceTry()` option getter threw. A thrown value that is not an `Error` is wrapped in one, with the value on `cause`.
 
 ```typescript
 // Start and wait for completion
@@ -356,8 +381,8 @@ void runner.run(false);
 Waits for the current operation to complete. Returns `Promise<RunResult<T>>` with one of:
 
 - `{ status: 'attempt_success', data?: T }` - succeeded
-- `{ status: 'attempts_exhausted', error? }` - all retries failed (`error` is from the final attempt)
-- `{ status: 'attempt_fatal', error? }` - fatal error, no retry
+- `{ status: 'attempts_exhausted', error? }` - retry budget exhausted (`error` is from the final attempt; a forced attempt that reports `skip` may omit it)
+- `{ status: 'attempt_fatal', error?, code? }` - fatal error, no retry; `code: 'unexpected_error'` identifies a failure while setting up an attempt, evaluating the retry policy or installing its timer
 - `{ status: 'canceled' }` - canceled during execution
 - `{ status: 'not_started', code: 'not_running', error }` - runner has not been started
 
@@ -381,34 +406,47 @@ Cancels the current operation and any scheduled retries.
 Returns `Promise<CancelResult>`:
 
 - `'canceled'` - operation acknowledged the abort signal and stopped
+- `'superseded'` - a newer forced restart took over while cancellation was pending; the runner may still be running
 - `'forced'` - operation did not acknowledge within the grace period and was force-stopped
-- `'not-running'` - nothing was running
+- `'not-running'` - no cancelable operation remains, including a terminal outcome already being published or success/fatal completion that wins while cancellation is pending. Use `waitForCompletion()` for that operation's result. Such a call has no effect, with one exception: made from an abort listener (or a terminal listener it triggers) while `forceTry({ shouldAbortRunning: true })` is dispatching its abort, it still supersedes that force, which then starts no replacement - unless the operation succeeded. See `forceTry()`.
 
 ```typescript
 const cancelResult = await runner.cancel();
 ```
 
-**Cancellation grace period:** When canceling, the runner sends an abort signal to the operation and waits up to 1000ms (default) for it to call `reportResult`. If the operation doesn't respond in time, the cancel is forced. Use `overrideGraceCancelPeriodMS(ms)` to change this timeout.
+**Cancellation grace period:** When canceling, the runner sends an abort signal to the operation and waits up to 1000ms (default) for it to call `reportResult`. If the operation doesn't respond in time, the cancel is forced. Use `overrideGraceCancelPeriodMS(ms)` to change this timeout. Invalid values throw; `0` forces cancellation on the next timer turn, and `Infinity` uses the timer ceiling.
+
+If the cancellation grace timer cannot be installed, cancellation completes immediately as `'forced'` and reports the timer failure on the global error channel.
 
 #### `reset()`
 
-Fully resets the runner so it can be used again from scratch. This:
+Resets the current operation so the runner can be used again from scratch, unless a newer operation supersedes the request while it waits. This:
 
 1. Cancels the current operation first if the runner is in `'running'` or `'stopping'` state (awaits cancellation)
-2. Resets all runner state (`runnerState` back to `'not-started'`, clears timers, etc.)
-3. Resets the underlying retry policy (clears all tracked errors, attempt counts, and success state)
+2. Unless superseded by a newer operation while waiting, resets all runner state (`runnerState` back to `'not-started'`, clears timers, etc.)
+3. Unless superseded, resets the underlying retry policy (clears all tracked errors, attempt counts, and success state)
 
 Returns `Promise<void>`.
 
+Reset applies to the operation current when it is requested. This includes an ordinary
+reset waiting for cancellation and a reset requested by a terminal event listener.
+If a newer operation starts before that wait ends, reset resolves without clearing or
+canceling the newer operation. Its `Promise<void>` does not distinguish this superseded
+case; completion alone does not guarantee `runnerState === 'not-started'` when calls
+race. Serialize reset and start/force calls if you need that guarantee.
+
+A terminal listener's reset waits for its operation's result before clearing state.
+A replacement attempt has its own cancellation acknowledgement and grace period.
+
 ```typescript
 await runner.reset();
-// Runner is now in 'not-started' state with zero errors/attempts
+// With reset/start calls serialized, state is now 'not-started' with zero errors/attempts
 await runner.run(true);
 ```
 
 #### `resume(shouldWaitForCompletion?: boolean)`
 
-Resumes a previously canceled operation. Only works when `runnerState` is `'stopped'`.
+Resumes a previously canceled operation. Only works when `runnerState` is `'stopped'`. `shouldWaitForCompletion` is validated as for `run()`.
 
 Returns `Promise<RunResult<T>>` - same completion statuses as `run()`.
 
@@ -421,7 +459,8 @@ On pre-operation error: `{ status: 'pre_operation_error', code, error }` with co
 - `'attempts_exhausted'` - all retries used (use `forceTry()` or `reset()`)
 - `'not_paused'` - runner is not in `'stopped'` state
 - `'lock_error'` - concurrent operation call detected
-- `'unexpected_error'` - an unexpected internal error occurred
+- `'terminal_dispatch_in_progress'` - called while the operation's terminal outcome is being published
+- `'unexpected_error'` - `shouldWaitForCompletion` is not a boolean, or an unexpected internal error occurred
 
 ```typescript
 await runner.cancel();
@@ -435,25 +474,34 @@ Forces an immediate retry attempt, bypassing policy limits. Works in all states 
 > **Note:** `forceTry()` cannot be called from `'completed'` state. Use `reset()` first to run the operation again from scratch, which clears all errors and attempt history. This prevents accidentally mixing results from a completed operation with a new forced attempt.
 
 - If called from `'not-started'`, it acts as the first try. If a retry delay is pending, it fires immediately.
-- If called while the runner is in `'stopping'` or `'stopped'` state, any pending cancel promises are resolved and the runner transitions back to `'running'`.
+- If called from `'stopped'`, it starts a new operation.
+- If called while `'stopping'` (a cancellation is waiting for the in-flight attempt to acknowledge), the outcome depends on `shouldAbortRunning`. With the default `false`, it attaches to that attempt like any other in-flight one (`{ status: 'running', reattached: true }`, or the operation's result when waiting) and the cancellation proceeds: the runner still ends `'stopped'` and the waiting caller receives `{ status: 'canceled' }`. With `shouldAbortRunning: true`, it aborts the attempt, resolves every pending `cancel()` with `'superseded'`, and the runner returns to `'running'` with a new attempt.
+- `canForceTry` reports whether a call would be accepted, not whether it starts an attempt: an accepted call may attach as described here, and `shouldAbortRunning: true` can still refuse with `force_try_in_progress` while a forced attempt is in flight.
+- **Abort-listener outcomes:** If an abort listener reports success synchronously, waiting force calls return that operation's successful result; non-waiting calls return `pre_operation_error` with `code: 'already_completed'`. Neither starts a replacement. A call made after the operation has already completed still returns `already_completed`, even when waiting. A newer `cancel()` or `reset()` requested by an abort listener also wins: waiting force calls join that operation's result rather than restarting. Non-waiting calls return immediately with `pre_operation_error` / `force_try_superseded`, without claiming that cancellation has finished. A force request made after cancellation was requested can still intentionally restart it.
+- **Supersession has side effects:** `force_try_superseded` is an exception to the usual pre-operation refusal: the running attempt has already received its abort signal, but no replacement was started. Keep the original `run(true)` or `waitForCompletion()` promise if you need its final outcome. Await the newer cancel/reset before deciding whether to start more work.
+- **Combined outcomes:** If a listener reports success and then calls `reset()`, the newer reset takes precedence: a non-waiting force returns `force_try_superseded`, while a waiting force returns the captured operation's successful result. A `cancel()` after success is a no-op, so waiting calls retain success and non-waiting calls return `already_completed`. Neither combination starts a replacement.
+- **Fatal/exhausted abort outcomes:** If the abort listener reports fatal failure or exhausts the retry budget, original waiters receive that terminal result. The accepted force request then starts a new operation, just as an explicit force from those states does. Its waiting caller receives the new operation's result. The retry budget is not reset. If the listener (or an `attempt-handled` / `operation-ended` listener during that publication) also calls `cancel()` or `reset()`, the newer stop request wins instead: no new operation starts, waiting force calls receive the fatal/exhausted result, and non-waiting calls return `force_try_superseded`. That `cancel()` itself resolves `'not-running'`, since the operation had already ended.
+- **Replacing an active attempt:** If the aborted attempt did not report an outcome synchronously, it emits `attempt-handled` with `status: 'skip'`, `wasCanceled: true`, and its duration before the replacement starts. This does not spend the retry budget. A cancel/reset from that event can supersede the replacement. Force-aborting an attempt in a running operation (including pending cancellation) retains the operation's elapsed time and completion promise. It starts a new attempt without another `operation-started` event; the eventual terminal result emits the matching `operation-ended`.
 - **Timer behavior:** `timeTakenMS` resets when starting a new attempt from terminal states (`'not-started'`, `'exhausted'`, `'fatal-error'`, `'stopped'`) but does NOT reset when accelerating a pending retry (operation already running, just clearing the delay timer).
 
-Options:
+Options (only booleans or `undefined` are accepted; invalid values or throwing getters resolve as `pre_operation_error` / `unexpected_error`):
 
 - **`shouldWaitForCompletion`** (`boolean`, default: `false`) - Whether to wait for the attempt to complete before resolving.
-- **`shouldAbortRunning`** (`boolean`, default: `false`) - What to do if an attempt is already in-flight. When `false`, attaches to the current operation and waits for its result. When `true`, aborts the running attempt and starts a new one.
+- **`shouldAbortRunning`** (`boolean`, default: `false`) - What to do if an attempt is already in-flight. When `false`, attaches to the current operation (waiting only if `shouldWaitForCompletion` is true). When `true`, aborts the running attempt and starts a new one unless an abort listener completes it or requests cancellation/reset, as described above.
 
 Returns `Promise<RunResult<T>>`:
 
-- If `shouldWaitForCompletion` is `false`: resolves immediately with `{ status: 'running', reattached: boolean }` where `reattached` indicates whether it attached to an already-running attempt (`true`) or started a new one (`false`).
+- If `shouldWaitForCompletion` is `false`: normally resolves immediately with `{ status: 'running', reattached: boolean }` where `reattached` indicates whether it attached to an already-running attempt (`true`) or started a new one (`false`). The abort-listener cancellation/reset case above instead returns `pre_operation_error` / `force_try_superseded` immediately.
 - If `shouldWaitForCompletion` is `true`: same completion statuses as `run()`.
 
 On pre-operation error: `{ status: 'pre_operation_error', code, error }` with codes:
 
 - `'already_completed'` - operation already finished (call `reset()` first)
-- `'force_try_in_progress'` - a forced attempt with `shouldAbortRunning: true` is already running
+- `'force_try_superseded'` - an abort listener requested cancel/reset after this non-waiting force request
+- `'force_try_in_progress'` - `shouldAbortRunning: true` was requested while a forced attempt (with or without `shouldAbortRunning`) is already running
 - `'lock_error'` - concurrent operation call detected
-- `'unexpected_error'` - an unexpected internal error occurred
+- `'terminal_dispatch_in_progress'` - called while the operation's terminal outcome is being published
+- `'unexpected_error'` - invalid options (a non-boolean value, or a getter that throws), or an unexpected internal error
 
 > **Important:** `forceTry()` does not reset the policy's retry budget. If a forced attempt from `'exhausted'` reports `'error'`, the runner returns to `'exhausted'`. If a forced attempt from `'fatal-error'` reports `'error'`, the runner either schedules another retry (if the policy still has remaining budget) or transitions to `'exhausted'`. Use `reset()` to start fresh with a full retry budget.
 
@@ -470,7 +518,13 @@ const result = await runner.forceTry({
 
 #### `overrideGraceCancelPeriodMS(ms)`
 
-Overrides the default 1000ms cancellation grace period. Non-finite or negative values default to 1000ms. A value of `0` will force-cancel immediately without waiting for the operation to acknowledge the abort signal.
+Overrides the default 1000ms cancellation grace period. This setter requires a numeric
+argument: `null`, `undefined`, an omitted argument, or `NaN` throws `TypeError`; negative
+values throw `RangeError`. To restore the default, pass `1000` explicitly. `Infinity`
+selects the timer ceiling. A value of `0` force-cancels on the next timer turn: the zero-length timer
+is still armed, so an operation that acknowledges the abort signal before it fires - in its
+`'abort'` listener or a microtask - still settles the cancellation as `'canceled'` rather
+than `'forced'`.
 
 ### Events
 
@@ -494,7 +548,23 @@ Subscribe using the `on` method or provide handlers in the constructor.
 
 - `attemptID` - A unique [ULID](https://github.com/ulid/spec) (Universally Unique Lexicographically Sortable Identifier) generated for each attempt. ULIDs are 26-character strings that are timestamp-based and sortable by creation time (e.g., `"01ARZ3NDEKTSV4RRFFQ69G5FAV"`).
 
-> **Event ordering:** `attempt-handled` fires before the runner transitions to its terminal state and before `operation-ended`. If you need to react to the final `runnerState`, use the `operation-ended` event.
+> **Event ordering:** `attempt-handled` fires before the runner transitions to its terminal state and before `operation-ended`. If you need to react to the final `runnerState`, use the `operation-ended` event. During terminal outcome publication, a re-entrant `cancel()` cannot replace the committed outcome. From an `attempt-handled` listener of a running operation - which still observes `runnerState: 'running'` and `isOperationRunning: true` - it returns `'not-running'`; from an `operation-ended` listener the state is already terminal, so it returns `'not-running'` too. While a cancellation is already pending (`'stopping'`), an `attempt-handled` listener's `cancel()` instead joins it and resolves with the same result as the earlier `cancel()` callers: `'canceled'` (or `'forced'` after the grace period) when the attempt acknowledged the abort, `'not-running'` when its success or fatal report won. `run()`, `resume()` and `forceTry()` return `terminal_dispatch_in_progress` (and `canForceTry` reads `false`), and `reset()` waits for that outcome to settle. An `operation-started` listener can call `waitForCompletion()` for the operation being announced.
+
+> **Forcing from a non-terminal `attempt-handled` listener:** when an attempt fails and a retry is scheduled, `attempt-handled` fires with the retry timer already armed. If the attempt reported outside any `run()` / `resume()` / `forceTry()` call - asynchronously, or from an attempt the retry timer started - `forceTry()` from that listener starts the next attempt synchronously, inside the dispatch. Listeners registered after it then see the earlier attempt's `attempt-handled` only after the next attempt's `attempt-started` - and, if that attempt reports synchronously and ends the operation, after `operation-ended` too. If the attempt instead reported synchronously while the call that started it was still dispatching (an operation that calls `reportResult` before returning, on the attempt `run()`, `resume()` or `forceTry()` starts), that call still holds the operation lock: `canForceTry` reads `false`, `forceTry()` returns `lock_error`, and the retry stays on its timer. In either case, calling `forceTry()` from a `queueMicrotask()` instead runs once that dispatch has finished and released the lock, and keeps listener ordering intact.
+
+To start more work from a terminal listener, wait for the outcome to settle first. Existing `run(true)` / `waitForCompletion()` callers still receive the original result. Guard the retry so a forced attempt that also ends `exhausted` does not trigger another one, without bound:
+
+```typescript
+let hasForced = false;
+
+runner.on(OPERATION_ENDED, async ({ runnerState }) => {
+  if (runnerState === 'exhausted' && !hasForced) {
+    hasForced = true;
+    await runner.waitForCompletion(); // Resolves once the outcome has settled.
+    await runner.forceTry();
+  }
+});
+```
 
 ```typescript
 const runner = new RetryRunner(policy, operation, {
@@ -618,21 +688,23 @@ if (result.status === 'attempt_success') {
 
 All error classes are exported and can be used for `instanceof` checks:
 
-| Error Class                                  | Thrown By / Code          | Description                                                                          | Error Message                                                                                                                                          |
-| -------------------------------------------- | ------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `RetryUtilsErrPolicyConfigInvalidStrategy`   | `RetryPolicy` constructor | Invalid strategy provided                                                            | `"Invalid strategy provided."`                                                                                                                         |
-| `RetryUtilsErrRunnerAlreadyCompleted`        | `already_completed`       | Operation already finished                                                           | `"The runner has already completed running the operation. Use the .reset() method, and .run() to run the operation again."`                            |
-| `RetryUtilsErrRunnerAlreadyRunning`          | `already_running`         | Operation is already in progress                                                     | `"The operation is already running and cannot be started again."`                                                                                      |
-| `RetryUtilsErrRunnerCancelPending`           | `cancel_pending`          | A cancellation is in progress                                                        | `"A cancel operation is pending. The operation cannot be started again."`                                                                              |
-| `RetryUtilsErrRunnerRetryCanceled`           | `retry_canceled`          | Operation was canceled                                                               | `"The operation was already canceled. Use either .resume(), .forceTry() or .reset() and .run() to run the operation again."`                           |
-| `RetryUtilsErrRunnerLastRetryFatallyFailed`  | `fatally_failed`          | Last attempt failed fatally                                                          | `"The last retry attempt failed fatally. The operation cannot be retried. Use either .reset() then .run() or .forceTry() to run the operation again."` |
-| `RetryUtilsErrRunnerAttemptsExhausted`       | `attempts_exhausted`      | All retry attempts used                                                              | `"All attempts were exhausted. The operation cannot be retried. Use either .reset() then .run() or .forceTry() to run the operation again."`           |
-| `RetryUtilsErrRunnerLockAcquisitionError`    | `lock_error`              | Re-entrant call detected (e.g., calling `run()` from an event listener during setup) | `"Failed to acquire operation lock. Cannot attempt to run the operation."`                                                                             |
-| `RetryUtilsErrRunnerNotPaused`               | `not_paused`              | Runner is not in stopped state (for `resume()`)                                      | `"The runner is not in a paused state. resume() can only be called when the runner state is stopped."`                                                 |
-| `RetryUtilsErrRunnerNotRunning`              | `not_running`             | Runner has not been started (for `waitForCompletion`)                                | `"The operation is not currently running."`                                                                                                            |
-| `RetryUtilsErrRunnerUnknownState`            | Internal                  | Unknown runner state encountered (should not occur in normal usage)                  | `"An unknown runner state was encountered."`                                                                                                           |
-| `RetryUtilsErrRunnerForceTryRetryInProgress` | `force_try_in_progress`   | A forced attempt is already running                                                  | `"Force try retry is already in progress."`                                                                                                            |
-| `RetryUtilsErrRunnerUnexpectedError`         | `unexpected_error`        | An unexpected internal error occurred                                                | `"An unexpected error occurred."`                                                                                                                      |
+| Error Class                                     | Thrown By / Code                | Description                                                                            | Error Message                                                                                                                                                                    |
+| ----------------------------------------------- | ------------------------------- | -------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RetryUtilsErrPolicyConfigInvalidStrategy`      | `RetryPolicy` constructor       | Invalid strategy provided                                                              | `"Invalid strategy provided."`                                                                                                                                                   |
+| `RetryUtilsErrRunnerAlreadyCompleted`           | `already_completed`             | Operation already finished                                                             | `"The runner has already completed running the operation. Use the .reset() method, and .run() to run the operation again."`                                                      |
+| `RetryUtilsErrRunnerAlreadyRunning`             | `already_running`               | Operation is already in progress                                                       | `"The operation is already running and cannot be started again."`                                                                                                                |
+| `RetryUtilsErrRunnerCancelPending`              | `cancel_pending`                | A cancellation is in progress                                                          | `"A cancel operation is pending. The operation cannot be started again."`                                                                                                        |
+| `RetryUtilsErrRunnerRetryCanceled`              | `retry_canceled`                | Operation was canceled                                                                 | `"The operation was already canceled. Use either .resume(), .forceTry() or .reset() and .run() to run the operation again."`                                                     |
+| `RetryUtilsErrRunnerLastRetryFatallyFailed`     | `fatally_failed`                | Last attempt failed fatally                                                            | `"The last retry attempt failed fatally. The operation cannot be retried. Use either .reset() then .run() or .forceTry() to run the operation again."`                           |
+| `RetryUtilsErrRunnerAttemptsExhausted`          | `attempts_exhausted`            | All retry attempts used                                                                | `"All attempts were exhausted. The operation cannot be retried. Use either .reset() then .run() or .forceTry() to run the operation again."`                                     |
+| `RetryUtilsErrRunnerLockAcquisitionError`       | `lock_error`                    | Re-entrant call detected (e.g., calling `run()` from an event listener during setup)   | `"Failed to acquire operation lock. Cannot attempt to run the operation."`                                                                                                       |
+| `RetryUtilsErrRunnerTerminalDispatchInProgress` | `terminal_dispatch_in_progress` | `run()`, `resume()` or `forceTry()` called while a terminal outcome is being published | `"The current operation is publishing its terminal outcome. Wait for it to settle (waitForCompletion()) before starting more work."`                                             |
+| `RetryUtilsErrRunnerNotPaused`                  | `not_paused`                    | Runner is not in stopped state (for `resume()`)                                        | `"The runner is not in a paused state. resume() can only be called when the runner state is stopped."`                                                                           |
+| `RetryUtilsErrRunnerNotRunning`                 | `not_running`                   | Runner has not been started (for `waitForCompletion`)                                  | `"The operation is not currently running."`                                                                                                                                      |
+| `RetryUtilsErrRunnerUnknownState`               | Internal                        | Unknown runner state encountered (should not occur in normal usage)                    | `"An unknown runner state was encountered."`                                                                                                                                     |
+| `RetryUtilsErrRunnerForceTryRetryInProgress`    | `force_try_in_progress`         | A forced attempt is already running                                                    | `"Force try retry is already in progress."`                                                                                                                                      |
+| `RetryUtilsErrRunnerForceTrySuperseded`         | `force_try_superseded`          | A newer abort-listener cancel/reset prevented a non-waiting forced retry               | `"A newer cancel or reset request superseded this forced retry after abort was sent. Await that request before deciding whether to retry with forceTry() or reset() and run()."` |
+| `RetryUtilsErrRunnerUnexpectedError`            | `unexpected_error`              | An unexpected internal error occurred                                                  | `"An unexpected error occurred."`                                                                                                                                                |
 
 > **Note:** All error instances include detailed messages with guidance on how to recover (e.g., which methods to call to resolve the error state).
 
@@ -645,7 +717,7 @@ The following types are exported for use in consuming code:
 | `RetryPolicyOptions`                    | Union of fixed and exponential strategy option interfaces                                                                                            |
 | `RetryPolicyOptionsStrategyFixed`       | Options interface for the `'fixed'` strategy                                                                                                         |
 | `RetryPolicyOptionsStrategyExponential` | Options interface for the `'exponential'` strategy                                                                                                   |
-| `RetryPolicyValidated`                  | `Required<RetryPolicyOptions>` - all options resolved (narrow on `strategy` to access strategy-specific properties)                                  |
+| `RetryPolicyValidated`                  | `RequiredNonNullable<RetryPolicyOptions>` - all options resolved (narrow on `strategy` to access strategy-specific properties)                       |
 | `RetryQueryResult`                      | Return type of `RetryPolicy.shouldRetry()`: `{ shouldRetry: boolean, delayMS: number }`                                                              |
 | `RunAttemptStatusCodes`                 | Union of all possible `status` values in `RunResult`                                                                                                 |
 | `RunnerErrorCode`                       | Union of all possible `code` values in pre-operation errors                                                                                          |
@@ -655,7 +727,7 @@ The following types are exported for use in consuming code:
 | `RunnerState`                           | Union of all runner lifecycle states                                                                                                                 |
 | `ReportResult<T>`                       | Type of the `reportResult` callback passed to the operation                                                                                          |
 | `ReportResultStatus`                    | Union of report result statuses: `'success' \| 'error' \| 'fatal' \| 'skip'`                                                                         |
-| `CancelResult`                          | Return type of `cancel()`: `'canceled' \| 'forced' \| 'not-running'`                                                                                 |
+| `CancelResult`                          | Return type of `cancel()`: `'canceled' \| 'forced' \| 'not-running' \| 'superseded'`                                                                 |
 | `ForceTryOptions`                       | Options for `forceTry()`                                                                                                                             |
 | `RetryRunnerOptions<T>`                 | Options for the `RetryRunner` constructor (operation label and event handlers)                                                                       |
 | `OnOperationStartedInfo`                | Payload for the `operation-started` event                                                                                                            |

@@ -36,6 +36,15 @@ export class RetryUtilsErrRunnerForceTryRetryInProgress extends Error {
   }
 }
 
+export class RetryUtilsErrRunnerForceTrySuperseded extends Error {
+  constructor(public invokedMethod: 'forceTry') {
+    super(
+      'A newer cancel or reset request superseded this forced retry after abort was sent. Await that request before deciding whether to retry with forceTry() or reset() and run().',
+    );
+    this.name = 'RetryUtilsErrRunnerForceTrySuperseded';
+  }
+}
+
 export class RetryUtilsErrRunnerNotPaused extends Error {
   constructor(public invokedMethod: 'resume') {
     super(
@@ -87,6 +96,15 @@ export class RetryUtilsErrRunnerLockAcquisitionError extends Error {
       'Failed to acquire operation lock. Cannot attempt to run the operation.',
     );
     this.name = 'RetryUtilsErrRunnerLockAcquisitionError';
+  }
+}
+
+export class RetryUtilsErrRunnerTerminalDispatchInProgress extends Error {
+  constructor(public invokedMethod: 'run' | 'resume' | 'forceTry') {
+    super(
+      'The current operation is publishing its terminal outcome. Wait for it to settle (waitForCompletion()) before starting more work.',
+    );
+    this.name = 'RetryUtilsErrRunnerTerminalDispatchInProgress';
   }
 }
 
