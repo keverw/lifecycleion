@@ -1612,7 +1612,7 @@ logger.exit(0);
 - If you need custom exit logic, set it up manually with `logger.setBeforeExitCallback()`
 - If `logger.exit()` is called while shutdown is already in progress, that exit call returns `{ action: 'wait' }` instead of exiting immediately.
 - The first such `logger.exit()` call is kept pending and allowed to proceed when the in-flight shutdown completes or reaches its global timeout.
-- Later duplicate `logger.exit()` calls during the same shutdown also return `{ action: 'wait' }`, but are otherwise ignored so they cannot override the pending exit code or exit early.
+- Later duplicate `logger.exit()` calls during the same shutdown also return `{ action: 'wait' }`, so they cannot exit early; the logger still records their codes, and the pending exit uses the last non-zero one.
 
 #### Process Exit Design & Rationale
 

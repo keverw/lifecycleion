@@ -153,8 +153,11 @@ export interface LoggerDiagnostic {
    * thrown value derived from logged content: a `redaction` failure's cause is derived
    * from the secret being masked, and a message carrying it would route around the
    * masking on the line above it. A sink's I/O failure - a `FileSink` or `NamedPipeSink`
-   * with no `onError` - does carry its error text (path, errno), its target, and what
-   * became of the line; a `'format'` failure's does not.
+   * with no `onError` - names its target and what became of the line, and some of the
+   * system error: an open or setup failure carries the errno and path, and a
+   * `NamedPipeSink` write failure the errno only. A `FileSink` write, stream or rotation
+   * failure has fixed text, with the system error only in `error.cause`; a `'format'`
+   * failure's message carries no error text either.
    *
    * Read {@link LoggerDiagnostic.error} for the cause. It is handed to every
    * `'diagnostic'` listener and every sink implementing `writeDiagnostic`, which is where

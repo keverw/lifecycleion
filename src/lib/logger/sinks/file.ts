@@ -396,10 +396,10 @@ export class FileSink implements LogSink {
         // `droppedEntries` and reported once as `'lost'`; see `LossLedger.abandon`. A file
         // that never opened is named as the reason rather than the budget, with the open
         // failure as the cause.
-        abandoned: (count, isUnreachable) =>
-          isUnreachable
-            ? `Closed with ${describeEntryCount(count)} still queued: the log file could not be opened, so they were not written`
-            : `Closed with ${describeEntryCount(count)} still queued (closeTimeoutMS=${String(this.closeTimeoutMS)}); they were not written`,
+        abandoned: (count, reason) =>
+          reason === 'timeout'
+            ? `Closed with ${describeEntryCount(count)} still queued (closeTimeoutMS=${String(this.closeTimeoutMS)}); they were not written`
+            : `Closed with ${describeEntryCount(count)} still queued: the log file ${reason === 'never_opened' ? 'could not be opened' : 'was lost and could not be reopened'}, so they were not written`,
         // Counted and said, not discarded quietly: `close()` waits up to
         // `closeTimeoutMS`, and a line logged in that window is one this sink did not
         // deliver.
@@ -819,8 +819,8 @@ export class FileSink implements LogSink {
       throw new FileSinkError('Cannot write to closed sink');
     }
 
-    // Always the line rendered in `write`. A render that threw has already been raised
-    // above, so this is never a second attempt at one.
+    // Always the line rendered in `write`, which reports a render that threw and never
+    // queues it, so this is never a second attempt at one.
     const messageToWrite = queued.formatted;
     const messageBytes = Buffer.byteLength(messageToWrite, 'utf8');
 

@@ -660,8 +660,8 @@ export class ProcessSignalManager {
     }
 
     // Nothing to throw, so nothing to wait for: reported now. Deferred, a raw-mode
-    // restore failure - the terminal left in raw mode - was lost to a caller that exits
-    // right after `detach()` returns, as a shutdown-completed listener may:
+    // restore failure - the terminal left in raw mode - would be lost to a caller that
+    // exits right after `detach()` returns, as a shutdown-completed listener may:
     // `process.exit()` does not drain microtasks. Synchronous is safe here because every
     // step is done - listeners removed, stdin paused, `isAttached` false - so a listener
     // that attaches from the report attaches over a finished detach, and nothing after it

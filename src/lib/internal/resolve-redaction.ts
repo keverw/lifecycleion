@@ -123,10 +123,10 @@ export function resolveRedaction(
  * Throw if a `redactFunction` answered with a promise or other thenable.
  *
  * The function is called synchronously, so a promise is never an answer: the value it
- * would settle to arrives after the leaf has been written. Read as an object, it landed on
- * the default masking with nothing said, and a promise that rejected - an `async`
- * function that throws - had nothing observing it, which is an unhandled rejection and
- * fatal under Node's default `--unhandled-rejections=throw`.
+ * would settle to arrives after the leaf has been written. Read as an object, it would
+ * land on the default masking with nothing said, and a promise that rejects - an `async`
+ * function that throws - would have nothing observing it, which is an unhandled rejection
+ * and fatal under Node's default `--unhandled-rejections=throw`.
  *
  * A native promise's rejection is observed and contained here; any other thenable's
  * `then` is never called, so a lazy one never starts the work it would defer. The throw

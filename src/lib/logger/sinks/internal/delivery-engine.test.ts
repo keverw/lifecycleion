@@ -278,8 +278,8 @@ function makeEngine(
     orphanSettleMS: options.orphanSettleMS ?? ORPHAN_SETTLE_MS,
     messages: {
       queueFull: (limit) => `full at ${String(limit)}`,
-      abandoned: (count, isUnreachable) =>
-        `abandoned ${String(count)}${isUnreachable ? ' unreachable' : ''}`,
+      abandoned: (count, reason) =>
+        `abandoned ${String(count)}${reason === 'timeout' ? '' : ` ${reason}`}`,
       refusedAfterClose: () => 'refused after close',
       unconfirmed: (attempts) => `unconfirmed after ${String(attempts)}`,
       outageCap: (maxReports) => `cap ${String(maxReports)}`,
@@ -668,7 +668,7 @@ describe('DeliveryEngine', () => {
       }),
     ]);
     // Abandoned for want of a destination, not of time.
-    expect(closeReports[0].error.message).toBe('abandoned 3 unreachable');
+    expect(closeReports[0].error.message).toBe('abandoned 3 never_opened');
     expect(engine.getHealth().droppedByKind.close).toBe(3);
     // The grace window kept asking, past the backoff.
     expect(
@@ -811,8 +811,88 @@ describe('DeliveryEngine', () => {
       ]),
     ).toEqual([
       ['setup', 'open failed', 'ENOTDIR'],
-      ['close', 'abandoned 1 unreachable', 'open failed'],
+      ['close', 'abandoned 1 never_opened', 'open failed'],
     ]);
+  });
+
+  test('a quiet failed open leaves no older failure as the cause', async () => {
+    const destination = new FakeDestination();
+    const harness = makeEngine({ destination });
+    let opens = 0;
+
+    destination.defaultOpen = { status: 'unavailable' };
+    // The first attempt reports why it failed; every later one fails quietly, as a pipe
+    // that now exists but has no reader does.
+    destination.onOpen = () => {
+      if (++opens === 1) {
+        harness.engine.reportOpenFailure(
+          'not_found',
+          'pipe missing',
+          new Error('ENOENT'),
+        );
+      }
+    };
+    harness.engine.start();
+    await harness.engine.openSettled;
+    harness.write('a');
+    await harness.engine.close();
+
+    const abandoned = harness.reports.find(
+      (failure) => failure.kind === 'close',
+    );
+
+    expect(opens).toBeGreaterThan(1);
+    expect(abandoned?.error.message).toBe('abandoned 1 never_opened');
+    expect(abandoned?.error.cause).toBeUndefined();
+  });
+
+  test('a connection lost during close and not regained is said as lost', async () => {
+    const { destination, engine, reports, write } = await started(
+      makeEngine({ closeTimeoutMS: 200 }),
+    );
+
+    write('a');
+    write('b');
+    destination.canContinue = false;
+
+    const closing = engine.close();
+
+    // The first open has settled, so close reaches its drain loop - with the connection
+    // in hand - within microtasks, before any macrotask runs.
+    await tick();
+
+    // The connection goes away mid-drain, and every reopen fails, saying why.
+    destination.isOpen = false;
+    destination.defaultOpen = { status: 'unavailable' };
+    destination.onOpen = () => {
+      engine.reportOpenFailure('setup', 'reopen failed', new Error('EACCES'));
+    };
+    destination.fail(new Error('EPIPE'));
+    await closing;
+
+    const abandoned = reports.find((failure) => failure.kind === 'close');
+
+    expect(abandoned?.error.message).toMatch(/^abandoned \d connection_lost$/);
+    expect((abandoned?.error.cause as Error | undefined)?.message).toBe(
+      'reopen failed',
+    );
+  });
+
+  test('a first open still pending when the budget runs out blames the budget', async () => {
+    const destination = new FakeDestination();
+    const harness = makeEngine({ destination, closeTimeoutMS: 30 });
+
+    destination.openAnswers = ['pending'];
+    harness.engine.start();
+    harness.write('a');
+    await harness.engine.close();
+
+    const abandoned = harness.reports.find(
+      (failure) => failure.kind === 'close',
+    );
+
+    expect(abandoned?.error.message).toBe('abandoned 1');
+    expect(abandoned?.error.cause).toBeUndefined();
   });
 
   test('close that runs out of time with the destination in hand blames the budget', async () => {

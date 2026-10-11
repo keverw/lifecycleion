@@ -30,9 +30,10 @@ import { reportSinkFailure } from '../../internal/sink-failure-routing';
  *
  * - `'write'` - a line could not be written. The one kind that means an entry is at risk.
  * - `'format'` - a line could not be formatted. `disposition` says what that cost:
- *   `'fallback'` when a custom `formatter` threw and the sink substituted its own default
- *   format, `'lost'` when no line could be produced at all. Never retried either way: a
- *   line is rendered once, on purpose, so a second attempt could not come out
+ *   `'fallback'` when the line goes on degraded - a custom `formatter` threw and the sink
+ *   substituted its own default format, or a param would not render and a marker stands
+ *   in for it - and `'lost'` when no line could be produced at all. Never retried either
+ *   way: a line is rendered once, on purpose, so a second attempt could not come out
  *   differently.
  * - `'close'` - shutting the destination down failed.
  * - `'setup'` - the destination could not be opened, created, or rotated.

@@ -19,13 +19,46 @@ import { sleep } from './sleep';
 // These suites deliberately drive the paths that fall through to `console.error` when
 // nothing claims the report. Captured rather than printed so a real failure in the run
 // output still stands out; flip `DEBUG` in the helper to see them.
+//
+// `isRaw` is saved and restored around every test too: `attach()` reads it back after
+// `setRawMode(true)`, and the stand-ins below set it, as the real call does.
+let stdinIsRawDescriptor: PropertyDescriptor | undefined;
+
 beforeEach(() => {
   muteConsoleError();
+  stdinIsRawDescriptor = Object.getOwnPropertyDescriptor(
+    process.stdin,
+    'isRaw',
+  );
 });
 
 afterEach(() => {
   restoreConsoleError();
+  if (stdinIsRawDescriptor === undefined) {
+    Reflect.deleteProperty(process.stdin, 'isRaw');
+  } else {
+    Object.defineProperty(process.stdin, 'isRaw', stdinIsRawDescriptor);
+  }
 });
+
+/**
+ * A stand-in for `stdin.setRawMode` that records the mode on `isRaw`, as the real one
+ * does. `attach()` reads `isRaw` back to detect a change that failed without throwing, so
+ * a stand-in that leaves it alone reads as a failure when stdin is a terminal, whose
+ * `isRaw` is a real `false`.
+ */
+function rawModeMock(): ReturnType<typeof mock> {
+  return mock((isEnabled: boolean) => {
+    Object.defineProperty(process.stdin, 'isRaw', {
+      configurable: true,
+      enumerable: true,
+      writable: true,
+      value: isEnabled,
+    });
+
+    return process.stdin;
+  });
+}
 
 describe('ProcessSignalManager', () => {
   let manager: ProcessSignalManager;
@@ -557,7 +590,7 @@ describe('ProcessSignalManager', () => {
       const savedPause = process.stdin.pause;
 
       (process.stdin as any).isTTY = true;
-      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).setRawMode = rawModeMock();
       (process.stdin as any).pause = mock(() => {});
 
       try {
@@ -1120,7 +1153,7 @@ describe('ProcessSignalManager', () => {
       const savedPause = process.stdin.pause;
 
       (process.stdin as any).isTTY = true;
-      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).setRawMode = rawModeMock();
       (process.stdin as any).pause = mock(() => {});
 
       try {
@@ -1166,7 +1199,7 @@ describe('ProcessSignalManager', () => {
       };
       globals[stateKey] = shared;
       (process.stdin as any).isTTY = true;
-      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).setRawMode = rawModeMock();
       (process.stdin as any).pause = mock(() => {});
       const emitFailure = new Error('emitKeypressEvents failed');
       const emitSpy = spyOn(readline, 'emitKeypressEvents').mockImplementation(
@@ -1209,7 +1242,7 @@ describe('ProcessSignalManager', () => {
       const savedPause = process.stdin.pause;
 
       (process.stdin as any).isTTY = true;
-      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).setRawMode = rawModeMock();
       (process.stdin as any).pause = mock(() => {});
 
       try {
@@ -1241,7 +1274,7 @@ describe('ProcessSignalManager', () => {
       // eslint-disable-next-line @typescript-eslint/unbound-method
       const savedPause = process.stdin.pause;
       (process.stdin as any).isTTY = true;
-      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).setRawMode = rawModeMock();
       (process.stdin as any).pause = mock(() => {});
       const killSpy = spyOn(process, 'kill').mockImplementation(() => true);
 
@@ -1281,7 +1314,7 @@ describe('ProcessSignalManager', () => {
         };
         globals[stateKey] = shared;
         (process.stdin as any).isTTY = true;
-        (process.stdin as any).setRawMode = mock(() => {});
+        (process.stdin as any).setRawMode = rawModeMock();
         (process.stdin as any).pause = mock(() => {});
         const oldShutdown = mock(() => {});
         const oldKeypress = (_text: string, key: any) => {
@@ -1353,7 +1386,7 @@ describe('ProcessSignalManager', () => {
       const savedPause = process.stdin.pause;
 
       (process.stdin as any).isTTY = true;
-      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).setRawMode = rawModeMock();
       (process.stdin as any).pause = mock(() => {});
 
       try {
@@ -1387,7 +1420,7 @@ describe('ProcessSignalManager', () => {
       const savedPause = process.stdin.pause;
 
       (process.stdin as any).isTTY = true;
-      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).setRawMode = rawModeMock();
       (process.stdin as any).pause = mock(() => {});
 
       try {
@@ -1422,7 +1455,7 @@ describe('ProcessSignalManager', () => {
       const savedPause = process.stdin.pause;
 
       (process.stdin as any).isTTY = true;
-      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).setRawMode = rawModeMock();
       (process.stdin as any).pause = mock(() => {});
 
       try {
@@ -1456,7 +1489,7 @@ describe('ProcessSignalManager', () => {
       const savedPause = process.stdin.pause;
 
       (process.stdin as any).isTTY = true;
-      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).setRawMode = rawModeMock();
       (process.stdin as any).pause = mock(() => {});
 
       try {
@@ -1491,7 +1524,7 @@ describe('ProcessSignalManager', () => {
       const savedPause = process.stdin.pause;
 
       (process.stdin as any).isTTY = true;
-      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).setRawMode = rawModeMock();
       (process.stdin as any).pause = mock(() => {});
 
       try {
@@ -1526,7 +1559,7 @@ describe('ProcessSignalManager', () => {
       const savedPause = process.stdin.pause;
 
       (process.stdin as any).isTTY = true;
-      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).setRawMode = rawModeMock();
       (process.stdin as any).pause = mock(() => {});
 
       try {
@@ -1560,7 +1593,7 @@ describe('ProcessSignalManager', () => {
       const savedPause = process.stdin.pause;
 
       (process.stdin as any).isTTY = true;
-      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).setRawMode = rawModeMock();
       (process.stdin as any).pause = mock(() => {});
 
       try {
@@ -3214,7 +3247,7 @@ test('one Ctrl+C is forwarded once when its leader detaches during SIGINT', () =
   // eslint-disable-next-line @typescript-eslint/unbound-method
   const raw = process.stdin.setRawMode;
   (process.stdin as any).isTTY = true;
-  process.stdin.setRawMode = mock(() => process.stdin);
+  process.stdin.setRawMode = rawModeMock() as typeof process.stdin.setRawMode;
   const callback = mock(() => {});
   const first: ProcessSignalManager = new ProcessSignalManager({
     onShutdownRequested: () => {
@@ -3345,7 +3378,7 @@ describe('keypress events whose key is not a readable object', () => {
     // eslint-disable-next-line @typescript-eslint/unbound-method
     const raw = process.stdin.setRawMode;
     (process.stdin as any).isTTY = true;
-    process.stdin.setRawMode = mock(() => process.stdin);
+    process.stdin.setRawMode = rawModeMock() as typeof process.stdin.setRawMode;
     const reload = mock(() => {});
     const manager = new ProcessSignalManager({
       onReloadRequested: reload,

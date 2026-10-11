@@ -178,14 +178,14 @@ function boxPromiseValue<T>(value: T): PromiseResultBox<T> {
  * promise, but not on a native promise carrying its own `constructor` as well - it wraps
  * that and calls the own `then` - and `Promise.resolve()` hands a native promise back with
  * its own properties, so `.then()`, `.catch()` and `Promise.race()` on the result call it.
- * A no-op one never settled for the caller, and the real rejection went unhandled - fatal
- * under Node's default `--unhandled-rejections=throw`. A value with an own `then` is
+ * A no-op one would never settle for the caller, and leave the real rejection unhandled -
+ * fatal under Node's default `--unhandled-rejections=throw`. A value with an own `then` is
  * therefore read through the native `Promise.prototype.then`, which only a native
  * promise's internal state answers.
  *
  * Everything else is followed the standard way, as `await` follows it. A `then` a
  * `Promise` subclass defines on its prototype is its behaviour - a lazy promise that
- * starts its work there, say - and skipping it skipped the work and reported success. A
+ * starts its work there, say - and skipping it would skip the work and report success. A
  * proxy around a promise has no internal slot for the native `then` to read, but it can
  * have a `then` that works - one its `get` trap binds to the promise - and succeeds or
  * fails as `await` would when that `then` is inherited. Either way the value it fulfills

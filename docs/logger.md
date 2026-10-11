@@ -1629,11 +1629,21 @@ A reader that goes away while `close()` is draining gets the same window: the wr
 failed spends its retry, the lines buffered behind it are held, and they go out if the
 reader is back within it.
 
-Open failures during `close()` are not reported one by one. If the destination never opened,
-the single `'close'` report for the abandoned entries says so (`... the pipe could not be
-opened, so they were not written`, or for a FileSink `the log file could not be opened`),
-and carries the last open failure as `error.cause`. Entries abandoned with the destination still open are blamed on
-the close budget instead (a FileSink's message names `closeTimeoutMS`).
+Open failures during `close()` are not reported one by one; the single `'close'` report for
+the entries it abandons says why it gave up, in both sinks:
+
+- No destination was in hand at any point of the close, and its last attempts to open one
+  failed: `... the pipe could not be opened, so they were not written` (a FileSink says
+  `the log file could not be opened`).
+- A destination was in hand during the close, went away, and could not be reopened:
+  `... the pipe was lost and could not be reopened, ...` (`the log file was lost ...`).
+- Otherwise it ran out of time - the destination still in hand, or an open still pending,
+  such as a first open that had not answered by the deadline. A FileSink's message names
+  `closeTimeoutMS`; a NamedPipeSink's gives no reason.
+
+In the first two cases `error.cause` is the failure the latest open attempt reported. An
+attempt that failed without reporting anything - a pipe with no reader - leaves no cause,
+rather than an older failure that no longer applies.
 
 `NamedPipeSink.reconnect()` reconnects on demand. Because the sink
 also reopens on its own, a `reconnect()` that races one of those automatic attempts answers
@@ -1654,9 +1664,10 @@ const pipeSink = new NamedPipeSink({
 
     // Only reconnect on a failure that means the pipe itself is broken. Not every kind
     // does: 'format' with disposition 'fallback' says your `formatter` threw and the
-    // default format was used instead, or a param would not render and a marker was
-    // written for it - either way the line was written and the pipe is healthy, and
-    // reconnecting on that would tear the sink down and rebuild it once per log call.
+    // default format was used instead, or a param would not render and a marker stands
+    // in for it - either way the line goes on to the pipe (a later failure of its write
+    // is reported on its own), the failure says nothing about the pipe, and reconnecting
+    // on that would tear the sink down and rebuild it once per log call.
     //
     // The sink also reopens on its own, so this is rarely needed; see above.
     if (kind === 'write') {
@@ -2277,7 +2288,10 @@ Two caveats remain:
   not get another chance through the same channel.
 - **`ConsoleSink` still honors its lifecycle.** It writes diagnostics to `console.error`
   while active, but a muted or closed instance remains silent just as it does for ordinary
-  entries.
+  entries. The exception is an owned sink's failure (a FileSink, NamedPipeSink or ArraySink
+  routing to this logger): when a muted ConsoleSink is the only other destination and no
+  `'diagnostic'` listener is registered, that failure still goes to `console.error`, since
+  muting the console's log output does not silence another sink's failure channel.
 
 ### Standalone Renderers Are Different
 

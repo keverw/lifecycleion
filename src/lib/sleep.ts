@@ -1,9 +1,10 @@
 import { assertDurationMS, clampTimerDelayMS } from './internal/timer-limits';
 /**
  * Sleeps the function for the specified number of milliseconds
- * Zero and negative delays resume on the next timer turn, never synchronously.
- * This lets computed deadlines that have already passed resume normally; NaN and
- * non-number values still reject rather than being coerced into an immediate delay.
+ * Zero and negative delays resume on the next timer turn, never synchronously, so a
+ * computed deadline that has already passed resumes normally. NaN and every non-number,
+ * numeric strings included, reject with a TypeError. Infinity and delays above
+ * 2,147,483,647 ms wait that maximum.
  *
  *  ```typescript
  * await sleep(1000);

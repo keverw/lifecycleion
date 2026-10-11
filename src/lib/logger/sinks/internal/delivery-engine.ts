@@ -271,15 +271,27 @@ export type DeliveryReporter = (
   routing: { isDiagnostic: boolean; onSettled?: () => void },
 ) => boolean;
 
+/**
+ * Why `close()` gave up on lines it still held.
+ *
+ * - `'timeout'` - out of time: the destination was still in hand, or an open was still
+ *   pending, when the budget or the grace window ran out.
+ * - `'never_opened'` - no destination to write them to: none was in hand at any point of
+ *   this close, and its last attempts to open one failed.
+ * - `'connection_lost'` - the destination was in hand during this close, went away, and
+ *   the attempts to reopen it failed.
+ */
+export type CloseAbandonReason = 'timeout' | 'never_opened' | 'connection_lost';
+
 /** The sink's own wording for the reports the engine makes. */
 export interface DeliveryMessages {
   queueFull(limit: number): string;
   /**
-   * Lines still queued when `close()` gave up on them: with the destination still in
-   * hand when its budget ran out, or - `isUnreachable` - with none to write them to, the
-   * destination not having opened by the end of close's last attempts.
+   * Lines still queued when `close()` gave up on them, and why. For any reason but
+   * `'timeout'` the report carries the last open failure, if the latest attempt reported
+   * one, as its `cause`.
    */
-  abandoned(count: number, isUnreachable: boolean): string;
+  abandoned(count: number, reason: CloseAbandonReason): string;
   refusedAfterClose(): string;
   /**
    * A line given up on after `attempts` writes, the last of them never answered by a
@@ -575,6 +587,8 @@ export class DeliveryEngine {
    * made while closing are not reported on their own.
    */
   private lastOpenFailure?: Error;
+  /** The open attempt {@link lastOpenFailure} came from. */
+  private lastOpenFailureAttempt = 0;
   private consecutiveFailures = 0;
   private totalWritten = 0;
 
@@ -711,12 +725,6 @@ export class DeliveryEngine {
         this.dispatch(slot);
       }
     } finally {
-      // A drained queue - nothing queued or in flight - closes the reported overflow
-      // episode, so a sink that overflows again hours later says so again.
-      if (this.queueSize === 0) {
-        this.losses.endOverflowEpisode();
-      }
-
       this.isPumping = false;
     }
   }
@@ -777,6 +785,7 @@ export class DeliveryEngine {
     const failure = new Error(message, { cause });
 
     this.lastOpenFailure = failure;
+    this.lastOpenFailureAttempt = this.openAttemptsStarted;
 
     if (this.closing || shouldSuppressFailureReport) {
       this.lastError = failure;
@@ -1504,10 +1513,12 @@ export class DeliveryEngine {
         this.slots = [];
         this.head = 0;
         this.queuedFrom = 0;
-        // The last line confirmed or given up on drains the queue, which closes the
-        // reported overflow episode, so a sink that overflows again hours later says so
-        // again. Here rather than only after a pass: with no in-flight cap, no pass
-        // follows the confirmation that empties it.
+        // The last line confirmed or given up on drains the queue - nothing queued or in
+        // flight - which closes the reported overflow episode, so a sink that overflows
+        // again hours later says so again. The one place that happens while the sink
+        // runs: eviction always leaves `maxQueueSize` (at least 1) lines, and only
+        // `close()` abandons the rest at once. Not after a pass: with no in-flight cap,
+        // no pass follows the confirmation that empties the queue.
         this.losses.endOverflowEpisode();
       } else if (this.head * 2 >= this.slots.length) {
         this.compactSlots();
@@ -1719,6 +1730,12 @@ export class DeliveryEngine {
     }
 
     this.lastFailedAttempt = attemptNumber;
+
+    // An attempt that failed quietly - a pipe with no reader - leaves no failure of its
+    // own, and an older one no longer says why the destination is unavailable now.
+    if (this.lastOpenFailureAttempt !== attemptNumber) {
+      this.lastOpenFailure = undefined;
+    }
 
     if (this.state === 'opening') {
       this.state = 'cooling_down';
@@ -1981,12 +1998,18 @@ export class DeliveryEngine {
       (await this.reopenWithinGrace(startTime, reopenGraceUntil)) ||
       hasHadConnection;
 
+    // Whether a destination was in hand at any point of this close, unlike
+    // `hasHadConnection`, which each grace window resets: what tells a backlog abandoned
+    // for a connection lost from one abandoned for a destination that never opened.
+    let didHoldConnection = hasHadConnection;
+
     // Drain what the destination can still take before giving up on it - a line in flight
     // included, since its write may still fail and need another attempt. The deadline
     // bounds the wait.
     while (!this.isDrained && Date.now() - startTime <= timeoutMS) {
       if (this.adapter.hasConnection()) {
         hasHadConnection = true;
+        didHoldConnection = true;
       } else if (this.state === 'opening' && Date.now() < reopenGraceUntil) {
         // An open in progress counts as work to wait for, within the grace window it was
         // made in: past it, an open that hangs must not hold the close for its whole
@@ -2020,8 +2043,13 @@ export class DeliveryEngine {
     }
 
     // Read before the adapter hears the close: whether what is left was abandoned for want
-    // of a destination rather than of time.
-    const isUnreachable = !this.adapter.hasConnection();
+    // of time, or of a destination - and if so, whether one was ever in hand.
+    const abandonReason: CloseAbandonReason =
+      this.adapter.hasConnection() || this.state === 'opening'
+        ? 'timeout'
+        : didHoldConnection
+          ? 'connection_lost'
+          : 'never_opened';
 
     // Closed is not healthy, and not connected either.
     this.state = 'closed';
@@ -2033,7 +2061,7 @@ export class DeliveryEngine {
     // flush share one deadline.
     const remainingMS = (): number => timeoutMS - (Date.now() - startTime);
 
-    await this.closeOnEvidence(remainingMS, isUnreachable);
+    await this.closeOnEvidence(remainingMS, abandonReason);
   }
 
   /**
@@ -2094,12 +2122,12 @@ export class DeliveryEngine {
   /**
    * Give up on what close could not send, and say so once, with the oldest line as a
    * sample. `'close'` rather than `'write'`, so it is not counted against a connection
-   * that is being torn down anyway. With no destination to send it to, the report says so
-   * and carries the last open failure as its cause.
+   * that is being torn down anyway. Abandoned for want of a destination, the report says
+   * so and carries the last open failure as its cause.
    */
   private abandonOnClose(
     isAbandoned: (slot: DeliverySlot) => boolean,
-    isUnreachable: boolean,
+    reason: CloseAbandonReason,
   ): void {
     const abandoned = new Set(this.compactSlots().filter(isAbandoned));
 
@@ -2111,9 +2139,9 @@ export class DeliveryEngine {
 
     this.losses.abandon(
       this.compactSlots(),
-      (count) => this.options.messages.abandoned(count, isUnreachable),
+      (count) => this.options.messages.abandoned(count, reason),
       (slot) => abandoned.has(slot),
-      isUnreachable ? this.lastOpenFailure : undefined,
+      reason === 'timeout' ? undefined : this.lastOpenFailure,
     );
     this.queuedFrom = 0;
   }
@@ -2131,11 +2159,11 @@ export class DeliveryEngine {
    */
   private async closeOnEvidence(
     remainingMS: () => number,
-    isUnreachable: boolean,
+    abandonReason: CloseAbandonReason,
   ): Promise<void> {
     this.abandonOnClose(
       (slot) => slot.state !== 'in_flight' || !slot.committed,
-      isUnreachable,
+      abandonReason,
     );
 
     const settlement: CloseSettlement = { failed: [] };

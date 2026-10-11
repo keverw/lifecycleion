@@ -258,8 +258,10 @@ export class NamedPipeSink implements LogSink {
       messages: {
         queueFull: (limit) =>
           `Pipe queue is full (maxQueueSize=${limit}); dropping the oldest entries`,
-        abandoned: (count, isUnreachable) =>
-          `Closed with ${describeEntryCount(count)} still queued for ${this.pipePath}${isUnreachable ? ': the pipe could not be opened, so' : ';'} they were not written`,
+        abandoned: (count, reason) =>
+          reason === 'timeout'
+            ? `Closed with ${describeEntryCount(count)} still queued for ${this.pipePath}; they were not written`
+            : `Closed with ${describeEntryCount(count)} still queued for ${this.pipePath}: the pipe ${reason === 'never_opened' ? 'could not be opened' : 'was lost and could not be reopened'}, so they were not written`,
         refusedAfterClose: () =>
           `Entry logged after close() began for ${this.pipePath}; it was not written, and further ones are counted in droppedEntries without being reported`,
         unconfirmed: (attempts) =>
@@ -1090,10 +1092,10 @@ export class NamedPipeSink implements LogSink {
 
         return custom + '\n';
       } catch (error) {
-        // `FORMAT`, not `WRITE`: the fallback below still produces a line and the pipe is
-        // untouched, so this is advisory. It also keeps the both-threw case honest - if
-        // the default format throws too, `writeEntry` reports that as the one `WRITE`
-        // failure, so a caller counting lost entries counts one rather than two.
+        // `'format'`, not `'write'`: the fallback below still produces a line and the pipe
+        // is untouched, so this is advisory. If the default format throws too, `write()`
+        // reports that as the one `'format'`/`'lost'` failure that loses the line, so a
+        // caller counting lost entries counts one.
         // `'fallback'`, not a claim that the line was written: this runs *inside*
         // rendering, before the default format has been produced and long before anything
         // reaches the pipe. What is true at this moment is only that the sink substituted

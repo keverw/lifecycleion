@@ -20,6 +20,45 @@ function recordExitProcess(logger: Logger): number[] {
   return processed;
 }
 
+// Settles on the logger's next `eventType` event: `exit-completed` once an exit's sinks
+// have closed and, for a real exit, `process.exit()` has been called.
+function nextLoggerEvent(logger: Logger, eventType: string): Promise<void> {
+  return new Promise((resolve) => {
+    logger.on<{ eventType: string }>('logger', (event) => {
+      if (event.eventType === eventType) {
+        resolve();
+      }
+    });
+  });
+}
+
+// Every `beforeExit` answer, so a test can wait for a request that proceeds after its
+// exit has already completed - and for what that late answer does - before asserting.
+function recordAnswers(
+  callback: (
+    code: number,
+    isFirstExit: boolean,
+  ) => Promise<{ action: 'proceed' | 'wait' }>,
+): {
+  callback: typeof callback;
+  settled: () => Promise<void>;
+} {
+  const answers: Promise<unknown>[] = [];
+  return {
+    callback: (code, isFirstExit) => {
+      const answer = callback(code, isFirstExit);
+      answers.push(answer);
+      return answer;
+    },
+    settled: async () => {
+      await Promise.all(answers);
+      // The logger acts on an answer a few promise reactions later; one macrotask
+      // runs them all.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    },
+  };
+}
+
 test.each([1.5, 1e20, -1, 256, 2 ** 40])(
   'invalid real exit code %s is normalized before notifications',
   async (requestedCode) => {
@@ -521,22 +560,26 @@ test('a success exit that proceeds first does not downgrade a pending failure', 
   );
   const output = spyOn(console, 'error').mockImplementation(() => {});
   try {
+    const answers = recordAnswers(async (code) => {
+      if (code !== 0) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return { action: 'proceed' };
+    });
     const logger = new Logger({
       sinks: [],
       callProcessExit: true,
-      beforeExitCallback: async (code) => {
-        if (code !== 0) {
-          await new Promise((resolve) => setTimeout(resolve, 5));
-        }
-        return { action: 'proceed' };
-      },
+      beforeExitCallback: answers.callback,
     });
     const processed = recordExitProcess(logger);
+    const completed = nextLoggerEvent(logger, 'exit-completed');
     // Neither has proceeded when the other is requested. The success proceeds first,
     // but commits the pending failure rather than its own code.
     logger.exit(1);
     logger.exit(0);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await completed;
+    // The failure proceeds too, after the exit it joined: it has nothing left to publish.
+    await answers.settled();
 
     expect(processed).toEqual([1]);
     expect(logger.exitCode).toBe(1);
@@ -751,8 +794,9 @@ test('a failure exit beforeExit waits out behind a pending success exit replaces
       },
     });
     const processed = recordExitProcess(logger);
+    const completed = nextLoggerEvent(logger, 'exit-completed');
     logger.exit(0);
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await completed;
 
     expect(processed).toEqual([1]);
     expect(logger.exitCode).toBe(1);
@@ -784,9 +828,10 @@ test('an invalid exit during a pending success exit replaces it with 1', async (
       },
     });
     const processed = recordExitProcess(logger);
+    const completed = nextLoggerEvent(logger, 'exit-completed');
     logger.exit(0);
     logger.exit(300);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await completed;
 
     expect(processed).toEqual([1]);
     expect(logger.exitCode).toBe(1);
@@ -824,15 +869,17 @@ test('a failure exit requested after exit-process fired is ignored and reported'
       },
     });
     const processed = recordExitProcess(logger);
+    const published = nextLoggerEvent(logger, 'exit-process');
+    const completed = nextLoggerEvent(logger, 'exit-completed');
     logger.exit(0);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await published;
     expect(processed).toEqual([0]);
     expect(exit).not.toHaveBeenCalled();
 
     // The code is final once published: the failure cannot change it.
     logger.exit(1);
     releaseClose();
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await completed;
 
     expect(processed).toEqual([0]);
     expect(logger.exitCode).toBe(0);
@@ -893,11 +940,12 @@ test('the last failure exit replaces an earlier one, and a success does not down
       },
     });
     const processed = recordExitProcess(logger);
+    const completed = nextLoggerEvent(logger, 'exit-completed');
     logger.exit(2);
     logger.exit(0);
     logger.exit(1);
     logger.exit(1);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await completed;
 
     expect(processed).toEqual([1]);
     expect(logger.exitCode).toBe(1);
@@ -991,8 +1039,9 @@ test('a simulated failure exit beforeExit waits out behind a pending success exi
       shuttingDown.error('component failed to stop', { exitCode: 1 });
     });
     const processed = recordExitProcess(logger);
+    const completed = nextLoggerEvent(logger, 'exit-completed');
     logger.exit(0);
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await completed;
 
     expect(processed).toEqual([1]);
     expect(logger.didExit).toBe(true);
@@ -1033,10 +1082,11 @@ test.each<[string, number[], number, string[]]>([
     try {
       const logger = simulatedShutdownLogger();
       const processed = recordExitProcess(logger);
+      const completed = nextLoggerEvent(logger, 'exit-completed');
       for (const code of requests) {
         logger.exit(code);
       }
-      await new Promise((resolve) => setTimeout(resolve, 30));
+      await completed;
 
       expect(processed).toEqual([settledCode]);
       expect(logger.exitCode).toEqual(settledCode);
@@ -1050,22 +1100,25 @@ test.each<[string, number[], number, string[]]>([
 test('overlapping simulated exits that both proceed publish the settled code once', async () => {
   const output = spyOn(console, 'error').mockImplementation(() => {});
   try {
+    const answers = recordAnswers(async (code) => {
+      if (code !== 0) {
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+      return { action: 'proceed' };
+    });
     const logger = new Logger({
       sinks: [],
       callProcessExit: false,
-      beforeExitCallback: async (code) => {
-        if (code !== 0) {
-          await new Promise((resolve) => setTimeout(resolve, 5));
-        }
-        return { action: 'proceed' };
-      },
+      beforeExitCallback: answers.callback,
     });
     const processed = recordExitProcess(logger);
+    const completed = nextLoggerEvent(logger, 'exit-completed');
     // As with a real exit, the success proceeds first and commits the pending failure;
     // the failure, proceeding later, was already folded into it.
     logger.exit(1);
     logger.exit(0);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await completed;
+    await answers.settled();
 
     expect(processed).toEqual([1]);
     expect(logger.exitCode).toBe(1);

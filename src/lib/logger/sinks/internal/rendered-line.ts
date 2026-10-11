@@ -22,8 +22,9 @@ import { toError } from '../../../to-error';
  *
  * Shared because the invariant is one rule and the two sinks had it written out twice, in
  * prose that overlapped almost sentence for sentence. What they legitimately differ on stays
- * theirs: both sinks keep the `LogEntry` and an attempt count for retries and `onError`;
- * their destination-specific write and reconnect behavior stays in each sink.
+ * theirs: their destination-specific write and reconnect behavior stays in each sink, and
+ * the delivery engine they share keeps each line's `LogEntry` and attempt count for
+ * retries and `onError`.
  */
 export interface RenderedLine {
   /** The line to write, or `undefined` when rendering it threw. */
