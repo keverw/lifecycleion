@@ -1,35 +1,56 @@
 /**
- * A state object shared on `globalThis` under a `Symbol.for` key, so every bundled copy of
- * the library in a realm agrees on it - and the one repair strategy for when it proves
- * unusable.
+ * How a {@link SharedSlot}'s state records that it is taken. Called on states read from
+ * the global slot, so either may throw or be ignored; the slot repairs that.
+ */
+export interface SharedSlotOptions<T extends object> {
+  /** The `Symbol.for` key the state lives under. */
+  key: symbol;
+  /** Whether a slot value is a usable state. Reads descriptors only. */
+  isValid: (value: unknown) => value is T;
+  /** A fresh, free state. */
+  create: () => T;
+  /** Whether `state` is taken. */
+  isHeld: (state: T) => boolean;
+  /** Mark `state` taken or free. */
+  setHeld: (state: T, isHeld: boolean) => void;
+}
+
+/**
+ * A guard every bundled copy of the library in a realm agrees on: a state object shared on
+ * `globalThis` under a `Symbol.for` key, taken by one holder at a time - and the one
+ * repair strategy for when it proves unusable.
  *
- * The slot is read on every call rather than cached, so a copy follows a state another
- * copy installed. It is read as an own data property, so an accessor someone put there is
- * never invoked. Anything that is not a valid state is replaced with a fresh one through
- * `Reflect.defineProperty`, and so is a valid-looking state that later proves hostile - a
- * `Proxy` whose flag throws, a write that does not take - via {@link replace}: replacing
- * the slot repairs every copy reading it, where keeping a state of one's own would leave
- * the others on the broken one.
+ * The slot is read on every call, so a copy follows a state another copy installed; the
+ * state last validated is kept, so following one costs a single descriptor read of the
+ * global, compared by identity. It is read as an own data property, so an accessor someone
+ * put there is never invoked. Anything that is not a valid state is replaced with a fresh
+ * one, and so is a valid-looking state that proves unusable when taken or released - a
+ * `Proxy` whose flag throws, a write that does not take: replacing the slot repairs every
+ * copy reading it, where keeping a state of one's own would leave the others on the
+ * broken one.
  *
- * Only a global that refuses the definition - non-extensible, or a non-configurable
- * property under the key - leaves this copy on a state of its own. That refusal is
- * permanent (neither can be undone), so it is remembered and the slot is not tried again.
+ * What it cannot tell apart is a state left taken by a holder that will never release it
+ * from one another copy holds right now: both read as taken, and taking it waits. The
+ * slot defends against values that misbehave when used, not against a global tampered
+ * with to look busy.
+ *
+ * Only a global that refuses the slot - non-extensible, or a non-configurable property
+ * under the key that cannot hold a data value - leaves this copy on a state of its own.
+ * That refusal is permanent (neither can be undone), so it is remembered and the slot is
+ * not tried again.
  */
 export class SharedSlot<T extends object> {
+  private readonly options: SharedSlotOptions<T>;
+  /** This copy's own state, used once the global refuses the slot. */
+  private readonly local: T;
+  /** The state last read from the slot and found valid, so a repeat read skips `isValid`. */
+  private cached: T | undefined;
   private isRefused = false;
 
-  /**
-   * @param key The `Symbol.for` key the state lives under.
-   * @param isValid Whether a slot value is a usable state. Reads descriptors only.
-   * @param create A fresh state.
-   * @param local This copy's own state, used once the global refuses the slot.
-   */
-  constructor(
-    private readonly key: symbol,
-    private readonly isValid: (value: unknown) => value is T,
-    private readonly create: () => T,
-    public readonly local: T,
-  ) {}
+  constructor(options: SharedSlotOptions<T>) {
+    this.options = options;
+    this.local = options.create();
+  }
 
   /** The shared state, installing a fresh one when the slot holds anything else. */
   public current(): T {
@@ -40,10 +61,15 @@ export class SharedSlot<T extends object> {
     try {
       const existing: unknown = Object.getOwnPropertyDescriptor(
         globalThis,
-        this.key,
+        this.options.key,
       )?.value;
 
-      if (this.isValid(existing)) {
+      if (existing !== undefined && existing === this.cached) {
+        return this.cached;
+      }
+
+      if (this.options.isValid(existing)) {
+        this.cached = existing;
         return existing;
       }
     } catch {
@@ -51,6 +77,78 @@ export class SharedSlot<T extends object> {
     }
 
     return this.replace();
+  }
+
+  /** Whether the state is taken - by this copy or another. */
+  public isHeld(): boolean {
+    const state = this.current();
+
+    try {
+      return this.options.isHeld(state);
+    } catch {
+      return this.options.isHeld(this.replace());
+    }
+  }
+
+  /**
+   * Take the state. The state taken, to hand to {@link release}, or `undefined` when it is
+   * already taken. A state that throws, or ignores the write, is replaced and the fresh one
+   * taken instead.
+   */
+  public acquire(): T | undefined {
+    const state = this.current();
+
+    try {
+      if (this.options.isHeld(state)) {
+        return undefined;
+      }
+
+      this.options.setHeld(state, true);
+
+      if (this.options.isHeld(state)) {
+        return state;
+      }
+
+      // The write was ignored rather than refused: this state cannot guard anything.
+    } catch {
+      // It threw: repaired below, as an ignored write is.
+    }
+
+    const fresh = this.replace();
+
+    try {
+      if (this.options.isHeld(fresh)) {
+        return undefined;
+      }
+
+      this.options.setHeld(fresh, true);
+
+      return fresh;
+    } catch {
+      // Only reachable for a state that went hostile between two statements.
+      return undefined;
+    }
+  }
+
+  /**
+   * Free a state {@link acquire} returned. One that will not be freed is replaced, so no
+   * copy is left waiting on it.
+   */
+  public release(state: T): void {
+    try {
+      this.options.setHeld(state, false);
+
+      if (!this.options.isHeld(state)) {
+        return;
+      }
+    } catch {
+      // Refused: a state that can never be freed, as an ignored write is.
+    }
+
+    // This copy's own state cannot refuse; anything else is replaced.
+    if (state !== this.local) {
+      this.replace();
+    }
   }
 
   /**
@@ -62,16 +160,23 @@ export class SharedSlot<T extends object> {
       return this.local;
     }
 
-    const fresh = this.create();
+    const fresh = this.options.create();
+    const key = this.options.key;
 
     try {
+      // A fresh data property, replacing even an accessor or a read-only value. On a
+      // non-configurable key that is refused, but a writable one still takes a new value:
+      // the second definition changes the value alone, as an assignment from an older
+      // copy would, without invoking an accessor.
       if (
-        Reflect.defineProperty(globalThis, this.key, {
+        Reflect.defineProperty(globalThis, key, {
           value: fresh,
           configurable: true,
           writable: true,
-        })
+        }) ||
+        Reflect.defineProperty(globalThis, key, { value: fresh })
       ) {
+        this.cached = fresh;
         return fresh;
       }
     } catch {
@@ -79,6 +184,7 @@ export class SharedSlot<T extends object> {
     }
 
     this.isRefused = true;
+    this.cached = undefined;
 
     return this.local;
   }

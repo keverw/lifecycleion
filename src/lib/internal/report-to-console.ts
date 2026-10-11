@@ -18,79 +18,26 @@ function isConsoleReportState(value: unknown): value is ConsoleReportState {
 }
 
 /**
- * The console origin, shared across bundled copies. A state that proves unusable - a
- * `Proxy` passes the descriptor check and can still throw on its flag, or ignore a write -
- * is replaced in the slot, which repairs every copy: a flag left stuck `true` would
- * otherwise drop every console report in every copy for the life of the process. The same
- * strategy `report-to-host` applies to its lease; see {@link SharedSlot}.
+ * The console origin, shared across bundled copies. A state that proves unusable when a
+ * report takes or frees it - a `Proxy` passes the descriptor check and can still throw on
+ * its flag, or ignore a write - is replaced in the slot, which repairs every copy: a flag
+ * that could not be put down would otherwise drop every console report in every copy for
+ * the life of the process. The same guard `report-to-host` keeps for its lease; see
+ * {@link SharedSlot}, including what it cannot repair.
  */
-const consoleState = new SharedSlot<ConsoleReportState>(
-  CONSOLE_REPORT_STATE_KEY,
-  isConsoleReportState,
-  () => ({ active: false }),
-  { active: false },
-);
-
-function isActive(): boolean {
-  const state = consoleState.current();
-  try {
-    return state.active === true;
-  } catch {
-    return consoleState.replace().active;
-  }
-}
-
-/**
- * Mark a console report as running. The state it was marked on, or `undefined` when one is
- * already running - in this copy or another.
- */
-function acquire(): ConsoleReportState | undefined {
-  const state = consoleState.current();
-  try {
-    if (state.active === true) {
-      return undefined;
-    }
-    state.active = true;
-    if (state.active === true) {
-      return state;
-    }
-    // The write was ignored rather than refused: this state cannot guard anything.
-  } catch {
-    // The flag threw: repaired below, as an ignored write is.
-  }
-  const fresh = consoleState.replace();
-  try {
-    if (fresh.active) {
-      return undefined;
-    }
-    fresh.active = true;
-    return fresh;
-  } catch {
-    // Only reachable for a state that went hostile between two statements.
-    return undefined;
-  }
-}
-
-/** Mark the report run on `state` as finished, repairing a state that will not take it. */
-function release(state: ConsoleReportState): void {
-  try {
-    state.active = false;
-    if (state.active === false) {
-      return;
-    }
-  } catch {
-    // Refused: a flag that can never be put down, as an ignored write is.
-  }
-  if (state === consoleState.local) {
-    consoleState.local.active = false;
-    return;
-  }
-  consoleState.replace();
-}
+const consoleState = new SharedSlot<ConsoleReportState>({
+  key: CONSOLE_REPORT_STATE_KEY,
+  isValid: isConsoleReportState,
+  create: () => ({ active: false }),
+  isHeld: (state) => state.active === true,
+  setHeld: (state, isHeld) => {
+    state.active = isHeld;
+  },
+});
 
 /** Capture this when queuing work so its failures cannot feed a console report back. */
 export function isConsoleReportActive(): boolean {
-  return isActive();
+  return consoleState.isHeld();
 }
 
 /**
@@ -149,7 +96,7 @@ export function isConsoleReportActive(): boolean {
 export function reportToConsole(...args: unknown[]): void {
   // Include the property read: a console shim can log from its getter as well as its
   // function body. Queued reporters must also capture this state when work is created.
-  const state = acquire();
+  const state = consoleState.acquire();
   if (state === undefined) {
     return;
   }
@@ -162,6 +109,6 @@ export function reportToConsole(...args: unknown[]): void {
     // missing `console`, a replaced `error` that is not a function, and a console that
     // throws on write all land here, and all of them are quieter than the alternative.
   } finally {
-    release(state);
+    consoleState.release(state);
   }
 }

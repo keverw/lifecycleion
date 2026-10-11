@@ -19,7 +19,6 @@ interface HostReportSharedState {
 }
 
 const HOST_REPORT_STATE_KEY = Symbol.for('lifecycleion.reportToHost.v1');
-const localHostReportState: HostReportSharedState = { dispatchDepth: 0 };
 
 /** A slot value with a writable own `dispatchDepth`, read without invoking an accessor. */
 function isHostReportState(value: unknown): value is HostReportSharedState {
@@ -36,106 +35,27 @@ function isHostReportState(value: unknown): value is HostReportSharedState {
 }
 
 /**
- * The cross-bundle state. A shared object that proves unusable - a squatter under our
- * symbol whose `dispatchDepth` throws, one that silently drops the write, one that refused
- * to release a lease - is replaced in the slot rather than abandoned, which also repairs
- * the *other* copies, since every copy reads the slot on every report: an object stuck at a
- * nonzero depth would otherwise send every later report in every copy to the emergency
- * console rung for the life of the process. Only a global that refuses the slot leaves
- * this copy on its own guard. The same strategy `report-to-console` applies to its flag;
- * see {@link SharedSlot}.
- */
-const hostReportState = new SharedSlot<HostReportSharedState>(
-  HOST_REPORT_STATE_KEY,
-  isHostReportState,
-  () => ({ dispatchDepth: 0 }),
-  localHostReportState,
-);
-
-/**
- * Enter the global reporting channel. A missing lease means another report owns it.
- * Every operation is guarded because this is itself part of the last-resort error path.
- */
-function acquireHostReportLease(): HostReportSharedState | undefined {
-  const state = hostReportState.current();
-
-  try {
-    if (state.dispatchDepth > 0) {
-      return undefined;
-    }
-
-    state.dispatchDepth++;
-
-    if (state.dispatchDepth > 0) {
-      return state;
-    }
-
-    // The increment was ignored rather than refused, so this object cannot hold a lease at
-    // all - and unlike a refusal it says so silently, leaving every copy to believe it owns
-    // a channel none of them is guarding.
-  } catch {
-    // A hostile value stored under our symbol can still change behaviour after the
-    // descriptor check: a `Proxy` answers it like a plain object.
-  }
-
-  return acquireRepairedLease();
-}
-
-/**
- * Acquire from a replacement shared object, or from this copy's own guard.
+ * The cross-bundle lease. A shared object that proves unusable when a report takes or
+ * releases it - a squatter under our symbol whose `dispatchDepth` throws, one that
+ * silently drops the write, one that refuses to release a lease - is replaced in the slot
+ * rather than abandoned, which also repairs the *other* copies, since every copy reads the
+ * slot on every report: a lease that could not be put down would otherwise send every
+ * later report in every copy to the emergency console rung for the life of the process.
+ * The same guard `report-to-console` keeps for its flag; see {@link SharedSlot}, including
+ * what it cannot repair.
  *
- * Reached when the shared object cannot hold a lease. Replacing it keeps cross-copy
- * protection for every report after this one; `localHostReportState` is the fallback for a
- * global that will not take a replacement, and it can neither refuse nor ignore the write
- * because it is this copy's own object.
+ * A lease is only taken at depth `0`, so held is depth `1` and free is `0` - what copies of
+ * this module that increment and decrement it read the same way.
  */
-function acquireRepairedLease(): HostReportSharedState | undefined {
-  const state = hostReportState.replace();
-
-  try {
-    if (state.dispatchDepth > 0) {
-      return undefined;
-    }
-
-    state.dispatchDepth++;
-
-    return state;
-  } catch {
-    // Only reachable for a replacement that went hostile between two statements. One
-    // report on the console rung is the cost; the next one gets a fresh object.
-    return undefined;
-  }
-}
-
-/** Release a lease without allowing a hostile shared object to raise another failure. */
-function releaseHostReportLease(state: HostReportSharedState): void {
-  try {
-    state.dispatchDepth = Math.max(0, state.dispatchDepth - 1);
-
-    // A lease is only granted at depth `0`, so anything but `0` here means the write did
-    // not take. Left alone, the lease is never released and every later report - in this
-    // copy and in every other one reading the same object - takes the emergency console
-    // rung and never reaches an `'error'` listener again.
-    if (state.dispatchDepth === 0) {
-      return;
-    }
-  } catch {
-    // The shared object refused the write. Same outcome as an ignored one: a lease that
-    // can never be put down.
-  }
-
-  if (state === localHostReportState) {
-    // Ours, and it just refused a write, which should not be reachable. Reset outright
-    // rather than leaving this copy unable to report for the life of the process.
-    localHostReportState.dispatchDepth = 0;
-
-    return;
-  }
-
-  // Replace the object instead of abandoning it, so the copies still reading it recover
-  // too. A global that will not take a replacement leaves this copy on its own guard.
-  hostReportState.replace();
-}
+const hostReportLease = new SharedSlot<HostReportSharedState>({
+  key: HOST_REPORT_STATE_KEY,
+  isValid: isHostReportState,
+  create: () => ({ dispatchDepth: 0 }),
+  isHeld: (state) => state.dispatchDepth > 0,
+  setHeld: (state, isHeld) => {
+    state.dispatchDepth = isHeld ? 1 : 0;
+  },
+});
 
 /**
  * The standard global `'error'` reporting channel, and the rungs beneath it.
@@ -297,7 +217,7 @@ export function reportToHost(
   error: Error,
   renderForConsole?: () => string,
 ): void {
-  const lease = acquireHostReportLease();
+  const lease = hostReportLease.acquire();
 
   if (!lease) {
     // A listener or one of its sinks failed while handling an earlier report. Sending
@@ -354,7 +274,7 @@ export function reportToHost(
     // contract is that it never throws.
     reportToConsole(renderedReport(error, renderForConsole));
   } finally {
-    releaseHostReportLease(lease);
+    hostReportLease.release(lease);
   }
 }
 

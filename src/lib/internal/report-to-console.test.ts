@@ -246,7 +246,8 @@ describe('reportToConsole', () => {
     expect(stderr).toBe('');
     expect(exitCode).toBe(0);
     expect(JSON.parse(stdout)).toEqual({
-      defines: 1,
+      // One attempt - a fresh definition, then the value alone - never repeated.
+      defines: 2,
       calls: 2,
       wasActive: true,
       isActive: false,
