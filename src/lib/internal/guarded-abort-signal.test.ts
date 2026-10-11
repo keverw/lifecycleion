@@ -188,6 +188,42 @@ test('onabort keeps an object, as the native attribute does, and stores other va
   }
 });
 
+test('onabort stores and runs what a native signal stores and runs, a handleEvent object included', () => {
+  // The attribute is an event handler (`[LegacyTreatNonObjectAsNull]`): any object is
+  // kept, callable or not, and a non-object reads back `null`. A `handleEvent` object is
+  // kept but never invoked - unlike an `'abort'` listener.
+  const reports = claimReports();
+  const native = new AbortController();
+  const { controller, signal } = guarded();
+  const calls: string[] = [];
+  const listenerObject = {
+    handleEvent: () => {
+      calls.push('handleEvent');
+    },
+  };
+
+  for (const value of [
+    listenerObject,
+    {},
+    5,
+    'handler',
+    true,
+    null,
+    undefined,
+  ]) {
+    native.signal.onabort = value as () => void;
+    signal.onabort = value as () => void;
+    expect(signal.onabort as unknown).toBe(native.signal.onabort as unknown);
+  }
+
+  native.signal.onabort = listenerObject as unknown as () => void;
+  signal.onabort = listenerObject as unknown as () => void;
+  native.abort();
+  controller.abort();
+  expect(calls).toEqual([]);
+  expect(reports).toHaveLength(0);
+});
+
 test('an async listener that rejects is reported rather than left unhandled', async () => {
   const reports = claimReports();
   const { controller, signal } = guarded();

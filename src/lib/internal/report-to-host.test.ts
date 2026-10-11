@@ -1,4 +1,5 @@
 import { expect, test } from 'bun:test';
+import { join } from 'node:path';
 import type * as ReportToHostModule from './report-to-host';
 
 /** Import separately evaluated copies, as code splitting or dependency duplication can. */
@@ -65,20 +66,60 @@ function clearSharedHostReportState(): void {
 }
 
 test('a global that refuses the shared state still guards each copy on its own', async () => {
-  // `Object.freeze(globalThis)` is the real-world shape and is not something a test in a
-  // shared process can do; a non-writable property under the same key refuses the write
-  // the same way, which is what the fallback turns on.
+  // `Object.preventExtensions(globalThis)` - the shape `Object.freeze(globalThis)` takes for
+  // a new key - cannot be undone, so it runs in a process of its own. A squatter that is
+  // merely non-writable is no refusal: the slot is configurable, so it is replaced.
+  const modulePath = join(import.meta.dir, 'report-to-host.ts');
+  const script = `
+    Object.preventExtensions(globalThis);
+    const first = await import(${JSON.stringify(`${modulePath}?copy=first`)});
+    const second = await import(${JSON.stringify(`${modulePath}?copy=second`)});
+    let listenerCalls = 0;
+    const consoled = [];
+    console.error = (value) => {
+      consoled.push(String(value?.message ?? value));
+    };
+    globalThis.addEventListener('error', (event) => {
+      listenerCalls++;
+      event.preventDefault();
+      if (listenerCalls === 1) {
+        second.reportToHost(new Error('nested report'));
+      }
+    });
+    first.reportToHost(new Error('outer report'));
+    process.stdout.write(JSON.stringify({ listenerCalls, consoled }));
+  `;
+  const child = Bun.spawn([process.execPath, '-e', script], {
+    stdout: 'pipe',
+    stderr: 'pipe',
+  });
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(child.stdout).text(),
+    new Response(child.stderr).text(),
+    child.exited,
+  ]);
+
+  expect(stderr).toBe('');
+  expect(exitCode).toBe(0);
+  // The documented degradation: with no shared lease, the second copy does not see the
+  // first copy's dispatch and re-enters the listeners once. Bounded by the number of
+  // loaded copies rather than growing with the listeners they hold between them - each
+  // copy still refuses to re-enter its *own* dispatch, which is what stops the recursion
+  // from running away.
+  expect(JSON.parse(stdout)).toEqual({ listenerCalls: 2, consoled: [] });
+});
+
+test('a non-writable squatter under the key is replaced, so copies still share', async () => {
   Object.defineProperty(globalThis, HOST_REPORT_STATE_KEY, {
-    // Invalid on purpose, so the state is rejected and a fresh install is attempted -
-    // and refused.
+    // Invalid on purpose, and not writable - but configurable, so replaceable.
     value: { dispatchDepth: -1 },
     writable: false,
     configurable: true,
   });
 
   const [firstCopy, secondCopy] = await Promise.all([
-    importReportToHostCopy('frozen-first'),
-    importReportToHostCopy('frozen-second'),
+    importReportToHostCopy('readonly-first'),
+    importReportToHostCopy('readonly-second'),
   ]);
   const nestedError = new Error('nested report');
   const consoled: unknown[] = [];
@@ -102,13 +143,9 @@ test('a global that refuses the shared state still guards each copy on its own',
   try {
     firstCopy.reportToHost(new Error('outer report'));
 
-    // The documented degradation: with no shared lease, the second copy does not see the
-    // first copy's dispatch and re-enters the listeners once. Bounded by the number of
-    // loaded copies rather than growing with the listeners they hold between them - each
-    // copy still refuses to re-enter its *own* dispatch, which is what stops the
-    // recursion from running away.
-    expect(listenerCalls).toBe(2);
-    expect(consoled).toEqual([]);
+    // One lease between them: the nested report from the other copy found it held.
+    expect(listenerCalls).toBe(1);
+    expect(consoled).toEqual([nestedError]);
   } finally {
     globalThis.removeEventListener('error', onError);
     console.error = originalConsoleError;
@@ -184,12 +221,11 @@ test('a shared object that refuses to release its lease is replaced, not abandon
 });
 
 test('a global that silently drops the write still guards one copy against itself', async () => {
-  // The case a refusal does not cover, and the one the read-back in
-  // `installFreshHostReportState` exists for. A setter that ignores the value does not
-  // throw under strict mode, so the install *returned* the object it had just built and
-  // nobody else could ever see - which meant every call built another one, at depth zero,
-  // and a copy stopped guarding even against itself: the nested report below dispatched
-  // again. Reading the property back afterwards is what catches it.
+  // An accessor under our symbol whose setter drops the value. An assignment would
+  // "succeed" into it and leave a state nobody else could see - every call building
+  // another at depth zero, so a copy stopped guarding even against itself. Read as a
+  // descriptor it is no state at all, and it is replaced with a data property: the nested
+  // report below finds this copy's own lease held.
   const squatter = { dispatchDepth: -1 };
 
   Object.defineProperty(globalThis, HOST_REPORT_STATE_KEY, {

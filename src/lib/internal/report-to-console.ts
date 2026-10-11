@@ -1,4 +1,5 @@
 import { isObjectLike } from './is-object-like';
+import { SharedSlot } from './shared-slot';
 
 const CONSOLE_REPORT_STATE_KEY = Symbol.for('lifecycleion.reportToConsole.v1');
 
@@ -6,14 +7,6 @@ const CONSOLE_REPORT_STATE_KEY = Symbol.for('lifecycleion.reportToConsole.v1');
 interface ConsoleReportState {
   active: boolean;
 }
-
-/**
- * The state this copy uses, once it has found, installed or given up on the shared one.
- * Every copy keeps a state it finds in the slot, so the first one there is the one every
- * copy uses, and holding it here spares each check - one per guarded callback, emit and
- * report - a descriptor read of the global.
- */
-let sharedState: ConsoleReportState | undefined;
 
 /** A slot value with a writable own `active` flag, read without invoking an accessor. */
 function isConsoleReportState(value: unknown): value is ConsoleReportState {
@@ -25,62 +18,74 @@ function isConsoleReportState(value: unknown): value is ConsoleReportState {
 }
 
 /**
- * Share the console origin across bundled copies. A slot holding anything else is
- * replaced when possible. When it is not - a frozen `globalThis`, a non-configurable
- * property - no copy can ever install one, so this copy keeps a state of its own instead,
- * which contains only its own re-entry, and does not try the slot again.
+ * The console origin, shared across bundled copies. A state that proves unusable - a
+ * `Proxy` passes the descriptor check and can still throw on its flag, or ignore a write -
+ * is replaced in the slot, which repairs every copy: a flag left stuck `true` would
+ * otherwise drop every console report in every copy for the life of the process. The same
+ * strategy `report-to-host` applies to its lease; see {@link SharedSlot}.
  */
-function sharedConsoleState(): ConsoleReportState {
-  if (sharedState !== undefined) {
-    return sharedState;
-  }
-  const state: ConsoleReportState = { active: false };
+const consoleState = new SharedSlot<ConsoleReportState>(
+  CONSOLE_REPORT_STATE_KEY,
+  isConsoleReportState,
+  () => ({ active: false }),
+  { active: false },
+);
+
+function isActive(): boolean {
+  const state = consoleState.current();
   try {
-    const existing: unknown = Object.getOwnPropertyDescriptor(
-      globalThis,
-      CONSOLE_REPORT_STATE_KEY,
-    )?.value;
-    if (isConsoleReportState(existing)) {
-      sharedState = existing;
-      return sharedState;
-    }
-    void Reflect.defineProperty(globalThis, CONSOLE_REPORT_STATE_KEY, {
-      value: state,
-      configurable: true,
-      writable: true,
-    });
+    return state.active === true;
   } catch {
-    // Unshared, as for a refused definition.
+    return consoleState.replace().active;
   }
-  sharedState = state;
-  return state;
 }
 
 /**
- * Stop sharing: keep a state of this copy's own from now on. The descriptor check cannot
- * tell a Proxy from a plain object, so a shared state whose flag then throws when read or
- * written lands here instead of throwing out of the console rung.
+ * Mark a console report as running. The state it was marked on, or `undefined` when one is
+ * already running - in this copy or another.
  */
-function useOwnConsoleState(): ConsoleReportState {
-  const own: ConsoleReportState = { active: false };
-  sharedState = own;
-  return own;
-}
-
-function isActive(): boolean {
+function acquire(): ConsoleReportState | undefined {
+  const state = consoleState.current();
   try {
-    return sharedConsoleState().active === true;
+    if (state.active === true) {
+      return undefined;
+    }
+    state.active = true;
+    if (state.active === true) {
+      return state;
+    }
+    // The write was ignored rather than refused: this state cannot guard anything.
   } catch {
-    return useOwnConsoleState().active;
+    // The flag threw: repaired below, as an ignored write is.
+  }
+  const fresh = consoleState.replace();
+  try {
+    if (fresh.active) {
+      return undefined;
+    }
+    fresh.active = true;
+    return fresh;
+  } catch {
+    // Only reachable for a state that went hostile between two statements.
+    return undefined;
   }
 }
 
-function setActive(isActiveNow: boolean): void {
+/** Mark the report run on `state` as finished, repairing a state that will not take it. */
+function release(state: ConsoleReportState): void {
   try {
-    sharedConsoleState().active = isActiveNow;
+    state.active = false;
+    if (state.active === false) {
+      return;
+    }
   } catch {
-    useOwnConsoleState().active = isActiveNow;
+    // Refused: a flag that can never be put down, as an ignored write is.
   }
+  if (state === consoleState.local) {
+    consoleState.local.active = false;
+    return;
+  }
+  consoleState.replace();
 }
 
 /** Capture this when queuing work so its failures cannot feed a console report back. */
@@ -142,13 +147,12 @@ export function isConsoleReportActive(): boolean {
  *             `Error` inspected rather than stringified can still hand one over.
  */
 export function reportToConsole(...args: unknown[]): void {
-  if (isActive()) {
-    return;
-  }
-
   // Include the property read: a console shim can log from its getter as well as its
   // function body. Queued reporters must also capture this state when work is created.
-  setActive(true);
+  const state = acquire();
+  if (state === undefined) {
+    return;
+  }
 
   try {
     // eslint-disable-next-line no-console -- this function is the console rung itself
@@ -158,6 +162,6 @@ export function reportToConsole(...args: unknown[]): void {
     // missing `console`, a replaced `error` that is not a function, and a console that
     // throws on write all land here, and all of them are quieter than the alternative.
   } finally {
-    setActive(false);
+    release(state);
   }
 }

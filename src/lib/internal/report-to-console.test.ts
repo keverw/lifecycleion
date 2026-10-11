@@ -149,6 +149,57 @@ describe('reportToConsole', () => {
     }
   });
 
+  test('a shared flag that cannot be put down is replaced for every copy', async () => {
+    const key = Symbol.for('lifecycleion.reportToConsole.v1');
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    // Takes the first write - the report starting - and throws on the next, the one that
+    // would end it, leaving the flag stuck `true` for every copy reading this object.
+    let writes = 0;
+    const target = { active: false };
+    const squatter = new Proxy(target, {
+      set(object, property, value: unknown) {
+        if (++writes > 1) {
+          throw new Error('flag stuck');
+        }
+        return Reflect.set(object, property, value);
+      },
+    });
+    Object.defineProperty(globalThis, key, {
+      configurable: true,
+      writable: true,
+      value: squatter,
+    });
+    try {
+      const [first, second] = await Promise.all([
+        importConsoleReportCopy('stuck-first'),
+        importConsoleReportCopy('stuck-second'),
+      ]);
+      const captured = muteConsoleError();
+      first.reportToConsole('first failure');
+      expect(target.active).toBe(true);
+
+      // The stuck object is gone from the slot, so the other copy is not silenced.
+      expect((globalThis as unknown as Record<symbol, unknown>)[key]).not.toBe(
+        squatter,
+      );
+      expect(second.isConsoleReportActive()).toBe(false);
+      second.reportToConsole('later failure from another copy');
+      first.reportToConsole('later failure');
+
+      expect(captured).toEqual([
+        'first failure',
+        'later failure from another copy',
+        'later failure',
+      ]);
+    } finally {
+      if (descriptor === undefined) {
+        Reflect.deleteProperty(globalThis, key);
+      } else {
+        Object.defineProperty(globalThis, key, descriptor);
+      }
+    }
+  });
+
   test('a global that refuses the shared slot is tried once, and re-entry is still bounded', async () => {
     // `Object.preventExtensions(globalThis)` cannot be undone, so it runs in a process of
     // its own. Every check after the refused install reads this copy's own state.
