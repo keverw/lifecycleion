@@ -218,9 +218,10 @@ class MyEmitter extends EventEmitterProtected {
 ```
 
 The optional `data` is the value emitted to the failing handler, including for an async
-rejection. Two rules for an override: it must not throw - it runs on the failure path and
-there is nothing above it left to catch - and it must not assume `error` is an `Error`. Use
-[`describeError`](./to-error.md#describeerror), which satisfies both.
+rejection. Two rules for an override: it should not throw - a throw does not escape
+`emit()`, but it is only written to `console.error` alongside the original failure, so the
+report the override meant to make is lost - and it must not assume `error` is an `Error`.
+Use [`describeError`](./to-error.md#describeerror), which satisfies both.
 
 [`Logger`](./logger.md) overrides this exact hook for the loop described above, routing
 its own `'logger'` handler failures to its separate asynchronous diagnostic channel.

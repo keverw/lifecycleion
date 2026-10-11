@@ -1106,9 +1106,10 @@ logger.error('Fatal error', { exitCode: 1 });
 ```
 
 If `logger.exit()` is called while LifecycleManager shutdown is already in
-progress, that exit call returns `{ action: 'wait' }` instead of exiting immediately. The
-first such exit request stays pending and proceeds after shutdown finishes.
-Later duplicate exit calls during that same shutdown also return `{ action: 'wait' }`, so
+progress, it does not exit immediately. The first such exit request's `beforeExitCallback`
+stays pending and answers `{ action: 'proceed' }` once that shutdown finishes (or reaches
+its global timeout), so that request is the one that exits.
+Later duplicate exit calls during that same shutdown return `{ action: 'wait' }`, so
 they run no second shutdown, but their codes still count: a failure replaces the pending
 exit code (last non-zero wins), and a success never downgrades a pending failure. See
 [Exit Behavior](#exit-behavior).
@@ -1632,18 +1633,22 @@ reader is back within it.
 Open failures during `close()` are not reported one by one; the single `'close'` report for
 the entries it abandons says why it gave up, in both sinks:
 
-- No destination was in hand at any point of the close, and its last attempts to open one
-  failed: `... the pipe could not be opened, so they were not written` (a FileSink says
-  `the log file could not be opened`).
-- A destination was in hand during the close, went away, and could not be reopened:
-  `... the pipe was lost and could not be reopened, ...` (`the log file was lost ...`).
-- Otherwise it ran out of time - the destination still in hand, or an open still pending,
-  such as a first open that had not answered by the deadline. A FileSink's message names
-  `closeTimeoutMS`; a NamedPipeSink's gives no reason.
+- Out of budget: `closeTimeoutMS` ran out with the destination still in hand, or with an
+  open still pending, such as a first open that had not answered by then. A FileSink's
+  message names `closeTimeoutMS`; a NamedPipeSink's gives no reason.
+- No destination: the reopen grace window ran out with the latest open failed or still
+  pending. `... the pipe could not be opened, so they were not written` (a FileSink says
+  `the log file could not be opened`) when none was in hand at any point of the close, or
+  `... the pipe was lost and could not be reopened, ...` (`the log file was lost ...`) when
+  one was and went away.
+- Failing writes: the destination reopened, but writes to it kept failing and taking the
+  connection with them - a full disk, say: `... writes to the pipe kept failing, ...`
+  (`writes to the log file kept failing`).
 
-In the first two cases `error.cause` is the failure the latest open attempt reported. An
-attempt that failed without reporting anything - a pipe with no reader - leaves no cause,
-rather than an older failure that no longer applies.
+`error.cause` is the failure behind the reason: the latest write failure for failing
+writes, and for a timeout while writes are failing; otherwise the failure the latest open
+attempt reported. An attempt that failed without reporting anything - a pipe with no
+reader - leaves no cause, rather than an older failure that no longer applies.
 
 `NamedPipeSink.reconnect()` reconnects on demand. Because the sink
 also reopens on its own, a `reconnect()` that races one of those automatic attempts answers

@@ -33,6 +33,7 @@ import { NonBlockingPipeStream } from './internal/non-blocking-pipe-stream';
 import { openRetryBackoff } from './internal/reopen-backoff';
 import {
   DeliveryEngine,
+  describeCloseAbandonReason,
   type DeliverySlot,
   type FlushResult,
   type OpenResult,
@@ -261,7 +262,7 @@ export class NamedPipeSink implements LogSink {
         abandoned: (count, reason) =>
           reason === 'timeout'
             ? `Closed with ${describeEntryCount(count)} still queued for ${this.pipePath}; they were not written`
-            : `Closed with ${describeEntryCount(count)} still queued for ${this.pipePath}: the pipe ${reason === 'never_opened' ? 'could not be opened' : 'was lost and could not be reopened'}, so they were not written`,
+            : `Closed with ${describeEntryCount(count)} still queued for ${this.pipePath}: ${describeCloseAbandonReason(reason, 'the pipe')}, so they were not written`,
         refusedAfterClose: () =>
           `Entry logged after close() began for ${this.pipePath}; it was not written, and further ones are counted in droppedEntries without being reported`,
         unconfirmed: (attempts) =>
@@ -347,13 +348,9 @@ export class NamedPipeSink implements LogSink {
     // Queued whenever there is nowhere to put it *yet* - before the first open, and after
     // a failure took the stream away - and written at once when there is.
     //
-    // Held rather than dropped, which is the whole of what changed here once. A pipe
-    // failure used to end the sink: the stream `'error'` handler cleared `pipeStream` and
-    // left the sink looking initialized, so every later entry fell through a silent early
-    // return - uncounted, unreported, and not recoverable by the `reconnect()` the class
-    // documents, since there was nothing left to flush. `FileSink` answers the identical
-    // failure by queueing, retrying and reopening; there was never a reason for the two to
-    // differ.
+    // Held rather than dropped: a pipe failure does not end the sink. The line waits,
+    // bounded by `maxQueueSize`, for the reopen - automatic or a `reconnect()` - to flush
+    // it, exactly as `FileSink` holds its lines through the same failure.
     this.engine.enqueue({
       line: rendered.formatted ?? '',
       entry,
@@ -614,10 +611,10 @@ export class NamedPipeSink implements LogSink {
     // Check platform support
     const platform = os.platform();
     if (platform !== 'linux' && platform !== 'darwin') {
-      // Through the dedup every other open failure goes through. Called directly, this one
-      // bypassed it, so every reopen attempt called the caller's `onError` again, forever -
-      // the flood {@link DeliveryEngine.outages} exists to prevent, on the one failure that
-      // is certain never to clear: the platform is what it is for the life of the process.
+      // Through the dedup every other open failure goes through, so it is said once rather
+      // than on every reopen attempt - the flood {@link DeliveryEngine.outages} exists to
+      // prevent, on the one failure certain never to clear: the platform is what it is for
+      // the life of the process.
       reportOpenFailure(
         'unsupported_platform',
         `Named pipes are only supported on Linux and macOS, current platform: ${platform}`,
@@ -654,23 +651,17 @@ export class NamedPipeSink implements LogSink {
     // Every way an open can fail answers `unavailable`, and the engine arms the next
     // attempt behind each one - which is what makes recovery independent of traffic: no
     // reader on the FIFO, the open itself refused, the `stat` finding nothing there, the
-    // path there but not a FIFO. The alternative is what the sink used to do for three of
-    // those four - wait for the next `write()` to ask - and that is only a retry policy
-    // for a process that is still logging. A pipe recreated, a reader restarted, or a
-    // permission fixed during a quiet minute would otherwise be picked up whenever traffic
-    // happened to resume, or never.
+    // path there but not a FIFO. Waiting for the next `write()` to ask would only be a
+    // retry policy for a process that is still logging: a pipe recreated, a reader
+    // restarted, or a permission fixed during a quiet minute is picked up by the timer.
     try {
       // Check if the pipe exists and is a FIFO
       const stats = await fsPromises.stat(this.pipePath);
       if (!stats.isFIFO()) {
-        // Reported and retried on the same terms as every other failed open, which it was
-        // not until this was written. Reporting directly meant once per attempt - six
-        // callbacks in four seconds against a path that was an ordinary file - and
-        // returning with nothing scheduled made this an absorbing state: the retry chain
-        // that recovers a missing path walks into it the moment the path exists as
-        // something else, and stops. Measured: `rm pipe; touch pipe; rm pipe; mkfifo pipe`
-        // with a live reader on the end of it left the sink uninitialized for good, having
-        // stopped looking after the second step.
+        // Reported and retried on the same terms as every other failed open: said once,
+        // not once per attempt, and with the next attempt scheduled, so a path that is
+        // briefly something else - `rm pipe; touch pipe; rm pipe; mkfifo pipe` - is picked
+        // up once it is a FIFO again rather than ending the retry chain.
         reportOpenFailure(
           'not_a_pipe',
           `${this.pipePath} exists but is not a named pipe (FIFO)`,
@@ -705,18 +696,13 @@ export class NamedPipeSink implements LogSink {
         //
         // Reported as `'setup'` - "the destination could not be opened" - and deliberately
         // not as the `'not_found'` the `catch` below uses, which means the destination does
-        // not exist and is simply false for `EACCES` or `EMFILE`. It is not `'write'`
-        // either, though that is the kind this failure used to arrive as: it reached the
-        // sink through the stream's `'error'` handler, because `createWriteStream` does not
-        // throw for these, it emits. `'write'` is documented as the one kind that means an
-        // entry is at risk, and an open that failed before any stream existed is about no
-        // entry at all.
+        // not exist and is simply false for `EACCES` or `EMFILE`. Nor `'write'`, which is
+        // documented as the one kind that means an entry is at risk: an open that failed
+        // before any stream existed is about no entry at all.
         //
-        // And retried, because moving this failure off the stream's `'error'` handler took
-        // a retry away: reported from here with nothing behind it, it would have gone
-        // silent until some later `write()` happened along - and a permission fixed, or
-        // descriptor pressure relieved, a minute later is exactly the kind of thing a quiet
-        // process never notices.
+        // And retried on the engine's timer like every other failed open, so a permission
+        // fixed, or descriptor pressure relieved, a minute later is noticed by a quiet
+        // process too.
         reportOpenFailure(
           'setup',
           `Could not open named pipe at ${this.pipePath}: ${describeError(error)}`,
@@ -824,11 +810,10 @@ export class NamedPipeSink implements LogSink {
       // the kind the probe path above already chose for exactly these.
       //
       // Retried like every other failure: this is the `stat` failing - the FIFO deleted,
-      // or not created yet - and it was once the one failure with no timer behind it at
-      // all, so a `rm pipe; mkfifo pipe` during a quiet minute was picked up whenever
-      // traffic happened to resume. On the same backoff as every other failure, capped at
-      // five seconds: a pipe being recreated is meant to be picked up promptly, and the
-      // cost of asking is two syscalls.
+      // or not created yet - so a `rm pipe; mkfifo pipe` during a quiet minute is picked
+      // up on the timer. On the same backoff as every other failure, capped at five
+      // seconds: a pipe being recreated is meant to be picked up promptly, and the cost of
+      // asking is two syscalls.
       reportOpenFailure(
         openFailureKind(error),
         `Could not open named pipe at ${this.pipePath}: ${describeError(error)}`,
@@ -1125,12 +1110,13 @@ export class NamedPipeSink implements LogSink {
     if (this.jsonFormat) {
       // The logger's own renderer over the redacted bag, not a second `JSON.stringify`:
       // see `renderJSONLine`. A value it cannot render becomes a marker and is reported
-      // as `'format'`/`'fallback'` - the line is still written. Guarded like the
+      // as `'format'`/`'fallback'` - the line, marker and all, still goes on to the pipe.
+      // Guarded like the
       // throwing-formatter report above, and for the same reason.
       formatted = renderJSONLine(entry, (error) => {
         this.scheduleFormatReport(
           new Error(
-            'Failed to render a value in the log entry; a marker was written in its place',
+            'Failed to render a value in the log entry; a marker stands in for it in the line',
             { cause: toError(error) },
           ),
           { disposition: 'fallback', entry },

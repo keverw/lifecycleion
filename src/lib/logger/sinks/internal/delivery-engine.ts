@@ -274,22 +274,45 @@ export type DeliveryReporter = (
 /**
  * Why `close()` gave up on lines it still held.
  *
- * - `'timeout'` - out of time: the destination was still in hand, or an open was still
- *   pending, when the budget or the grace window ran out.
+ * - `'timeout'` - out of budget: the destination was still in hand, or an open was still
+ *   pending, when `closeTimeoutMS` ran out.
  * - `'never_opened'` - no destination to write them to: none was in hand at any point of
- *   this close, and its last attempts to open one failed.
- * - `'connection_lost'` - the destination was in hand during this close, went away, and
- *   the attempts to reopen it failed.
+ *   this close, and its latest attempt to open one failed, or was still pending when the
+ *   reopen grace window ran out.
+ * - `'connection_lost'` - the same, for a destination that was in hand during this close
+ *   and went away.
+ * - `'write_failed'` - the destination kept opening, but writes to it kept failing: the
+ *   latest open succeeded, and a failed write took that connection away again.
  */
-export type CloseAbandonReason = 'timeout' | 'never_opened' | 'connection_lost';
+export type CloseAbandonReason =
+  'timeout' | 'never_opened' | 'connection_lost' | 'write_failed';
+
+/**
+ * The clause a sink's abandon report gives for each reason but `'timeout'`, about the
+ * `destination` it names ("the log file", "the pipe"), so both sinks say the same thing.
+ */
+export function describeCloseAbandonReason(
+  reason: Exclude<CloseAbandonReason, 'timeout'>,
+  destination: string,
+): string {
+  switch (reason) {
+    case 'never_opened':
+      return `${destination} could not be opened`;
+    case 'connection_lost':
+      return `${destination} was lost and could not be reopened`;
+    case 'write_failed':
+      return `writes to ${destination} kept failing`;
+  }
+}
 
 /** The sink's own wording for the reports the engine makes. */
 export interface DeliveryMessages {
   queueFull(limit: number): string;
   /**
-   * Lines still queued when `close()` gave up on them, and why. For any reason but
-   * `'timeout'` the report carries the last open failure, if the latest attempt reported
-   * one, as its `cause`.
+   * Lines still queued when `close()` gave up on them, and why. The report carries as its
+   * `cause` the failure behind that reason, when there is one: the latest write failure
+   * for `'write_failed'` - or for `'timeout'`, while writes are failing - and otherwise
+   * the failure the latest open attempt reported.
    */
   abandoned(count: number, reason: CloseAbandonReason): string;
   refusedAfterClose(): string;
@@ -589,6 +612,14 @@ export class DeliveryEngine {
   private lastOpenFailure?: Error;
   /** The open attempt {@link lastOpenFailure} came from. */
   private lastOpenFailureAttempt = 0;
+  /** Whether the latest open attempt to settle succeeded. */
+  private didLastOpenSucceed = false;
+  /**
+   * The latest write failure on the connection in hand, cleared by a write that succeeds:
+   * while it is set, writes are failing - a full disk, say - and a close that abandons
+   * lines says so through it.
+   */
+  private latestWriteFailure?: Error;
   private consecutiveFailures = 0;
   private totalWritten = 0;
 
@@ -1252,6 +1283,7 @@ export class DeliveryEngine {
         // current one may be in.
         if (isCurrent) {
           this.consecutiveFailures = 0;
+          this.latestWriteFailure = undefined;
           this.resetBackoff();
         }
 
@@ -1311,6 +1343,10 @@ export class DeliveryEngine {
   ): void {
     const willRetry =
       outcome.isRetryable && slot.attempts < this.options.maxRetries;
+
+    if (isCurrent) {
+      this.latestWriteFailure = toError(outcome.error);
+    }
     // The reopen this failure may ask for is routed by the line that failed, which a line
     // given up on no longer leaves in the queue for the timer to read.
     const reopenRequest: OpenRequest = {
@@ -1723,6 +1759,7 @@ export class DeliveryEngine {
       // A later outage is a new fact and is reported as one, and routed by its own cause.
       this.outages.clear();
       this.lastOpenFailure = undefined;
+      this.didLastOpenSucceed = true;
       this.outageRouting = undefined;
       this.pump();
 
@@ -1730,6 +1767,7 @@ export class DeliveryEngine {
     }
 
     this.lastFailedAttempt = attemptNumber;
+    this.didLastOpenSucceed = false;
 
     // An attempt that failed quietly - a pipe with no reader - leaves no failure of its
     // own, and an older one no longer says why the destination is unavailable now.
@@ -2042,14 +2080,34 @@ export class DeliveryEngine {
       await sleep(CLOSE_DRAIN_POLL_MS);
     }
 
-    // Read before the adapter hears the close: whether what is left was abandoned for want
-    // of time, or of a destination - and if so, whether one was ever in hand.
-    const abandonReason: CloseAbandonReason =
-      this.adapter.hasConnection() || this.state === 'opening'
-        ? 'timeout'
-        : didHoldConnection
-          ? 'connection_lost'
-          : 'never_opened';
+    // Read before the adapter hears the close: why what is left is being abandoned, and the
+    // failure behind it. Out of budget with the destination in hand or an open pending is
+    // a timeout. Otherwise the grace window ran out first: with the latest open failed or
+    // still pending, for want of a destination; with it succeeded, the connection it made
+    // was lost again, and if writes are failing that is what the report says.
+    const isOpenPending = this.state === 'opening';
+    const isOutOfBudget = Date.now() - startTime >= timeoutMS;
+    let abandon: { reason: CloseAbandonReason; cause?: Error };
+
+    if (this.adapter.hasConnection() || (isOpenPending && isOutOfBudget)) {
+      abandon = {
+        reason: 'timeout',
+        cause:
+          this.latestWriteFailure ??
+          (this.adapter.hasConnection() ? undefined : this.lastOpenFailure),
+      };
+    } else if (
+      !isOpenPending &&
+      this.didLastOpenSucceed &&
+      this.latestWriteFailure !== undefined
+    ) {
+      abandon = { reason: 'write_failed', cause: this.latestWriteFailure };
+    } else {
+      abandon = {
+        reason: didHoldConnection ? 'connection_lost' : 'never_opened',
+        cause: this.lastOpenFailure,
+      };
+    }
 
     // Closed is not healthy, and not connected either.
     this.state = 'closed';
@@ -2061,7 +2119,7 @@ export class DeliveryEngine {
     // flush share one deadline.
     const remainingMS = (): number => timeoutMS - (Date.now() - startTime);
 
-    await this.closeOnEvidence(remainingMS, abandonReason);
+    await this.closeOnEvidence(remainingMS, abandon);
   }
 
   /**
@@ -2122,12 +2180,12 @@ export class DeliveryEngine {
   /**
    * Give up on what close could not send, and say so once, with the oldest line as a
    * sample. `'close'` rather than `'write'`, so it is not counted against a connection
-   * that is being torn down anyway. Abandoned for want of a destination, the report says
-   * so and carries the last open failure as its cause.
+   * that is being torn down anyway. The report says why, with the failure behind it as
+   * its cause; see {@link DeliveryMessages.abandoned}.
    */
   private abandonOnClose(
     isAbandoned: (slot: DeliverySlot) => boolean,
-    reason: CloseAbandonReason,
+    abandon: { reason: CloseAbandonReason; cause?: Error },
   ): void {
     const abandoned = new Set(this.compactSlots().filter(isAbandoned));
 
@@ -2139,9 +2197,9 @@ export class DeliveryEngine {
 
     this.losses.abandon(
       this.compactSlots(),
-      (count) => this.options.messages.abandoned(count, reason),
+      (count) => this.options.messages.abandoned(count, abandon.reason),
       (slot) => abandoned.has(slot),
-      reason === 'timeout' ? undefined : this.lastOpenFailure,
+      abandon.cause,
     );
     this.queuedFrom = 0;
   }
@@ -2159,11 +2217,11 @@ export class DeliveryEngine {
    */
   private async closeOnEvidence(
     remainingMS: () => number,
-    abandonReason: CloseAbandonReason,
+    abandon: { reason: CloseAbandonReason; cause?: Error },
   ): Promise<void> {
     this.abandonOnClose(
       (slot) => slot.state !== 'in_flight' || !slot.committed,
-      abandonReason,
+      abandon,
     );
 
     const settlement: CloseSettlement = { failed: [] };

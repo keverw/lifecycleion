@@ -2640,7 +2640,7 @@ describe('FileSink - jsonFormat renders what JSON.stringify refuses', () => {
     expect(failures).toHaveLength(1);
     expect(failures[0]?.kind).toBe('format' satisfies SinkFailureKind);
     expect(failures[0]?.disposition).toBe('fallback');
-    expect(failures[0]?.error.message).toContain('a marker was written');
+    expect(failures[0]?.error.message).toContain('a marker stands in for it');
     // Advisory: the line went out, so the sink is not less healthy for it.
     expect(sink.getHealth().droppedEntries).toBe(0);
   });

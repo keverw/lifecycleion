@@ -878,6 +878,38 @@ describe('DeliveryEngine', () => {
     );
   });
 
+  test('an open still pending when the grace window ends does not blame the budget', async () => {
+    const destination = new FakeDestination();
+    const harness = makeEngine({ destination, closeTimeoutMS: 30_000 });
+
+    // The first attempt fails and says why; the one close makes never answers.
+    destination.openAnswers = [{ status: 'unavailable' }, 'pending'];
+    destination.onOpen = () => {
+      if (destination.opens.length === 1) {
+        harness.engine.reportOpenFailure(
+          'setup',
+          'open failed',
+          new Error('EACCES'),
+        );
+      }
+    };
+    harness.engine.start();
+    await harness.engine.openSettled;
+    harness.write('a');
+    await harness.engine.close();
+
+    const abandoned = harness.reports.find(
+      (failure) => failure.kind === 'close',
+    );
+
+    // Given up on at the grace window, long before the budget: no destination, and the
+    // latest failure said why.
+    expect(abandoned?.error.message).toBe('abandoned 1 never_opened');
+    expect((abandoned?.error.cause as Error | undefined)?.message).toBe(
+      'open failed',
+    );
+  });
+
   test('a first open still pending when the budget runs out blames the budget', async () => {
     const destination = new FakeDestination();
     const harness = makeEngine({ destination, closeTimeoutMS: 30 });
@@ -1606,6 +1638,41 @@ describe('DeliveryEngine (one write at a time)', () => {
       timedOut: false,
       entriesQueued: 0,
     });
+  });
+
+  test('a close whose reopens succeed but whose writes keep failing names the write failure', async () => {
+    // A full disk: the file opens every time, and every write to it fails and takes the
+    // stream with it. Not a destination that could not be reopened.
+    const destination = oneAtATime();
+    const { engine, reports, write } = await started(
+      makeEngine({ destination, closeTimeoutMS: 150 }),
+    );
+    let writes = 0;
+
+    destination.onWrite = () => {
+      writes++;
+      queueMicrotask(() => {
+        destination.isOpen = false;
+        destination.fail(new Error('ENOSPC: no space left on device'));
+      });
+    };
+
+    for (let index = 0; index < 50; index++) {
+      write(`line-${String(index)}`);
+    }
+
+    await engine.close();
+
+    const abandoned = reports.find((failure) => failure.kind === 'close');
+
+    expect(writes).toBeGreaterThan(1);
+    // `write_failed` when the close ends between a failed write and the next reopen;
+    // `timeout` if the budget ran out just as a reopen succeeded. Either way the full
+    // disk is the cause, never "could not be reopened".
+    expect(abandoned?.error.message).toMatch(/^abandoned \d+( write_failed)?$/);
+    expect((abandoned?.error.cause as Error | undefined)?.message).toBe(
+      'ENOSPC: no space left on device',
+    );
   });
 
   test('the first reopen after a failed write is at once, later ones back off', async () => {

@@ -4516,7 +4516,7 @@ describe('NamedPipeSink', () => {
     expect(formats[0]?.disposition).toBe('fallback');
     expect(formats[0]?.error.message).not.toContain('getter exploded');
     expect(formats[0]?.error.message).toBe(
-      'Failed to render a value in the log entry; a marker was written in its place',
+      'Failed to render a value in the log entry; a marker stands in for it in the line',
     );
     expect((formats[0]?.error.cause as Error | undefined)?.message).toBe(
       'getter exploded',
@@ -5435,7 +5435,14 @@ describe('NamedPipeSink - flush()', () => {
 
     setOpenRetryBackoffForTesting(FAST_OPEN_RETRY);
 
-    const sink = new NamedPipeSink({ pipePath, closeTimeoutMS: 50 });
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      closeTimeoutMS: 50,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
 
     setOpenRetryBackoffForTesting(undefined);
 
@@ -5458,6 +5465,18 @@ describe('NamedPipeSink - flush()', () => {
       await sink.close();
       await directory.cleanup();
     }
+
+    // A reader never came, so the close gave the line up for want of a pipe - and said
+    // so, rather than blaming its budget. No reader is a quiet failure: no cause.
+    expect(
+      failures.map((failure) => [failure.kind, failure.error.message]),
+    ).toEqual([
+      [
+        'close',
+        `Closed with 1 entry still queued for ${pipePath}: the pipe could not be opened, so they were not written`,
+      ],
+    ]);
+    expect(failures[0]?.error.cause).toBeUndefined();
   });
 
   test('rejects an invalid timeout before it counts anything', async () => {

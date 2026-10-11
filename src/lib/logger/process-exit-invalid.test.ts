@@ -1370,8 +1370,9 @@ test('a failure exitCode logged after close() while an exit is pending replaces 
       shuttingDown.error('component failed to stop', { exitCode: 1 });
     });
     const processed = recordExitProcess(logger);
+    const completed = nextLoggerEvent(logger, 'exit-completed');
     logger.exit(0);
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await completed;
 
     expect(processed).toEqual([1]);
     expect(logger.exitCode).toBe(1);
@@ -1386,11 +1387,12 @@ test('a failure exitCode logged after close() while an exit is pending replaces 
 test('isPendingExit holds for every pending exit, including a later simulated one', async () => {
   const logger = simulatedShutdownLogger();
   expect(logger.isPendingExit).toBe(false);
+  const completed = nextLoggerEvent(logger, 'exit-completed');
 
   logger.exit(0);
   expect(logger.isPendingExit).toBe(true);
   expect(logger.hasExitedOrPending).toBe(true);
-  await new Promise((resolve) => setTimeout(resolve, 30));
+  await completed;
   expect(logger.isPendingExit).toBe(false);
   expect(logger.didExit).toBe(true);
   expect(logger.exitCode).toBe(0);
@@ -1420,6 +1422,7 @@ test('pendingExitCode reads the code the pending exit settles on', async () => {
       },
     });
     expect(logger.pendingExitCode).toBeUndefined();
+    const completed = nextLoggerEvent(logger, 'exit-completed');
 
     logger.exit(0);
     expect(logger.pendingExitCode).toBe(0);
@@ -1438,7 +1441,7 @@ test('pendingExitCode reads the code the pending exit settles on', async () => {
       [0, 3],
     ]);
 
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await completed;
     expect(logger.exitCode).toBe(3);
     expect(logger.pendingExitCode).toBeUndefined();
   } finally {
@@ -1492,10 +1495,11 @@ test('replacement reports are bounded to one line per exit plus a settled-code s
   try {
     const logger = simulatedShutdownLogger();
     const processed = recordExitProcess(logger);
+    const completed = nextLoggerEvent(logger, 'exit-completed');
     for (const code of [0, 1, 2, 1, 2, 3]) {
       logger.exit(code);
     }
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await completed;
 
     expect(processed).toEqual([3]);
     expect(output.mock.calls.map((call) => String(call[0]))).toEqual([

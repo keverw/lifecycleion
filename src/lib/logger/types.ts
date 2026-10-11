@@ -146,18 +146,22 @@ export interface LoggerDiagnostic {
   kind: LoggerDiagnosticKind;
   error: Error;
   /**
-   * Guardedly rendered text suitable for the fallback `LogEntry`.
+   * Guardedly rendered text for the fallback `LogEntry`. With no `diagnosticSinks`
+   * configured this string is written to the ordinary log sinks, and it is not redacted.
    *
-   * Safe to persist. With no `diagnosticSinks` configured this string is written to the
-   * ordinary log sinks, so it names *what* failed and *where* but never interpolates a
-   * thrown value derived from logged content: a `redaction` failure's cause is derived
-   * from the secret being masked, and a message carrying it would route around the
-   * masking on the line above it. A sink's I/O failure - a `FileSink` or `NamedPipeSink`
-   * with no `onError` - names its target and what became of the line, and some of the
+   * `'redaction'` and `'render'` messages are generic: they name *what* failed but carry
+   * neither the property path nor the thrown text, since a redaction failure's cause is
+   * derived from the secret being masked, and a message carrying it would route around
+   * the masking on the line above it.
+   *
+   * Sink and event-handler messages can include the underlying error's text: a sink that
+   * threw or rejected (`Error writing to sink: ...`) and a failing event handler carry
+   * what it threw, which is caller-controlled. A `FileSink` or `NamedPipeSink` failure
+   * with no `onError` names its target and what became of the line, and some of the
    * system error: an open or setup failure carries the errno and path, and a
    * `NamedPipeSink` write failure the errno only. A `FileSink` write, stream or rotation
    * failure has fixed text, with the system error only in `error.cause`; a `'format'`
-   * failure's message carries no error text either.
+   * failure's message carries no error text.
    *
    * Read {@link LoggerDiagnostic.error} for the cause. It is handed to every
    * `'diagnostic'` listener and every sink implementing `writeDiagnostic`, which is where

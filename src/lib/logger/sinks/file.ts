@@ -28,6 +28,7 @@ import { FormatReportScheduler } from './internal/format-report-scheduler';
 import { Backoff, openRetryBackoff } from './internal/reopen-backoff';
 import {
   DeliveryEngine,
+  describeCloseAbandonReason,
   type DeliverySlot,
   type FlushResult,
   type OpenContext,
@@ -393,13 +394,13 @@ export class FileSink implements LogSink {
           `Log queue is full (maxQueueSize=${limit}); dropping the oldest entries`,
         // `close()` is bounded by `closeTimeoutMS`, so a slow or broken destination leaves
         // entries behind - and once it gives up nothing will ever process them. Counted in
-        // `droppedEntries` and reported once as `'lost'`; see `LossLedger.abandon`. A file
-        // that never opened is named as the reason rather than the budget, with the open
-        // failure as the cause.
+        // `droppedEntries` and reported once as `'lost'`; see `LossLedger.abandon`. Only
+        // a close that ran out of budget names it; one that gave up sooner says why - no
+        // file, or writes to it failing - with that failure as the cause.
         abandoned: (count, reason) =>
           reason === 'timeout'
             ? `Closed with ${describeEntryCount(count)} still queued (closeTimeoutMS=${String(this.closeTimeoutMS)}); they were not written`
-            : `Closed with ${describeEntryCount(count)} still queued: the log file ${reason === 'never_opened' ? 'could not be opened' : 'was lost and could not be reopened'}, so they were not written`,
+            : `Closed with ${describeEntryCount(count)} still queued: ${describeCloseAbandonReason(reason, 'the log file')}, so they were not written`,
         // Counted and said, not discarded quietly: `close()` waits up to
         // `closeTimeoutMS`, and a line logged in that window is one this sink did not
         // deliver.
@@ -914,7 +915,7 @@ export class FileSink implements LogSink {
     if (this.jsonFormat) {
       // The logger's own renderer over the redacted bag, not a second `JSON.stringify`:
       // see `renderJSONLine`. A value it cannot render becomes a marker and is reported
-      // as `'format'`/`'fallback'` - the line is still written.
+      // as `'format'`/`'fallback'` - the line, marker and all, still goes on to the file.
       formatted = renderJSONLine(entry, (error) => {
         this.reportRenderFallback(entry, error);
       });
@@ -1250,12 +1251,11 @@ export class FileSink implements LogSink {
 
     // Rename with timestamp, disambiguated when one second holds more than one rotation.
     //
-    // A second-resolution suffix alone named the same archive twice under any burst that
-    // filled `maxSizeMB` twice inside one second, and `rename` overwrites silently: the
-    // earlier archive was gone, with `entriesFailed: 0`, `droppedEntries: 0` and `onError`
-    // never firing - lines that this sink had reported as written, lost with nothing
-    // anywhere saying so. Milliseconds make the ordinary collision impossible and the
-    // counter settles the rest, since rotations are serialized on this sink.
+    // A second-resolution suffix alone would name the same archive twice under any burst
+    // that fills `maxSizeMB` twice inside one second, and `rename` overwrites silently:
+    // lines this sink reported as written would be lost with nothing saying so.
+    // Milliseconds make the ordinary collision impossible and the counter settles the
+    // rest, since rotations are serialized on this sink.
     const rotatedFile = await this.reserveRotatedFileName(currentDate);
 
     // Asked again, for the failure the check at the top cannot cover on its own. Both
@@ -1313,10 +1313,10 @@ export class FileSink implements LogSink {
    * The counter is only reached when two rotations land in the same millisecond, and it is
    * bounded: after {@link MAX_ROTATION_NAME_ATTEMPTS} the caller gets the last candidate
    * anyway rather than this looping while the queue is parked. A `rename` onto an existing
-   * archive is still better than a rotation that never finishes - but it used to happen
-   * without a word, and an archive overwritten in silence is a loss an operator cannot
-   * trace. Reported as a `'setup'` failure before the rename, with the archive about to be
-   * replaced as the target: `'no_entry'`, since no line is at stake, only history.
+   * archive is still better than a rotation that never finishes, but an archive
+   * overwritten in silence is a loss an operator cannot trace, so it is reported as a
+   * `'setup'` failure before the rename, with the archive about to be replaced as the
+   * target: `'no_entry'`, since no line is at stake, only history.
    */
   private async reserveRotatedFileName(currentDate: string): Promise<string> {
     const timestamp = Date.now();
@@ -1417,7 +1417,8 @@ export class FileSink implements LogSink {
   }
 
   /**
-   * A value in `entry` would not render and a marker was written in its place.
+   * A value in `entry` would not render and a marker stands in for it in the rendered
+   * line, which goes on to the file - not yet written, so a later failure is its own report.
    *
    * `'fallback'`, because the line goes out: this is advisory, and does not touch
    * `consecutiveFailures`. Guarded by `formatReports` for the same reason the
@@ -1428,7 +1429,7 @@ export class FileSink implements LogSink {
    */
   private reportRenderFallback(entry: LogEntry, error: Error): void {
     const failure = new FileSinkError(
-      'Failed to render a value in the log entry; a marker was written in its place',
+      'Failed to render a value in the log entry; a marker stands in for it in the line',
       error,
     );
 
