@@ -1,3 +1,5 @@
+import { isObjectLike } from './is-object-like';
+
 /**
  * How a {@link SharedSlot}'s state records that it is taken. Called on states read from
  * the global slot, so either may throw or be ignored; the slot repairs that.
@@ -13,6 +15,18 @@ export interface SharedSlotOptions<T extends object> {
   isHeld: (state: T) => boolean;
   /** Mark `state` taken or free. */
   setHeld: (state: T, isHeld: boolean) => void;
+}
+
+/**
+ * The value of `value`'s own writable data property `key`, read without invoking an
+ * accessor; `undefined` when there is none. For an {@link SharedSlotOptions.isValid} check.
+ */
+export function readOwnWritableValue(value: unknown, key: string): unknown {
+  if (!isObjectLike(value)) {
+    return undefined;
+  }
+  const descriptor = Object.getOwnPropertyDescriptor(value, key);
+  return descriptor?.writable === true ? descriptor.value : undefined;
 }
 
 /**

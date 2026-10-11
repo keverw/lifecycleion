@@ -3,9 +3,8 @@ import {
   installGlobalEventTarget,
   isGlobalEventTargetAvailable,
 } from '../global-event-target';
-import { isObjectLike } from './is-object-like';
 import { reportToConsole } from './report-to-console';
-import { SharedSlot } from './shared-slot';
+import { readOwnWritableValue, SharedSlot } from './shared-slot';
 
 /**
  * Reporting state shared by every bundled copy of Lifecycleion in this realm.
@@ -22,16 +21,8 @@ const HOST_REPORT_STATE_KEY = Symbol.for('lifecycleion.reportToHost.v1');
 
 /** A slot value with a writable own `dispatchDepth`, read without invoking an accessor. */
 function isHostReportState(value: unknown): value is HostReportSharedState {
-  if (!isObjectLike(value)) {
-    return false;
-  }
-  const depth = Object.getOwnPropertyDescriptor(value, 'dispatchDepth');
-  return (
-    typeof depth?.value === 'number' &&
-    Number.isSafeInteger(depth.value) &&
-    depth.value >= 0 &&
-    depth.writable === true
-  );
+  const depth = readOwnWritableValue(value, 'dispatchDepth');
+  return Number.isSafeInteger(depth) && (depth as number) >= 0;
 }
 
 /**

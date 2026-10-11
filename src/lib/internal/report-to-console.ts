@@ -1,5 +1,4 @@
-import { isObjectLike } from './is-object-like';
-import { SharedSlot } from './shared-slot';
+import { readOwnWritableValue, SharedSlot } from './shared-slot';
 
 const CONSOLE_REPORT_STATE_KEY = Symbol.for('lifecycleion.reportToConsole.v1');
 
@@ -10,11 +9,7 @@ interface ConsoleReportState {
 
 /** A slot value with a writable own `active` flag, read without invoking an accessor. */
 function isConsoleReportState(value: unknown): value is ConsoleReportState {
-  if (!isObjectLike(value)) {
-    return false;
-  }
-  const active = Object.getOwnPropertyDescriptor(value, 'active');
-  return typeof active?.value === 'boolean' && active.writable === true;
+  return typeof readOwnWritableValue(value, 'active') === 'boolean';
 }
 
 /**
