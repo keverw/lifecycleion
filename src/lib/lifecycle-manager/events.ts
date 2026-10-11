@@ -3,6 +3,7 @@ import type {
   ComponentHealthResult,
   ComponentStallInfo,
   ComponentStatus,
+  ComponentState,
   InsertComponentAtResult,
   MessageResult,
   RegistrationFailureCode,
@@ -14,15 +15,32 @@ import type {
 } from './types';
 import type { ShutdownSignal } from '../process-signal-manager';
 
+/**
+ * State notifications are FIFO: synchronous transitions queue them until their
+ * outermost boundary. Listener re-entry appends notifications behind those pending,
+ * after all listeners of the current notification. Failed transitions still flush,
+ * delivery failures are contained, and listener promises are never awaited.
+ *
+ * Four control checkpoints are synchronous even during a transition or notification
+ * drain: lifecycle-manager:signals-attached, lifecycle-manager:shutdown-initiated,
+ * signal:shutdown, and
+ * lifecycle-manager:shutdown-escalation-forced. They may interleave with notifications:
+ * startup must allow intervention after attachment, shutdown initiation must precede
+ * dependency reads and hook abort listeners, signals must precede a force exit,
+ * and forced listeners must retain the active force/escalation guards. Call sites
+ * commit the state needed by these listeners before dispatch and recheck afterwards.
+ * Payloads describe the originating change; earlier listeners can change live state.
+ */
 export interface LifecycleManagerEventMap {
   'component:unregistered': { name: string; duringShutdown?: boolean };
   'component:start-skipped': { name: string; reason: string };
-  'component:start-failed-optional': { name: string; error?: Error };
+  'component:start-failed-optional': { name: string; error: Error };
   'lifecycle-manager:started': {
     startedComponents: string[];
     failedOptionalComponents: StartupResult['failedOptionalComponents'];
     skippedComponents: string[];
   };
+  /** Synchronous control checkpoint; automatic pre-start attachment precedes startup work. */
   'lifecycle-manager:signals-attached': undefined;
   'lifecycle-manager:signals-detached': undefined;
   'component:health-check-started': { name: string };
@@ -40,6 +58,17 @@ export interface LifecycleManagerEventMap {
     from: string | null;
     payload: unknown;
   };
+  /**
+   * Follows `component:message-sent` for a handler that threw, rejected, or timed out.
+   * For a timeout, `error` is one describing it - the event always carries an `Error` -
+   * while the `MessageResult` answers `error: null` with `timedOut: true`.
+   * It also follows `component:message-sent` when the target became unavailable before
+   * dispatch - a sent listener or getter unregistered it, or it is no longer running or
+   * stalled: the handler never ran, `code` is `not_found`, `stopped` or `stalled`, and
+   * the `MessageResult` answers `sent: false` with `error: null`.
+   * The one exception to that pairing: an `onMessage` getter that throws fails the call
+   * before anything is sent, so this arrives alone, with `handlerImplemented: false`.
+   */
   'component:message-failed': {
     componentName: string;
     from: string | null;
@@ -101,8 +130,11 @@ export interface LifecycleManagerEventMap {
     targetFound?: boolean;
     duringStartup?: boolean;
     autoStartAttempted?: boolean;
+    /** Left to an upcoming restart/startup batch; see `RegistrationResultBase`. */
+    autoStartDeferred?: boolean;
     autoStartSucceeded?: boolean;
   };
+  /** Synchronous control checkpoint after the shutdown latch is acquired, before hooks. */
   'lifecycle-manager:shutdown-initiated': {
     method: ShutdownMethod;
     duringStartup: boolean;
@@ -124,7 +156,10 @@ export interface LifecycleManagerEventMap {
     requestCount: number;
     armedUntil: number;
   };
-  /** Repeated shutdown requests crossed the force threshold and onForceShutdown() was invoked. */
+  /**
+   * Synchronous control checkpoint after onForceShutdown() returns, with force and
+   * escalation guards still active. Not emitted if that callback exits the process.
+   */
   'lifecycle-manager:shutdown-escalation-forced': {
     firstMethod: ShutdownMethod;
     latestMethod: ShutdownMethod;
@@ -149,6 +184,21 @@ export interface LifecycleManagerEventMap {
   'lifecycle-manager:shutdown-warning': { timeoutMS: number };
   'component:shutdown-warning': { name: string };
   'component:shutdown-warning-completed': { name: string };
+  /**
+   * The invoked warning hook threw or rejected. Not emitted for a component already
+   * reported by `component:shutdown-warning-timeout`: a late failure is only logged.
+   */
+  'component:shutdown-warning-failed': { name: string; error: Error };
+  'component:shutdown-warning-skipped': {
+    name: string;
+    // `component_not_found`: unregistered. `component_changed`: another instance now
+    // holds the name. `component_not_available`: same instance, no longer in the
+    // state it was selected in, or hook entry is blocked by startup cleanup.
+    reason:
+      'component_not_found' | 'component_changed' | 'component_not_available';
+    // The name's current state; absent when nothing is registered under it.
+    state?: ComponentState;
+  };
   'lifecycle-manager:shutdown-warning-completed': { timeoutMS: number };
   'component:shutdown-warning-timeout': { name: string; timeoutMS: number };
   'lifecycle-manager:shutdown-warning-timeout': {
@@ -165,6 +215,10 @@ export interface LifecycleManagerEventMap {
   };
   'component:shutdown-force': {
     name: string;
+    /**
+     * Describes this attempt: whether it ran `stop()`, and whether that timed out. A
+     * stalled retry runs no graceful phase, so it reports `false` for both.
+     */
     context: { gracefulPhaseRan: boolean; gracefulTimedOut: boolean };
   };
   'component:stalled': {
@@ -177,11 +231,20 @@ export interface LifecycleManagerEventMap {
     name: string;
     stallInfo: ComponentStallInfo;
     stalledDurationMS: number;
+    /**
+     * Set when a forced start supersedes the old stop rather than that stop finishing:
+     * `'forced-start'` when the forced start itself marks the component running (it
+     * succeeded, or it is being stopped at once because shutdown began meanwhile), and
+     * `'late-start-cleanup'` when a timed-out forced start succeeds late and its cleanup
+     * retires the stall.
+     */
+    reason?: 'late-start-cleanup' | 'forced-start';
   };
   'component:unexpected-stop': { name: string; error?: Error };
   'component:shutdown-force-completed': { name: string };
   'component:shutdown-force-timeout': { name: string; timeoutMS: number };
   'component:startup-rollback': { name: string };
+  /** Synchronous control checkpoint before this request can invoke onForceShutdown(). */
   'signal:shutdown': {
     method: ShutdownSignal;
     isAlreadyShuttingDown: boolean;
@@ -224,7 +287,7 @@ export class LifecycleManagerEvents {
     this.emit('component:start-skipped', { name, reason });
   }
 
-  public componentStartFailedOptional(name: string, error?: Error): void {
+  public componentStartFailedOptional(name: string, error: Error): void {
     this.emit('component:start-failed-optional', { name, error });
   }
 
@@ -376,6 +439,8 @@ export class LifecycleManagerEvents {
     targetFound?: boolean;
     duringStartup?: boolean;
     autoStartAttempted?: boolean;
+    /** Left to an upcoming restart/startup batch; see `RegistrationResultBase`. */
+    autoStartDeferred?: boolean;
     autoStartSucceeded?: boolean;
   }): void {
     this.emit('component:registered', input);
@@ -469,8 +534,25 @@ export class LifecycleManagerEvents {
     this.emit('component:shutdown-warning', { name });
   }
 
+  public componentShutdownWarningSkipped(
+    name: string,
+    reason: LifecycleManagerEventMap['component:shutdown-warning-skipped']['reason'],
+    state?: ComponentState,
+  ): void {
+    // Omitted, not present as `undefined`, when there is no state: the docs promise the
+    // key only when there is one, and `'state' in payload` should agree with them.
+    this.emit(
+      'component:shutdown-warning-skipped',
+      state === undefined ? { name, reason } : { name, reason, state },
+    );
+  }
+
   public componentShutdownWarningCompleted(name: string): void {
     this.emit('component:shutdown-warning-completed', { name });
+  }
+
+  public componentShutdownWarningFailed(name: string, error: Error): void {
+    this.emit('component:shutdown-warning-failed', { name, error });
   }
 
   public lifecycleManagerShutdownWarningCompleted(timeoutMS: number): void {
@@ -539,11 +621,13 @@ export class LifecycleManagerEvents {
     name: string,
     stallInfo: ComponentStallInfo,
     stalledDurationMS: number,
+    reason?: LifecycleManagerEventMap['component:stalled-resolved']['reason'],
   ): void {
     this.emit('component:stalled-resolved', {
       name,
       stallInfo,
       stalledDurationMS,
+      ...(reason === undefined ? {} : { reason }),
     });
   }
 
