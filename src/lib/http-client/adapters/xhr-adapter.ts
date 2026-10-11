@@ -1,3 +1,4 @@
+import { defineEntry } from '../../internal/define-entry';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 import { guardProgressCallback } from '../internal/progress';
 import type {
@@ -433,7 +434,9 @@ function parseXHRResponseHeaders(
         result['set-cookie'] = [existing, value];
       }
     } else {
-      result[key] = value;
+      // Defined, not assigned, as every other adapter does: a `__proto__` header
+      // would otherwise hit the prototype setter and vanish.
+      defineEntry(result, key, value);
     }
   }
 

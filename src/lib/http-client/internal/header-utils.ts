@@ -4,6 +4,7 @@ import {
   BROWSER_RESTRICTED_HEADERS,
   BROWSER_RESTRICTED_HEADER_PREFIXES,
 } from '../consts';
+import { defineEntry } from '../../internal/define-entry';
 
 export function isBrowserRestrictedHeader(
   key: string,
@@ -73,4 +74,30 @@ export function isJSONContentType(contentType: string | undefined): boolean {
 
   const lower = contentType.toLowerCase();
   return lower.includes('application/json') || lower.includes('+json');
+}
+
+/**
+ * Join repeated request header values into the single field each transport sends:
+ * `; ` for `Cookie` (the RFC 6265 cookie-pair delimiter), `, ` for everything else.
+ * Shared by NodeAdapter and MockAdapter, so it stays free of Node-only imports.
+ */
+export function materializeRequestHeaders(
+  headers: Record<string, string | string[]>,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (!Array.isArray(value)) {
+      defineEntry(result, key, value);
+      continue;
+    }
+
+    defineEntry(
+      result,
+      key,
+      key.toLowerCase() === 'cookie' ? value.join('; ') : value.join(', '),
+    );
+  }
+
+  return result;
 }

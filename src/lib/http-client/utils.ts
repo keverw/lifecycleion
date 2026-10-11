@@ -1,4 +1,5 @@
 import qs from 'qs';
+import { defineEntry } from '../internal/define-entry';
 import {
   matchesWildcardDomain,
   normalizeDomain,
@@ -316,7 +317,7 @@ export function normalizeHeaders(
   const result: Record<string, string> = {};
 
   for (const [key, value] of Object.entries(headers)) {
-    result[key.toLowerCase()] = value;
+    defineEntry(result, key.toLowerCase(), value);
   }
 
   return result;
@@ -337,13 +338,20 @@ export function mergeHeaders(
     }
 
     for (const [key, value] of Object.entries(headers)) {
-      result[key.toLowerCase()] = Array.isArray(value)
-        ? normalizeMergedHeaderArray(value)
-        : String(value);
+      defineEntry(result, key.toLowerCase(), normalizeMergedHeaderValue(value));
     }
   }
 
   return result;
+}
+
+/** One header value as {@link mergeHeaders} stores it. Throws if conversion does. */
+export function normalizeMergedHeaderValue(
+  value: string | string[],
+): string | string[] {
+  return Array.isArray(value)
+    ? normalizeMergedHeaderArray(value)
+    : String(value);
 }
 
 function normalizeMergedHeaderArray(value: string[]): string | string[] {
@@ -351,8 +359,16 @@ function normalizeMergedHeaderArray(value: string[]): string | string[] {
   return normalized.length === 1 ? normalized[0] : normalized;
 }
 
+/**
+ * Merges header records as observers see them, normalizing keys to lowercase. Later
+ * objects win on conflict. Unlike {@link mergeHeaders}, an array is never collapsed: it
+ * is copied with each element converted to a string. A scalar is converted to a string
+ * (Node's `getHeaders()` answers numbers), and an `undefined` value is skipped.
+ */
 export function mergeObservedHeaders(
-  ...headerSets: Array<Record<string, string | string[]> | undefined>
+  ...headerSets: Array<
+    Record<string, string | string[] | number | undefined> | undefined
+  >
 ): Record<string, string | string[]> {
   const result: Record<string, string | string[]> = {};
 
@@ -362,9 +378,17 @@ export function mergeObservedHeaders(
     }
 
     for (const [key, value] of Object.entries(headers)) {
-      result[key.toLowerCase()] = Array.isArray(value)
-        ? value.map((item) => String(item))
-        : String(value);
+      if (value === undefined) {
+        continue;
+      }
+
+      defineEntry(
+        result,
+        key.toLowerCase(),
+        Array.isArray(value)
+          ? value.map((item) => String(item))
+          : String(value),
+      );
     }
   }
 
@@ -507,7 +531,7 @@ export function extractFetchHeaders(
     const lower = key.toLowerCase();
 
     if (lower !== 'set-cookie') {
-      result[lower] = value;
+      defineEntry(result, lower, value);
     }
   }
 
@@ -568,7 +592,11 @@ export function normalizeAdapterResponseHeaders(
         result[lower] = [...existingLines, ...chunk];
       }
     } else {
-      result[lower] = Array.isArray(value) ? (value[0] ?? '') : value;
+      defineEntry(
+        result,
+        lower,
+        Array.isArray(value) ? (value[0] ?? '') : value,
+      );
     }
   }
 
