@@ -10,6 +10,8 @@ Safely execute sync or async callbacks with automatic error reporting on the sta
   - [safeHandleCallbackAndWait](#safehandlecallbackandwait)
   - [reportCallbackError](#reportcallbackerror)
   - [runCallbackSafely](#runcallbacksafely)
+  - [reportToHost](#reporttohost)
+  - [Keeping `this`](#keeping-this)
 - [The Reporting Pattern](#the-reporting-pattern)
 - [Runtime Support](#runtime-support)
 
@@ -36,7 +38,7 @@ safeHandleCallback('onData', myCallback, arg1, arg2);
 
 **Parameters:**
 
-- `callbackName` - Name used in error messages for identification
+- `callbackName` - Name used in error messages for identification: a `string`, or a function returning one (`type CallbackName = string | (() => string)`). A function is called only when there is a failure to report, so a name that costs something to build - such as one naming the event a handler belongs to - costs nothing when the callback succeeds. Any other value, or whatever the function returns, is rendered with `String()` (a symbol as `Symbol(description)`), or as `<unnamed callback>` when that throws; a function that throws is reported as `<unnamed callback>` too, so a bad name never turns a reported failure into a thrown one. It is rendered only when there is a failure to report.
 - `callback` - The function to execute (sync or async)
 - `...args` - Arguments forwarded to the callback
 
@@ -62,7 +64,7 @@ logger.registerReportErrorListener();
 
 ### safeHandleCallbackAndWait
 
-Async variant that waits for the callback to complete and returns a result object indicating success or failure. Also reports errors on the `'error'` channel like `safeHandleCallback`.
+Async variant that waits for the callback to complete and returns a result object indicating success or failure. Also reports errors on the `'error'` channel like `safeHandleCallback`, and takes the same `callbackName`.
 
 ```typescript
 const result = await safeHandleCallbackAndWait('onData', myCallback, arg1);
@@ -74,10 +76,18 @@ if (result.success) {
 }
 ```
 
-**Returns:** `Promise<{ success: boolean; value?: T; error?: Error }>`
+**Returns:** `Promise<CallbackResult<T>>`, a discriminated union:
+
+```typescript
+type CallbackResult<T = unknown> =
+  | { success: true; value: T; error?: undefined }
+  | { success: false; error: Error; value?: undefined };
+```
 
 - `success: true` - callback completed without throwing, and `value` holds the return value
-- `success: false` - callback threw or was not a function, and `error` holds the failure
+- `success: false` - callback threw, its returned promise rejected, it returned a value whose `then` getter threw, or it was not a function, and `error` holds the failure (for the unreadable `then`, an `Error` whose `cause` is what the getter threw)
+
+Checking `result.success` narrows the type, so neither field needs a non-null assertion afterwards. `T` cannot be inferred from the callback (it is typed `unknown`) and defaults to `unknown`; supply it explicitly when you know what the callback returns.
 
 `error` is always a real `Error`, even when the callback did something like `throw null`: the value is normalized with [`toError`](./to-error.md), which keeps whatever was actually thrown on `error.cause`. Reading `result.error.message` is therefore safe against a non-`Error` throw - though see the note below about errors whose `message` accessor itself throws.
 
@@ -87,22 +97,39 @@ if (result.success) {
 function reportCallbackError(callbackName: string, error: unknown): void;
 ```
 
-Reports a caught callback failure through the same standard `'error'` channel and fallback chain used by `safeHandleCallback`. The dispatched wrapper identifies `callbackName` and keeps the original thrown value on `event.error.cause`.
+Reports a caught callback failure through the same standard `'error'` channel and fallback chain used by `safeHandleCallback`. The dispatched wrapper identifies `callbackName` (rendered as described under [safeHandleCallback](#safehandlecallback) when it is not a string - though, since this is only ever called with a failure in hand, a function is rendered with `String()` rather than called) and keeps the original thrown value on `event.error.cause`.
 
 ### runCallbackSafely
 
 ```typescript
 function runCallbackSafely(
-  callbackName: string,
+  callbackName: CallbackName,
   callback: unknown,
   args: unknown[],
   onError: (error: unknown) => void,
+  thisArg?: unknown,
 ): void;
 ```
 
-Runs a callback without awaiting it, forwarding a synchronous throw, a returned promise's rejection, or a synthesized non-function error to `onError`. The `onError` callback runs on the final failure path and must not throw.
+Runs a callback without awaiting it, forwarding a synchronous throw, a returned promise's rejection, or a synthesized non-function error to `onError`. The `onError` callback runs on the final failure path and should not throw; one that does is contained (see below).
 
-This is the lower-level invocation helper used by `safeHandleCallback()`. Choose `safeHandleCallback()` for the standard global error reporting and fallback chain. Choose `runCallbackSafely()` when you need to route failures yourself, such as to logger diagnostics or a local fallback. It does not report failures globally unless your `onError` handler does so. Keep that handler synchronous and non-throwing, because its own returned promise is not followed. Use `safeHandleCallbackAndWait()` when you need to await completion and receive a result.
+This is the lower-level invocation helper used by `safeHandleCallback()`. Choose `safeHandleCallback()` for the standard global error reporting and fallback chain. Choose `runCallbackSafely()` when you need to route failures yourself, such as to logger diagnostics or a local fallback. It does not report failures globally unless your `onError` handler does so. That handler should not throw, but one that throws - or is `async` and rejects - is contained: its failure goes to the console alongside the original, never escaping or becoming an unhandled rejection. Use `safeHandleCallbackAndWait()` when you need to await completion and receive a result.
+
+When a console shim invokes a callback while Lifecycleion is writing a terminal console report, the callback still runs and its returned promise is observed. Any failure from that invocation is contained without calling `onError` or reporting again, including failures that arrive asynchronously. This prevents the forwarding failure from starting another reporting cycle. Independently invoked callbacks retain normal error reporting.
+
+`callbackName` is described under [safeHandleCallback](#safehandlecallback). `thisArg` is the receiver the callback is invoked with. Omit it for a plain function or a closure, and supply the owning object when passing an extracted method.
+
+### reportToHost
+
+```typescript
+function reportToHost(error: Error, renderForConsole?: () => string): void;
+```
+
+Publishes an `Error` you already hold on the standard `'error'` channel, with the same dispatch-first fallback chain `reportCallbackError()` uses (see [The Reporting Pattern](#the-reporting-pattern)). Use it when the `Error` is already well-formed - its own `cause` chain, its own details - and listeners should see exactly that. `reportCallbackError()` is the normalizer for the other case: a raw thrown value, which it wraps in an `Error` whose message names the callback. `renderForConsole` is consulted only when the report reaches the console uncancelled.
+
+### Keeping `this`
+
+`safeHandleCallback()` and `safeHandleCallbackAndWait()` invoke the callback without a receiver, so an extracted method such as `logger.info` loses `logger`, and any `this.x` inside it throws. That throw arrives as an ordinary callback failure rather than a `TypeError` at the call site, so a method that only reports through this path can look like it ran. Pass `() => logger.info(a, b)` or `logger.info.bind(logger)` instead, or use `runCallbackSafely()` with `thisArg`.
 
 ## The Reporting Pattern
 
@@ -153,7 +180,7 @@ The fallback writes to guarded `console.error`, not `console.log`. The three hos
 | `safeHandleCallback` / `reportCallbackError`                                                          | Global cancelable `'error'` event → host `reportError` only if dispatch is unavailable → console | An unclaimed or throwing dispatch goes straight to console. Nested host reports also go straight there to prevent recursion                         |
 | Standalone `serializeError`, `errorToString`, `stringifyValue`, related render/redaction helpers      | Supplied `onFormatError`, otherwise the same host route                                          | A supplied handler that throws or rejects ends at console. It is never rebroadcast                                                                  |
 | Logger-owned formatting, sink-method failures, logger event-handler failures                          | Logger `'diagnostic'` event and selected diagnostic sinks                                        | Failed diagnostic delivery goes straight to console. With no destination (or a closed logger), it falls back there if no diagnostic listener exists |
-| Sink-owned callbacks such as `FileSink.onError` / `NamedPipeSink.onError` / `ArraySink.onFormatError` | Supplied callback, otherwise console                                                             | These local reports do not enter the global host route. A failing callback also ends at console                                                     |
+| Sink-owned callbacks such as `FileSink.onError` / `NamedPipeSink.onError` / `ArraySink.onFormatError` | Supplied callback, otherwise the owning logger's diagnostic route; standalone sinks use console  | The failed sink is excluded. Failure while handling a diagnostic, or a failing supplied callback, ends at console                                   |
 
 A registered logger can claim the global event with `preventDefault()`. Merely observing it does not suppress fallback. Its diagnostics are deferred to a microtask, so an immediate `process.exit()` can prevent them from being delivered. Await `logger.close()` for orderly shutdown. Custom sinks and formatters using standalone helpers should supply a local failure handler to avoid re-entering a registered logger. See [logger failure routing](./logger.md#where-errors-go-when-the-logger-cannot-log-them).
 

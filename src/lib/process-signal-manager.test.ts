@@ -11,7 +11,9 @@ import {
   muteConsoleError,
   restoreConsoleError,
 } from './internal/console-test-utils';
+import { reportToConsole } from './internal/report-to-console';
 import { ProcessSignalManager } from './process-signal-manager';
+import readline from 'readline';
 import { sleep } from './sleep';
 
 // These suites deliberately drive the paths that fall through to `console.error` when
@@ -46,19 +48,26 @@ describe('ProcessSignalManager', () => {
   });
 
   describe('constructor', () => {
-    test('normalizes non-finite keypress throttles to the default window', () => {
-      for (const keypressThrottleMS of [Infinity, NaN]) {
+    test.each([null, undefined])(
+      'nullish throttle %s uses the default',
+      (keypressThrottleMS) => {
         manager = new ProcessSignalManager({ keypressThrottleMS });
-        const internal = manager as unknown as {
-          keypressThrottleMS: number;
-          lastActionTimes: { reload: number };
-          shouldThrottle(action: 'reload'): boolean;
-        };
+        expect(
+          (manager as unknown as { keypressThrottleMS: number })
+            .keypressThrottleMS,
+        ).toBe(200);
+      },
+    );
 
-        expect(internal.keypressThrottleMS).toBe(200);
-        internal.lastActionTimes.reload = Date.now() - 201;
-        expect(internal.shouldThrottle('reload')).toBe(false);
+    test('rejects invalid throttles and caps Infinity', () => {
+      for (const keypressThrottleMS of [NaN, -1, '200' as unknown as number]) {
+        expect(
+          () => new ProcessSignalManager({ keypressThrottleMS }),
+        ).toThrow();
       }
+      manager = new ProcessSignalManager({ keypressThrottleMS: Infinity });
+      const internal = manager as unknown as { keypressThrottleMS: number };
+      expect(internal.keypressThrottleMS).toBe(2_147_483_647);
     });
 
     test('creates instance with no callbacks', () => {
@@ -725,6 +734,112 @@ describe('ProcessSignalManager', () => {
       expect(shutdownCallback).toHaveBeenCalledWith('SIGTERM');
       expect(shutdownCallback.mock.calls.length).toBe(1);
     });
+
+    test('an attach from a process newListener listener inside attach() registers nothing twice', () => {
+      // Caller code runs inside attach() - here a 'newListener' listener - and an attach
+      // from there must not register this instance's listeners again under the first.
+      const before = process.listenerCount('SIGTERM');
+      manager = new ProcessSignalManager({
+        onShutdownRequested: shutdownCallback,
+      });
+      let nestedCalls = 0;
+      const onNewListener = (): void => {
+        nestedCalls += 1;
+        manager.attach();
+      };
+      process.on('newListener', onNewListener);
+
+      try {
+        manager.attach();
+      } finally {
+        process.off('newListener', onNewListener);
+      }
+
+      expect(nestedCalls).toBeGreaterThan(0);
+      expect(manager.isAttached).toBe(true);
+      expect(process.listenerCount('SIGTERM')).toBe(before + 1);
+
+      manager.triggerShutdown('SIGTERM');
+      expect(shutdownCallback).toHaveBeenCalledTimes(1);
+
+      manager.detach();
+      expect(process.listenerCount('SIGTERM')).toBe(before);
+    });
+
+    test('a detach from a process newListener listener inside attach() runs once the attach finishes', () => {
+      const before = process.listenerCount('SIGTERM');
+      manager = new ProcessSignalManager({
+        onShutdownRequested: shutdownCallback,
+      });
+      const onNewListener = (): void => {
+        manager.detach();
+      };
+      process.on('newListener', onNewListener);
+
+      try {
+        manager.attach();
+      } finally {
+        process.off('newListener', onNewListener);
+      }
+
+      expect(manager.isAttached).toBe(false);
+      expect(process.listenerCount('SIGTERM')).toBe(before);
+    });
+
+    test('a deferred detach that fails is reported, not thrown out of the attach that ran it', () => {
+      // The attach did what it was asked and has returned to its caller by the time the
+      // detach asked for inside it runs, so that detach's failure is reported instead.
+      const before = process.listeners('SIGTERM');
+      manager = new ProcessSignalManager({
+        onShutdownRequested: shutdownCallback,
+      });
+      const removalError = new Error('off failed');
+      const originalOff = process.off.bind(process);
+      let hasRefused = false;
+      const offSpy = spyOn(process, 'off').mockImplementation(((
+        event: string,
+        listener: (...args: unknown[]) => void,
+      ) => {
+        if (event === 'SIGTERM' && !hasRefused) {
+          hasRefused = true;
+          throw removalError;
+        }
+        originalOff(event, listener);
+        return process;
+      }) as typeof process.off);
+      const onNewListener = (): void => {
+        manager.detach();
+      };
+      const reports: unknown[] = [];
+      const onGlobalError = (event: Event): void => {
+        reports.push((event as ErrorEvent).error);
+        event.preventDefault();
+      };
+      globalThis.addEventListener('error', onGlobalError);
+      process.on('newListener', onNewListener);
+
+      try {
+        expect(() => manager.attach()).not.toThrow();
+      } finally {
+        process.off('newListener', onNewListener);
+        globalThis.removeEventListener('error', onGlobalError);
+        offSpy.mockRestore();
+        // The listener whose removal was refused is still on `process`.
+        for (const listener of process.listeners('SIGTERM')) {
+          if (!before.includes(listener)) {
+            process.off('SIGTERM', listener);
+          }
+        }
+      }
+
+      expect(hasRefused).toBe(true);
+      expect(manager.isAttached).toBe(false);
+      expect(reports).toHaveLength(1);
+      expect((reports[0] as Error).message).toContain(
+        'ProcessSignalManager deferred detach',
+      );
+      expect((reports[0] as Error).cause).toBe(removalError);
+    });
   });
 
   describe('process signal handling', () => {
@@ -997,7 +1112,7 @@ describe('ProcessSignalManager', () => {
   });
 
   describe('keyboard event handling', () => {
-    test('non-finite throttles still allow a second keypress after the default window', async () => {
+    test('an Infinity throttle suppresses repeats until the capped window expires', async () => {
       const wasOriginallyTTY = process.stdin.isTTY;
       // eslint-disable-next-line @typescript-eslint/unbound-method
       const savedSetRawMode = process.stdin.setRawMode;
@@ -1009,31 +1124,77 @@ describe('ProcessSignalManager', () => {
       (process.stdin as any).pause = mock(() => {});
 
       try {
-        let expectedCalls = 0;
-
-        for (const keypressThrottleMS of [Infinity, NaN]) {
-          manager = new ProcessSignalManager({
-            onReloadRequested: reloadCallback,
-            keypressThrottleMS,
-          });
-          manager.attach();
-
-          process.stdin.emit('keypress', 'r', { name: 'r' });
-          expectedCalls++;
-          const internal = manager as unknown as {
-            lastActionTimes: { reload: number };
-          };
-          internal.lastActionTimes.reload = Date.now() - 201;
-          process.stdin.emit('keypress', 'r', { name: 'r' });
-          expectedCalls++;
-          await sleep(1);
-
-          expect(reloadCallback).toHaveBeenCalledTimes(expectedCalls);
-          manager.detach();
-        }
+        manager = new ProcessSignalManager({
+          onReloadRequested: reloadCallback,
+          keypressThrottleMS: Infinity,
+        });
+        manager.attach();
+        process.stdin.emit('keypress', 'r', { name: 'r' });
+        const internal = manager as unknown as {
+          lastActionTimes: { reload: number };
+        };
+        internal.lastActionTimes.reload = Date.now() - 201;
+        process.stdin.emit('keypress', 'r', { name: 'r' });
+        await sleep(1);
+        expect(reloadCallback).toHaveBeenCalledTimes(1);
+        internal.lastActionTimes.reload = Date.now() - 2_147_483_647;
+        process.stdin.emit('keypress', 'r', { name: 'r' });
+        await sleep(1);
+        expect(reloadCallback).toHaveBeenCalledTimes(2);
       } finally {
         manager.detach();
         (process.stdin as any).isTTY = wasOriginallyTTY;
+        (process.stdin as any).setRawMode = savedSetRawMode;
+        (process.stdin as any).pause = savedPause;
+      }
+    });
+
+    test('an emitKeypressEvents that throws is called again by the next attach', () => {
+      const wasTTY = process.stdin.isTTY;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedSetRawMode = process.stdin.setRawMode;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedPause = process.stdin.pause;
+      const stateKey = Symbol.for('lifecycleion.ProcessSignalManager.v1');
+      const globals = globalThis as any;
+      const savedState = globals[stateKey];
+      const shared = {
+        keypressEventsEmittedOnStdin: false,
+        attachedInstances: new Set<string>(),
+        rawModeOwner: null,
+        rawModeEnabledByManager: false,
+      };
+      globals[stateKey] = shared;
+      (process.stdin as any).isTTY = true;
+      (process.stdin as any).setRawMode = mock(() => {});
+      (process.stdin as any).pause = mock(() => {});
+      const emitFailure = new Error('emitKeypressEvents failed');
+      const emitSpy = spyOn(readline, 'emitKeypressEvents').mockImplementation(
+        () => {
+          throw emitFailure;
+        },
+      );
+
+      try {
+        manager = new ProcessSignalManager({
+          onReloadRequested: reloadCallback,
+          keypressThrottleMS: 0,
+        });
+        expect(() => manager.attach()).toThrow(emitFailure);
+        expect(manager.isAttached).toBe(false);
+        // The flag was set before the call, so the next attach skipped it and listened
+        // for keypresses nothing would ever emit.
+        expect(shared.keypressEventsEmittedOnStdin).toBe(false);
+
+        emitSpy.mockImplementation(() => {});
+        manager.attach();
+        expect(emitSpy).toHaveBeenCalledTimes(2);
+        expect(shared.keypressEventsEmittedOnStdin).toBe(true);
+      } finally {
+        manager.detach();
+        emitSpy.mockRestore();
+        globals[stateKey] = savedState;
+        (process.stdin as any).isTTY = wasTTY;
         (process.stdin as any).setRawMode = savedSetRawMode;
         (process.stdin as any).pause = savedPause;
       }
@@ -1453,7 +1614,7 @@ describe('ProcessSignalManager', () => {
       shared.rawModeEnabledByManager = false;
     }
 
-    test('a detach whose setRawMode(false) throws reports it and keeps ownership so a later instance can retry', () => {
+    test('a detach whose setRawMode(false) throws reports it and keeps ownership so a later instance can retry', async () => {
       // A terminal left in raw mode is the user's shell broken, and this said nothing
       // about it. Reported on the global `'error'` channel, with the shared state left in
       // the shape a later `attach()` can adopt and repair from.
@@ -1504,6 +1665,9 @@ describe('ProcessSignalManager', () => {
 
         manager.detach();
 
+        // Reported before detach() returns, as its last step: a caller that exits right
+        // after it - a shutdown-completed listener calling process.exit(), which does not
+        // drain microtasks - must not lose the one report that its terminal is broken.
         expect(events).toHaveLength(1);
         expect((events[0]?.error as Error).message).toContain(
           'stdin raw mode restore',
@@ -1530,6 +1694,7 @@ describe('ProcessSignalManager', () => {
 
         later.attach();
         later.detach();
+        await Promise.resolve();
 
         expect(isRaw).toBe(false);
         expect(readShared()?.rawModeEnabledByManager).toBe(false);
@@ -1550,12 +1715,10 @@ describe('ProcessSignalManager', () => {
       }
     });
 
-    test('an attach() from inside the restore report does not have stdin paused under it by the detach that raised it', () => {
-      // `reportCallbackError` dispatches the global `'error'` synchronously, so a listener
-      // that answers a broken restore by attaching a fresh instance returns into the
-      // middle of `restoreStdin`. The stale `isLastInstance` read then paused stdin under
-      // the new instance, whose keypress handler was registered and silent. The pause is
-      // gated on the live set, and this is the path that pins it.
+    test('an attach() from inside the restore report does not have stdin paused under it by the detach that raised it', async () => {
+      // The restore report is the detach's last step, after it has paused stdin, so a
+      // listener that answers a broken restore by attaching a fresh instance does so
+      // over a finished detach, and its own attach resumes it.
       const wasOriginallyTTY = process.stdin.isTTY;
       const wasOriginallyRaw = (process.stdin as any).isRaw;
       // eslint-disable-next-line @typescript-eslint/unbound-method
@@ -1580,9 +1743,14 @@ describe('ProcessSignalManager', () => {
 
         isRaw = enableRaw;
       });
-      const pause = mock(() => {});
+      const stdinCalls: string[] = [];
+      const pause = mock(() => {
+        stdinCalls.push('pause');
+      });
       (process.stdin as any).pause = pause;
-      (process.stdin as any).resume = mock(() => {});
+      (process.stdin as any).resume = mock(() => {
+        stdinCalls.push('resume');
+      });
 
       let replacement: ProcessSignalManager | undefined;
       const events: ErrorEvent[] = [];
@@ -1615,10 +1783,12 @@ describe('ProcessSignalManager', () => {
         manager.detach();
 
         expect(events).toHaveLength(1);
+        expect(manager.isAttached).toBe(false);
         expect(replacement?.getStatus().isAttached).toBe(true);
         expect(readShared()?.attachedInstances.size).toBe(1);
-        // The whole point: stdin was left running for the instance now on it.
-        expect(pause).not.toHaveBeenCalled();
+        // The detach finished - and paused stdin - before the replacement attached, and
+        // the replacement's attach resumed it: stdin is running for the instance on it.
+        expect(stdinCalls).toEqual(['resume', 'pause', 'resume']);
         // And the replacement adopted the raw-mode ownership the failed restore left.
         expect(readShared()?.rawModeEnabledByManager).toBe(true);
         expect(
@@ -1627,9 +1797,10 @@ describe('ProcessSignalManager', () => {
 
         shouldFailDisable = false;
         replacement?.detach();
+        await Promise.resolve();
 
         expect(isRaw).toBe(false);
-        expect(pause).toHaveBeenCalledTimes(1);
+        expect(pause).toHaveBeenCalledTimes(2);
         expect(readShared()?.attachedInstances.size).toBe(0);
         expect(events).toHaveLength(1);
       } finally {
@@ -1647,12 +1818,823 @@ describe('ProcessSignalManager', () => {
       }
     });
 
-    test('a failed attach whose raw-mode rollback also fails reports after the shared state is repaired', () => {
+    function mockRawTTY(
+      onDisable: () => void,
+      onEnable: () => void = () => {},
+    ): {
+      stdinCalls: string[];
+      restore: () => void;
+    } {
+      const wasOriginallyTTY = process.stdin.isTTY;
+      const wasOriginallyRaw = (process.stdin as any).isRaw;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedSetRawMode = process.stdin.setRawMode;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedPause = process.stdin.pause;
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const savedResume = process.stdin.resume;
+      let isRaw = false;
+      const stdinCalls: string[] = [];
+
+      (process.stdin as any).isTTY = true;
+      Object.defineProperty(process.stdin, 'isRaw', {
+        configurable: true,
+        get: () => isRaw,
+      });
+      (process.stdin as any).setRawMode = mock((enableRaw: boolean) => {
+        if (enableRaw) {
+          onEnable();
+        } else {
+          onDisable();
+        }
+        isRaw = enableRaw;
+      });
+      (process.stdin as any).pause = mock(() => {
+        stdinCalls.push('pause');
+      });
+      (process.stdin as any).resume = mock(() => {
+        stdinCalls.push('resume');
+      });
+
+      return {
+        stdinCalls,
+        restore: () => {
+          resetShared();
+          (process.stdin as any).isTTY = wasOriginallyTTY;
+          Object.defineProperty(process.stdin, 'isRaw', {
+            configurable: true,
+            writable: true,
+            value: wasOriginallyRaw,
+          });
+          (process.stdin as any).setRawMode = savedSetRawMode;
+          (process.stdin as any).pause = savedPause;
+          (process.stdin as any).resume = savedResume;
+        },
+      };
+    }
+
+    test('a throwing detach reports its raw-mode restore failure before the throw and its listener cleanup failures after', async () => {
+      // The first listener failure is the one thrown. The broken terminal is reported
+      // before that throw, as a failed attach() reports it: a caller that exits from its
+      // catch - try { detach() } catch { process.exit(1) } - never drains a microtask.
+      // The later listener failures still wait until the throw has reached the caller.
+      let shouldFailDisable = true;
+      const tty = mockRawTTY(() => {
+        if (shouldFailDisable) {
+          throw new Error('tty refused');
+        }
+      });
+      const reports: Error[] = [];
+      const onGlobalError = (event: Event): void => {
+        reports.push((event as ErrorEvent).error as Error);
+        event.preventDefault();
+      };
+      globalThis.addEventListener('error', onGlobalError);
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+          onReloadRequested: reloadCallback,
+        });
+        manager.attach();
+
+        // Each removal still happens; it just also reports a failure.
+        const originalOff = process.off.bind(process);
+        const offSpy = spyOn(process, 'off').mockImplementation(((
+          event: string,
+          listener: (...args: unknown[]) => void,
+        ) => {
+          originalOff(event, listener);
+          throw new Error(`off ${event} failed`);
+        }) as typeof process.off);
+
+        let reportsAtThrow: string[] = [];
+        try {
+          expect(() => {
+            try {
+              manager.detach();
+            } finally {
+              reportsAtThrow = reports.map((report) => report.message);
+            }
+          }).toThrow('off SIGINT failed');
+        } finally {
+          offSpy.mockRestore();
+        }
+        expect(reportsAtThrow).toEqual([
+          'Error in a callback ProcessSignalManager stdin raw mode restore',
+        ]);
+        expect((reports[0]?.cause as Error).message).toBe('tty refused');
+        expect(manager.isAttached).toBe(false);
+
+        await Promise.resolve();
+
+        const later = reports.slice(1);
+        expect(later.length).toBeGreaterThan(0);
+        for (const report of later) {
+          expect(report.message).toContain(
+            'ProcessSignalManager listener cleanup',
+          );
+        }
+        expect((later.at(-1)?.cause as Error).message).toBe(
+          'off SIGHUP failed',
+        );
+      } finally {
+        shouldFailDisable = false;
+        globalThis.removeEventListener('error', onGlobalError);
+        tty.restore();
+      }
+    });
+
+    test('an attach from inside setRawMode(false) does not have stdin paused under it', () => {
+      // A caller's stdin 'error' listener runs inside a failed `setRawMode()` (see the
+      // next test); the mock attaches directly. An attach from there returns
+      // into `restoreStdin` after its `isLastInstance` read, and only the live re-check
+      // of the attached set keeps the pause from landing under that new instance.
+      let replacement: ProcessSignalManager | undefined;
+      const tty = mockRawTTY(() => {
+        if (replacement === undefined) {
+          replacement = new ProcessSignalManager({
+            onShutdownRequested: shutdownCallback,
+          });
+          replacement.attach();
+        }
+      });
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+        manager.detach();
+
+        expect(replacement?.getStatus().isAttached).toBe(true);
+        expect(readShared()?.attachedInstances.size).toBe(1);
+        // Resumed by the first attach, resumed again by the replacement, never paused.
+        expect(tty.stdinCalls).toEqual(['resume', 'resume']);
+        // The replacement adopted the raw mode being turned off; it is back on, owned.
+        expect((process.stdin as any).isRaw).toBe(true);
+        expect(readShared()?.rawModeEnabledByManager).toBe(true);
+        expect(readShared()?.rawModeOwner).not.toBeNull();
+
+        replacement?.detach();
+        expect(tty.stdinCalls).toEqual(['resume', 'resume', 'pause']);
+        expect((process.stdin as any).isRaw).toBe(false);
+        expect(readShared()?.rawModeOwner).toBeNull();
+      } finally {
+        if (replacement?.isAttached) {
+          replacement.detach();
+        }
+        tty.restore();
+      }
+    });
+
+    test("an attach from a caller's stdin 'error' listener during a failed setRawMode(false) keeps its raw-mode claim", () => {
+      // Node's and Bun's `setRawMode()` report a failed mode change by emitting 'error'
+      // on stdin, synchronously, and leave `isRaw` as it was - so a caller's listener runs
+      // inside the restore. An attach from it adopts the raw mode still on, and the
+      // detach that was restoring must leave that claim alone rather than clear it.
+      let replacement: ProcessSignalManager | undefined;
+      let shouldFailDisable = true;
+      const tty = mockRawTTY(() => {
+        if (shouldFailDisable) {
+          shouldFailDisable = false;
+          process.stdin.emit('error', new Error('setRawMode failed'));
+          throw new Error('setRawMode failed');
+        }
+      });
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const failingSetRawMode = process.stdin.setRawMode;
+      // Like the real one: a failure is emitted, not thrown, and `isRaw` is unchanged.
+      (process.stdin as any).setRawMode = mock((enableRaw: boolean) => {
+        try {
+          failingSetRawMode.call(process.stdin, enableRaw);
+        } catch {
+          // Emitted above.
+        }
+        return process.stdin;
+      });
+      const onStdinError = (): void => {
+        replacement ??= new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        replacement.attach();
+      };
+      process.stdin.on('error', onStdinError);
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+        manager.detach();
+
+        expect(replacement?.isAttached).toBe(true);
+        expect(readShared()?.attachedInstances.size).toBe(1);
+        expect(tty.stdinCalls).not.toContain('pause');
+        expect((process.stdin as any).isRaw).toBe(true);
+        expect(readShared()?.rawModeEnabledByManager).toBe(true);
+        expect(attachedOwner()).not.toBeNull();
+
+        // The claim it kept is what lets its own detach restore the terminal.
+        replacement?.detach();
+        expect((process.stdin as any).isRaw).toBe(false);
+        expect(readShared()?.rawModeOwner).toBeNull();
+        expect(tty.stdinCalls.at(-1)).toBe('pause');
+      } finally {
+        process.stdin.off('error', onStdinError);
+        if (replacement?.isAttached) {
+          replacement.detach();
+        }
+        tty.restore();
+      }
+    });
+
+    /**
+     * Route `setRawMode()` failures the way Node and Bun do: emitted on stdin as 'error',
+     * not thrown, with `isRaw` left as it was. `shouldFail` picks the calls that fail.
+     */
+    function emitRawModeFailures(shouldFail: (enableRaw: boolean) => boolean): {
+      restore: () => void;
+    } {
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const mockedSetRawMode = process.stdin.setRawMode;
+      (process.stdin as any).setRawMode = mock((enableRaw: boolean) => {
+        if (shouldFail(enableRaw)) {
+          process.stdin.emit('error', new Error('setRawMode failed'));
+          return process.stdin;
+        }
+
+        return mockedSetRawMode.call(process.stdin, enableRaw);
+      });
+      return {
+        restore: () => {
+          (process.stdin as any).setRawMode = mockedSetRawMode;
+        },
+      };
+    }
+
+    test('a detach whose setRawMode(false) failure is emitted on stdin reports it and keeps ownership for a later instance', () => {
+      // With an 'error' listener on stdin the failure is not thrown, and raw mode is
+      // still on: a failed restore, reported as one, with the claim left for adoption.
+      const tty = mockRawTTY(() => {});
+      let shouldFailDisable = true;
+      const emitted = emitRawModeFailures(
+        (enableRaw) => !enableRaw && shouldFailDisable,
+      );
+      const stdinErrors: Error[] = [];
+      const onStdinError = (error: Error): void => {
+        stdinErrors.push(error);
+      };
+      process.stdin.on('error', onStdinError);
+      const { reports, stop } = captureReports();
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+        manager.detach();
+
+        expect(stdinErrors).toHaveLength(1);
+        expect(reports.map((report) => report.message)).toEqual([
+          'Error in a callback ProcessSignalManager stdin raw mode restore',
+        ]);
+        expect((reports[0]?.cause as Error).message).toBe(
+          'stdin raw mode is still enabled',
+        );
+        expect((process.stdin as any).isRaw).toBe(true);
+        expect(readShared()?.attachedInstances.size).toBe(0);
+        expect(readShared()?.rawModeEnabledByManager).toBe(true);
+        expect(readShared()?.rawModeOwner).not.toBeNull();
+
+        // A later instance adopts the claim and, with a working tty, restores it.
+        shouldFailDisable = false;
+        const later = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        later.attach();
+        later.detach();
+
+        expect((process.stdin as any).isRaw).toBe(false);
+        expect(readShared()?.rawModeOwner).toBeNull();
+        expect(readShared()?.rawModeEnabledByManager).toBe(false);
+        expect(reports).toHaveLength(1);
+      } finally {
+        stop();
+        process.stdin.off('error', onStdinError);
+        emitted.restore();
+        tty.restore();
+      }
+    });
+
+    test('an attach whose setRawMode(true) failure is emitted on stdin fails and claims nothing', () => {
+      const tty = mockRawTTY(() => {});
+      const emitted = emitRawModeFailures((enableRaw) => enableRaw);
+      const onStdinError = (): void => {};
+      process.stdin.on('error', onStdinError);
+      const keypressListeners = process.stdin.listenerCount('keypress');
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+
+        expect(() => manager.attach()).toThrow(
+          'stdin raw mode was not enabled',
+        );
+        expect(manager.isAttached).toBe(false);
+        expect(manager.getStatus().listeningFor.keypresses).toBe(false);
+        expect(process.stdin.listenerCount('keypress')).toBe(keypressListeners);
+        expect((process.stdin as any).isRaw).toBe(false);
+        expect(readShared()?.attachedInstances.size).toBe(0);
+        expect(readShared()?.rawModeOwner).toBeNull();
+        expect(readShared()?.rawModeEnabledByManager).toBe(false);
+      } finally {
+        process.stdin.off('error', onStdinError);
+        emitted.restore();
+        tty.restore();
+      }
+    });
+
+    test("an attach from a stdin 'error' listener during this instance's own detach re-attaches it once the detach finishes", () => {
+      // The failed setRawMode(false) runs the caller's listener inside detach(), while
+      // this instance still reads as attached. Its attach must not be lost to that.
+      const tty = mockRawTTY(() => {});
+      let shouldFailDisable = true;
+      const emitted = emitRawModeFailures(
+        (enableRaw) => !enableRaw && shouldFailDisable,
+      );
+      const onStdinError = (): void => {
+        manager.attach();
+      };
+      process.stdin.on('error', onStdinError);
+      const sigtermListeners = process.listenerCount('SIGTERM');
+      const { reports, stop } = captureReports();
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+        manager.detach();
+
+        expect(manager.isAttached).toBe(true);
+        expect(process.listenerCount('SIGTERM')).toBe(sigtermListeners + 1);
+        expect(readShared()?.attachedInstances.size).toBe(1);
+        expect((process.stdin as any).isRaw).toBe(true);
+        expect(attachedOwner()).not.toBeNull();
+        expect(readShared()?.rawModeEnabledByManager).toBe(true);
+        expect(tty.stdinCalls.at(-1)).toBe('resume');
+        expect(reports.map((report) => report.message)).toEqual([
+          'Error in a callback ProcessSignalManager stdin raw mode restore',
+        ]);
+
+        // The claim it kept is what lets its next detach restore the terminal.
+        shouldFailDisable = false;
+        process.stdin.off('error', onStdinError);
+        manager.detach();
+
+        expect(manager.isAttached).toBe(false);
+        expect(process.listenerCount('SIGTERM')).toBe(sigtermListeners);
+        expect((process.stdin as any).isRaw).toBe(false);
+        expect(readShared()?.rawModeOwner).toBeNull();
+      } finally {
+        stop();
+        process.stdin.off('error', onStdinError);
+        emitted.restore();
+        tty.restore();
+      }
+    });
+
+    test('an attach from inside a failed attach rollback keeps its raw mode', () => {
+      // The failed attach's own rollback turns raw mode off too. An attach from inside
+      // that setRawMode(false) adopts the raw mode, and must not have it cleared.
+      let replacement: ProcessSignalManager | undefined;
+      const tty = mockRawTTY(() => {
+        if (replacement === undefined) {
+          replacement = new ProcessSignalManager({
+            onShutdownRequested: shutdownCallback,
+          });
+          replacement.attach();
+        }
+      });
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const mockedResume = process.stdin.resume;
+      // Fail only the first attach's own resume, after it enabled raw mode. Keypress
+      // setup can resume stdin earlier, and the replacement's resume must succeed.
+      (process.stdin as any).resume = mock(() => {
+        if (
+          (process.stdin as any).isRaw === true &&
+          replacement === undefined
+        ) {
+          throw new Error('resume failed');
+        }
+
+        return mockedResume.call(process.stdin);
+      });
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        expect(() => manager.attach()).toThrow('resume failed');
+
+        expect(replacement?.getStatus().isAttached).toBe(true);
+        expect(readShared()?.attachedInstances.size).toBe(1);
+        expect((process.stdin as any).isRaw).toBe(true);
+        expect(readShared()?.rawModeEnabledByManager).toBe(true);
+        expect(readShared()?.rawModeOwner).not.toBeNull();
+
+        replacement?.detach();
+        expect((process.stdin as any).isRaw).toBe(false);
+        expect(readShared()?.rawModeOwner).toBeNull();
+      } finally {
+        if (replacement?.isAttached) {
+          replacement.detach();
+        }
+        tty.restore();
+      }
+    });
+
+    function captureReports(): { reports: Error[]; stop: () => void } {
+      const reports: Error[] = [];
+      const onGlobalError = (event: Event): void => {
+        reports.push((event as ErrorEvent).error as Error);
+        event.preventDefault();
+      };
+      globalThis.addEventListener('error', onGlobalError);
+      return {
+        reports,
+        stop: () => globalThis.removeEventListener('error', onGlobalError),
+      };
+    }
+
+    /** The recorded owner, if it is an attached instance - the only one when size is 1. */
+    function attachedOwner(): string | null {
+      const shared = readShared();
+      const owner = shared?.rawModeOwner ?? null;
+      return owner !== null && shared?.attachedInstances.has(owner) === true
+        ? owner
+        : null;
+    }
+
+    test('a detach whose re-enable for an attach from inside setRawMode(false) fails reports it as a re-enable', () => {
+      // The attach adopts the raw mode being turned off, so the detach turns it back on
+      // for that instance. When that throws, the report must say what failed - the
+      // re-enable, not the restore, which succeeded - and the claim stays with the
+      // instance that took over, for its own detach to settle.
+      let replacement: ProcessSignalManager | undefined;
+      const tty = mockRawTTY(
+        () => {
+          if (replacement === undefined) {
+            replacement = new ProcessSignalManager({
+              onShutdownRequested: shutdownCallback,
+            });
+            replacement.attach();
+          }
+        },
+        () => {
+          if (replacement !== undefined) {
+            throw new Error('re-enable refused');
+          }
+        },
+      );
+      const { reports, stop } = captureReports();
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+        manager.detach();
+
+        expect(reports.map((report) => report.message)).toEqual([
+          'Error in a callback ProcessSignalManager stdin raw mode re-enable',
+        ]);
+        expect((reports[0]?.cause as Error).message).toBe('re-enable refused');
+        expect(replacement?.isAttached).toBe(true);
+        expect(readShared()?.attachedInstances.size).toBe(1);
+        expect(attachedOwner()).not.toBeNull();
+        expect(readShared()?.rawModeEnabledByManager).toBe(true);
+        expect((process.stdin as any).isRaw).toBe(false);
+
+        replacement?.detach();
+        expect(readShared()?.rawModeOwner).toBeNull();
+        expect(readShared()?.rawModeEnabledByManager).toBe(false);
+        expect(reports).toHaveLength(1);
+      } finally {
+        stop();
+        if (replacement?.isAttached) {
+          replacement.detach();
+        }
+        tty.restore();
+      }
+    });
+
+    test('an owner that detaches while another instance remains hands raw mode ownership over', () => {
+      const tty = mockRawTTY(() => {});
+      let second: ProcessSignalManager | undefined;
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+        const owner = readShared()?.rawModeOwner;
+        second = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        second.attach();
+        expect(readShared()?.rawModeOwner).toBe(owner ?? null);
+
+        manager.detach();
+
+        expect(attachedOwner()).not.toBeNull();
+        expect(attachedOwner()).not.toBe(owner ?? null);
+        expect((process.stdin as any).isRaw).toBe(true);
+
+        second.detach();
+
+        expect((process.stdin as any).isRaw).toBe(false);
+        expect(readShared()?.rawModeOwner).toBeNull();
+        expect(readShared()?.rawModeEnabledByManager).toBe(false);
+      } finally {
+        if (second?.isAttached) {
+          second.detach();
+        }
+        tty.restore();
+      }
+    });
+
+    test('a failed raw-mode enable adopts a stale owner before restoring stdin', () => {
+      const tty = mockRawTTY(() => {});
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+        manager.detach();
+        const shared = readShared();
+        if (shared === undefined) {
+          throw new Error('shared state was not created');
+        }
+        shared.rawModeOwner = 'detached-instance';
+        shared.rawModeEnabledByManager = true;
+        Object.defineProperty(process.stdin, 'isRaw', {
+          configurable: true,
+          writable: true,
+          value: false,
+        });
+        const disabled: boolean[] = [];
+        process.stdin.setRawMode = mock((isEnabled: boolean) => {
+          process.stdin.isRaw = isEnabled;
+          if (isEnabled) {
+            throw new Error('enable threw after changing raw mode');
+          }
+          disabled.push(isEnabled);
+          return process.stdin;
+        });
+        expect(() => manager.attach()).toThrow('enable threw');
+        expect(manager.isAttached).toBe(false);
+        expect(process.stdin.isRaw).toBe(false);
+        expect(disabled).toEqual([false]);
+        expect(shared.rawModeOwner).toBeNull();
+        expect(shared.rawModeEnabledByManager).toBe(false);
+      } finally {
+        tty.restore();
+      }
+    });
+
+    test('a detach re-anchors raw mode ownership left on an instance that is no longer attached', () => {
+      const tty = mockRawTTY(() => {});
+      let second: ProcessSignalManager | undefined;
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        manager.attach();
+        second = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        second.attach();
+
+        const shared = readShared();
+        if (shared === undefined) {
+          throw new Error('shared state was not created');
+        }
+        shared.rawModeOwner = 'detached-instance';
+
+        second.detach();
+
+        // The one instance left now owns raw mode, so its detach restores the terminal.
+        expect(readShared()?.attachedInstances.size).toBe(1);
+        expect(attachedOwner()).not.toBeNull();
+
+        manager.detach();
+
+        expect((process.stdin as any).isRaw).toBe(false);
+        expect(readShared()?.rawModeOwner).toBeNull();
+        expect(readShared()?.rawModeEnabledByManager).toBe(false);
+      } finally {
+        if (second?.isAttached) {
+          second.detach();
+        }
+        tty.restore();
+      }
+    });
+
+    test('a failed attach whose rollback re-enable fails reports it once, as a re-enable', () => {
+      // The same re-enable, reached from a failed attach's rollback. `attach()`'s catch
+      // does not retry it - ownership went to the instance that attached - so the
+      // rollback's failure is the one reported, before the attach error is thrown, as
+      // every raw-mode failure from a failed attach is.
+      let replacement: ProcessSignalManager | undefined;
+      const tty = mockRawTTY(
+        () => {
+          if (replacement === undefined) {
+            replacement = new ProcessSignalManager({
+              onShutdownRequested: shutdownCallback,
+            });
+            replacement.attach();
+          }
+        },
+        () => {
+          if (replacement !== undefined) {
+            throw new Error('re-enable refused');
+          }
+        },
+      );
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const mockedResume = process.stdin.resume;
+      // Fail only the first attach's own resume, after it enabled raw mode.
+      (process.stdin as any).resume = mock(() => {
+        if (
+          (process.stdin as any).isRaw === true &&
+          replacement === undefined
+        ) {
+          throw new Error('resume failed');
+        }
+
+        return mockedResume.call(process.stdin);
+      });
+      const { reports, stop } = captureReports();
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        expect(() => manager.attach()).toThrow('resume failed');
+
+        expect(reports.map((report) => report.message)).toEqual([
+          'Error in a callback ProcessSignalManager stdin raw mode re-enable',
+        ]);
+        expect((reports[0]?.cause as Error).message).toBe('re-enable refused');
+        expect(replacement?.isAttached).toBe(true);
+        expect(readShared()?.attachedInstances.size).toBe(1);
+        expect(attachedOwner()).not.toBeNull();
+        expect(readShared()?.rawModeEnabledByManager).toBe(true);
+
+        replacement?.detach();
+        expect(readShared()?.rawModeOwner).toBeNull();
+        expect(reports).toHaveLength(1);
+      } finally {
+        stop();
+        if (replacement?.isAttached) {
+          replacement.detach();
+        }
+        tty.restore();
+      }
+    });
+
+    test('a failed attach whose rollback restore fails once is not reported when the retry restores the terminal', async () => {
+      // The rollback's failure is held, and `attach()`'s catch retries the same restore.
+      // The retry worked, so the terminal is fine and there is nothing to report.
+      const tty = mockRawTTY(() => {});
+      let isRaw = false;
+      let disableCalls = 0;
+      Object.defineProperty(process.stdin, 'isRaw', {
+        configurable: true,
+        get: () => isRaw,
+      });
+      (process.stdin as any).setRawMode = mock((enableRaw: boolean) => {
+        if (enableRaw) {
+          // Enabled, then threw.
+          isRaw = true;
+          throw new Error('enable threw late');
+        }
+
+        disableCalls += 1;
+        if (disableCalls === 1) {
+          throw new Error('disable refused once');
+        }
+
+        isRaw = false;
+      });
+      const { reports, stop } = captureReports();
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        expect(() => manager.attach()).toThrow('enable threw late');
+        await Promise.resolve();
+
+        expect(disableCalls).toBe(2);
+        expect(reports).toEqual([]);
+        expect((process.stdin as any).isRaw).toBe(false);
+        expect(readShared()?.rawModeOwner).toBeNull();
+        expect(readShared()?.rawModeEnabledByManager).toBe(false);
+      } finally {
+        stop();
+        tty.restore();
+      }
+    });
+
+    test('a failed attach reports its raw-mode restore failure before throwing and its listener cleanup failures after', async () => {
+      // A caller that exits from its catch never drains a microtask, so the broken
+      // terminal is reported before the throw. Leaked listeners die with the process,
+      // so those reports still wait until the attach error has reached its caller.
+      const tty = mockRawTTY(() => {
+        throw new Error('tty refused');
+      });
+      // eslint-disable-next-line @typescript-eslint/unbound-method
+      const mockedResume = process.stdin.resume;
+      // Fail the attach's own resume, after it enabled raw mode.
+      (process.stdin as any).resume = mock(() => {
+        if ((process.stdin as any).isRaw === true) {
+          throw new Error('resume failed');
+        }
+
+        return mockedResume.call(process.stdin);
+      });
+      const originalOff = process.off.bind(process);
+      const offSpy = spyOn(process, 'off').mockImplementation(((
+        event: string,
+        listener: (...args: unknown[]) => void,
+      ) => {
+        originalOff(event, listener);
+        throw new Error(`off ${event} failed`);
+      }) as typeof process.off);
+      const { reports, stop } = captureReports();
+
+      try {
+        resetShared();
+        manager = new ProcessSignalManager({
+          onShutdownRequested: shutdownCallback,
+        });
+        let reportsAtThrow: string[] = [];
+        try {
+          manager.attach();
+        } catch (error) {
+          reportsAtThrow = reports.map((report) => report.message);
+          expect((error as Error).message).toBe('resume failed');
+        }
+        offSpy.mockRestore();
+
+        expect(reportsAtThrow).toEqual([
+          'Error in a callback ProcessSignalManager stdin raw mode restore',
+        ]);
+        expect((reports[0]?.cause as Error).message).toBe('tty refused');
+
+        await Promise.resolve();
+
+        const later = reports.slice(1).map((report) => report.message);
+        expect(later.length).toBeGreaterThan(1);
+        expect(later[0]).toContain('ProcessSignalManager attach cleanup');
+        for (const name of later.slice(1)) {
+          expect(name).toContain('ProcessSignalManager listener cleanup');
+        }
+        expect(manager.isAttached).toBe(false);
+      } finally {
+        offSpy.mockRestore();
+        stop();
+        resetShared();
+        tty.restore();
+      }
+    });
+
+    test('a failed attach whose raw-mode rollback also fails reports before throwing, after the shared state is repaired', () => {
       // `setRawMode(true)` can throw after actually enabling raw mode, and the rollback's
-      // own `setRawMode(false)` can fail too. The report runs a global `'error'` listener
-      // synchronously, and a listener that reads the shared state from there must see it
-      // already repaired - an owner on record and the manager flag set - rather than the
-      // half-way shape where nothing is attached and nothing can be adopted.
+      // own `setRawMode(false)` can fail too. The report is dispatched before the failed
+      // attach throws - a caller that exits from its catch must not lose the one report
+      // that its terminal is broken - and a listener that reads the shared state from
+      // there must see it already repaired - an owner on record and the manager flag set
+      // - rather than the half-way shape where nothing is attached and nothing can be
+      // adopted.
       const wasOriginallyTTY = process.stdin.isTTY;
       const wasOriginallyRaw = (process.stdin as any).isRaw;
       // eslint-disable-next-line @typescript-eslint/unbound-method
@@ -1708,15 +2690,24 @@ describe('ProcessSignalManager', () => {
           onShutdownRequested: shutdownCallback,
         });
 
-        expect(() => failing.attach()).toThrow('enable threw late');
+        // `process.exit()` from the catch does not drain microtasks, so the report
+        // must already be out by the time the throw arrives.
+        let reportsAtThrow = -1;
+        try {
+          failing.attach();
+        } catch (error) {
+          reportsAtThrow = seenDuringReport.length;
+          expect((error as Error).message).toBe('enable threw late');
+        }
+        expect(reportsAtThrow).toBe(1);
         expect(failing.isAttached).toBe(false);
 
-        // Two reports, not one: the rollback inside `listenForKeyPresses` tries the
+        // One report, not two: the rollback inside `listenForKeyPresses` tries the
         // restore and fails, and `attach`'s own catch runs `restoreStdin`, which retries
-        // it - a second genuine attempt, reported when it fails too. Each must be
+        // it. The retry's outcome is what the terminal is left in, so it replaces the
+        // rollback's rather than reporting the same broken terminal twice. It must be
         // dispatched only after the shared state was repaired.
         expect(seenDuringReport.map((entry) => entry.message)).toEqual([
-          'Error in a callback ProcessSignalManager stdin raw mode restore',
           'Error in a callback ProcessSignalManager stdin raw mode restore',
         ]);
 
@@ -1742,6 +2733,229 @@ describe('ProcessSignalManager', () => {
   });
 
   describe('error handling', () => {
+    test('detach removes every listener when an earlier removal throws', () => {
+      manager = new ProcessSignalManager({
+        onShutdownRequested: shutdownCallback,
+        onReloadRequested: reloadCallback,
+        onInfoRequested: infoCallback,
+        onDebugRequested: debugCallback,
+      });
+      const counts = (): number[] =>
+        ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGUSR1', 'SIGUSR2'].map((signal) =>
+          process.listenerCount(signal),
+        );
+      const before = counts();
+      manager.attach();
+
+      const originalOff = process.off.bind(process);
+      const failure = new Error('off failed');
+      let hasThrown = false;
+      const offSpy = spyOn(process, 'off').mockImplementation(((
+        event: string,
+        listener: (...args: unknown[]) => void,
+      ) => {
+        originalOff(event, listener);
+        if (event === 'SIGINT' && !hasThrown) {
+          hasThrown = true;
+          throw failure;
+        }
+        return process;
+      }) as typeof process.off);
+
+      try {
+        expect(() => manager.detach()).toThrow(failure);
+      } finally {
+        offSpy.mockRestore();
+      }
+
+      expect(manager.getStatus().isAttached).toBe(false);
+      expect(counts()).toEqual(before);
+    });
+
+    test('an attach from a detach cleanup report is not undone by that detach', async () => {
+      manager = new ProcessSignalManager({
+        onShutdownRequested: shutdownCallback,
+        onReloadRequested: reloadCallback,
+        onInfoRequested: infoCallback,
+        onDebugRequested: debugCallback,
+      });
+      const counts = (): number[] =>
+        ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGUSR1', 'SIGUSR2'].map((signal) =>
+          process.listenerCount(signal),
+        );
+      const before = counts();
+      manager.attach();
+
+      // Two removals fail, so detach has a later failure to report.
+      const originalOff = process.off.bind(process);
+      const failure = new Error('off failed');
+      const failingSignals = new Set(['SIGINT', 'SIGTERM']);
+      const offSpy = spyOn(process, 'off').mockImplementation(((
+        event: string,
+        listener: (...args: unknown[]) => void,
+      ) => {
+        originalOff(event, listener);
+        if (failingSignals.delete(event)) {
+          throw failure;
+        }
+        return process;
+      }) as typeof process.off);
+
+      let wasAttachedDuringReport: boolean | undefined;
+      const onGlobalError = (event: Event): void => {
+        event.preventDefault();
+        if (wasAttachedDuringReport === undefined) {
+          wasAttachedDuringReport = manager.isAttached;
+          manager.attach();
+        }
+      };
+      globalThis.addEventListener('error', onGlobalError);
+
+      try {
+        try {
+          expect(() => manager.detach()).toThrow(failure);
+        } finally {
+          offSpy.mockRestore();
+        }
+        // Later failures are reported only after the first has reached the caller.
+        expect(wasAttachedDuringReport).toBeUndefined();
+        await Promise.resolve();
+      } finally {
+        globalThis.removeEventListener('error', onGlobalError);
+      }
+
+      // The report came after detach finished, so the listener's attach took effect
+      // and nothing removed its listeners afterward.
+      expect(wasAttachedDuringReport).toBe(false);
+      expect(manager.isAttached).toBe(true);
+      expect(counts()).toEqual(before.map((count) => count + 1));
+
+      manager.detach();
+      expect(counts()).toEqual(before);
+    });
+
+    test('a cleanup failure during attach keeps the registration error', async () => {
+      manager = new ProcessSignalManager({
+        onShutdownRequested: shutdownCallback,
+        onReloadRequested: reloadCallback,
+      });
+      const before = process.listenerCount('SIGINT');
+      const registrationError = new Error('on failed');
+      const onSpy = spyOn(process, 'on').mockImplementation(((
+        event: string,
+      ) => {
+        if (event === 'SIGHUP') {
+          throw registrationError;
+        }
+        return process;
+      }) as typeof process.on);
+      const offSpy = spyOn(process, 'off').mockImplementation((() => {
+        throw new Error('off failed');
+      }) as typeof process.off);
+
+      const reports: unknown[] = [];
+      const onGlobalError = (event: Event): void => {
+        reports.push((event as ErrorEvent).error);
+        event.preventDefault();
+      };
+      globalThis.addEventListener('error', onGlobalError);
+
+      try {
+        try {
+          expect(() => manager.attach()).toThrow(registrationError);
+        } finally {
+          onSpy.mockRestore();
+          offSpy.mockRestore();
+        }
+        // Reported only after the failed attach has reached its caller.
+        expect(reports).toEqual([]);
+        await Promise.resolve();
+      } finally {
+        globalThis.removeEventListener('error', onGlobalError);
+      }
+
+      expect(manager.getStatus().isAttached).toBe(false);
+      expect(process.listenerCount('SIGINT')).toBe(before);
+      // Every cleanup failure is reported rather than lost behind the rethrow, in the
+      // order the removals failed: the first by attach, then the later ones.
+      expect(reports.length).toBeGreaterThan(1);
+      for (const report of reports) {
+        expect((report as Error).cause).toMatchObject({
+          message: 'off failed',
+        });
+      }
+      expect((reports[0] as Error).message).toContain(
+        'ProcessSignalManager attach cleanup',
+      );
+      expect((reports.at(-1) as Error).message).toContain(
+        'ProcessSignalManager listener cleanup',
+      );
+    });
+
+    test('an attach from an attach cleanup report is not thrown over', async () => {
+      manager = new ProcessSignalManager({
+        onShutdownRequested: shutdownCallback,
+        onReloadRequested: reloadCallback,
+      });
+      const before = process.listenerCount('SIGINT');
+      const registrationError = new Error('on failed');
+      const originalOn = process.on.bind(process);
+      const onSpy = spyOn(process, 'on').mockImplementation(((
+        event: string,
+        listener: (...args: unknown[]) => void,
+      ) => {
+        if (event === 'SIGHUP') {
+          throw registrationError;
+        }
+        originalOn(event, listener);
+        return process;
+      }) as typeof process.on);
+      const originalOff = process.off.bind(process);
+      const offSpy = spyOn(process, 'off').mockImplementation(((
+        event: string,
+        listener: (...args: unknown[]) => void,
+      ) => {
+        originalOff(event, listener);
+        if (event === 'SIGINT') {
+          throw new Error('off failed');
+        }
+        return process;
+      }) as typeof process.off);
+
+      let reattachError: unknown;
+      const onGlobalError = (event: Event): void => {
+        event.preventDefault();
+        try {
+          manager.attach();
+        } catch (error) {
+          reattachError = error;
+        }
+      };
+      globalThis.addEventListener('error', onGlobalError);
+
+      try {
+        try {
+          expect(() => manager.attach()).toThrow(registrationError);
+        } finally {
+          onSpy.mockRestore();
+          offSpy.mockRestore();
+        }
+        expect(manager.isAttached).toBe(false);
+        expect(process.listenerCount('SIGINT')).toBe(before);
+        await Promise.resolve();
+      } finally {
+        globalThis.removeEventListener('error', onGlobalError);
+      }
+
+      // The failed attach had already thrown, so the listener's attach stands.
+      expect(reattachError).toBeUndefined();
+      expect(manager.isAttached).toBe(true);
+      expect(process.listenerCount('SIGINT')).toBe(before + 1);
+
+      manager.detach();
+      expect(process.listenerCount('SIGINT')).toBe(before);
+    });
+
     test('handles error in shutdown callback gracefully', () => {
       const errorCallback = mock(() => {
         throw new Error('Test error');
@@ -2025,4 +3239,256 @@ test('one Ctrl+C is forwarded once when its leader detaches during SIGINT', () =
     (process.stdin as any).isTTY = wasTTY;
     process.stdin.setRawMode = raw;
   }
+});
+
+describe('callback name options', () => {
+  const OPTION_NAMES = [
+    'shutdownCallbackName',
+    'reloadCallbackName',
+    'infoCallbackName',
+    'debugCallbackName',
+  ] as const;
+
+  // A name that is not a string threw out of every signal and keypress dispatch - an
+  // uncaught exception - when the report was built from it. Refused when constructed.
+  for (const option of OPTION_NAMES) {
+    test(`${option} that is not a string is a TypeError at construction`, () => {
+      for (const value of [Symbol('name'), 42, {}, () => 'name']) {
+        expect(
+          () =>
+            new ProcessSignalManager({
+              [option]: value as unknown as string,
+            }),
+        ).toThrow(TypeError);
+      }
+    });
+
+    test(`${option} that is null or undefined uses the default`, () => {
+      for (const value of [null, undefined]) {
+        const manager = new ProcessSignalManager({
+          [option]: value as unknown as string,
+        });
+        expect(
+          (manager as unknown as Record<string, unknown>)[option],
+        ).toBeString();
+      }
+    });
+  }
+
+  test('a custom string name is used in the report', () => {
+    const reports: Error[] = [];
+    const onError = (event: Event): void => {
+      reports.push((event as ErrorEvent).error as Error);
+      event.preventDefault();
+    };
+    globalThis.addEventListener('error', onError);
+    try {
+      const manager = new ProcessSignalManager({
+        onReloadRequested: () => {
+          throw new Error('reload failed');
+        },
+        reloadCallbackName: 'customReload',
+      });
+      manager.triggerReload(true);
+      expect(reports.map((report) => report.message)).toEqual([
+        'Error in a callback customReload',
+      ]);
+    } finally {
+      globalThis.removeEventListener('error', onError);
+    }
+  });
+});
+
+describe('callback options', () => {
+  const OPTION_NAMES = [
+    'onShutdownRequested',
+    'onReloadRequested',
+    'onInfoRequested',
+    'onDebugRequested',
+  ] as const;
+
+  // A truthy value that is not a function was stored as a registered handler: attach()
+  // installed its signal listeners (taking over Ctrl+C) and every dispatch reported a
+  // failed callback instead of running one. Refused when constructed.
+  for (const option of OPTION_NAMES) {
+    test(`${option} that is not a function is a TypeError at construction`, () => {
+      for (const value of ['shutdown', 42, {}, true, Symbol('cb')]) {
+        expect(
+          () => new ProcessSignalManager({ [option]: value as never }),
+        ).toThrow(`${option} must be a function`);
+      }
+    });
+
+    test(`${option} that is null or undefined registers no handler`, () => {
+      for (const value of [null, undefined]) {
+        const manager = new ProcessSignalManager({ [option]: value as never });
+        expect(Object.values(manager.getStatus().handlers)).not.toContain(true);
+      }
+    });
+  }
+});
+
+describe('keypress events whose key is not a readable object', () => {
+  const hostileKey = {
+    get name(): string {
+      throw new Error('name getter failed');
+    },
+  };
+
+  test.each([
+    ['undefined', undefined],
+    ['null', null],
+    ['a string', 'r'],
+    ['an object whose name getter throws', hostileKey],
+  ])('a key that is %s is ignored', (_kind, key) => {
+    const wasTTY = process.stdin.isTTY;
+    // eslint-disable-next-line @typescript-eslint/unbound-method
+    const raw = process.stdin.setRawMode;
+    (process.stdin as any).isTTY = true;
+    process.stdin.setRawMode = mock(() => process.stdin);
+    const reload = mock(() => {});
+    const manager = new ProcessSignalManager({
+      onReloadRequested: reload,
+      keypressThrottleMS: 0,
+    });
+    try {
+      manager.attach();
+      expect(() => process.stdin.emit('keypress', 'r', key)).not.toThrow();
+      expect(reload).not.toHaveBeenCalled();
+      // The handler still works for the next ordinary key.
+      process.stdin.emit('keypress', 'r', { name: 'r' });
+      expect(reload).toHaveBeenCalledTimes(1);
+    } finally {
+      manager.detach();
+      (process.stdin as any).isTTY = wasTTY;
+      process.stdin.setRawMode = raw;
+    }
+  });
+});
+
+test('keypress listening status is false when stdin does not expose isTTY', () => {
+  const descriptor = Object.getOwnPropertyDescriptor(process.stdin, 'isTTY');
+  const manager = new ProcessSignalManager({ onReloadRequested() {} });
+  Object.defineProperty(process.stdin, 'isTTY', {
+    configurable: true,
+    value: undefined,
+  });
+  try {
+    manager.attach();
+    expect(manager.getStatus().listeningFor.keypresses).toBe(false);
+  } finally {
+    manager.detach();
+    if (descriptor) {
+      Object.defineProperty(process.stdin, 'isTTY', descriptor);
+    } else {
+      Reflect.deleteProperty(process.stdin, 'isTTY');
+    }
+  }
+});
+
+test('console-origin attach retries do not enqueue another cleanup report', async () => {
+  const originalConsole = console.error;
+  const originalOn = process.on.bind(process);
+  const originalOff = process.off.bind(process);
+  const manager = new ProcessSignalManager({ onReloadRequested: () => {} });
+  const attachFailure = new Error('attach failed');
+  let consoleCalls = 0;
+  let attachCalls = 0;
+  let cleanupCalls = 0;
+  const on = spyOn(process, 'on').mockImplementation(
+    function (event, listener) {
+      if (event === 'SIGHUP') {
+        attachCalls++;
+        throw attachFailure;
+      }
+      return Reflect.apply(originalOn, process, [event, listener]);
+    },
+  );
+  const off = spyOn(process, 'off').mockImplementation(
+    function (event, listener) {
+      if (event === 'SIGHUP') {
+        cleanupCalls++;
+        throw new Error('cleanup failed');
+      }
+      return Reflect.apply(originalOff, process, [event, listener]);
+    },
+  );
+  console.error = (): void => {
+    // Cap a regression before it can create an unbounded microtask chain.
+    if (++consoleCalls <= 10) {
+      expect(() => manager.attach()).toThrow(attachFailure);
+    }
+  };
+  try {
+    // This ordinary attach reports its cleanup failure. The console shim retries it.
+    expect(() => manager.attach()).toThrow(attachFailure);
+    await sleep(10);
+    expect(consoleCalls).toBe(1);
+    expect(attachCalls).toBe(2);
+    expect(cleanupCalls).toBe(2);
+    expect(manager.isAttached).toBe(false);
+    console.error = (): void => {
+      consoleCalls++;
+    };
+    expect(() => manager.attach()).toThrow(attachFailure);
+    await sleep(10);
+    expect(consoleCalls).toBe(2);
+  } finally {
+    console.error = originalConsole;
+    on.mockRestore();
+    off.mockRestore();
+  }
+});
+
+test('a console-origin failed attach still reports its cleanup failure', async () => {
+  const originalOn = process.on.bind(process);
+  const originalOff = process.off.bind(process);
+  const manager = new ProcessSignalManager({ onReloadRequested: () => {} });
+  const attachFailure = new Error('attach failed');
+  const cleanupFailure = new Error('cleanup failed');
+  const heard: unknown[] = [];
+  const onError = (event: Event): void => {
+    heard.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+  const on = spyOn(process, 'on').mockImplementation(
+    function (event, listener) {
+      if (event === 'SIGHUP') {
+        throw attachFailure;
+      }
+      return Reflect.apply(originalOn, process, [event, listener]);
+    },
+  );
+  const off = spyOn(process, 'off').mockImplementation(
+    function (event, listener) {
+      if (event === 'SIGHUP') {
+        throw cleanupFailure;
+      }
+      return Reflect.apply(originalOff, process, [event, listener]);
+    },
+  );
+  let attachError: unknown;
+  globalThis.addEventListener('error', onError);
+  try {
+    console.error = (): void => {
+      try {
+        manager.attach();
+      } catch (error) {
+        attachError = error;
+      }
+    };
+    reportToConsole('terminal line');
+    await sleep(10);
+  } finally {
+    globalThis.removeEventListener('error', onError);
+    on.mockRestore();
+    off.mockRestore();
+  }
+  expect(attachError).toBe(attachFailure);
+  expect(manager.isAttached).toBe(false);
+  expect(heard).toHaveLength(1);
+  expect((heard[0] as Error).message).toContain(
+    'ProcessSignalManager attach cleanup',
+  );
+  expect((heard[0] as Error).cause).toBe(cleanupFailure);
 });

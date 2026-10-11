@@ -133,31 +133,11 @@ export function describeContainer(
   }
 }
 
-/**
- * Write one entry into a container being rebuilt.
- *
- * Defined rather than assigned, and that is the whole reason this is a function: a plain
- * assignment to `__proto__` is a no-op for a string value and *reparents the object* for
- * an object one, so a payload carrying that key silently lost the entry or changed the
- * shape of the result. Five walks rebuild containers and all five need the same
- * incantation; written out five times, it is five chances to write `copy[key] = value`
- * instead.
- *
- * Writable and configurable so the rebuilt container behaves like the plain object or
- * array a caller expects to receive, rather than a frozen approximation of one.
- */
-export function defineEntry(
-  target: Record<string, unknown>,
-  key: string,
-  value: unknown,
-): void {
-  Object.defineProperty(target, key, {
-    value,
-    enumerable: true,
-    writable: true,
-    configurable: true,
-  });
-}
+// Re-exported for the container walks that already import it from here. It lives in a
+// module of its own so the HTTP client can share it without loading this module's import
+// of the redaction walkers.
+export { defineEntry } from './define-entry';
+
 /**
  * The largest value that is an array *index* rather than an ordinary named property.
  *

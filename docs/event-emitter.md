@@ -146,8 +146,11 @@ Gets the number of subscribers for an event.
 
 Removes event listeners.
 
-- With event name: removes all listeners for that event
-- Without event name: removes all listeners for all events
+- With event name: removes all listeners for that event only. Any value other than
+  `undefined` or `null` is treated as an event name, so `clear('')` removes only
+  listeners registered under `''`
+- Without event name (or with `undefined`, or `null` from JavaScript): removes all
+  listeners for all events
 
 ## Error Handling
 
@@ -173,7 +176,7 @@ emitter.on('test', async () => {
 }); // Promise rejection will be caught and reported on the 'error' channel
 ```
 
-The error messages include the event name and detailed error information, making debugging easier.
+The error messages include the event name and detailed error information, making debugging easier. Event names are typed `string`; any other `Map` key a JavaScript caller uses still dispatches, and is named in reports as `String()` renders it (a symbol as `Symbol(description)`), or as `<unnamed event>` when that throws.
 
 ### Overriding Where Handler Failures Go
 

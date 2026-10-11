@@ -320,6 +320,8 @@ const manager = new ProcessSignalManager({
 // Errors will now be reported with your custom names
 ```
 
+A name that is not a string (a symbol, an object, a number) is a `TypeError` from the constructor, so a bad name surfaces when the manager is created rather than when a signal arrives. `null` or `undefined` uses the default name.
+
 ### Reload-Only Manager
 
 For specialized use cases, you can create a manager that only handles reload:
@@ -448,40 +450,49 @@ Creates a new ProcessSignalManager instance.
 **Parameters:**
 
 - `options`: Configuration object with the following properties:
-  - `onShutdownRequested?`: `(method: ShutdownSignal) => void | Promise<void>` **(optional)**
+  - `onShutdownRequested?`: `((method: ShutdownSignal) => void | Promise<void>) | null` **(optional)**
     - Callback invoked when a shutdown signal is received
     - `method` will be one of: `'SIGINT'`, `'SIGTERM'`, or `'SIGTRAP'`
-  - `onReloadRequested?`: `() => void | Promise<unknown>` **(optional)**
+    - `null` means no handler; a value that is not a function throws a `TypeError` from the constructor
+  - `onReloadRequested?`: `(() => void | Promise<unknown>) | null` **(optional)**
     - Callback invoked when reload is requested
     - Triggered by: SIGHUP signal or R key press (case-insensitive)
-  - `onInfoRequested?`: `() => void | Promise<unknown>` **(optional)**
+    - `null` means no handler; a value that is not a function throws a `TypeError` from the constructor
+  - `onInfoRequested?`: `(() => void | Promise<unknown>) | null` **(optional)**
     - Callback invoked when info/stats are requested
     - Triggered by: SIGUSR1 signal or I key press (case-insensitive)
     - Common uses: Print stats, health checks, show metrics
-  - `onDebugRequested?`: `() => void | Promise<unknown>` **(optional)**
+    - `null` means no handler; a value that is not a function throws a `TypeError` from the constructor
+  - `onDebugRequested?`: `(() => void | Promise<unknown>) | null` **(optional)**
     - Callback invoked when debug mode toggle is requested
     - Triggered by: SIGUSR2 signal or D key press (case-insensitive)
     - Common uses: Toggle debug mode, dump full state, enable verbose logging
-  - `shutdownCallbackName?`: `string` **(optional)**
+    - `null` means no handler; a value that is not a function throws a `TypeError` from the constructor
+  - `shutdownCallbackName?`: `string | null` **(optional)**
     - Custom name for the shutdown callback used in error reporting
-    - Default: `'onShutdownRequested'`
-  - `reloadCallbackName?`: `string` **(optional)**
+    - Default: `'onShutdownRequested'` (also used for `null`)
+    - A value that is not a string throws a `TypeError` from the constructor
+  - `reloadCallbackName?`: `string | null` **(optional)**
     - Custom name for the reload callback used in error reporting
-    - Default: `'onReloadRequested'`
-  - `infoCallbackName?`: `string` **(optional)**
+    - Default: `'onReloadRequested'` (also used for `null`)
+    - A value that is not a string throws a `TypeError` from the constructor
+  - `infoCallbackName?`: `string | null` **(optional)**
     - Custom name for the info callback used in error reporting
-    - Default: `'onInfoRequested'`
-  - `debugCallbackName?`: `string` **(optional)**
+    - Default: `'onInfoRequested'` (also used for `null`)
+    - A value that is not a string throws a `TypeError` from the constructor
+  - `debugCallbackName?`: `string | null` **(optional)**
     - Custom name for the debug callback used in error reporting
-    - Default: `'onDebugRequested'`
-  - `keypressThrottleMS?`: `number` **(optional)**
+    - Default: `'onDebugRequested'` (also used for `null`)
+    - A value that is not a string throws a `TypeError` from the constructor
+  - `keypressThrottleMS?`: `number | null` **(optional)**
     - Throttle interval in milliseconds for keyboard events (uses leading-edge rate limiting)
     - Allows an action to trigger at most once per interval
     - First press fires immediately, subsequent presses within the window are ignored
     - Prevents accidental double-triggers while allowing predictable repeated actions
     - Only affects keyboard events, not process signals (signals are never throttled)
     - Set to `0` to disable throttling entirely
-    - Default: `200` (200ms, allowing 5 triggers per second maximum)
+    - Default: `200` (200ms, allowing 5 triggers per second maximum); `null` and `undefined` select this default
+    - Explicit `NaN`, non-number, or negative values throw; `Infinity` and oversized values cap the interval at 2,147,483,647ms (about 24.8 days per keyboard action). `Infinity` does not select the 200ms default; the first trigger still runs immediately.
 
 **Returns:** `ProcessSignalManager` instance
 
@@ -587,6 +598,17 @@ Attach signal handlers and start listening for process signals and keyboard even
 - Starts listening for Ctrl+C, Escape, R, I, and D key presses
 - Calling multiple times is safe (idempotent)
 
+If registration fails partway, `attach()` removes what it registered, restores the
+terminal, and throws the registration error. If restoring terminal mode fails during that
+cleanup, the failure is reported on the global `'error'` channel before the throw, so a
+caller that exits from its `catch` does not lose it. Any failure to remove a listener it
+had registered is reported on that channel in a microtask, after the throw has reached the
+caller.
+
+Failing to enable raw mode is a registration failure whether `setRawMode(true)` throws or,
+as Node and Bun do, emits the failure on stdin as `'error'` and leaves raw mode off; the
+emitted case throws `stdin raw mode was not enabled`.
+
 ### `detach(): void`
 
 Detach signal handlers and stop listening for process signals and keyboard events.
@@ -597,8 +619,34 @@ Detach signal handlers and stop listening for process signals and keyboard event
 - Calling multiple times is safe (idempotent)
 
 If restoring terminal mode fails, `detach()` still returns normally and reports the
-failure on the global `'error'` channel. The shared state remains marked so a future
-manager attachment can adopt ownership and retry restoration when it detaches.
+failure on the global `'error'` channel before it returns, so a caller that exits right
+after `detach()` does not lose it. A `setRawMode(false)` failure emitted on stdin as
+`'error'` rather than thrown, with raw mode left on, is reported the same way. The shared
+state remains marked so a future manager attachment can adopt ownership and retry
+restoration when it detaches.
+
+If removing a signal listener fails, `detach()` still removes the rest and restores the
+terminal, then throws the first removal failure; any further failures are reported on the
+`'error'` channel in a microtask, after that throw has reached the caller. A terminal-mode
+restore failure in the same `detach()` is still reported before the throw, so a caller
+that exits from its `catch` does not lose it.
+
+When `attach()` or `detach()` is called from a console shim while Lifecycleion is writing
+a terminal console report, listener-removal failures are reported before the throw
+instead of in a microtask: a report queued past that console write could start the shim
+again. Console output nested inside the shim is dropped, but `'error'` listeners still
+receive the report. Because that report comes first, an `'error'` listener that calls
+`attach()` from it can leave the manager attached behind the `attach()` or `detach()`
+call that then throws.
+
+Caller code can run inside `attach()` and `detach()`: a `process` `'newListener'` or
+`'removeListener'` listener, or a stdin `'error'` listener a failed `setRawMode()` is
+emitted to. A call on the same instance from there does not act inside the one in
+progress. The same call is a no-op; the opposite call - `detach()` inside `attach()`,
+`attach()` inside `detach()` - runs once the outer call returns, the latest request
+winning, and a failure in it is reported on the `'error'` channel rather than thrown.
+When the outer call throws instead, the request is dropped and `isAttached` reports the
+state the outer call left.
 
 ### Trigger Methods
 

@@ -1,4 +1,6 @@
-import { safeHandleCallback } from './safe-handle-callback';
+import { readMember } from './internal/read-member';
+import { isFunction } from './is-function';
+import { reportCallbackError, runCallbackSafely } from './safe-handle-callback';
 
 /**
  * Instead of using `SingleEventObserver`, you could extend `SingleEventObserverProtected`
@@ -17,14 +19,32 @@ export class SingleEventObserverProtected<T> {
    */
 
   private subscribers = new Set<(data: T) => void | Promise<void>>();
+  private readonly failureReporters = new WeakMap<
+    object,
+    (error: unknown) => void
+  >();
 
   /**
    * Subscribes a function to the observer.
    * @param fn The function to be subscribed.
+   * @throws {TypeError} When `fn` is not a function.
    */
 
   public subscribe(fn: (data: T) => void | Promise<void>): void {
+    if (!isFunction(fn)) {
+      throw new TypeError(
+        `SingleEventObserver subscriber must be a function, got: ${fn === null ? 'null' : typeof fn}`,
+      );
+    }
     this.subscribers.add(fn);
+    if (!this.failureReporters.has(fn)) {
+      this.failureReporters.set(fn, (error: unknown) => {
+        reportCallbackError(
+          `SingleEventObserver_${readSubscriberName(fn)}`,
+          error,
+        );
+      });
+    }
   }
 
   /**
@@ -53,14 +73,31 @@ export class SingleEventObserverProtected<T> {
    */
 
   protected notify(data: T): void {
-    for (const subscriber of this.subscribers) {
-      safeHandleCallback(
-        `SingleEventObserver_${(subscriber as EventListener).name || 'anonymous'}`,
+    // Snapshot at the start of this notification, as `EventEmitter.emit` does: a
+    // subscriber added (or removed and re-added) midway through runs from the next
+    // notification, not this one, so it cannot extend this pass - or loop it forever.
+    for (const subscriber of Array.from(this.subscribers)) {
+      // The report's name is read only once the subscriber has failed, so a notify that
+      // succeeds never reads `name` - which can be a getter - or builds a label for it.
+      // `subscribe` admits only functions, so the fixed name below is never reported.
+      runCallbackSafely(
+        'SingleEventObserver subscriber',
         subscriber,
-        data,
+        [data],
+        this.failureReporters.get(subscriber) as (error: unknown) => void,
       );
     }
   }
+}
+
+/**
+ * The subscriber's `name` for its report, or `'anonymous'`. Read on the failure path,
+ * where a throw would replace the report it was building: `name` is an ordinary
+ * property a getter (or a proxy) can throw from, or redefine as a symbol.
+ */
+function readSubscriberName(subscriber: object): string {
+  const name = readMember(subscriber, 'name');
+  return typeof name === 'string' && name !== '' ? name : 'anonymous';
 }
 
 /**

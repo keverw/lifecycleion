@@ -1,4 +1,11 @@
-import type { LogEntry } from '../../types';
+import type { LogEntry, LogSink } from '../../types';
+import { reportThroughHandler } from '../../../internal/failure-reporter';
+import {
+  isConsoleReportActive,
+  reportToConsole,
+} from '../../../internal/report-to-console';
+import { describeError } from '../../../to-error';
+import { reportSinkFailure } from '../../internal/sink-failure-routing';
 
 /**
  * What a sink reports when it cannot do its job, in one shape.
@@ -49,14 +56,17 @@ export type SinkFailureKind =
  * the failure - so a count here and the `onError` calls that reported it use one word.
  *
  * - `'queue_full'` - evicted at `maxQueueSize` to make room.
- * - `'write'` - out of retries against a destination that kept failing.
+ * - `'write'` - out of retries writing to a destination.
  * - `'format'` - could not be rendered, so there was never a line to write.
  * - `'close'` - refused or abandoned because `close()` had begun.
+ *
+ * A destination that cannot be opened loses no line by itself: lines wait in the queue
+ * until it opens, and an outage shows up as `'queue_full'` or `'close'`.
  */
 export type DroppedEntryKind = 'queue_full' | 'write' | 'format' | 'close';
 
 /**
- * How many lines were lost to each reason. The four always sum to `droppedEntries`; a
+ * How many lines were lost to each reason. The counts always sum to `droppedEntries`; a
  * total alone said *that* lines were lost and left "why" to whoever kept the `onError`
  * calls, which is not the shape an operator polling health is in.
  */
@@ -93,8 +103,9 @@ export interface SinkFailure {
    * The entry that failed, when the sink still has it.
    *
    * Absent for a failure that belongs to no particular entry - a failed rotation, a
-   * reconnect that never came back. A queue that overflowed carries the oldest entry it
-   * dropped as a sample, not every one it lost. Both `FileSink` and `NamedPipeSink` keep
+   * reconnect that never came back. An aggregate queue loss carries an ordinary entry
+   * when one was lost, otherwise the oldest diagnostic entry, as a sample rather than
+   * every lost line. Both `FileSink` and `NamedPipeSink` keep
    * the entry queued alongside its rendered line and hand it over here, so a handler can
    * write a lost line somewhere else.
    */
@@ -136,7 +147,11 @@ export interface SinkFailure {
  *
  * Never called for an ordinary success, and never called more than once for one failure -
  * including a failed write that a stream reports twice, once through the write callback
- * and again as an `'error'` event.
+ * and again as an `'error'` event. A line reported `'retrying'` keeps its place in the
+ * queue whatever this handler does: lines it logs through the same sink cannot push it
+ * out, and a `close()` it calls takes the line in its drain. Should the queue cap later
+ * drop that line, it is reported again, as `'queue_full'` / `'lost'` with its `entry` -
+ * the final word, so a fallback consumer told `'retrying'` learns that it did not arrive.
  *
  * May be `async`. A handler that throws *or rejects* is reported to the console rather
  * than being allowed to turn one failure into two - see `reportThroughHandler`. Declaring
@@ -148,7 +163,69 @@ export interface SinkFailure {
  * this sink is dropped: `Logger.close()` marks the logger closed first so shutdown cannot
  * re-enter logging, and a successful handler is not a diagnostic delivery failure, so
  * nothing falls through to `console.error`. Report those with `console.error` or a
- * destination that logger is not closing. With no handler, the sink already writes the
- * failure to guarded `console.error`.
+ * destination that logger is not closing. With no handler, the sink offers the
+ * failure to its owning loggers, then uses guarded `console.error` if unowned.
+ * Failures of diagnostic entries always use the terminal console path.
  */
 export type SinkErrorHandler = (failure: SinkFailure) => void | Promise<void>;
+
+/**
+ * Preserve explicit handlers, otherwise offer the failure to every owning logger.
+ *
+ * Answers whether the report went out: `false` when it was suppressed because a console
+ * report was in progress, the check `reportThroughHandler` makes.
+ */
+export function reportSinkError(
+  sink: LogSink,
+  failure: SinkFailure,
+  handler: SinkErrorHandler | undefined,
+  line: () => string,
+  options: { label: string; isDiagnostic?: boolean; onSettled?: () => void },
+): boolean {
+  const didReport = !isConsoleReportActive();
+
+  reportThroughHandler(
+    options.isDiagnostic === true
+      ? undefined
+      : handler === undefined
+        ? () => {
+            if (
+              !reportSinkFailure(sink, {
+                kind: 'sink',
+                error: failure.error,
+                context: failure.kind === 'close' ? 'close' : 'write',
+                message: describeRoutedFailure(options.label, failure),
+                terminalLine: line,
+              })
+            ) {
+              reportToConsole(line());
+            }
+          }
+        : () => handler(failure),
+    line,
+    { handlerName: `${options.label} onError`, onSettled: options.onSettled },
+  );
+
+  return didReport;
+}
+
+/**
+ * The routed diagnostic's `message`, which the owning logger's other sinks persist.
+ *
+ * Names the target and what became of the line, and for an I/O failure the error's own
+ * text - the sink's wording around a path and errno, which is what an operator acts on.
+ * A `'format'` failure's error comes from a caller's `formatter` or a value in the entry,
+ * so its text stays on `diagnostic.error`, as `LoggerDiagnostic.message` requires.
+ */
+function describeRoutedFailure(label: string, failure: SinkFailure): string {
+  const details = [
+    failure.disposition === 'no_entry' ? undefined : failure.disposition,
+    failure.attempt === undefined
+      ? undefined
+      : `attempt ${String(failure.attempt)}`,
+  ].filter((detail) => detail !== undefined);
+  const head = `${label} ${failure.kind} failed for ${failure.target}${details.length > 0 ? ` (${details.join(', ')})` : ''}`;
+  return failure.kind === 'format'
+    ? head
+    : `${head}: ${describeError(failure.error)}`;
+}

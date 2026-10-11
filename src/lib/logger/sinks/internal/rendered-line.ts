@@ -22,9 +22,8 @@ import { toError } from '../../../to-error';
  *
  * Shared because the invariant is one rule and the two sinks had it written out twice, in
  * prose that overlapped almost sentence for sentence. What they legitimately differ on stays
- * theirs: `FileSink` keeps the `LogEntry` and an attempt count, because its public `onError`
- * hands the entry back to the caller and it retries; `NamedPipeSink` deliberately drops the
- * entry so an outage does not pin the caller's params graph, and never retries at all.
+ * theirs: both sinks keep the `LogEntry` and an attempt count for retries and `onError`;
+ * their destination-specific write and reconnect behavior stays in each sink.
  */
 export interface RenderedLine {
   /** The line to write, or `undefined` when rendering it threw. */

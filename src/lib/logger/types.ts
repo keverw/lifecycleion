@@ -105,7 +105,17 @@ export interface LogEntry {
   redactedParams?: Record<string, unknown>; // Present when redaction is configured: { userID: 456, password: '***' }
   redactedKeys?: string[]; // List of keys that were redacted (e.g., ['password', 'user.apiKey'])
   error?: unknown; // Original error object from errorObject() calls
-  exitCode?: number; // Exit code if this log triggers a process exit
+  /**
+   * Exit code this log requested, normalized as `exit()` normalizes it: an invalid code
+   * for a real exit reads 1. This is the request, not the outcome. Overlapping exits,
+   * real or simulated, settle on one code while an exit is pending: the last non-zero
+   * request wins, a request with code 0 never downgrades a pending failure, and nothing
+   * changes the code once `exit-process` has fired. That holds for an absorbed request
+   * too (an `exit-called` listener's exit, or one `beforeExitCallback` answers
+   * `{ action: 'wait' }` for). Read `logger.exitCode` or the `exit-process` event for the
+   * code the exit uses.
+   */
+  exitCode?: number;
   tags?: string[]; // Optional tags for categorizing/filtering logs (e.g., ['auth', 'security'])
 }
 
@@ -120,7 +130,8 @@ export interface LogSink {
    * The logger calls this directly, outside its normal formatting and event path. A sink
    * that does not implement it receives an already-rendered diagnostic through `write()`
    * instead. A failure here falls straight to the guarded console rung; it never creates
-   * another diagnostic.
+   * another diagnostic. The sink that raised a diagnostic is excluded from its
+   * destinations, including when it appears in both sink lists.
    */
   writeDiagnostic?(diagnostic: LoggerDiagnostic): void | Promise<void>;
   close?(): void | Promise<void>;
@@ -138,9 +149,12 @@ export interface LoggerDiagnostic {
    * Guardedly rendered text suitable for the fallback `LogEntry`.
    *
    * Safe to persist. With no `diagnosticSinks` configured this string is written to the
-   * ordinary log sinks, so it names *what* failed and *where* but never interpolates the
-   * thrown value: a `redaction` failure's cause is derived from the secret being masked,
-   * and a message carrying it would route around the masking on the line above it.
+   * ordinary log sinks, so it names *what* failed and *where* but never interpolates a
+   * thrown value derived from logged content: a `redaction` failure's cause is derived
+   * from the secret being masked, and a message carrying it would route around the
+   * masking on the line above it. A sink's I/O failure - a `FileSink` or `NamedPipeSink`
+   * with no `onError` - does carry its error text (path, errno), its target, and what
+   * became of the line; a `'format'` failure's does not.
    *
    * Read {@link LoggerDiagnostic.error} for the cause. It is handed to every
    * `'diagnostic'` listener and every sink implementing `writeDiagnostic`, which is where
@@ -148,6 +162,7 @@ export interface LoggerDiagnostic {
    */
   message: string;
   context?: 'write' | 'close';
+  /** Source of a sink failure, excluded from that diagnostic's destinations. */
   sink?: LogSink;
   event?: string;
   path?: string;
@@ -160,7 +175,9 @@ export interface BeforeExitResult {
   /**
    * Whether to proceed with the exit
    * - 'proceed': Continue with process exit
-   * - 'wait': Shutdown is already in progress, wait for it to complete
+   * - 'wait': Shutdown is already in progress, wait for it to complete. The request's
+   *   code still counts: a non-zero code replaces the pending exit's code until that
+   *   exit publishes `exit-process`.
    */
   action: 'proceed' | 'wait';
 }
@@ -215,6 +232,17 @@ export interface LoggerOptions {
 
   // Behavior
   callProcessExit?: boolean;
+  /**
+   * Maximum time `close()` waits for all owned sinks together, in milliseconds.
+   * Defaults to 60,000. Zero waits through the current microtasks only; Infinity
+   * and larger values are bounded by the longest usable timer delay. Invalid
+   * values throw during construction: TypeError for NaN/non-numbers, RangeError
+   * for negatives. Null or undefined uses the default. A deadline reports
+   * still-pending sink cleanup as unconfirmed and lets the logger finish closing.
+   * This cap overrides longer sink close budgets; exit() may then terminate with
+   * buffered output unflushed. Raise this budget too when a sink needs more time.
+   */
+  closeTimeoutMS?: number | null;
   beforeExitCallback?: (
     exitCode: number,
     isFirstExit: boolean,
@@ -239,6 +267,17 @@ export interface LoggerEventMap {
   'exit-process': {
     eventType: 'exit-process';
     code: number;
+  };
+  'exit-completed': {
+    eventType: 'exit-completed';
+    code: number;
+    /**
+     * `true` when `process.exit(code)` is about to be called, right after this event's
+     * listeners return - unless one of them removes `process.exit`, which skips the call
+     * (reported to the console) and leaves the process running. `false` for a simulated
+     * exit, or a real one that found `process.exit` gone before this event.
+     */
+    endedProcess: boolean;
   };
   uncaughtException: {
     eventType: 'uncaughtException';
