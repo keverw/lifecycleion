@@ -204,6 +204,52 @@ test('a real exit that finds process.exit gone emits exit-completed with endedPr
   }
 });
 
+test('an exit-completed listener that removes process.exit stops the call it was told was scheduled', async () => {
+  // `endedProcess: true` says a real process.exit() was scheduled when the event fired.
+  // The call is re-checked after the listeners, and a skip is reported rather than
+  // thrown or passed over in silence.
+  const actualExit = Object.getOwnPropertyDescriptor(process, 'exit');
+  const calls: number[] = [];
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  process.exit = ((code?: number) => {
+    calls.push(code ?? 0);
+  }) as typeof process.exit;
+
+  try {
+    const logger = new Logger({ sinks: [], callProcessExit: true });
+    const events = recordExitEvents(logger);
+    logger.on<ExitEvent>('logger', ({ eventType }) => {
+      if (eventType === 'exit-completed') {
+        (process as { exit?: unknown }).exit = undefined;
+      }
+    });
+
+    logger.exit(6);
+    await waitFor(() => completions(events).length > 0);
+    await Promise.resolve();
+
+    expect(completions(events)).toEqual([{ code: 6, endedProcess: true }]);
+    expect(calls).toEqual([]);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger process exit skipped: process.exit is no longer callable',
+    ]);
+    // Ended as a simulated exit does: the next request starts the next exit.
+    expect(logger.isFinishingExit).toBe(false);
+    logger.exit(2);
+    await waitFor(() => completions(events).length > 1);
+    expect(completions(events)).toEqual([
+      { code: 6, endedProcess: true },
+      { code: 2, endedProcess: false },
+    ]);
+    expect(logger.exitCode).toBe(2);
+  } finally {
+    if (actualExit) {
+      Object.defineProperty(process, 'exit', actualExit);
+    }
+    output.mockRestore();
+  }
+});
+
 test('exit-completed fires when sink cleanup fails', async () => {
   const output = spyOn(console, 'error').mockImplementation(() => {});
   const logger = new Logger({ sinks: [], callProcessExit: false });
