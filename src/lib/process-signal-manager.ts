@@ -1234,10 +1234,9 @@ export class ProcessSignalManager {
           shared.rawModeOwner = this.instanceID;
         }
         // rawModeEnabledByManager stays true so future instances can adopt and retry.
-        // Terminal will be restored on process exit anyway.
 
         // Reported for the reason `restoreStdin`'s twin is: a terminal left in raw mode is
-        // the user's shell broken, and this said nothing about it.
+        // the user's shell broken, in a long-lived process as much as at exit.
         //
         // Held for `attach()`'s catch, not reported here: this runs inside a failing
         // `attach()`, and a listener that attaches from the report must not have that

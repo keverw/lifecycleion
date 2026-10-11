@@ -1106,13 +1106,13 @@ logger.error('Fatal error', { exitCode: 1 });
 ```
 
 If `logger.exit()` is called while LifecycleManager shutdown is already in
-progress, it does not exit immediately. The first such exit request's `beforeExitCallback`
+progress, it does not exit immediately. Only the logger's first exit request
+(`isFirstExit`) is deferred: if it arrives during a shutdown, its `beforeExitCallback`
 stays pending and answers `{ action: 'proceed' }` once that shutdown finishes (or reaches
-its global timeout), so that request is the one that exits.
-Later duplicate exit calls during that same shutdown return `{ action: 'wait' }`, so
-they run no second shutdown, but their codes still count: a failure replaces the pending
-exit code (last non-zero wins), and a success never downgrades a pending failure. See
-[Exit Behavior](#exit-behavior).
+its global timeout), so that request is the one that exits. Every other exit call during a
+shutdown returns `{ action: 'wait' }`, so it runs no second shutdown, but its code still
+counts: a failure replaces the pending exit code (last non-zero wins), and a success never
+downgrades a pending failure. See [Exit Behavior](#exit-behavior).
 
 **Manual Integration:** For custom exit logic or when not using LifecycleManager, use `setBeforeExitCallback()` directly:
 
@@ -1641,14 +1641,18 @@ the entries it abandons says why it gave up, in both sinks:
   `the log file could not be opened`) when none was in hand at any point of the close, or
   `... the pipe was lost and could not be reopened, ...` (`the log file was lost ...`) when
   one was and went away.
-- Failing writes: the destination reopened, but writes to it kept failing and taking the
-  connection with them - a full disk, say: `... writes to the pipe kept failing, ...`
-  (`writes to the log file kept failing`).
+- Failing writes: the destination reopened after a failed write, and a write on the new
+  connection failed and took it away again - a full disk, say: `... writes to the pipe kept
+failing, ...` (`writes to the log file kept failing`). A single failed write with no
+  reopen since counts as a lost destination.
 
 `error.cause` is the failure behind the reason: the latest write failure for failing
-writes, and for a timeout while writes are failing; otherwise the failure the latest open
-attempt reported. An attempt that failed without reporting anything - a pipe with no
-reader - leaves no cause, rather than an older failure that no longer applies.
+writes, and for a timeout while writes to the latest connection are failing; the failure
+the latest open attempt reported for a destination never in hand; and for one that was
+lost, that open failure or, with none, the write failure that took it away. A failure on a
+connection since replaced is never the cause. An attempt that failed without reporting
+anything - a pipe with no reader - leaves no cause, rather than an older failure that no
+longer applies.
 
 `NamedPipeSink.reconnect()` reconnects on demand. Because the sink
 also reopens on its own, a `reconnect()` that races one of those automatic attempts answers

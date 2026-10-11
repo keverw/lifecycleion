@@ -878,6 +878,63 @@ describe('DeliveryEngine', () => {
     );
   });
 
+  test.each([5, 140, 195])(
+    'one write failure with no reopen since is a lost connection, not failing writes (at %p ms)',
+    async (failAtMS) => {
+      const destination = new FakeDestination();
+      const { engine, reports, write } = await started(
+        makeEngine({ destination, closeTimeoutMS: 200 }),
+      );
+
+      // The first connection opened; every reopen finds nothing, quietly.
+      destination.defaultOpen = { status: 'unavailable' };
+      destination.canContinue = false;
+      write('a');
+      write('b');
+
+      const closing = engine.close();
+
+      // Wherever the one failure lands - early, or in the last moments of the budget
+      // with no time left to reopen - the destination never reopened after it.
+      setTimeout(() => {
+        destination.isOpen = false;
+        destination.fail(new Error('EPIPE'));
+      }, failAtMS);
+      await closing;
+
+      const abandoned = reports.find((failure) => failure.kind === 'close');
+
+      expect(abandoned?.error.message).toBe('abandoned 2 connection_lost');
+      expect((abandoned?.error.cause as Error | undefined)?.message).toBe(
+        'EPIPE',
+      );
+    },
+  );
+
+  test('a write failure on a connection since replaced is not the cause of a later timeout', async () => {
+    const destination = new FakeDestination();
+    const { engine, reports, write } = await started(
+      makeEngine({ destination, closeTimeoutMS: 50 }),
+    );
+
+    // The first connection loses a line and goes away; the reopen succeeds at once.
+    write('x');
+    destination.isOpen = false;
+    destination.fail(new Error('EPIPE (old reader)'), false);
+    await until(() => destination.isOpen);
+
+    // The new connection stalls, with nothing failing on it.
+    destination.canContinue = false;
+    write('a');
+    write('b');
+    await engine.close();
+
+    const abandoned = reports.find((failure) => failure.kind === 'close');
+
+    expect(abandoned?.error.message).toBe('abandoned 1');
+    expect(abandoned?.error.cause).toBeUndefined();
+  });
+
   test('an open still pending when the grace window ends does not blame the budget', async () => {
     const destination = new FakeDestination();
     const harness = makeEngine({ destination, closeTimeoutMS: 30_000 });

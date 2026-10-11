@@ -280,9 +280,10 @@ export type DeliveryReporter = (
  *   this close, and its latest attempt to open one failed, or was still pending when the
  *   reopen grace window ran out.
  * - `'connection_lost'` - the same, for a destination that was in hand during this close
- *   and went away.
- * - `'write_failed'` - the destination kept opening, but writes to it kept failing: the
- *   latest open succeeded, and a failed write took that connection away again.
+ *   and went away - including one a single failed write took away, with no reopen since.
+ * - `'write_failed'` - the destination kept opening, but writes to it kept failing: it
+ *   reopened after a failed write, and a write on the new connection failed and took it
+ *   away again.
  */
 export type CloseAbandonReason =
   'timeout' | 'never_opened' | 'connection_lost' | 'write_failed';
@@ -311,8 +312,10 @@ export interface DeliveryMessages {
   /**
    * Lines still queued when `close()` gave up on them, and why. The report carries as its
    * `cause` the failure behind that reason, when there is one: the latest write failure
-   * for `'write_failed'` - or for `'timeout'`, while writes are failing - and otherwise
-   * the failure the latest open attempt reported.
+   * for `'write_failed'`, and for `'timeout'` while writes to the latest connection are
+   * failing; the failure the latest open attempt reported for `'never_opened'`; and for
+   * `'connection_lost'` that open failure or, with none, the write failure that took the
+   * connection away.
    */
   abandoned(count: number, reason: CloseAbandonReason): string;
   refusedAfterClose(): string;
@@ -615,11 +618,17 @@ export class DeliveryEngine {
   /** Whether the latest open attempt to settle succeeded. */
   private didLastOpenSucceed = false;
   /**
-   * The latest write failure on the connection in hand, cleared by a write that succeeds:
-   * while it is set, writes are failing - a full disk, say - and a close that abandons
-   * lines says so through it.
+   * The latest write failure on the latest connection, cleared by a write that succeeds and
+   * by the next successful open: while it is set, writes to that connection are failing - a
+   * full disk, say - and a close that abandons lines says so through it.
    */
   private latestWriteFailure?: Error;
+  /**
+   * Whether the latest connection replaced one whose writes were failing. With
+   * {@link latestWriteFailure} set too, the destination reopened and its writes failed
+   * again: failing writes, rather than one failure that took a connection away.
+   */
+  private didReopenAfterWriteFailure = false;
   private consecutiveFailures = 0;
   private totalWritten = 0;
 
@@ -1760,6 +1769,9 @@ export class DeliveryEngine {
       this.outages.clear();
       this.lastOpenFailure = undefined;
       this.didLastOpenSucceed = true;
+      // A failure on the connection this one replaces says nothing about this one.
+      this.didReopenAfterWriteFailure = this.latestWriteFailure !== undefined;
+      this.latestWriteFailure = undefined;
       this.outageRouting = undefined;
       this.pump();
 
@@ -2082,9 +2094,10 @@ export class DeliveryEngine {
 
     // Read before the adapter hears the close: why what is left is being abandoned, and the
     // failure behind it. Out of budget with the destination in hand or an open pending is
-    // a timeout. Otherwise the grace window ran out first: with the latest open failed or
-    // still pending, for want of a destination; with it succeeded, the connection it made
-    // was lost again, and if writes are failing that is what the report says.
+    // a timeout. Otherwise the grace window ran out first, for want of a destination -
+    // unless the destination reopened after a write failure and its writes failed again,
+    // which is failing writes. One failure that took the connection away, with no reopen
+    // since, is a lost connection, with that failure as the cause when no open said more.
     const isOpenPending = this.state === 'opening';
     const isOutOfBudget = Date.now() - startTime >= timeoutMS;
     let abandon: { reason: CloseAbandonReason; cause?: Error };
@@ -2099,14 +2112,17 @@ export class DeliveryEngine {
     } else if (
       !isOpenPending &&
       this.didLastOpenSucceed &&
+      this.didReopenAfterWriteFailure &&
       this.latestWriteFailure !== undefined
     ) {
       abandon = { reason: 'write_failed', cause: this.latestWriteFailure };
-    } else {
+    } else if (didHoldConnection) {
       abandon = {
-        reason: didHoldConnection ? 'connection_lost' : 'never_opened',
-        cause: this.lastOpenFailure,
+        reason: 'connection_lost',
+        cause: this.lastOpenFailure ?? this.latestWriteFailure,
       };
+    } else {
+      abandon = { reason: 'never_opened', cause: this.lastOpenFailure };
     }
 
     // Closed is not healthy, and not connected either.
