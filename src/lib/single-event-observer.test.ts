@@ -1,3 +1,4 @@
+import { reportCallbackError } from './safe-handle-callback';
 import {
   SingleEventObserver,
   SingleEventObserverProtected,
@@ -174,4 +175,222 @@ describe('SingleEventObserverProtected', () => {
 
     expect(() => counter.emit(1)).not.toThrow();
   });
+});
+
+describe('subscriber changes during a notification', () => {
+  test('a subscriber added during notify runs from the next notification', () => {
+    const observer = new SingleEventObserver<number>();
+    const seen: string[] = [];
+    const late = (value: number): void => {
+      seen.push(`late ${value}`);
+    };
+
+    observer.subscribe((value) => {
+      seen.push(`first ${value}`);
+      observer.subscribe(late);
+    });
+
+    observer.notify(1);
+    expect(seen).toEqual(['first 1']);
+
+    observer.notify(2);
+    expect(seen).toEqual(['first 1', 'first 2', 'late 2']);
+  });
+
+  test('a subscriber that re-subscribes itself runs once per notification', () => {
+    // Re-adding moves it to the end of the live set, so iterating that set reached it
+    // again on every pass and never finished.
+    const observer = new SingleEventObserver<number>();
+    let calls = 0;
+    const resubscriber = (): void => {
+      calls++;
+      if (calls > 10) {
+        throw new Error('looped');
+      }
+      observer.unsubscribe(resubscriber);
+      observer.subscribe(resubscriber);
+    };
+
+    observer.subscribe(resubscriber);
+    observer.notify(1);
+    expect(calls).toBe(1);
+
+    observer.notify(2);
+    expect(calls).toBe(2);
+    expect(observer.hasSubscriber(resubscriber)).toBe(true);
+  });
+
+  test('a subscriber removed during notify still runs in that notification', () => {
+    const observer = new SingleEventObserver<number>();
+    const seen: string[] = [];
+    const second = (value: number): void => {
+      seen.push(`second ${value}`);
+    };
+
+    observer.subscribe((value) => {
+      seen.push(`first ${value}`);
+      observer.unsubscribe(second);
+    });
+    observer.subscribe(second);
+
+    observer.notify(1);
+    observer.notify(2);
+    expect(seen).toEqual(['first 1', 'second 1', 'first 2']);
+  });
+});
+
+describe('subscriber names and values', () => {
+  let reports: Error[] = [];
+  const onError = (event: Event): void => {
+    reports.push((event as ErrorEvent).error as Error);
+    event.preventDefault();
+  };
+
+  beforeEach(() => {
+    reports = [];
+    globalThis.addEventListener('error', onError);
+  });
+
+  afterEach(() => {
+    globalThis.removeEventListener('error', onError);
+  });
+
+  // The report's callback name is read from the subscriber's `name`, which is an
+  // ordinary property: a getter can throw, and a value can be a symbol. Either threw out
+  // of `notify` and skipped every subscriber after it.
+  const NAMES: [string, PropertyDescriptor, string][] = [
+    [
+      'a name getter that throws',
+      {
+        get: () => {
+          throw new Error('name getter failed');
+        },
+      },
+      'SingleEventObserver_anonymous',
+    ],
+    [
+      'a symbol name',
+      { value: Symbol('named') },
+      'SingleEventObserver_anonymous',
+    ],
+    ['an ordinary name', { value: 'named' }, 'SingleEventObserver_named'],
+  ];
+
+  for (const [kind, descriptor, callbackName] of NAMES) {
+    test(`a subscriber with ${kind} is notified, and so are the rest`, () => {
+      const observer = new SingleEventObserver<number>();
+      const seen: string[] = [];
+      const thrown = new Error('subscriber failed');
+      const odd = (value: number): void => {
+        seen.push(`odd ${value}`);
+        throw thrown;
+      };
+      Object.defineProperty(odd, 'name', {
+        configurable: true,
+        ...descriptor,
+      });
+
+      observer.subscribe(odd);
+      observer.subscribe((value) => {
+        seen.push(`next ${value}`);
+      });
+
+      expect(() => observer.notify(1)).not.toThrow();
+      expect(seen).toEqual(['odd 1', 'next 1']);
+      expect(reports.map((report) => report.message)).toEqual([
+        `Error in a callback ${callbackName}`,
+      ]);
+      expect(reports[0].cause).toBe(thrown);
+    });
+  }
+
+  test("a subscriber's name is read only when it fails", () => {
+    const observer = new SingleEventObserver<number>();
+    let nameReads = 0;
+    const subscriber = (): void => {};
+    Object.defineProperty(subscriber, 'name', {
+      configurable: true,
+      get: () => {
+        nameReads++;
+        return 'counted';
+      },
+    });
+
+    observer.subscribe(subscriber);
+    observer.notify(1);
+    observer.notify(2);
+    expect(nameReads).toBe(0);
+    expect(reports).toEqual([]);
+  });
+
+  test('a function proxy whose name read throws is still notified', () => {
+    const observer = new SingleEventObserver<number>();
+    const seen: number[] = [];
+    const subscriber = new Proxy(
+      (value: number): void => {
+        seen.push(value);
+      },
+      {
+        get: () => {
+          throw new Error('proxy get failed');
+        },
+      },
+    );
+
+    observer.subscribe(subscriber);
+    observer.subscribe((value) => {
+      seen.push(value * 10);
+    });
+
+    expect(() => observer.notify(2)).not.toThrow();
+    expect(seen).toEqual([2, 20]);
+    expect(reports).toEqual([]);
+  });
+
+  test.each([
+    ['null', null],
+    ['undefined', undefined],
+    ['a string', 'subscriber'],
+    ['an object', { handleEvent: () => {} }],
+  ])('subscribing %s is a TypeError', (_kind, value) => {
+    const observer = new SingleEventObserver<number>();
+    expect(() =>
+      observer.subscribe(value as unknown as (data: number) => void),
+    ).toThrow(TypeError);
+    expect(
+      observer.hasSubscriber(value as unknown as (data: number) => void),
+    ).toBe(false);
+  });
+});
+
+test('async subscribers entered by console forwarding do not restart diagnostics', async () => {
+  const observer = new SingleEventObserver<string>();
+  let calls = 0;
+  let consoleCalls = 0;
+  observer.subscribe(async () => {
+    calls++;
+    await Promise.resolve();
+    throw new Error('observer forwarding failed');
+  });
+  const originalConsole = console.error;
+  console.error = (): void => {
+    if (++consoleCalls <= 10) {
+      observer.notify('forward');
+    }
+  };
+  try {
+    reportCallbackError('original failure', new Error('initial'));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(consoleCalls).toBe(1);
+    expect(calls).toBe(1);
+    console.error = (): void => {
+      consoleCalls++;
+    };
+    observer.notify('independent failure');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(consoleCalls).toBe(2);
+    expect(calls).toBe(2);
+  } finally {
+    console.error = originalConsole;
+  }
 });

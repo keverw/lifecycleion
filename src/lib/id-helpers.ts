@@ -7,6 +7,7 @@ import {
 } from 'uuid';
 import { ulid } from 'ulid';
 import { convertMSToUnix } from './unix-time-helpers';
+import { renderName } from './internal/render-name';
 
 /**
  * Supported identifier types:
@@ -45,7 +46,7 @@ export const IDENTIFIER_TYPES = ['objectID', 'uuid4', 'uuid7', 'ulid'] as const;
 function assertIdentifierType(type: unknown): asserts type is IdentifierType {
   if (!IDENTIFIER_TYPES.includes(type as IdentifierType)) {
     throw new TypeError(
-      `Invalid ID type given: "${type as string}". Expected one of: ${IDENTIFIER_TYPES.join(', ')}`,
+      `Invalid ID type given: "${renderName(type, '<unrenderable value>')}". Expected one of: ${IDENTIFIER_TYPES.join(', ')}`,
     );
   }
 }
@@ -84,7 +85,7 @@ export function generateID(type: IdentifierType, seedTime?: number): string {
 
   if (seedTime !== undefined && (!Number.isFinite(seedTime) || seedTime < 0)) {
     throw new TypeError(
-      `seedTime must be a non-negative finite number (milliseconds), got: ${seedTime}`,
+      `seedTime must be a non-negative finite number (milliseconds), got: ${renderName(seedTime, '<unrenderable value>')}`,
     );
   }
 

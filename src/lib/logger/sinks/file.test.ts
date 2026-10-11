@@ -12,11 +12,20 @@ import { FileSink } from './file';
 import type { SinkFailure, SinkFailureKind } from './internal/sink-failure';
 import type { LogEntry } from '../types';
 import { LogLevel } from '../types';
+import { markDiagnosticEntry } from '../internal/sink-failure-routing';
 import { TmpDir } from '../../tmp-dir';
 import {
   muteConsoleError,
   restoreConsoleError,
 } from '../../internal/console-test-utils';
+import { reportToConsole } from '../../internal/report-to-console';
+import { setOpenRetryBackoffForTesting } from './internal/reopen-backoff';
+
+/**
+ * Open retries spaced in milliseconds rather than seconds, for tests that hold lines
+ * through an outage and wait for the sink to recover on its own.
+ */
+const FAST_OPEN_RETRY = { initialMS: 20, maxMS: 50 };
 
 /**
  * A message the JSON envelope cannot serialize: `JSON.stringify` calls `toJSON` and it
@@ -55,6 +64,44 @@ describe('FileSink', () => {
     (Date.prototype as any).toISOString = originalToISOString;
 
     await tmpDir.cleanup();
+  });
+
+  test('an initialization that rejects is reported, and flush and close still settle', async () => {
+    // The open is built never to reject, but `close()` and `flush()` wait on it, so they
+    // must not depend on that staying true: one rejection and `close()` rejected too, with
+    // the constructor's promise unhandled until something awaited it.
+    const initialize = spyOn(
+      FileSink.prototype as unknown as { openFile: () => Promise<unknown> },
+      'openFile',
+    ).mockImplementation(() => Promise.reject(new Error('init exploded')));
+    const captured = muteConsoleError();
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+    process.on('unhandledRejection', onUnhandled);
+
+    try {
+      const sink = new FileSink({
+        logDir: tmpDir.path,
+        basename: 'init-rejects',
+      });
+
+      expect((await sink.flush(50)).timedOut).toBe(false);
+      await sink.close();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(unhandled).toEqual([]);
+      expect(captured).toHaveLength(1);
+      expect(captured[0]).toContain(
+        'FileSink initialization failed unexpectedly',
+      );
+      expect(captured[0]).toContain('init exploded');
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+      restoreConsoleError();
+      initialize.mockRestore();
+    }
   });
 
   test('should create log directory if it does not exist', async () => {
@@ -490,33 +537,48 @@ describe('FileSink', () => {
 
     expect(failures.length).toBeGreaterThanOrEqual(1);
     expect(failures[0]?.kind).toBe('setup');
-    // Nothing is lost here: the queue still holds every entry and a later write tries the
-    // setup again, so a fallback consumer must not write a duplicate copy.
-    expect(failures[0]?.disposition).toBe('retrying');
+    // Nothing is lost here and no line is at stake: the queue still holds every entry and
+    // a later write tries the setup again, so a fallback consumer has nothing to write.
+    expect(failures[0]?.disposition).toBe('no_entry');
+    expect(Object.hasOwn(failures[0] ?? {}, 'entry')).toBe(false);
     expect(sink.getHealth().lastError).toBeDefined();
 
     await sink.close();
     await fsPromises.rm(blocked, { force: true });
   });
 
-  test('reports itself initialized once a lazy setup succeeds', async () => {
-    // `isInitialized` was set only by `initialize()`, which runs once from the constructor
-    // and swallows what it catches. A sink whose directory was not there yet recovers in
-    // `writeEntry` and writes every line from then on, while `getHealth()` went on
-    // answering `{ isHealthy: false, isInitialized: false }` forever.
+  test('reports itself initialized once a later open succeeds', async () => {
+    // A sink whose directory is not there yet - a volume that mounts late - keeps trying
+    // on its own timer and writes every line once the file opens, and `getHealth()` says
+    // so rather than answering `{ isHealthy: false, isInitialized: false }` forever.
     const blocked = `${tmpDir.path}/not-a-directory`;
 
     await fsPromises.writeFile(blocked, 'in the way');
 
-    const sink = new FileSink({
-      logDir: `${blocked}/logs`,
-      basename: 'lazy-test',
-      maxSizeMB: 1,
-      jsonFormat: false,
-    });
+    // No `onError`, so the failed setup falls through to the console rung - once, however
+    // many attempts the outage takes.
+    const captured = muteConsoleError();
+    let sink: FileSink;
 
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    setOpenRetryBackoffForTesting(FAST_OPEN_RETRY);
 
+    try {
+      sink = new FileSink({
+        logDir: `${blocked}/logs`,
+        basename: 'lazy-test',
+        maxSizeMB: 1,
+        jsonFormat: false,
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } finally {
+      setOpenRetryBackoffForTesting(undefined);
+      restoreConsoleError();
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('Failed to setup log file');
+    expect(captured[0]).toContain('ENOTDIR');
     expect(sink.getHealth().isInitialized).toBe(false);
 
     // The obstruction goes away, exactly as a volume that mounts late would.
@@ -555,25 +617,34 @@ describe('FileSink', () => {
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     const privateSink = sink as unknown as {
-      destroyStream: () => void;
-      setupLogFile: () => Promise<void>;
+      writeEntry: () => Promise<void>;
     };
 
-    privateSink.destroyStream();
-    privateSink.setupLogFile = mock(() => {
-      throw new Error('Failed to setup log file');
-    });
+    privateSink.writeEntry = mock(() =>
+      Promise.reject(new Error('Failed to write log file')),
+    );
 
-    sink.write({
-      timestamp: Date.now(),
-      type: 'info',
-      serviceName: 'FlushCountTest',
-      template: 'never lands',
-      message: 'never lands',
-    });
+    // No `onError`, so the line lost to exhausted retries is reported on the console.
+    const captured = muteConsoleError();
+    let result: Awaited<ReturnType<FileSink['flush']>>;
 
-    const result = await sink.flush();
+    try {
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        serviceName: 'FlushCountTest',
+        template: 'never lands',
+        message: 'never lands',
+      });
 
+      result = await sink.flush();
+    } finally {
+      restoreConsoleError();
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('FileSink error writing to');
+    expect(captured[0]).toContain('Failed to write log file');
     expect(result.entriesFailed).toBe(1);
     expect(result.success).toBe(false);
     expect(sink.getHealth().droppedEntries).toBe(1);
@@ -608,21 +679,32 @@ describe('FileSink', () => {
     // Get access to private properties for testing (using type assertion to access private fields)
     const privateSink = sink as any;
 
-    // Simulate an error on the stream
-    if (privateSink.logFileStream) {
-      privateSink.logFileStream.emit(
-        'error',
-        new Error('Simulated stream error'),
-      );
+    // Simulate an error on the stream. No `onError`, so it is reported on the console.
+    const captured = muteConsoleError();
+    const stream = privateSink.logFileStream;
+
+    try {
+      if (privateSink.logFileStream) {
+        privateSink.logFileStream.emit(
+          'error',
+          new Error('Simulated stream error'),
+        );
+      }
+
+      // Give time for error to be processed
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } finally {
+      restoreConsoleError();
     }
 
-    // Give time for error to be processed
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('error-test');
 
-    // The stream should have been destroyed
-    expect(privateSink.logFileStream).toBeUndefined();
+    // The failed stream was torn down, and the sink reopened the file on its own
+    expect(stream.destroyed).toBe(true);
+    expect(privateSink.logFileStream).not.toBe(stream);
 
-    // Now write again - it should recover by creating a new stream
+    // Now write again - it goes out on the reopened stream
     const entry2: LogEntry = {
       timestamp: Date.now(),
       type: 'info',
@@ -633,14 +715,11 @@ describe('FileSink', () => {
 
     sink.write(entry2);
 
-    // Flush to ensure recovery - this will trigger stream recreation during writeEntry
+    // Flush to ensure the write completes on the reopened stream
     const result2 = await sink.flush();
 
-    // After successful flush, stream should exist (created during writeEntry)
-    // Note: Stream is created lazily during writeEntry, so it will exist after flush succeeds
-    if (result2.success) {
-      expect(privateSink.logFileStream).not.toBeUndefined();
-    }
+    expect(result2.success).toBe(true);
+    expect(privateSink.logFileStream).not.toBeUndefined();
 
     // Get current date in UTC format for filename check
     const currentDate = new Date().toISOString().slice(0, 10);
@@ -683,6 +762,7 @@ describe('FileSink', () => {
     const health = sink.getHealth();
     expect(health.isHealthy).toBe(true);
     expect(health.isInitialized).toBe(true);
+    expect(health.isReconnecting).toBe(false);
     expect(health.consecutiveFailures).toBe(0);
     expect(health.queueSize).toBe(0);
 
@@ -745,13 +825,11 @@ describe('FileSink', () => {
     // Get access to private properties
     const privateSink = sink as any;
 
-    // Destroy the stream to cause write failures
-    privateSink.destroyStream();
-
-    // Make sure it stays destroyed by preventing recreation
-    privateSink.setupLogFile = mock(() => {
-      throw new Error('Failed to setup log file');
-    });
+    // Fail writes on the initialized destination. A failed setup belongs to the
+    // separate initialization flag and must not increment consecutiveFailures.
+    privateSink.writeEntry = mock(() =>
+      Promise.reject(new Error('Failed to write to log file')),
+    );
 
     // Write an entry - it should fail and retry
     const entry: LogEntry = {
@@ -818,7 +896,7 @@ describe('FileSink', () => {
         throw new Error('transient write failure');
       }
 
-      return realWriteEntry(entry);
+      return await realWriteEntry(entry);
     };
 
     sink.write(entryFor('first'));
@@ -926,11 +1004,21 @@ describe('FileSink', () => {
       message: 'Should not be written',
     };
 
-    // Writing after close should not throw, but should be ignored
-    sink.write(entry);
+    // Writing after close should not throw, but should be ignored - and, with no
+    // `onError`, reported once on the console.
+    const captured = muteConsoleError();
 
-    // Wait a bit
-    await new Promise((resolve) => setTimeout(resolve, 100));
+    try {
+      sink.write(entry);
+
+      // Wait a bit
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    } finally {
+      restoreConsoleError();
+    }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('Entry logged after close() began');
 
     const currentDate = new Date().toISOString().slice(0, 10);
     const logFilePath = `${tmpDir.path}/closed-test-${currentDate}.log`;
@@ -1121,7 +1209,7 @@ describe('FileSink', () => {
     await sink.close();
   });
 
-  test('should get current minLevel', () => {
+  test('should get current minLevel', async () => {
     const sink = new FileSink({
       logDir: tmpDir.path,
       basename: 'get-level',
@@ -1134,9 +1222,12 @@ describe('FileSink', () => {
 
     sink.setMinLevel(LogLevel.DEBUG);
     expect(sink.getMinLevel()).toBe(LogLevel.DEBUG);
+
+    // Closed so its setup does not outlive the temp dir and fail on the console later.
+    await sink.close();
   });
 
-  test('should default to INFO level', () => {
+  test('should default to INFO level', async () => {
     const sink = new FileSink({
       logDir: tmpDir.path,
       basename: 'default-level',
@@ -1145,6 +1236,9 @@ describe('FileSink', () => {
     });
 
     expect(sink.getMinLevel()).toBe(LogLevel.INFO);
+
+    // Closed so its setup does not outlive the temp dir and fail on the console later.
+    await sink.close();
   });
 
   test('does not re-render a queued entry whose first render failed', async () => {
@@ -1203,6 +1297,61 @@ describe('FileSink', () => {
     expect(failure.kind).toBe('format' satisfies SinkFailureKind);
   });
 
+  test('reports a render failure from write() instead of queueing it', async () => {
+    // Queued, an unrenderable entry took a slot from real work and was reported only when
+    // the drain reached it - so evicted at the cap first, it was counted as `'queue_full'`
+    // and the `'format'` report it was owed never fired.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'format-in-write',
+      jsonFormat: true,
+      maxQueueSize: 1,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    // Before the file is open, so nothing drains between these writes.
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'unrenderable',
+      message: UNRENDERABLE_MESSAGE,
+    });
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.kind).toBe('format' satisfies SinkFailureKind);
+    expect(failures[0]?.disposition).toBe('lost');
+    expect(failures[0]?.attempt).toBe(1);
+    expect(sink.getHealth().queueSize).toBe(0);
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'kept',
+      message: 'kept',
+    });
+
+    await sink.flush();
+    await sink.close();
+
+    expect(failures).toHaveLength(1);
+    expect(sink.getHealth().droppedByKind).toEqual({
+      queue_full: 0,
+      write: 0,
+      format: 1,
+      close: 0,
+    });
+
+    const content = await fsPromises.readFile(
+      `${tmpDir.path}/format-in-write-${new Date().toISOString().split('T')[0]}.log`,
+      'utf8',
+    );
+
+    expect(content).toContain('kept');
+  });
+
   test('an async onError that rejects is caught, not left unhandled', async () => {
     // A handler is free to be `async` - the named-pipe docs show one - and a rejected
     // promise sails straight past the `try`/`catch` that guards a throw. Unfollowed, that
@@ -1228,10 +1377,9 @@ describe('FileSink', () => {
 
       const privateSink = sink as any;
 
-      privateSink.destroyStream();
-      privateSink.setupLogFile = mock(() => {
-        throw new Error('Failed to setup log file');
-      });
+      privateSink.writeEntry = mock(() =>
+        Promise.reject(new Error('Failed to write log file')),
+      );
 
       sink.write({
         timestamp: Date.now(),
@@ -1249,7 +1397,61 @@ describe('FileSink', () => {
       expect(reports.length).toBeGreaterThan(0);
       expect(reports[0]).toContain('onError rejected');
       // The failure the handler was told about rides along, as it does for a throw.
-      expect(reports[0]).toContain('Failed to setup log file');
+      expect(reports[0]).toContain('Failed to write log file');
+
+      await sink.close();
+    } finally {
+      restoreConsoleError();
+    }
+  });
+
+  test('an onError result whose then cannot be read names the option', async () => {
+    // Named after the option the caller set, as NamedPipeSink's `onError` and ArraySink's
+    // `onFormatError` are, rather than a description of it.
+    const captured = muteConsoleError();
+
+    try {
+      const sink = new FileSink({
+        logDir: tmpDir.path,
+        basename: 'callback-unreadable-then',
+        maxSizeMB: 1,
+        maxRetries: 0,
+        onError: () => {
+          const result = {};
+          Object.defineProperty(result, 'then', {
+            get: (): never => {
+              throw new Error('then getter exploded');
+            },
+          });
+
+          return result as unknown as void;
+        },
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      const privateSink = sink as any;
+
+      privateSink.writeEntry = mock(() =>
+        Promise.reject(new Error('Failed to write log file')),
+      );
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'will fail',
+        message: 'will fail',
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      const reports = captured.filter((line) =>
+        line.includes('returned a value whose then could not be read'),
+      );
+
+      expect(reports.length).toBeGreaterThan(0);
+      expect(reports[0]).toContain('Failure handler (FileSink onError)');
+      expect(reports[0]).toContain('Failed to write log file');
 
       await sink.close();
     } finally {
@@ -1283,10 +1485,9 @@ describe('FileSink', () => {
 
       const privateSink = sink as any;
 
-      privateSink.destroyStream();
-      privateSink.setupLogFile = mock(() => {
-        throw new Error('Failed to setup log file');
-      });
+      privateSink.writeEntry = mock(() =>
+        Promise.reject(new Error('Failed to write log file')),
+      );
 
       sink.write({
         timestamp: Date.now(),
@@ -1307,7 +1508,7 @@ describe('FileSink', () => {
       expect(reports.length).toBe(3);
       expect(reports[0]).toContain('onError itself blew up');
       // The write error the callback was handed rides along, so neither failure is lost.
-      expect(reports[0]).toContain('Failed to setup log file');
+      expect(reports[0]).toContain('Failed to write log file');
 
       await sink.close();
     } finally {
@@ -1350,10 +1551,20 @@ describe('FileSink - bounded queue', () => {
       maxQueueSize: 5,
     });
 
-    // Written before initialization completes, so they queue rather than drain.
-    for (let index = 0; index < 50; index++) {
-      sink.write(makeEntry(`entry-${index}`));
+    // Written before initialization completes, so they queue rather than drain. No
+    // `onError`, so the first drop is reported on the console, and only the first.
+    const captured = muteConsoleError();
+
+    try {
+      for (let index = 0; index < 50; index++) {
+        sink.write(makeEntry(`entry-${index}`));
+      }
+    } finally {
+      restoreConsoleError();
     }
+
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('maxQueueSize=5');
 
     const health = sink.getHealth();
 
@@ -1540,62 +1751,187 @@ describe('FileSink - bounded queue', () => {
     await sink.close();
   });
 
-  test('an unusable closeTimeoutMS takes the default and Infinity is bounded', async () => {
-    // `NaN` - `Number(process.env.UNSET)` - made every `elapsed > closeTimeoutMS` check
-    // false, so the drain loop inside `close()` could never time out and a stalled
-    // destination hung shutdown for good. `Infinity` did the reverse: `setTimeout` reads
-    // it as `1`, so the init wait gave up at once. Both are resolved, the way the queue
-    // options are, and the same way in `NamedPipeSink`.
-    const read = (sink: FileSink): number =>
-      (sink as unknown as { closeTimeoutMS: number }).closeTimeoutMS;
-
-    const nan = new FileSink({
-      logDir: tmpDir.path,
-      basename: 'nan-timeout',
-      closeTimeoutMS: Number.NaN,
-    });
-    const negative = new FileSink({
-      logDir: tmpDir.path,
-      basename: 'negative-timeout',
-      closeTimeoutMS: -5,
-    });
-    const infinite = new FileSink({
-      logDir: tmpDir.path,
-      basename: 'infinite-timeout',
-      closeTimeoutMS: Number.POSITIVE_INFINITY,
-    });
-
-    expect(read(nan)).toBe(30_000);
-    expect(read(negative)).toBe(30_000);
-    expect(read(infinite)).toBe(2_147_483_647);
-
-    await Promise.all([nan.close(), negative.close(), infinite.close()]);
+  test('invalid closeTimeoutMS rejects before initialization', () => {
+    const initialize = spyOn(
+      FileSink.prototype as unknown as { initialize(): Promise<void> },
+      'initialize',
+    ).mockResolvedValue();
+    const timer = spyOn(globalThis, 'setTimeout');
+    try {
+      for (const requested of [
+        Number.NaN,
+        -1,
+        -Infinity,
+        '12',
+        false,
+        {},
+        Symbol('timeout'),
+      ]) {
+        expect(
+          () =>
+            new FileSink({
+              logDir: tmpDir.path,
+              basename: 'timeout-option',
+              closeTimeoutMS: requested as number,
+            }),
+        ).toThrow(
+          typeof requested === 'number' && requested < 0
+            ? RangeError
+            : TypeError,
+        );
+      }
+      expect(initialize).not.toHaveBeenCalled();
+      expect(timer).not.toHaveBeenCalled();
+    } finally {
+      initialize.mockRestore();
+      timer.mockRestore();
+    }
   });
 
-  test('flush(NaN) still times out rather than waiting forever', async () => {
-    // The same comparison inside `flush()`: `Date.now() - startTime > NaN` is never true.
-    // Resolved to the default, the deadline is real again - shown here with a stalled
-    // stream and a queue that can never drain, where the call must come back at all.
+  test.each([NaN, -1])(
+    'invalid file close budget %s identifies its option',
+    (closeTimeoutMS) => {
+      expect(
+        () =>
+          new FileSink({
+            logDir: tmpDir.path,
+            basename: 'invalid-budget',
+            closeTimeoutMS,
+          }),
+      ).toThrow('FileSink closeTimeoutMS');
+    },
+  );
+
+  test.each(['maxQueueSize', 'maxRetries', 'maxSizeMB'] as const)(
+    'NaN or non-number %s rejects before initialization, naming its option',
+    (option) => {
+      const initialize = spyOn(
+        FileSink.prototype as unknown as { initialize(): Promise<void> },
+        'initialize',
+      ).mockResolvedValue();
+      try {
+        for (const requested of [Number.NaN, '12', {}]) {
+          expect(
+            () =>
+              new FileSink({
+                logDir: tmpDir.path,
+                basename: 'count-option',
+                [option]: requested as number,
+              }),
+          ).toThrow(`FileSink ${option} must be a number other than NaN`);
+        }
+        expect(initialize).not.toHaveBeenCalled();
+      } finally {
+        initialize.mockRestore();
+      }
+    },
+  );
+
+  test('nullish, zero, finite and infinite close budgets keep their meanings', async () => {
+    const initialize = spyOn(
+      FileSink.prototype as unknown as { initialize(): Promise<void> },
+      'initialize',
+    ).mockResolvedValue();
+    try {
+      for (const [requested, expected] of [
+        [undefined, 30_000],
+        [null, 30_000],
+        [0, 0],
+        [12, 12],
+        [Infinity, 2_147_483_647],
+        [3e9, 2_147_483_647],
+      ] as const) {
+        const sink = new FileSink({
+          logDir: tmpDir.path,
+          basename: 'timeout-option',
+          closeTimeoutMS: requested,
+        });
+        expect(
+          (sink as unknown as { closeTimeoutMS: number }).closeTimeoutMS,
+        ).toBe(expected);
+        await sink.close();
+      }
+    } finally {
+      initialize.mockRestore();
+    }
+  });
+
+  test('flush preserves nullish, zero, finite and infinite budgets', async () => {
+    const sink = new FileSink({ logDir: tmpDir.path, basename: 'flush-valid' });
+    await sink.flush();
+    const state = sink as unknown as {
+      engine: { flush(timeoutMS: number, startTime: number): Promise<unknown> };
+    };
+    const engineFlush = spyOn(state.engine, 'flush').mockResolvedValue({
+      success: true,
+      entriesWritten: 0,
+      entriesFailed: 0,
+      timedOut: false,
+      entriesQueued: 0,
+    });
+    try {
+      for (const [requested, expected] of [
+        [undefined, 30_000],
+        [null, 30_000],
+        [0, 0],
+        [12, 12],
+        [Infinity, 2_147_483_647],
+        [3e9, 2_147_483_647],
+      ] as const) {
+        await sink.flush(requested);
+        expect(engineFlush.mock.calls.at(-1)?.[0]).toBe(expected);
+      }
+    } finally {
+      engineFlush.mockRestore();
+      await sink.close();
+    }
+  });
+
+  test('invalid flush budgets reject without queuing work or advancing the flush window', async () => {
     const sink = new FileSink({
       logDir: tmpDir.path,
-      basename: 'flush-nan',
-      closeTimeoutMS: 150,
+      basename: 'flush-invalid',
     });
-
     await sink.flush();
-
-    const privateSink = sink as unknown as {
-      flush: (timeoutMS?: number) => Promise<{ timedOut: boolean }>;
-    };
-
-    // A flush with nothing queued returns at once whatever the timeout, so the value has
-    // to be resolved for the deadline to mean anything; `0` proves the resolution is in
-    // the path, since an unresolved `NaN` and a `0` behave identically on an empty queue.
-    const result = await privateSink.flush(Number.NaN);
-
-    expect(result.timedOut).toBe(false);
-
-    await sink.close();
+    const engine = (
+      sink as unknown as {
+        engine: {
+          flushes: { settled: Promise<void> };
+          flush(timeoutMS: number, startTime: number): Promise<unknown>;
+        };
+      }
+    ).engine;
+    const pendingBefore = engine.flushes.settled;
+    const engineFlush = spyOn(engine, 'flush');
+    const timer = spyOn(globalThis, 'setTimeout');
+    try {
+      for (const requested of [
+        Number.NaN,
+        -1,
+        -Infinity,
+        '12',
+        false,
+        {},
+        Symbol('timeout'),
+      ]) {
+        const error: unknown = await sink
+          .flush(requested as number)
+          .catch((error: unknown) => error);
+        expect(error).toBeInstanceOf(
+          typeof requested === 'number' && requested < 0
+            ? RangeError
+            : TypeError,
+        );
+        expect((error as Error).message).toContain('FileSink flush timeoutMS');
+      }
+      expect(engine.flushes.settled).toBe(pendingBefore);
+      expect(engineFlush).not.toHaveBeenCalled();
+      expect(timer).not.toHaveBeenCalled();
+    } finally {
+      engineFlush.mockRestore();
+      timer.mockRestore();
+      await sink.close();
+    }
   });
 
   test('getHealth() reports unhealthy for the whole of a close', async () => {
@@ -1693,8 +2029,8 @@ describe('FileSink - bounded queue', () => {
 
     // Nothing drains the queue from here, so `close()` waits out its timeout and leaves
     // these behind - which is what a stalled volume does to it for real.
-    (sink as unknown as { processQueue: () => Promise<void> }).processQueue =
-      () => Promise.resolve();
+    (sink as unknown as { engine: { pump: () => void } }).engine.pump = () =>
+      undefined;
 
     for (let index = 0; index < 3; index++) {
       sink.write(makeEntry(`abandoned-${String(index)}`));
@@ -1717,6 +2053,35 @@ describe('FileSink - bounded queue', () => {
     // The oldest abandoned entry, as a sample. Every entry in the queue was lost, so
     // unlike the cap's report there is no surviving line to confuse this with.
     expect(closeFailures[0]?.entry?.message).toBe('abandoned-0');
+  });
+
+  test('a close before the log file ever opens says why its entries were not written', async () => {
+    // The open failures a close makes are not reported on their own - the abandon report
+    // accounts for the backlog - so that report is where the reason has to be.
+    const logDir = `${tmpDir.path}/not-a-directory`;
+    await fsPromises.writeFile(logDir, 'x');
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir,
+      basename: 'never-opens',
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    sink.write(makeEntry('stranded'));
+    await sink.close();
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ kind: 'close', disposition: 'lost' });
+    // Not blamed on closeTimeoutMS: close gave up for want of a file, long before that.
+    expect(failures[0]?.error.message).toBe(
+      'Closed with 1 entry still queued: the log file could not be opened, so they were not written',
+    );
+    const cause = failures[0]?.error.cause as Error | undefined;
+    expect(cause?.message).toContain('Failed to setup log file');
+    expect(cause?.message).toContain(logDir);
+    expect(sink.getHealth().droppedByKind.close).toBe(1);
   });
 
   test('a drop the cap did not cause is not reported as a full queue', async () => {
@@ -1746,8 +2111,8 @@ describe('FileSink - bounded queue', () => {
     (sink as unknown as { droppedEntries: number }).droppedEntries = 3;
 
     // Nothing drains the queue, so these sit under the cap.
-    (sink as unknown as { processQueue: () => Promise<void> }).processQueue =
-      () => Promise.resolve();
+    (sink as unknown as { engine: { pump: () => void } }).engine.pump = () =>
+      undefined;
 
     for (let index = 0; index < 4; index++) {
       sink.write(makeEntry(`under-cap-${String(index)}`));
@@ -1853,59 +2218,67 @@ describe('FileSink - bounded queue', () => {
     // will not render either - and `processQueue` was still draining when it was queued,
     // so the outer loop picked it up, reported it, and the handler logged again. A drain
     // that never returned, with every later line stuck behind it.
-    let calls = 0;
-    let depth = 0;
-    let maxDepth = 0;
+    const captured = muteConsoleError();
+    try {
+      let calls = 0;
+      let depth = 0;
+      let maxDepth = 0;
 
-    const self: { sink?: FileSink } = {};
+      const self: { sink?: FileSink } = {};
 
-    const sink = new FileSink({
-      logDir: tmpDir.path,
-      basename: 'self-logging-format',
-      jsonFormat: true,
-      onError: (failure) => {
-        calls++;
-        depth++;
-        maxDepth = Math.max(maxDepth, depth);
+      const sink = new FileSink({
+        logDir: tmpDir.path,
+        basename: 'self-logging-format',
+        jsonFormat: true,
+        onError: (failure) => {
+          calls++;
+          depth++;
+          maxDepth = Math.max(maxDepth, depth);
 
-        self.sink?.write({
-          timestamp: Date.now(),
-          type: 'error',
-          template: 'the log sink failed',
-          message: UNRENDERABLE_MESSAGE,
-          redactedParams: { failure },
-        });
+          self.sink?.write({
+            timestamp: Date.now(),
+            type: 'error',
+            template: 'the log sink failed',
+            message: UNRENDERABLE_MESSAGE,
+            redactedParams: { failure },
+          });
 
-        depth--;
-      },
-    });
+          depth--;
+        },
+      });
 
-    self.sink = sink;
+      self.sink = sink;
 
-    await sink.flush();
+      await sink.flush();
 
-    sink.write({
-      timestamp: Date.now(),
-      type: 'info',
-      template: 'unrenderable',
-      message: UNRENDERABLE_MESSAGE,
-    });
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'unrenderable',
+        message: UNRENDERABLE_MESSAGE,
+      });
 
-    // Would never resolve before the guard.
-    await sink.flush();
+      // Would never resolve before the guard.
+      await sink.flush();
 
-    expect(maxDepth).toBe(1);
-    expect(calls).toBe(1);
+      expect(maxDepth).toBe(1);
+      expect(calls).toBe(1);
 
-    // Both lines counted: the one that started this and the handler's own, which was
-    // refused at the door rather than silently forgotten.
-    expect(sink.getHealth().droppedEntries).toBe(2);
+      // Both lines counted: the one that started this and the handler's own, which was
+      // refused at the door and said on the console rather than handed back to the handler.
+      expect(sink.getHealth().droppedEntries).toBe(2);
+      expect(
+        captured.filter((line) => line.includes('Failed to format log entry')),
+      ).toHaveLength(1);
 
-    // And the sink keeps writing.
-    sink.write(makeEntry('still-working'));
+      // And the sink keeps writing.
+      sink.write(makeEntry('still-working'));
 
-    await sink.flush();
-    await sink.close();
+      await sink.flush();
+      await sink.close();
+    } finally {
+      restoreConsoleError();
+    }
 
     const files = await fsPromises.readdir(tmpDir.path);
     const logFile = files.find((name) =>
@@ -1938,57 +2311,66 @@ describe('FileSink - async self-logging onError', () => {
     // A flag cleared when the handler *returned* was cleared at its first `await`, so a
     // handler that logged the failure back after awaiting found no guard, and the chain
     // ran on: one report per turn of the event loop, for as long as the process lived.
-    let calls = 0;
+    const captured = muteConsoleError();
+    try {
+      let calls = 0;
 
-    const self: { sink?: FileSink } = {};
+      const self: { sink?: FileSink } = {};
 
-    const sink = new FileSink({
-      logDir: tmpDir.path,
-      basename: 'async-self-logging',
-      jsonFormat: true,
-      onError: async (failure) => {
-        calls++;
+      const sink = new FileSink({
+        logDir: tmpDir.path,
+        basename: 'async-self-logging',
+        jsonFormat: true,
+        onError: async (failure) => {
+          calls++;
 
-        await new Promise((resolve) => setTimeout(resolve, 5));
+          await new Promise((resolve) => setTimeout(resolve, 5));
 
-        self.sink?.write({
-          timestamp: Date.now(),
-          type: 'error',
-          template: 'the log sink failed',
-          message: UNRENDERABLE_MESSAGE,
-          redactedParams: { failure },
-        });
-      },
-    });
+          self.sink?.write({
+            timestamp: Date.now(),
+            type: 'error',
+            template: 'the log sink failed',
+            message: UNRENDERABLE_MESSAGE,
+            redactedParams: { failure },
+          });
+        },
+      });
 
-    self.sink = sink;
+      self.sink = sink;
 
-    await sink.flush();
+      await sink.flush();
 
-    sink.write({
-      timestamp: Date.now(),
-      type: 'info',
-      template: 'unrenderable',
-      message: UNRENDERABLE_MESSAGE,
-    });
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'unrenderable',
+        message: UNRENDERABLE_MESSAGE,
+      });
 
-    // Long enough for several rounds of the loop this used to be.
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    await sink.flush();
+      // Long enough for several rounds of the loop this used to be.
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await sink.flush();
 
-    // One deferred report is allowed after the async handler settles; the line that
-    // handler logs is reported once, and its handler's own line is the recursion fuse.
-    expect(calls).toBe(2);
-    expect(sink.getHealth().droppedEntries).toBe(3);
-    // All three were format losses, and the breakdown says so.
-    expect(sink.getHealth().droppedByKind).toEqual({
-      queue_full: 0,
-      write: 0,
-      format: 3,
-      close: 0,
-    });
+      // One deferred report is allowed after the async handler settles; the line that
+      // handler logs is reported once, and its handler's own line is the recursion fuse:
+      // reported on the console, never to the handler.
+      expect(calls).toBe(2);
+      expect(sink.getHealth().droppedEntries).toBe(3);
+      expect(
+        captured.filter((line) => line.includes('Failed to format log entry')),
+      ).toHaveLength(1);
+      // All three were format losses, and the breakdown says so.
+      expect(sink.getHealth().droppedByKind).toEqual({
+        queue_full: 0,
+        write: 0,
+        format: 3,
+        close: 0,
+      });
 
-    await sink.close();
+      await sink.close();
+    } finally {
+      restoreConsoleError();
+    }
   });
 
   test('reports one concurrent format failure after the active handler settles', async () => {
@@ -2040,6 +2422,64 @@ describe('FileSink - async self-logging onError', () => {
     await sink.close();
   });
 
+  test('a format failure the guard cannot hold for the handler goes to the console', async () => {
+    // One report active and the one deferred slot taken: a third failure had nowhere to
+    // go and was dropped without a word - counted, but said nowhere. `ArraySink` sends
+    // what its guard cannot hold to the console, and so does this.
+    const captured = muteConsoleError();
+    let releaseFirst!: () => void;
+    const firstPending = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const templates: string[] = [];
+
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'format-overflow',
+      jsonFormat: true,
+      onError: (failure) => {
+        if (failure.kind !== 'format' || failure.entry === undefined) {
+          return;
+        }
+
+        templates.push(failure.entry.template);
+
+        return templates.length === 1 ? firstPending : undefined;
+      },
+    });
+
+    try {
+      await sink.flush();
+
+      for (const template of ['first', 'second', 'third']) {
+        sink.write({
+          timestamp: Date.now(),
+          type: 'info',
+          template,
+          message: UNRENDERABLE_MESSAGE,
+        });
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(templates).toEqual(['first']);
+      expect(
+        captured.filter((line) => line.includes('Failed to format log entry')),
+      ).toHaveLength(1);
+
+      releaseFirst();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      // The held one reaches the handler; the overflow already went to the console.
+      expect(templates).toEqual(['first', 'second']);
+      expect(sink.getHealth().droppedByKind.format).toBe(3);
+
+      await sink.close();
+    } finally {
+      restoreConsoleError();
+    }
+  });
+
   test('droppedByKind splits the total by reason and always sums to it', async () => {
     const makeEntry = (message: string): LogEntry => ({
       timestamp: Date.now(),
@@ -2059,33 +2499,45 @@ describe('FileSink - async self-logging onError', () => {
       maxQueueSize: 1,
     });
 
-    // Two lines into a one-slot queue before the file is open, so nothing drains between
-    // them: the older is evicted.
-    sink.write(makeEntry('first'));
-    sink.write(makeEntry('second'));
+    // No `onError`: each of the three losses is reported once on the console.
+    const captured = muteConsoleError();
 
-    await sink.flush();
+    try {
+      // Two lines into a one-slot queue before the file is open, so nothing drains
+      // between them: the older is evicted.
+      sink.write(makeEntry('first'));
+      sink.write(makeEntry('second'));
 
-    expect(sink.getHealth().droppedByKind.queue_full).toBe(1);
-    // Destination health recovers independently of historical loss counters.
-    expect(sink.getHealth().isHealthy).toBe(true);
+      await sink.flush();
 
-    sink.write({
-      timestamp: Date.now(),
-      type: 'info',
-      template: 'unrenderable',
-      message: UNRENDERABLE_MESSAGE,
-    });
+      expect(sink.getHealth().droppedByKind.queue_full).toBe(1);
+      // Destination health recovers independently of historical loss counters.
+      expect(sink.getHealth().isHealthy).toBe(true);
 
-    await sink.flush();
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'unrenderable',
+        message: UNRENDERABLE_MESSAGE,
+      });
 
-    expect(sink.getHealth().droppedByKind.format).toBe(1);
+      await sink.flush();
 
-    const closing = sink.close();
+      expect(sink.getHealth().droppedByKind.format).toBe(1);
 
-    sink.write(makeEntry('after close'));
+      const closing = sink.close();
 
-    await closing;
+      sink.write(makeEntry('after close'));
+
+      await closing;
+    } finally {
+      restoreConsoleError();
+    }
+
+    expect(captured).toHaveLength(3);
+    expect(captured[0]).toContain('maxQueueSize=1');
+    expect(captured[1]).toContain('Failed to format log entry');
+    expect(captured[2]).toContain('Entry logged after close() began');
 
     const health = sink.getHealth();
     const byKind = health.droppedByKind;
@@ -2188,78 +2640,87 @@ describe('FileSink - jsonFormat renders what JSON.stringify refuses', () => {
     expect(failures).toHaveLength(1);
     expect(failures[0]?.kind).toBe('format' satisfies SinkFailureKind);
     expect(failures[0]?.disposition).toBe('fallback');
-    expect(failures[0]?.error.message).toContain('a marker was written');
+    expect(failures[0]?.error.message).toContain('a marker stands in for it');
     // Advisory: the line went out, so the sink is not less healthy for it.
     expect(sink.getHealth().droppedEntries).toBe(0);
   });
 
   test('a self-logging onError cannot recurse through the fallback report', async () => {
     // The handler logs the failure back, carrying the same throwing getter. Its line
-    // renders - marker and all - and is queued; only the nested report is skipped.
-    let calls = 0;
-    let maxDepth = 0;
-    let depth = 0;
+    // renders - marker and all - and is queued; only the nested report leaves the
+    // handler, for the console.
+    const captured = muteConsoleError();
+    try {
+      let calls = 0;
+      let maxDepth = 0;
+      let depth = 0;
 
-    const self: { sink?: FileSink } = {};
+      const self: { sink?: FileSink } = {};
 
-    const hostile = {
-      get boom(): never {
-        throw new Error('getter exploded');
-      },
-    };
+      const hostile = {
+        get boom(): never {
+          throw new Error('getter exploded');
+        },
+      };
 
-    const sink = new FileSink({
-      logDir: tmpDir.path,
-      basename: 'json-fallback-self-log',
-      jsonFormat: true,
-      onError: () => {
-        calls++;
-        depth++;
-        maxDepth = Math.max(maxDepth, depth);
+      const sink = new FileSink({
+        logDir: tmpDir.path,
+        basename: 'json-fallback-self-log',
+        jsonFormat: true,
+        onError: () => {
+          calls++;
+          depth++;
+          maxDepth = Math.max(maxDepth, depth);
 
-        self.sink?.write({
-          timestamp: Date.now(),
-          type: 'error',
-          template: 'the log sink failed',
-          message: 'the log sink failed',
-          redactedParams: { hostile },
-        });
+          self.sink?.write({
+            timestamp: Date.now(),
+            type: 'error',
+            template: 'the log sink failed',
+            message: 'the log sink failed',
+            redactedParams: { hostile },
+          });
 
-        depth--;
-      },
-    });
+          depth--;
+        },
+      });
 
-    self.sink = sink;
+      self.sink = sink;
 
-    await sink.flush();
+      await sink.flush();
 
-    sink.write({
-      timestamp: Date.now(),
-      type: 'info',
-      template: 'first',
-      message: 'first',
-      redactedParams: { hostile },
-    });
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'first',
+        message: 'first',
+        redactedParams: { hostile },
+      });
 
-    await sink.flush();
-    await sink.close();
+      await sink.flush();
+      await sink.close();
 
-    expect(calls).toBe(1);
-    expect(maxDepth).toBe(1);
+      expect(calls).toBe(1);
+      expect(maxDepth).toBe(1);
+      expect(
+        captured.filter((line) => line.includes('Failed to render a value')),
+      ).toHaveLength(1);
 
-    const files = await fsPromises.readdir(tmpDir.path);
-    const logFile = files.find((name) =>
-      name.startsWith('json-fallback-self-log'),
-    );
-    const contents = await fsPromises.readFile(
-      `${tmpDir.path}/${logFile ?? ''}`,
-      'utf8',
-    );
+      const files = await fsPromises.readdir(tmpDir.path);
+      const logFile = files.find((name) =>
+        name.startsWith('json-fallback-self-log'),
+      );
+      const contents = await fsPromises.readFile(
+        `${tmpDir.path}/${logFile ?? ''}`,
+        'utf8',
+      );
 
-    // Both lines written, the handler's included.
-    expect(contents).toContain('"message":"first"');
-    expect(contents).toContain('"message":"the log sink failed"');
-    expect(sink.getHealth().droppedEntries).toBe(0);
+      // Both lines written, the handler's included.
+      expect(contents).toContain('"message":"first"');
+      expect(contents).toContain('"message":"the log sink failed"');
+      expect(sink.getHealth().droppedEntries).toBe(0);
+    } finally {
+      restoreConsoleError();
+    }
   });
 });
 
@@ -2344,11 +2805,12 @@ describe('FileSink - accounting across a rotation', () => {
       basename: 'queued-timeout',
     });
     await sink.flush();
-    const internals = sink as unknown as {
-      isProcessing: boolean;
-      totalEntriesWritten: number;
-    };
-    internals.isProcessing = true;
+    const internals = (
+      sink as unknown as {
+        engine: { isPumping: boolean; totalWritten: number };
+      }
+    ).engine;
+    internals.isPumping = true;
     const first = sink.flush(1000);
     try {
       const result = await Promise.race([
@@ -2365,10 +2827,11 @@ describe('FileSink - accounting across a rotation', () => {
         entriesWritten: 0,
         entriesFailed: 0,
         timedOut: true,
+        entriesQueued: 0,
       });
-      internals.totalEntriesWritten++;
+      internals.totalWritten++;
     } finally {
-      internals.isProcessing = false;
+      internals.isPumping = false;
     }
     expect((await first).entriesWritten).toBe(1);
     expect((await sink.flush()).entriesWritten).toBe(0);
@@ -2500,6 +2963,7 @@ describe('FileSink - entries refused at the door', () => {
     const stream = (
       sink as unknown as {
         logFileStream?: {
+          pending: boolean;
           write: (chunk: string, cb: (err?: Error) => void) => boolean;
           emit: (event: string, error: Error) => void;
         };
@@ -2507,6 +2971,12 @@ describe('FileSink - entries refused at the door', () => {
     ).logFileStream;
 
     expect(stream).toBeDefined();
+
+    // A write failure on a stream that has opened: one still opening reports a failed
+    // callback as the open that failed, which is a `'setup'` loss rather than this one.
+    while (stream?.pending === true) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
 
     if (stream) {
       stream.write = (_chunk, cb) => {
@@ -2573,6 +3043,114 @@ describe('FileSink - entries refused at the door', () => {
     await sink.close();
   });
 
+  test('a write to a stream destroyed after it opened is a write loss, not a setup loss', async () => {
+    // A destroyed stream has no descriptor, as one that never opened has none: only the
+    // error code tells the two apart.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'destroyed-after-open',
+      maxRetries: 0,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'opens the stream',
+      message: 'opens the stream',
+    });
+    await sink.flush(2000);
+    const stream = (sink as unknown as { logFileStream: NodeJS.WritableStream })
+      .logFileStream as unknown as { pending: boolean; destroy: () => void };
+    stream.destroy();
+    expect(stream.pending).toBe(true);
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'into a destroyed stream',
+      message: 'into a destroyed stream',
+    });
+    await sink.flush(2000);
+
+    const lost = failures.filter(
+      (failure) => failure.entry?.message === 'into a destroyed stream',
+    );
+    expect(lost.map((failure) => failure.kind)).not.toContain('setup');
+    expect(sink.getHealth().droppedByKind.write).toBe(1);
+
+    await sink.close();
+  });
+
+  test('a line written while the log file cannot be opened is held, not lost', async () => {
+    // A destination that cannot be opened is an outage, not a failed write: the line waits
+    // in the queue with its retries unspent, and goes out once the sink's own timer finds
+    // the file openable again.
+    const failures: SinkFailure[] = [];
+    const logPath = `${tmpDir.path}/unopenable-${new Date().toISOString().slice(0, 10)}.log`;
+
+    await fsPromises.mkdir(logPath, { recursive: true });
+
+    setOpenRetryBackoffForTesting(FAST_OPEN_RETRY);
+
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'unopenable',
+      maxRetries: 1,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    setOpenRetryBackoffForTesting(undefined);
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      // Said once, however many attempts the sink has made since.
+      expect(
+        failures.map((failure) => [failure.kind, failure.disposition]),
+      ).toEqual([['setup', 'no_entry']]);
+      failures.length = 0;
+
+      sink.write({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'nowhere to go',
+        message: 'nowhere to go',
+      });
+      await new Promise((resolve) => setTimeout(resolve, 200));
+
+      expect(failures).toEqual([]);
+      expect(sink.getHealth()).toMatchObject({
+        queueSize: 1,
+        droppedEntries: 0,
+        consecutiveFailures: 0,
+        isHealthy: false,
+        isInitialized: false,
+      });
+
+      // The obstruction goes away: the held line is written without another `write()`.
+      await fsPromises.rm(logPath, { recursive: true });
+      await sink.flush(2000);
+
+      expect(await fsPromises.readFile(logPath, 'utf8')).toContain(
+        'nowhere to go',
+      );
+      expect(failures).toEqual([]);
+      expect(sink.getHealth()).toMatchObject({
+        queueSize: 0,
+        droppedEntries: 0,
+        isHealthy: true,
+        isInitialized: true,
+      });
+    } finally {
+      await sink.close();
+    }
+  });
+
   test('an entry written after close() is counted and reported once', async () => {
     // The other half of `abandonQueueOnClose`. That counts what was already queued; these
     // are the lines refused at the door during and after a close, which used to leave
@@ -2609,12 +3187,11 @@ describe('FileSink - entries refused at the door', () => {
     expect(closeFailures[0]?.disposition).toBe('lost');
   });
 
-  test('a close whose flush times out with bytes still buffered says so before it resolves', async () => {
-    // This sink writes one line at a time and waits for the callback, so the stream's
-    // buffer holds nothing the in-flight report does not already name. The backstop for
-    // the case that model rules out: a stream that still holds bytes when `end()` times
-    // out is reported once, as `'close'` / `'no_entry'`, before `await close()` answers -
-    // the same report at the same moment as `NamedPipeSink`.
+  test('a close whose final flush times out reports the write it still held once, before it resolves', async () => {
+    // This sink writes one line at a time and waits for the callback, so what the stream
+    // still holds when `end()` times out is the write in flight. Its delivery is unknown -
+    // destroying the stream does not cancel a write already handed to the filesystem - so
+    // it is reported once, as `'close'` / `'no_entry'`, and not counted.
     const failures: SinkFailure[] = [];
     const sink = new FileSink({
       logDir: tmpDir.path,
@@ -2627,11 +3204,13 @@ describe('FileSink - entries refused at the door', () => {
 
     await sink.flush();
 
-    // Stand in for a stream on a hung mount: bytes accepted, `end()` never calls back.
+    // Stand in for a stream on a hung mount: the line accepted, neither its callback nor
+    // `end()`'s ever called.
     let destroyed = 0;
     const stuck = {
       destroyed: false,
       writableLength: 4096,
+      write: () => true,
       end: () => {},
       once: () => {},
       on: () => {},
@@ -2643,6 +3222,12 @@ describe('FileSink - entries refused at the door', () => {
     };
 
     (sink as unknown as { logFileStream: unknown }).logFileStream = stuck;
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'stuck',
+      message: 'stuck',
+    });
 
     await sink.close();
 
@@ -2651,10 +3236,13 @@ describe('FileSink - entries refused at the door', () => {
     expect(destroyed).toBe(1);
     expect(closeFailures).toHaveLength(1);
     expect(closeFailures[0]?.disposition).toBe('no_entry');
-    expect(closeFailures[0]?.error.message).toContain(
-      '4096 bytes still buffered',
+    expect(closeFailures[0]?.error.message).toMatch(
+      /write still in flight.*unknown/i,
     );
-    expect(sink.getHealth().droppedEntries).toBe(0);
+    expect(sink.getHealth()).toMatchObject({
+      queueSize: 0,
+      droppedEntries: 0,
+    });
   });
 
   test('a rotation that finds no free archive name says so before it overwrites', async () => {
@@ -2863,8 +3451,71 @@ describe('FileSink - entries written during close', () => {
   });
 
   test.each([false, true])(
-    'reports a failed line lost when retry room is consumed (callback=%p)',
+    'an open that keeps failing with a line queued is said once, and not as that line (onError=%p)',
+    async (hasHandler) => {
+      // Every attempt fails with `EISDIR`, and the line waits through all of them: no
+      // `'retrying'` or `'lost'` for it, and - without a handler - one console line for the
+      // outage rather than one per attempt.
+      const currentDate = new Date().toISOString().slice(0, 10);
+      await fsPromises.mkdir(`${tmpDir.path}/eisdir-entry-${currentDate}.log`, {
+        recursive: true,
+      });
+      const failures: SinkFailure[] = [];
+      const captured = muteConsoleError();
+
+      setOpenRetryBackoffForTesting(FAST_OPEN_RETRY);
+
+      try {
+        const sink = new FileSink({
+          logDir: tmpDir.path,
+          basename: 'eisdir-entry',
+          maxRetries: 1,
+          ...(hasHandler
+            ? {
+                onError: (failure: SinkFailure) => {
+                  failures.push(failure);
+                },
+              }
+            : {}),
+        });
+
+        setOpenRetryBackoffForTesting(undefined);
+        sink.write(makeEntry('never opens'));
+        await new Promise((resolve) => setTimeout(resolve, 300));
+
+        if (hasHandler) {
+          expect(failures).toHaveLength(1);
+          expect(failures[0]).toMatchObject({
+            kind: 'setup',
+            disposition: 'no_entry',
+          });
+          expect(Object.hasOwn(failures[0] ?? {}, 'entry')).toBe(false);
+          expect(failures[0]?.error.message).toContain('EISDIR');
+        } else {
+          expect(captured).toHaveLength(1);
+          expect(captured[0]).toContain('EISDIR');
+        }
+
+        expect(sink.getHealth()).toMatchObject({
+          queueSize: 1,
+          droppedEntries: 0,
+          consecutiveFailures: 0,
+        });
+
+        await sink.close();
+      } finally {
+        setOpenRetryBackoffForTesting(undefined);
+        restoreConsoleError();
+      }
+    },
+  );
+
+  test.each([false, true])(
+    'a failed line keeps its place in a full queue (callback=%p)',
     async (shouldFillFromCallback) => {
+      // A line in flight counts against `maxQueueSize` and is never evicted, so the lines
+      // written while it is out - by the caller, or by a handler told it is retrying - are
+      // the ones the cap takes, and the failed line goes out again.
       const failures: SinkFailure[] = [];
       const sink = new FileSink({
         logDir: tmpDir.path,
@@ -2873,7 +3524,7 @@ describe('FileSink - entries written during close', () => {
         onError: (failure) => {
           failures.push(failure);
           if (shouldFillFromCallback && failure.disposition === 'retrying') {
-            sink.write(makeEntry('callback survivor'));
+            sink.write(makeEntry('callback line'));
           }
         },
       });
@@ -2897,23 +3548,30 @@ describe('FileSink - entries written during close', () => {
         await started.promise;
         if (!shouldFillFromCallback) {
           sink.write(makeEntry('evicted while busy'));
-          sink.write(makeEntry('survivor'));
-          // The aggregate overflow report has already fired before the failed retry.
+          sink.write(makeEntry('also evicted'));
+          // One report for the overflow episode.
           expect(failures.filter((f) => f.kind === 'queue_full')).toHaveLength(
             1,
           );
         }
         pending.reject(new Error('write failed'));
         await sink.flush();
-        const finalLoss = failures.filter(
-          (f) => f.disposition === 'lost' && f.entry?.message === 'failed line',
-        );
-        expect(finalLoss).toHaveLength(1);
-        expect(finalLoss[0]?.kind).toBe('write');
-        expect(sink.getHealth().droppedByKind.write).toBe(1);
-        expect(sink.getHealth().droppedByKind.queue_full).toBe(
-          shouldFillFromCallback ? 0 : 1,
-        );
+        expect(
+          failures
+            .filter((f) => f.entry?.message === 'failed line')
+            .map((f) => [f.disposition, f.attempt]),
+        ).toEqual([['retrying', 1]]);
+        expect(
+          failures
+            .filter((f) => f.kind === 'queue_full')
+            .map((f) => f.entry?.message),
+        ).toEqual([
+          shouldFillFromCallback ? 'callback line' : 'evicted while busy',
+        ]);
+        expect(sink.getHealth().droppedByKind).toMatchObject({
+          write: 0,
+          queue_full: shouldFillFromCallback ? 1 : 2,
+        });
         expect(attempts).toBe(2);
         expect(sink.getHealth().queueSize).toBe(0);
       } finally {
@@ -2930,7 +3588,7 @@ describe('FileSink - entries written during close', () => {
     // ever going to drain again: `getHealth().queueSize` sat above zero after `await
     // close()` resolved, the line was reported `'retrying'` for `maxRetries` rounds against
     // a sink that could only answer `Cannot write to closed sink`, and only then counted.
-    // `NamedPipeSink.requeue` takes the same view this now does: past the close, the entry
+    // `NamedPipeSink` takes the same view this now does: past the close, the entry
     // is lost.
     const failures: SinkFailure[] = [];
     const sink = new FileSink({
@@ -2981,19 +3639,75 @@ describe('FileSink - entries written during close', () => {
     await sink.close();
 
     const droppedAtClose = sink.getHealth().droppedEntries;
+    const reportedAtClose = failures.length;
 
     // The destination answers after the close has already resolved.
     settleWrite?.(new Error('stalled write failed after the close'));
 
     await new Promise((resolve) => setTimeout(resolve, 200));
 
-    // Nothing waiting on a sink nothing will drain, and the line counted rather than
-    // retried into a queue that no longer exists.
+    // Nothing waiting on a sink nothing will drain, and the line not retried into a queue
+    // that no longer exists. Nor reported or counted a second time: the close already
+    // answered for it as `'close'` / `'no_entry'`.
     expect(sink.getHealth().queueSize).toBe(0);
-    expect(sink.getHealth().droppedEntries).toBe(droppedAtClose + 1);
+    expect(sink.getHealth().droppedEntries).toBe(droppedAtClose);
+    expect(failures).toHaveLength(reportedAtClose);
     expect(failures.some((failure) => failure.disposition === 'retrying')).toBe(
       false,
     );
+  });
+
+  test('a write close() gave up on before it reached the stream is not reported again when its pass resumes', async () => {
+    // An entry waiting on setup or rotation has never reached stream.write(). Close
+    // counts it as queued loss, and the resumed pass must not report it again.
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: tmpDir.path,
+      basename: 'inflight-resumed',
+      closeTimeoutMS: 150,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    await sink.flush();
+
+    const held = Promise.withResolvers<void>();
+    const internals = sink as unknown as {
+      rotateIfNeeded: () => Promise<void>;
+    };
+
+    internals.rotateIfNeeded = () => held.promise;
+
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      serviceName: 'TestService',
+      template: 'held',
+      message: 'held',
+    });
+
+    await sink.close();
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.kind).toBe('close');
+    expect(failures[0]?.disposition).toBe('lost');
+    expect(failures[0]?.entry?.message).toBe('held');
+    expect(failures[0]?.error.message).toContain('still queued');
+
+    // The pass resumes into a closed sink.
+    held.resolve();
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    expect(failures).toHaveLength(1);
+    expect(sink.getHealth().droppedEntries).toBe(1);
+    expect(sink.getHealth().droppedByKind.close).toBe(1);
+    expect(sink.getHealth().lastError?.message).toContain('still queued');
+    // Its pass is over, so the sink no longer holds the entry or its params.
+    expect(
+      (sink as unknown as { inFlightEntry?: unknown }).inFlightEntry,
+    ).toBeUndefined();
   });
 
   test('close() reports the write it gave up on, and does not call it a clean shutdown', async () => {
@@ -3100,64 +3814,6 @@ describe('FileSink - entries written during close', () => {
     expect(sink.getHealth().droppedEntries).toBe(0);
   });
 
-  test('a write interrupted during setup is classified as a close failure', async () => {
-    const sink = new FileSink({
-      logDir: tmpDir.path,
-      basename: 'setup-close-race',
-    });
-    await sink.flush();
-    const internals = sink as unknown as {
-      closed: boolean;
-      logFileStream: unknown;
-      setupLogFile: () => Promise<void>;
-      writeEntry: (queued: {
-        entry: LogEntry;
-        attempts: number;
-        formatted: string;
-        formatError: undefined;
-      }) => Promise<void>;
-    };
-    const stream = internals.logFileStream;
-    const setup = internals.setupLogFile;
-    internals.logFileStream = undefined;
-    internals.setupLogFile = () => {
-      internals.closed = true;
-      return Promise.resolve();
-    };
-    try {
-      const failure = await internals
-        .writeEntry({
-          entry: {
-            timestamp: Date.now(),
-            type: 'info',
-            template: 'line',
-            message: 'line',
-          },
-          attempts: 0,
-          formatted: 'line\n',
-          formatError: undefined,
-        })
-        .then(
-          () => undefined,
-          (error: unknown) => error,
-        );
-      expect(failure).toBeInstanceOf(Error);
-      expect((failure as Error).message).toBe('Cannot write to closed sink');
-      expect(
-        (
-          sink as unknown as {
-            failureKindFor: (error: Error) => SinkFailureKind;
-          }
-        ).failureKindFor(failure as Error),
-      ).toBe('close');
-    } finally {
-      internals.closed = false;
-      internals.logFileStream = stream;
-      internals.setupLogFile = setup;
-      await sink.close();
-    }
-  });
-
   test('an oversized-line rotation cannot resume writing after close completes', async () => {
     const sink = new FileSink({
       logDir: tmpDir.path,
@@ -3167,7 +3823,7 @@ describe('FileSink - entries written during close', () => {
     await sink.flush();
 
     const internals = sink as unknown as {
-      closed: boolean;
+      engine: { state: string };
       currentLogSize: number;
       maxSizeMB: number;
       rotateFile: () => Promise<void>;
@@ -3181,9 +3837,11 @@ describe('FileSink - entries written during close', () => {
 
     internals.currentLogSize = 1;
     internals.maxSizeMB = 0;
+    const stateBeforeClose = internals.engine.state;
+
     internals.rotateFile = () => {
       // The state visible when a real close wins while rotateFile() is suspended.
-      internals.closed = true;
+      internals.engine.state = 'closed';
 
       return Promise.resolve();
     };
@@ -3214,7 +3872,7 @@ describe('FileSink - entries written during close', () => {
     );
 
     // Let the ordinary close path release the real stream used by this focused probe.
-    internals.closed = false;
+    internals.engine.state = stateBeforeClose;
     await sink.close();
   });
 
@@ -3248,7 +3906,7 @@ describe('FileSink - entries written during close', () => {
       };
 
     const internals = sink as unknown as {
-      closing: boolean;
+      engine: { closing: boolean };
       rotateIfNeeded: () => Promise<void>;
       logFileStream: unknown;
     };
@@ -3259,7 +3917,7 @@ describe('FileSink - entries written during close', () => {
     // after it is refused at the door.
     const streamBeforeClose = internals.logFileStream;
 
-    internals.closing = true;
+    internals.engine.closing = true;
 
     await internals.rotateIfNeeded();
 
@@ -3270,7 +3928,7 @@ describe('FileSink - entries written during close', () => {
 
     // And the guard is the only thing holding it back: the same call outside a close does
     // rotate, so this test cannot pass by the date change going unnoticed.
-    internals.closing = false;
+    internals.engine.closing = false;
 
     await internals.rotateIfNeeded();
 
@@ -3359,7 +4017,7 @@ describe('FileSink - entries written during close', () => {
     expect(content).toContain(message);
   });
 
-  test('refuses a negative or unreadable maxSizeMB the same way', async () => {
+  test('takes the default for a negative maxSizeMB and refuses NaN', async () => {
     const logDir = `${tmpDir.path}/negative-max-size`;
 
     const sink = new FileSink({
@@ -3381,25 +4039,17 @@ describe('FileSink - entries written during close', () => {
 
     expect((await fsPromises.readdir(logDir)).length).toBe(1);
 
-    const nanDir = `${tmpDir.path}/nan-max-size`;
-    const nanSink = new FileSink({
-      logDir: nanDir,
-      basename: 'nan',
-      maxSizeMB: Number.NaN,
-      jsonFormat: false,
-    });
-
-    nanSink.write({
-      timestamp: Date.now(),
-      type: 'info',
-      serviceName: 'TestService',
-      template: 'NaN threshold',
-      message: 'NaN threshold',
-    });
-
-    await nanSink.close();
-
-    expect((await fsPromises.readdir(nanDir)).length).toBe(1);
+    // NaN names no threshold at all - a config parse mistake - so it is refused at
+    // construction like `closeTimeoutMS`, rather than quietly taking the default.
+    expect(
+      () =>
+        new FileSink({
+          logDir: `${tmpDir.path}/nan-max-size`,
+          basename: 'nan',
+          maxSizeMB: Number.NaN,
+          jsonFormat: false,
+        }),
+    ).toThrow('FileSink maxSizeMB must be a number other than NaN');
   });
 });
 
@@ -3552,4 +4202,592 @@ test('failed rotation keeps appending and recovers when renaming becomes availab
     await sink.close();
     await directory.cleanup();
   }
+});
+
+test('a log file that cannot be reopened holds its lines instead of spending their retries', async () => {
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const failures: SinkFailure[] = [];
+
+  setOpenRetryBackoffForTesting(FAST_OPEN_RETRY);
+
+  const sink = new FileSink({
+    logDir: directory.path,
+    basename: 'setup-loss',
+    maxRetries: 0,
+    onError: (failure) => {
+      failures.push(failure);
+    },
+  });
+
+  setOpenRetryBackoffForTesting(undefined);
+
+  try {
+    await sink.flush();
+    const internals = sink as unknown as {
+      logDir: string;
+      logFileStream?: { emit: (event: string, error: Error) => void };
+    };
+    const logDir = internals.logDir;
+    // The stream fails, and the reopen cannot create the log directory: a regular file
+    // stands where it would go.
+    await fsPromises.writeFile(`${directory.path}/not-a-directory`, '');
+    internals.logDir = `${directory.path}/not-a-directory/logs`;
+    internals.logFileStream?.emit('error', new Error('EIO: simulated'));
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'held',
+      message: 'held',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(
+      failures.map((failure) => [failure.kind, failure.disposition]),
+    ).toEqual([
+      ['write', 'no_entry'],
+      ['setup', 'no_entry'],
+    ]);
+    expect(sink.getHealth()).toMatchObject({
+      queueSize: 1,
+      droppedEntries: 0,
+      isInitialized: false,
+    });
+
+    // The directory is back: the held line goes out on the sink's own timer.
+    internals.logDir = logDir;
+    await sink.flush(2000);
+    expect(sink.getHealth()).toMatchObject({
+      queueSize: 0,
+      droppedEntries: 0,
+      isInitialized: true,
+      isHealthy: true,
+    });
+    const logFile = `${logDir}/setup-loss-${new Date().toISOString().slice(0, 10)}.log`;
+    expect(await fsPromises.readFile(logFile, 'utf8')).toContain('held');
+  } finally {
+    await sink.close();
+    await directory.cleanup();
+  }
+});
+
+test('bytes a rotation abandons are reported as a write loss, not a close', async () => {
+  // Nothing is closing during a rotation, so `'close'` routed it to owners as a close
+  // failure of a sink that was still running.
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const failures: SinkFailure[] = [];
+  const sink = new FileSink({
+    logDir: directory.path,
+    basename: 'rotation-loss',
+    onError: (failure) => {
+      failures.push(failure);
+    },
+  });
+  try {
+    await sink.flush();
+    (
+      sink as unknown as {
+        reportRotationFlushLoss(bytes: number, target: string): void;
+      }
+    ).reportRotationFlushLoss(42, directory.path);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.kind).toBe('write');
+    expect(failures[0]?.disposition).toBe('no_entry');
+    expect(failures[0]?.error.message).toContain('Rotation abandoned 42 bytes');
+  } finally {
+    await sink.close();
+    await directory.cleanup();
+  }
+});
+
+test('a log file opened over a stream already installed lets the older one go', async () => {
+  // A reopen after a stream error can install a stream while a rotation is between
+  // streams; the rotation's own reopen then installed over it, and nothing - not even
+  // `close()` - ever ended the first.
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const sink = new FileSink({
+    logDir: directory.path,
+    basename: 'install-race',
+  });
+  try {
+    await sink.flush();
+    const internals = sink as unknown as {
+      logFileStream?: { writableEnded: boolean; destroyed: boolean };
+      setupLogFile(shouldSkipRotation?: boolean): Promise<void>;
+    };
+    const older = internals.logFileStream;
+
+    await internals.setupLogFile(true);
+
+    expect(internals.logFileStream).toBeDefined();
+    expect(internals.logFileStream).not.toBe(older);
+    expect(older?.writableEnded === true || older?.destroyed === true).toBe(
+      true,
+    );
+    expect(sink.getHealth().isInitialized).toBe(true);
+  } finally {
+    await sink.close();
+    await directory.cleanup();
+  }
+});
+
+test('a stream failure between streams is routed by the diagnostic line in flight', async () => {
+  // During a rotation the line is in flight but not yet handed to a stream, so the
+  // routing has to come from the entry in flight, as the suppression flag's already did.
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const failures: SinkFailure[] = [];
+  const sink = new FileSink({
+    logDir: directory.path,
+    basename: 'diagnostic-in-flight',
+    onError: (failure) => {
+      failures.push(failure);
+    },
+  });
+  const lines = muteConsoleError();
+  const internals = sink as unknown as {
+    inFlightEntry?: unknown;
+    logFileStream?: { emit: (event: string, error: Error) => void };
+  };
+  try {
+    await sink.flush();
+    internals.inFlightEntry = {
+      entry: markDiagnosticEntry({
+        timestamp: Date.now(),
+        type: 'info',
+        template: 'diagnostic',
+        message: 'diagnostic',
+      }),
+      attempts: 0,
+      formatted: 'diagnostic\n',
+      formatError: undefined,
+    };
+    internals.logFileStream?.emit('error', new Error('EIO: simulated'));
+
+    // A diagnostic's failure goes to the console, never to the handler.
+    expect(failures).toEqual([]);
+    expect(lines.some((line) => line.includes('Log file stream failed'))).toBe(
+      true,
+    );
+  } finally {
+    internals.inFlightEntry = undefined;
+    restoreConsoleError();
+    await sink.close();
+    await directory.cleanup();
+  }
+});
+
+test('concurrent and reentrant file closes share one teardown and in-flight report', async () => {
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const failures: SinkFailure[] = [];
+  let reentrant: Promise<void> | undefined;
+  const sink = new FileSink({
+    logDir: directory.path,
+    basename: 'shared-close',
+    closeTimeoutMS: 20,
+    onError: (failure) => {
+      failures.push(failure);
+      reentrant = sink.close();
+    },
+  });
+  try {
+    await sink.flush();
+    let ends = 0;
+    const stuck = {
+      destroyed: false,
+      writableLength: 10,
+      write: () => true,
+      end: () => {
+        ends++;
+      },
+      once: () => {},
+      on: () => {},
+      removeListener: () => {},
+      destroy() {
+        this.destroyed = true;
+      },
+    };
+    (sink as unknown as { logFileStream: unknown }).logFileStream = stuck;
+    sink.write({
+      timestamp: Date.now(),
+      type: 'info',
+      template: 'stuck',
+      message: 'stuck',
+    });
+    const first = sink.close();
+    const second = sink.close();
+    expect(second).toBe(first);
+    await Promise.all([first, second]);
+    expect(reentrant).toBe(first);
+    expect(sink.close()).toBe(first);
+    expect(ends).toBe(1);
+    expect(failures).toHaveLength(1);
+    expect(failures[0]?.error.message).toContain('still in flight');
+  } finally {
+    await sink.close();
+    await directory.cleanup();
+  }
+});
+
+test('a diagnostic eviction does not silence the overflow report for application entries', async () => {
+  const makeEntry = (message: string): LogEntry => ({
+    timestamp: Date.now(),
+    type: 'info',
+    serviceName: 'TestService',
+    template: message,
+    message,
+  });
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const failures: SinkFailure[] = [];
+  const sink = new FileSink({
+    logDir: directory.path,
+    basename: 'diagnostic-overflow',
+    // The line in flight takes one place.
+    maxQueueSize: 2,
+    onError: (failure) => {
+      failures.push(failure);
+    },
+  });
+  const captured = muteConsoleError();
+  const pending = Promise.withResolvers<void>();
+  try {
+    await sink.flush();
+    const started = Promise.withResolvers<void>();
+    (sink as unknown as { writeEntry: () => Promise<void> }).writeEntry =
+      () => {
+        started.resolve();
+        return pending.promise;
+      };
+    sink.write(makeEntry('in flight'));
+    await started.promise;
+    sink.write(markDiagnosticEntry(makeEntry('diagnostic')));
+    // Evicts only the diagnostic: its report goes to the console, not `onError`.
+    sink.write(makeEntry('first app line'));
+    expect(failures).toEqual([]);
+    expect(captured.some((line) => line.includes('Log queue is full'))).toBe(
+      true,
+    );
+    // Evicts an application entry: still reported to `onError`.
+    sink.write(makeEntry('second app line'));
+    expect(failures.map((failure) => failure.kind)).toEqual(['queue_full']);
+    expect(failures[0]?.entry?.message).toBe('first app line');
+  } finally {
+    pending.resolve();
+    await sink.close();
+    restoreConsoleError();
+    await directory.cleanup();
+  }
+});
+
+test.each(['console', 'diagnostic'] as const)(
+  'a rotation failure reaches onError when a %s entry triggered the rotation',
+  async (origin) => {
+    // The rename failure belongs to no entry, and only the first of a backoff run is
+    // reported. Routed by whichever entry happened to trigger the rotation, a forwarded
+    // console line suppressed that one report and a diagnostic sent it to the console,
+    // so `onError` never heard of the outage at all.
+    const makeEntry = (message: string): LogEntry => ({
+      timestamp: Date.now(),
+      type: 'info',
+      template: message,
+      message,
+    });
+    const directory = new TmpDir({ unsafeCleanup: true });
+    await directory.initialize();
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: directory.path,
+      basename: `rotation-origin-${origin}`,
+      maxSizeMB: 0.001,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+    const captured = muteConsoleError();
+    let renameSpy: { mockRestore(): void } | undefined;
+    try {
+      sink.write(makeEntry('fill-' + 'x'.repeat(2000)));
+      await sink.flush();
+      renameSpy = spyOn(fsPromises, 'rename').mockImplementation(() =>
+        Promise.reject(new Error('archive rename denied')),
+      );
+      if (origin === 'console') {
+        const consoleShim = spyOn(console, 'error').mockImplementation(() => {
+          sink.write(makeEntry('forwarded terminal report'));
+        });
+        try {
+          reportToConsole('terminal failure');
+        } finally {
+          consoleShim.mockRestore();
+        }
+      } else {
+        sink.write(markDiagnosticEntry(makeEntry('diagnostic')));
+      }
+      await sink.flush();
+      expect(failures.map((failure) => failure.kind)).toEqual(['setup']);
+      expect(failures[0]?.disposition).toBe('no_entry');
+      expect(failures[0]?.error.message).toContain('Error rotating log file');
+      expect(captured).toEqual([]);
+    } finally {
+      renameSpy?.mockRestore();
+      await sink.close();
+      restoreConsoleError();
+      await directory.cleanup();
+    }
+  },
+);
+
+test('a refusal suppressed inside a console report leaves the one refusal report owed', async () => {
+  const directory = new TmpDir({ unsafeCleanup: true });
+  await directory.initialize();
+  const makeEntry = (message: string): LogEntry => ({
+    timestamp: Date.now(),
+    type: 'info',
+    template: message,
+    message,
+  });
+  const failures: SinkFailure[] = [];
+  const sink = new FileSink({
+    logDir: directory.path,
+    basename: 'refusal-latch',
+    onError: (failure) => {
+      failures.push(failure);
+    },
+  });
+  try {
+    await sink.close();
+    const consoleShim = spyOn(console, 'error').mockImplementation(() => {
+      sink.write(makeEntry('forwarded terminal report'));
+    });
+    try {
+      reportToConsole('terminal failure');
+    } finally {
+      consoleShim.mockRestore();
+    }
+    expect(failures).toEqual([]);
+
+    sink.write(makeEntry('application line'));
+    sink.write(makeEntry('another application line'));
+    expect(failures.map((failure) => failure.entry?.message)).toEqual([
+      'application line',
+    ]);
+    expect(failures[0]?.kind).toBe('close');
+    expect(sink.getHealth().droppedByKind.close).toBe(3);
+  } finally {
+    await directory.cleanup();
+  }
+});
+
+describe('FileSink - holds lines while its log file cannot be opened', () => {
+  let directory: TmpDir;
+
+  beforeEach(async () => {
+    directory = new TmpDir({
+      unsafeCleanup: true,
+      prefix: 'filesink-outage-',
+    });
+    await directory.initialize();
+    setOpenRetryBackoffForTesting(FAST_OPEN_RETRY);
+  });
+
+  afterEach(async () => {
+    setOpenRetryBackoffForTesting(undefined);
+    await directory.cleanup();
+  });
+
+  const makeEntry = (message: string): LogEntry => ({
+    timestamp: Date.now(),
+    type: 'info',
+    template: message,
+    message,
+  });
+
+  /** A sink whose `logDir` sits under a regular file, so every `mkdir` fails. */
+  const makeUnopenableSink = async (
+    maxRetries = 3,
+  ): Promise<{
+    sink: FileSink;
+    blocker: string;
+    failures: SinkFailure[];
+  }> => {
+    const blocker = `${directory.path}/not-a-directory`;
+    await fsPromises.writeFile(blocker, '');
+
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir: `${blocker}/logs`,
+      basename: 'outage',
+      maxRetries,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    // Past the constructor's failed open.
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
+    return { sink, blocker, failures };
+  };
+
+  test('reports the outage once and keeps trying on its own timer, backing off', async () => {
+    const { sink, failures } = await makeUnopenableSink();
+    const internals = sink as unknown as {
+      openFile: (context: unknown) => Promise<unknown>;
+    };
+    const realOpen = internals.openFile.bind(sink);
+    const attemptedAt: number[] = [];
+
+    internals.openFile = (context) => {
+      attemptedAt.push(Date.now());
+
+      return realOpen(context);
+    };
+
+    // No traffic at all: the timer alone drives the attempts.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(attemptedAt.length).toBeGreaterThanOrEqual(3);
+
+    // Doubling from 20 ms to the 50 ms cap, never back to back.
+    for (let index = 1; index < attemptedAt.length; index++) {
+      expect(
+        attemptedAt[index] - attemptedAt[index - 1],
+      ).toBeGreaterThanOrEqual(15);
+    }
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({
+      kind: 'setup',
+      disposition: 'no_entry',
+    });
+    expect(failures[0]?.error.message).toContain('ENOTDIR');
+
+    await sink.close();
+  });
+
+  test('held lines spend no retries, and are written in order once the file opens', async () => {
+    const { sink, blocker, failures } = await makeUnopenableSink(0);
+
+    sink.write(makeEntry('first'));
+    sink.write(makeEntry('second'));
+    sink.write(makeEntry('third'));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    expect(failures.filter((failure) => failure.entry !== undefined)).toEqual(
+      [],
+    );
+    expect(sink.getHealth()).toMatchObject({
+      queueSize: 3,
+      droppedEntries: 0,
+      consecutiveFailures: 0,
+      isInitialized: false,
+      isHealthy: false,
+    });
+
+    await fsPromises.rm(blocker);
+    expect(await sink.flush(2000)).toEqual({
+      success: true,
+      entriesWritten: 3,
+      entriesFailed: 0,
+      timedOut: false,
+      entriesQueued: 0,
+    });
+
+    const [logFile] = await fsPromises.readdir(`${blocker}/logs`);
+    const contents = await fsPromises.readFile(
+      `${blocker}/logs/${logFile}`,
+      'utf8',
+    );
+
+    expect(contents.indexOf('first')).toBeLessThan(contents.indexOf('second'));
+    expect(contents.indexOf('second')).toBeLessThan(contents.indexOf('third'));
+    expect(sink.getHealth()).toMatchObject({
+      queueSize: 0,
+      droppedEntries: 0,
+      isHealthy: true,
+    });
+
+    await sink.close();
+  });
+
+  test('an ordinary write failure is still retried at once', async () => {
+    const attempts: number[] = [];
+    const sink = new FileSink({
+      logDir: directory.path,
+      basename: 'write-retry',
+      maxRetries: 3,
+      onError: (failure) => {
+        if (failure.entry !== undefined) {
+          attempts.push(Date.now());
+        }
+      },
+    });
+    await sink.flush(1000);
+
+    (sink as unknown as { writeEntry: () => Promise<void> }).writeEntry = () =>
+      Promise.reject(new Error('disk said no'));
+
+    sink.write(makeEntry('not delayed'));
+    await sink.flush(2000);
+
+    // The stream is still usable, so nothing waits on a reopen: back to back.
+    expect(attempts).toHaveLength(4);
+    expect(attempts[3] - attempts[0]).toBeLessThan(100);
+    expect(sink.getHealth().droppedByKind.write).toBe(1);
+
+    await sink.close();
+  });
+
+  test('close() keeps trying for a short grace window, then reports the held lines once', async () => {
+    const { sink, failures } = await makeUnopenableSink();
+
+    sink.write(makeEntry('held one'));
+    sink.write(makeEntry('held two'));
+
+    const startedAt = Date.now();
+    await sink.close();
+
+    // The 500 ms grace window, not the 30 s close budget.
+    expect(Date.now() - startedAt).toBeLessThan(2000);
+
+    const closeFailures = failures.filter(
+      (failure) => failure.kind === 'close',
+    );
+
+    expect(closeFailures).toHaveLength(1);
+    expect(closeFailures[0]).toMatchObject({
+      disposition: 'lost',
+      entry: { message: 'held one' },
+    });
+    expect(closeFailures[0]?.error.message).toContain('still queued');
+    expect(sink.getHealth()).toMatchObject({
+      queueSize: 0,
+      droppedEntries: 2,
+      droppedByKind: { close: 2, write: 0 },
+    });
+  });
+
+  test('flush() during an outage returns once an open attempt fails, with the lines still queued', async () => {
+    const { sink } = await makeUnopenableSink();
+
+    sink.write(makeEntry('flushed mid-outage'));
+
+    const startedAt = Date.now();
+
+    expect(await sink.flush(5000)).toEqual({
+      success: false,
+      entriesWritten: 0,
+      entriesFailed: 0,
+      timedOut: false,
+      entriesQueued: 1,
+    });
+    // The next attempt, not the deadline.
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+    expect(sink.getHealth().queueSize).toBe(1);
+
+    await sink.close();
+  });
 });

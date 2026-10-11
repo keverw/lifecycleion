@@ -1,3 +1,93 @@
+import { isObjectLike } from './is-object-like';
+
+const CONSOLE_REPORT_STATE_KEY = Symbol.for('lifecycleion.reportToConsole.v1');
+
+/** Whether a console report is running, in any copy sharing this state. */
+interface ConsoleReportState {
+  active: boolean;
+}
+
+/**
+ * The state this copy uses, once it has found, installed or given up on the shared one.
+ * Every copy keeps a state it finds in the slot, so the first one there is the one every
+ * copy uses, and holding it here spares each check - one per guarded callback, emit and
+ * report - a descriptor read of the global.
+ */
+let sharedState: ConsoleReportState | undefined;
+
+/** A slot value with a writable own `active` flag, read without invoking an accessor. */
+function isConsoleReportState(value: unknown): value is ConsoleReportState {
+  if (!isObjectLike(value)) {
+    return false;
+  }
+  const active = Object.getOwnPropertyDescriptor(value, 'active');
+  return typeof active?.value === 'boolean' && active.writable === true;
+}
+
+/**
+ * Share the console origin across bundled copies. A slot holding anything else is
+ * replaced when possible. When it is not - a frozen `globalThis`, a non-configurable
+ * property - no copy can ever install one, so this copy keeps a state of its own instead,
+ * which contains only its own re-entry, and does not try the slot again.
+ */
+function sharedConsoleState(): ConsoleReportState {
+  if (sharedState !== undefined) {
+    return sharedState;
+  }
+  const state: ConsoleReportState = { active: false };
+  try {
+    const existing: unknown = Object.getOwnPropertyDescriptor(
+      globalThis,
+      CONSOLE_REPORT_STATE_KEY,
+    )?.value;
+    if (isConsoleReportState(existing)) {
+      sharedState = existing;
+      return sharedState;
+    }
+    void Reflect.defineProperty(globalThis, CONSOLE_REPORT_STATE_KEY, {
+      value: state,
+      configurable: true,
+      writable: true,
+    });
+  } catch {
+    // Unshared, as for a refused definition.
+  }
+  sharedState = state;
+  return state;
+}
+
+/**
+ * Stop sharing: keep a state of this copy's own from now on. The descriptor check cannot
+ * tell a Proxy from a plain object, so a shared state whose flag then throws when read or
+ * written lands here instead of throwing out of the console rung.
+ */
+function useOwnConsoleState(): ConsoleReportState {
+  const own: ConsoleReportState = { active: false };
+  sharedState = own;
+  return own;
+}
+
+function isActive(): boolean {
+  try {
+    return sharedConsoleState().active === true;
+  } catch {
+    return useOwnConsoleState().active;
+  }
+}
+
+function setActive(isActiveNow: boolean): void {
+  try {
+    sharedConsoleState().active = isActiveNow;
+  } catch {
+    useOwnConsoleState().active = isActiveNow;
+  }
+}
+
+/** Capture this when queuing work so its failures cannot feed a console report back. */
+export function isConsoleReportActive(): boolean {
+  return isActive();
+}
+
 /**
  * Write to `console.error` without letting it throw.
  *
@@ -8,15 +98,29 @@
  * replaced by a second one thrown from the reporter.
  *
  * `console.error` is not a safe call. It is an ordinary mutable property on an ordinary
- * global, and two ordinary situations make it throw:
+ * global, and ordinary situations make it throw synchronously:
  *
- * - **A closed or broken stdout.** Node raises `EPIPE` when writing to a pipe whose reader
- *   has gone - `| head`, a supervisor that exited first - and a stream destroyed during
- *   shutdown throws on write. That is exactly when this rung runs in a lifecycle library:
+ * - **A replaced or missing console.** Patching `console.error` to throw so an unexpected
+ *   warning fails the build is a common setup, and this package's own `console-test-utils`
+ *   replaces it too. A runtime or sandbox without a usable `console` throws on the call.
+ * - **A console implementation that throws on write.** A custom console, or a runtime
+ *   whose console writes synchronously to a destination that refuses the write, throws
+ *   out of the call. That is most likely when this rung runs in a lifecycle library:
  *   sinks are closing, handlers are being torn down, and the process is on its way out.
- * - **A test harness that replaces it.** Patching `console.error` to throw so an
- *   unexpected warning fails the build is a common setup, and this package's own
- *   `console-test-utils` replaces it too.
+ *
+ * A console shim may also forward the report back into the library. Nested terminal
+ * output is dropped while the shim runs. Reporters that queue work capture
+ * `isConsoleReportActive()` at entry and retain it until that work settles, so a
+ * later failure cannot restart the loop after this synchronous guard clears.
+ *
+ * Only a synchronous throw is contained here. On Node, a write to a stdout or stderr pipe
+ * whose reader has gone - `| head`, a supervisor that exited first - does not throw: the
+ * `EPIPE` arrives later as an `'error'` event on `process.stdout` / `process.stderr`, out
+ * of reach of this `try`, exactly as it does for a plain `console.log`. With no listener
+ * for that event, Node treats it as an uncaught exception. The library installs no
+ * listener on the process's standard streams, since what a broken pipe should mean for
+ * the process is the application's decision; an application that runs with its output
+ * piped handles it there, for example with `process.stdout.on('error', ...)`.
  *
  * The escape was real at four call sites and not merely theoretical: `Logger`'s
  * `handleEventHandlerFailure` and `handleSinkError` both reach here from a `catch` that
@@ -38,12 +142,22 @@
  *             `Error` inspected rather than stringified can still hand one over.
  */
 export function reportToConsole(...args: unknown[]): void {
+  if (isActive()) {
+    return;
+  }
+
+  // Include the property read: a console shim can log from its getter as well as its
+  // function body. Queued reporters must also capture this state when work is created.
+  setActive(true);
+
   try {
     // eslint-disable-next-line no-console -- this function is the console rung itself
     console.error(...args);
   } catch {
     // Nothing left to try, which is the whole point of this being the last rung. A
-    // missing `console`, a replaced `error` that is not a function, and a write to a
-    // broken pipe all land here, and all of them are quieter than the alternative.
+    // missing `console`, a replaced `error` that is not a function, and a console that
+    // throws on write all land here, and all of them are quieter than the alternative.
+  } finally {
+    setActive(false);
   }
 }

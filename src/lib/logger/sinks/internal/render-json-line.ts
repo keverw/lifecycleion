@@ -27,7 +27,7 @@ import type { LogEntry } from '../../types';
  * line is JSON however hostile the bag.
  *
  * `onFormatError` hears the first value that would not render, as the sink's
- * `'format'`/`'fallback'` report: the line was written, with a marker in it.
+ * `'format'`/`'fallback'` report: the line goes on with a marker in it, not yet written.
  */
 export function renderJSONLine(
   entry: LogEntry,

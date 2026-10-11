@@ -101,10 +101,14 @@ const LABELS: Record<FormatFailureKind, string> = {
  * @param kind    Which stage this reporter speaks for.
  * @param handler Called with the first failure. A handler that throws falls back to the
  *                console: a handler for failures must not be able to turn one into two.
+ * @param onHandlerSettled Called after a supplied handler settles, including failures.
+ * @param handlerName Optional identity for malformed handler returns.
  */
 export function createFormatReporter(
   kind: FormatFailureKind,
   handler?: FormatErrorHandler,
+  onHandlerSettled?: () => void,
+  handlerName: string = 'onFormatError',
 ): ReportFormatFailure {
   // The shared rungs. What is specific to this channel is its kind, its documentation and
   // the label in the console line; the guarantees beneath are one implementation.
@@ -119,7 +123,12 @@ export function createFormatReporter(
         // rejection on the console rung exactly as it lands a throw.
         (error: Error, path: string): void => handler(error, kind, path);
 
-  return createFailureReporter(LABELS[kind], bound);
+  return createFailureReporter(
+    LABELS[kind],
+    bound,
+    onHandlerSettled,
+    handlerName,
+  );
 }
 
 /**

@@ -8,7 +8,7 @@ export function clamp(value: number, min: number, max: number): number {
  * `clamp` is `Math.max`/`Math.min`, and both launder `NaN`: `clamp(NaN, 1, Infinity)` is
  * `NaN`, not `1`. Every caller that turns the result into a duration then inherits it -
  * a `NaN` delay reads as "not greater than zero", which callers spell as *now*, so a
- * bound meant to slow something down removed the wait entirely. `Infinity` is refused for
+ * bound meant to slow something down would remove the wait entirely. `Infinity` is refused for
  * the same reason from the other end: `setTimeout(Infinity)` fires on the next tick.
  *
  * @param value - The value to clamp.

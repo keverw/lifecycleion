@@ -146,8 +146,11 @@ Gets the number of subscribers for an event.
 
 Removes event listeners.
 
-- With event name: removes all listeners for that event
-- Without event name: removes all listeners for all events
+- With event name: removes all listeners for that event only. Any value other than
+  `undefined` or `null` is treated as an event name, so `clear('')` removes only
+  listeners registered under `''`
+- Without event name (or with `undefined`, or `null` from JavaScript): removes all
+  listeners for all events
 
 ## Error Handling
 
@@ -173,7 +176,7 @@ emitter.on('test', async () => {
 }); // Promise rejection will be caught and reported on the 'error' channel
 ```
 
-The error messages include the event name and detailed error information, making debugging easier.
+The error messages include the event name and detailed error information, making debugging easier. Event names are typed `string`; any other `Map` key a JavaScript caller uses still dispatches, and is named in reports as `String()` renders it (a symbol as `Symbol(description)`), or as `<unnamed event>` when that throws.
 
 ### Overriding Where Handler Failures Go
 
@@ -215,9 +218,10 @@ class MyEmitter extends EventEmitterProtected {
 ```
 
 The optional `data` is the value emitted to the failing handler, including for an async
-rejection. Two rules for an override: it must not throw - it runs on the failure path and
-there is nothing above it left to catch - and it must not assume `error` is an `Error`. Use
-[`describeError`](./to-error.md#describeerror), which satisfies both.
+rejection. Two rules for an override: it should not throw - a throw does not escape
+`emit()`, but it is only written to `console.error` alongside the original failure, so the
+report the override meant to make is lost - and it must not assume `error` is an `Error`.
+Use [`describeError`](./to-error.md#describeerror), which satisfies both.
 
 [`Logger`](./logger.md) overrides this exact hook for the loop described above, routing
 its own `'logger'` handler failures to its separate asynchronous diagnostic channel.
