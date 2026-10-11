@@ -1711,3 +1711,49 @@ test('a failure exit requested by a simulated exit-process listener is reported,
     output.mockRestore();
   }
 });
+
+test('a request whose replacement report lets a console shim commit runs nothing after that commit', async () => {
+  let logger!: Logger;
+  const output = spyOn(console, 'error').mockImplementation(
+    (...args: unknown[]) => {
+      // A shim forwarding the report back as an exit that commits on the spot.
+      if (String(args[0]).includes('replaces the pending exit code')) {
+        logger.exit(1);
+      }
+    },
+  );
+  try {
+    const beforeExitCodes: number[] = [];
+    logger = new Logger({
+      sinks: [],
+      callProcessExit: false,
+      beforeExitCallback: (code) => {
+        beforeExitCodes.push(code);
+        return new Promise(() => {});
+      },
+    });
+    const called: number[] = [];
+    logger.on<{ eventType: string; code: number }>(
+      'logger',
+      ({ eventType, code }) => {
+        if (eventType === 'exit-called') {
+          called.push(code);
+        }
+      },
+    );
+    const processed = recordExitProcess(logger);
+
+    logger.exit(0);
+    logger.setBeforeExitCallback(undefined);
+    logger.exit(1);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // The shim's exit committed 1, this request's code; the request itself then started
+    // nothing - no second `exit-called` for an exit that had already committed.
+    expect(processed).toEqual([1]);
+    expect(called).toEqual([0, 1]);
+    expect(beforeExitCodes).toEqual([0]);
+  } finally {
+    output.mockRestore();
+  }
+});

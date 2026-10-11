@@ -627,3 +627,45 @@ test('a close override returning a thenable whose then throws on read still comp
     output.mockRestore();
   }
 });
+
+test('an exit a console shim makes from the skip report belongs to the exit still finishing', async () => {
+  // The skip is reported while the exit is still finishing, so a shim that exits from it
+  // is ignored rather than starting the next exit ahead of this one's `exit-completed`.
+  const actualExit = Object.getOwnPropertyDescriptor(process, 'exit');
+  let logger!: Logger;
+  const output = spyOn(console, 'error').mockImplementation(
+    (...args: unknown[]) => {
+      if (String(args[0]).includes('process exit skipped')) {
+        logger.exit(1);
+      }
+    },
+  );
+  process.exit = (() => {}) as typeof process.exit;
+
+  try {
+    logger = new Logger({ sinks: [], callProcessExit: true });
+    const events = recordExitEvents(logger);
+    logger.on<ExitEvent>('logger', ({ eventType }) => {
+      if (eventType === 'exit-process') {
+        (process as { exit?: unknown }).exit = undefined;
+      }
+    });
+
+    logger.exit(0);
+    await waitFor(() => completions(events).length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(events.map(({ event }) => event.eventType)).toEqual([
+      'exit-called',
+      'exit-process',
+      'exit-completed',
+    ]);
+    expect(completions(events)).toEqual([{ code: 0, endedProcess: false }]);
+    expect(logger.isFinishingExit).toBe(false);
+  } finally {
+    if (actualExit) {
+      Object.defineProperty(process, 'exit', actualExit);
+    }
+    output.mockRestore();
+  }
+});

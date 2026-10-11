@@ -283,7 +283,7 @@ export class Logger extends EventEmitter {
   // Whether a committed exit is still closing the sinks: from `processExit` committing its
   // code until the close it joined settles, real or simulated. A request made then belongs
   // to that exit and is ignored rather than starting the next one (see
-  // `recordExitRequest`), so a simulated exit settles on the code a real one exits with.
+  // `ignoreAfterCommit`), so a simulated exit settles on the code a real one exits with.
   private _isFinishingExit = false;
   private _closed = false;
 
@@ -428,6 +428,11 @@ export class Logger extends EventEmitter {
     // Recorded before `exit-called` and `beforeExit` run, so a request either of them
     // makes - and one `beforeExit` answers 'wait' for - is judged against this one.
     const pendingExit = this.recordExitRequest(requestedCode, code);
+    // A replacement is reported to the console, where a shim may have exited and committed
+    // - with this request's code already folded in.
+    if (this.ignoreAfterCommit(requestedCode)) {
+      return;
+    }
 
     this._exitRequested = true;
 
@@ -2136,9 +2141,9 @@ export class Logger extends EventEmitter {
     // bounded: requests alternating between failure codes while a shutdown runs would
     // otherwise write a line apiece to the console the logger falls back to. The commit
     // reports the count and the code they settled on (see `processExit`). Once per
-    // pending exit, which for a real exit is once per logger. A repeat of the pending
-    // code changes nothing and is neither reported nor counted. Names the normalized code
-    // when it differs from the request, as `exit(300)` does.
+    // pending exit. A repeat of the pending code changes nothing and is neither reported
+    // nor counted. Names the normalized code when it differs from the request, as
+    // `exit(300)` does.
     if (pendingExit.didReportReplacement) {
       pendingExit.suppressedReplacements++;
       return pendingExit;
@@ -2154,7 +2159,8 @@ export class Logger extends EventEmitter {
 
   /**
    * Ignore a request made once an exit has committed its code: from then until that exit's
-   * cleanup settles (for a real exit, for good), it starts nothing - no `exit-called`, no
+   * cleanup settles - for a real exit, until `process.exit()` is found missing or does
+   * not end the process - it starts nothing - no `exit-called`, no
    * `beforeExit` - since that exit has published its code and is closing the sinks, and
    * telling listeners and the callback an exit was requested would describe one that never
    * runs. Answers whether `requested` was ignored.
@@ -2238,8 +2244,8 @@ export class Logger extends EventEmitter {
     // that counts is the one this commit runs in. A code kept by a simulated request -
     // `exit(256)` while `process.exit` was absent - would otherwise reach a real
     // `process.exit()` here and wrap to 0 at the OS boundary: a failure exiting as
-    // success. A real commit happens at most once per logger, so its report below is
-    // bounded by that alone.
+    // success. A real commit happens once per exit, so its report below is bounded as the
+    // exit's other reports are.
     const isInvalidForRealExit =
       this._hasScheduledProcessExit && this.isInvalidExitCode(pendingExit.code);
     const exitCode = isInvalidForRealExit ? 1 : pendingExit.code;
@@ -2338,11 +2344,15 @@ export class Logger extends EventEmitter {
       this._hasScheduledProcessExit = false;
     };
     const finishExit = (): void => {
-      // Cleanup has settled, so a simulated exit is complete and the next request starts
-      // the next exit. A real one stays latched by `_hasScheduledProcessExit`.
-      this._isFinishingExit = false;
+      // Checked while the exit is still finishing: a console shim that exits from the
+      // skip report is then ignored as belonging to this exit, rather than starting the
+      // next one before this one's `exit-completed`.
       const doesEndProcess =
         this._hasScheduledProcessExit && isProcessExitCallable();
+      // Cleanup has settled, so a simulated exit is complete and the next request starts
+      // the next exit. A real one stays latched by `_hasScheduledProcessExit` until
+      // `process.exit()` is found missing or does not end the process.
+      this._isFinishingExit = false;
       // Once per exit, on the close-failure path too. A listener that exits from here
       // starts the next exit when this one is simulated - it has settled - and is ignored
       // behind a real one, already committed. `emit` contains a listener's throw; an

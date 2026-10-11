@@ -25,9 +25,10 @@ export interface SharedSlotOptions<T extends object> {
  * validated again. Taking and releasing read the slot as an own data property, so an
  * accessor someone put there is never invoked. {@link isHeld} - on the hot path of every
  * guarded callback, emit and log call - compares a plain read instead, which allocates
- * nothing: the slot holds a data property this copy or another installed, so the read
- * invokes nothing unless the global itself has been redefined since, which is tampering
- * outside what this defends; even then a throw is caught and the slot read the guarded way.
+ * nothing: once this copy or another has installed the slot it holds a data property, so
+ * the read invokes nothing unless something else defines an accessor under the key -
+ * before the first install or after it - which is tampering outside what this defends;
+ * even then a throw is caught and the slot read the guarded way.
  * Anything that is not a valid state is replaced with a fresh
  * one, and so is a valid-looking state that proves unusable when taken or released - a
  * `Proxy` whose flag throws, a write that does not take: replacing the slot repairs every

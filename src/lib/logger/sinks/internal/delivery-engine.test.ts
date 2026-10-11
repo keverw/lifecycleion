@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
 import {
   DeliveryEngine,
   type DeliverySlot,
@@ -878,34 +878,51 @@ describe('DeliveryEngine', () => {
     );
   });
 
-  test('one write failure with no reopen since is a lost connection, not failing writes', async () => {
-    const destination = new FakeDestination();
-    const { engine, reports, write } = await started(
-      makeEngine({ destination, closeTimeoutMS: 200 }),
-    );
+  test.each([0, 140, 195])(
+    'one write failure with no reopen since is a lost connection, not failing writes (%p ms into the budget)',
+    async (failAtMS) => {
+      const destination = new FakeDestination();
+      const { engine, reports, write } = await started(
+        makeEngine({ destination, closeTimeoutMS: 200 }),
+      );
 
-    // The first connection opened; every reopen finds nothing, quietly.
-    destination.defaultOpen = { status: 'unavailable' };
-    destination.canContinue = false;
-    write('a');
-    write('b');
+      // The first connection opened; every reopen finds nothing, quietly.
+      destination.defaultOpen = { status: 'unavailable' };
+      destination.canContinue = false;
+      write('a');
+      write('b');
 
-    const closing = engine.close();
+      // The engine's clock jumps rather than a timer racing the deadline, so a late
+      // failure lands where it is meant to - with almost no budget left to reopen -
+      // however loaded the machine is.
+      const realNow = Date.now.bind(Date);
+      let offsetMS = 0;
+      const clock = spyOn(Date, 'now').mockImplementation(
+        () => realNow() + offsetMS,
+      );
 
-    // Close reaches its drain loop with the connection in hand within microtasks; the one
-    // failure lands there, and the destination never reopens after it.
-    await tick();
-    destination.isOpen = false;
-    destination.fail(new Error('EPIPE'));
-    await closing;
+      try {
+        const closing = engine.close();
 
-    const abandoned = reports.find((failure) => failure.kind === 'close');
+        // Close reaches its drain loop with the connection in hand within microtasks;
+        // the one failure lands there, and the destination never reopens after it.
+        await tick();
+        offsetMS = failAtMS;
+        destination.isOpen = false;
+        destination.fail(new Error('EPIPE'));
+        await closing;
+      } finally {
+        clock.mockRestore();
+      }
 
-    expect(abandoned?.error.message).toBe('abandoned 2 connection_lost');
-    expect((abandoned?.error.cause as Error | undefined)?.message).toBe(
-      'EPIPE',
-    );
-  });
+      const abandoned = reports.find((failure) => failure.kind === 'close');
+
+      expect(abandoned?.error.message).toBe('abandoned 2 connection_lost');
+      expect((abandoned?.error.cause as Error | undefined)?.message).toBe(
+        'EPIPE',
+      );
+    },
+  );
 
   test('a confirmed write after a reopen ends the failing-writes streak', async () => {
     const destination = new FakeDestination();

@@ -280,9 +280,11 @@ export interface LoggerEventMap {
     code: number;
     /**
      * `true` when `process.exit(code)` is about to be called, right after this event's
-     * listeners return - unless one of them removes `process.exit`, which skips the call
-     * (reported to the console) and leaves the process running. `false` for a simulated
-     * exit, or a real one that found `process.exit` gone before this event.
+     * listeners return. Scheduled, not guaranteed: a listener that removes `process.exit`
+     * skips the call (reported to the console), and a `process.exit` that returns - a stub
+     * or a host shim - or throws along with its fallback leaves the process running too.
+     * In each case a later `exit()` starts the next exit. `false` for a simulated exit, or
+     * a real one that found `process.exit` gone before this event.
      */
     endedProcess: boolean;
   };
