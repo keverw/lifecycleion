@@ -911,6 +911,45 @@ describe('DeliveryEngine', () => {
     },
   );
 
+  test('a reopen after an old write failure, then good writes, leaves one late failure a lost connection', async () => {
+    const destination = new FakeDestination();
+    const { engine, reports, write } = await started(
+      makeEngine({ destination, closeTimeoutMS: 200 }),
+    );
+
+    // An earlier connection loses a line and the reopen succeeds.
+    write('x');
+    destination.isOpen = false;
+    destination.fail(new Error('EPIPE (old reader)'), false);
+    await until(() => destination.isOpen);
+
+    // The new connection writes fine for a while.
+    write('ok');
+    await until(() => destination.pendingLines().includes('ok'));
+    destination.succeed();
+
+    // Then, during close, it fails once and never comes back.
+    destination.defaultOpen = { status: 'unavailable' };
+    destination.canContinue = false;
+    write('a');
+    write('b');
+
+    const closing = engine.close();
+
+    setTimeout(() => {
+      destination.isOpen = false;
+      destination.fail(new Error('EPIPE'));
+    }, 195);
+    await closing;
+
+    const abandoned = reports.find((failure) => failure.kind === 'close');
+
+    expect(abandoned?.error.message).toBe('abandoned 2 connection_lost');
+    expect((abandoned?.error.cause as Error | undefined)?.message).toBe(
+      'EPIPE',
+    );
+  });
+
   test('a write failure on a connection since replaced is not the cause of a later timeout', async () => {
     const destination = new FakeDestination();
     const { engine, reports, write } = await started(

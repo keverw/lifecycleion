@@ -626,7 +626,8 @@ export class DeliveryEngine {
   /**
    * Whether the latest connection replaced one whose writes were failing. With
    * {@link latestWriteFailure} set too, the destination reopened and its writes failed
-   * again: failing writes, rather than one failure that took a connection away.
+   * again: failing writes, rather than one failure that took a connection away. A
+   * confirmed write on the current connection clears it.
    */
   private didReopenAfterWriteFailure = false;
   private consecutiveFailures = 0;
@@ -1291,8 +1292,10 @@ export class DeliveryEngine {
         // A late answer from a replaced connection says nothing about the outage the
         // current one may be in.
         if (isCurrent) {
+          // A confirmed write ends any streak of failing writes, across reopens too.
           this.consecutiveFailures = 0;
           this.latestWriteFailure = undefined;
+          this.didReopenAfterWriteFailure = false;
           this.resetBackoff();
         }
 
