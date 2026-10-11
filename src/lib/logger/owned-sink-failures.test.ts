@@ -1,9 +1,9 @@
-import { expect, spyOn, test } from 'bun:test';
+import { expect, mock, spyOn, test } from 'bun:test';
 import { Logger } from './index';
 import { ArraySink } from './sinks/array';
 import { ConsoleSink } from './sinks/console';
 import { FileSink } from './sinks/file';
-import type { LogEntry, LoggerDiagnostic } from './types';
+import type { LogEntry, LoggerDiagnostic, LogSink } from './types';
 import { TmpDir } from '../tmp-dir';
 import { sleep } from '../sleep';
 
@@ -298,6 +298,92 @@ test('a muted ConsoleSink does not swallow an owned sink failure', async () => {
         log.tags?.includes('lifecycleion-diagnostic'),
       ),
     ).toHaveLength(1);
+  } finally {
+    await logger.close();
+    consoleReport.mockRestore();
+  }
+});
+
+test('a muted ConsoleSink from another copy of the library does not swallow an owned sink failure', async () => {
+  const failure = new Error('transform failed');
+  const source = new ArraySink({
+    transformer: () => {
+      throw failure;
+    },
+  });
+  // Not an instance of this copy's ConsoleSink, but carrying the shared brand: what
+  // another bundled copy's muted ConsoleSink looks like from here.
+  const writeDiagnostic = mock(() => {});
+  const muted = {
+    write: () => {},
+    writeDiagnostic,
+    isMuted: () => true,
+    [Symbol.for('lifecycleion.ConsoleSink.v1')]: true,
+  } as LogSink;
+  const logger = new Logger({ sinks: [source, muted], callProcessExit: false });
+  const consoleReport = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    logger.info('original');
+    await sleep(0);
+    expect(writeDiagnostic).not.toHaveBeenCalled();
+    expect(consoleReport).toHaveBeenCalledTimes(1);
+    expect(String(consoleReport.mock.calls[0][0])).toContain(
+      'transform failed',
+    );
+  } finally {
+    await logger.close();
+    consoleReport.mockRestore();
+  }
+});
+
+test('a sink that is not a ConsoleSink counts as a destination whatever its isMuted says', async () => {
+  const source = new ArraySink({
+    transformer: () => {
+      throw new Error('transform failed');
+    },
+  });
+  const writeDiagnostic = mock(() => {});
+  const sink: LogSink = {
+    write: () => {},
+    writeDiagnostic,
+    isMuted: () => true,
+  } as LogSink;
+  const logger = new Logger({ sinks: [source, sink], callProcessExit: false });
+  const consoleReport = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    logger.info('original');
+    await sleep(0);
+    // Delivered to it, so the console stays quiet.
+    expect(writeDiagnostic).toHaveBeenCalledTimes(1);
+    expect(consoleReport).not.toHaveBeenCalled();
+  } finally {
+    await logger.close();
+    consoleReport.mockRestore();
+  }
+});
+
+test('a branded sink whose isMuted cannot be read counts as a destination', async () => {
+  const source = new ArraySink({
+    transformer: () => {
+      throw new Error('transform failed');
+    },
+  });
+  const writeDiagnostic = mock(() => {});
+  const sink = {
+    write: () => {},
+    writeDiagnostic,
+    [Symbol.for('lifecycleion.ConsoleSink.v1')]: true,
+    get isMuted(): () => boolean {
+      throw new Error('hostile getter');
+    },
+  } as unknown as LogSink;
+  const logger = new Logger({ sinks: [source, sink], callProcessExit: false });
+  const consoleReport = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    logger.info('original');
+    await sleep(0);
+    expect(writeDiagnostic).toHaveBeenCalledTimes(1);
+    expect(consoleReport).not.toHaveBeenCalled();
   } finally {
     await logger.close();
     consoleReport.mockRestore();

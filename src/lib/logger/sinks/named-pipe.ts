@@ -53,13 +53,8 @@ export interface NamedPipeSinkOptions {
   pipePath: string;
   /**
    * Lowest level this sink writes. Defaults to {@link LogLevel.INFO}, matching `FileSink`
-   * and `ConsoleSink`.
-   *
-   * This sink had no level filtering at all, so every entry went down the pipe on the
-   * reasoning that whatever is reading it decides. That is still a reasonable posture for
-   * an aggregator - pass `LogLevel.DEBUG` to restore it - but a sink that cannot be told
-   * what to send was the odd one out of the three, and the asymmetry is paid for in
-   * bandwidth to a reader that is only going to discard it.
+   * and `ConsoleSink`. Pass `LogLevel.DEBUG` to send every entry and let the reader
+   * decide, as an aggregator may want.
    *
    * A `raw` entry is written whatever this is set to, as in the other sinks.
    */
@@ -263,8 +258,8 @@ export class NamedPipeSink implements LogSink {
       messages: {
         queueFull: (limit) =>
           `Pipe queue is full (maxQueueSize=${limit}); dropping the oldest entries`,
-        abandoned: (count) =>
-          `Closed with ${describeEntryCount(count)} still queued for ${this.pipePath}; they were not written`,
+        abandoned: (count, isUnreachable) =>
+          `Closed with ${describeEntryCount(count)} still queued for ${this.pipePath}${isUnreachable ? ': the pipe could not be opened, so' : ';'} they were not written`,
         refusedAfterClose: () =>
           `Entry logged after close() began for ${this.pipePath}; it was not written, and further ones are counted in droppedEntries without being reported`,
         unconfirmed: (attempts) =>
@@ -383,13 +378,9 @@ export class NamedPipeSink implements LogSink {
   }
 
   /**
-   * Current state of the sink, in the shape `FileSink.getHealth()` uses.
-   *
-   * The one place this sink reports on itself. It replaced a `droppedEntryCount` getter
-   * and an `isReconnecting` getter, which between them answered two of the seven
-   * questions worth asking and left a queue growing behind an unusable pipe invisible
-   * until entries began falling off the end of it. One method, the same shape as the
-   * other queueing sink, so a consumer can watch both the same way.
+   * Current state of the sink, in the shape `FileSink.getHealth()` uses, so a consumer
+   * can watch both queueing sinks the same way: whether it is healthy and connected, the
+   * queue behind it, what it dropped and why, and its most recent failure.
    *
    * Cheap enough to poll: every field is already being tracked.
    */

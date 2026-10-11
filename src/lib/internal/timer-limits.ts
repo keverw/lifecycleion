@@ -70,10 +70,12 @@ export function assertDurationMS(
 
 /**
  * Resolve an optional non-negative duration. Null and undefined select the default.
- * Invalid explicit values fail before a timer or operation is started, rather than
- * silently disabling a deadline or turning a typo into a multi-week wait. Infinity
- * and oversized finite durations retain the longest delay the runtime can enforce.
- * Zero is preserved here: each API decides whether it means immediate or disabled.
+ * Invalid explicit values - NaN, non-numbers, negatives - fail before a timer or
+ * operation is started, rather than silently disabling a deadline. Infinity and
+ * oversized finite durations are not invalid: they clamp to the longest delay the
+ * runtime can enforce, {@link MAX_TIMER_MS} (about 24.8 days), rather than overflowing
+ * into an immediate timer. Zero is preserved here: each API decides whether it means
+ * immediate or disabled.
  */
 export function resolveTimeoutMS(
   requested: number | null | undefined,

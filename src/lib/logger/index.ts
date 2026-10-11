@@ -1,4 +1,5 @@
 import { isNullish } from '../internal/is-nullish';
+import { isObjectLike } from '../internal/is-object-like';
 import {
   noop,
   observeRejection,
@@ -45,7 +46,7 @@ import {
   type SnapshotLogOptions,
 } from './internal/log-options';
 import { ArraySink } from './sinks/array';
-import { ConsoleSink } from './sinks/console';
+import { CONSOLE_SINK_BRAND, ConsoleSink } from './sinks/console';
 import { applyRedaction, markAllRedactionFailed } from './utils/redaction';
 import { snapshotList } from '../internal/redact-paths';
 import { prepareErrorObjectLog } from './utils/error-object';
@@ -275,6 +276,9 @@ export class Logger extends EventEmitter {
   private _pendingExit: PendingExit | undefined;
   // Whether an exit's `exit-called` listeners are running.
   private _isEmittingExitCalled = false;
+  // The last failure code a request absorbed during that emit stood for, so the
+  // `beforeExit` that follows is told it (see `exit`). Undefined otherwise.
+  private _absorbedExitCode: number | undefined;
   private _hasScheduledProcessExit = false;
   // Whether a committed exit is still closing the sinks: from `processExit` committing its
   // code until the close it joined settles, real or simulated. A request made then belongs
@@ -408,7 +412,12 @@ export class Logger extends EventEmitter {
     // code still counts toward the pending one, but it runs no listeners or
     // `beforeExit` of its own.
     if (this._isEmittingExitCalled) {
-      this.recordExitRequest(requestedCode, code);
+      if (
+        this.recordExitRequest(requestedCode, code) !== undefined &&
+        code !== 0
+      ) {
+        this._absorbedExitCode = code;
+      }
       return;
     }
     const isFirstExit = !this._exitRequested;
@@ -431,18 +440,28 @@ export class Logger extends EventEmitter {
     const beforeExit = this.withoutActiveSinkClose(() => {
       // Only the emit is guarded, not `beforeExit`: that callback is told `isFirstExit`
       // and decides repeats itself (`LifecycleManager` relies on seeing them).
+      //
+      // The event names this request's code: it fires before its listeners run, so it
+      // cannot describe what they go on to request. `beforeExit` runs after them and is
+      // the only callback an absorbed request reaches, so it is told the code this
+      // request and those absorbed into it settle on - by the pending-code rule, the
+      // last absorbed failure, else this request's own code. So an `exit(0)` whose
+      // listener calls `exit(1)` tells `beforeExit` 1, the code it exits with.
       this._isEmittingExitCalled = true;
+      this._absorbedExitCode = undefined;
       try {
         this.emit('logger', { eventType: 'exit-called', code, isFirstExit });
       } finally {
         this._isEmittingExitCalled = false;
       }
+      const beforeExitCode = this._absorbedExitCode ?? code;
+      this._absorbedExitCode = undefined;
 
       return this.beforeExitCallback
         ? safeHandleCallbackAndWait<BeforeExitResult>(
             'beforeExit',
             this.beforeExitCallback,
-            code,
+            beforeExitCode,
             isFirstExit,
           )
         : undefined;
@@ -512,7 +531,9 @@ export class Logger extends EventEmitter {
    *
    * @param callback - Function to call before process exit (receives exitCode and isFirstExit).
    *                   `exitCode` is this request's code (normalized as `exit()` normalizes
-   *                   it), not the code the exit will settle on: overlapping requests settle
+   *                   it), or the last failure code an `exit-called` listener requested
+   *                   during it, since those requests run no callback of their own. It is
+   *                   not the code the exit will settle on: overlapping requests settle
    *                   on the last non-zero one, so read `logger.pendingExitCode` for
    *                   the code the exit will use (or the `exit-process` event once it
    *                   commits).
@@ -1850,10 +1871,7 @@ export class Logger extends EventEmitter {
       return;
     }
     // Keep validation of malformed sink values at their existing write boundary.
-    if (
-      sink === null ||
-      (typeof sink !== 'object' && typeof sink !== 'function')
-    ) {
+    if (!isObjectLike(sink)) {
       return;
     }
     this.sinkFailureSubscriptions.set(
@@ -2375,13 +2393,22 @@ function isExitCodeRequest(value: unknown): value is number {
 }
 
 /**
- * Whether `sink` is a muted `ConsoleSink`, which delivers nothing. Guarded: a sink is
- * caller-supplied, and `instanceof` on a revoked `Proxy` or an overridden `isMuted`
- * can throw. A sink that cannot be classified counts as a destination.
+ * Whether `sink` is a muted `ConsoleSink`, which delivers nothing. Recognised by
+ * {@link CONSOLE_SINK_BRAND} rather than `instanceof`, so a `ConsoleSink` from another
+ * bundled copy of the library counts too; any other sink is a destination, whatever an
+ * `isMuted()` of its own answers. Guarded: a sink is caller-supplied, and calling its
+ * `isMuted` - or reading it off a revoked `Proxy` - can throw. A sink that cannot be
+ * classified counts as a destination.
  */
 function isMutedConsoleSink(sink: LogSink): boolean {
   try {
-    return sink instanceof ConsoleSink && sink.isMuted() === true;
+    if (readUnknownMember(sink, CONSOLE_SINK_BRAND) !== true) {
+      return false;
+    }
+    const isMuted: unknown = readUnknownMember(sink, 'isMuted');
+    return (
+      typeof isMuted === 'function' && Reflect.apply(isMuted, sink, []) === true
+    );
   } catch {
     return false;
   }

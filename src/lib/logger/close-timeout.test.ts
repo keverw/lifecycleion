@@ -659,8 +659,11 @@ test('synchronous time in one close hook is not charged to a later sink', async 
   };
   const laterSink: LogSink = {
     write: () => {},
+    // Settles on a timer armed before the deadline is, so by due time alone it wins
+    // against a deadline armed after the hooks, and loses against one armed before them
+    // that the slow hook has already spent - no wall-clock margin either way.
     close: async () => {
-      await sleep(10);
+      await sleep(0);
       didLaterSinkFinish = true;
     },
   };

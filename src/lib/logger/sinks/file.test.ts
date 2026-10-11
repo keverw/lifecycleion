@@ -2055,6 +2055,35 @@ describe('FileSink - bounded queue', () => {
     expect(closeFailures[0]?.entry?.message).toBe('abandoned-0');
   });
 
+  test('a close before the log file ever opens says why its entries were not written', async () => {
+    // The open failures a close makes are not reported on their own - the abandon report
+    // accounts for the backlog - so that report is where the reason has to be.
+    const logDir = `${tmpDir.path}/not-a-directory`;
+    await fsPromises.writeFile(logDir, 'x');
+    const failures: SinkFailure[] = [];
+    const sink = new FileSink({
+      logDir,
+      basename: 'never-opens',
+      onError: (failure) => {
+        failures.push(failure);
+      },
+    });
+
+    sink.write(makeEntry('stranded'));
+    await sink.close();
+
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ kind: 'close', disposition: 'lost' });
+    // Not blamed on closeTimeoutMS: close gave up for want of a file, long before that.
+    expect(failures[0]?.error.message).toBe(
+      'Closed with 1 entry still queued: the log file could not be opened, so they were not written',
+    );
+    const cause = failures[0]?.error.cause as Error | undefined;
+    expect(cause?.message).toContain('Failed to setup log file');
+    expect(cause?.message).toContain(logDir);
+    expect(sink.getHealth().droppedByKind.close).toBe(1);
+  });
+
   test('a drop the cap did not cause is not reported as a full queue', async () => {
     // `droppedEntries` counts two different things now - entries evicted by the cap, and
     // entries `close()` gave up on - and `enforceQueueLimit` read the total. A `close()`

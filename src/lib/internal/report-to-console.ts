@@ -1,32 +1,47 @@
-let isReporting = false;
+import { isObjectLike } from './is-object-like';
+
 const CONSOLE_REPORT_STATE_KEY = Symbol.for('lifecycleion.reportToConsole.v1');
 
+/** Whether a console report is running, in any copy sharing this state. */
+interface ConsoleReportState {
+  active: boolean;
+}
+
 /**
- * The `Set` this copy uses, once it has found, installed or given up on the shared one.
- * Every copy keeps a `Set` it finds in the slot, so the first one there is the one every
+ * The state this copy uses, once it has found, installed or given up on the shared one.
+ * Every copy keeps a state it finds in the slot, so the first one there is the one every
  * copy uses, and holding it here spares each check - one per guarded callback, emit and
  * report - a descriptor read of the global.
  */
-let sharedState: Set<boolean> | undefined;
+let sharedState: ConsoleReportState | undefined;
+
+/** A slot value with a writable own `active` flag, read without invoking an accessor. */
+function isConsoleReportState(value: unknown): value is ConsoleReportState {
+  if (!isObjectLike(value)) {
+    return false;
+  }
+  const active = Object.getOwnPropertyDescriptor(value, 'active');
+  return typeof active?.value === 'boolean' && active.writable === true;
+}
 
 /**
- * Share the console origin across bundled copies. A slot holding something other than a
- * `Set` is replaced when possible. When it is not - a frozen `globalThis`, a
- * non-configurable property - no copy can ever install one, so this copy keeps a `Set` of
- * its own instead, which contains only its own re-entry, and does not try the slot again.
+ * Share the console origin across bundled copies. A slot holding anything else is
+ * replaced when possible. When it is not - a frozen `globalThis`, a non-configurable
+ * property - no copy can ever install one, so this copy keeps a state of its own instead,
+ * which contains only its own re-entry, and does not try the slot again.
  */
-function sharedConsoleState(): Set<boolean> {
+function sharedConsoleState(): ConsoleReportState {
   if (sharedState !== undefined) {
     return sharedState;
   }
-  const state = new Set<boolean>();
+  const state: ConsoleReportState = { active: false };
   try {
     const existing: unknown = Object.getOwnPropertyDescriptor(
       globalThis,
       CONSOLE_REPORT_STATE_KEY,
     )?.value;
-    if (existing instanceof Set) {
-      sharedState = existing as Set<boolean>;
+    if (isConsoleReportState(existing)) {
+      sharedState = existing;
       return sharedState;
     }
     void Reflect.defineProperty(globalThis, CONSOLE_REPORT_STATE_KEY, {
@@ -43,10 +58,7 @@ function sharedConsoleState(): Set<boolean> {
 
 /** Capture this when queuing work so its failures cannot feed a console report back. */
 export function isConsoleReportActive(): boolean {
-  if (isReporting) {
-    return true;
-  }
-  return sharedConsoleState().has(true);
+  return sharedConsoleState().active;
 }
 
 /**
@@ -103,18 +115,14 @@ export function isConsoleReportActive(): boolean {
  *             `Error` inspected rather than stringified can still hand one over.
  */
 export function reportToConsole(...args: unknown[]): void {
-  if (isReporting) {
-    return;
-  }
   const shared = sharedConsoleState();
-  if (shared.has(true)) {
+  if (shared.active) {
     return;
   }
 
   // Include the property read: a console shim can log from its getter as well as its
   // function body. Queued reporters must also capture this state when work is created.
-  isReporting = true;
-  shared.add(true);
+  shared.active = true;
 
   try {
     // eslint-disable-next-line no-console -- this function is the console rung itself
@@ -124,7 +132,6 @@ export function reportToConsole(...args: unknown[]): void {
     // missing `console`, a replaced `error` that is not a function, and a console that
     // throws on write all land here, and all of them are quieter than the alternative.
   } finally {
-    shared.delete(true);
-    isReporting = false;
+    shared.active = false;
   }
 }

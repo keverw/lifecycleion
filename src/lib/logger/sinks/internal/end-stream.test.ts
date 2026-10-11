@@ -21,6 +21,8 @@ function fakeStream(
     destroy() {
       events.push('destroy');
       this.destroyed = true;
+      // As a real stream drops its buffer.
+      this.writableLength = 0;
     },
   };
 
@@ -55,35 +57,27 @@ test('a stream that flushes reports nothing left and is released', async () => {
   const stream = fakeStream((callback) => {
     callback();
   }, events);
-  let wasAbandoned = false;
 
   const bytesLeft = await endStreamWithin(stream, 1000, {
     shouldUnref: false,
-    onAbandon: () => {
-      wasAbandoned = true;
-    },
   });
 
   expect(bytesLeft).toBe(0);
-  expect(wasAbandoned).toBe(false);
   expect(events).toEqual(['destroy']);
 });
 
-test('a stalled flush gives up at the floor, reporting before it destroys', async () => {
+test('a stalled flush gives up at the floor, counting the buffer before it destroys', async () => {
   const events: string[] = [];
   const stream = fakeStream(() => {}, events);
   const startedAt = Date.now();
 
   const bytesLeft = await endStreamWithin(stream, 0, {
     shouldUnref: true,
-    onAbandon: (bytes) => {
-      events.push(`abandon ${String(bytes)}`);
-    },
   });
 
   expect(Date.now() - startedAt).toBeGreaterThanOrEqual(MIN_CLOSE_FLUSH_MS - 5);
   expect(bytesLeft).toBe(64);
-  expect(events).toEqual(['abandon 64', 'destroy']);
+  expect(events).toEqual(['destroy']);
 });
 
 test('an end() that throws is reported and the stream abandoned', async () => {
@@ -96,9 +90,6 @@ test('an end() that throws is reported and the stream abandoned', async () => {
 
   const bytesLeft = await endStreamWithin(stream, 1000, {
     shouldUnref: false,
-    onAbandon: () => {
-      events.push('abandon');
-    },
     onEndError: (error) => {
       endErrors.push(error);
     },
@@ -106,7 +97,7 @@ test('an end() that throws is reported and the stream abandoned', async () => {
 
   expect(endErrors).toEqual([failure]);
   expect(bytesLeft).toBe(64);
-  expect(events).toEqual(['abandon', 'destroy']);
+  expect(events).toEqual(['destroy']);
 });
 
 test('a flush that fails is abandoned, not counted as flushed', async () => {
@@ -118,9 +109,6 @@ test('a flush that fails is abandoned, not counted as flushed', async () => {
 
   const bytesLeft = await endStreamWithin(stream, 1000, {
     shouldUnref: false,
-    onAbandon: (bytes) => {
-      events.push(`abandon ${String(bytes)}`);
-    },
     onEndError: (error) => {
       endErrors.push(error);
     },
@@ -129,7 +117,7 @@ test('a flush that fails is abandoned, not counted as flushed', async () => {
   // The stream's own `'error'` event reports a failed flush, so it is not passed on here.
   expect(endErrors).toEqual([]);
   expect(bytesLeft).toBe(64);
-  expect(events).toEqual(['abandon 64', 'destroy']);
+  expect(events).toEqual(['destroy']);
 });
 
 test('only a background flush lets its deadline release the process', async () => {

@@ -2103,6 +2103,74 @@ describe('NamedPipeSink', () => {
     }
   }, 15000);
 
+  test('a reader that stalls again after the queue drained is reported again', async () => {
+    const pipePath = `${tmpDir.path}/episodes.pipe`;
+    await createNamedPipe(pipePath);
+
+    // Read on demand only, so the test decides when the reader stalls.
+    const readerFd = fs.openSync(
+      pipePath,
+      fs.constants.O_RDONLY | fs.constants.O_NONBLOCK,
+    );
+    const buffer = Buffer.alloc(1 << 20);
+    const readAvailable = (): void => {
+      try {
+        while (fs.readSync(readerFd, buffer, 0, buffer.length, null) > 0) {
+          // Discarded: only the room it makes matters.
+        }
+      } catch {
+        // EAGAIN: nothing left to read for now.
+      }
+    };
+    const failures: SinkFailure[] = [];
+    const sink = new NamedPipeSink({
+      pipePath,
+      maxQueueSize: 10,
+      onError: (failure) => {
+        failures.push(failure);
+      },
+      closeTimeoutMS: 200,
+    });
+    const line = 'x'.repeat(8192);
+    const overflow = (): void => {
+      for (let index = 0; index < 200; index++) {
+        sink.write({
+          timestamp: Date.now(),
+          type: 'info',
+          template: line,
+          message: line,
+        });
+      }
+    };
+    const queueFullReports = (): number =>
+      failures.filter((failure) => failure.kind === 'queue_full').length;
+
+    try {
+      expect(await waitForOpenPipe(sink)).toBe(true);
+
+      overflow();
+      expect(queueFullReports()).toBe(1);
+
+      // Drain completely: every write confirmed, nothing queued or in flight.
+      const deadline = Date.now() + 5000;
+
+      while (sink.getHealth().queueSize > 0 && Date.now() < deadline) {
+        readAvailable();
+        await new Promise((resolve) => setTimeout(resolve, 5));
+      }
+
+      expect(sink.getHealth().queueSize).toBe(0);
+
+      // The reader stalls again: a new episode, said again.
+      overflow();
+      expect(queueFullReports()).toBe(2);
+    } finally {
+      readAvailable();
+      await sink.close();
+      fs.closeSync(readerFd);
+    }
+  }, 15000);
+
   test('recovers a requeued entry without waiting for later traffic', async () => {
     // A failed write reports through its callback before the stream emits `'error'`, so
     // the requeue asks for a reconnection while the sink still looks connected and is told

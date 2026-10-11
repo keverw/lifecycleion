@@ -3,13 +3,10 @@ import {
   abandonQueuedEntries,
   evictQueuedEntries,
   ReportOnceLatch,
-  type EvictOptions,
 } from './queue-accounting';
-import {
-  createDroppedEntryCounts,
-  type DroppedEntryCounts,
-  type DroppedEntryKind,
-} from './sink-failure';
+import type { EvictOptions } from './queue-accounting';
+import { createDroppedEntryCounts } from './sink-failure';
+import type { DroppedEntryCounts, DroppedEntryKind } from './sink-failure';
 
 /**
  * How a {@link LossLedger} hands a report to the sink that owns it.
@@ -26,6 +23,7 @@ export type LossReporter = (
   kind: 'close' | 'queue_full',
   message: string,
   entry: LogEntry | undefined,
+  cause?: Error,
 ) => boolean;
 
 /** `1 entry` or `N entries`, for a loss report's message. */
@@ -173,12 +171,14 @@ export class LossLedger {
    * out of the process. Every entry in the queue was lost, so there is no surviving line to
    * confuse the sample with.
    *
-   * `isAbandoned` limits it to some entries; see {@link abandonQueuedEntries}.
+   * `isAbandoned` limits it to some entries; see {@link abandonQueuedEntries}. `cause` is
+   * the failure that left them undelivered, when there is one.
    */
   public abandon<T extends { entry: LogEntry }>(
     queue: T[],
     message: (count: number) => string,
     isAbandoned?: (item: T) => boolean,
+    cause?: Error,
   ): void {
     const abandoned = abandonQueuedEntries(queue, isAbandoned);
 
@@ -187,6 +187,6 @@ export class LossLedger {
     }
 
     this.count('close', abandoned.count);
-    this.report('close', message(abandoned.count), abandoned.entry);
+    this.report('close', message(abandoned.count), abandoned.entry, cause);
   }
 }

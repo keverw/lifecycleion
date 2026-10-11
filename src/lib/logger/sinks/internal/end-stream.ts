@@ -13,14 +13,7 @@ export interface EndStreamOptions {
    */
   shouldUnref: boolean;
   /**
-   * Told how many bytes the stream still held when it did not flush - the wait gave up,
-   * `end()` threw, or the flush failed - before `destroy()` fails their write callbacks, so
-   * the caller can mark the stream as abandoned first.
-   */
-  onAbandon?: (bytesLeft: number) => void;
-  /**
-   * A throw from `end()`. The stream is then abandoned as if its flush had timed out, and
-   * {@link onAbandon} follows: one failure, for a caller that reports from both to say once.
+   * A throw from `end()`. The stream is then abandoned as if its flush had timed out.
    *
    * Not called for a flush that fails. That failure reaches `end()`'s callback and the
    * stream's `'error'` event alike, and the event is where the stream's owner reports it.
@@ -72,9 +65,9 @@ export async function endStreamWithin(
 
   let bytesLeft = 0;
 
+  // Read before `destroy()`, which drops the buffer.
   if (!didFlush) {
     bytesLeft = stream.writableLength;
-    options.onAbandon?.(bytesLeft);
   }
 
   if (!stream.destroyed) {

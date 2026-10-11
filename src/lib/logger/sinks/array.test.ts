@@ -652,6 +652,17 @@ describe('ArraySink - a transformer that returns a promise', () => {
     const seen: string[] = [];
     let active = 0;
     let maxActive = 0;
+    let calls = 0;
+    // The first report stays pending until the test lets it go, so the rejection is
+    // certain to arrive while it is.
+    let releaseFirst = (): void => {};
+    const firstGate = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    let onBothSeen = (): void => {};
+    const bothSeen = new Promise<void>((resolve) => {
+      onBothSeen = resolve;
+    });
     const sink = new ArraySink({
       transformer: (async () => {
         await Promise.resolve();
@@ -661,16 +672,25 @@ describe('ArraySink - a transformer that returns a promise', () => {
       onFormatError: async (error, kind, subject) => {
         active++;
         maxActive = Math.max(maxActive, active);
-        await new Promise((resolve) => setTimeout(resolve, 5));
+        if (++calls === 1) {
+          await firstGate;
+        }
         seen.push(`${kind}|${subject}|${error.message}`);
         active--;
+        if (seen.length === 2) {
+          onBothSeen();
+        }
       },
     });
     const output = spyOn(console, 'error').mockImplementation(() => {});
 
     try {
       const unhandled = await collectUnhandled(() => sink.write(entry));
-      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      // The rejection has arrived and is held: nothing delivered beside the first.
+      expect(calls).toBe(1);
+      releaseFirst();
+      await bothSeen;
 
       expect(unhandled).toEqual([]);
       expect(seen).toHaveLength(2);

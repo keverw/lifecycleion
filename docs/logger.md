@@ -872,7 +872,9 @@ with the system error as `diagnostic.error.cause`.
 A `'format'` failure's message omits the error text, which may come from entry content;
 read `diagnostic.error` for it. A muted ConsoleSink does not count as a destination for
 these reports: when it is the only other sink and no `'diagnostic'` listener is
-registered, the report goes to guarded `console.error`. A sink holds its owners weakly,
+registered, the report goes to guarded `console.error`. That holds for a ConsoleSink from
+another bundled copy of the library too; a sink of any other class is a destination,
+whatever an `isMuted()` of its own answers. A sink holds its owners weakly,
 so a logger dropped without `close()` stops receiving its failures once it is
 garbage-collected; `close()` or `removeSink()` releases it immediately.
 
@@ -1149,9 +1151,9 @@ Repeats must answer `{ action: 'wait' }` while the first exit is still in progre
 
 **Notes:**
 
-- The callback's `exitCode` is the code of the request that called it (normalized as `exit()` normalizes it), not the code the exit will use. Overlapping requests settle on the last non-zero code while the exit is pending; read `logger.pendingExitCode` for the code the exit will actually use (or the `exit-process` event once it commits).
+- The callback's `exitCode` is the code of the request that called it (normalized as `exit()` normalizes it), not the code the exit will use. Requests an `exit-called` listener makes during that request are absorbed into it and run no callback of their own, so they count here: if one of them requested a failure, the callback is told the last such code (an `exit(0)` whose listener calls `exit(1)` calls it with 1). The `exit-called` event itself still carries the request's own code, since it fires before those listeners run. Overlapping requests settle on the last non-zero code while the exit is pending; read `logger.pendingExitCode` for the code the exit will actually use (or the `exit-process` event once it commits).
 - `isFirstExit` means the first exit request observed by the logger, not necessarily the first exit that has fully completed.
-- `isFirstExit` stays `false` for every exit after the first, even once that first exit has finished. With `callProcessExit: false` the process keeps running, so a callback gated on `isFirstExit` skips the shutdown on every later exit. The example above (like `enableLoggerExitHook()`) instead treats an exit as new whenever no earlier one is still in progress.
+- `isFirstExit` stays `false` for every exit after the first, even once that first exit has finished. With `callProcessExit: false` the process keeps running, so a callback gated on `isFirstExit` skips the shutdown on every later exit. `enableLoggerExitHook()` is gated that way: it stops the components only for the first exit, and a later exit made once that shutdown has finished proceeds without stopping them again. The example above instead treats an exit as new whenever no earlier one is still in progress, so it runs the shutdown for each exit.
 - This method overwrites any existing `beforeExitCallback` (including one set in the Logger constructor).
 
 ## Built-In Sinks
@@ -1388,7 +1390,9 @@ FileSink automatically retries failed writes up to `maxRetries` times (default: 
 > value becomes a marker (`"1"`, `"[circular]"`, `"[undefined]"`, `"[Function: f]"`,
 > `"[unrenderable: value]"`) inside a line that is still one JSON object. A value that
 > would not render is reported once per entry as `kind: 'format'` with
-> `disposition: 'fallback'`, meaning the line was written with the marker in it.
+> `disposition: 'fallback'`, meaning the line goes on with the marker in it. That is
+> not a confirmation that it was written: if it is later evicted at the cap or its write
+> fails, that is reported on its own.
 
 ```typescript
 import { FileSink, type LogEntry } from 'lifecycleion/logger';
@@ -1625,6 +1629,12 @@ A reader that goes away while `close()` is draining gets the same window: the wr
 failed spends its retry, the lines buffered behind it are held, and they go out if the
 reader is back within it.
 
+Open failures during `close()` are not reported one by one. If the destination never opened,
+the single `'close'` report for the abandoned entries says so (`... the pipe could not be
+opened, so they were not written`, or for a FileSink `the log file could not be opened`),
+and carries the last open failure as `error.cause`. Entries abandoned with the destination still open are blamed on
+the close budget instead (a FileSink's message names `closeTimeoutMS`).
+
 `NamedPipeSink.reconnect()` reconnects on demand. Because the sink
 also reopens on its own, a `reconnect()` that races one of those automatic attempts answers
 `already_reconnecting`, meaning the reconnection it would have performed is already under way.
@@ -1688,9 +1698,10 @@ interface SinkFailure {
   // somewhere else:
   //   'retrying'  - the sink will try again; a fallback write here duplicates it
   //   'lost'      - it will not arrive: out of retries, unrenderable, or dropped at the cap
-  //   'fallback'  - the line was written, degraded: a custom formatter threw and the
+  //   'fallback'  - the line goes on, degraded: a custom formatter threw and the
   //                  default format was used, or a param would not render and a marker
-  //                  stands in for it; a later failure is reported separately
+  //                  stands in for it. Not confirmed written: a later eviction or write
+  //                  failure is reported separately
   //   'no_entry'  - the failure is not about a particular line (open, rotate, close)
   disposition: 'retrying' | 'lost' | 'fallback' | 'no_entry';
 }
@@ -2006,9 +2017,10 @@ When a log includes an `exitCode`, the logger will:
    - **IMPORTANT:** If the callback throws an error or rejects, the exit process proceeds automatically to prevent the application from hanging
    - Errors from the callback use the standard host path: global `'error'`, followed by `globalThis.reportError()` when event dispatch is unavailable, then guarded `console.error`
    - Design your callback to handle errors internally if you need guaranteed cleanup
-2. Set `logger.didExit = true` and `logger.exitCode = <code>` (the code overlapping requests settled on; see below)
+2. Set `logger.didExit = true` and `logger.exitCode = <code>` (the code overlapping requests settled on; see below), and emit `exit-process`
 3. Attempt to close all sinks within `closeTimeoutMS`; report any unfinished cleanup
-4. Call `process.exit(code)` **only if** `callProcessExit: true` (default)
+4. Once that cleanup has settled, clear `logger.isFinishingExit` and emit `exit-completed` (`{ code, endedProcess }`)
+5. Call `process.exit(code)` **only if** `callProcessExit: true` (default)
 
 The cleanup deadline starts once every sink's close hook has been invoked and its
 synchronous part has returned (see [Important Notes](#important-notes)); it does not
@@ -2038,7 +2050,7 @@ This means `callProcessExit: false` creates a "simulated exit" - the logger goes
 - **Callback Hook Execution**: Calls the registered `beforeExitCallback` (e.g. to shut down component lifecycles).
 - **State Property Updates**: Sets `logger.didExit = true` and updates `logger.exitCode` (enabling clean unit/integration test assertions). Overlapping requests settle the code as they do for a real exit: last non-zero wins, and 0 never downgrades a failure. A request made after the exit commits but before its sink cleanup settles is ignored, as behind a real exit. Each later exit, made after the previous one completed, settles its own code.
 - **Sink Cleanup**: Attempts cleanup within the configured deadline, reporting failures.
-- **Event Signaling**: Emits `'logger'` events (`exit-called` and `exit-process`), allowing external code to react to the exit intent.
+- **Event Signaling**: Emits `'logger'` events (`exit-called`, `exit-process`, and `exit-completed` once sink cleanup has settled, with `endedProcess: false`), allowing external code to react to the exit intent and to its completion. `logger.isFinishingExit` is `true` from `exit-process` until `exit-completed`.
 
 This is useful for:
 

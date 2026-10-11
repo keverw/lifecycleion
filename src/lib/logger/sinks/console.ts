@@ -16,6 +16,13 @@ export interface ConsoleSinkOptions {
 }
 
 /**
+ * Marks a `ConsoleSink`, on its prototype, so a logger recognises one made by another
+ * bundled copy of the library, which `instanceof` against its own class does not.
+ * Internal: not re-exported from the sinks index.
+ */
+export const CONSOLE_SINK_BRAND = Symbol.for('lifecycleion.ConsoleSink.v1');
+
+/**
  * ConsoleSink writes logs to the console with optional colors, timestamps, and type labels
  */
 export class ConsoleSink implements LogSink {
@@ -212,3 +219,7 @@ export class ConsoleSink implements LogSink {
     }
   }
 }
+
+Object.defineProperty(ConsoleSink.prototype, CONSOLE_SINK_BRAND, {
+  value: true,
+});

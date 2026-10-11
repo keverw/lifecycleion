@@ -10,7 +10,10 @@
  * whose every code unit is a character of its own - no astral characters, combining
  * marks, joiners or `\r\n` pairs - masks exactly as `datamask` masks it; one with a
  * multi-unit cluster such as `e` + combining accent counts it once, so its mask is
- * shorter.
+ * shorter. The other difference is a domain with dots around it: {@link maskDomain}
+ * keeps the last non-empty label readable, so `example.com.` keeps `com` readable where
+ * `datamask` kept the empty label after the dot and masked `com`, and a single label
+ * behind leading dots (`.internal`) is masked where `datamask` left it readable.
  *
  * A character is a grapheme cluster where the runtime has `Intl.Segmenter` - so a
  * family emoji, a flag, a skin-tone variant or `e` + combining accent is one character,

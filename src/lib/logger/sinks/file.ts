@@ -1,7 +1,7 @@
 import { isNullish } from '../../internal/is-nullish';
 import fs, { promises as fsPromises } from 'fs';
 import { describeError, toError } from '../../to-error';
-import { renderOnce, type RenderedLine } from './internal/rendered-line';
+import { renderOnce } from './internal/rendered-line';
 import { isConsoleReportActive } from '../../internal/report-to-console';
 import { renderJSONLine } from './internal/render-json-line';
 import { renderTextEntry } from './internal/render-text-line';
@@ -190,11 +190,10 @@ export interface FileSinkOptions {
    * loggers, or to guarded console output when this sink has no owner. Failures
    * while writing diagnostic entries go directly to the console.
    *
-   * One object rather than four positional arguments, and the same one `NamedPipeSink`
-   * hands back: `kind` says what failed, `target` which file it was writing to at the
-   * time, `entry` / `attempt` which line and try, and `disposition` what became of the
-   * line - `'lost'` is the one that means write it somewhere else, and the `willRetry`
-   * boolean it replaced could not say that. See {@link SinkFailure}.
+   * The same object `NamedPipeSink` hands back: `kind` says what failed, `target` which
+   * file it was writing to at the time, `entry` / `attempt` which line and try, and
+   * `disposition` what became of the line - `'lost'` is the one that means write it
+   * somewhere else. See {@link SinkFailure}.
    */
   onError?: SinkErrorHandler;
 }
@@ -230,8 +229,8 @@ export interface FileSinkHealth {
  * Error handler class for FileSink.
  *
  * `kind` is set where a write is raised as something other than a failed write, and read
- * by `dispatchEntry`: `'format'` for a line that can never be written, `'setup'` for one
- * that found no file to write to and was never attempted.
+ * by `dispatchEntry`: `'setup'` for a line that found no file to write to and was never
+ * attempted.
  */
 class FileSinkError extends Error {
   constructor(
@@ -256,13 +255,13 @@ function noStreamError(): FileSinkError {
  * One entry on its way to the file, with its line already rendered: what `writeEntry` is
  * handed for one attempt.
  *
- * The render policy is {@link RenderedLine}'s, shared with `NamedPipeSink`. What is added
- * here is this sink's own: the `LogEntry`, because the public `onError` hands it back to the
- * caller, and the attempt count, because this sink retries a write - though never a render.
+ * Only a line that rendered reaches here: `write()` reports a render failure and never
+ * queues it (see `RenderedLine`). The `LogEntry` comes along because the public `onError`
+ * hands it back to the caller.
  */
-interface QueuedEntry extends RenderedLine {
+interface QueuedEntry {
+  formatted: string;
   entry: LogEntry;
-  attempts: number;
   /** A console fallback may be forwarded here, but must not start another report. */
   shouldSuppressFailureReport?: boolean;
   /**
@@ -394,9 +393,13 @@ export class FileSink implements LogSink {
           `Log queue is full (maxQueueSize=${limit}); dropping the oldest entries`,
         // `close()` is bounded by `closeTimeoutMS`, so a slow or broken destination leaves
         // entries behind - and once it gives up nothing will ever process them. Counted in
-        // `droppedEntries` and reported once as `'lost'`; see `LossLedger.abandon`.
-        abandoned: (count) =>
-          `Closed with ${describeEntryCount(count)} still queued (closeTimeoutMS=${String(this.closeTimeoutMS)}); they were not written`,
+        // `droppedEntries` and reported once as `'lost'`; see `LossLedger.abandon`. A file
+        // that never opened is named as the reason rather than the budget, with the open
+        // failure as the cause.
+        abandoned: (count, isUnreachable) =>
+          isUnreachable
+            ? `Closed with ${describeEntryCount(count)} still queued: the log file could not be opened, so they were not written`
+            : `Closed with ${describeEntryCount(count)} still queued (closeTimeoutMS=${String(this.closeTimeoutMS)}); they were not written`,
         // Counted and said, not discarded quietly: `close()` waits up to
         // `closeTimeoutMS`, and a line logged in that window is one this sink did not
         // deliver.
@@ -428,7 +431,7 @@ export class FileSink implements LogSink {
         lostAtClose: (count, bytesLeft) =>
           `Closed with ${describeWriteCount(count)} failing as ${this.currentLogFile ?? this.logDir} was closed (${String(bytesLeft)} bytes still buffered); they were not written`,
       },
-      createError: (message) => new FileSinkError(message),
+      createError: (message, cause) => new FileSinkError(message, cause),
       report: (failure, routing) =>
         reportSinkError(
           this,
@@ -734,10 +737,7 @@ export class FileSink implements LogSink {
   ): void {
     const queued: QueuedEntry = {
       formatted: slot.line,
-      // `write()` reports a render failure and never queues it.
-      formatError: undefined,
       entry: slot.entry,
-      attempts: slot.attempts,
       shouldSuppressFailureReport: slot.shouldSuppressFailureReport,
       onCommitted,
     };
@@ -782,15 +782,7 @@ export class FileSink implements LogSink {
         done(
           kind === 'setup'
             ? { status: 'unavailable' }
-            : {
-                status: 'failed',
-                error: failure,
-                // A render that failed is never retried: the line is not re-rendered by
-                // design (see `QueuedEntry.formatError`), so every attempt would raise the
-                // same failure and call `onError` again for one entry that can never be
-                // written.
-                isRetryable: kind !== 'format',
-              },
+            : { status: 'failed', error: failure, isRetryable: true },
         );
         release();
       },
@@ -798,21 +790,11 @@ export class FileSink implements LogSink {
   }
 
   /**
-   * Write a single entry to the file
-   * If stream is broken, it will be recreated on next attempt
+   * Write one rendered line to the file, rotating first when a rotation is due. A stream
+   * that is gone fails as `'setup'`, which hands the line back unattempted for the
+   * engine's reopen to carry.
    */
   private async writeEntry(queued: QueuedEntry): Promise<void> {
-    // `write()` reports a render failure and never queues it, so this is a backstop: an
-    // entry with no line must not reach the stream, and is never re-rendered. Raised as an
-    // ordinary failure so `onError`, `lastError` and the counters still see it.
-    if (queued.formatError !== undefined) {
-      throw new FileSinkError(
-        'Failed to format log entry',
-        queued.formatError,
-        'format',
-      );
-    }
-
     if (this.closed) {
       throw new FileSinkError('Cannot write to closed sink');
     }
@@ -839,7 +821,7 @@ export class FileSink implements LogSink {
 
     // Always the line rendered in `write`. A render that threw has already been raised
     // above, so this is never a second attempt at one.
-    const messageToWrite = queued.formatted ?? '';
+    const messageToWrite = queued.formatted;
     const messageBytes = Buffer.byteLength(messageToWrite, 'utf8');
 
     // Check if writing would exceed limit

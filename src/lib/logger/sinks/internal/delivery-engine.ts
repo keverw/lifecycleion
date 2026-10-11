@@ -274,8 +274,12 @@ export type DeliveryReporter = (
 /** The sink's own wording for the reports the engine makes. */
 export interface DeliveryMessages {
   queueFull(limit: number): string;
-  /** Lines still queued when `close()` gave up on them. */
-  abandoned(count: number): string;
+  /**
+   * Lines still queued when `close()` gave up on them: with the destination still in
+   * hand when its budget ran out, or - `isUnreachable` - with none to write them to, the
+   * destination not having opened by the end of close's last attempts.
+   */
+  abandoned(count: number, isUnreachable: boolean): string;
   refusedAfterClose(): string;
   /**
    * A line given up on after `attempts` writes, the last of them never answered by a
@@ -312,9 +316,10 @@ export interface DeliveryEngineOptions {
   messages: DeliveryMessages;
   /**
    * The error a report the engine composes carries, built from the sink's own message, so
-   * a sink with its own error class reports in it. Defaults to `Error`.
+   * a sink with its own error class reports in it. `cause` is the failure behind it, when
+   * the report has one. Defaults to `Error`.
    */
-  createError?: (message: string) => Error;
+  createError?: (message: string, cause?: Error) => Error;
   report: DeliveryReporter;
   /** Whether the sink has an explicit `onError`, read at report time. */
   hasHandler: () => boolean;
@@ -564,6 +569,12 @@ export class DeliveryEngine {
   private outageRouting?: OpenRequest;
 
   private lastError?: Error;
+  /**
+   * Why the destination last failed to open, cleared when it opens. The cause a close
+   * that abandons its backlog for want of a destination reports, since the open failures
+   * made while closing are not reported on their own.
+   */
+  private lastOpenFailure?: Error;
   private consecutiveFailures = 0;
   private totalWritten = 0;
 
@@ -571,8 +582,8 @@ export class DeliveryEngine {
     this.options = options;
     this.adapter = options.adapter;
     this.backoff = new Backoff(options.backoff);
-    this.losses = new LossLedger((kind, message, entry) =>
-      this.report(kind, this.createError(message), {
+    this.losses = new LossLedger((kind, message, entry, cause) =>
+      this.report(kind, this.createError(message, cause), {
         disposition: 'lost',
         entry,
       }),
@@ -746,9 +757,10 @@ export class DeliveryEngine {
 
   /**
    * Report a failed open, once per distinct failure per outage rather than once per
-   * attempt; see {@link outages}. Nothing while closing: `close()` is about to account
-   * for the backlog itself. A suppressed one is recorded in `lastError` and no budget is
-   * spent.
+   * attempt; see {@link outages}. Not reported while closing: `close()` is about to
+   * account for the backlog itself, and its abandon report carries this as its cause. A
+   * suppressed one, or one made while closing, is recorded in `lastError` and no budget
+   * is spent.
    */
   public reportOpenFailure(
     kind: SinkFailureKind,
@@ -757,12 +769,17 @@ export class DeliveryEngine {
     isDiagnostic = false,
     shouldSuppressFailureReport = false,
   ): void {
-    if (this.closing || this.closed) {
+    // A late answer from an open `close()` stopped waiting for describes nothing left.
+    if (this.closed) {
       return;
     }
 
-    if (shouldSuppressFailureReport) {
-      this.lastError = new Error(message, { cause });
+    const failure = new Error(message, { cause });
+
+    this.lastOpenFailure = failure;
+
+    if (this.closing || shouldSuppressFailureReport) {
+      this.lastError = failure;
 
       return;
     }
@@ -1040,8 +1057,11 @@ export class DeliveryEngine {
     return this.closePromise;
   }
 
-  private createError(message: string): Error {
-    return this.options.createError?.(message) ?? new Error(message);
+  private createError(message: string, cause?: Error): Error {
+    return (
+      this.options.createError?.(message, cause) ??
+      new Error(message, cause === undefined ? undefined : { cause })
+    );
   }
 
   private firstQueued(): DeliverySlot | undefined {
@@ -1484,6 +1504,11 @@ export class DeliveryEngine {
         this.slots = [];
         this.head = 0;
         this.queuedFrom = 0;
+        // The last line confirmed or given up on drains the queue, which closes the
+        // reported overflow episode, so a sink that overflows again hours later says so
+        // again. Here rather than only after a pass: with no in-flight cap, no pass
+        // follows the confirmation that empties it.
+        this.losses.endOverflowEpisode();
       } else if (this.head * 2 >= this.slots.length) {
         this.compactSlots();
       }
@@ -1686,6 +1711,7 @@ export class DeliveryEngine {
 
       // A later outage is a new fact and is reported as one, and routed by its own cause.
       this.outages.clear();
+      this.lastOpenFailure = undefined;
       this.outageRouting = undefined;
       this.pump();
 
@@ -1993,6 +2019,10 @@ export class DeliveryEngine {
       await sleep(CLOSE_DRAIN_POLL_MS);
     }
 
+    // Read before the adapter hears the close: whether what is left was abandoned for want
+    // of a destination rather than of time.
+    const isUnreachable = !this.adapter.hasConnection();
+
     // Closed is not healthy, and not connected either.
     this.state = 'closed';
     this.clearReopenTimer();
@@ -2003,7 +2033,7 @@ export class DeliveryEngine {
     // flush share one deadline.
     const remainingMS = (): number => timeoutMS - (Date.now() - startTime);
 
-    await this.closeOnEvidence(remainingMS);
+    await this.closeOnEvidence(remainingMS, isUnreachable);
   }
 
   /**
@@ -2064,9 +2094,13 @@ export class DeliveryEngine {
   /**
    * Give up on what close could not send, and say so once, with the oldest line as a
    * sample. `'close'` rather than `'write'`, so it is not counted against a connection
-   * that is being torn down anyway.
+   * that is being torn down anyway. With no destination to send it to, the report says so
+   * and carries the last open failure as its cause.
    */
-  private abandonOnClose(isAbandoned: (slot: DeliverySlot) => boolean): void {
+  private abandonOnClose(
+    isAbandoned: (slot: DeliverySlot) => boolean,
+    isUnreachable: boolean,
+  ): void {
     const abandoned = new Set(this.compactSlots().filter(isAbandoned));
 
     // Their outcomes, should any still arrive, no longer have a slot to settle.
@@ -2077,8 +2111,9 @@ export class DeliveryEngine {
 
     this.losses.abandon(
       this.compactSlots(),
-      (count) => this.options.messages.abandoned(count),
+      (count) => this.options.messages.abandoned(count, isUnreachable),
       (slot) => abandoned.has(slot),
+      isUnreachable ? this.lastOpenFailure : undefined,
     );
     this.queuedFrom = 0;
   }
@@ -2094,9 +2129,13 @@ export class DeliveryEngine {
    * uncounted, since it may well have arrived. Any later callback is ignored, the report
    * sent before `close()` resolved being its only word.
    */
-  private async closeOnEvidence(remainingMS: () => number): Promise<void> {
+  private async closeOnEvidence(
+    remainingMS: () => number,
+    isUnreachable: boolean,
+  ): Promise<void> {
     this.abandonOnClose(
       (slot) => slot.state !== 'in_flight' || !slot.committed,
+      isUnreachable,
     );
 
     const settlement: CloseSettlement = { failed: [] };

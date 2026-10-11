@@ -80,6 +80,36 @@ describe('reportToConsole', () => {
     }
   });
 
+  test('a shared state whose flag cannot be written is replaced', async () => {
+    const key = Symbol.for('lifecycleion.reportToConsole.v1');
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, key);
+    const squatter = Object.freeze({ active: false });
+    Object.defineProperty(globalThis, key, {
+      configurable: true,
+      writable: true,
+      value: squatter,
+    });
+    try {
+      const copy = await importConsoleReportCopy('frozen-state');
+      const captured = muteConsoleError();
+      // Writing the frozen flag would throw out of the console rung.
+      expect(() => {
+        copy.reportToConsole('first failure');
+      }).not.toThrow();
+      expect(captured).toEqual(['first failure']);
+      expect((globalThis as unknown as Record<symbol, unknown>)[key]).not.toBe(
+        squatter,
+      );
+      expect(copy.isConsoleReportActive()).toBe(false);
+    } finally {
+      if (descriptor === undefined) {
+        Reflect.deleteProperty(globalThis, key);
+      } else {
+        Object.defineProperty(globalThis, key, descriptor);
+      }
+    }
+  });
+
   test('a global that refuses the shared slot is tried once, and re-entry is still bounded', async () => {
     // `Object.preventExtensions(globalThis)` cannot be undone, so it runs in a process of
     // its own. Every check after the refused install reads this copy's own state.

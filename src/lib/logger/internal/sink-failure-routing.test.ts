@@ -5,8 +5,8 @@ import {
   markDiagnosticEntry,
   registerSinkFailureReporter,
   reportSinkFailure,
-  type SinkFailureReport,
 } from './sink-failure-routing';
+import type { SinkFailureReport } from './sink-failure-routing';
 import { diagnosticEntry } from './diagnostic-entry';
 
 const report: SinkFailureReport = {

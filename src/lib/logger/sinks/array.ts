@@ -369,6 +369,8 @@ export class ArraySink implements LogSink {
       return;
     }
 
+    const isDiagnostic = isDiagnosticEntry(entry);
+
     // Taken before the transformer runs, so a transformer that reads `redactedParams`
     // sees the same values a later reader of `logs` will. `params` is deliberately left
     // alone: it is documented as the caller's own object by reference, an escape hatch
@@ -386,13 +388,11 @@ export class ArraySink implements LogSink {
               // See `createGuardedFormatReporter` for why the handler is never the
               // reporter's own default, and see
               // `formatReportsInFlight` for what the guard stops.
-              this.createGuardedFormatReporter('render', {
-                isDiagnostic: isDiagnosticEntry(entry),
-              }),
+              this.createGuardedFormatReporter('render', { isDiagnostic }),
             ),
           };
 
-    if (isDiagnosticEntry(entry)) {
+    if (isDiagnostic) {
       markDiagnosticEntry(stored);
     }
 
@@ -405,9 +405,7 @@ export class ArraySink implements LogSink {
         if (transformed !== false) {
           // Store the transformed entry
           this.logs.push(
-            isDiagnosticEntry(entry)
-              ? markDiagnosticEntry(transformed)
-              : transformed,
+            isDiagnostic ? markDiagnosticEntry(transformed) : transformed,
           );
           return;
         }
@@ -416,9 +414,10 @@ export class ArraySink implements LogSink {
         // recovery - a broken transformer must not cost you the log - but it was also
         // completely silent, so a transformer that threw on every entry looked exactly
         // like one that had chosen to pass every entry through untouched.
-        this.createGuardedFormatReporter('transform', {
-          isDiagnostic: isDiagnosticEntry(entry),
-        })(error, '<transformer>');
+        this.createGuardedFormatReporter('transform', { isDiagnostic })(
+          error,
+          '<transformer>',
+        );
       }
     }
     // Store the original entry

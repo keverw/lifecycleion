@@ -113,29 +113,22 @@ export interface SinkFailure {
   /** Which attempt this was, 1-based, for a failure that is tied to an entry. */
   attempt?: number;
   /**
-   * What became of the line this failure is about.
-   *
-   * One field rather than a `willRetry` boolean, because the boolean could not say what a
-   * consumer actually needs to know. `willRetry: false` was documented as "the line is
-   * gone", and then `NamedPipeSink` reported a `formatter` that threw with `false` and
-   * went on to write the line using its own default format - so a handler following that
-   * documentation wrote a duplicate. Retry intent and delivery are two questions, and
-   * only the second decides whether to write the line somewhere else.
+   * What became of the line this failure is about: whether to write it somewhere else,
+   * which retry intent alone cannot say.
    *
    * - `'retrying'` - the sink will try this line again. Do nothing; a fallback write here
    *   duplicates it.
    * - `'lost'` - the line will not arrive: out of retries, unrenderable, or dropped to
    *   stay under the queue cap. **This is the one that means write it somewhere else.**
    * - `'fallback'` - the sink substituted something of its own and carried on with the
-   *   line. `NamedPipeSink` reports this when a custom `formatter` threw and its default
-   *   format was used instead: worth knowing, since your formatter is not running, but
-   *   the line is not lost *by this failure*.
+   *   line: a custom `formatter` threw and the default format was used, or a param would
+   *   not render and a marker stands in for it. Worth knowing, but the line is not lost
+   *   *by this failure*.
    *
-   *   Deliberately not `'written'`. That would be a promise made too early - the
-   *   substitution happens while the line is still being rendered, before anything
-   *   reaches the destination - and a line that is afterwards queued, evicted at the cap,
-   *   or failed on is reported again on its own terms. Nothing to do here either way:
-   *   `'lost'` is what asks for a fallback write.
+   *   Not a confirmation that the line was written: the substitution happens while it is
+   *   still being rendered, before anything reaches the destination, and a line that is
+   *   afterwards queued, evicted at the cap, or failed on is reported again on its own
+   *   terms. Nothing to do here either way: `'lost'` is what asks for a fallback write.
    * - `'no_entry'` - the failure belongs to no particular line: a pipe that could not be
    *   opened, a rotation that failed, a close that did not complete.
    */

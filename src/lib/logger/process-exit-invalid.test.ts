@@ -584,6 +584,64 @@ test('an exit-called listener that requests a failure replaces a pending success
   }
 });
 
+test('beforeExit is told the failure an exit-called listener requested', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    const told: [number, boolean][] = [];
+    const logger = new Logger({
+      sinks: [],
+      callProcessExit: false,
+      beforeExitCallback: (code, isFirstExit) => {
+        told.push([code, isFirstExit]);
+        return { action: 'proceed' };
+      },
+    });
+    const called: number[] = [];
+    logger.on<{ eventType: string; code: number }>(
+      'logger',
+      ({ eventType, code }) => {
+        if (eventType === 'exit-called') {
+          called.push(code);
+          logger.exit(1);
+          // A later success does not downgrade the absorbed failure.
+          logger.exit(0);
+        }
+      },
+    );
+    const processed = recordExitProcess(logger);
+    logger.exit(0);
+    await logger.close();
+
+    // The event fired before the listener asked for 1, so it names the request; the
+    // absorbed request runs no beforeExit of its own, so the outer one carries its code.
+    expect(called).toEqual([0]);
+    expect(told).toEqual([[1, true]]);
+    expect(processed).toEqual([1]);
+    expect(logger.exitCode).toBe(1);
+  } finally {
+    output.mockRestore();
+  }
+});
+
+test('beforeExit is told its own code when its exit-called listeners request none', async () => {
+  const told: number[] = [];
+  const logger = new Logger({
+    sinks: [],
+    callProcessExit: false,
+    beforeExitCallback: (code) => {
+      told.push(code);
+      return { action: told.length === 1 ? 'wait' : 'proceed' };
+    },
+  });
+  // An earlier failure still pending is not this request's code.
+  logger.exit(2);
+  logger.exit(0);
+  await logger.close();
+
+  expect(told).toEqual([2, 0]);
+  expect(logger.exitCode).toBe(2);
+});
+
 test('a later success or repeated failure exit is not reported', async () => {
   const exit = spyOn(process, 'exit').mockImplementation(
     () => undefined as never,

@@ -278,7 +278,8 @@ function makeEngine(
     orphanSettleMS: options.orphanSettleMS ?? ORPHAN_SETTLE_MS,
     messages: {
       queueFull: (limit) => `full at ${String(limit)}`,
-      abandoned: (count) => `abandoned ${String(count)}`,
+      abandoned: (count, isUnreachable) =>
+        `abandoned ${String(count)}${isUnreachable ? ' unreachable' : ''}`,
       refusedAfterClose: () => 'refused after close',
       unconfirmed: (attempts) => `unconfirmed after ${String(attempts)}`,
       outageCap: (maxReports) => `cap ${String(maxReports)}`,
@@ -553,6 +554,31 @@ describe('DeliveryEngine', () => {
     });
   });
 
+  test('an overflow episode ends when the last write is confirmed, with no in-flight cap', async () => {
+    const { destination, reports, write } = await started(
+      makeEngine({ maxQueueSize: 2 }),
+    );
+    const overflows = (): Array<string | undefined> =>
+      reports
+        .filter((failure) => failure.kind === 'queue_full')
+        .map((failure) => failure.entry?.message);
+
+    // Both are in flight and fill the cap, so `c` is evicted and the episode reported.
+    write('a');
+    write('b');
+    write('c');
+    expect(overflows()).toEqual(['c']);
+
+    // The confirmations drain the queue, and no pass follows them to notice: the
+    // episode still ends, so the next overflow is said again.
+    destination.succeed(2);
+    expect(destination.writes).toHaveLength(0);
+    write('d');
+    write('e');
+    write('f');
+    expect(overflows()).toEqual(['c', 'f']);
+  });
+
   test('a backpressured destination resumes the queue when it drains', async () => {
     const { destination, write } = await started(makeEngine());
 
@@ -641,7 +667,8 @@ describe('DeliveryEngine', () => {
         entry: expect.objectContaining({ message: 'a' }),
       }),
     ]);
-    expect(closeReports[0].error.message).toBe('abandoned 3');
+    // Abandoned for want of a destination, not of time.
+    expect(closeReports[0].error.message).toBe('abandoned 3 unreachable');
     expect(engine.getHealth().droppedByKind.close).toBe(3);
     // The grace window kept asking, past the backoff.
     expect(
@@ -759,6 +786,49 @@ describe('DeliveryEngine', () => {
 
     expect(fake.delivered).toEqual(['a']);
     expect(reports.filter((failure) => failure.kind === 'close')).toEqual([]);
+  });
+
+  test('close with no destination says so, with the last open failure as the cause', async () => {
+    const destination = new FakeDestination();
+    const harness = makeEngine({ destination });
+    const setupFailure = new Error('ENOTDIR');
+
+    destination.defaultOpen = { status: 'unavailable' };
+    destination.onOpen = () => {
+      harness.engine.reportOpenFailure('setup', 'open failed', setupFailure);
+    };
+    harness.engine.start();
+    harness.write('a');
+    await harness.engine.close();
+
+    // The first open's failure was reported, the ones close made were not, and the
+    // abandon report carries the latest.
+    expect(
+      harness.reports.map((failure) => [
+        failure.kind,
+        failure.error.message,
+        (failure.error.cause as Error | undefined)?.message,
+      ]),
+    ).toEqual([
+      ['setup', 'open failed', 'ENOTDIR'],
+      ['close', 'abandoned 1 unreachable', 'open failed'],
+    ]);
+  });
+
+  test('close that runs out of time with the destination in hand blames the budget', async () => {
+    const { destination, engine, reports, write } = await started(
+      makeEngine({ closeTimeoutMS: 30 }),
+    );
+
+    destination.canContinue = false;
+    write('a');
+    write('b');
+    await engine.close();
+
+    const abandoned = reports.find((failure) => failure.kind === 'close');
+
+    expect(abandoned?.error.message).toBe('abandoned 1');
+    expect(abandoned?.error.cause).toBeUndefined();
   });
 
   test('lines refused after close are counted, and reported once', async () => {
