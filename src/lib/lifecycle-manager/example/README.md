@@ -1,6 +1,8 @@
 # Simple LifecycleManager Example
 
-A minimal example demonstrating the core features of LifecycleManager.
+A minimal example demonstrating the core features of LifecycleManager. It simulates
+a database connection and an API server; it does not open a real database or listen
+on port 3000.
 
 ## Features Demonstrated
 
@@ -25,6 +27,7 @@ bun run src/lib/lifecycle-manager/example/index.ts
 - No dependencies
 - Starts first
 - Simulates database connection
+- Checks the `AbortSignal` passed to `start()`, which aborts if its startup times out
 
 ### API Component
 
@@ -64,8 +67,10 @@ This demo also installs a `shutdown-completed` listener that calls `process.exit
 successful shutdown and `process.exit(1)` otherwise. That listener runs before the
 logger resumes its pending exit, so it overrides a requested logger exit code. In an
 application that must preserve `logger.exit(code)`, let the logger perform that exit and
-keep the completion listener for reporting/policy instead. Close persistent log sinks
-before an application-controlled exit if their queued output must be drained.
+keep the completion listener for reporting/policy instead. Before an application-controlled
+exit, await `logger.close()` and monitor cleanup diagnostics for persistent sinks.
+Cleanup can finish at its deadline with flushing unconfirmed; configure the logger's
+budget to allow the sink cleanup your application needs.
 
 This is useful for handling fatal errors gracefully:
 

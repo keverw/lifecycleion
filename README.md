@@ -127,7 +127,13 @@ await manager.stopAllComponents();
 await logger.close();
 ```
 
-Tip: listen for `lifecycle-manager:shutdown-completed` when you want one place to react to shutdown results from manual stops, signals like `SIGINT` / `SIGTERM`, or logger-exit hooks. This is the centralized hook for logging or follow-up policy when `timedOut` is `true` or `stalledComponents` is non-empty. If `timedOut` is `true`, the payload reflects the result when the manager stopped waiting. A stop already in flight remains protected against per-component overlap, while exit handling and later shutdown/escalation attempts may proceed. Use repeated shutdown escalation separately when you want additional shutdown requests to retry or force behavior.
+Lifecycle operations report failures in their results, including unexpected errors;
+check `success` and `code` after awaiting them. A completed shutdown attempt can leave
+components running or stalled, and `logger.close()` can finish at its cleanup deadline
+with buffered output unflushed. Configure shutdown and logger cleanup budgets for your
+application and monitor their results/diagnostics.
+
+Tip: listen for `lifecycle-manager:shutdown-completed` when you want one place to react to shutdown results from manual stops, signals like `SIGINT` / `SIGTERM`, or logger-exit hooks. This is the centralized hook for logging or follow-up policy when `success` is `false`, including `code: 'cleanup_incomplete'`, timeouts, and stalled components. If `timedOut` is `true`, the payload reflects the result when the manager stopped waiting. A stop already in flight remains protected against per-component overlap, while exit handling and later shutdown/escalation attempts may proceed. Use repeated shutdown escalation separately when you want additional shutdown requests to retry or force behavior.
 
 ## Available Libraries
 
@@ -171,6 +177,17 @@ Each library has reference documentation in the [docs](./docs) folder. Click a l
 | [stringify-value](./docs/stringify-value.md)                       | `lifecycleion/stringify-value`                          | Render any value as a display string, or return it with parts redacted                                                                        |
 | [to-error](./docs/to-error.md)                                     | `lifecycleion/to-error`                                 | Coerce any thrown or rejected value into an `Error` (`toError`), or describe it as a string that is always safe to read (`describeError`)     |
 | [unix-time-helpers](./docs/unix-time-helpers.md)                   | `lifecycleion/unix-time-helpers`                        | Unix timestamp utilities for seconds, milliseconds, high-resolution timing, and unit conversion                                               |
+
+## Security and threat model
+
+Lifecycleion calls code it does not control, and defends against that code misbehaving:
+
+- **Component instances and option objects.** Getters may throw, or answer differently on each read. Members are read once where the answer matters, and a throw is reported as a failure of that operation rather than escaping it.
+- **Promises and thenables returned by hooks and callbacks.** Each is adopted into a fresh promise the library owns. A promise with its own `then` is observed through `Promise.prototype.then` rather than that `then`, so a no-op or throwing own `then` cannot hang an operation or hide its rejection. For this realm's native promises, values with their own `then`, and plain thenables, the fulfilled value is carried through without its `then` being read again; a `Promise` subclass instance or a Proxy around a promise is followed through its `then` as `await` follows it, which reads the fulfilled value's `then` again. The limits are those of `await`: a promise whose `constructor` or species is broken - a getter that throws, a value that is not a constructor, a species that never builds a promise - fails the operation, but its own rejection is left unhandled, since no reaction can be attached to it without modifying it; and a subclass or Proxy whose `then` never settles hangs the wait, as `await` would.
+- **Loggers, sinks, adapters, interceptors, and listeners.** What they throw or reject with is contained and reported on the documented channel, and the work around them still completes.
+- **Caller data with a polluted prototype.** Rendering, redaction, and record rebuilding read a value's own properties, so a property inherited from a polluted `Object.prototype` - one a JSON merge of untrusted input added, say - does not appear in the output, and does not change the records and property descriptors the library builds from caller data. A `__proto__` key is kept as an ordinary entry rather than reparenting the rebuilt record.
+
+The library reads built-ins - `Promise`, `Reflect`, `Object`, `Array`, `Set`, `Map`, `WeakMap`, `WeakSet`, `Math`, `Number`, `Symbol`, `EventTarget`, `AbortController`, and their methods - live, when it uses them, and does not defend against them being replaced or modified. Tampering with built-ins, such as replacing `Promise.prototype.then` or `Object.defineProperty`, is unsupported. That is separate from the pollution above: an extra property on `Object.prototype` is defended where it would change how the library reads caller data; a replaced built-in method is not.
 
 ## Change Log
 
