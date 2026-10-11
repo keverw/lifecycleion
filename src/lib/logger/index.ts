@@ -279,6 +279,9 @@ export class Logger extends EventEmitter {
   // The last failure code a request absorbed during that emit stood for, so the
   // `beforeExit` that follows is told it (see `exit`). Undefined otherwise.
   private _absorbedExitCode: number | undefined;
+  // Requests made from a real exit's `exit-completed` listeners, held until it is known
+  // whether `process.exit()` follows them (see `processExit`). Undefined otherwise.
+  private _heldExitRequests: [requested: number, code: number][] | undefined;
   private _hasScheduledProcessExit = false;
   // Whether a committed exit is still closing the sinks: from `processExit` committing its
   // code until the close it joined settles, real or simulated. A request made then belongs
@@ -405,6 +408,12 @@ export class Logger extends EventEmitter {
         );
       }
       code = 1;
+    }
+    // Made from a real exit's `exit-completed` listener: whether it is ignored behind that
+    // exit or starts the next one depends on whether `process.exit()` still follows.
+    if (this._heldExitRequests !== undefined) {
+      this._heldExitRequests.push([requestedCode, code]);
+      return;
     }
     // An `exit-called` listener that exits again is absorbed too: its nested emit
     // reaches the same listener, so an unconditional one recursed until the stack
@@ -2300,12 +2309,11 @@ export class Logger extends EventEmitter {
     // The decision `endsProcessOnExit` made above, re-checked live: listeners and sink
     // close ran since, and may have removed a stubbed `process.exit`. No exit happened,
     // so say so, and release the latch: the process is still running, so this exit
-    // ends as a simulated one does. Left set, every later `exit()` was ignored as if
-    // `process.exit()` were already on its way - a failure behind a skipped 0 was even
-    // reported as "an exit with code 0 is already processing" - and nothing would ever
-    // end the process. A later request starts the next exit, which re-decides whether
-    // it is real. Requests refused while this exit's cleanup ran are not replayed:
-    // each was judged, and a dropped failure reported, when it was made.
+    // ends as a simulated one does. Left set, every later `exit()` would be ignored as if
+    // `process.exit()` were already on its way, and nothing would ever end the process. A
+    // later request starts the next exit, which re-decides whether it is real. Requests
+    // refused while this exit's cleanup ran are not replayed: each was judged, and a
+    // dropped failure reported, when it was made.
     const isProcessExitCallable = (): boolean => {
       if (typeof globalThis.process?.exit === 'function') {
         return true;
@@ -2316,18 +2324,43 @@ export class Logger extends EventEmitter {
       );
       return false;
     };
+    // Whether `process.exit()` was called without throwing - which for a real one means it
+    // never returns. One bounded fallback: on Node, an exit listener may throw even for
+    // code 1; the second exit bypasses that listener. When both throw the process is still
+    // running, so the latch is released as for a skipped exit.
+    const callProcessExit = (): boolean => {
+      try {
+        globalThis.process.exit(exitCode);
+        return true;
+      } catch (error) {
+        reportToConsole(`Logger process exit failed: ${describeError(error)}`);
+      }
+      try {
+        globalThis.process.exit(1);
+        return true;
+      } catch (fallbackError) {
+        reportToConsole(
+          `Logger fallback process exit failed: ${describeError(fallbackError)}`,
+        );
+      }
+      this._hasScheduledProcessExit = false;
+      return false;
+    };
     const finishExit = (): void => {
       // Cleanup has settled, so a simulated exit is complete and the next request starts
       // the next exit. A real one stays latched by `_hasScheduledProcessExit`.
       this._isFinishingExit = false;
       const doesEndProcess =
         this._hasScheduledProcessExit && isProcessExitCallable();
+      // A real exit's listeners have their requests held: ignored behind it if
+      // `process.exit()` follows, made again - starting the next exit - if it does not.
+      const heldRequests: [number, number][] = [];
       // Once per exit, on the close-failure path too. A listener that exits from here
-      // starts the next exit when this one is simulated - it has settled - and is ignored
-      // behind a real one, already scheduled. `emit` contains a listener's throw; an
-      // overridden `emit` that throws is reported here, so it cannot keep a real exit
-      // from reaching `process.exit()`.
+      // starts the next exit when this one is simulated - it has settled. `emit` contains
+      // a listener's throw; an overridden `emit` that throws is reported here, so it
+      // cannot keep a real exit from reaching `process.exit()`.
       try {
+        this._heldExitRequests = doesEndProcess ? heldRequests : undefined;
         this.withoutActiveSinkClose(() => {
           this.emit('logger', {
             eventType: 'exit-completed',
@@ -2339,24 +2372,23 @@ export class Logger extends EventEmitter {
         reportToConsole(
           `Logger exit-completed event failed: ${describeError(error)}`,
         );
+      } finally {
+        this._heldExitRequests = undefined;
       }
       // Re-checked after the listeners, which may have removed a stubbed `process.exit`.
-      if (!doesEndProcess || !isProcessExitCallable()) {
-        return;
-      }
-      try {
-        globalThis.process.exit(exitCode);
-      } catch (error) {
-        reportToConsole(`Logger process exit failed: ${describeError(error)}`);
-        // One bounded fallback. On Node, an exit listener may throw even
-        // for code 1; the second exit bypasses that listener.
-        try {
-          globalThis.process.exit(1);
-        } catch (fallbackError) {
-          reportToConsole(
-            `Logger fallback process exit failed: ${describeError(fallbackError)}`,
-          );
+      if (doesEndProcess && isProcessExitCallable()) {
+        // Reported before the call, which does not return when it works.
+        for (const [requested, code] of heldRequests) {
+          this.reportIgnoredFailureExit(requested, code);
         }
+        if (callProcessExit()) {
+          return;
+        }
+      }
+      // No `process.exit()` after all: this exit ended as a simulated one does, so the
+      // requests its listeners made start the next exit, in order.
+      for (const [requested] of heldRequests) {
+        this.exit(requested);
       }
     };
     const exiting = closing.then(finishExit, (error: unknown) => {

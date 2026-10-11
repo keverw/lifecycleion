@@ -250,6 +250,113 @@ test('an exit-completed listener that removes process.exit stops the call it was
   }
 });
 
+test('a failure requested from exit-completed after process.exit was removed starts the next exit', async () => {
+  const actualExit = Object.getOwnPropertyDescriptor(process, 'exit');
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  process.exit = (() => {}) as typeof process.exit;
+
+  try {
+    const logger = new Logger({ sinks: [], callProcessExit: true });
+    const events = recordExitEvents(logger);
+    let isFirstCompletion = true;
+    logger.on<ExitEvent>('logger', ({ eventType }) => {
+      if (eventType === 'exit-completed' && isFirstCompletion) {
+        isFirstCompletion = false;
+        (process as { exit?: unknown }).exit = undefined;
+        logger.exit(1);
+      }
+    });
+
+    logger.exit(0);
+    await waitFor(() => completions(events).length > 1);
+
+    // Not lost behind an exit that never happened, and not reported as ignored.
+    expect(completions(events)).toEqual([
+      { code: 0, endedProcess: true },
+      { code: 1, endedProcess: false },
+    ]);
+    expect(logger.exitCode).toBe(1);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger process exit skipped: process.exit is no longer callable',
+    ]);
+  } finally {
+    if (actualExit) {
+      Object.defineProperty(process, 'exit', actualExit);
+    }
+    output.mockRestore();
+  }
+});
+
+test('a failure requested from exit-completed before process.exit runs is reported as ignored', async () => {
+  const calls: number[] = [];
+  const exit = spyOn(process, 'exit').mockImplementation(((code?: number) => {
+    calls.push(code ?? 0);
+  }) as typeof process.exit);
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+
+  try {
+    const logger = new Logger({ sinks: [], callProcessExit: true });
+    const events = recordExitEvents(logger);
+    logger.on<ExitEvent>('logger', ({ eventType }) => {
+      if (eventType === 'exit-completed') {
+        logger.exit(1);
+      }
+    });
+
+    logger.exit(0);
+    await waitFor(() => calls.length > 0);
+
+    expect(calls).toEqual([0]);
+    expect(completions(events)).toEqual([{ code: 0, endedProcess: true }]);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit(1) ignored: an exit with code 0 is already processing',
+    ]);
+  } finally {
+    exit.mockRestore();
+    output.mockRestore();
+  }
+});
+
+test('a real exit whose process.exit and fallback both throw releases the latch', async () => {
+  const calls: number[] = [];
+  const exit = spyOn(process, 'exit').mockImplementation((code?: number) => {
+    calls.push(code ?? 0);
+    throw new Error(`exit ${String(code)} refused`);
+  });
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+
+  try {
+    const logger = new Logger({ sinks: [], callProcessExit: true });
+    const events = recordExitEvents(logger);
+
+    logger.exit(0);
+    await waitFor(() => calls.length >= 2);
+    await Promise.resolve();
+    expect(calls).toEqual([0, 1]);
+
+    // The process is still running: the next request is the next exit, not ignored
+    // behind one that never happened.
+    logger.exit(1);
+    await waitFor(() => calls.length >= 4);
+
+    expect(
+      events
+        .filter(({ event }) => event.eventType === 'exit-called')
+        .map(({ event }) => event.code),
+    ).toEqual([0, 1]);
+    expect(logger.exitCode).toBe(1);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger process exit failed: exit 0 refused',
+      'Logger fallback process exit failed: exit 1 refused',
+      'Logger process exit failed: exit 1 refused',
+      'Logger fallback process exit failed: exit 1 refused',
+    ]);
+  } finally {
+    exit.mockRestore();
+    output.mockRestore();
+  }
+});
+
 test('exit-completed fires when sink cleanup fails', async () => {
   const output = spyOn(console, 'error').mockImplementation(() => {});
   const logger = new Logger({ sinks: [], callProcessExit: false });
