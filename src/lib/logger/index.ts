@@ -2324,27 +2324,26 @@ export class Logger extends EventEmitter {
       );
       return false;
     };
-    // Whether `process.exit()` was called without throwing - which for a real one means it
-    // never returns. One bounded fallback: on Node, an exit listener may throw even for
-    // code 1; the second exit bypasses that listener. When both throw the process is still
-    // running, so the latch is released as for a skipped exit.
-    const callProcessExit = (): boolean => {
+    // Call `process.exit()` - which for a real one never returns. One bounded fallback: on
+    // Node, an exit listener may throw even for code 1; the second exit bypasses that
+    // listener. When both throw the process is still running, so the latch is released as
+    // for a skipped exit, and a later request starts the next exit.
+    const tryProcessExit = (): void => {
       try {
         globalThis.process.exit(exitCode);
-        return true;
+        return;
       } catch (error) {
         reportToConsole(`Logger process exit failed: ${describeError(error)}`);
       }
       try {
         globalThis.process.exit(1);
-        return true;
+        return;
       } catch (fallbackError) {
         reportToConsole(
           `Logger fallback process exit failed: ${describeError(fallbackError)}`,
         );
       }
       this._hasScheduledProcessExit = false;
-      return false;
     };
     const finishExit = (): void => {
       // Cleanup has settled, so a simulated exit is complete and the next request starts
@@ -2353,7 +2352,8 @@ export class Logger extends EventEmitter {
       const doesEndProcess =
         this._hasScheduledProcessExit && isProcessExitCallable();
       // A real exit's listeners have their requests held: ignored behind it if
-      // `process.exit()` follows, made again - starting the next exit - if it does not.
+      // `process.exit()` is called, made again - starting the next exit - only if it is not
+      // called at all because it was removed.
       const heldRequests: [number, number][] = [];
       // Once per exit, on the close-failure path too. A listener that exits from here
       // starts the next exit when this one is simulated - it has settled. `emit` contains
@@ -2377,18 +2377,27 @@ export class Logger extends EventEmitter {
       }
       // Re-checked after the listeners, which may have removed a stubbed `process.exit`.
       if (doesEndProcess && isProcessExitCallable()) {
-        // Reported before the call, which does not return when it works.
+        // Decided: `process.exit()` is called, so the held requests are ignored, whatever
+        // the call then does - a call that throws releases the latch but replays nothing,
+        // so a listener that always exits cannot loop. Reported before the call, which
+        // does not return when it works.
         for (const [requested, code] of heldRequests) {
           this.reportIgnoredFailureExit(requested, code);
         }
-        if (callProcessExit()) {
-          return;
-        }
+        tryProcessExit();
+        return;
       }
-      // No `process.exit()` after all: this exit ended as a simulated one does, so the
-      // requests its listeners made start the next exit, in order.
+      // No `process.exit()` at all: this exit ended as a simulated one does, so the
+      // requests its listeners made start the next exit, in order. Each on its own, so one
+      // that throws - an overridden `emit`, say - neither drops the rest nor escapes.
       for (const [requested] of heldRequests) {
-        this.exit(requested);
+        try {
+          this.exit(requested);
+        } catch (error) {
+          reportToConsole(
+            `Logger exit(${String(requested)}) requested from an exit-completed listener failed: ${describeError(error)}`,
+          );
+        }
       }
     };
     const exiting = closing.then(finishExit, (error: unknown) => {

@@ -56,32 +56,38 @@ test('copies share the state the first one installs', () => {
   const first = slot(key);
   const second = slot(key);
 
-  const state = first.current();
+  const state = first.acquire();
 
+  expect(state).toBeDefined();
   expect(slotValue(key)).toBe(state);
-  expect(second.current()).toBe(state);
-
-  const taken = first.acquire();
-  expect(taken).toBe(state);
   // Taken in one copy is taken in every copy.
   expect(second.isHeld()).toBe(true);
   expect(second.acquire()).toBeUndefined();
 
-  first.release(state);
+  first.release(state as TestState);
   expect(second.isHeld()).toBe(false);
   expect(second.acquire()).toBe(state);
 });
 
 test('a copy follows a state another copy installed in place of the one it last read', () => {
   const key = testKey();
-  const first = slot(key);
-  const second = slot(key);
-  const original = second.current();
+  const copy = slot(key);
+  expect(copy.isHeld()).toBe(false);
+  const original = slotValue(key);
 
-  const replacement = first.replace();
+  // What another copy's repair leaves in the slot: a fresh state, here already taken.
+  const installed: TestState = { held: true };
+  Object.defineProperty(globalThis, key, {
+    configurable: true,
+    writable: true,
+    value: installed,
+  });
 
-  expect(replacement).not.toBe(original);
-  expect(second.current()).toBe(replacement);
+  expect(installed).not.toBe(original);
+  expect(copy.isHeld()).toBe(true);
+  expect(copy.acquire()).toBeUndefined();
+  installed.held = false;
+  expect(copy.acquire()).toBe(installed);
 });
 
 test('a state whose descriptor read throws is replaced', () => {
@@ -100,8 +106,9 @@ test('a state whose descriptor read throws is replaced', () => {
     value: squatter,
   });
 
-  const state = slot(key).current();
+  const state = slot(key).acquire();
 
+  expect(state).toBeDefined();
   expect(state).not.toBe(squatter);
   expect(slotValue(key)).toBe(state);
 });
@@ -137,6 +144,27 @@ test('a state that will not be freed is replaced for every copy', () => {
   expect(second.acquire()).toBe(slotValue(key) as TestState);
 });
 
+test('a state that ignores the write that takes it is replaced, and the fresh one taken', () => {
+  const key = testKey();
+  const squatter = new Proxy(
+    { held: false },
+    {
+      set: () => true,
+    },
+  );
+  Object.defineProperty(globalThis, key, {
+    configurable: true,
+    writable: true,
+    value: squatter,
+  });
+
+  const state = slot(key).acquire();
+
+  expect(state).not.toBe(squatter);
+  expect(state?.held).toBe(true);
+  expect(slotValue(key)).toBe(state);
+});
+
 test('a non-configurable but writable key still takes a fresh state', () => {
   const key = testKey();
   Object.defineProperty(globalThis, key, {
@@ -145,12 +173,12 @@ test('a non-configurable but writable key still takes a fresh state', () => {
     value: 'not a state',
   });
 
-  const first = slot(key);
-  const state = first.current();
+  const state = slot(key).acquire();
 
   // Shared through the slot, not a state of this copy's own.
+  expect(state).toBeDefined();
   expect(slotValue(key)).toBe(state);
-  expect(slot(key).current()).toBe(state);
+  expect(slot(key).isHeld()).toBe(true);
 });
 
 test('a key that cannot hold a state leaves each copy on its own, and is not tried again', () => {
@@ -161,32 +189,31 @@ test('a key that cannot hold a state leaves each copy on its own, and is not tri
     value: 'not a state',
   });
   const defineProperty = spyOn(Reflect, 'defineProperty');
+  const attemptsOnKey = (): number =>
+    defineProperty.mock.calls.filter(
+      ([target, property]) => target === globalThis && property === key,
+    ).length;
 
   try {
     const first = slot(key);
     const second = slot(key);
-    const own = first.current();
+    const own = first.acquire();
 
+    expect(own).toBeDefined();
     expect(slotValue(key)).toBe('not a state');
-    const attempts = defineProperty.mock.calls.filter(
-      ([target, property]) => target === globalThis && property === key,
-    ).length;
+    const attempts = attemptsOnKey();
     expect(attempts).toBeGreaterThan(0);
 
     // Latched: the same state of its own, with no further attempt on the global.
-    expect(first.current()).toBe(own);
-    expect(first.replace()).toBe(own);
+    first.release(own as TestState);
+    expect(first.isHeld()).toBe(false);
     expect(first.acquire()).toBe(own);
-    expect(
-      defineProperty.mock.calls.filter(
-        ([target, property]) => target === globalThis && property === key,
-      ).length,
-    ).toBe(attempts);
+    expect(attemptsOnKey()).toBe(attempts);
 
     // Each copy keeps its own, so the other is not blocked by this one's hold.
-    expect(second.acquire()).not.toBe(own);
-    first.release(own);
-    expect(first.isHeld()).toBe(false);
+    const secondOwn = second.acquire();
+    expect(secondOwn).toBeDefined();
+    expect(secondOwn).not.toBe(own);
   } finally {
     defineProperty.mockRestore();
   }

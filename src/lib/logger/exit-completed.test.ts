@@ -357,6 +357,96 @@ test('a real exit whose process.exit and fallback both throw releases the latch'
   }
 });
 
+test('a request held behind a process.exit that throws is reported as ignored, not replayed', async () => {
+  // Bounded too: a listener that requests another exit every time, behind a process.exit
+  // that always throws, does not start one exit after another.
+  const calls: number[] = [];
+  const exit = spyOn(process, 'exit').mockImplementation((code?: number) => {
+    calls.push(code ?? 0);
+    throw new Error(`exit ${String(code)} refused`);
+  });
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+
+  try {
+    const logger = new Logger({ sinks: [], callProcessExit: true });
+    const events = recordExitEvents(logger);
+    logger.on<ExitEvent>('logger', ({ eventType }) => {
+      if (eventType === 'exit-completed') {
+        logger.exit(1);
+      }
+    });
+
+    logger.exit(0);
+    await waitFor(() => calls.length >= 2);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(calls).toEqual([0, 1]);
+    expect(
+      events
+        .filter(({ event }) => event.eventType === 'exit-called')
+        .map(({ event }) => event.code),
+    ).toEqual([0]);
+    expect(completions(events)).toEqual([{ code: 0, endedProcess: true }]);
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit(1) ignored: an exit with code 0 is already processing',
+      'Logger process exit failed: exit 0 refused',
+      'Logger fallback process exit failed: exit 1 refused',
+    ]);
+  } finally {
+    exit.mockRestore();
+    output.mockRestore();
+  }
+});
+
+test('each request replayed after process.exit was removed is made on its own', async () => {
+  // An overridden `emit` that throws on the replayed requests' `exit-called` makes each
+  // `exit()` throw: reported for what it is, and the next request is still made.
+  class ThrowingOnFailureLogger extends Logger {
+    public override emit<T = unknown>(event: string, data?: T): void {
+      const payload = data as ExitEvent | undefined;
+      if (payload?.eventType === 'exit-called' && payload.code !== 0) {
+        throw new Error(`emit refused ${String(payload.code)}`);
+      }
+      super.emit(event, data);
+    }
+  }
+  const actualExit = Object.getOwnPropertyDescriptor(process, 'exit');
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  process.exit = (() => {}) as typeof process.exit;
+
+  try {
+    const logger = new ThrowingOnFailureLogger({
+      sinks: [],
+      callProcessExit: true,
+    });
+    const events = recordExitEvents(logger);
+    logger.on<ExitEvent>('logger', ({ eventType }) => {
+      if (eventType === 'exit-completed') {
+        (process as { exit?: unknown }).exit = undefined;
+        logger.exit(1);
+        logger.exit(2);
+      }
+    });
+
+    logger.exit(0);
+    await waitFor(() => completions(events).length > 0);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger process exit skipped: process.exit is no longer callable',
+      'Logger exit(1) requested from an exit-completed listener failed: emit refused 1',
+      // Made all the same: the first was recorded before its `exit-called` threw.
+      'Logger exit(2) replaces the pending exit code 1',
+      'Logger exit(2) requested from an exit-completed listener failed: emit refused 2',
+    ]);
+  } finally {
+    if (actualExit) {
+      Object.defineProperty(process, 'exit', actualExit);
+    }
+    output.mockRestore();
+  }
+});
+
 test('exit-completed fires when sink cleanup fails', async () => {
   const output = spyOn(console, 'error').mockImplementation(() => {});
   const logger = new Logger({ sinks: [], callProcessExit: false });
