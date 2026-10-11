@@ -1,3 +1,4 @@
+import { hostileRejections } from '../../internal/hostile-promise-test-utils';
 import { describe, expect, test, beforeAll, afterAll, spyOn } from 'bun:test';
 import { execSync } from 'node:child_process';
 import crypto from 'node:crypto';
@@ -14,6 +15,7 @@ import type { NodeAdapterConfig } from './node-adapter';
 import { HTTPClient } from '../http-client';
 import { CookieJar } from '../cookie-jar';
 import {
+  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
@@ -179,6 +181,105 @@ test.each(['abort', 'close'] as const)(
     }
   },
 );
+
+test('an abort while a streamed writable is finishing fires the factory signal', async () => {
+  // The body has fully arrived and the adapter is waiting on `end`'s callback, which this
+  // writable never calls. The abort settles the request, which takes the signal relay off
+  // within the same dispatch, so the abort listener has to fire the stream signal itself.
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'Content-Length': '4' });
+    res.end('body');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('No test address');
+  }
+  const controller = new AbortController();
+  const ending = Promise.withResolvers<void>();
+  let streamSignal: AbortSignal | undefined;
+  const writable: WritableLike = {
+    write: (_chunk, callback) => {
+      callback?.(null);
+      return true;
+    },
+    end: () => {
+      ending.resolve();
+    },
+    on() {
+      return this;
+    },
+    once() {
+      return this;
+    },
+    destroy: () => {},
+  };
+  const pending = new NodeAdapter()
+    .send(
+      makeAdapterRequest(`http://127.0.0.1:${String(address.port)}/`, {
+        signal: controller.signal,
+        streamResponse: (_info, context) => {
+          streamSignal = context.signal;
+          return writable;
+        },
+      }),
+    )
+    .then(
+      (result) => result,
+      (error: unknown) => error,
+    );
+  try {
+    await ending.promise;
+    controller.abort();
+    const result = await pending;
+    expect((result as Error).name).toBe('AbortError');
+    expect(streamSignal?.aborted).toBe(true);
+  } finally {
+    controller.abort();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('request header values are converted once, when send() is called', async () => {
+  // Converted again at settle time, inside a response callback, a `toString` that throws
+  // was an uncaught exception and the send never settled.
+  const server = http.createServer((_req, res) => {
+    res.end('ok');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  if (!address || typeof address === 'string') {
+    throw new Error('No test address');
+  }
+  let conversions = 0;
+  const value = {
+    toString(): string {
+      conversions++;
+      if (conversions > 1) {
+        throw new Error('converted twice');
+      }
+      return 'once';
+    },
+  };
+  const accept = ['text/plain'];
+  try {
+    const pending = new NodeAdapter().send(
+      makeAdapterRequest(`http://127.0.0.1:${String(address.port)}/`, {
+        headers: { 'x-value': value as unknown as string, accept },
+      }),
+    );
+    accept.push('application/json');
+    const res = await pending;
+    expect(res.status).toBe(200);
+    expect(conversions).toBe(1);
+    expect(res.effectiveRequestHeaders?.['x-value']).toBe('once');
+    expect(res.effectiveRequestHeaders?.accept).toBe('text/plain');
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
 
 class MockClientRequest extends EventEmitter {
   public destroyed = false;
@@ -537,6 +638,57 @@ describe('post-header stream aborts report why the retry stopped', () => {
 });
 
 describe('NodeAdapter streamResponse factory failures', () => {
+  test("the factory is called on the caller's request, not on the adapter's copy", async () => {
+    // `send()` reads every member of the request once, into a plain object of its own.
+    // Calling `streamResponse` off that copy handed a class-instance request's method the
+    // copy as `this`, so a factory reading its own fields threw and the download failed
+    // as a setup error.
+    const net = await import('node:net');
+
+    const server = net.createServer((socket) => {
+      socket.on('data', () => {
+        socket.end(
+          'HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 4\r\n\r\nbody',
+        );
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+    const chunks: Buffer[] = [];
+
+    class Download implements AdapterRequest {
+      public readonly requestURL = `http://127.0.0.1:${port}/data`;
+      public readonly method = 'GET' as const;
+      public readonly headers: Record<string, string> = {};
+      private readonly sink = new Writable({
+        write(chunk: Buffer, _encoding, callback): void {
+          chunks.push(chunk);
+          callback();
+        },
+      });
+
+      public streamResponse(): WritableLike {
+        return this.sink;
+      }
+    }
+
+    try {
+      const response = await new NodeAdapter().send(new Download());
+
+      expect(response.status).toBe(200);
+      expect(response.isStreamError).toBeFalsy();
+      expect(Buffer.concat(chunks).toString()).toBe('body');
+    } finally {
+      await new Promise<void>((done) => {
+        server.close(() => done());
+      });
+    }
+  });
+
   test('a frozen error from the factory is still classified as non-retryable', async () => {
     // `markStreamFactoryError` tags the error in place so the caller keeps its identity.
     // A frozen error refuses that assignment in strict mode, and falling through untagged
@@ -592,6 +744,131 @@ describe('NodeAdapter streamResponse factory failures', () => {
       });
     }
   });
+
+  test('a factory return whose then cannot be read fails with the original error', async () => {
+    // Matches what `await` rejects with (and RetryRunner's handling of the same return):
+    // the getter's own error, not the internal wrapper describing it, so the caller can
+    // still identify the failure it raised.
+    const net = await import('node:net');
+
+    const server = net.createServer((socket) => {
+      socket.on('data', () => {
+        socket.end(
+          'HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 4\r\n\r\nbody',
+        );
+      });
+    });
+
+    await new Promise<void>((done) => {
+      server.listen(0, '127.0.0.1', done);
+    });
+
+    const { port } = server.address() as { port: number };
+    const failure = new Error('cannot read factory then');
+    let factoryCalls = 0;
+
+    try {
+      const client = new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL: `http://127.0.0.1:${port}`,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+      });
+
+      const builder = client.get('/unreadable-then').streamResponse(() => {
+        factoryCalls++;
+        return {
+          get then(): never {
+            throw failure;
+          },
+        } as unknown as Promise<null>;
+      });
+
+      const res = await builder.send();
+
+      expect(res.isFailed).toBe(true);
+      expect(builder.error?.code).toBe('stream_setup_error');
+      expect(builder.error?.cause).toBe(failure);
+      expect(factoryCalls).toBe(1);
+    } finally {
+      await new Promise<void>((done) => {
+        server.close(() => done());
+      });
+    }
+  });
+
+  test.each([
+    ['undefined', undefined],
+    ['a number', 42],
+    ['a string', 'download.bin'],
+    // Objects that are neither a cancel nor a sink. These passed the old primitive-only
+    // check and failed on the first `write` as a `stream_write_error` on a 200.
+    ['an empty object', {}],
+    ['a cancel object with cancel: false', { cancel: false }],
+    ['an object with write but no end', { write: () => true }],
+    ['a function', () => undefined],
+  ] as const)(
+    'a factory returning %s fails setup without retrying or leaking its connection',
+    async (_label, returned) => {
+      // A factory that forgot its `return`. It is neither a cancel nor a sink, and it
+      // used to reach the stream pipe, throw there, and be retried as a network error:
+      // the factory called once per attempt, each leaving its connection open with the
+      // response still streaming in, and its signal never fired.
+      let requests = 0;
+      let closedResponses = 0;
+      const server = http.createServer((_req, res) => {
+        requests++;
+        res.on('close', () => {
+          closedResponses++;
+        });
+        res.writeHead(200, { 'Content-Length': '1000' });
+        res.write('partial');
+      });
+
+      await new Promise<void>((resolve) =>
+        server.listen(0, '127.0.0.1', resolve),
+      );
+
+      const { port } = server.address() as { port: number };
+      const signals: AbortSignal[] = [];
+
+      try {
+        const client = new HTTPClient({
+          adapter: new NodeAdapter(),
+          baseURL: `http://127.0.0.1:${port}`,
+          retryPolicy: { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 1 },
+        });
+
+        const builder = client.get('/slow').streamResponse((_info, context) => {
+          signals.push(context.signal);
+          return returned as unknown as WritableLike;
+        });
+
+        const res = await builder.send();
+
+        expect(res.isFailed).toBe(true);
+        expect(res.isNetworkError).toBe(false);
+        expect(builder.error?.code).toBe('stream_setup_error');
+        expect(builder.error?.cause).toBeInstanceOf(TypeError);
+        expect(builder.error?.cause?.message).toContain(
+          `returned ${typeof returned}`,
+        );
+        expect(requests).toBe(1);
+        expect(signals).toHaveLength(1);
+        expect(signals[0]?.aborted).toBe(true);
+
+        const deadline = Date.now() + 2000;
+
+        while (closedResponses < requests && Date.now() < deadline) {
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+
+        expect(closedResponses).toBe(1);
+      } finally {
+        server.closeAllConnections();
+        await new Promise<void>((resolve) => server.close(() => resolve()));
+      }
+    },
+  );
 
   test('streamResponse on other adapters becomes request_setup_error', async () => {
     const adapter: HTTPAdapter = {
@@ -3308,7 +3585,7 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     // Concurrent requests sharing one writable attach one absorber between them, not one
     // each: a dozen failures inside a single turn would otherwise trip Node's listener
     // warning before any removal ran.
-    await Promise.all(Array.from({ length: 12 }, async () => runOnce()));
+    await Promise.all(Array.from({ length: 12 }, async () => await runOnce()));
     expect(emitter.listenerCount('error')).toBe(1);
 
     // Released a turn after the error was delivered, not a turn after it was attached.
@@ -3478,18 +3755,122 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     expect(handlers.length).toBe(1);
 
     // It still absorbs the error the torn-down writable delivers late, and settles
-    // nothing, because the request has already settled.
-    expect(() => handlers[0]?.(new Error('late boom'))).not.toThrow();
+    // nothing, because the request has already settled. With no request registered
+    // behind it, the error is reported through the host error reporter, as the absorber
+    // on a writable that can be detached reports it.
+    const reports: ErrorEvent[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+    const lateError = new Error('late boom');
 
-    await new Promise<void>((done) => {
-      setImmediate(done);
-    });
+    globalThis.addEventListener('error', onError);
+
+    try {
+      expect(() => handlers[0]?.(lateError)).not.toThrow();
+
+      await new Promise<void>((done) => {
+        setImmediate(done);
+      });
+    } finally {
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(reports.length).toBe(1);
+    expect(reports[0]?.error).toBe(lateError);
 
     // And a second request through the same sink adds none: this is what a reused sink
     // used to pay two listeners and a retained request closure for, every time.
     await runOnce();
 
     expect(handlers.length).toBe(1);
+  });
+
+  test('the permanent fan-out stops reporting unclaimed errors once the window has passed', async () => {
+    // The permanent listener never detaches, so reporting every `'error'` that reached it
+    // with no request registered put each error a long-lived sink's owner handles itself
+    // on the host's global channel, for the life of the writable. It reports within the
+    // window a detachable writable's absorber would have, and only absorbs after that.
+    const handlers: ((error: Error) => void)[] = [];
+    const writable = {
+      write: () => true,
+      end: () => {
+        throw new Error('sync end boom');
+      },
+      on: (event: string, listener: (error: Error) => void) => {
+        if (event === 'error') {
+          handlers.push(listener);
+        }
+
+        return writable;
+      },
+      once: () => writable,
+      destroy: () => writable,
+    } as unknown as WritableLike;
+
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '1',
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('a'));
+            res.emit('end');
+          });
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        streamResponse: () => writable,
+      });
+
+      expect(response.streamErrorCode).toBe('stream_write_error');
+    } finally {
+      requestSpy.mockRestore();
+    }
+
+    expect(handlers.length).toBe(1);
+
+    const reports: ErrorEvent[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+    const realNow = Date.now();
+    const nowSpy = spyOn(Date, 'now').mockImplementation(
+      () => realNow + 60_000,
+    );
+
+    globalThis.addEventListener('error', onError);
+
+    try {
+      // Still absorbed - never an uncaught exception - but no longer reported.
+      expect(() =>
+        handlers[0]?.(new Error('owner handles this one')),
+      ).not.toThrow();
+
+      await new Promise<void>((done) => {
+        setImmediate(done);
+      });
+    } finally {
+      nowSpy.mockRestore();
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(reports).toEqual([]);
   });
 
   test('a refused removal keeps the absorber tracked instead of stacking another', async () => {
@@ -3574,6 +3955,44 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     expect(errorListeners).toBe(5);
   });
 
+  test.each(hostileRejections)(
+    'stream factory adopts %s',
+    async (_label, make) => {
+      const req = new MockClientRequest();
+      const res = new MockIncomingMessage(200, {
+        'content-type': 'application/octet-stream',
+      });
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        (_options, callback) => {
+          queueMicrotask(() =>
+            (
+              callback as ((response: http.IncomingMessage) => void) | undefined
+            )?.(res as unknown as http.IncomingMessage),
+          );
+          return req as unknown as http.ClientRequest;
+        },
+      );
+      const failure = new Error('hostile factory failure');
+      try {
+        const error = await new NodeAdapter()
+          .send({
+            requestURL: 'http://example.test/data',
+            method: 'GET',
+            headers: {},
+            signal: AbortSignal.timeout(100),
+            streamResponse: () => make(failure),
+          })
+          .then(
+            () => undefined,
+            (error: unknown) => error,
+          );
+        expect(error).toBe(failure);
+      } finally {
+        requestSpy.mockRestore();
+      }
+    },
+  );
+
   test('async streamResponse factory rejection rejects the promise', async () => {
     const req = new MockClientRequest();
     const res = new MockIncomingMessage(200, {
@@ -3657,6 +4076,8 @@ describe('NodeAdapter.send() — unit branches without server', () => {
         },
       });
 
+      // Let the response reach the factory, so the abort lands during its setup.
+      await new Promise((resolve) => setTimeout(resolve, 0));
       controller.abort();
 
       let caught: Error | undefined;
@@ -3671,6 +4092,109 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       await new Promise((resolve) => setTimeout(resolve, 20));
       expect(wasDestroyed).toBe(true);
     } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
+  test('a late writable with no removal method reports an error it emits after being discarded', async () => {
+    // The writable an async factory hands back after the request was aborted is destroyed
+    // with a listener attached first. On a writable with no `off`/`removeListener`, that
+    // listener is the permanent fan-out - registered into and at once deregistered from -
+    // and an `'error'` reaching it with nothing registered was dropped without a trace,
+    // where the absorber on a detachable writable reports it.
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '3',
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    const errorHandlers: ((error: Error) => void)[] = [];
+    let wasDestroyed = false;
+    const writable = {
+      write: () => true,
+      end: () => {},
+      on: (event: string, listener: (error: Error) => void) => {
+        if (event === 'error') {
+          errorHandlers.push(listener);
+        }
+
+        return writable;
+      },
+      once: () => writable,
+      destroy: () => {
+        wasDestroyed = true;
+      },
+    } as unknown as WritableLike;
+
+    const reports: ErrorEvent[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+
+    globalThis.addEventListener('error', onError);
+
+    const controller = new AbortController();
+    let releaseFactory!: () => void;
+    const factoryGate = new Promise<void>((resolve) => {
+      releaseFactory = resolve;
+    });
+
+    try {
+      const promise = new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        signal: controller.signal,
+        streamResponse: async () => {
+          await factoryGate;
+          return writable;
+        },
+      });
+
+      // Let the response reach the factory, so the abort lands during its setup.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      controller.abort();
+
+      let caught: Error | undefined;
+
+      try {
+        await promise;
+      } catch (error) {
+        caught = error as Error;
+      }
+
+      expect(caught?.message).toContain('Request aborted');
+
+      releaseFactory();
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      expect(wasDestroyed).toBe(true);
+      expect(errorHandlers.length).toBe(1);
+
+      // The failed `open` a destroyed `createWriteStream()` emits regardless.
+      const lateError = new Error('ENOENT on open');
+
+      expect(() => errorHandlers[0]?.(lateError)).not.toThrow();
+
+      await new Promise<void>((done) => {
+        setImmediate(done);
+      });
+
+      expect(reports.length).toBe(1);
+      expect(reports[0]?.error).toBe(lateError);
+    } finally {
+      globalThis.removeEventListener('error', onError);
       requestSpy.mockRestore();
     }
   });
@@ -6010,7 +6534,7 @@ describe('NodeAdapter — crl option (enforcement)', () => {
   });
 
   const get = async (config: NodeAdapterConfig, server: TlsTestServer) =>
-    new HTTPClient({
+    await new HTTPClient({
       adapter: new NodeAdapter(config),
       baseURL: server.url,
     })
@@ -7053,4 +7577,239 @@ describe('NodeAdapter — abort listeners are released when the request settles'
 
 test('rejects malformed initial CRLs before any request or retry', () => {
   expect(() => new NodeAdapter({ crl: 'garbage' })).toThrow();
+});
+
+test('a refreshed CRL that fails validation is a non-retryable adapter_error', async () => {
+  // Whitespace passes the constructor's check; the refresh is what is malformed. It is
+  // normalized per request, and its failure used to be retried as a network error.
+  const config: NodeAdapterConfig = { crl: '' };
+  const adapter = new NodeAdapter(config);
+  const requestSpy = spyOn(https, 'request');
+  let attempts = 0;
+
+  config.crl = 'not a crl';
+
+  try {
+    const builder = new HTTPClient({ adapter })
+      .get('https://crl.test/api')
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 3, delayMS: 1 })
+      .onAttemptEnd(() => {
+        attempts++;
+      });
+
+    const res = await builder.send();
+
+    expect(res.isFailed).toBe(true);
+    expect(res.isNetworkError).toBe(false);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(builder.error?.isRetriesExhausted).toBe(false);
+    expect(builder.error?.cause?.message).toMatch(/outside any complete/);
+    expect(attempts).toBe(1);
+    expect(requestSpy).not.toHaveBeenCalled();
+  } finally {
+    requestSpy.mockRestore();
+  }
+});
+
+test('a caller throw while a refreshed CRL is normalized stays retryable and untagged', async () => {
+  // Not the adapter's validation refusal: caller code run by the normalization threw.
+  // It keeps the usual retryable adapter-error path, and the caller's error object is
+  // not given the adapter's terminal flag.
+  const failure = new Error('crl source not ready');
+  const config: NodeAdapterConfig = { crl: '' };
+  const adapter = new NodeAdapter(config);
+  const requestSpy = spyOn(https, 'request');
+  let attempts = 0;
+
+  config.crl = [
+    {
+      toString(): string {
+        throw failure;
+      },
+    } as unknown as Buffer,
+  ];
+
+  try {
+    const builder = new HTTPClient({ adapter })
+      .get('https://crl.test/api')
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 })
+      .onAttemptEnd(() => {
+        attempts++;
+      });
+
+    const res = await builder.send();
+
+    expect(res.isFailed).toBe(true);
+    expect(attempts).toBe(3);
+    expect(builder.error?.cause).toBe(failure);
+    expect(
+      Object.getOwnPropertyNames(failure).includes(
+        NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
+      ),
+    ).toBe(false);
+    expect(requestSpy).not.toHaveBeenCalled();
+  } finally {
+    requestSpy.mockRestore();
+  }
+});
+
+describe('NodeAdapter upload finalization', () => {
+  test.each(['string', 'bytes', 'multipart'] as const)(
+    '%s upload reports req.end failure after accepting all body bytes',
+    async (kind) => {
+      const failure = new Error('request end failed');
+      const chunks: Buffer[] = [];
+      const req = new MockClientRequest((data, callback) => {
+        chunks.push(Buffer.from(data));
+        callback?.(null);
+        return true;
+      });
+      const endSpy = spyOn(req, 'end').mockImplementation(() => {
+        // All writes succeeded. Finalizing the request is still part of the upload,
+        // so its failure must win over a premature successful body settlement.
+        expect(Buffer.concat(chunks).toString()).toContain('payload');
+        throw failure;
+      });
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        () => req as unknown as http.ClientRequest,
+      );
+      const form = new FormData();
+      form.append('field', 'payload');
+      const body =
+        kind === 'multipart'
+          ? form
+          : kind === 'bytes'
+            ? new TextEncoder().encode('payload')
+            : 'payload';
+      try {
+        const response = await new NodeAdapter().send({
+          requestURL: 'http://example.test/upload',
+          method: 'POST',
+          headers: {},
+          body,
+        });
+        expect(endSpy).toHaveBeenCalledTimes(1);
+        expect(response.status).toBe(0);
+        expect(response.isTransportError).toBe(true);
+        expect(response.errorCause).toBe(failure);
+        expect(response.requestBodySettled).toBeDefined();
+        expect(await response.requestBodySettled).toBe(failure);
+        expect(req.destroyed).toBe(true);
+      } finally {
+        requestSpy.mockRestore();
+        endSpy.mockRestore();
+      }
+    },
+  );
+});
+
+test.each(['aborted', 'addEventListener', 'setHeader'] as const)(
+  'destroys an allocated request when %s throws during synchronous setup',
+  async (failureAt) => {
+    const failure = new Error(`hostile ${failureAt}`);
+    let destroys = 0;
+    const request = Object.assign(new EventEmitter(), {
+      destroyed: false,
+      setHeader: () => {
+        if (failureAt === 'setHeader') {
+          throw failure;
+        }
+      },
+      end: () => {},
+      destroy() {
+        this.destroyed = true;
+        destroys++;
+        return this;
+      },
+    });
+    const requestSpy = spyOn(http, 'request').mockReturnValue(
+      request as unknown as http.ClientRequest,
+    );
+    const signal = {
+      get aborted() {
+        if (failureAt === 'aborted') {
+          throw failure;
+        }
+        return false;
+      },
+      addEventListener: () => {
+        if (failureAt === 'addEventListener') {
+          throw failure;
+        }
+      },
+      removeEventListener: () => {},
+    } as unknown as AbortSignal;
+    try {
+      let caught: unknown;
+      try {
+        await new NodeAdapter().send(
+          makeAdapterRequest('http://example.test', {
+            body: failureAt === 'setHeader' ? 'body' : null,
+            signal,
+          }),
+        );
+      } catch (error) {
+        caught = error;
+      }
+      expect(caught).toBe(failure);
+      expect(request.destroyed).toBe(true);
+      expect(destroys).toBe(1);
+    } finally {
+      requestSpy.mockRestore();
+    }
+  },
+);
+
+test('a response arriving after the signal aborted does not call the streamResponse factory', async () => {
+  let respond: ((res: http.IncomingMessage) => void) | undefined;
+  const request = Object.assign(new EventEmitter(), {
+    destroyed: false,
+    setHeader: () => {},
+    end: () => {},
+    destroy() {
+      this.destroyed = true;
+      return this;
+    },
+  });
+  const requestSpy = spyOn(http, 'request').mockImplementation(((
+    _options: unknown,
+    callback: (res: http.IncomingMessage) => void,
+  ) => {
+    respond = callback;
+    return request;
+  }) as unknown as typeof http.request);
+  const controller = new AbortController();
+  let factoryCalls = 0;
+  try {
+    const sending = new NodeAdapter().send(
+      makeAdapterRequest('http://example.test', {
+        signal: controller.signal,
+        streamResponse: () => {
+          factoryCalls++;
+          return makeMemoryWritable().stream;
+        },
+      }),
+    );
+    controller.abort();
+    // A response the transport had already parsed still reaches the callback.
+    respond?.(
+      Object.assign(new EventEmitter(), {
+        statusCode: 200,
+        headers: {},
+        complete: false,
+      }) as unknown as http.IncomingMessage,
+    );
+    let caught: unknown;
+    try {
+      await sending;
+    } catch (error) {
+      caught = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect((caught as Error).name).toBe('AbortError');
+    expect(request.destroyed).toBe(true);
+    expect(factoryCalls).toBe(0);
+  } finally {
+    requestSpy.mockRestore();
+  }
 });

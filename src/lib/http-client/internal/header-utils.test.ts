@@ -3,6 +3,7 @@ import {
   assertNoBrowserRestrictedHeaders,
   isBrowserRestrictedHeader,
   isJSONContentType,
+  materializeRequestHeaders,
 } from './header-utils';
 
 describe('isBrowserRestrictedHeader', () => {
@@ -139,5 +140,27 @@ describe('isJSONContentType', () => {
 
   test('is case-insensitive', () => {
     expect(isJSONContentType('Application/JSON')).toBe(true);
+  });
+});
+
+describe('materializeRequestHeaders', () => {
+  test('joins repeated Cookie headers with RFC cookie delimiters', () => {
+    expect(
+      materializeRequestHeaders({
+        cookie: ['session=abc123', 'theme=dark'],
+      }),
+    ).toEqual({
+      cookie: 'session=abc123; theme=dark',
+    });
+  });
+
+  test('joins non-cookie arrays with comma delimiters', () => {
+    expect(
+      materializeRequestHeaders({
+        accept: ['application/json', 'text/plain'],
+      }),
+    ).toEqual({
+      accept: 'application/json, text/plain',
+    });
   });
 });

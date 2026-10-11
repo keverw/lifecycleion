@@ -431,7 +431,11 @@ export interface HTTPClientConfig {
    */
   baseURL?: string;
   defaultHeaders?: Record<string, string | string[]>;
-  timeout?: number;
+  /**
+   * Null or undefined selects `DEFAULT_TIMEOUT_MS`. In `createSubClient` overrides,
+   * either inherits the parent client's timeout instead.
+   */
+  timeout?: number | null;
   cookieJar?: CookieJar | null;
   retryPolicy?: RetryPolicyOptions;
   /**
@@ -474,7 +478,8 @@ export interface HTTPRequestOptions {
   headers?: Record<string, string | string[]>;
   params?: Record<string, unknown>;
   body?: unknown;
-  timeout?: number;
+  /** Null or undefined inherits the client's configured `timeout`. */
+  timeout?: number | null;
   signal?: AbortSignal;
   retryPolicy?: RetryPolicyOptions | null;
   /**
@@ -521,6 +526,14 @@ export interface HTTPResponse<T = unknown> {
    * control-flow failures). For adapter-originated transport failures,
    * `isTransportError` is the explicit signal; bare `status: 0` is also
    * treated as a transport failure by the client.
+   *
+   * Three failures can carry a nonzero status: a stream error and an
+   * `adapter_error` for an answered response the client could not read keep
+   * the real status, and an adapter-reported `isTransportError` keeps whatever
+   * status the adapter gave. Any of them can be `isFailed: true` with a 2xx or
+   * 3xx `status`. A timeout reports `status: 0`, even for an attempt whose
+   * answer arrived after its timer fired and then could not be read; only a
+   * body that timed out mid-stream keeps its status, as a stream error.
    *
    * Ordinary HTTP responses, including HTTP error statuses like 4xx/5xx,
    * remain `false`. This tracks client-level failure handling, not HTTP
@@ -636,7 +649,11 @@ export interface HTTPClientError {
   redirectHistory: string[];
   requestID: string;
   isTimeout: boolean;
-  /** True when a retry policy was active and all attempts were exhausted before a response was received. */
+  /**
+   * True when a retry policy was active and all of its attempts were spent. The
+   * last attempt may still have received a response: a retryable status whose
+   * body then could not be read ends as an `adapter_error` with its status.
+   */
   isRetriesExhausted: boolean;
   /**
    * Optional reason string when the request was cancelled with an explicit string reason.
