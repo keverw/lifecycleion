@@ -546,7 +546,7 @@ test('a failure exit ignored behind a scheduled success exit is reported once', 
     expect(exit.mock.calls).toEqual([[0]]);
     expect(output).toHaveBeenCalledTimes(1);
     expect(String(output.mock.calls[0]?.[0])).toContain(
-      'Logger exit(1) ignored: an exit with code 0 is already processing',
+      'Logger exit(1) ignored: the logger is already exiting with code 0',
     );
   } finally {
     output.mockRestore();
@@ -685,7 +685,7 @@ test('beforeExit is told its own code when its exit-called listeners request non
   expect(logger.exitCode).toBe(2);
 });
 
-test('a later success or repeated failure exit is not reported', async () => {
+test('a later failure behind a committed failure is reported once, and a later success not at all', async () => {
   const exit = spyOn(process, 'exit').mockImplementation(
     () => undefined as never,
   );
@@ -695,11 +695,15 @@ test('a later success or repeated failure exit is not reported', async () => {
     logger.exit(2);
     logger.exit(0);
     logger.exit(1);
+    logger.exit(3);
     await logger.close();
     await Promise.resolve();
 
     expect(exit.mock.calls).toEqual([[2]]);
-    expect(output).not.toHaveBeenCalled();
+    // Whatever code the exit committed: the request asked to fail and did not change it.
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit(1) ignored: the logger is already exiting with code 2',
+    ]);
   } finally {
     output.mockRestore();
     exit.mockRestore();
@@ -885,7 +889,7 @@ test('a failure exit requested after exit-process fired is ignored and reported'
     expect(logger.exitCode).toBe(0);
     expect(exit.mock.calls).toEqual([[0]]);
     expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
-      'Logger exit(1) ignored: an exit with code 0 is already processing',
+      'Logger exit(1) ignored: the logger is already exiting with code 0',
     ]);
   } finally {
     output.mockRestore();
@@ -914,7 +918,7 @@ test('a failure exit requested by an exit-process listener is not applied', asyn
     expect(logger.exitCode).toBe(0);
     expect(exit.mock.calls).toEqual([[0]]);
     expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
-      'Logger exit(1) ignored: an exit with code 0 is already processing',
+      'Logger exit(1) ignored: the logger is already exiting with code 0',
     ]);
   } finally {
     output.mockRestore();
@@ -1155,7 +1159,7 @@ test('a simulated exit requested after an earlier one completed starts fresh', a
   }
 });
 
-test('an invalid exit absorbed by a scheduled exit does not claim to exit with 1', async () => {
+test('an invalid exit ignored behind a scheduled exit is reported as ignored, not normalized', async () => {
   const exit = spyOn(process, 'exit').mockImplementation(
     () => undefined as never,
   );
@@ -1168,10 +1172,10 @@ test('an invalid exit absorbed by a scheduled exit does not claim to exit with 1
     await Promise.resolve();
 
     const lines = output.mock.calls.map((call) => String(call[0]));
-    // Said "exiting with code 1" while the process went on to exit 0.
+    // The request does not run, so it is not normalized: no "treating it as code 1" for a
+    // process that goes on to exit 0.
     expect(lines).toEqual([
-      'Logger exit code 300 is invalid; treating it as code 1',
-      'Logger exit(300) ignored: an exit with code 0 is already processing',
+      'Logger exit(300) ignored: the logger is already exiting with code 0',
     ]);
     expect(exit.mock.calls).toEqual([[0]]);
   } finally {
@@ -1200,7 +1204,7 @@ test('a failure exitCode logged after a real exit committed 0 is reported as ign
     expect(sink.logs.map((entry) => entry.message)).toEqual([]);
     expect(exit.mock.calls).toEqual([[0]]);
     expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
-      'Logger exit(1) ignored: an exit with code 0 is already processing',
+      'Logger exit(1) ignored: the logger is already exiting with code 0',
     ]);
   } finally {
     output.mockRestore();
@@ -1323,7 +1327,7 @@ test.each([false, true])(
       expect(beforeExitCodes).toEqual([0]);
       expect(exit.mock.calls).toEqual(shouldCallProcessExit ? [[0]] : []);
       expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
-        'Logger exit(1) ignored: an exit with code 0 is already processing',
+        'Logger exit(1) ignored: the logger is already exiting with code 0',
       ]);
     } finally {
       output.mockRestore();
@@ -1355,7 +1359,10 @@ test('an exit ignored behind a committed real exit emits no exit-called and runs
     expect(processed).toEqual([1]);
     expect(logger.isPendingExit).toBe(false);
     expect(exit.mock.calls).toEqual([[1]]);
-    expect(output).not.toHaveBeenCalled();
+    // Reported once for the logger, however many follow.
+    expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+      'Logger exit(2) ignored: the logger is already exiting with code 1',
+    ]);
   } finally {
     output.mockRestore();
     exit.mockRestore();
@@ -1571,7 +1578,7 @@ test('a failure exit requested by a simulated exit-process listener is reported,
     expect(logger.exitCode).toBe(0);
     // Dropped silently before, while the real exit reported the same request.
     expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
-      'Logger exit(1) ignored: an exit with code 0 is already processing',
+      'Logger exit(1) ignored: the logger is already exiting with code 0',
     ]);
   } finally {
     output.mockRestore();

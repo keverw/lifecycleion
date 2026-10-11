@@ -144,6 +144,71 @@ test('a state that will not be freed is replaced for every copy', () => {
   expect(second.acquire()).toBe(slotValue(key) as TestState);
 });
 
+test('a stuck state another copy already replaced is dropped, not replaced again', () => {
+  const key = testKey();
+  const copy = slot(key);
+  let writes = 0;
+  // Takes the write that marks it held, and throws on the one that would free it.
+  const stuck = new Proxy(
+    { held: false },
+    {
+      set(object, property, value: unknown) {
+        if (++writes > 1) {
+          throw new Error('stuck');
+        }
+        return Reflect.set(object, property, value);
+      },
+    },
+  );
+  Object.defineProperty(globalThis, key, {
+    configurable: true,
+    writable: true,
+    value: stuck,
+  });
+  expect(copy.acquire()).toBe(stuck);
+
+  // Meanwhile another copy repaired the slot, and holds the healthy state right now.
+  const healthy: TestState = { held: true };
+  Object.defineProperty(globalThis, key, {
+    configurable: true,
+    writable: true,
+    value: healthy,
+  });
+
+  copy.release(stuck);
+
+  expect(slotValue(key)).toBe(healthy);
+  expect(healthy.held).toBe(true);
+  expect(copy.isHeld()).toBe(true);
+});
+
+test('a definition that throws is not remembered as a refusal', () => {
+  const key = testKey();
+  const copy = slot(key);
+  const defineProperty = spyOn(
+    Reflect,
+    'defineProperty',
+  ).mockImplementationOnce(() => {
+    throw new Error('defineProperty unavailable for a moment');
+  });
+
+  try {
+    // This call falls back to a state of its own...
+    const own = copy.acquire();
+    expect(own).toBeDefined();
+    expect(slotValue(key)).toBeUndefined();
+    copy.release(own as TestState);
+
+    // ...and the next one tries the slot again, and shares it.
+    const shared = copy.acquire();
+    expect(shared).not.toBe(own);
+    expect(slotValue(key)).toBe(shared);
+    expect(slot(key).isHeld()).toBe(true);
+  } finally {
+    defineProperty.mockRestore();
+  }
+});
+
 test('a state that ignores the write that takes it is replaced, and the fresh one taken', () => {
   const key = testKey();
   const squatter = new Proxy(

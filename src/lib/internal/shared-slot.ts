@@ -42,7 +42,8 @@ export interface SharedSlotOptions<T extends object> {
  * Only a global that refuses the slot - non-extensible, or a non-configurable property
  * under the key that cannot hold a data value - leaves this copy on a state of its own.
  * That refusal is permanent (neither can be undone), so it is remembered and the slot is
- * not tried again.
+ * not tried again. A definition that throws instead says nothing permanent, and the slot
+ * is tried again next time.
  */
 export class SharedSlot<T extends object> {
   private readonly options: SharedSlotOptions<T>;
@@ -62,12 +63,10 @@ export class SharedSlot<T extends object> {
     let state: T;
 
     try {
-      const cached = this.cached;
       state =
-        cached !== undefined &&
-        (globalThis as Record<symbol, unknown>)[this.options.key] === cached
-          ? cached
-          : this.current();
+        this.readCached(
+          (globalThis as Record<symbol, unknown>)[this.options.key],
+        ) ?? this.current();
     } catch {
       state = this.current();
     }
@@ -99,7 +98,8 @@ export class SharedSlot<T extends object> {
 
   /**
    * Free a state {@link acquire} returned. One that will not be freed is replaced, so no
-   * copy is left waiting on it.
+   * copy is left waiting on it - if the slot still holds it: one another copy has
+   * already replaced is dropped, rather than replacing the healthy state now in its place.
    */
   public release(state: T): void {
     try {
@@ -112,8 +112,22 @@ export class SharedSlot<T extends object> {
       // Refused: a state that can never be freed, as an ignored write is.
     }
 
-    // This copy's own state cannot refuse; anything else is replaced.
-    if (state !== this.local) {
+    // This copy's own state cannot refuse.
+    if (state === this.local) {
+      return;
+    }
+
+    let isInSlot = false;
+
+    try {
+      isInSlot =
+        Object.getOwnPropertyDescriptor(globalThis, this.options.key)?.value ===
+        state;
+    } catch {
+      // Unreadable: nothing here to say it still holds this state.
+    }
+
+    if (isInSlot) {
       this.replace();
     }
   }
@@ -129,9 +143,10 @@ export class SharedSlot<T extends object> {
         globalThis,
         this.options.key,
       )?.value;
+      const cached = this.readCached(existing);
 
-      if (existing !== undefined && existing === this.cached) {
-        return this.cached;
+      if (cached !== undefined) {
+        return cached;
       }
 
       if (this.options.isValid(existing)) {
@@ -143,6 +158,16 @@ export class SharedSlot<T extends object> {
     }
 
     return this.replace();
+  }
+
+  /**
+   * The state last validated, if `slotValue` - however the slot was read - is that same
+   * object, so a repeat read skips `isValid`; otherwise `undefined`.
+   */
+  private readCached(slotValue: unknown): T | undefined {
+    return slotValue !== undefined && slotValue === this.cached
+      ? this.cached
+      : undefined;
   }
 
   /** Take `state`: it, `undefined` when already taken, or `'unusable'` when it cannot be. */
@@ -168,7 +193,9 @@ export class SharedSlot<T extends object> {
 
   /**
    * Install a fresh state in place of whatever the slot holds, and return it - or this
-   * copy's own state once the global refuses the slot.
+   * copy's own state when the global refuses the slot. A refusal answered `false` is
+   * permanent and remembered; one that throws may not be, so this call uses its own state
+   * and the next one tries the slot again.
    */
   private replace(): T {
     if (this.isRefused) {
@@ -195,7 +222,9 @@ export class SharedSlot<T extends object> {
         return fresh;
       }
     } catch {
-      // Refused by throwing rather than by answering false: the same refusal.
+      // Not an answer about the slot - the global's `defineProperty` itself threw - so not
+      // remembered as one.
+      return this.local;
     }
 
     this.isRefused = true;
