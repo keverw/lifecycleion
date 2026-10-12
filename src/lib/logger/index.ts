@@ -2142,16 +2142,15 @@ export class Logger extends EventEmitter {
       return pendingExit;
     }
     pendingExit.code = code;
-    // The first replacement is reported, so the code changing is never a surprise. Later
-    // ones are counted rather than each written, as the file's other exit reports are
-    // bounded: requests alternating between failure codes while a shutdown runs would
-    // otherwise write a line apiece to the console the logger falls back to. The commit
-    // reports the count and the code they settled on (see `processExit`). Once per
-    // pending exit. A repeat of the pending code changes nothing and is neither reported
-    // nor counted. Names the normalized code when it differs from the request, as
-    // `exit(300)` does.
-    // One the claim refuses while a console report runs is counted too, for the commit's
-    // summary.
+    // One replacement per pending exit is reported, so the code changing is never a
+    // surprise: the first whose report can be written - one made while a console report
+    // runs would be dropped, so it does not claim it. Every other is counted rather than
+    // written, as the file's other exit reports are bounded: requests alternating between
+    // failure codes while a shutdown runs would otherwise write a line apiece to the
+    // console the logger falls back to. The commit reports the count and the code they
+    // settled on (see `processExit`). A repeat of the pending code changes nothing and is
+    // neither reported nor counted. Names the normalized code when it differs from the
+    // request, as `exit(300)` does.
     if (!pendingExit.replacementReport.claim()) {
       pendingExit.suppressedReplacements++;
       return pendingExit;
@@ -2263,7 +2262,7 @@ export class Logger extends EventEmitter {
     // `recordExitRequest`); say once what they settled on, so the bound costs no answer.
     if (pendingExit.suppressedReplacements > 0) {
       reportToConsole(
-        `Logger exit code settled on ${String(pendingExit.code)} after ${String(pendingExit.suppressedReplacements)} further replacement${pendingExit.suppressedReplacements === 1 ? '' : 's'} not reported`,
+        `Logger exit code settled on ${String(pendingExit.code)} after ${String(pendingExit.suppressedReplacements)} replacement${pendingExit.suppressedReplacements === 1 ? '' : 's'} not reported`,
       );
     }
     if (isInvalidForRealExit) {

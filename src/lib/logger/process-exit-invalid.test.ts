@@ -1639,7 +1639,7 @@ test('replacement reports are bounded to one line per exit plus a settled-code s
     expect(processed).toEqual([3]);
     expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
       'Logger exit(1) replaces the pending exit code 0',
-      'Logger exit code settled on 3 after 4 further replacements not reported',
+      'Logger exit code settled on 3 after 4 replacements not reported',
     ]);
   } finally {
     output.mockRestore();
@@ -1917,7 +1917,7 @@ test('a replacement made inside a console report is counted for the commit summa
     expect(processed).toEqual([2]);
     expect(lines).toEqual([
       'another report',
-      'Logger exit code settled on 2 after 1 further replacement not reported',
+      'Logger exit code settled on 2 after 1 replacement not reported',
     ]);
   } finally {
     output.mockRestore();
