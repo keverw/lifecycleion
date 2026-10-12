@@ -4,10 +4,12 @@ import {
   OPERATION_ENDED,
   OPERATION_STARTED,
   RetryRunner,
-  type CancelResult,
-  type ReportResult,
-  type RunResult,
-  type RunResultNonSuccess,
+} from './retry-runner';
+import type {
+  CancelResult,
+  ReportResult,
+  RunResult,
+  RunResultNonSuccess,
 } from './retry-runner';
 import { RetryUtilsErrRunnerLockAcquisitionError } from './retry-utils-errors';
 

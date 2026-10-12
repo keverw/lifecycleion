@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from 'bun:test';
-import { type ReportResult, RetryRunner } from './retry-runner';
+import { RetryRunner } from './retry-runner';
+import type { ReportResult } from './retry-runner';
 import type { RetryPolicyOptionsStrategyFixed } from './types';
 import { sleep } from '../../sleep';
 import {

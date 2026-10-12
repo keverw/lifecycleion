@@ -1,9 +1,6 @@
 import { expect, spyOn, test } from 'bun:test';
-import {
-  RetryRunner,
-  type ReportResult,
-  type OnAttemptHandledInfo,
-} from './retry-runner';
+import { RetryRunner } from './retry-runner';
+import type { ReportResult, OnAttemptHandledInfo } from './retry-runner';
 import * as idHelpers from '../../id-helpers';
 
 const policy = { strategy: 'fixed', delayMS: 1, maxRetryAttempts: 1 } as const;
