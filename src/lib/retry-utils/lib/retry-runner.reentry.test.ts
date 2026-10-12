@@ -1,6 +1,7 @@
 import { expect, spyOn, test } from 'bun:test';
 import {
   ATTEMPT_HANDLED,
+  ATTEMPT_STARTED,
   OPERATION_ENDED,
   OPERATION_STARTED,
   RetryRunner,
@@ -1205,5 +1206,37 @@ test('a non-callable hook inheriting from Function.prototype is not registered',
     expect(reports).toEqual([]);
   } finally {
     globalThis.removeEventListener('error', onGlobalError);
+  }
+});
+
+test('forceTry from attempt-started is locked for the first attempt and attaches for a timer-driven one', async () => {
+  const reports: ReportResult[] = [];
+  const runner = new RetryRunner(
+    { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 1 },
+    (report) => {
+      reports.push(report);
+    },
+  );
+  const forced: Array<Promise<RunResult<unknown>>> = [];
+  runner.on(ATTEMPT_STARTED, () => {
+    forced.push(runner.forceTry());
+  });
+  try {
+    await runner.run();
+    // The first attempt started inside run(), which still held the lock.
+    expect(await forced[0]).toMatchObject({
+      status: 'pre_operation_error',
+      code: 'lock_error',
+    });
+    reports[0]('error', new Error('first attempt failed'));
+    for (let i = 0; i < 100 && reports.length < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    // The retry timer started this one, outside any locked call.
+    expect(await forced[1]).toEqual({ status: 'running', reattached: true });
+    expect(reports).toHaveLength(2);
+  } finally {
+    runner.overrideGraceCancelPeriodMS(0);
+    await runner.cancel();
   }
 });
