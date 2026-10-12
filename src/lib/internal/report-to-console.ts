@@ -36,6 +36,27 @@ export function isConsoleReportActive(): boolean {
 }
 
 /**
+ * A console report made at most once. Claim it before writing the report: a claim made
+ * while a console report is running is refused, since the guard would drop that write,
+ * so the once is not used up by a line nobody saw. A refused claim is not remembered -
+ * the next claim tries again. Claimed in the same synchronous step that writes (or queues
+ * and then writes) the report, so the answer still holds when it is written.
+ */
+export class ConsoleReportOnce {
+  private isClaimed = false;
+
+  /** Whether the report should be written now; `true` at most once. */
+  public claim(): boolean {
+    if (this.isClaimed || isConsoleReportActive()) {
+      return false;
+    }
+
+    this.isClaimed = true;
+    return true;
+  }
+}
+
+/**
  * Write to `console.error` without letting it throw.
  *
  * This is the last rung of every reporting path in the library - what runs once a caller's

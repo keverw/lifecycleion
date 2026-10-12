@@ -22,6 +22,7 @@ import { describeError, isErrorValue, toError } from '../to-error';
 import { readMember, readUnknownMember } from '../internal/read-member';
 import { renderEventName } from '../internal/render-name';
 import {
+  ConsoleReportOnce,
   isConsoleReportActive,
   reportToConsole,
 } from '../internal/report-to-console';
@@ -65,7 +66,7 @@ const DEFAULT_LOGGER_CLOSE_TIMEOUT_MS = 60_000;
  */
 interface PendingExit {
   code: number;
-  didReportReplacement: boolean;
+  replacementReport: ConsoleReportOnce;
   suppressedReplacements: number;
 }
 
@@ -264,8 +265,8 @@ export class Logger extends EventEmitter {
   private _didExit = false;
   private _exitCode: number = 0;
   private _exitRequested = false;
-  private _didReportInvalidExitCode = false;
-  private _didReportIgnoredFailureExit = false;
+  private readonly _invalidExitCodeReport = new ConsoleReportOnce();
+  private readonly _ignoredFailureExitReport = new ConsoleReportOnce();
   // The exit in hand until one of its requests proceeds and `processExit` commits its
   // code. Its first request creates it, and every request made before the commit
   // settles `code` (see `recordExitRequest`). Undefined while no exit is pending. A
@@ -406,10 +407,7 @@ export class Logger extends EventEmitter {
     // absorbed as a listener's is. See `flushReports`.
     const reports: string[] = [];
     if (this.isInvalidExitCode(code)) {
-      // A report made while a console report is running would be dropped, so it does not
-      // spend the once-per-logger report; the same for every once-only exit report.
-      if (!this._didReportInvalidExitCode && !isConsoleReportActive()) {
-        this._didReportInvalidExitCode = true;
+      if (this._invalidExitCodeReport.claim()) {
         reports.push(
           `Logger exit code ${String(code)} is invalid; treating it as code 1`,
         );
@@ -2133,7 +2131,7 @@ export class Logger extends EventEmitter {
     if (pendingExit === undefined) {
       this._pendingExit = {
         code,
-        didReportReplacement: false,
+        replacementReport: new ConsoleReportOnce(),
         suppressedReplacements: 0,
       };
       return this._pendingExit;
@@ -2152,13 +2150,12 @@ export class Logger extends EventEmitter {
     // pending exit. A repeat of the pending code changes nothing and is neither reported
     // nor counted. Names the normalized code when it differs from the request, as
     // `exit(300)` does.
-    // One made while a console report runs would be dropped, so it is counted instead,
-    // for the commit's summary.
-    if (pendingExit.didReportReplacement || isConsoleReportActive()) {
+    // One the claim refuses while a console report runs is counted too, for the commit's
+    // summary.
+    if (!pendingExit.replacementReport.claim()) {
       pendingExit.suppressedReplacements++;
       return pendingExit;
     }
-    pendingExit.didReportReplacement = true;
     reports.push(
       `Logger exit(${String(requested)}) replaces the pending exit code ${String(pendingCode)}${
         Object.is(requested, code) ? '' : ` with ${String(code)}`
@@ -2193,12 +2190,10 @@ export class Logger extends EventEmitter {
     if (
       requested === 0 ||
       this._exitCode !== 0 ||
-      this._didReportIgnoredFailureExit ||
-      isConsoleReportActive()
+      !this._ignoredFailureExitReport.claim()
     ) {
       return true;
     }
-    this._didReportIgnoredFailureExit = true;
     reportToConsole(
       `Logger exit(${String(requested)}) ignored: the logger is already exiting with code 0`,
     );
