@@ -404,7 +404,9 @@ export class Logger extends EventEmitter {
     // half-made. See `flushReports`.
     const reports: string[] = [];
     if (this.isInvalidExitCode(code)) {
-      if (!this._didReportInvalidExitCode) {
+      // A report made while a console report is running would be dropped, so it does not
+      // spend the once-per-logger report; the same for every once-only exit report.
+      if (!this._didReportInvalidExitCode && !isConsoleReportActive()) {
         this._didReportInvalidExitCode = true;
         reports.push(
           `Logger exit code ${String(code)} is invalid; treating it as code 1`,
@@ -2157,6 +2159,9 @@ export class Logger extends EventEmitter {
       pendingExit.suppressedReplacements++;
       return pendingExit;
     }
+    if (isConsoleReportActive()) {
+      return pendingExit;
+    }
     pendingExit.didReportReplacement = true;
     reports.push(
       `Logger exit(${String(requested)}) replaces the pending exit code ${String(pendingCode)}${
@@ -2192,7 +2197,8 @@ export class Logger extends EventEmitter {
     if (
       requested === 0 ||
       this._exitCode !== 0 ||
-      this._didReportIgnoredFailureExit
+      this._didReportIgnoredFailureExit ||
+      isConsoleReportActive()
     ) {
       return true;
     }
@@ -2332,14 +2338,15 @@ export class Logger extends EventEmitter {
     // Call `process.exit()` - which for a real one never returns. One bounded fallback: on
     // Node, an exit listener may throw even for code 1; the second exit bypasses that
     // listener. The first failure is reported before the fallback, which would otherwise
-    // end the process with it unsaid; the exit is still committed then, so a request made
-    // from that report is ignored. Reaching the end means the process is still running -
-    // both calls threw, or one returned, as a stub, a mock or a host shim does - so the
-    // latch is released as for a skipped exit, before the fallback's failure is reported,
-    // and a later request starts the next exit. A return is not reported: it is what
-    // every test that stubs `process.exit` does.
+    // end the process with it unsaid. Both failures are reported while the exit is still
+    // committed, so a request made from either is ignored, as one from an `exit-completed`
+    // listener is: a console shim that exits on every failure would otherwise start a
+    // real exit that fails the same way, without end. Reaching the end means the process
+    // is still running - both calls threw, or one returned, as a stub, a mock or a host
+    // shim does - so the latch is released as for a skipped exit, and a later request
+    // starts the next exit. A return is not reported: it is what every test that stubs
+    // `process.exit` does.
     const tryProcessExit = (): void => {
-      let fallbackFailure: string | undefined;
       try {
         globalThis.process.exit(exitCode);
       } catch (error) {
@@ -2347,13 +2354,12 @@ export class Logger extends EventEmitter {
         try {
           globalThis.process.exit(1);
         } catch (fallbackError) {
-          fallbackFailure = `Logger fallback process exit failed: ${describeError(fallbackError)}`;
+          reportToConsole(
+            `Logger fallback process exit failed: ${describeError(fallbackError)}`,
+          );
         }
       }
       this._hasScheduledProcessExit = false;
-      if (fallbackFailure !== undefined) {
-        reportToConsole(fallbackFailure);
-      }
     };
     const finishExit = (): void => {
       // Cleanup has settled, so a simulated exit is complete and the next request starts

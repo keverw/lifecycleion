@@ -4,6 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ArraySink, Logger, type LogSink } from './index';
+import { reportToConsole } from '../internal/report-to-console';
 
 // The codes `exit-process` publishes, so a test can check they agree with
 // `logger.exitCode` and the `process.exit()` call.
@@ -345,7 +346,7 @@ test('an exit skipped because process.exit disappeared releases later exits', as
     expect(processed).toEqual([0, 2]);
     expect(logger.exitCode).toBe(2);
     expect(calls).toEqual([2]);
-    expect(reported()).not.toContain('already processing');
+    expect(reported()).not.toContain('ignored');
   } finally {
     if (actualExit !== undefined) {
       Object.defineProperty(process, 'exit', actualExit);
@@ -1785,6 +1786,52 @@ test('a console shim that exits 0 from the invalid-code report cannot drop the f
     expect(calls).toEqual([1]);
   } finally {
     exit.mockRestore();
+    output.mockRestore();
+  }
+});
+
+test('a once-only exit report dropped inside a console shim is not used up', async () => {
+  // A shim's exit(1) behind a committed 0 is ignored, and its report dropped by the
+  // console guard; a later exit(1) behind that 0 still gets the report.
+  let logger!: Logger;
+  const lines: string[] = [];
+  const output = spyOn(console, 'error').mockImplementation(
+    (...args: unknown[]) => {
+      const line = String(args[0]);
+      lines.push(line);
+      if (line === 'another report') {
+        logger.exit(1);
+      }
+    },
+  );
+  const actualExit = Object.getOwnPropertyDescriptor(process, 'exit');
+  try {
+    let releaseClose!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      releaseClose = resolve;
+    });
+    process.exit = (() => {}) as typeof process.exit;
+    logger = new Logger({
+      sinks: [{ write: () => {}, close: () => gate }],
+      callProcessExit: true,
+    });
+
+    logger.exit(0);
+    expect(logger.isFinishingExit).toBe(true);
+    // Any library report while the exit closes its sinks; the shim exits from it.
+    reportToConsole('another report');
+    logger.exit(1);
+    releaseClose();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(lines).toEqual([
+      'another report',
+      'Logger exit(1) ignored: the logger is already exiting with code 0',
+    ]);
+  } finally {
+    if (actualExit !== undefined) {
+      Object.defineProperty(process, 'exit', actualExit);
+    }
     output.mockRestore();
   }
 });

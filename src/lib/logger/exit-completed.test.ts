@@ -723,30 +723,42 @@ test('an exit a console shim makes from the skip report after exit-completed is 
   }
 });
 
-test('an exit a console shim makes once process.exit and its fallback both threw is the next exit', async () => {
+test('a console shim that exits on every failed process.exit report does not loop', async () => {
+  // Both failures are reported while the exit is still committed, so the shim's requests
+  // are ignored, as an `exit-completed` listener's are; the next exit is the caller's.
   const calls: number[] = [];
   const exit = spyOn(process, 'exit').mockImplementation((code?: number) => {
     calls.push(code ?? 0);
     throw new Error(`exit ${String(code)} refused`);
   });
   let logger!: Logger;
-  const output = exitingShim(() => logger, 'fallback process exit failed', 1);
+  const output = spyOn(console, 'error').mockImplementation(
+    (...args: unknown[]) => {
+      if (String(args[0]).includes('process exit failed')) {
+        logger.exit(1);
+      }
+    },
+  );
 
   try {
     logger = new Logger({ sinks: [], callProcessExit: true });
     const events = recordExitEvents(logger);
 
-    logger.exit(0);
-    await waitFor(() => calls.length >= 4);
+    logger.exit(1);
+    await waitFor(() => calls.length >= 2);
+    await new Promise((resolve) => setTimeout(resolve, 20));
 
-    // Reported once the latch was released, so the shim's failure was not lost.
-    expect(calls).toEqual([0, 1, 1, 1]);
+    expect(calls).toEqual([1, 1]);
     expect(
       events
         .filter(({ event }) => event.eventType === 'exit-called')
         .map(({ event }) => event.code),
-    ).toEqual([0, 1]);
-    expect(logger.exitCode).toBe(1);
+    ).toEqual([1]);
+
+    // The latch was released, so the caller's next request is the next exit.
+    logger.exit(2);
+    await waitFor(() => calls.length >= 4);
+    expect(calls).toEqual([1, 1, 2, 1]);
   } finally {
     exit.mockRestore();
     output.mockRestore();
