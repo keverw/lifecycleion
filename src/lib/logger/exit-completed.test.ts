@@ -628,18 +628,36 @@ test('a close override returning a thenable whose then throws on read still comp
   }
 });
 
-test('an exit a console shim makes from the skip report belongs to the exit still finishing', async () => {
-  // The skip is reported while the exit is still finishing, so a shim that exits from it
-  // is ignored rather than starting the next exit ahead of this one's `exit-completed`.
+// A console shim that calls `exit(code)` once, on the first report containing `trigger`.
+function exitingShim(
+  getLogger: () => Logger,
+  trigger: string,
+  code: number,
+): ReturnType<typeof spyOn> {
+  let hasExited = false;
+  return spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+    if (!hasExited && String(args[0]).includes(trigger)) {
+      hasExited = true;
+      getLogger().exit(code);
+    }
+  });
+}
+
+function eventLog(events: { event: ExitEvent }[]): string[] {
+  return events.map(({ event }) =>
+    event.eventType === 'exit-completed'
+      ? `${event.eventType} ${String(event.code)} ${String(event.endedProcess)}`
+      : `${event.eventType} ${String(event.code)}`,
+  );
+}
+
+test('an exit a console shim makes from the skip report is the next exit, after this one completes', async () => {
+  // The skip is reported once the exit has settled - latch released, `exit-completed`
+  // fired - so a shim that exits from it starts the next exit, neither dropped behind an
+  // exit that never happened nor run inside it.
   const actualExit = Object.getOwnPropertyDescriptor(process, 'exit');
   let logger!: Logger;
-  const output = spyOn(console, 'error').mockImplementation(
-    (...args: unknown[]) => {
-      if (String(args[0]).includes('process exit skipped')) {
-        logger.exit(1);
-      }
-    },
-  );
+  const output = exitingShim(() => logger, 'process exit skipped', 1);
   process.exit = (() => {}) as typeof process.exit;
 
   try {
@@ -652,20 +670,85 @@ test('an exit a console shim makes from the skip report belongs to the exit stil
     });
 
     logger.exit(0);
-    await waitFor(() => completions(events).length > 0);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await waitFor(() => completions(events).length > 1);
 
-    expect(events.map(({ event }) => event.eventType)).toEqual([
-      'exit-called',
-      'exit-process',
-      'exit-completed',
+    expect(eventLog(events)).toEqual([
+      'exit-called 0',
+      'exit-process 0',
+      'exit-completed 0 false',
+      'exit-called 1',
+      'exit-process 1',
+      'exit-completed 1 false',
     ]);
-    expect(completions(events)).toEqual([{ code: 0, endedProcess: false }]);
-    expect(logger.isFinishingExit).toBe(false);
+    expect(logger.exitCode).toBe(1);
   } finally {
     if (actualExit) {
       Object.defineProperty(process, 'exit', actualExit);
     }
+    output.mockRestore();
+  }
+});
+
+test('an exit a console shim makes from the skip report after exit-completed is the next exit', async () => {
+  const actualExit = Object.getOwnPropertyDescriptor(process, 'exit');
+  let logger!: Logger;
+  const output = exitingShim(() => logger, 'process exit skipped', 1);
+  process.exit = (() => {}) as typeof process.exit;
+
+  try {
+    logger = new Logger({ sinks: [], callProcessExit: true });
+    const events = recordExitEvents(logger);
+    logger.on<ExitEvent>('logger', ({ eventType }) => {
+      if (eventType === 'exit-completed') {
+        (process as { exit?: unknown }).exit = undefined;
+      }
+    });
+
+    logger.exit(0);
+    await waitFor(() => completions(events).length > 1);
+
+    expect(eventLog(events)).toEqual([
+      'exit-called 0',
+      'exit-process 0',
+      'exit-completed 0 true',
+      'exit-called 1',
+      'exit-process 1',
+      'exit-completed 1 false',
+    ]);
+  } finally {
+    if (actualExit) {
+      Object.defineProperty(process, 'exit', actualExit);
+    }
+    output.mockRestore();
+  }
+});
+
+test('an exit a console shim makes once process.exit and its fallback both threw is the next exit', async () => {
+  const calls: number[] = [];
+  const exit = spyOn(process, 'exit').mockImplementation((code?: number) => {
+    calls.push(code ?? 0);
+    throw new Error(`exit ${String(code)} refused`);
+  });
+  let logger!: Logger;
+  const output = exitingShim(() => logger, 'fallback process exit failed', 1);
+
+  try {
+    logger = new Logger({ sinks: [], callProcessExit: true });
+    const events = recordExitEvents(logger);
+
+    logger.exit(0);
+    await waitFor(() => calls.length >= 4);
+
+    // Reported once the latch was released, so the shim's failure was not lost.
+    expect(calls).toEqual([0, 1, 1, 1]);
+    expect(
+      events
+        .filter(({ event }) => event.eventType === 'exit-called')
+        .map(({ event }) => event.code),
+    ).toEqual([0, 1]);
+    expect(logger.exitCode).toBe(1);
+  } finally {
+    exit.mockRestore();
     output.mockRestore();
   }
 });

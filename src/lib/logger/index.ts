@@ -399,16 +399,16 @@ export class Logger extends EventEmitter {
     if (this.ignoreAfterCommit(requestedCode)) {
       return;
     }
+    // Console reports wait until this request's state is recorded: a console shim may
+    // call `exit()` from one, and must find this request already counted rather than
+    // half-made. See `flushReports`.
+    const reports: string[] = [];
     if (this.isInvalidExitCode(code)) {
       if (!this._didReportInvalidExitCode) {
         this._didReportInvalidExitCode = true;
-        reportToConsole(
+        reports.push(
           `Logger exit code ${String(code)} is invalid; treating it as code 1`,
         );
-        // The report reached the console, where a shim may have exited and committed.
-        if (this.ignoreAfterCommit(requestedCode)) {
-          return;
-        }
       }
       code = 1;
     }
@@ -418,21 +418,24 @@ export class Logger extends EventEmitter {
     // code still counts toward the pending one, but it runs no listeners or
     // `beforeExit` of its own.
     if (this._isEmittingExitCalled) {
-      this.recordExitRequest(requestedCode, code);
+      this.recordExitRequest(requestedCode, code, reports);
       if (code !== 0) {
         this._absorbedExitCode = code;
       }
+      flushReports(reports);
       return;
     }
-    const isFirstExit = !this._exitRequested;
     // Recorded before `exit-called` and `beforeExit` run, so a request either of them
     // makes - and one `beforeExit` answers 'wait' for - is judged against this one.
-    const pendingExit = this.recordExitRequest(requestedCode, code);
-    // A replacement is reported to the console, where a shim may have exited and committed
-    // - with this request's code already folded in.
-    if (this.ignoreAfterCommit(requestedCode)) {
+    const pendingExit = this.recordExitRequest(requestedCode, code, reports);
+    flushReports(reports);
+    // A console shim that exited from a report above may have committed the exit this
+    // request joined - with this request's code already in it - leaving nothing to run.
+    if (pendingExit !== this._pendingExit) {
       return;
     }
+    // Read after the reports, so an exit a shim started from one counts as the first.
+    const isFirstExit = !this._exitRequested;
 
     this._exitRequested = true;
 
@@ -2119,8 +2122,14 @@ export class Logger extends EventEmitter {
    *
    * @param requested The code as the caller wrote it, which is what a report names.
    * @param code The code that request stands for in its mode.
+   * @param reports Where a replacement report goes, for the caller to flush once the
+   *                request is recorded.
    */
-  private recordExitRequest(requested: number, code: number): PendingExit {
+  private recordExitRequest(
+    requested: number,
+    code: number,
+    reports: string[],
+  ): PendingExit {
     const pendingExit = this._pendingExit;
     if (pendingExit === undefined) {
       this._pendingExit = {
@@ -2149,7 +2158,7 @@ export class Logger extends EventEmitter {
       return pendingExit;
     }
     pendingExit.didReportReplacement = true;
-    reportToConsole(
+    reports.push(
       `Logger exit(${String(requested)}) replaces the pending exit code ${String(pendingCode)}${
         Object.is(requested, code) ? '' : ` with ${String(code)}`
       }`,
@@ -2306,29 +2315,31 @@ export class Logger extends EventEmitter {
     }
     // The decision `endsProcessOnExit` made above, re-checked live: listeners and sink
     // close ran since, and may have removed a stubbed `process.exit`. No exit happened,
-    // so say so, and release the latch: the process is still running, so this exit
-    // ends as a simulated one does. Left set, every later `exit()` would be ignored as if
-    // `process.exit()` were already on its way, and nothing would ever end the process. A
-    // later request starts the next exit, which re-decides whether it is real. Requests
-    // refused while this exit's cleanup ran are not replayed: each was judged, and a
-    // dropped failure reported, when it was made.
-    const isProcessExitCallable = (): boolean => {
-      if (typeof globalThis.process?.exit === 'function') {
-        return true;
-      }
-      this._hasScheduledProcessExit = false;
+    // so the latch is released and that is reported: the process is still running, so
+    // this exit ends as a simulated one does. Left set, every later `exit()` would be
+    // ignored as if `process.exit()` were already on its way, and nothing would ever end
+    // the process. A later request - one a console shim makes from the report included -
+    // starts the next exit, which re-decides whether it is real. Requests refused while
+    // this exit's cleanup ran are not replayed: each was judged, and a dropped failure
+    // reported, when it was made.
+    const canCallProcessExit = (): boolean =>
+      typeof globalThis.process?.exit === 'function';
+    const reportSkipped = (): void => {
       reportToConsole(
         'Logger process exit skipped: process.exit is no longer callable',
       );
-      return false;
     };
     // Call `process.exit()` - which for a real one never returns. One bounded fallback: on
     // Node, an exit listener may throw even for code 1; the second exit bypasses that
-    // listener. Reaching the end means the process is still running - both calls threw,
-    // or one returned, as a stub, a mock or a host shim does - so the latch is released as
-    // for a skipped exit, and a later request starts the next exit. A return is not
-    // reported: it is what every test that stubs `process.exit` does.
+    // listener. The first failure is reported before the fallback, which would otherwise
+    // end the process with it unsaid; the exit is still committed then, so a request made
+    // from that report is ignored. Reaching the end means the process is still running -
+    // both calls threw, or one returned, as a stub, a mock or a host shim does - so the
+    // latch is released as for a skipped exit, before the fallback's failure is reported,
+    // and a later request starts the next exit. A return is not reported: it is what
+    // every test that stubs `process.exit` does.
     const tryProcessExit = (): void => {
+      let fallbackFailure: string | undefined;
       try {
         globalThis.process.exit(exitCode);
       } catch (error) {
@@ -2336,22 +2347,26 @@ export class Logger extends EventEmitter {
         try {
           globalThis.process.exit(1);
         } catch (fallbackError) {
-          reportToConsole(
-            `Logger fallback process exit failed: ${describeError(fallbackError)}`,
-          );
+          fallbackFailure = `Logger fallback process exit failed: ${describeError(fallbackError)}`;
         }
       }
       this._hasScheduledProcessExit = false;
+      if (fallbackFailure !== undefined) {
+        reportToConsole(fallbackFailure);
+      }
     };
     const finishExit = (): void => {
-      // Checked while the exit is still finishing: a console shim that exits from the
-      // skip report is then ignored as belonging to this exit, rather than starting the
-      // next one before this one's `exit-completed`.
-      const doesEndProcess =
-        this._hasScheduledProcessExit && isProcessExitCallable();
       // Cleanup has settled, so a simulated exit is complete and the next request starts
       // the next exit. A real one stays latched by `_hasScheduledProcessExit` until
-      // `process.exit()` is found missing or does not end the process.
+      // `process.exit()` is found missing or does not end the process. All of it is
+      // settled before `exit-completed` and any report, so a request made from either
+      // finds this exit complete.
+      const doesEndProcess =
+        this._hasScheduledProcessExit && canCallProcessExit();
+      const isSkipped = this._hasScheduledProcessExit && !doesEndProcess;
+      if (isSkipped) {
+        this._hasScheduledProcessExit = false;
+      }
       this._isFinishingExit = false;
       // Once per exit, on the close-failure path too. A listener that exits from here
       // starts the next exit when this one is simulated - it has settled - and is ignored
@@ -2371,9 +2386,19 @@ export class Logger extends EventEmitter {
           `Logger exit-completed event failed: ${describeError(error)}`,
         );
       }
+      if (isSkipped) {
+        reportSkipped();
+        return;
+      }
+      if (!doesEndProcess) {
+        return;
+      }
       // Re-checked after the listeners, which may have removed a stubbed `process.exit`.
-      if (doesEndProcess && isProcessExitCallable()) {
+      if (canCallProcessExit()) {
         tryProcessExit();
+      } else {
+        this._hasScheduledProcessExit = false;
+        reportSkipped();
       }
     };
     const exiting = closing.then(finishExit, (error: unknown) => {
@@ -2395,6 +2420,21 @@ export * from './types';
 export { REDACTION_FAILED_MARKER } from './utils/redaction';
 export * from './sinks';
 export type { LoggerService } from './logger-service';
+
+/**
+ * Write the console reports an exit step held back until its state was recorded.
+ *
+ * A console shim may call `exit()` from a report. Reported partway through a step, that
+ * request would find the logger half-changed - a latch released but the exit not yet
+ * complete, a code reported but not yet recorded - and be dropped, or run ahead of the
+ * exit it belongs after, depending on which write the report fell between. Reported once
+ * the step's state is settled, it meets the ordinary rules for when it was made.
+ */
+function flushReports(reports: string[]): void {
+  for (const report of reports) {
+    reportToConsole(report);
+  }
+}
 
 /**
  * Whether a log entry's `exitCode` requests an exit: any number, `NaN` included.

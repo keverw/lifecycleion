@@ -1757,3 +1757,34 @@ test('a request whose replacement report lets a console shim commit runs nothing
     output.mockRestore();
   }
 });
+
+test('a console shim that exits 0 from the invalid-code report cannot drop the failure', async () => {
+  // The request is recorded before its report, so an exit the shim commits from it
+  // carries the failure.
+  let logger!: Logger;
+  const output = spyOn(console, 'error').mockImplementation(
+    (...args: unknown[]) => {
+      if (String(args[0]).includes('is invalid; treating it as code 1')) {
+        logger.exit(0);
+      }
+    },
+  );
+  const calls: number[] = [];
+  const exit = spyOn(process, 'exit').mockImplementation((code?: number) => {
+    calls.push(code ?? 0);
+    return undefined as never;
+  });
+  try {
+    logger = new Logger({ sinks: [], callProcessExit: true });
+    const processed = recordExitProcess(logger);
+
+    logger.exit(256);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(processed).toEqual([1]);
+    expect(calls).toEqual([1]);
+  } finally {
+    exit.mockRestore();
+    output.mockRestore();
+  }
+});
