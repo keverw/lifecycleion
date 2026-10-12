@@ -1,17 +1,12 @@
 import { afterEach, expect, spyOn, test } from 'bun:test';
-import { isObjectLike } from './is-object-like';
-import { SharedSlot } from './shared-slot';
+import { readOwnWritableValue, SharedSlot } from './shared-slot';
 
 interface TestState {
   held: boolean;
 }
 
 function isTestState(value: unknown): value is TestState {
-  if (!isObjectLike(value)) {
-    return false;
-  }
-  const held = Object.getOwnPropertyDescriptor(value, 'held');
-  return typeof held?.value === 'boolean' && held.writable === true;
+  return typeof readOwnWritableValue(value, 'held') === 'boolean';
 }
 
 let keyCount = 0;
@@ -311,4 +306,28 @@ test('a key that cannot hold a state leaves each copy on its own, and is not tri
   } finally {
     defineProperty.mockRestore();
   }
+});
+
+test('a key held by a non-configurable accessor is refused, and the accessor never called', () => {
+  const key = testKey();
+  let accessorCalls = 0;
+  Object.defineProperty(globalThis, key, {
+    configurable: false,
+    get: () => {
+      accessorCalls++;
+      return undefined;
+    },
+    set: () => {
+      accessorCalls++;
+    },
+  });
+
+  const copy = slot(key);
+  const own = copy.acquire();
+
+  expect(own).toBeDefined();
+  expect(copy.isHeld()).toBe(true);
+  copy.release(own as TestState);
+  expect(copy.isHeld()).toBe(false);
+  expect(accessorCalls).toBe(0);
 });

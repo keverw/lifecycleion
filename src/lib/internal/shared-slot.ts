@@ -75,6 +75,11 @@ export class SharedSlot<T extends object> {
 
   /** Whether the state is taken - by this copy or another. */
   public isHeld(): boolean {
+    // Refused for good, so the slot is not read: an accessor that refused it stays uncalled.
+    if (this.isRefused) {
+      return this.options.isHeld(this.local);
+    }
+
     let state: T;
 
     try {
