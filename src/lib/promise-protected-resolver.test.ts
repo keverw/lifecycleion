@@ -160,4 +160,98 @@ describe('PromiseProtectedResolver with beforeResolveOrRejectCallback', () => {
 
     expect(resolver.promise).resolves.toEqual('Error test');
   });
+
+  it.each(['resolve', 'reject'] as const)(
+    'a throwing hook getter is reported and does not strand %s',
+    async (action) => {
+      const failure = new Error('hook getter failed');
+      const reports: Error[] = [];
+      const onError = (event: Event): void => {
+        event.preventDefault();
+        reports.push((event as ErrorEvent).error as Error);
+      };
+      let reads = 0;
+      const resolver = new PromiseProtectedResolver<number>({
+        get beforeResolveOrReject(): () => void {
+          reads++;
+          throw failure;
+        },
+      });
+
+      globalThis.addEventListener('error', onError);
+      try {
+        if (action === 'resolve') {
+          expect(() => resolver.resolveOnce(1)).not.toThrow();
+          expect(await resolver.promise).toBe(1);
+        } else {
+          const reason = new Error('original rejection');
+          expect(() => resolver.rejectOnce(reason)).not.toThrow();
+          expect(await resolver.promise.catch((error: unknown) => error)).toBe(
+            reason,
+          );
+        }
+
+        expect(resolver.hasResolved).toBe(true);
+        expect(reads).toBe(1);
+        expect(reports).toHaveLength(1);
+        expect(reports[0]?.cause).toBe(failure);
+      } finally {
+        globalThis.removeEventListener('error', onError);
+      }
+    },
+  );
+
+  it('reads the hook option only once before settling', async () => {
+    const callback = mock();
+    let reads = 0;
+    const resolver = new PromiseProtectedResolver<number>({
+      get beforeResolveOrReject(): () => void {
+        reads++;
+        if (reads > 1) {
+          throw new Error('hook read again');
+        }
+        return callback;
+      },
+    });
+
+    expect(() => resolver.resolveOnce(42)).not.toThrow();
+    expect(await resolver.promise).toBe(42);
+    expect(reads).toBe(1);
+    expect(callback).toHaveBeenCalledWith('resolve', 42);
+  });
+
+  it.each([
+    ['resolveOnce', 'resolve'],
+    ['rejectOnce', 'reject'],
+  ] as const)(
+    'a %s from inside the callback cannot settle the promise first',
+    async (method, action) => {
+      const actions: string[] = [];
+      const resolver: PromiseProtectedResolver<number> =
+        new PromiseProtectedResolver<number>({
+          beforeResolveOrReject: (seenAction, valueOrReason) => {
+            actions.push(
+              `${seenAction} ${String(valueOrReason)} ${resolver.hasResolved}`,
+            );
+            resolver.resolveOnce(2);
+            resolver.rejectOnce(new Error('nested'));
+          },
+        });
+
+      if (method === 'resolveOnce') {
+        resolver.resolveOnce(1);
+        expect(await resolver.promise).toBe(1);
+      } else {
+        const reason = new Error('outer');
+        resolver.rejectOnce(reason);
+        expect(await resolver.promise.catch((error: unknown) => error)).toBe(
+          reason,
+        );
+      }
+
+      expect(actions).toEqual([
+        action === 'resolve' ? 'resolve 1 true' : 'reject Error: outer true',
+      ]);
+    },
+  );
 });

@@ -7,6 +7,8 @@
  */
 
 import { reportCallbackError, runCallbackSafely } from './safe-handle-callback';
+import { renderEventName } from './internal/render-name';
+import { isNullish } from './internal/is-nullish';
 
 type EventCallback<T = unknown> = (data: T) => void | Promise<void>;
 
@@ -112,13 +114,15 @@ export class EventEmitterProtected {
 
   /**
    * Remove all event listeners
-   * @param event Optional event name. If not provided, removes all listeners for all events
+   * @param event Optional event name. If `undefined` (or `null`, from JavaScript), removes
+   * all listeners for all events; any other value (`''` included) removes only the
+   * listeners for that event
    */
   public clear(event?: string): void {
-    if (event) {
-      this.events.delete(event);
-    } else {
+    if (isNullish(event)) {
       this.events.clear();
+    } else {
+      this.events.delete(event);
     }
   }
 
@@ -135,7 +139,15 @@ export class EventEmitterProtected {
       return;
     }
 
+    // Built only when a handler fails, through `renderEventName`: a template literal over
+    // a symbol event would throw out of `emit`. An emission whose handlers all succeed
+    // never renders the event name.
+    const handlerName = (): string =>
+      `event handler for ${renderEventName(event)}`;
+
     // Loop-invariant: the reporter depends on the event, not on which handler failed.
+    // `runCallbackSafely` withholds it from a handler entered by terminal console output,
+    // including a rejection that arrives after that output has finished.
     const handleFailure = (error: unknown): void => {
       this.handleEventHandlerFailure(event, error, data);
     };
@@ -144,17 +156,12 @@ export class EventEmitterProtected {
     // nested) emissions, but cannot skip a sibling or add another callback midway
     // through this one. This matches the dispatch semantics consumers expect from
     // Node's EventEmitter.
-    for (const callback of [...callbacks]) {
+    for (const callback of Array.from(callbacks)) {
       // The same invocation helper `safeHandleCallback` uses, with this emitter's
       // overridable reporter in place of the global `'error'` channel. The callback name
-      // matches what `safeHandleCallback` produced before, so the "is not a function"
-      // message is unchanged for consumers matching on it.
-      runCallbackSafely(
-        `event handler for ${event}`,
-        callback,
-        [data],
-        handleFailure,
-      );
+      // is the one `handleEventHandlerFailure` reports with, so a non-function handler's
+      // "is not a function" message names the event the same way.
+      runCallbackSafely(handlerName, callback, [data], handleFailure);
     }
   }
 
@@ -178,7 +185,7 @@ export class EventEmitterProtected {
     error: unknown,
     _data?: unknown,
   ): void {
-    reportCallbackError(`event handler for ${event}`, error);
+    reportCallbackError(`event handler for ${renderEventName(event)}`, error);
   }
 }
 

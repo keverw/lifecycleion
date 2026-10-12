@@ -4,6 +4,7 @@ import {
   isGlobalEventTargetAvailable,
 } from '../global-event-target';
 import { reportToConsole } from './report-to-console';
+import { readOwnWritableValue, SharedSlot } from './shared-slot';
 
 /**
  * Reporting state shared by every bundled copy of Lifecycleion in this realm.
@@ -17,158 +18,35 @@ interface HostReportSharedState {
 }
 
 const HOST_REPORT_STATE_KEY = Symbol.for('lifecycleion.reportToHost.v1');
-const localHostReportState: HostReportSharedState = { dispatchDepth: 0 };
+
+/** A slot value with a writable own `dispatchDepth`, read without invoking an accessor. */
+function isHostReportState(value: unknown): value is HostReportSharedState {
+  const depth = readOwnWritableValue(value, 'dispatchDepth');
+  return Number.isSafeInteger(depth) && (depth as number) >= 0;
+}
 
 /**
- * Install a fresh shared state, replacing whatever is there.
- *
- * The repair path for every way the shared object can prove unusable: a squatter under our
- * symbol whose `dispatchDepth` throws, one that silently drops the write, one that refused
- * to release a lease. Replacing it also repairs the *other* copies, which re-read the
- * global on every report - an object stuck at a nonzero depth would otherwise send every
+ * The cross-bundle lease. A shared object that proves unusable when a report takes or
+ * releases it - a squatter under our symbol whose `dispatchDepth` throws, one that
+ * silently drops the write, one that refuses to release a lease - is replaced in the slot
+ * rather than abandoned, which also repairs the *other* copies, since every copy reads the
+ * slot on every report: a lease that could not be put down would otherwise send every
  * later report in every copy to the emergency console rung for the life of the process.
+ * The same guard `report-to-console` keeps for its flag; see {@link SharedSlot}, including
+ * what it cannot repair.
  *
- * @returns The installed state, or `undefined` when the global itself refuses it - a frozen
- *          `globalThis`, a non-writable property - which is the only case with no repair.
+ * A lease is only taken at depth `0`, so held is depth `1` and free is `0` - what copies of
+ * this module that increment and decrement it read the same way.
  */
-function installFreshHostReportState(): HostReportSharedState | undefined {
-  try {
-    const globalObject = globalThis as Record<symbol, unknown>;
-    const state: HostReportSharedState = { dispatchDepth: 0 };
-
-    globalObject[HOST_REPORT_STATE_KEY] = state;
-
-    // Read back rather than trusted. A write that is *refused* throws under the module's
-    // own strict mode and is caught below; one that is *ignored* - a non-writable
-    // property, a setter that drops the value - returns normally and left this reporting
-    // with a state nobody would ever see, so every copy believed it held the only lease.
-    return globalObject[HOST_REPORT_STATE_KEY] === state ? state : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Get the cross-bundle state, falling back to this copy's own when the global refuses it.
- *
- * Nothing is latched. An earlier version remembered that the shared state was unusable and
- * never looked again, which is wrong in the one direction that matters: the conditions are
- * another package's doing, not the environment's, and `installFreshHostReportState` - run
- * here or by a *different* copy releasing a stuck lease - repairs them. A copy that had
- * latched would have stayed blind to the healthy object its neighbour installed, for the
- * life of the process. The cost of asking every time is a few property reads on a path
- * that is already reporting a failure.
- */
-function getHostReportState(): HostReportSharedState {
-  try {
-    const globalObject = globalThis as Record<symbol, unknown>;
-    const existing = globalObject[HOST_REPORT_STATE_KEY];
-
-    if (typeof existing === 'object' && existing !== null) {
-      const dispatchDepth = (existing as Partial<HostReportSharedState>)
-        .dispatchDepth;
-
-      if (
-        typeof dispatchDepth === 'number' &&
-        Number.isSafeInteger(dispatchDepth) &&
-        dispatchDepth >= 0
-      ) {
-        return existing as HostReportSharedState;
-      }
-    }
-  } catch {
-    // A throwing accessor under our symbol: the read itself is somebody else's code. Not
-    // a reason to give up on sharing - the repair below replaces exactly that object.
-  }
-
-  return installFreshHostReportState() ?? localHostReportState;
-}
-
-/**
- * Enter the global reporting channel. A missing lease means another report owns it.
- * Every operation is guarded because this is itself part of the last-resort error path.
- */
-function acquireHostReportLease(): HostReportSharedState | undefined {
-  const state = getHostReportState();
-
-  try {
-    if (state.dispatchDepth > 0) {
-      return undefined;
-    }
-
-    state.dispatchDepth++;
-
-    if (state.dispatchDepth > 0) {
-      return state;
-    }
-
-    // The increment was ignored rather than refused, so this object cannot hold a lease at
-    // all - and unlike a refusal it says so silently, leaving every copy to believe it owns
-    // a channel none of them is guarding.
-  } catch {
-    // A hostile value stored under our symbol can still change behaviour after the
-    // guarded read in getHostReportState.
-  }
-
-  return acquireRepairedLease();
-}
-
-/**
- * Acquire from a replacement shared object, or from this copy's own guard.
- *
- * Reached when the object `getHostReportState` handed back cannot hold a lease. Replacing
- * it keeps cross-copy protection for every report after this one; `localHostReportState`
- * is the fallback for a global that will not take a replacement, and it can neither refuse
- * nor ignore the write because it is this copy's own object.
- */
-function acquireRepairedLease(): HostReportSharedState | undefined {
-  const state = installFreshHostReportState() ?? localHostReportState;
-
-  try {
-    if (state.dispatchDepth > 0) {
-      return undefined;
-    }
-
-    state.dispatchDepth++;
-
-    return state;
-  } catch {
-    // Only reachable for a replacement that went hostile between two statements. One
-    // report on the console rung is the cost; the next one gets a fresh object.
-    return undefined;
-  }
-}
-
-/** Release a lease without allowing a hostile shared object to raise another failure. */
-function releaseHostReportLease(state: HostReportSharedState): void {
-  try {
-    state.dispatchDepth = Math.max(0, state.dispatchDepth - 1);
-
-    // A lease is only granted at depth `0`, so anything but `0` here means the write did
-    // not take. Left alone, the lease is never released and every later report - in this
-    // copy and in every other one reading the same object - takes the emergency console
-    // rung and never reaches an `'error'` listener again.
-    if (state.dispatchDepth === 0) {
-      return;
-    }
-  } catch {
-    // The shared object refused the write. Same outcome as an ignored one: a lease that
-    // can never be put down.
-  }
-
-  if (state === localHostReportState) {
-    // Ours, and it just refused a write, which should not be reachable. Reset outright
-    // rather than leaving this copy unable to report for the life of the process.
-    localHostReportState.dispatchDepth = 0;
-
-    return;
-  }
-
-  // Replace the object instead of abandoning it, so the copies still reading it recover
-  // too. Nothing to do when the global will not take a replacement: the next report reads
-  // the stuck object, finds a lease it cannot take, and goes through the same repair.
-  installFreshHostReportState();
-}
+const hostReportLease = new SharedSlot<HostReportSharedState>({
+  key: HOST_REPORT_STATE_KEY,
+  isValid: isHostReportState,
+  create: () => ({ dispatchDepth: 0 }),
+  isHeld: (state) => state.dispatchDepth > 0,
+  setHeld: (state, isHeld) => {
+    state.dispatchDepth = isHeld ? 1 : 0;
+  },
+});
 
 /**
  * The standard global `'error'` reporting channel, and the rungs beneath it.
@@ -225,10 +103,7 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
   const dispatchEvent = readGlobal('dispatchEvent');
   const errorEventConstructor = readGlobal('ErrorEvent');
 
-  if (
-    !isFunction(dispatchEvent) ||
-    typeof errorEventConstructor !== 'function'
-  ) {
+  if (!isFunction(dispatchEvent) || !isFunction(errorEventConstructor)) {
     return 'unavailable';
   }
 
@@ -263,11 +138,11 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
   }
 
   try {
-    // `.call` rather than a bare call: the polyfilled methods are already bound, but a
-    // native `dispatchEvent` needs the global object as its receiver.
-    return (dispatchEvent as (this: unknown, event: Event) => boolean).call(
+    // Preserve the host receiver without reading a caller-owned call property.
+    return Reflect.apply(
+      dispatchEvent as (event: Event) => boolean,
       globalThis,
-      event,
+      [event],
     ) === false
       ? 'handled'
       : 'unhandled';
@@ -315,12 +190,25 @@ function dispatchErrorEvent(error: Error): DispatchOutcome {
  *
  * An unclaimed dispatch still falls through to `console.error`, mirroring the console
  * output a native `reportError()` produces when no listener cancels the event.
+ *
+ * Public through `lifecycleion/safe-handle-callback`. Reach for it when you already hold a
+ * well-formed `Error` - its own `cause` chain, its own `additionalInfo` - and want
+ * listeners to see exactly that. `reportCallbackError` is the normalizer for the other
+ * case: a raw thrown value (`throw 'boom'`, `throw 42`, a rejected promise carrying a
+ * string), which it wraps in an `Error` whose message names the callback. Passing an
+ * already-structured `Error` through that wrapper only adds a nesting level and a message
+ * describing the caller's callback name rather than what actually failed.
+ *
+ * @param error The report to publish. Already an `Error`; normalize with `toError` first
+ *              if what you hold might not be.
+ * @param renderForConsole Consulted only if the report reaches the console rung
+ *                         uncancelled, so a caller can control that rendering.
  */
 export function reportToHost(
   error: Error,
   renderForConsole?: () => string,
 ): void {
-  const lease = acquireHostReportLease();
+  const lease = hostReportLease.acquire();
 
   if (!lease) {
     // A listener or one of its sinks failed while handling an earlier report. Sending
@@ -347,8 +235,7 @@ export function reportToHost(
 
       if (isFunction(reportError)) {
         try {
-          (reportError as (this: unknown, error: unknown) => void).call(
-            globalThis,
+          Reflect.apply(reportError as (error: unknown) => void, globalThis, [
             // Rendered, like the console rung below it, and for the same reason: this rung
             // is only reached when dispatch is unavailable, so there is no listener to hand
             // the structured failure to - only a host that will print it. Handing over the
@@ -356,7 +243,7 @@ export function reportToHost(
             // an error's own properties, so an `additionalInfo` this library exists to mask
             // would reach stderr in the clear.
             renderedReport(error, renderForConsole),
-          );
+          ]);
 
           return;
         } catch {
@@ -370,8 +257,15 @@ export function reportToHost(
     // `safeHandleCallback` nor `safeHandleCallbackAndWait` may throw from this path.
     // `renderedReport` guards its own rendering and falls back to the error itself.
     reportToConsole(renderedReport(error, renderForConsole));
+  } catch {
+    // Anything above reading a hostile global - an `ErrorEvent` constructor, a
+    // `dispatchEvent`, an installer - that throws has not reported anything. Callers
+    // reach here with nothing left to catch for them: `safeHandleCallback` hands it
+    // failures directly, and a throw from here would escape the one function whose
+    // contract is that it never throws.
+    reportToConsole(renderedReport(error, renderForConsole));
   } finally {
-    releaseHostReportLease(lease);
+    hostReportLease.release(lease);
   }
 }
 

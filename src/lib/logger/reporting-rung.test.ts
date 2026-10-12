@@ -9,13 +9,15 @@ import { NamedPipeSink } from './sinks/named-pipe';
 import { installGlobalEventTarget } from '../global-event-target';
 import { sleep } from '../sleep';
 import { stringifyValue } from '../stringify-value';
+import { hostileRejections } from '../internal/hostile-promise-test-utils';
 
 /**
  * The last rung of every reporting path is `console.error`, and it is a call that can
- * throw: Node raises `EPIPE` writing to a pipe whose reader has gone, a stream destroyed
- * during shutdown throws on write, and a harness that patches it to fail a build on
- * warnings is an ordinary setup. Every one of those is a *shutdown-time* condition, which
- * is exactly when sinks fail and handlers are torn down.
+ * throw synchronously: a console that writes to a destination that refuses the write, or
+ * a harness that patches it to fail a build on warnings, is an ordinary setup, and a
+ * console torn down during shutdown is most likely exactly when sinks fail and handlers
+ * are torn down. (Node's `EPIPE` on a broken stdout pipe is not one of these: it arrives
+ * later as a stream `'error'` event, which the application handles.)
  *
  * Reporting a failure must never raise one. These drive each site that falls through to
  * that rung with the rung itself broken, and assert the original failure is still the only
@@ -375,4 +377,69 @@ describe('reporting rungs survive a broken console', () => {
       },
     );
   });
+});
+
+describe('a sink returning a hostile rejected promise', () => {
+  test.each(hostileRejections)(
+    'a write returning one with %s is handled, not left unhandled',
+    async (_label, make) => {
+      const rejections = trackUnhandledRejections();
+      const sinkErrors: unknown[] = [];
+      const logger = new Logger({
+        sinks: [{ write: () => make(new Error('write rejected')) }],
+        callProcessExit: false,
+      });
+      (
+        logger as unknown as { handleSinkError: (error: unknown) => void }
+      ).handleSinkError = (error: unknown): void => {
+        sinkErrors.push(error);
+      };
+
+      logger.info('hello');
+      await sleep(10);
+
+      expect(rejections.seen).toEqual([]);
+      expect((sinkErrors[0] as Error | undefined)?.message).toBe(
+        'write rejected',
+      );
+    },
+  );
+
+  test.each(hostileRejections)(
+    'a diagnostic write returning one with %s is handled, not left unhandled',
+    async (_label, make) => {
+      const rejections = trackUnhandledRejections();
+      const consoleError = spyOn(console, 'error').mockImplementation(() => {});
+      const logger = new Logger({
+        sinks: [
+          {
+            write: () => {
+              throw new Error('ordinary write failed');
+            },
+          },
+        ],
+        diagnosticSinks: [
+          {
+            write: () => {},
+            writeDiagnostic: () => make(new Error('diagnostic rejected')),
+          },
+        ],
+        callProcessExit: false,
+      });
+
+      try {
+        logger.info('trigger');
+        await sleep(10);
+
+        expect(rejections.seen).toEqual([]);
+        expect(
+          consoleError.mock.calls.some((call) =>
+            String(call[0]).includes('diagnostic rejected'),
+          ),
+        ).toBe(true);
+      } finally {
+        consoleError.mockRestore();
+      }
+    },
+  );
 });

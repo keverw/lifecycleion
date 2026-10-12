@@ -1797,6 +1797,43 @@ describe('applyRedaction - reporting why redaction failed', () => {
     expect(result['password']).toBe(REDACTION_FAILED_MARKER);
   });
 
+  test('an async redactFunction fails closed and reaches onFormatError without an unhandled rejection', async () => {
+    // Called synchronously, so the promise it returned was taken for an object: the key
+    // landed on the default masking with nothing reported, and the rejection went
+    // unhandled, which takes the process down under Node's default settings.
+    const reports: [string, string][] = [];
+    const unhandled: unknown[] = [];
+    const onUnhandled = (reason: unknown): void => {
+      unhandled.push(reason);
+    };
+
+    process.on('unhandledRejection', onUnhandled);
+
+    let result: Record<string, unknown>;
+
+    try {
+      result = applyRedaction(
+        { password: SECRET },
+        ['password'],
+        (async () => {
+          await Promise.resolve();
+          throw new Error('redactor rejected');
+        }) as unknown as RedactFunction,
+        (error, _kind, key) => reports.push([key, error.message]),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+
+    expect(result['password']).toBe(REDACTION_FAILED_MARKER);
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.[0]).toBe('password');
+    expect(reports[0]?.[1]).toContain('returned a promise');
+    expect(JSON.stringify(result)).not.toContain(SECRET);
+    expect(unhandled).toEqual([]);
+  });
+
   test('a non-array redactedKeys is reported rather than dropped in silence', () => {
     // This branch returns `{}` - every param gone. Without a report that is indisputably
     // correct and completely inexplicable from the outside.

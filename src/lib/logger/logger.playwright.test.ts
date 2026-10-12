@@ -115,6 +115,7 @@ browserScenarios(
     'a synthetic plain error event on a resource element is left alone',
     'an element error event naming no resource is left alone',
     'unregister detaches the capturing listener',
+    'browser exit retains codes without claiming a process-exit fallback',
   ],
   () => suite,
 );

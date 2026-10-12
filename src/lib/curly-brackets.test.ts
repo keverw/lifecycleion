@@ -1,5 +1,9 @@
 import { describe, expect, it, test } from 'bun:test';
 import { CurlyBrackets, type TruncationInfo } from './curly-brackets';
+import {
+  muteConsoleError,
+  restoreConsoleError,
+} from './internal/console-test-utils';
 
 const html = `
 <html>
@@ -727,14 +731,25 @@ describe('maxRenderLength and onTruncate', () => {
   });
 
   it('survives a handler that throws', () => {
-    // A notification about a degradation, not a step in producing the output.
-    const rendered = CurlyBrackets('{{body}}', { body }, undefined, {
-      onTruncate: () => {
-        throw new Error('boom');
-      },
-    });
+    // A notification about a degradation, not a step in producing the output. With no
+    // `onFormatError` to take the handler's failure, it falls through to the console rung.
+    const captured = muteConsoleError();
+    let rendered: string;
+
+    try {
+      rendered = CurlyBrackets('{{body}}', { body }, undefined, {
+        onTruncate: () => {
+          throw new Error('boom');
+        },
+      });
+    } finally {
+      restoreConsoleError();
+    }
 
     expect(rendered.length).toBeLessThan(1_100_000);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toContain('could not be reported to onTruncate');
+    expect(captured[0]).toContain('boom');
   });
 
   it('does not route truncation through onFormatError', () => {

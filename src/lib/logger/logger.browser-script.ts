@@ -244,6 +244,42 @@ async function runTests(): Promise<void> {
     browserExpect(sink.logs.length).toBe(0);
   });
 
+  await test('browser exit retains codes without claiming a process-exit fallback', async () => {
+    const errors: unknown[][] = [];
+    // eslint-disable-next-line no-console -- capture browser diagnostics for this test
+    const originalError = console.error;
+    // eslint-disable-next-line no-console -- capture browser diagnostics for this test
+    console.error = (...args: unknown[]) => {
+      errors.push(args);
+    };
+    try {
+      const seen: number[] = [];
+      const logger = new Logger({
+        sinks: [],
+        beforeExitCallback(code) {
+          seen.push(code);
+          return { action: 'proceed' };
+        },
+      });
+      logger.on<{ eventType: string; code: number }>(
+        'logger',
+        ({ eventType, code }) => {
+          if (eventType === 'exit-called' || eventType === 'exit-process') {
+            seen.push(code);
+          }
+        },
+      );
+      logger.exit(300);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      browserExpect(JSON.stringify(seen)).toBe(JSON.stringify([300, 300, 300]));
+      browserExpect(logger.exitCode).toBe(300);
+      browserExpect(errors.length).toBe(0);
+    } finally {
+      // eslint-disable-next-line no-console -- restore the test diagnostic capture
+      console.error = originalError;
+    }
+  });
+
   window.loggerBrowserTestResults = finish();
 }
 

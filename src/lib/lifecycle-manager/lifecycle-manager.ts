@@ -1937,8 +1937,8 @@ export class LifecycleManager
     this.rootLogger.setBeforeExitCallback(
       async (exitCode: number, isFirstExit: boolean) => {
         // Defer the first logger.exit() that arrives during an already-running
-        // shutdown. Later duplicate exit calls stay ignored so they cannot
-        // override the eventual exit code after shutdown completes.
+        // shutdown. Later duplicate exit calls answer 'wait' so they cannot exit
+        // early; the logger still folds their codes into the pending exit.
         if (this.isShuttingDown) {
           if (isFirstExit && this.pendingLoggerExitResolve === null) {
             this.logger.debug(

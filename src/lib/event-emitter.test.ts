@@ -1,5 +1,6 @@
 import { describe, test, expect, mock } from 'bun:test';
 import { EventEmitter, EventEmitterProtected } from './event-emitter';
+import { reportCallbackError } from './safe-handle-callback';
 
 function getFirstReportedError(
   errorHandler: ReturnType<typeof mock>,
@@ -400,4 +401,143 @@ describe('EventEmitterProtected', () => {
     expect(callback1.mock.calls.length).toBe(2);
     expect(callback2.mock.calls.length).toBe(1);
   });
+});
+
+describe('event names that are not strings', () => {
+  // Typed `string`, but a JavaScript caller can subscribe and emit with any key a `Map`
+  // accepts. A template literal over the event throws for a symbol, so the handler name
+  // goes through `renderEventName` instead of escaping `emit`.
+  test('a symbol event dispatches, and its handler failure is reported', () => {
+    const reports: Error[] = [];
+    const onError = (event: Event): void => {
+      reports.push((event as ErrorEvent).error as Error);
+      event.preventDefault();
+    };
+    globalThis.addEventListener('error', onError);
+    try {
+      const emitter = new EventEmitter();
+      const event = Symbol('ready') as unknown as string;
+      const thrown = new Error('handler failed');
+      const seen: unknown[] = [];
+      emitter.on(event, () => {
+        throw thrown;
+      });
+      emitter.on(event, (data) => {
+        seen.push(data);
+      });
+
+      expect(() => emitter.emit(event, 1)).not.toThrow();
+      expect(seen).toEqual([1]);
+      expect(reports.map((report) => report.message)).toEqual([
+        'Error in a callback event handler for Symbol(ready)',
+      ]);
+      expect(reports[0].cause).toBe(thrown);
+    } finally {
+      globalThis.removeEventListener('error', onError);
+    }
+  });
+
+  test('a symbol event whose handler succeeds does not throw', () => {
+    const emitter = new EventEmitter();
+    const event = Symbol('ok') as unknown as string;
+    const callback = mock(() => {});
+    emitter.on(event, callback);
+    expect(() => emitter.emit(event, 'x')).not.toThrow();
+    expect(callback).toHaveBeenCalledWith('x');
+  });
+
+  test('the event name is rendered only when a handler fails', () => {
+    let renders = 0;
+    const event = {
+      toString(): string {
+        renders++;
+        return 'counted';
+      },
+    } as unknown as string;
+    const emitter = new EventEmitter();
+    emitter.on(event, () => {});
+    emitter.emit(event, 1);
+    emitter.emit(event, 2);
+    expect(renders).toBe(0);
+
+    const reports: Error[] = [];
+    const onError = (errorEvent: Event): void => {
+      reports.push((errorEvent as ErrorEvent).error as Error);
+      errorEvent.preventDefault();
+    };
+    globalThis.addEventListener('error', onError);
+    try {
+      emitter.on(event, () => {
+        throw new Error('handler failed');
+      });
+      emitter.emit(event, 3);
+    } finally {
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(renders).toBeGreaterThan(0);
+    expect(reports.map((report) => report.message)).toEqual([
+      'Error in a callback event handler for counted',
+    ]);
+  });
+});
+
+test('clear accepts an empty event name without removing other events', () => {
+  const emitter = new EventEmitter();
+  emitter.on('', () => {});
+  emitter.on('other', () => {});
+  emitter.clear('');
+  expect(emitter.hasListeners('')).toBe(false);
+  expect(emitter.hasListeners('other')).toBe(true);
+});
+
+test('clear treats null like undefined and removes every event', () => {
+  const emitter = new EventEmitter();
+  emitter.on('a', () => {});
+  emitter.on('b', () => {});
+  emitter.clear(null as unknown as string);
+  expect(emitter.hasListeners('a')).toBe(false);
+  expect(emitter.hasListeners('b')).toBe(false);
+});
+
+test('clear removes only the named event for a falsy non-nullish name', () => {
+  const emitter = new EventEmitter();
+  const zero = 0 as unknown as string;
+  emitter.on(zero, () => {});
+  emitter.on('other', () => {});
+  emitter.clear(zero);
+  expect(emitter.hasListeners(zero)).toBe(false);
+  expect(emitter.hasListeners('other')).toBe(true);
+});
+
+test('async listeners entered by console forwarding do not restart diagnostics', async () => {
+  const emitter = new EventEmitter();
+  let calls = 0;
+  let consoleCalls = 0;
+  emitter.on('forward', async () => {
+    calls++;
+    await Promise.resolve();
+    throw new Error('event forwarding failed');
+  });
+  const originalConsole = console.error;
+  console.error = (): void => {
+    if (++consoleCalls <= 10) {
+      emitter.emit('forward');
+    }
+  };
+  try {
+    reportCallbackError('original failure', new Error('initial'));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(consoleCalls).toBe(1);
+    expect(calls).toBe(1);
+    console.error = (): void => {
+      consoleCalls++;
+    };
+    emitter.emit('forward');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(consoleCalls).toBe(2);
+    expect(calls).toBe(2);
+  } finally {
+    console.error = originalConsole;
+  }
 });

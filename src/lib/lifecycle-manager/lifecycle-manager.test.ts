@@ -10219,16 +10219,26 @@ describe('LifecycleManager - Signal Integration', () => {
 
       await sleep(5);
 
-      logger.exit(7);
-      logger.exit(8);
+      const output = spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        // The first exit is the one deferred; the second waits, but the last failure
+        // code is the one the deferred exit settles on.
+        logger.exit(7);
+        logger.exit(8);
 
-      await stopPromise;
-      await sleep(5);
+        await stopPromise;
+        await sleep(5);
 
-      expect(lifecycle.getRunningComponentCount()).toBe(0);
-      expect(logger.didExit).toBe(true);
-      expect(logger.exitCode).toBe(7);
-      expect(logger.isPendingExit).toBe(false);
+        expect(lifecycle.getRunningComponentCount()).toBe(0);
+        expect(logger.didExit).toBe(true);
+        expect(logger.exitCode).toBe(8);
+        expect(logger.isPendingExit).toBe(false);
+        expect(output.mock.calls.map((call) => String(call[0]))).toEqual([
+          'Logger exit(8) replaces the pending exit code 7',
+        ]);
+      } finally {
+        output.mockRestore();
+      }
     });
 
     test('releases a logger exit when a manual shutdown times out on a never-settling stop', async () => {

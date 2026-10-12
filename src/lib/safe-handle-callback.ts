@@ -1,15 +1,52 @@
+import { observeRejection } from './internal/promise-reactions';
 import { errorToString } from './error-to-string';
-import { isPromise } from './is-promise';
-import { isFunction } from './is-function';
 import { toError } from './to-error';
 import { DOUBLE_EOL } from './constants';
 import { installGlobalEventTarget } from './global-event-target';
 import { reportToHost } from './internal/report-to-host';
+import { UnreadableReturn, adoptResult } from './internal/adopt-promise';
+import { reportThroughHandler } from './internal/failure-reporter';
+import { isFunction } from './is-function';
+import { renderName, resolveName } from './internal/render-name';
+import { isConsoleReportActive } from './internal/report-to-console';
 
 // Node.js has a global `ErrorEvent` constructor (Node 25+) but does not make `globalThis`
 // an EventTarget, so the global event methods must be supplied before anything can be
 // dispatched or listened for. No-op in browsers, Bun, and Deno.
 installGlobalEventTarget();
+
+// Re-exported so an integrator holding its own structured `Error` can publish it directly.
+// `reportCallbackError` is a normalizer for raw thrown values; see `reportToHost`'s own
+// docs for when each one applies. Imported above as well, because this module calls it.
+export { reportToHost } from './internal/report-to-host';
+
+/**
+ * A callback's name as the helpers that invoke a callback accept it: the name itself, or a
+ * function that builds it. A builder is called only when there is a failure to report, so
+ * a caller whose name costs something to assemble - an emitter naming the event a handler
+ * belongs to - pays nothing on the calls that succeed. {@link reportCallbackError} takes a
+ * plain `string`: it only ever runs with a failure in hand.
+ */
+export type CallbackName = string | (() => string);
+
+const UNNAMED_CALLBACK = '<unnamed callback>';
+
+/**
+ * The callback name as a string, never a throw: see `renderName`. A name that cannot be
+ * rendered is reported as `<unnamed callback>`.
+ */
+function renderCallbackName(callbackName: unknown): string {
+  return renderName(callbackName, UNNAMED_CALLBACK);
+}
+
+/**
+ * {@link renderCallbackName} for a {@link CallbackName}: a builder is called here, on the
+ * failure path, and one that throws is reported as `<unnamed callback>` rather than
+ * replacing the failure it was naming.
+ */
+function resolveCallbackName(callbackName: unknown): string {
+  return resolveName(callbackName, UNNAMED_CALLBACK);
+}
 
 /**
  * Report a callback failure on the standard `'error'` channel. See {@link reportToHost}.
@@ -35,7 +72,12 @@ export function reportCallbackError(
   callbackName: string,
   error: unknown,
 ): void {
-  const report = new Error(`Error in a callback ${callbackName}`, {
+  reportRenderedCallbackError(renderCallbackName(callbackName), error);
+}
+
+/** {@link reportCallbackError} for a name that has already been rendered. */
+function reportRenderedCallbackError(name: string, error: unknown): void {
+  const report = new Error(`Error in a callback ${name}`, {
     cause: error,
   });
 
@@ -54,8 +96,7 @@ export function reportCallbackError(
     // and `42` come back on the `Cause` row. The two exceptions are `throw null` and
     // `throw undefined`: `addErrorTail` emits the row only for a `cause` that is neither,
     // so those render as the wrapper alone - the message still names the callback.
-    () =>
-      `Error in a callback ${callbackName}: ${DOUBLE_EOL}${errorToString(report)}`,
+    () => `Error in a callback ${name}: ${DOUBLE_EOL}${errorToString(report)}`,
   );
 }
 
@@ -78,20 +119,25 @@ export function reportCallbackError(
  * to handle the result or error of the callback, consider using the
  * `safeHandleCallbackAndWait` function instead.
  *
- * @param {string} callbackName - The name of the callback function, used for error reporting.
+ * Invokes without a receiver. See {@link runCallbackSafely} for the callback binding
+ * contract and how to preserve `this` with a closure, binding, or explicit receiver.
+ *
+ * @param {CallbackName} callbackName - The name of the callback function, used for error
+ *                                      reporting, or a function returning it (see
+ *                                      {@link CallbackName}).
  * @param {unknown} callback - The callback function to be executed. It can be either a
  *                             synchronous function or a function that returns a Promise.
  * @param {...unknown[]} args - Additional arguments to pass to the callback function.
  */
 
 export function safeHandleCallback(
-  callbackName: string,
+  callbackName: CallbackName,
   callback: unknown,
   ...args: unknown[]
 ): void {
-  runCallbackSafely(callbackName, callback, args, (error) => {
-    reportCallbackError(callbackName, error);
-  });
+  // No `onError` closure: the standard channel is the default, so a callback that
+  // succeeds allocates nothing for a failure it never had.
+  invokeCallbackSafely(callbackName, callback, args, undefined, undefined);
 }
 
 /**
@@ -104,56 +150,169 @@ export function safeHandleCallback(
  * that must stay off the global `'error'` channel (`Logger`) does not need a second copy
  * of this body.
  *
- * `onError` must not throw: it runs on the failure path, and there is nothing above it
- * left to catch.
+ * A callback entered while terminal console output is active still runs and its
+ * return is observed, but its failures do not invoke `onError` or report again.
+ * This applies after asynchronous settlement too, so a console forwarding failure
+ * cannot start another generation of error handlers.
  *
- * @param callbackName Used only for the "is not a function" message.
+ * `onError` should not throw, but a throw from it is contained rather than escaping: it
+ * runs on the failure path, where there is nothing above it left to catch. A synchronous
+ * throw would otherwise surface at an unrelated call site, and one from the promise rung
+ * would be an unhandled rejection - fatal under Node's default
+ * `--unhandled-rejections=throw`, which is the outcome this helper exists to prevent. Both
+ * are caught and sent to the guarded console rung instead.
+ *
+ * **`this` is not preserved unless you pass `thisArg`.** The callback is invoked with the
+ * receiver you supply, and with none by default. Passing an extracted method such as
+ * `logger.info` therefore loses `logger`, and any `this.x` inside it throws - which
+ * arrives as an ordinary callback failure on `onError`, not as a `TypeError` at the call
+ * site, so a method that merely *reports* through this path can look like it ran. Pass
+ * `thisArg`, or hand over `() => logger.info(a, b)` or `logger.info.bind(logger)`.
+ *
+ * @param callbackName Names the callback in the "is not a function" message and in the
+ *                     console line for a failing `onError`. Either the name or a
+ *                     function returning it (see {@link CallbackName}); either way it is
+ *                     rendered only when there is a failure to report.
  * @param callback The untrusted value to invoke.
  * @param args Arguments to pass to the callback.
  * @param onError Receives the thrown value, the rejection reason, or a synthesized
- *                `Error` when `callback` is not callable.
+ *                `Error` when `callback` is not callable or its return has an unreadable
+ *                `then` (the original failure is its `cause`). It may be `async`: a promise it
+ *                returns is followed, and a rejection lands on the console rung like a
+ *                throw does.
+ * @param thisArg Receiver to invoke `callback` with. Omit for a plain function or a
+ *                closure; supply the owning object when passing an extracted method.
  */
 export function runCallbackSafely(
-  callbackName: string,
+  callbackName: CallbackName,
   callback: unknown,
   args: unknown[],
   onError: (error: unknown) => void,
+  thisArg?: unknown,
 ): void {
+  invokeCallbackSafely(callbackName, callback, args, onError, thisArg);
+}
+
+/**
+ * The body of {@link runCallbackSafely}, with `onError` optional: when it is `undefined`,
+ * a failure goes straight to {@link reportCallbackError}, which is what
+ * {@link safeHandleCallback} wants without building a closure for it on every call.
+ */
+function invokeCallbackSafely(
+  callbackName: CallbackName,
+  callback: unknown,
+  args: unknown[],
+  onError: ((error: unknown) => void) | undefined,
+  thisArg: unknown,
+): void {
+  // A console shim can enter an async callback. Its rejection arrives after the
+  // terminal reporter returns, so retain the origin instead of checking only then.
+  const shouldSuppressDiagnostics = isConsoleReportActive();
   if (!isFunction(callback)) {
-    onError(
-      new Error(`Callback provided for ${callbackName} is not a function`),
+    const name = resolveCallbackName(callbackName);
+    reportToOnError(
+      name,
+      new Error(`Callback provided for ${name} is not a function`),
+      onError,
+      shouldSuppressDiagnostics,
     );
 
     return;
   }
 
+  let result: unknown;
   try {
-    // We need to cast callback to the appropriate function type now
-    const result = (callback as (...args: unknown[]) => unknown)(...args);
-
-    if (isPromise(result)) {
-      // Fire-and-forget: a rejection is reported, never awaited.
-      //
-      // Adopted through `Promise.resolve` rather than calling `result.catch` directly, as
-      // `ArraySink` does and for the same reason: `isPromise` accepts any thenable, and a
-      // `then`-only one has no `catch`. Calling it threw a `TypeError` that the
-      // surrounding `catch` reported *in place of* the real failure - and because `then`
-      // was never called, the callback's actual rejection was dropped and went nowhere.
-      // Every untrusted-callback surface funnels through here: `safeHandleCallback`,
-      // `EventEmitter`, `ProcessSignalManager`, `LRUCache.onChange`,
-      // `PromiseProtectedResolver`.
-      void Promise.resolve(result).catch(onError);
-    }
+    // Use `Reflect.apply` so an extracted method keeps its receiver, not
+    // `callback.apply(...)`, which reads `apply` off the untrusted callback itself: one
+    // with its own `apply` property would run that instead. With `thisArg` omitted the
+    // callback is called with no receiver.
+    result = Reflect.apply(
+      callback as (...args: unknown[]) => unknown,
+      thisArg,
+      args,
+    );
   } catch (error) {
-    onError(error);
+    reportToOnError(callbackName, error, onError, shouldSuppressDiagnostics);
+    return;
+  }
+  const pending = adoptResult(result);
+  if (pending instanceof UnreadableReturn) {
+    reportToOnError(callbackName, pending, onError, shouldSuppressDiagnostics);
+    return;
+  }
+  if (pending !== undefined) {
+    // A `constructor`/species read that throws arrives here as a rejection too.
+    observeRejection(pending, (error: unknown) => {
+      reportToOnError(callbackName, error, onError, shouldSuppressDiagnostics);
+    });
   }
 }
 
-interface CallbackResult<T> {
-  success: boolean;
-  value?: T;
-  error?: Error;
+/**
+ * Hand a callback's failure to `onError`, through the rung every supplied failure handler
+ * in this library shares. `onError` is the last rung that can still describe the original
+ * failure: a throw or rejection from it goes to the console alongside that failure rather
+ * than replacing it or escaping, and a `then` on its return that cannot be read is not
+ * mistaken for either. Module-level, so a callback that succeeds - every guarded log line
+ * - allocates nothing for a failure it never had.
+ */
+function reportToOnError(
+  rawCallbackName: CallbackName,
+  error: unknown,
+  onError: ((error: unknown) => void) | undefined,
+  shouldSuppressDiagnostics: boolean,
+): void {
+  if (onError === undefined) {
+    // The standard channel. `reportToHost` never throws - a hostile global it reads
+    // included - so this needs no rung beneath it.
+    if (!shouldSuppressDiagnostics) {
+      reportRenderedCallbackError(resolveCallbackName(rawCallbackName), error);
+    }
+
+    return;
+  }
+
+  // With `onError` supplied, the name is read only if `onError` itself fails, and both
+  // the console line and `handlerName` may then need it: render it then, at most once.
+  let renderedName: string | undefined;
+  const callbackName = (): string =>
+    (renderedName ??= resolveCallbackName(rawCallbackName));
+
+  reportThroughHandler(
+    // Typed `void`, but an `async` handler returns a promise: one that rejects is
+    // followed, not dropped as an unhandled rejection.
+    () => onError(error),
+    // Rendered, not passed raw: `console.error` of the error itself prints every
+    // `additionalInfo` and `cause` field in the clear, which the masking in
+    // `errorToString` - what `reportCallbackError()` renders with - exists to prevent.
+    () =>
+      `Error handler for ${callbackName()} failed while reporting a failure${DOUBLE_EOL}` +
+      `Original failure:${DOUBLE_EOL}${errorToString(toError(error))}`,
+    {
+      handlerName: () => `onError for ${callbackName()}`,
+      suppressDiagnostics: shouldSuppressDiagnostics,
+    },
+  );
 }
+
+/**
+ * Outcome of {@link safeHandleCallbackAndWait}.
+ *
+ * A discriminated union, so `if (result.success)` narrows to the branch that carries
+ * `value` and the `else` narrows to the one that carries `error`. Neither field needs a
+ * non-null assertion after the check.
+ *
+ * Each branch declares the other's field as optional `undefined` rather than omitting it,
+ * so reading `result.value` without narrowing first still type-checks - as `T | undefined`
+ * - and existing callers that check `success` some other way keep compiling.
+ *
+ * `T` cannot be inferred - `callback` is typed `unknown`, so nothing in the call carries
+ * the return type - and defaults to `unknown`. Supply it explicitly when you know what the
+ * callback returns.
+ */
+export type CallbackResult<T = unknown> =
+  | { success: true; value: T; error?: undefined }
+  | { success: false; error: Error; value?: undefined };
 
 /**
  * Safely handles a callback function by catching any errors and reporting them on the
@@ -169,7 +328,12 @@ interface CallbackResult<T> {
  * but not the global event methods, so importing this module installs them via a shared
  * `EventTarget` (see `global-event-target`) without overwriting existing implementations.
  *
- * @param {string} callbackName - The name of the callback function, used for error reporting.
+ * Invokes without a receiver. See {@link runCallbackSafely} for the callback binding
+ * contract and how to preserve `this` with a closure, binding, or explicit receiver.
+ *
+ * @param {CallbackName} callbackName - The name of the callback function, used for error
+ *                                      reporting, or a function returning it (see
+ *                                      {@link CallbackName}).
  * @param {unknown} callback - The callback function to be executed. It can be either a
  *                             synchronous function or a function that returns a Promise.
  * @param {...unknown[]} args - Additional arguments to pass to the callback function.
@@ -178,39 +342,68 @@ interface CallbackResult<T> {
  */
 
 export async function safeHandleCallbackAndWait<T>(
-  callbackName: string,
+  callbackName: CallbackName,
   callback: unknown,
   ...args: unknown[]
 ): Promise<CallbackResult<T>> {
-  const handleError = (error: unknown): CallbackResult<T> => {
-    reportCallbackError(callbackName, error);
+  const shouldSuppressDiagnostics = isConsoleReportActive();
+  const handleError = (
+    error: unknown,
+    name: string = resolveCallbackName(callbackName),
+  ): CallbackResult<T> => {
+    if (!shouldSuppressDiagnostics) {
+      reportRenderedCallbackError(name, error);
+    }
 
     // Normalized, not cast: `CallbackResult.error` is declared `Error`, but `throw` and
     // promise rejection both accept any value, so a callback that throws `null` would
     // otherwise hand the caller a `null` typed as an `Error` and break
     // `result.error.message`. The original value stays reachable as `cause`.
-    return { success: false, error: toError(error) };
+    const callbackResult = {
+      success: false as const,
+      error: toError(error),
+    };
+    return callbackResult;
   };
 
   if (isFunction(callback)) {
     try {
-      // We need to cast callback to the appropriate function type now
-      const result = (callback as (...args: unknown[]) => unknown)(...args);
+      // Use `Reflect.apply` and `adoptResult()`, as `runCallbackSafely()` does:
+      // one path for how an untrusted callback is invoked and how its promise is read.
+      const result: unknown = Reflect.apply(
+        callback as (...args: unknown[]) => unknown,
+        undefined,
+        args,
+      );
 
-      if (isPromise(result)) {
+      const pending = adoptResult(result);
+      if (pending instanceof UnreadableReturn) {
+        return handleError(pending);
+      }
+      if (pending !== undefined) {
         // Wait for the async callback to complete
-        const value = await (result as Promise<T>);
+        const { value } = await pending;
 
-        return { success: true, value };
+        const callbackResult = {
+          success: true as const,
+          value: value as T,
+        };
+        return callbackResult;
       } else {
-        return { success: true, value: result as T };
+        const callbackResult = {
+          success: true as const,
+          value: result as T,
+        };
+        return callbackResult;
       }
     } catch (error) {
       return handleError(error);
     }
   } else {
+    const name = resolveCallbackName(callbackName);
     return handleError(
-      new Error(`Callback provided for ${callbackName} is not a function`),
+      new Error(`Callback provided for ${name} is not a function`),
+      name,
     );
   }
 }

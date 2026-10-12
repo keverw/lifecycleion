@@ -1,3 +1,5 @@
+import { isObjectLike } from './is-object-like';
+
 /**
  * Read a property off a value without trusting it.
  *
@@ -49,10 +51,7 @@ export function readMember(source: object, key: PropertyKey): unknown {
  *          it threw.
  */
 export function readUnknownMember(source: unknown, key: PropertyKey): unknown {
-  if (
-    source === null ||
-    (typeof source !== 'object' && typeof source !== 'function')
-  ) {
+  if (!isObjectLike(source)) {
     return undefined;
   }
 

@@ -1,23 +1,24 @@
 import { describe, expect, test } from 'bun:test';
 
+import { MAX_TIMER_MS, resolveTimeoutMS } from '../../../internal/timer-limits';
 import {
   DEFAULT_MAX_QUEUE_SIZE,
   DEFAULT_MAX_RETRIES,
-  MAX_TIMER_MS,
   UNLIMITED_QUEUE,
   resolveMaxQueueSize,
   resolveMaxRetries,
-  resolveTimeoutMS,
 } from './queue-policy';
 
 describe('resolveTimeoutMS', () => {
-  test('takes the default for an absent or unusable request', () => {
+  test('defaults only an omitted timeout and rejects invalid explicit requests', () => {
     // `NaN` made every `elapsed > timeoutMS` comparison false, so a drain loop bounded
     // by it never timed out and `close()` hung on a stalled destination.
     expect(resolveTimeoutMS(undefined, 30_000)).toBe(30_000);
-    expect(resolveTimeoutMS(Number.NaN, 30_000)).toBe(30_000);
-    expect(resolveTimeoutMS('5000' as unknown as number, 30_000)).toBe(30_000);
-    expect(resolveTimeoutMS(-1, 30_000)).toBe(30_000);
+    expect(() => resolveTimeoutMS(Number.NaN, 30_000)).toThrow(TypeError);
+    expect(() => resolveTimeoutMS('5000' as unknown as number, 30_000)).toThrow(
+      TypeError,
+    );
+    expect(() => resolveTimeoutMS(-1, 30_000)).toThrow(RangeError);
   });
 
   test('honours zero and any finite wait', () => {
@@ -36,12 +37,17 @@ describe('resolveTimeoutMS', () => {
 });
 
 describe('resolveMaxQueueSize', () => {
-  test('takes the default for an absent or unusable request', () => {
+  test('takes the default for an absent request', () => {
     expect(resolveMaxQueueSize()).toBe(DEFAULT_MAX_QUEUE_SIZE);
-    expect(resolveMaxQueueSize(Number.NaN)).toBe(DEFAULT_MAX_QUEUE_SIZE);
-    expect(resolveMaxQueueSize('20' as unknown as number)).toBe(
-      DEFAULT_MAX_QUEUE_SIZE,
-    );
+    expect(resolveMaxQueueSize(null)).toBe(DEFAULT_MAX_QUEUE_SIZE);
+  });
+
+  test('refuses NaN and non-numbers, like closeTimeoutMS in the same options', () => {
+    // These silently took the default while the sibling timeout threw for the same input.
+    expect(() => resolveMaxQueueSize(Number.NaN)).toThrow(TypeError);
+    expect(() =>
+      resolveMaxQueueSize('20' as unknown as number, 'FileSink maxQueueSize'),
+    ).toThrow('FileSink maxQueueSize must be a number other than NaN');
   });
 
   test('reads a negative value, and `Infinity`, as unlimited', () => {
@@ -73,12 +79,19 @@ describe('resolveMaxQueueSize', () => {
 });
 
 describe('resolveMaxRetries', () => {
-  test('takes the default for an absent or unusable request', () => {
+  test('takes the default for an absent or unbounded request', () => {
     expect(resolveMaxRetries()).toBe(DEFAULT_MAX_RETRIES);
-    expect(resolveMaxRetries(Number.NaN)).toBe(DEFAULT_MAX_RETRIES);
+    expect(resolveMaxRetries(null)).toBe(DEFAULT_MAX_RETRIES);
     expect(resolveMaxRetries(Number.POSITIVE_INFINITY)).toBe(
       DEFAULT_MAX_RETRIES,
     );
+  });
+
+  test('refuses NaN and non-numbers, like closeTimeoutMS in the same options', () => {
+    expect(() => resolveMaxRetries(Number.NaN)).toThrow(TypeError);
+    expect(() =>
+      resolveMaxRetries('3' as unknown as number, 'NamedPipeSink maxRetries'),
+    ).toThrow('NamedPipeSink maxRetries must be a number other than NaN');
   });
 
   test('resolves a non-positive request to no retries at all', () => {

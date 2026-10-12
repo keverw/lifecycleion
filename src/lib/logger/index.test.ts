@@ -159,6 +159,46 @@ describe('Logger', () => {
       }
     });
 
+    test('redaction survives a polluted Object.prototype.get', () => {
+      const params = { user: { name: 'alice', password: 'hunter2secret' } };
+      const expected = JSON.stringify(
+        (() => {
+          logger.info('name={{user.name}} password={{user.password}}', {
+            params,
+            redactedKeys: ['user.password'],
+          });
+          return arraySink.logs[0];
+        })(),
+      );
+      arraySink.logs.length = 0;
+      // As JSON-merge pollution of caller data leaves it: a plain enumerable value.
+      (Object.prototype as Record<string, unknown>)['get'] = 'x';
+
+      try {
+        logger.info('name={{user.name}} password={{user.password}}', {
+          params,
+          redactedKeys: ['user.password'],
+        });
+      } finally {
+        delete (Object.prototype as Record<string, unknown>)['get'];
+      }
+
+      expect(arraySink.logs[0]?.message).toContain('name=alice');
+      expect(arraySink.logs[0]?.message).not.toContain('hunter2secret');
+      expect(JSON.stringify(arraySink.logs[0]?.redactedParams)).not.toContain(
+        'hunter2secret',
+      );
+      // Redacted exactly as without the pollution - not failed closed.
+      expect(
+        JSON.stringify({ ...arraySink.logs[0], timestamp: undefined }),
+      ).toBe(
+        JSON.stringify({
+          ...(JSON.parse(expected) as object),
+          timestamp: undefined,
+        }),
+      );
+    });
+
     test('should log error message', () => {
       logger.error('Test error message');
 
@@ -889,8 +929,8 @@ describe('Logger', () => {
       // The regular sinks are the diagnostic sinks when no separate set was supplied.
       expect(arraySink.logs.at(-1)?.tags).toContain('lifecycleion-diagnostic');
 
-      // The failing sink also refused its diagnostic, so delivery ended at the console.
-      expect(consoleErrorSpy).toHaveBeenCalled();
+      // The source is excluded; the healthy sink received the diagnostic.
+      expect(consoleErrorSpy).not.toHaveBeenCalled();
 
       consoleErrorSpy.mockRestore();
     });
@@ -1019,10 +1059,14 @@ describe('Logger', () => {
       expect(logger.didExit).toBe(false);
     });
 
-    test('should not exit when exitCode is NaN', () => {
+    test('should exit when exitCode is NaN, as exit(NaN) does', () => {
+      // A broken code, not a request not to exit. This logger is simulated, so the code
+      // is kept as a failure; a real exit uses 1 (see process-exit-invalid.test.ts).
       logger.error('Error with NaN', { exitCode: NaN });
 
-      expect(logger.didExit).toBe(false);
+      expect(logger.didExit).toBe(true);
+      expect(logger.exitCode).toBeNaN();
+      expect(arraySink.logs[0].exitCode).toBeNaN();
     });
 
     test('should include exitCode in LogEntry', () => {
@@ -3146,7 +3190,7 @@ describe('Logger diagnostic channel', () => {
     expect(consoleErrors).toEqual([]);
   });
 
-  test('asynchronously tells every regular sink when no diagnostic sinks are set', async () => {
+  test('asynchronously tells the other regular sinks when no diagnostic sinks are set', async () => {
     const seen: LoggerDiagnostic[][] = [[], []];
     const makeSink = (diagnostics: LoggerDiagnostic[]): LogSink => ({
       write: () => {
@@ -3166,8 +3210,10 @@ describe('Logger diagnostic channel', () => {
 
     await Promise.resolve();
 
-    expect(seen[0]).toHaveLength(2);
-    expect(seen[1]).toHaveLength(2);
+    expect(seen[0]).toHaveLength(1);
+    expect(seen[1]).toHaveLength(1);
+    expect(seen[0][0]?.sink).toBe(logger.getSinks()[1]);
+    expect(seen[1][0]?.sink).toBe(logger.getSinks()[0]);
     expect(seen[0].every(({ kind }) => kind === 'sink')).toBe(true);
   });
 
@@ -3252,6 +3298,35 @@ describe('Logger diagnostic channel', () => {
     expect(logEvents).toBe(1);
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]?.kind).toBe('event-handler');
+  });
+
+  test('reports a failing handler of a symbol event as a diagnostic', async () => {
+    const consoleError = spyOn(console, 'error').mockImplementation(() => {});
+    const logger = new Logger({ sinks: [], callProcessExit: false });
+    const diagnostics: LoggerDiagnostic[] = [];
+    const symbolEvent = Symbol('custom') as unknown as string;
+
+    logger.on<LoggerDiagnostic>('diagnostic', (diagnostic) => {
+      diagnostics.push(diagnostic);
+    });
+    logger.on(symbolEvent, () => {
+      throw new Error('symbol handler failed');
+    });
+
+    try {
+      expect(() => logger.emit(symbolEvent)).not.toThrow();
+      await Promise.resolve();
+
+      expect(diagnostics).toHaveLength(1);
+      expect(diagnostics[0]?.kind).toBe('event-handler');
+      expect(diagnostics[0]?.event).toBe('Symbol(custom)');
+      expect(diagnostics[0]?.message).toBe(
+        'Error in a logger event handler for Symbol(custom): symbol handler failed',
+      );
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      consoleError.mockRestore();
+    }
   });
 
   test('preserves the original diagnostic when its only listener throws', async () => {
@@ -3492,4 +3567,57 @@ test('default diagnostic messages omit caller-controlled key names', async () =>
   expect(diagnostics[0]?.message).toBe('Redaction failed');
   expect(diagnostics[0]?.path).toContain(secret);
   expect(sink.logs.every((log) => !log.message.includes(secret))).toBe(true);
+});
+
+test('errorObject on a closed logger does not render the error, but its exitCode still counts', async () => {
+  const output = spyOn(console, 'error').mockImplementation(() => {});
+  try {
+    let reads = 0;
+    // Every read counted and refused, so a render would both show up here and fail into
+    // a 'Render failed' report.
+    const hostileError = new Proxy(new Error('boom'), {
+      get() {
+        reads++;
+        throw new Error('read refused');
+      },
+      getOwnPropertyDescriptor() {
+        reads++;
+        throw new Error('read refused');
+      },
+      ownKeys() {
+        reads++;
+        throw new Error('read refused');
+      },
+    });
+    const sink = new ArraySink();
+    const logger = new Logger({ sinks: [sink], callProcessExit: false });
+    const exitCodes: number[] = [];
+    logger.on<{ eventType: string; code: number }>(
+      'logger',
+      ({ eventType, code }) => {
+        if (eventType === 'exit-process') {
+          exitCodes.push(code);
+        }
+      },
+    );
+    const service = logger.service('svc').entity('one');
+    await logger.close();
+
+    logger.errorObject('closed', hostileError);
+    service.errorObject('closed', hostileError);
+    expect(reads).toBe(0);
+    expect(output).not.toHaveBeenCalled();
+    expect(sink.logs).toEqual([]);
+
+    logger.errorObject('closed', hostileError, { exitCode: 2 });
+    // Once that simulated exit has finished; requested while it still closes, the next
+    // would belong to it, as behind a real exit.
+    await sleep(0);
+    service.errorObject('closed', hostileError, { exitCode: 3 });
+    await sleep(0);
+    expect(reads).toBe(0);
+    expect(exitCodes).toEqual([2, 3]);
+  } finally {
+    output.mockRestore();
+  }
 });
