@@ -509,43 +509,15 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
             this.currentState.currentAttemptContext === context &&
             !context.handled
           ) {
-            const forceCancellation = (): void => {
-              if (
-                this.currentState.currentAttemptContext instanceof
-                  AttemptContext &&
-                !this.currentState.currentAttemptContext.handled
-              ) {
-                if (this.currentState.runnerState === 'stopping') {
-                  const context = this.currentState.currentAttemptContext;
-
-                  // The scope covers `attempt-handled`, not only the
-                  // `confirmCancellation` inside it (which opens its own): a listener
-                  // for this forced skip must not start a replacement before the
-                  // `'stopped'` outcome is published.
-                  this.withTerminalDispatch(true, () => {
-                    this.settleAbortedAttempt(context);
-
-                    // Force completion after grace period expired.
-                    this.confirmCancellation(
-                      'stopped',
-                      {
-                        status: 'canceled',
-                      },
-                      true,
-                    );
-                  });
-                }
-              }
-            };
             try {
-              this.currentState.cancellationTimeoutHandle = setTimeout(
-                forceCancellation,
-                this._gracePeriodMS,
-              );
+              this.currentState.cancellationTimeoutHandle = setTimeout(() => {
+                this.forceCancellation(context);
+              }, this._gracePeriodMS);
             } catch (error) {
-              // A missing timer cannot leave cancellation pending indefinitely.
-              forceCancellation();
+              // A missing timer cannot leave cancellation pending indefinitely. Reported
+              // first, so listeners of the forced outcome are not ahead of its cause.
               reportCallbackError('RetryRunner cancellation timer', error);
+              this.forceCancellation(context);
             }
           }
         }
@@ -623,6 +595,28 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       operationResolver,
       hasNewStopRequest: this.stopRequestToken !== stopRequestToken,
     };
+  }
+
+  /**
+   * End a cancellation whose grace period ran out: `context` has not acknowledged its
+   * abort, and is still the current attempt of a runner that is stopping.
+   */
+  private forceCancellation(context: AttemptContext): void {
+    if (
+      this.currentState.currentAttemptContext !== context ||
+      context.handled ||
+      this.currentState.runnerState !== 'stopping'
+    ) {
+      return;
+    }
+
+    // The scope covers `attempt-handled`, not only the `confirmCancellation` inside it
+    // (which opens its own): a listener for this forced skip must not start a
+    // replacement before the `'stopped'` outcome is published.
+    this.withTerminalDispatch(true, () => {
+      this.settleAbortedAttempt(context);
+      this.confirmCancellation('stopped', { status: 'canceled' }, true);
+    });
   }
 
   /**
@@ -1300,22 +1294,17 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     let isSkip = false;
     let shouldQueryForRetry = false;
 
-    let confirmCancellationInfo: {
-      run: boolean;
-      runnerState: RunnerState | null;
-      resolveInfo: ConfirmCancellationResolveInfo<T> | null;
-    } = {
-      run: false,
-      runnerState: null,
-      resolveInfo: null,
-    };
+    // The outcome this report ends the operation with, or `null` while it continues.
+    let terminal: {
+      runnerState: RunnerState;
+      resolveInfo: ConfirmCancellationResolveInfo<T>;
+    } | null = null;
 
     try {
       if (status === 'success') {
         this.policy.markAsSuccessful();
 
-        confirmCancellationInfo = {
-          run: true,
+        terminal = {
           runnerState: 'completed',
           resolveInfo: {
             status: 'attempt_success',
@@ -1328,8 +1317,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         // Fatal errors are recorded, but never retried.
         this.policy.reportError(valueInfo.error ?? valueInfo.data);
 
-        confirmCancellationInfo = {
-          run: true,
+        terminal = {
           runnerState: 'fatal-error',
           resolveInfo: {
             status: 'attempt_fatal',
@@ -1354,8 +1342,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           this.currentState.runnerState === 'stopped';
 
         if (isCanceledOrPendingCancel) {
-          confirmCancellationInfo = {
-            run: true,
+          terminal = {
             runnerState: 'stopped',
             resolveInfo: {
               status: 'canceled',
@@ -1380,8 +1367,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
             }, delayMS);
           } else {
             // No retry allowed: mark as exhausted.
-            confirmCancellationInfo = {
-              run: true,
+            terminal = {
               runnerState: 'exhausted',
               resolveInfo: {
                 status: 'attempts_exhausted',
@@ -1408,8 +1394,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // with no successor and no completion result.
       this.cleanupTimers();
       const isCanceling = this.currentState.runnerState === 'stopping';
-      confirmCancellationInfo = {
-        run: true,
+      if (!isCanceling) {
+        // Recorded as a reported fatal error is, so `lastError` names what ended it.
+        this.policy.reportError(error);
+      }
+      terminal = {
         runnerState: isCanceling ? 'stopped' : 'fatal-error',
         resolveInfo: isCanceling
           ? { status: 'canceled' }
@@ -1421,12 +1410,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     const attemptTimeElapsedMS = Date.now() - context.startTime;
     this.currentState.lastAttemptTimeTakenMS = attemptTimeElapsedMS;
 
-    const terminalRunnerState = confirmCancellationInfo.runnerState;
-    const terminalResolveInfo = confirmCancellationInfo.resolveInfo;
-    const isTerminalReport =
-      confirmCancellationInfo.run &&
-      terminalRunnerState !== null &&
-      terminalResolveInfo !== null;
+    const terminalReport = terminal;
+    const isTerminalReport = terminalReport !== null;
     // Opened here rather than left to `confirmCancellation`, so `attempt-handled` for a
     // terminal report is inside the reentry scope too.
     this.withTerminalDispatch(isTerminalReport, () => {
@@ -1444,8 +1429,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       } satisfies OnAttemptHandledInfo<T>);
 
       // if a confirm cancel should run
-      if (isTerminalReport) {
-        this.confirmCancellation(terminalRunnerState, terminalResolveInfo);
+      if (terminalReport !== null) {
+        this.confirmCancellation(
+          terminalReport.runnerState,
+          terminalReport.resolveInfo,
+        );
       }
     });
   }

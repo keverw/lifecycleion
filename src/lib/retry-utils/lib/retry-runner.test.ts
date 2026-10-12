@@ -1414,6 +1414,8 @@ for (const failingDependency of ['random', 'timer'] as const) {
     expect(runner.runnerState).toBe('fatal-error');
     expect(runner.isAttemptRunning).toBe(false);
     expect(runner.isRetryPending).toBe(false);
+    // Recorded as a reported fatal error is, so `lastError` names what ended it.
+    expect(runner.lastError).toBe(failure);
   });
 }
 
@@ -1446,6 +1448,11 @@ test('a cancellation timer that throws forces cancellation and settles existing 
       { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 1 },
       () => {},
     );
+    // Reported before the forced outcome is published, so its listeners can find it.
+    let reportsWhenEnded: number | undefined;
+    runner.on(OPERATION_ENDED, () => {
+      reportsWhenEnded = reports.length;
+    });
     const completion = runner.run(true);
     const timer = globalThis.setTimeout;
     let cancellation: ReturnType<typeof runner.cancel>;
@@ -1463,6 +1470,7 @@ test('a cancellation timer that throws forces cancellation and settles existing 
     expect(runner.isAttemptRunning).toBe(false);
     expect(reports).toHaveLength(1);
     expect(reports[0]?.cause).toBe(failure);
+    expect(reportsWhenEnded).toBe(1);
   } finally {
     release();
   }
