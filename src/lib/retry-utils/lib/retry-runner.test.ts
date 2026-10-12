@@ -1414,8 +1414,8 @@ for (const failingDependency of ['random', 'timer'] as const) {
     expect(runner.runnerState).toBe('fatal-error');
     expect(runner.isAttemptRunning).toBe(false);
     expect(runner.isRetryPending).toBe(false);
-    // Recorded as a reported fatal error is, so `lastError` names what ended it.
-    expect(runner.lastError).toBe(failure);
+    // Not counted as an attempt: `errors` holds the attempts' own errors only.
+    expect(runner.errors).not.toContain(failure);
   });
 }
 

@@ -283,14 +283,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       return false;
     }
 
-    return (
-      this.currentState.runnerState === 'running' ||
-      this.currentState.runnerState === 'exhausted' ||
-      this.currentState.runnerState === 'fatal-error' ||
-      this.currentState.runnerState === 'not-started' ||
-      this.currentState.runnerState === 'stopping' ||
-      this.currentState.runnerState === 'stopped'
-    );
+    // The only state `forceTry()` refuses.
+    return this.currentState.runnerState !== 'completed';
   }
 
   public get wasLastAttemptForced(): boolean {
@@ -1393,11 +1387,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // If either fails, publish an outcome instead of leaving a handled attempt
       // with no successor and no completion result.
       this.cleanupTimers();
-      const isCanceling = this.currentState.runnerState === 'stopping';
-      if (!isCanceling) {
-        // Recorded as a reported fatal error is, so `lastError` names what ended it.
-        this.policy.reportError(error);
-      }
+      // Classified as the main path above classifies it. The failure is not recorded in
+      // the policy: `errors` counts attempts, and this one's error, if any, already is.
+      const isCanceling =
+        this.currentState.runnerState === 'stopping' ||
+        this.currentState.runnerState === 'stopped';
       terminal = {
         runnerState: isCanceling ? 'stopped' : 'fatal-error',
         resolveInfo: isCanceling
