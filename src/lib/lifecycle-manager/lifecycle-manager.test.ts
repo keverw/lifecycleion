@@ -10326,19 +10326,12 @@ describe('LifecycleManager - Signal Integration', () => {
         new TestComponent(logger, { name: 'comp1' }),
       );
       await lifecycle.startAllComponents();
-      lifecycle.enableLoggerExitHook();
 
-      // A failure folded into the exit before the hook runs: requested 0, exits 3.
-      let hasFolded = false;
-      logger.on('logger', (event) => {
-        if (
-          !hasFolded &&
-          (event as { eventType: string }).eventType === 'exit-called'
-        ) {
-          hasFolded = true;
-          logger.exit(3);
-        }
-      });
+      // A failure already pending before the hook runs: an exit(3) whose callback never
+      // answers. The hook then handles a request for 0 that exits 3.
+      logger.setBeforeExitCallback(() => new Promise(() => {}));
+      logger.exit(3);
+      lifecycle.enableLoggerExitHook();
 
       const output = spyOn(console, 'error').mockImplementation(() => {});
       try {
