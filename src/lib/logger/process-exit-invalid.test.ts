@@ -1835,3 +1835,91 @@ test('a once-only exit report dropped inside a console shim is not used up', asy
     output.mockRestore();
   }
 });
+
+test("a console shim's exit from a request's own report is absorbed into that request", async () => {
+  // Written where `exit-called` listeners run, so the shim's exit(0) neither announces
+  // itself ahead of the request that made the report nor tells `beforeExit` a success.
+  let logger!: Logger;
+  const output = spyOn(console, 'error').mockImplementation(
+    (...args: unknown[]) => {
+      if (String(args[0]).includes('is invalid; treating it as code 1')) {
+        logger.exit(0);
+      }
+    },
+  );
+  const exit = spyOn(process, 'exit').mockImplementation(
+    () => undefined as never,
+  );
+  try {
+    const beforeExitCalls: [number, boolean][] = [];
+    logger = new Logger({
+      sinks: [],
+      callProcessExit: true,
+      beforeExitCallback: (code, isFirstExit) => {
+        beforeExitCalls.push([code, isFirstExit]);
+        return Promise.resolve({ action: 'proceed' });
+      },
+    });
+    const called: [number, boolean][] = [];
+    logger.on<{ eventType: string; code: number; isFirstExit: boolean }>(
+      'logger',
+      (event) => {
+        if (event.eventType === 'exit-called') {
+          called.push([event.code, event.isFirstExit]);
+        }
+      },
+    );
+    const processed = recordExitProcess(logger);
+
+    logger.exit(256);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(called).toEqual([[1, true]]);
+    expect(beforeExitCalls).toEqual([[1, true]]);
+    expect(processed).toEqual([1]);
+  } finally {
+    exit.mockRestore();
+    output.mockRestore();
+  }
+});
+
+test('a replacement made inside a console report is counted for the commit summary', async () => {
+  let logger!: Logger;
+  const lines: string[] = [];
+  const output = spyOn(console, 'error').mockImplementation(
+    (...args: unknown[]) => {
+      const line = String(args[0]);
+      lines.push(line);
+      if (line === 'another report') {
+        logger.exit(2);
+      }
+    },
+  );
+  try {
+    let proceed!: () => void;
+    logger = new Logger({
+      sinks: [],
+      callProcessExit: false,
+      beforeExitCallback: (_code, isFirstExit) =>
+        isFirstExit
+          ? new Promise((resolve) => {
+              proceed = () => resolve({ action: 'proceed' });
+            })
+          : Promise.resolve({ action: 'wait' }),
+    });
+    const processed = recordExitProcess(logger);
+
+    logger.exit(1);
+    reportToConsole('another report');
+    proceed();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(processed).toEqual([2]);
+    expect(lines).toEqual([
+      'another report',
+      'Logger exit code settled on 2 after 1 further replacement not reported',
+    ]);
+  } finally {
+    output.mockRestore();
+  }
+});

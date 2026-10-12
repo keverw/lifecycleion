@@ -201,9 +201,7 @@ export class SharedSlot<T extends object> {
    * object, so a repeat read skips `isValid`; otherwise `undefined`.
    */
   private readCached(slotValue: unknown): T | undefined {
-    return slotValue !== undefined && slotValue === this.cached
-      ? this.cached
-      : undefined;
+    return slotValue === this.cached ? this.cached : undefined;
   }
 
   /** Take `state`: it, `undefined` when already taken, or `'unusable'` when it cannot be. */

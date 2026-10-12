@@ -274,8 +274,9 @@ export class Logger extends EventEmitter {
   // `isPendingExit`, so that answer holds for every exit - a simulated exit after the
   // first included - rather than only until the first one commits.
   private _pendingExit: PendingExit | undefined;
-  // Whether an exit's `exit-called` listeners are running.
-  private _isEmittingExitCalled = false;
+  // Whether a request is writing its console reports or running its `exit-called`
+  // listeners: an `exit()` made then is absorbed into it (see `exit`).
+  private _isAbsorbingExitRequests = false;
   // The last failure code a request absorbed during that emit stood for, so the
   // `beforeExit` that follows is told it (see `exit`). Undefined otherwise.
   private _absorbedExitCode: number | undefined;
@@ -401,7 +402,8 @@ export class Logger extends EventEmitter {
     }
     // Console reports wait until this request's state is recorded: a console shim may
     // call `exit()` from one, and must find this request already counted rather than
-    // half-made. See `flushReports`.
+    // half-made. They are written where `exit-called` listeners run, so such a request is
+    // absorbed as a listener's is. See `flushReports`.
     const reports: string[] = [];
     if (this.isInvalidExitCode(code)) {
       // A report made while a console report is running would be dropped, so it does not
@@ -416,10 +418,11 @@ export class Logger extends EventEmitter {
     }
     // An `exit-called` listener that exits again is absorbed too: its nested emit
     // reaches the same listener, so an unconditional one recursed until the stack
-    // overflowed. The outer exit is already in flight and carries this request: its
-    // code still counts toward the pending one, but it runs no listeners or
-    // `beforeExit` of its own.
-    if (this._isEmittingExitCalled) {
+    // overflowed. So is an `exit()` a console shim makes from this request's own reports,
+    // which would otherwise announce itself ahead of the request that made it. The outer
+    // exit is already in flight and carries this request: its code still counts toward
+    // the pending one, but it runs no listeners or `beforeExit` of its own.
+    if (this._isAbsorbingExitRequests) {
       this.recordExitRequest(requestedCode, code, reports);
       if (code !== 0) {
         this._absorbedExitCode = code;
@@ -430,13 +433,6 @@ export class Logger extends EventEmitter {
     // Recorded before `exit-called` and `beforeExit` run, so a request either of them
     // makes - and one `beforeExit` answers 'wait' for - is judged against this one.
     const pendingExit = this.recordExitRequest(requestedCode, code, reports);
-    flushReports(reports);
-    // A console shim that exited from a report above may have committed the exit this
-    // request joined - with this request's code already in it - leaving nothing to run.
-    if (pendingExit !== this._pendingExit) {
-      return;
-    }
-    // Read after the reports, so an exit a shim started from one counts as the first.
     const isFirstExit = !this._exitRequested;
 
     this._exitRequested = true;
@@ -453,12 +449,13 @@ export class Logger extends EventEmitter {
       // request and those absorbed into it settle on - by the pending-code rule, the
       // last absorbed failure, else this request's own code. So an `exit(0)` whose
       // listener calls `exit(1)` tells `beforeExit` 1, the code it exits with.
-      this._isEmittingExitCalled = true;
+      this._isAbsorbingExitRequests = true;
       this._absorbedExitCode = undefined;
       try {
+        flushReports(reports);
         this.emit('logger', { eventType: 'exit-called', code, isFirstExit });
       } finally {
-        this._isEmittingExitCalled = false;
+        this._isAbsorbingExitRequests = false;
       }
       const beforeExitCode = this._absorbedExitCode ?? code;
       this._absorbedExitCode = undefined;
@@ -2155,11 +2152,10 @@ export class Logger extends EventEmitter {
     // pending exit. A repeat of the pending code changes nothing and is neither reported
     // nor counted. Names the normalized code when it differs from the request, as
     // `exit(300)` does.
-    if (pendingExit.didReportReplacement) {
+    // One made while a console report runs would be dropped, so it is counted instead,
+    // for the commit's summary.
+    if (pendingExit.didReportReplacement || isConsoleReportActive()) {
       pendingExit.suppressedReplacements++;
-      return pendingExit;
-    }
-    if (isConsoleReportActive()) {
       return pendingExit;
     }
     pendingExit.didReportReplacement = true;
