@@ -180,7 +180,7 @@ interface RetryRunnerCurrentState {
 }
 
 interface ConfirmCancellationResolveInfo<T> {
-  status: RunAttemptStatusCodes | null;
+  status: RunAttemptStatusCodes;
   code?: RunnerErrorCode;
   data?: T;
   error?: unknown;
@@ -929,12 +929,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         this.currentState.runnerState === 'stopping' ||
         this.currentState.runnerState === 'stopped'
       ) {
-        // Transition from stopped/stopping to running. Pending cancel() callers
-        // resolve 'superseded'; nothing here runs caller code synchronously.
-        this.cleanupTimers();
-        this.confirmCancellation('running', {
-          status: null,
-        });
+        this.supersedePendingCancellation();
       }
 
       return this.startOperation(
@@ -1105,13 +1100,26 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     }
   }
 
+  /**
+   * Move a stopping or stopped runner back to `running` for a forced restart. Pending
+   * `cancel()` callers resolve `'superseded'`; nothing here runs caller code.
+   */
+  private supersedePendingCancellation(): void {
+    this.cleanupTimers();
+    this.currentState.runnerState = 'running';
+
+    for (const resolver of this.cancelResolvers) {
+      resolver.resolveOnce('superseded');
+      this.cancelResolvers.delete(resolver);
+    }
+  }
+
   private confirmCancellation(
-    runnerState: RunnerState,
+    runnerState: Exclude<RunnerState, 'running'>,
     resolveInfo: ConfirmCancellationResolveInfo<T>,
     wasForced = false,
   ): void {
-    const isTerminal = runnerState !== 'running';
-    this.withTerminalDispatch(isTerminal, () => {
+    this.withTerminalDispatch(true, () => {
       // Resolve cancel promises and finalize operation state transitions.
       if (this.currentState.runnerState === 'stopping') {
         this.cleanupTimers();
@@ -1121,13 +1129,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         // resolve all cancel promises
         for (const resolver of this.cancelResolvers) {
           resolver.resolveOnce(
-            !isTerminal
-              ? 'superseded'
-              : runnerState !== 'stopped'
-                ? 'not-running'
-                : wasForced
-                  ? 'forced'
-                  : 'canceled',
+            runnerState !== 'stopped'
+              ? 'not-running'
+              : wasForced
+                ? 'forced'
+                : 'canceled',
           );
           this.cancelResolvers.delete(resolver);
         }
@@ -1135,43 +1141,37 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         this.currentState.runnerState = runnerState;
       }
 
-      if (runnerState !== 'running') {
-        // Freeze timeTakenMS for terminal states
-        this.currentState.finalTimeTakenMS =
-          this.currentState.operationStartTime !== null
-            ? Date.now() - this.currentState.operationStartTime
-            : -1;
+      // Freeze timeTakenMS for terminal states
+      this.currentState.finalTimeTakenMS =
+        this.currentState.operationStartTime !== null
+          ? Date.now() - this.currentState.operationStartTime
+          : -1;
 
-        // emit the operation ended event
-        this.emit(OPERATION_ENDED, {
-          runnerState,
-          timeTakenMS: this.timeTakenMS,
+      // emit the operation ended event
+      this.emit(OPERATION_ENDED, {
+        runnerState,
+        timeTakenMS: this.timeTakenMS,
+      });
+
+      if (resolveInfo.status === 'attempt_success') {
+        this.currentOperationResolver.resolveOnce({
+          status: 'attempt_success',
+          ...(resolveInfo.data !== undefined ? { data: resolveInfo.data } : {}),
         });
+      } else {
+        const nonSuccessResult: RunResultNonSuccess = {
+          status: resolveInfo.status,
+        };
 
-        if (resolveInfo.status !== null) {
-          if (resolveInfo.status === 'attempt_success') {
-            this.currentOperationResolver.resolveOnce({
-              status: 'attempt_success',
-              ...(resolveInfo.data !== undefined
-                ? { data: resolveInfo.data }
-                : {}),
-            });
-          } else {
-            const nonSuccessResult: RunResultNonSuccess = {
-              status: resolveInfo.status,
-            };
-
-            if (resolveInfo.code !== undefined) {
-              nonSuccessResult.code = resolveInfo.code;
-            }
-
-            if (resolveInfo.error !== undefined) {
-              nonSuccessResult.error = resolveInfo.error;
-            }
-
-            this.currentOperationResolver.resolveOnce(nonSuccessResult);
-          }
+        if (resolveInfo.code !== undefined) {
+          nonSuccessResult.code = resolveInfo.code;
         }
+
+        if (resolveInfo.error !== undefined) {
+          nonSuccessResult.error = resolveInfo.error;
+        }
+
+        this.currentOperationResolver.resolveOnce(nonSuccessResult);
       }
     });
   }
@@ -1290,7 +1290,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
     // The outcome this report ends the operation with, or `null` while it continues.
     let terminal: {
-      runnerState: RunnerState;
+      runnerState: Exclude<RunnerState, 'running'>;
       resolveInfo: ConfirmCancellationResolveInfo<T>;
     } | null = null;
 
@@ -1376,7 +1376,6 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // throwing. Their failure belongs to this transition, never to its successor.
       if (
         this.operationToken !== operationToken ||
-        this.currentOperationResolver !== operationResolver ||
         operationResolver.hasResolved ||
         this.currentState.currentAttemptContext !== null
       ) {
@@ -1438,7 +1437,6 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
    * caller code yet, so the runner is still `running` and no attempt is current.
    */
   private failAttemptSetup(error: unknown): void {
-    this.currentState.currentAttemptContext = null;
     this.cleanupTimers();
     this.confirmCancellation('fatal-error', {
       status: 'attempt_fatal',
