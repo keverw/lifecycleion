@@ -1388,8 +1388,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // throwing. Their failure belongs to this transition, never to its successor.
       if (
         this.operationToken !== operationToken ||
-        operationResolver.hasResolved ||
-        this.currentState.currentAttemptContext !== null
+        operationResolver.hasResolved
       ) {
         reportCallbackError('RetryRunner retry scheduling', error);
         return;
