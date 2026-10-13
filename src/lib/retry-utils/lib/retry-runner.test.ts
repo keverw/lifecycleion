@@ -1476,13 +1476,17 @@ test('a cancellation timer that throws forces cancellation and settles existing 
   }
 });
 
-test('a retry policy throw while a cancellation is pending is reported, not dropped', async () => {
-  const { reports, release } = collectRetryCallbackReports(
-    'RetryRunner retry scheduling',
-  );
+test('a report behind a pending cancel records its error without computing a retry delay', async () => {
   const random = Math.random;
+  let jitterCalls = 0;
+  const reportedGlobally: unknown[] = [];
+  const onGlobalError = (event: Event): void => {
+    reportedGlobally.push(event);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onGlobalError);
   try {
-    const failure = new Error('jitter failed');
+    const failure = new Error('attempt failed');
     let report: ReportResult | undefined;
     const runner = new RetryRunner(
       {
@@ -1500,75 +1504,22 @@ test('a retry policy throw while a cancellation is pending is reported, not drop
     runner.overrideGraceCancelPeriodMS(1000);
     const completion = runner.run(true);
     const cancellation = runner.cancel();
-    Math.random = (): never => {
-      throw failure;
+    Math.random = (): number => {
+      jitterCalls++;
+      return random();
     };
-    report?.('error', new Error('attempt failed'));
+    report?.('error', failure);
     Math.random = random;
 
+    expect(jitterCalls).toBe(0);
     expect(await cancellation).toBe('canceled');
     expect(await completion).toEqual({ status: 'canceled' });
-    expect(reports).toHaveLength(1);
-    expect(reports[0]?.cause).toBe(failure);
-  } finally {
-    Math.random = random;
-    release();
-  }
-});
-
-test('a retry policy throw behind a pending cancel is reported after the cancel is published', async () => {
-  const random = Math.random;
-  const failure = new Error('jitter failed');
-  let report: ReportResult | undefined;
-  let attempts = 0;
-  const runner = new RetryRunner(
-    {
-      strategy: 'exponential',
-      maxRetryAttempts: 3,
-      minTimeoutMS: 1,
-      maxTimeoutMS: 100,
-      factor: 2,
-      dispersion: 0.2,
-    },
-    (reportResult) => {
-      attempts++;
-      report = reportResult;
-    },
-  );
-  let forced: Promise<unknown> | undefined;
-  let stateWhenReported: string | undefined;
-  const onGlobalError = (event: Event): void => {
-    if (((event as ErrorEvent).error as Error).cause === failure) {
-      event.preventDefault();
-      stateWhenReported = runner.runnerState;
-      // A listener that starts new work from the report.
-      forced = runner.forceTry();
-    }
-  };
-  globalThis.addEventListener('error', onGlobalError);
-  try {
-    runner.overrideGraceCancelPeriodMS(1000);
-    const completion = runner.run(true);
-    const cancellation = runner.cancel();
-    Math.random = (): never => {
-      throw failure;
-    };
-    report?.('error', new Error('attempt failed'));
-    Math.random = random;
-
-    // The canceled outcome was published before the report ran its listeners.
-    expect(stateWhenReported).toBe('stopped');
-    expect(await cancellation).toBe('canceled');
-    expect(await completion).toEqual({ status: 'canceled' });
-    // So the listener's forceTry starts the next operation, which stays its own.
-    expect(await forced).toEqual({ status: 'running', reattached: false });
-    expect(runner.runnerState).toBe('running');
-    expect(attempts).toBe(2);
+    // Still recorded, as the docs promise for an 'error' acknowledgement.
+    expect(runner.errors).toEqual([failure]);
+    expect(reportedGlobally).toEqual([]);
   } finally {
     Math.random = random;
     globalThis.removeEventListener('error', onGlobalError);
-    runner.overrideGraceCancelPeriodMS(0);
-    await runner.cancel();
   }
 });
 

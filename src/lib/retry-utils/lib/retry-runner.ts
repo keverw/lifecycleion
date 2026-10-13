@@ -1389,9 +1389,6 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     let isSkip = false;
     let shouldQueryForRetry = false;
 
-    // A retry-transition failure the canceled outcome cannot carry, reported last.
-    let unreportedFailure: { error: unknown } | undefined;
-
     // The outcome this report ends the operation with, or `null` while it continues.
     let terminal: {
       runnerState: Exclude<RunnerState, 'running'>;
@@ -1430,12 +1427,12 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
       // Handle if query for retry
       if (shouldQueryForRetry) {
-        const shouldRetryQuery = this.policy.shouldRetry(
-          reportedValueOf(valueInfo),
-          isSkip,
-        );
-
         if (this.isCanceledOrPendingCancel) {
+          // Recorded as `shouldRetry` records it - an error, not a skip - without
+          // computing a retry delay the cancellation would throw away.
+          if (!isSkip) {
+            this.policy.reportError(reportedValueOf(valueInfo));
+          }
           terminal = {
             runnerState: 'stopped',
             resolveInfo: {
@@ -1443,6 +1440,10 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
             },
           };
         } else {
+          const shouldRetryQuery = this.policy.shouldRetry(
+            reportedValueOf(valueInfo),
+            isSkip,
+          );
           if (shouldRetryQuery.shouldRetry) {
             // Every retry goes through a timer, never a synchronous `attemptOperation`
             // call: `attempt-handled` for this attempt is emitted below, after this
@@ -1484,21 +1485,14 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // Retry policy evaluation and timer installation belong to this transition.
       // If either fails, publish an outcome instead of leaving a handled attempt
       // with no successor and no completion result.
+      // Only the running path queries the policy and arms a timer - a pending cancel
+      // only records the error - so the operation is still running here and ends fatal.
+      // The failure is not recorded in the policy: `errors` counts attempts, and this
+      // one's error, if any, already is.
       this.cleanupTimers();
-      // Classified as the main path above classifies it. The failure is not recorded in
-      // the policy: `errors` counts attempts, and this one's error, if any, already is.
-      const isCanceling = this.isCanceledOrPendingCancel;
-      if (isCanceling) {
-        // The canceled outcome does not carry it, so it is reported rather than dropped
-        // - once that outcome is published (below): the report runs global listeners,
-        // and one that starts new work must find this operation already over.
-        unreportedFailure = { error };
-      }
       terminal = {
-        runnerState: isCanceling ? 'stopped' : 'fatal-error',
-        resolveInfo: isCanceling
-          ? { status: 'canceled' }
-          : unexpectedFatal(error),
+        runnerState: 'fatal-error',
+        resolveInfo: unexpectedFatal(error),
       };
     }
 
@@ -1531,13 +1525,6 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         );
       }
     });
-
-    if (unreportedFailure !== undefined) {
-      reportCallbackError(
-        'RetryRunner retry scheduling',
-        unreportedFailure.error,
-      );
-    }
   }
 
   /**
