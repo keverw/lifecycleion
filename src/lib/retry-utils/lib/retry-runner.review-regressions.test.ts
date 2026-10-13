@@ -436,6 +436,26 @@ test('an error report with no value does not hide a later bare rejection', async
   }
 });
 
+test('rethrowing a reported NaN counts as a rethrow', async () => {
+  const reported: unknown[] = [];
+  const onGlobalError = (event: Event): void => {
+    reported.push(event);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onGlobalError);
+  try {
+    const runner = new RetryRunner(policy, (report) => {
+      report('fatal', NaN);
+      // eslint-disable-next-line @typescript-eslint/only-throw-error -- the case under test
+      throw NaN;
+    });
+    expect(await runner.run(true)).toMatchObject({ status: 'attempt_fatal' });
+    expect(reported).toEqual([]);
+  } finally {
+    globalThis.removeEventListener('error', onGlobalError);
+  }
+});
+
 test('a late report with a symbol status is reported, not thrown out of reportResult', async () => {
   const reports: unknown[] = [];
   const onGlobalError = (event: Event): void => {

@@ -1622,10 +1622,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // `cause`), so a rethrow of that value is the same shape.
       const isReportedErrorAgain = (failure: unknown): boolean =>
         context.handled &&
+        // `Object.is`, so a reported `NaN` rethrown is still the same value.
         ((firstReportedError !== undefined &&
-          firstReportedError.value === failure) ||
+          Object.is(firstReportedError.value, failure)) ||
           (latestReportedError !== undefined &&
-            latestReportedError.value === failure));
+            Object.is(latestReportedError.value, failure)));
 
       // A returned value whose `then` could not be read: a return-contract failure, kept
       // apart from a throw so a settled attempt reports it as what it is.
