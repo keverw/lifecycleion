@@ -298,6 +298,52 @@ test('a discarded second report does not hide the rethrow of the first report', 
   }
 });
 
+test('rethrowing a later reported error is not reported a second time', async () => {
+  const first = new Error('first failure');
+  const second = new Error('second failure');
+  const reported: unknown[] = [];
+  const onGlobalError = (event: Event): void => {
+    reported.push(((event as ErrorEvent).error as Error).cause);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onGlobalError);
+  try {
+    const runner = new RetryRunner(
+      { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 1 },
+      (report) => {
+        report('fatal', first);
+        // A later step fails: reported (discarded, and reported as late), then rethrown.
+        report('error', second);
+        throw second;
+      },
+    );
+    expect(await runner.run(true)).toMatchObject({ status: 'attempt_fatal' });
+    // Once, for the late report; the rethrow of the same error is not a new failure.
+    expect(reported).toEqual([second]);
+  } finally {
+    globalThis.removeEventListener('error', onGlobalError);
+  }
+});
+
+test('a late null error is reported as null on the error channel', async () => {
+  const reported: unknown[] = [];
+  const onGlobalError = (event: Event): void => {
+    reported.push(((event as ErrorEvent).error as Error).cause);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onGlobalError);
+  try {
+    const runner = new RetryRunner(policy, (report) => {
+      report('success', 'done');
+      report('error', null);
+    });
+    await runner.run(true);
+    expect(reported).toEqual([null]);
+  } finally {
+    globalThis.removeEventListener('error', onGlobalError);
+  }
+});
+
 test('a late report with a symbol status is reported, not thrown out of reportResult', async () => {
   const reports: unknown[] = [];
   const onGlobalError = (event: Event): void => {

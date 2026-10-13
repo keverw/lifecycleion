@@ -1291,12 +1291,15 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
             didOperationThrow
               ? 'RetryRunner operation threw after the attempt was settled'
               : 'RetryRunner reportResult (attempt already settled)',
-            valueInfo.error ??
-              new Error(
-                didOperationThrow
-                  ? 'the operation threw after the attempt was settled'
-                  : `reportResult('${renderName(status, 'unrenderable status')}') arrived after the attempt was settled`,
-              ),
+            // Only a missing value gets the stand-in below: a `null` error or `throw null`
+            // is reported as itself, as `report-discarded` publishes it.
+            valueInfo.error !== undefined
+              ? valueInfo.error
+              : new Error(
+                  didOperationThrow
+                    ? 'the operation threw after the attempt was settled'
+                    : `reportResult('${renderName(status, 'unrenderable status')}') arrived after the attempt was settled`,
+                ),
           );
         }
       }
@@ -1470,10 +1473,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     this.currentState.lastAttemptTimeTakenMS = attemptTimeElapsedMS;
 
     const terminalReport = terminal;
-    const isTerminalReport = terminalReport !== null;
     // Opened here rather than left to `confirmCancellation`, so `attempt-handled` for a
     // terminal report is inside the reentry scope too.
-    this.withTerminalDispatch(isTerminalReport, () => {
+    this.withTerminalDispatch(terminalReport !== null, () => {
       // emit the attempt handled event
       this.emit(ATTEMPT_HANDLED, {
         attemptID: context.id,
@@ -1554,24 +1556,17 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
       // reportResult is how the operation communicates outcome of this attempt.
       // Route the value to `data` for success/skip, or `error` for error/fatal.
-      // What the operation last handed `reportResult`, so the `catch` below can tell the
-      // ordinary `catch (e) { reportResult('error', e); throw e; }` shape - which is a
-      // rethrow of an outcome already recorded, not a second one - from a genuine throw
-      // after a settled attempt.
-      let didReport = false;
-      let reportedStatus: ReportResultStatus | undefined;
-      let reportedValue: unknown;
+      // Every value the operation handed `reportResult` as an error, so the `catch` below
+      // can tell the ordinary `catch (e) { reportResult('error', e); throw e; }` shape - a
+      // rethrow of an outcome already recorded, or already reported as a late report, not
+      // a second one - from a genuine throw after a settled attempt. Each report counts,
+      // not only the first: a later one is discarded but was still reported. Success and
+      // skip data is not held for as long as the operation keeps `reportResult`.
+      const reportedErrors = new Set<unknown>();
 
       const reportResult: ReportResult = (status, value) => {
-        // Only the first report is the attempt's outcome; a later one is discarded and
-        // must not change what the rethrow check compares against.
-        if (!didReport) {
-          didReport = true;
-          reportedStatus = status;
-          // Kept only for the rethrow check, which matches error statuses: a success's
-          // data is not held for as long as the operation keeps `reportResult`.
-          reportedValue =
-            status === 'success' || status === 'skip' ? undefined : value;
+        if (status !== 'success' && status !== 'skip') {
+          reportedErrors.add(value);
         }
 
         if (status === 'success' || status === 'skip') {
@@ -1591,11 +1586,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // unrecognized one included (it becomes a fatal `TypeError` with that value as
       // `cause`), so a rethrow of that value is the same shape.
       const isReportedErrorAgain = (failure: unknown): boolean =>
-        didReport &&
-        context.handled &&
-        reportedStatus !== 'success' &&
-        reportedStatus !== 'skip' &&
-        failure === reportedValue;
+        context.handled && reportedErrors.has(failure);
 
       // A returned value whose `then` could not be read: a return-contract failure, kept
       // apart from a throw so a settled attempt reports it as what it is.
