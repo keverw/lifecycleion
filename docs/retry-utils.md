@@ -405,9 +405,9 @@ Cancels the current operation and any scheduled retries.
 
 Returns `Promise<CancelResult>`:
 
-- `'canceled'` - operation acknowledged the abort signal and stopped
+- `'canceled'` - operation acknowledged the abort signal and stopped, or a `forceTry({ shouldAbortRunning: true })` had already settled its attempt when the cancellation finished
 - `'superseded'` - a newer forced restart took over while cancellation was pending; the runner may still be running
-- `'abandoned'` - operation never acknowledged the abort signal, and the runner stopped waiting for it: the grace period ran out, the grace timer could not be installed, or a `forceTry({ shouldAbortRunning: true })` settled the attempt mid-cancel and a newer `cancel()` or `reset()` (from that attempt's `attempt-handled` listener) took over. Without that newer request the force restart wins and pending `cancel()` calls resolve `'superseded'`. The operation may still be running.
+- `'abandoned'` - operation never acknowledged the abort signal, and the runner stopped waiting for it: the grace period ran out, or the grace timer could not be installed. The operation may still be running.
 - `'not-running'` - no cancelable operation remains, including a terminal outcome already being published or success/fatal completion that wins while cancellation is pending. Use `waitForCompletion()` for that operation's result. Such a call has no effect, with one exception: made from an abort listener (or a terminal listener it triggers) while `forceTry({ shouldAbortRunning: true })` is dispatching its abort, it still supersedes that force, which then starts no replacement - unless the operation succeeded. See `forceTry()`.
 
 ```typescript

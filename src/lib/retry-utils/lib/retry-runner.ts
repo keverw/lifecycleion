@@ -868,12 +868,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           // clearing the grace timer that would have finished the pending cancellation;
           // a cancel() from that settlement's attempt-handled listener only joined it.
           // Settle it here, or the cancel()/reset() calls joined to it never resolve.
-          // 'abandoned': the attempt never acknowledged its abort; forceTry settled it.
           if (
             this.currentState.runnerState === 'stopping' &&
             this.currentState.currentAttemptContext === null
           ) {
-            this.confirmCancellation('stopped', { status: 'canceled' }, true);
+            this.confirmCancellation('stopped', { status: 'canceled' });
           }
           return shouldWaitForCompletion
             ? operationResolver.promise

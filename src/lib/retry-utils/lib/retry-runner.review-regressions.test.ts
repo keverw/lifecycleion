@@ -175,8 +175,9 @@ test('a newer cancel from the forced skip prevents replacement', async () => {
   const runner = new RetryRunner(policy, () => {
     calls++;
   });
+  let cancellation: Promise<unknown> | undefined;
   runner.on('attempt-handled', () => {
-    void runner.cancel();
+    cancellation = runner.cancel();
   });
   await runner.run();
   expect(await runner.forceTry({ shouldAbortRunning: true })).toMatchObject({
@@ -186,6 +187,7 @@ test('a newer cancel from the forced skip prevents replacement', async () => {
   expect(await runner.waitForCompletion()).toMatchObject({
     status: 'canceled',
   });
+  expect(await cancellation).toBe('canceled');
   expect(calls).toBe(1);
 });
 
@@ -204,9 +206,10 @@ test('a newer cancel from the forced skip settles a pending cancellation', async
     code: 'force_try_superseded',
   });
   expect(runner.runnerState).toBe('stopped');
-  // The attempt never acknowledged its abort; forceTry settled it.
-  expect(await firstCancel).toBe('abandoned');
-  expect(await Promise.all(listenerCancels)).toEqual(['abandoned']);
+  // forceTry settled the attempt, so the cancellation ends 'canceled', as it does
+  // when no cancel was pending (below).
+  expect(await firstCancel).toBe('canceled');
+  expect(await Promise.all(listenerCancels)).toEqual(['canceled']);
   expect(await runResult).toMatchObject({ status: 'canceled' });
   expect(await runner.waitForCompletion()).toMatchObject({
     status: 'canceled',
