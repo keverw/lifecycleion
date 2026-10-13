@@ -186,6 +186,11 @@ interface ConfirmCancellationResolveInfo<T> {
   error?: unknown;
 }
 
+/** The outcome of an operation ended by a failure in the runner's own machinery. */
+function unexpectedFatal<T>(error: unknown): ConfirmCancellationResolveInfo<T> {
+  return { status: 'attempt_fatal', code: 'unexpected_error', error };
+}
+
 export class RetryRunner<T = unknown> extends EventEmitterProtected {
   // Human-readable label for debugging/logging purposes.
   private _operationLabel = 'Unnamed Operation';
@@ -1288,6 +1293,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     let isSkip = false;
     let shouldQueryForRetry = false;
 
+    // Read live: the retry query and the catch below classify the same transition.
+    const isCanceledOrPendingCancel = (): boolean =>
+      this.currentState.runnerState === 'stopping' ||
+      this.currentState.runnerState === 'stopped';
+
     // The outcome this report ends the operation with, or `null` while it continues.
     let terminal: {
       runnerState: Exclude<RunnerState, 'running'>;
@@ -1331,11 +1341,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           isSkip,
         );
 
-        const isCanceledOrPendingCancel =
-          this.currentState.runnerState === 'stopping' ||
-          this.currentState.runnerState === 'stopped';
-
-        if (isCanceledOrPendingCancel) {
+        if (isCanceledOrPendingCancel()) {
           terminal = {
             runnerState: 'stopped',
             resolveInfo: {
@@ -1388,14 +1394,12 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       this.cleanupTimers();
       // Classified as the main path above classifies it. The failure is not recorded in
       // the policy: `errors` counts attempts, and this one's error, if any, already is.
-      const isCanceling =
-        this.currentState.runnerState === 'stopping' ||
-        this.currentState.runnerState === 'stopped';
+      const isCanceling = isCanceledOrPendingCancel();
       terminal = {
         runnerState: isCanceling ? 'stopped' : 'fatal-error',
         resolveInfo: isCanceling
           ? { status: 'canceled' }
-          : { status: 'attempt_fatal', code: 'unexpected_error', error },
+          : unexpectedFatal(error),
       };
     }
 
@@ -1438,11 +1442,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
    */
   private failAttemptSetup(error: unknown): void {
     this.cleanupTimers();
-    this.confirmCancellation('fatal-error', {
-      status: 'attempt_fatal',
-      code: 'unexpected_error',
-      error,
-    });
+    this.confirmCancellation('fatal-error', unexpectedFatal(error));
   }
 
   private async attemptOperation(wasForced: boolean): Promise<void> {
