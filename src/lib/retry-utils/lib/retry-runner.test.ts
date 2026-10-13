@@ -1476,6 +1476,46 @@ test('a cancellation timer that throws forces cancellation and settles existing 
   }
 });
 
+test('a retry policy throw while a cancellation is pending is reported, not dropped', async () => {
+  const { reports, release } = collectRetryCallbackReports(
+    'RetryRunner retry scheduling',
+  );
+  const random = Math.random;
+  try {
+    const failure = new Error('jitter failed');
+    let report: ReportResult | undefined;
+    const runner = new RetryRunner(
+      {
+        strategy: 'exponential',
+        maxRetryAttempts: 3,
+        minTimeoutMS: 1,
+        maxTimeoutMS: 100,
+        factor: 2,
+        dispersion: 0.2,
+      },
+      (reportResult) => {
+        report = reportResult;
+      },
+    );
+    runner.overrideGraceCancelPeriodMS(1000);
+    const completion = runner.run(true);
+    const cancellation = runner.cancel();
+    Math.random = (): never => {
+      throw failure;
+    };
+    report?.('error', new Error('attempt failed'));
+    Math.random = random;
+
+    expect(await cancellation).toBe('canceled');
+    expect(await completion).toEqual({ status: 'canceled' });
+    expect(reports).toHaveLength(1);
+    expect(reports[0]?.cause).toBe(failure);
+  } finally {
+    Math.random = random;
+    release();
+  }
+});
+
 for (const replacement of ['forceTry', 'cancel'] as const) {
   test(`a retry policy throw after ${replacement} preserves the newer outcome`, async () => {
     const { reports, release } = collectRetryCallbackReports(

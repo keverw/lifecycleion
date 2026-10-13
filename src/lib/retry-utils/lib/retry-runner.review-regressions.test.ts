@@ -333,6 +333,24 @@ test('a throw while setting up an attempt ends the operation as an unexpected fa
   }
 });
 
+test('a forced attempt whose setup throws is not recorded as the last forced attempt', async () => {
+  const generateID = spyOn(idHelpers, 'generateID').mockImplementation(() => {
+    throw new Error('id generation failed');
+  });
+  try {
+    const runner = new RetryRunner(policy, (report) => {
+      report('success');
+    });
+    expect(
+      await runner.forceTry({ shouldWaitForCompletion: true }),
+    ).toMatchObject({ status: 'attempt_fatal', code: 'unexpected_error' });
+    // No attempt started, so none was forced.
+    expect(runner.wasLastAttemptForced).toBe(false);
+  } finally {
+    generateID.mockRestore();
+  }
+});
+
 // An operation that is not a function was accepted, and every attempt's call threw a
 // `TypeError` that was retried through the whole budget. Refused when constructed.
 test('an operation that is not a function is a TypeError at construction', () => {

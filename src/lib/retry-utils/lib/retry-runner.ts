@@ -863,11 +863,10 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         // Waiting calls join its outcome; non-waiting calls report supersession
         // immediately. Neither revives work the newer request wants stopped.
         if (hasNewStopRequest) {
-          // A guard, not a known path: a stop requested inside abort leaves the attempt
-          // attached with its grace timer armed, and any report from it moves the runner
-          // to 'stopped'. Were it ever 'stopping' with no attempt, nothing would remain
-          // to finish the cancellation, and the cancel()/reset() calls joined to it would
-          // never resolve.
+          // Forcing during 'stopping' settled the aborted attempt, detaching it and
+          // clearing the grace timer that would have finished the pending cancellation;
+          // a cancel() from that settlement's attempt-handled listener only joined it.
+          // Settle it here, or the cancel()/reset() calls joined to it never resolve.
           if (
             this.currentState.runnerState === 'stopping' &&
             this.currentState.currentAttemptContext === null
@@ -1396,6 +1395,10 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // Classified as the main path above classifies it. The failure is not recorded in
       // the policy: `errors` counts attempts, and this one's error, if any, already is.
       const isCanceling = isCanceledOrPendingCancel();
+      if (isCanceling) {
+        // The canceled outcome does not carry it, so report it rather than drop it.
+        reportCallbackError('RetryRunner retry scheduling', error);
+      }
       terminal = {
         runnerState: isCanceling ? 'stopped' : 'fatal-error',
         resolveInfo: isCanceling
@@ -1447,8 +1450,6 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   private async attemptOperation(wasForced: boolean): Promise<void> {
     // make sure the operation is running still, and not pending cancellation or canceled
     if (this.currentState.runnerState === 'running') {
-      this.currentState.lastAttemptWasForceTry = wasForced;
-
       // Every caller discards this method's promise, so a throw while creating the
       // attempt's context must end the operation here: as a rejection it would go
       // unhandled and leave the runner `running` with nothing to settle it. `emit` itself
@@ -1460,6 +1461,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         this.failAttemptSetup(error);
         return;
       }
+      this.currentState.lastAttemptWasForceTry = wasForced;
       this.currentState.currentAttemptContext = context;
 
       // emit the attempt started event
