@@ -855,11 +855,10 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       }
 
       // If an attempt is currently running and we want to abort it, do so.
-      if (this.isAttemptRunning && this.currentState.currentAttemptContext) {
+      const runningContext = this.currentState.currentAttemptContext;
+      if (runningContext instanceof AttemptContext && !runningContext.handled) {
         const { operationResolver, hasNewStopRequest } =
-          this.abortAttemptAndReadOwnership(
-            this.currentState.currentAttemptContext,
-          );
+          this.abortAttemptAndReadOwnership(runningContext);
         // A cancel/reset requested inside abort is newer than this force request.
         // Waiting calls join its outcome; non-waiting calls report supersession
         // immediately. Neither revives work the newer request wants stopped.
@@ -1422,9 +1421,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         error: valueInfo.error,
         operationTimeElapsedMS: this.timeTakenMS,
         attemptTimeElapsedMS,
-        wasCanceled:
-          this.currentState.runnerState === 'stopping' ||
-          this.currentState.runnerState === 'stopped',
+        wasCanceled: isCanceledOrPendingCancel(),
       } satisfies OnAttemptHandledInfo<T>);
 
       // if a confirm cancel should run
