@@ -922,12 +922,17 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           // clearing the grace timer that would have finished the pending cancellation;
           // a cancel() from that settlement's attempt-handled listener only joined it.
           // Settle it here, or the cancel()/reset() calls joined to it never resolve:
-          // 'abandoned', since the attempt never acknowledged its abort.
+          // 'abandoned' when the attempt was dropped without acknowledging its abort, by
+          // the same rule cancel() applies when it finds no attempt.
           if (
             this.currentState.runnerState === 'stopping' &&
             this.currentState.currentAttemptContext === null
           ) {
-            this.confirmCancellation('stopped', { status: 'canceled' }, true);
+            this.confirmCancellation(
+              'stopped',
+              { status: 'canceled' },
+              this.currentState.lastAttemptSettledAs === 'replaced',
+            );
           }
           return shouldWaitForCompletion
             ? operationResolver.promise
@@ -1335,8 +1340,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       this.emit(REPORT_DISCARDED, {
         attemptID: context.id,
         status: source === 'report' ? status : 'throw',
-        // By which key the report used, so a `null` error or `throw null` is kept.
-        value: 'error' in valueInfo ? valueInfo.error : valueInfo.data,
+        // By key, so a `null` error or `throw null` is kept.
+        value: reportedValueOf(valueInfo),
         reason:
           context.settledAs === 'abandoned' || context.settledAs === 'replaced'
             ? context.settledAs
@@ -1596,9 +1601,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
             data: value as T,
           });
         } else {
-          // An unrecognized status with no value records nothing: a later, unrelated
-          // `throw undefined` must not read as its rethrow.
-          if (status === 'error' || status === 'fatal' || value !== undefined) {
+          // A report with no value records nothing: a later, unrelated `throw undefined`
+          // or bare `Promise.reject()` must not read as its rethrow.
+          if (value !== undefined) {
             reportedErrors.add(value);
           }
           this.handleReportResult(context, status, {

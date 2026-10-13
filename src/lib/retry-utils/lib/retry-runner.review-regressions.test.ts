@@ -412,6 +412,30 @@ test('a reported null is kept as null in errors and on an invalid status cause',
   expect(error?.cause).toBeNull();
 });
 
+test('an error report with no value does not hide a later bare rejection', async () => {
+  const reported: string[] = [];
+  const onGlobalError = (event: Event): void => {
+    reported.push(((event as ErrorEvent).error as Error).message);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onGlobalError);
+  try {
+    const runner = new RetryRunner(policy, (report) => {
+      report('fatal');
+      // A cleanup step failing with no reason, unrelated to the report.
+      // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors -- the case under test
+      return Promise.reject();
+    });
+    await runner.run(true);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(reported).toEqual([
+      'Error in a callback RetryRunner operation threw after the attempt was settled',
+    ]);
+  } finally {
+    globalThis.removeEventListener('error', onGlobalError);
+  }
+});
+
 test('a late report with a symbol status is reported, not thrown out of reportResult', async () => {
   const reports: unknown[] = [];
   const onGlobalError = (event: Event): void => {
