@@ -876,9 +876,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         shouldWaitForCompletion,
       );
       assertBooleanOption('forceTry() shouldAbortRunning', shouldAbortRunning);
-      const refusal = this.checkForDisallowedPerOperationStates('forceTry', [
-        'completed',
-      ]);
+      const refusal = this.alreadyCompletedRefusal('forceTry');
       if (refusal) {
         return refusal;
       }
@@ -931,10 +929,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
                 error: new RetryUtilsErrRunnerForceTrySuperseded('forceTry'),
               };
         }
-        const afterAbort = this.checkForDisallowedPerOperationStates(
-          'forceTry',
-          ['completed'],
-        );
+        const afterAbort = this.alreadyCompletedRefusal('forceTry');
         if (afterAbort) {
           // The call was admitted before abort completed this operation.
           // Waiting callers retain its result; no replacement is started.
@@ -1016,6 +1011,20 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     };
   }
 
+  /** The `already_completed` refusal, when the runner has completed. */
+  private alreadyCompletedRefusal(
+    methodName: 'run' | 'resume' | 'forceTry',
+  ): RunResult<T> | undefined {
+    if (this.currentState.runnerState !== 'completed') {
+      return undefined;
+    }
+    return {
+      status: 'pre_operation_error',
+      code: 'already_completed',
+      error: new RetryUtilsErrRunnerAlreadyCompleted(methodName),
+    };
+  }
+
   private checkForDisallowedPerOperationStates(
     methodName: 'run' | 'resume' | 'forceTry',
     disallowedStates: Array<
@@ -1029,15 +1038,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   ): RunResult<T> | undefined {
     // Preflight state checks to normalize errors for each entrypoint.
     for (const checkForState of disallowedStates) {
-      if (
-        checkForState === 'completed' &&
-        this.currentState.runnerState === 'completed'
-      ) {
-        return {
-          status: 'pre_operation_error',
-          code: 'already_completed',
-          error: new RetryUtilsErrRunnerAlreadyCompleted(methodName),
-        };
+      if (checkForState === 'completed') {
+        const refusal = this.alreadyCompletedRefusal(methodName);
+        if (refusal) {
+          return refusal;
+        }
       } else if (
         checkForState === 'running' &&
         this.currentState.runnerState === 'running'
