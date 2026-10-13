@@ -133,8 +133,9 @@ export type ReportDiscardedReason =
 export interface OnReportDiscardedInfo {
   attemptID: string;
   /**
-   * The status passed to `reportResult`, as given, or `'throw'` for a throw (or a
-   * returned value whose `then` could not be read).
+   * The status passed to `reportResult`, as given and not validated (a late report is
+   * not checked), or `'throw'` for a throw (or a returned value whose `then` could not
+   * be read).
    */
   status: ReportResultStatus | 'throw';
   /** The reported data or error, or what was thrown. */
@@ -1306,7 +1307,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       this.emit(REPORT_DISCARDED, {
         attemptID: context.id,
         status: source === 'report' ? status : 'throw',
-        value: valueInfo.error ?? valueInfo.data,
+        // By which key the report used, so a `null` error or `throw null` is kept.
+        value: 'error' in valueInfo ? valueInfo.error : valueInfo.data,
         reason:
           context.settledAs === 'abandoned' || context.settledAs === 'replaced'
             ? context.settledAs

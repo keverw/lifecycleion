@@ -149,3 +149,19 @@ test('onReportDiscarded registers a report-discarded listener', async () => {
     { status: 'success', value: 'again', reason: 'already-reported' },
   ]);
 });
+
+test('a null late error and a throw null are published as null', async () => {
+  const runner = new RetryRunner(policy, (report) => {
+    report('success', 'done');
+    report('error', null);
+    // eslint-disable-next-line @typescript-eslint/only-throw-error -- the case under test
+    throw null;
+  });
+  const discarded = recordDiscards(runner);
+
+  await runner.run(true);
+  expect(discarded.map(({ status, value }) => ({ status, value }))).toEqual([
+    { status: 'error', value: null },
+    { status: 'throw', value: null },
+  ]);
+});
