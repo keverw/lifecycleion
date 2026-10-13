@@ -1587,13 +1587,15 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
       // reportResult is how the operation communicates outcome of this attempt.
       // Route the value to `data` for success/skip, or `error` for error/fatal.
-      // Every value the operation handed `reportResult` as an error, so the `catch` below
-      // can tell the ordinary `catch (e) { reportResult('error', e); throw e; }` shape - a
-      // rethrow of an outcome already recorded, or already reported as a late report, not
-      // a second one - from a genuine throw after a settled attempt. Each report counts,
-      // not only the first: a later one is discarded but was still reported. Success and
-      // skip data is not held for as long as the operation keeps `reportResult`.
-      const reportedErrors = new Set<unknown>();
+      // The first and the latest value the operation handed `reportResult` as an error, so
+      // the `catch` below can tell the ordinary `catch (e) { reportResult('error', e);
+      // throw e; }` shape - a rethrow of an outcome already recorded, or of a later report
+      // already reported as late, not a second one - from a genuine throw after a settled
+      // attempt. Two slots, not every value: an operation that wires a long-lived emitter
+      // to `reportResult` would otherwise keep each later error alive for as long as it
+      // holds the callback. Success and skip data is not held at all.
+      let firstReportedError: { value: unknown } | undefined;
+      let latestReportedError: { value: unknown } | undefined;
 
       const reportResult: ReportResult = (status, value) => {
         if (status === 'success' || status === 'skip') {
@@ -1604,7 +1606,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           // A report with no value records nothing: a later, unrelated `throw undefined`
           // or bare `Promise.reject()` must not read as its rethrow.
           if (value !== undefined) {
-            reportedErrors.add(value);
+            latestReportedError = { value };
+            firstReportedError ??= latestReportedError;
           }
           this.handleReportResult(context, status, {
             error: value,
@@ -1618,7 +1621,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // unrecognized one included (it becomes a fatal `TypeError` with that value as
       // `cause`), so a rethrow of that value is the same shape.
       const isReportedErrorAgain = (failure: unknown): boolean =>
-        context.handled && reportedErrors.has(failure);
+        context.handled &&
+        ((firstReportedError !== undefined &&
+          firstReportedError.value === failure) ||
+          (latestReportedError !== undefined &&
+            latestReportedError.value === failure));
 
       // A returned value whose `then` could not be read: a return-contract failure, kept
       // apart from a throw so a settled attempt reports it as what it is.
