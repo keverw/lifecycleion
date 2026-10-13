@@ -344,6 +344,30 @@ test('a late null error is reported as null on the error channel', async () => {
   }
 });
 
+test('an unrecognized status with no value does not hide a later throw undefined', async () => {
+  const reported: string[] = [];
+  const onGlobalError = (event: Event): void => {
+    reported.push(((event as ErrorEvent).error as Error).message);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onGlobalError);
+  try {
+    const runner = new RetryRunner(policy, (report) => {
+      report('success', 'done');
+      (report as (status: string) => void)('sucess');
+      // eslint-disable-next-line @typescript-eslint/only-throw-error -- the case under test
+      throw undefined;
+    });
+    await runner.run(true);
+    expect(reported).toEqual([
+      'Error in a callback RetryRunner reportResult (attempt already settled)',
+      'Error in a callback RetryRunner operation threw after the attempt was settled',
+    ]);
+  } finally {
+    globalThis.removeEventListener('error', onGlobalError);
+  }
+});
+
 test('a late report with a symbol status is reported, not thrown out of reportResult', async () => {
   const reports: unknown[] = [];
   const onGlobalError = (event: Event): void => {

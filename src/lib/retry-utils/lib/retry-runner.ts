@@ -7,6 +7,7 @@ import { renderName } from '../../internal/render-name';
 import { isString } from '../../strings';
 import { isPlainObject } from '../../is-plain-object';
 import { isFunction } from '../../is-function';
+import { isBoolean } from '../../is-boolean';
 import { toError } from '../../to-error';
 import { RetryPolicy } from './retry-policy';
 import { toTimerDelayMS } from '../../internal/timer-limits';
@@ -303,7 +304,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
    * current operation publishes its terminal outcome (`terminal_dispatch_in_progress`,
    * e.g. from an `attempt-handled` listener for a terminal report or an `operation-ended`
    * listener) or while another `run()` / `resume()` / `forceTry()` call holds the lock
-   * (`lock_error`) - reading `true` there sent callers into a refusal it promised away.
+   * (`lock_error`), so it never reads `true` where `forceTry()` would refuse.
    *
    * Accepted is not "starts an attempt": with an attempt in flight - including while
    * `'stopping'` - the default `forceTry()` attaches to it (`reattached: true`) and a
@@ -1565,15 +1566,16 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       const reportedErrors = new Set<unknown>();
 
       const reportResult: ReportResult = (status, value) => {
-        if (status !== 'success' && status !== 'skip') {
-          reportedErrors.add(value);
-        }
-
         if (status === 'success' || status === 'skip') {
           this.handleReportResult(context, status, {
             data: value as T,
           });
         } else {
+          // An unrecognized status with no value records nothing: a later, unrelated
+          // `throw undefined` must not read as its rethrow.
+          if (status === 'error' || status === 'fatal' || value !== undefined) {
+            reportedErrors.add(value);
+          }
           this.handleReportResult(context, status, {
             error: value,
           });
@@ -1668,7 +1670,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
  * is inspected or work is started, rather than truthiness deciding a `'yes'`.
  */
 function assertBooleanOption(label: string, value: unknown): void {
-  if (value !== undefined && typeof value !== 'boolean') {
+  if (value !== undefined && !isBoolean(value)) {
     throw new TypeError(`${label} must be a boolean when provided`);
   }
 }
