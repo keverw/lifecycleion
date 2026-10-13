@@ -172,3 +172,19 @@ test('a null late error and a throw null are published as null', async () => {
     { status: 'throw', value: null },
   ]);
 });
+
+test('a late report with an unrecognized status is published as invalid', async () => {
+  const runner = new RetryRunner(policy, (report) => {
+    report('success', 'done');
+    (report as (status: unknown, value: unknown) => void)(
+      Symbol('oops'),
+      'late',
+    );
+  });
+  const discarded = recordDiscards(runner);
+
+  await runner.run(true);
+  expect(discarded).toMatchObject([
+    { status: 'invalid', value: 'late', reason: 'already-reported' },
+  ]);
+});
