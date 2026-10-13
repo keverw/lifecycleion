@@ -205,6 +205,10 @@ interface RetryRunnerCurrentState {
   finalTimeTakenMS: number | null;
   // Cached duration of the last completed attempt.
   lastAttemptTimeTakenMS: number;
+  // How the last settled attempt was settled (`AttemptContext.settledAs`). A cancel
+  // that finds no attempt right after one was replaced without acknowledging its abort
+  // resolves 'abandoned': that operation may still be running.
+  lastAttemptSettledAs: AttemptContext['settledAs'];
 }
 
 interface ConfirmCancellationResolveInfo<T> {
@@ -520,10 +524,14 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           !this.currentState.currentAttemptContext ||
           this.currentState.currentAttemptContext.handled
         ) {
-          // No active attempt, can confirm immediately.
-          this.confirmCancellation('stopped', {
-            status: 'canceled',
-          });
+          // No active attempt, can confirm immediately - as 'abandoned' when the last
+          // one was replaced without acknowledging its abort (a cancel() from its
+          // attempt-handled listener while forceTry dispatches), since it may still run.
+          this.confirmCancellation(
+            'stopped',
+            { status: 'canceled' },
+            this.currentState.lastAttemptSettledAs === 'replaced',
+          );
         } else {
           // Signal the running attempt to abort.
           const context = this.currentState.currentAttemptContext;
@@ -659,6 +667,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   ): void {
     context.handled = true;
     context.settledAs = settledAs;
+    this.currentState.lastAttemptSettledAs = settledAs;
     this.currentState.currentAttemptContext = null;
     this.cleanupTimers();
     const attemptTimeElapsedMS = Date.now() - context.startTime;
@@ -899,12 +908,13 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           // Forcing during 'stopping' settled the aborted attempt, detaching it and
           // clearing the grace timer that would have finished the pending cancellation;
           // a cancel() from that settlement's attempt-handled listener only joined it.
-          // Settle it here, or the cancel()/reset() calls joined to it never resolve.
+          // Settle it here, or the cancel()/reset() calls joined to it never resolve:
+          // 'abandoned', since the attempt never acknowledged its abort.
           if (
             this.currentState.runnerState === 'stopping' &&
             this.currentState.currentAttemptContext === null
           ) {
-            this.confirmCancellation('stopped', { status: 'canceled' });
+            this.confirmCancellation('stopped', { status: 'canceled' }, true);
           }
           return shouldWaitForCompletion
             ? operationResolver.promise
@@ -995,6 +1005,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       operationStartTime: null,
       finalTimeTakenMS: null,
       lastAttemptTimeTakenMS: -1,
+      lastAttemptSettledAs: null,
     };
   }
 
@@ -1351,6 +1362,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     // Mark the context as handled
     context.handled = true;
     context.settledAs = 'reported';
+    this.currentState.lastAttemptSettledAs = 'reported';
 
     // Handle the result based on status
     let isSkip = false;

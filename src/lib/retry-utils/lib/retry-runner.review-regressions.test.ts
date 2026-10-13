@@ -187,7 +187,8 @@ test('a newer cancel from the forced skip prevents replacement', async () => {
   expect(await runner.waitForCompletion()).toMatchObject({
     status: 'canceled',
   });
-  expect(await cancellation).toBe('canceled');
+  // The replaced attempt never acknowledged its abort.
+  expect(await cancellation).toBe('abandoned');
   expect(calls).toBe(1);
 });
 
@@ -206,10 +207,10 @@ test('a newer cancel from the forced skip settles a pending cancellation', async
     code: 'force_try_superseded',
   });
   expect(runner.runnerState).toBe('stopped');
-  // forceTry settled the attempt, so the cancellation ends 'canceled', as it does
-  // when no cancel was pending (below).
-  expect(await firstCancel).toBe('canceled');
-  expect(await Promise.all(listenerCancels)).toEqual(['canceled']);
+  // forceTry dropped an attempt that never acknowledged its abort, so the cancellation
+  // ends 'abandoned', as it does when no cancel was pending (above).
+  expect(await firstCancel).toBe('abandoned');
+  expect(await Promise.all(listenerCancels)).toEqual(['abandoned']);
   expect(await runResult).toMatchObject({ status: 'canceled' });
   expect(await runner.waitForCompletion()).toMatchObject({
     status: 'canceled',
