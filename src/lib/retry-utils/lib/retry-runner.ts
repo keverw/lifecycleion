@@ -867,11 +867,12 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           // clearing the grace timer that would have finished the pending cancellation;
           // a cancel() from that settlement's attempt-handled listener only joined it.
           // Settle it here, or the cancel()/reset() calls joined to it never resolve.
+          // 'forced': the attempt never acknowledged its abort; forceTry settled it.
           if (
             this.currentState.runnerState === 'stopping' &&
             this.currentState.currentAttemptContext === null
           ) {
-            this.confirmCancellation('stopped', { status: 'canceled' });
+            this.confirmCancellation('stopped', { status: 'canceled' }, true);
           }
           return shouldWaitForCompletion
             ? operationResolver.promise
@@ -1113,10 +1114,15 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     this.cleanupTimers();
     this.currentState.runnerState = 'running';
 
+    this.resolvePendingCancels('superseded');
+  }
+
+  /** Answer every pending `cancel()` call with `result`. */
+  private resolvePendingCancels(result: CancelResult): void {
     for (const resolver of this.cancelResolvers) {
-      resolver.resolveOnce('superseded');
-      this.cancelResolvers.delete(resolver);
+      resolver.resolveOnce(result);
     }
+    this.cancelResolvers.clear();
   }
 
   private confirmCancellation(
@@ -1132,16 +1138,13 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         this.currentState.runnerState = runnerState;
 
         // resolve all cancel promises
-        for (const resolver of this.cancelResolvers) {
-          resolver.resolveOnce(
-            runnerState !== 'stopped'
-              ? 'not-running'
-              : wasForced
-                ? 'forced'
-                : 'canceled',
-          );
-          this.cancelResolvers.delete(resolver);
-        }
+        this.resolvePendingCancels(
+          runnerState !== 'stopped'
+            ? 'not-running'
+            : wasForced
+              ? 'forced'
+              : 'canceled',
+        );
       } else {
         this.currentState.runnerState = runnerState;
       }
@@ -1498,7 +1501,10 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       const reportResult: ReportResult = (status, value) => {
         didReport = true;
         reportedStatus = status;
-        reportedValue = value;
+        // Kept only for the rethrow check, which matches error statuses: a success's
+        // data is not held for as long as the operation keeps `reportResult`.
+        reportedValue =
+          status === 'success' || status === 'skip' ? undefined : value;
 
         if (status === 'success' || status === 'skip') {
           this.handleReportResult(context, status, {
