@@ -1126,6 +1126,14 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     this.cancelResolvers.clear();
   }
 
+  /** Whether a cancellation is pending or has stopped the operation. */
+  private get isCanceledOrPendingCancel(): boolean {
+    return (
+      this.currentState.runnerState === 'stopping' ||
+      this.currentState.runnerState === 'stopped'
+    );
+  }
+
   private confirmCancellation(
     runnerState: Exclude<RunnerState, 'running'>,
     resolveInfo: ConfirmCancellationResolveInfo<T>,
@@ -1297,11 +1305,6 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     let isSkip = false;
     let shouldQueryForRetry = false;
 
-    // Read live: the retry query and the catch below classify the same transition.
-    const isCanceledOrPendingCancel = (): boolean =>
-      this.currentState.runnerState === 'stopping' ||
-      this.currentState.runnerState === 'stopped';
-
     // The outcome this report ends the operation with, or `null` while it continues.
     let terminal: {
       runnerState: Exclude<RunnerState, 'running'>;
@@ -1345,7 +1348,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           isSkip,
         );
 
-        if (isCanceledOrPendingCancel()) {
+        if (this.isCanceledOrPendingCancel) {
           terminal = {
             runnerState: 'stopped',
             resolveInfo: {
@@ -1398,7 +1401,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       this.cleanupTimers();
       // Classified as the main path above classifies it. The failure is not recorded in
       // the policy: `errors` counts attempts, and this one's error, if any, already is.
-      const isCanceling = isCanceledOrPendingCancel();
+      const isCanceling = this.isCanceledOrPendingCancel;
       if (isCanceling) {
         // The canceled outcome does not carry it, so report it rather than drop it.
         reportCallbackError('RetryRunner retry scheduling', error);
@@ -1428,7 +1431,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         error: valueInfo.error,
         operationTimeElapsedMS: this.timeTakenMS,
         attemptTimeElapsedMS,
-        wasCanceled: isCanceledOrPendingCancel(),
+        wasCanceled: this.isCanceledOrPendingCancel,
       } satisfies OnAttemptHandledInfo<T>);
 
       // if a confirm cancel should run
