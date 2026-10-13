@@ -369,6 +369,49 @@ test('an unrecognized status with no value does not hide a later throw undefined
   }
 });
 
+test('an abandoned cancel does not carry over to the next operation', async () => {
+  let calls = 0;
+  const runner = new RetryRunner(policy, () => {
+    calls++;
+  });
+  let firstCancel: Promise<unknown> | undefined;
+  runner.once('attempt-handled', () => {
+    firstCancel = runner.cancel();
+  });
+  await runner.run();
+  await runner.forceTry({ shouldAbortRunning: true });
+  expect(await firstCancel).toBe('abandoned');
+  expect(runner.runnerState).toBe('stopped');
+
+  // A new operation, canceled before any attempt starts: nothing was abandoned.
+  let secondCancel: Promise<unknown> | undefined;
+  runner.once('operation-started', () => {
+    secondCancel = runner.cancel();
+  });
+  await runner.resume();
+  expect(await secondCancel).toBe('canceled');
+  expect(calls).toBe(1);
+});
+
+test('a reported null is kept as null in errors and on an invalid status cause', async () => {
+  const fatal = new RetryRunner(policy, (report) => {
+    report('fatal', null);
+  });
+  expect(await fatal.run(true)).toMatchObject({ status: 'attempt_fatal' });
+  expect(fatal.errors).toEqual([null]);
+  expect(fatal.lastError).toBeNull();
+
+  const invalid = new RetryRunner(policy, (report) => {
+    (report as (status: string, value: unknown) => void)('bogus', null);
+  });
+  const result = await invalid.run(true);
+  expect(result.status).toBe('attempt_fatal');
+  const error = (result as { error?: Error }).error;
+  expect(error).toBeInstanceOf(TypeError);
+  expect(error !== undefined && 'cause' in error).toBe(true);
+  expect(error?.cause).toBeNull();
+});
+
 test('a late report with a symbol status is reported, not thrown out of reportResult', async () => {
   const reports: unknown[] = [];
   const onGlobalError = (event: Event): void => {

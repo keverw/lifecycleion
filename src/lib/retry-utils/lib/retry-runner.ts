@@ -218,6 +218,17 @@ interface ConfirmCancellationResolveInfo<T> {
   error?: unknown;
 }
 
+/**
+ * The value a report carried, chosen by the key it used rather than by nullishness, so
+ * a reported `null` stays `null`.
+ */
+function reportedValueOf(valueInfo: {
+  data?: unknown;
+  error?: unknown;
+}): unknown {
+  return 'error' in valueInfo ? valueInfo.error : valueInfo.data;
+}
+
 /** The outcome of an operation ended by a failure in the runner's own machinery. */
 function unexpectedFatal<T>(error: unknown): ConfirmCancellationResolveInfo<T> {
   return { status: 'attempt_fatal', code: 'unexpected_error', error };
@@ -688,6 +699,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     shouldKeepPendingResolver = false,
   ): PromiseProtectedResolver<RunResult<T>> {
     this.operationToken = Symbol();
+    // How an earlier operation's last attempt settled says nothing about this one.
+    this.currentState.lastAttemptSettledAs = null;
     if (
       !shouldKeepPendingResolver ||
       !this.currentOperationResolver ||
@@ -1179,7 +1192,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   private confirmCancellation(
     runnerState: Exclude<RunnerState, 'running'>,
     resolveInfo: ConfirmCancellationResolveInfo<T>,
-    wasForced = false,
+    wasAbandoned = false,
   ): void {
     this.withTerminalDispatch(true, () => {
       // Resolve cancel promises and finalize operation state transitions.
@@ -1192,7 +1205,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         this.resolvePendingCancels(
           runnerState !== 'stopped'
             ? 'not-running'
-            : wasForced
+            : wasAbandoned
               ? 'abandoned'
               : 'canceled',
         );
@@ -1340,7 +1353,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       status !== 'skip'
     ) {
       // The reported value is kept on `cause`, so the mistake does not also lose it.
-      const reportedError = valueInfo.error ?? valueInfo.data;
+      const reportedError = reportedValueOf(valueInfo);
       status = 'fatal';
       valueInfo = {
         error: new TypeError(
@@ -1392,7 +1405,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         shouldQueryForRetry = true;
       } else if (status === 'fatal') {
         // Fatal errors are recorded, but never retried.
-        this.policy.reportError(valueInfo.error ?? valueInfo.data);
+        this.policy.reportError(reportedValueOf(valueInfo));
 
         terminal = {
           runnerState: 'fatal-error',
@@ -1410,7 +1423,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // Handle if query for retry
       if (shouldQueryForRetry) {
         const shouldRetryQuery = this.policy.shouldRetry(
-          valueInfo.error ?? valueInfo.data,
+          reportedValueOf(valueInfo),
           isSkip,
         );
 
