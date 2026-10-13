@@ -864,9 +864,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         // Waiting calls join its outcome; non-waiting calls report supersession
         // immediately. Neither revives work the newer request wants stopped.
         if (hasNewStopRequest) {
-          // Aborting during 'stopping' detached the attempt and cleared the grace
-          // timer that would have finished the pending cancellation. Settle it here,
-          // or the cancel()/reset() calls joined to it never resolve.
+          // A guard, not a known path: a stop requested inside abort leaves the attempt
+          // attached with its grace timer armed, and any report from it moves the runner
+          // to 'stopped'. Were it ever 'stopping' with no attempt, nothing would remain
+          // to finish the cancellation, and the cancel()/reset() calls joined to it would
+          // never resolve.
           if (
             this.currentState.runnerState === 'stopping' &&
             this.currentState.currentAttemptContext === null

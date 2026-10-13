@@ -1240,3 +1240,40 @@ test('forceTry from attempt-started is locked for the first attempt and attaches
     await runner.cancel();
   }
 });
+
+test('a force-abort from a timer-driven attempt-started replaces it before its operation runs', async () => {
+  const invoked: string[] = [];
+  const reports: ReportResult[] = [];
+  const runner = new RetryRunner(
+    { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 1 },
+    (report) => {
+      invoked.push(runner.wasLastAttemptForced ? 'forced' : 'automatic');
+      reports.push(report);
+    },
+  );
+  const started: string[] = [];
+  let hasForced = false;
+  runner.on(ATTEMPT_STARTED, ({ attemptID }: { attemptID: string }) => {
+    // Only on the timer-driven retry, outside any locked call.
+    if (reports.length === 1 && !hasForced) {
+      hasForced = true;
+      void runner.forceTry({ shouldAbortRunning: true });
+    }
+    started.push(attemptID);
+  });
+  try {
+    await runner.run();
+    reports[0]('error', new Error('first attempt failed'));
+    for (let i = 0; i < 100 && reports.length < 2; i++) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    // The replaced retry's operation never ran; only the forced attempt did.
+    expect(invoked).toEqual(['automatic', 'forced']);
+    // A later listener sees the replacement start before the replaced attempt.
+    expect(started).toHaveLength(3);
+    expect(runner.isAttemptRunning).toBe(true);
+  } finally {
+    runner.overrideGraceCancelPeriodMS(0);
+    await runner.cancel();
+  }
+});
