@@ -1304,6 +1304,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     let isSkip = false;
     let shouldQueryForRetry = false;
 
+    // A retry-transition failure the canceled outcome cannot carry, reported last.
+    let unreportedFailure: { error: unknown } | undefined;
+
     // The outcome this report ends the operation with, or `null` while it continues.
     let terminal: {
       runnerState: Exclude<RunnerState, 'running'>;
@@ -1401,8 +1404,10 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // the policy: `errors` counts attempts, and this one's error, if any, already is.
       const isCanceling = this.isCanceledOrPendingCancel;
       if (isCanceling) {
-        // The canceled outcome does not carry it, so report it rather than drop it.
-        reportCallbackError('RetryRunner retry scheduling', error);
+        // The canceled outcome does not carry it, so it is reported rather than dropped
+        // - once that outcome is published (below): the report runs global listeners,
+        // and one that starts new work must find this operation already over.
+        unreportedFailure = { error };
       }
       terminal = {
         runnerState: isCanceling ? 'stopped' : 'fatal-error',
@@ -1442,6 +1447,13 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         );
       }
     });
+
+    if (unreportedFailure !== undefined) {
+      reportCallbackError(
+        'RetryRunner retry scheduling',
+        unreportedFailure.error,
+      );
+    }
   }
 
   /**
