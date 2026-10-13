@@ -238,6 +238,7 @@ new RetryRunner<T>(
     onOperationEnded?: (info: OnOperationEndedInfo) => void;
     onAttemptStarted?: (info: OnAttemptStartedInfo) => void;
     onAttemptHandled?: (info: OnAttemptHandledInfo<T>) => void;
+    onReportDiscarded?: (info: OnReportDiscardedInfo) => void;
   }
 )
 ```
@@ -312,6 +313,8 @@ const operation = async (reportResult, signal) => {
 >
 > - **`cancel()`:** a `'skip'` or `'error'` report ends the operation `'stopped'`: the operation result is `{ status: 'canceled' }` and pending `cancel()` calls resolve `'canceled'`. `'error'` also records its value into `errors`, `mostCommonError`, and `lastError`, while `'skip'` keeps them clean for actual failures. A `'success'` or `'fatal'` report still wins over the pending cancellation: the operation ends `'completed'` (`attempt_success`) or `'fatal-error'` (`attempt_fatal`), and pending `cancel()` calls resolve `'not-running'` (see [`cancel()`](#cancel)). Once the grace period has run out and the attempt is abandoned, a late report of any status is discarded.
 > - **`forceTry({ shouldAbortRunning: true })`:** a report made after the replacement attempt has started - `'skip'` or any other status - is discarded, without the global `'error'` report a late report from an attempt that was not aborted produces. A report an abort listener makes synchronously, inside the abort, is still the attempt's outcome (see [`forceTry()`](#forcetryoptions)).
+>
+> **Seeing discarded reports:** every report or throw that arrives after its attempt was settled is published as a `report-discarded` event, `{ attemptID, status, value, reason }`, whether or not it was also reported on the global `'error'` channel. `status` is the status passed to `reportResult` (or `'throw'`), `value` the reported data or error, and `reason` why it was discarded: `'already-reported'` (the attempt had already reported or thrown), `'abandoned'` (a cancellation's grace period gave up on it) or `'replaced'` (`forceTry({ shouldAbortRunning: true })` replaced it). Reports after an abort are otherwise silent, so this is where a real failure in an aborted attempt's cleanup code shows up. Nothing is emitted unless someone listens.
 >
 > The `attempt-handled` event for a report made while cancellation is pending reflects the status you passed to `reportResult`, and includes `wasCanceled: true` so you can detect that cancellation was in progress. `wasCanceled: true` also marks an attempt `forceTry({ shouldAbortRunning: true })` aborted and settled, since that attempt was canceled too (see [`forceTry()`](#forcetryoptions)).
 
@@ -538,6 +541,7 @@ Subscribe using the `on` method or provide handlers in the constructor.
 | `operation-ended`   | `OPERATION_ENDED`   | `{ runnerState: RunnerState, timeTakenMS: number }`                                                                                                    |
 | `attempt-started`   | `ATTEMPT_STARTED`   | `{ attemptID: string, operationTimeElapsedMS: number, attemptTimeElapsedMS: number }`                                                                  |
 | `attempt-handled`   | `ATTEMPT_HANDLED`   | `{ attemptID: string, status: ReportResultStatus, operationTimeElapsedMS: number, attemptTimeElapsedMS: number, data?, error?, wasCanceled: boolean }` |
+| `report-discarded`  | `REPORT_DISCARDED`  | `{ attemptID: string, status: ReportResultStatus \| 'throw', value: unknown, reason: ReportDiscardedReason }`                                          |
 
 **Time fields:**
 
@@ -736,13 +740,16 @@ The following types are exported for use in consuming code:
 | `OnOperationEndedInfo`                  | Payload for the `operation-ended` event                                                                                                              |
 | `OnAttemptStartedInfo`                  | Payload for the `attempt-started` event                                                                                                              |
 | `OnAttemptHandledInfo<T>`               | Payload for the `attempt-handled` event                                                                                                              |
+| `OnReportDiscardedInfo`                 | Payload for the `report-discarded` event                                                                                                             |
+| `ReportDiscardedReason`                 | Why a report was discarded: `'already-reported' \| 'abandoned' \| 'replaced'`                                                                        |
 | `OperationStartedType`                  | Union of operation start types: `'initial' \| 'resume' \| 'force'`                                                                                   |
 
 The following constants are also exported:
 
-| Constant            | Value                 | Description                      |
-| ------------------- | --------------------- | -------------------------------- |
-| `OPERATION_STARTED` | `'operation-started'` | Event name for operation started |
-| `OPERATION_ENDED`   | `'operation-ended'`   | Event name for operation ended   |
-| `ATTEMPT_STARTED`   | `'attempt-started'`   | Event name for attempt started   |
-| `ATTEMPT_HANDLED`   | `'attempt-handled'`   | Event name for attempt handled   |
+| Constant            | Value                 | Description                       |
+| ------------------- | --------------------- | --------------------------------- |
+| `OPERATION_STARTED` | `'operation-started'` | Event name for operation started  |
+| `OPERATION_ENDED`   | `'operation-ended'`   | Event name for operation ended    |
+| `ATTEMPT_STARTED`   | `'attempt-started'`   | Event name for attempt started    |
+| `ATTEMPT_HANDLED`   | `'attempt-handled'`   | Event name for attempt handled    |
+| `REPORT_DISCARDED`  | `'report-discarded'`  | Event name for a discarded report |

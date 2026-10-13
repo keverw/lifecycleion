@@ -74,6 +74,13 @@ class AttemptContext {
   public startTime: number;
   /** Set before the abort is dispatched, so the operation's listeners already see it. */
   public isAborted = false;
+  /**
+   * How the attempt was settled: by its own report (or throw), or by the runner -
+   * `'abandoned'` when a cancellation's grace period ran out, `'replaced'` when
+   * `forceTry({ shouldAbortRunning: true })` replaced it. Names the reason a later report
+   * from it is discarded (`report-discarded`).
+   */
+  public settledAs: 'reported' | 'abandoned' | 'replaced' | null = null;
   private readonly abortController: AbortController;
 
   constructor() {
@@ -119,6 +126,22 @@ export interface OnAttemptStartedInfo {
   attemptTimeElapsedMS: number;
 }
 
+/** Why a report or throw from an attempt was discarded; see `report-discarded`. */
+export type ReportDiscardedReason =
+  'already-reported' | 'abandoned' | 'replaced';
+
+export interface OnReportDiscardedInfo {
+  attemptID: string;
+  /**
+   * The status passed to `reportResult`, as given, or `'throw'` for a throw (or a
+   * returned value whose `then` could not be read).
+   */
+  status: ReportResultStatus | 'throw';
+  /** The reported data or error, or what was thrown. */
+  value: unknown;
+  reason: ReportDiscardedReason;
+}
+
 export interface OnAttemptHandledInfo<T> {
   attemptID: string;
   status: ReportResultStatus;
@@ -134,6 +157,7 @@ export const OPERATION_STARTED = 'operation-started';
 export const OPERATION_ENDED = 'operation-ended';
 export const ATTEMPT_STARTED = 'attempt-started';
 export const ATTEMPT_HANDLED = 'attempt-handled';
+export const REPORT_DISCARDED = 'report-discarded';
 
 export interface RetryRunnerOptions<T = unknown> {
   operationLabel?: string;
@@ -141,6 +165,7 @@ export interface RetryRunnerOptions<T = unknown> {
   onOperationEnded?: (info: OnOperationEndedInfo) => void;
   onAttemptStarted?: (info: OnAttemptStartedInfo) => void;
   onAttemptHandled?: (info: OnAttemptHandledInfo<T>) => void;
+  onReportDiscarded?: (info: OnReportDiscardedInfo) => void;
 }
 
 export interface ForceTryOptions {
@@ -397,6 +422,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         [OPERATION_ENDED, options.onOperationEnded],
         [ATTEMPT_STARTED, options.onAttemptStarted],
         [ATTEMPT_HANDLED, options.onAttemptHandled],
+        [REPORT_DISCARDED, options.onReportDiscarded],
       ];
 
       for (const [event, hook] of hooks) {
@@ -589,7 +615,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     ) {
       // A silent abort still ends an attempt. Publish its accounting before its
       // replacement, without consulting retry policy or spending the retry budget.
-      this.settleAbortedAttempt(context);
+      this.settleAbortedAttempt(context, 'replaced');
     }
     return {
       operationResolver,
@@ -614,7 +640,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     // (which opens its own): a listener for this forced skip must not start a
     // replacement before the `'stopped'` outcome is published.
     this.withTerminalDispatch(true, () => {
-      this.settleAbortedAttempt(context);
+      this.settleAbortedAttempt(context, 'abandoned');
       this.confirmCancellation('stopped', { status: 'canceled' }, true);
     });
   }
@@ -625,8 +651,12 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
    * listeners see none pending (as for a reported attempt), record its duration and
    * publish it as a canceled `'skip'`. Consults no retry policy and spends no budget.
    */
-  private settleAbortedAttempt(context: AttemptContext): void {
+  private settleAbortedAttempt(
+    context: AttemptContext,
+    settledAs: 'abandoned' | 'replaced',
+  ): void {
     context.handled = true;
+    context.settledAs = settledAs;
     this.currentState.currentAttemptContext = null;
     this.cleanupTimers();
     const attemptTimeElapsedMS = Date.now() - context.startTime;
@@ -1226,9 +1256,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // way to learn its outcome went nowhere. A double report is a caller bug that should
       // not have to be inferred from a missing event.
       //
-      // Reported on the global `'error'` channel rather than through this runner's own
-      // events, deliberately: the attempt this belongs to has been settled, so emitting
-      // `attempt-handled` for it now would be inventing a lifecycle event out of order.
+      // Reported on the global `'error'` channel rather than through this runner's
+      // lifecycle events, deliberately: the attempt this belongs to has been settled, so
+      // emitting `attempt-handled` for it now would be inventing a lifecycle event out of
+      // order. Every discard - this reported one or the silent ones below - is also
+      // published as `report-discarded`, which is not part of that lifecycle.
       //
       // Only for an attempt that was *not* aborted, which is what separates a caller bug
       // from this API's own documented flow. `forceTry({ shouldAbortRunning: true })` and
@@ -1268,6 +1300,19 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         }
       }
 
+      // Every discarded report, reported above or not, so a subscriber can see what an
+      // aborted attempt sent after the runner moved on - the one place a real failure in
+      // cleanup code would otherwise go unseen. Silent unless someone listens.
+      this.emit(REPORT_DISCARDED, {
+        attemptID: context.id,
+        status: source === 'report' ? status : 'throw',
+        value: valueInfo.error ?? valueInfo.data,
+        reason:
+          context.settledAs === 'abandoned' || context.settledAs === 'replaced'
+            ? context.settledAs
+            : 'already-reported',
+      } satisfies OnReportDiscardedInfo);
+
       return; // Ensures we only handle the result once per context
     }
 
@@ -1299,6 +1344,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
     // Mark the context as handled
     context.handled = true;
+    context.settledAs = 'reported';
 
     // Handle the result based on status
     let isSkip = false;
