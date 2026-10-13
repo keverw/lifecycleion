@@ -1429,7 +1429,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         error: valueInfo.error,
         operationTimeElapsedMS: this.timeTakenMS,
         attemptTimeElapsedMS,
-        wasCanceled: this.isCanceledOrPendingCancel,
+        // An attempt a force-abort settled reads as canceled however it was settled:
+        // reported from its abort listener, or silent and settled by the runner.
+        wasCanceled: this.isCanceledOrPendingCancel || context.isAborted,
       } satisfies OnAttemptHandledInfo<T>);
 
       // if a confirm cancel should run
@@ -1501,12 +1503,16 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       let reportedValue: unknown;
 
       const reportResult: ReportResult = (status, value) => {
-        didReport = true;
-        reportedStatus = status;
-        // Kept only for the rethrow check, which matches error statuses: a success's
-        // data is not held for as long as the operation keeps `reportResult`.
-        reportedValue =
-          status === 'success' || status === 'skip' ? undefined : value;
+        // Only the first report is the attempt's outcome; a later one is discarded and
+        // must not change what the rethrow check compares against.
+        if (!didReport) {
+          didReport = true;
+          reportedStatus = status;
+          // Kept only for the rethrow check, which matches error statuses: a success's
+          // data is not held for as long as the operation keeps `reportResult`.
+          reportedValue =
+            status === 'success' || status === 'skip' ? undefined : value;
+        }
 
         if (status === 'success' || status === 'skip') {
           this.handleReportResult(context, status, {

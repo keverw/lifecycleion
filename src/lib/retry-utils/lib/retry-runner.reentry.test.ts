@@ -1277,3 +1277,30 @@ test('a force-abort from a timer-driven attempt-started replaces it before its o
     await runner.cancel();
   }
 });
+
+test('a force-aborted attempt that acknowledges from its abort listener reads as canceled', async () => {
+  const handled: Array<{ status: string; wasCanceled: boolean }> = [];
+  let attempts = 0;
+  const runner = new RetryRunner(policy, (report, signal) => {
+    attempts++;
+    if (attempts === 1) {
+      signal.addEventListener('abort', () => report('skip', 'aborted'));
+    }
+  });
+  runner.on(
+    ATTEMPT_HANDLED,
+    ({ status, wasCanceled }: { status: string; wasCanceled: boolean }) => {
+      handled.push({ status, wasCanceled });
+    },
+  );
+  try {
+    await runner.run();
+    await runner.forceTry({ shouldAbortRunning: true });
+    // As a silent attempt the force settles does (`settleAbortedAttempt`).
+    expect(handled).toEqual([{ status: 'skip', wasCanceled: true }]);
+    expect(attempts).toBe(2);
+  } finally {
+    runner.overrideGraceCancelPeriodMS(0);
+    await runner.cancel();
+  }
+});

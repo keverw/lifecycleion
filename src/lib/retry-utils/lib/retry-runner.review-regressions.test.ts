@@ -271,6 +271,33 @@ test('rethrowing the value reported with an invalid status is not reported again
   }
 });
 
+test('a discarded second report does not hide the rethrow of the first report', async () => {
+  const failure = new Error('attempt failed');
+  const reported: string[] = [];
+  const onGlobalError = (event: Event): void => {
+    reported.push(((event as ErrorEvent).error as Error).message);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onGlobalError);
+  try {
+    const runner = new RetryRunner(
+      { strategy: 'fixed', maxRetryAttempts: 0, delayMS: 1 },
+      (report) => {
+        report('fatal', failure);
+        report('skip');
+        throw failure;
+      },
+    );
+    expect(await runner.run(true)).toMatchObject({ status: 'attempt_fatal' });
+    // The double report is a caller bug and reported; the rethrow is not.
+    expect(reported).toEqual([
+      'Error in a callback RetryRunner reportResult (attempt already settled)',
+    ]);
+  } finally {
+    globalThis.removeEventListener('error', onGlobalError);
+  }
+});
+
 test('a late report with a symbol status is reported, not thrown out of reportResult', async () => {
   const reports: unknown[] = [];
   const onGlobalError = (event: Event): void => {
