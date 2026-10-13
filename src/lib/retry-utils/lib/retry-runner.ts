@@ -535,14 +535,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           !this.currentState.currentAttemptContext ||
           this.currentState.currentAttemptContext.handled
         ) {
-          // No active attempt, can confirm immediately - as 'abandoned' when the last
-          // one was replaced without acknowledging its abort (a cancel() from its
-          // attempt-handled listener while forceTry dispatches), since it may still run.
-          this.confirmCancellation(
-            'stopped',
-            { status: 'canceled' },
-            this.currentState.lastAttemptSettledAs === 'replaced',
-          );
+          // No active attempt, can confirm immediately.
+          this.confirmStoppedWithoutAttempt();
         } else {
           // Signal the running attempt to abort.
           const context = this.currentState.currentAttemptContext;
@@ -699,7 +693,8 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     shouldKeepPendingResolver = false,
   ): PromiseProtectedResolver<RunResult<T>> {
     this.operationToken = Symbol();
-    // How an earlier operation's last attempt settled says nothing about this one.
+    // How an earlier attempt settled says nothing about the attempt this operation starts
+    // next (at once, for a new operation or a force-abort replacement continuing one).
     this.currentState.lastAttemptSettledAs = null;
     if (
       !shouldKeepPendingResolver ||
@@ -921,18 +916,12 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           // Forcing during 'stopping' settled the aborted attempt, detaching it and
           // clearing the grace timer that would have finished the pending cancellation;
           // a cancel() from that settlement's attempt-handled listener only joined it.
-          // Settle it here, or the cancel()/reset() calls joined to it never resolve:
-          // 'abandoned' when the attempt was dropped without acknowledging its abort, by
-          // the same rule cancel() applies when it finds no attempt.
+          // Settle it here, or the cancel()/reset() calls joined to it never resolve.
           if (
             this.currentState.runnerState === 'stopping' &&
             this.currentState.currentAttemptContext === null
           ) {
-            this.confirmCancellation(
-              'stopped',
-              { status: 'canceled' },
-              this.currentState.lastAttemptSettledAs === 'replaced',
-            );
+            this.confirmStoppedWithoutAttempt();
           }
           return shouldWaitForCompletion
             ? operationResolver.promise
@@ -1191,6 +1180,20 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     return (
       this.currentState.runnerState === 'stopping' ||
       this.currentState.runnerState === 'stopped'
+    );
+  }
+
+  /**
+   * End a cancellation that has no attempt left to wait for. `'abandoned'` when the last
+   * attempt was replaced without acknowledging its abort - a cancel() from its
+   * attempt-handled listener while forceTry dispatches - since it may still be running;
+   * `'canceled'` otherwise.
+   */
+  private confirmStoppedWithoutAttempt(): void {
+    this.confirmCancellation(
+      'stopped',
+      { status: 'canceled' },
+      this.currentState.lastAttemptSettledAs === 'replaced',
     );
   }
 
