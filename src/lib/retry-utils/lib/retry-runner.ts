@@ -65,7 +65,8 @@ export interface RunResultNonSuccess {
 
 export type RunResult<T> = RunResultSuccess<T> | RunResultNonSuccess;
 
-export type CancelResult = 'canceled' | 'forced' | 'not-running' | 'superseded';
+export type CancelResult =
+  'canceled' | 'abandoned' | 'not-running' | 'superseded';
 
 class AttemptContext {
   public handled = false;
@@ -413,7 +414,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
    * Invalid values throw. Infinity and oversized values use the runtime timer ceiling.
    * Use 0 to force-cancel on the next timer turn: a zero-length timer is still armed, so an
    * attempt that acknowledges the abort before it fires (synchronously or in a microtask)
-   * still settles the cancellation as `'canceled'` rather than `'forced'`.
+   * still settles the cancellation as `'canceled'` rather than `'abandoned'`.
    */
 
   public overrideGraceCancelPeriodMS(value: number): void {
@@ -867,7 +868,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           // clearing the grace timer that would have finished the pending cancellation;
           // a cancel() from that settlement's attempt-handled listener only joined it.
           // Settle it here, or the cancel()/reset() calls joined to it never resolve.
-          // 'forced': the attempt never acknowledged its abort; forceTry settled it.
+          // 'abandoned': the attempt never acknowledged its abort; forceTry settled it.
           if (
             this.currentState.runnerState === 'stopping' &&
             this.currentState.currentAttemptContext === null
@@ -1142,7 +1143,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
           runnerState !== 'stopped'
             ? 'not-running'
             : wasForced
-              ? 'forced'
+              ? 'abandoned'
               : 'canceled',
         );
       } else {

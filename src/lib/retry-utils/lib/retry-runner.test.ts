@@ -374,7 +374,7 @@ describe('RetryRunner', () => {
 
       const cancelResult = await runner.cancel();
 
-      expect(cancelResult).toBe('forced');
+      expect(cancelResult).toBe('abandoned');
       expect(runner.runnerState).toBe('stopped');
       expect(handledInfo.wasCanceled).toBe(true);
       expect(handledInfo.status).toBe('skip');
@@ -1464,7 +1464,7 @@ test('a cancellation timer that throws forces cancellation and settles existing 
     } finally {
       globalThis.setTimeout = timer;
     }
-    expect(await cancellation).toBe('forced');
+    expect(await cancellation).toBe('abandoned');
     expect(await completion).toEqual({ status: 'canceled' });
     expect(runner.runnerState).toBe('stopped');
     expect(runner.isAttemptRunning).toBe(false);

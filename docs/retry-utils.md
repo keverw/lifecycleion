@@ -285,9 +285,9 @@ type ReportResult<T> = {
 
 > **CRITICAL:** `reportResult` **MUST** be called exactly once per attempt. If your operation completes without calling `reportResult` and without throwing an error, the attempt will hang indefinitely (it will wait forever, blocking any retry logic). The only exception is throwing an error, which is automatically treated as `reportResult('error', thrownError)`. A genuine second or late call is ignored by the runner and reported on the global `'error'` channel. An aborted attempt may still acknowledge cancellation with `reportResult('skip', ...)` without producing that report.
 
-> **Important:** When `cancel()` is called, the operation receives an abort signal via the `signal` parameter. If the operation doesn't call `reportResult` within the `graceCancelPeriodMS` (default 1000ms, configurable via `overrideGraceCancelPeriodMS()`), the cancellation is forced. Always check `signal.aborted` in long-running operations to respond to cancellation requests.
+> **Important:** When `cancel()` is called, the operation receives an abort signal via the `signal` parameter. If the operation doesn't call `reportResult` within the `graceCancelPeriodMS` (default 1000ms, configurable via `overrideGraceCancelPeriodMS()`), the runner stops waiting and `cancel()` resolves `'abandoned'`. Always check `signal.aborted` in long-running operations to respond to cancellation requests.
 >
-> **Note:** If cancellation is forced, the runner will emit `attempt-handled` with a `'skip'` status and `wasCanceled: true` for the in-flight attempt before emitting `operation-ended`.
+> **Note:** If the attempt is abandoned, the runner will emit `attempt-handled` with a `'skip'` status and `wasCanceled: true` for the in-flight attempt before emitting `operation-ended`.
 >
 > **Abort listeners:** Listeners the operation adds to `signal` - with `addEventListener('abort', ...)` (a function or a `handleEvent` object) or `onabort` - run inside `cancel()` and `forceTry({ shouldAbortRunning: true })`. One that throws, or an `async` one that rejects, is reported on the global `'error'` channel as `Error in a callback RetryRunner operation abort listener`, with the thrown value on `cause`; the listeners after it still run, and the abort proceeds.
 
@@ -407,16 +407,16 @@ Returns `Promise<CancelResult>`:
 
 - `'canceled'` - operation acknowledged the abort signal and stopped
 - `'superseded'` - a newer forced restart took over while cancellation was pending; the runner may still be running
-- `'forced'` - operation did not acknowledge within the grace period and was force-stopped
+- `'abandoned'` - operation never acknowledged the abort signal, and the runner stopped waiting for it: the grace period ran out, the grace timer could not be installed, or a `forceTry({ shouldAbortRunning: true })` settled the attempt while the cancellation was pending. The operation may still be running.
 - `'not-running'` - no cancelable operation remains, including a terminal outcome already being published or success/fatal completion that wins while cancellation is pending. Use `waitForCompletion()` for that operation's result. Such a call has no effect, with one exception: made from an abort listener (or a terminal listener it triggers) while `forceTry({ shouldAbortRunning: true })` is dispatching its abort, it still supersedes that force, which then starts no replacement - unless the operation succeeded. See `forceTry()`.
 
 ```typescript
 const cancelResult = await runner.cancel();
 ```
 
-**Cancellation grace period:** When canceling, the runner sends an abort signal to the operation and waits up to 1000ms (default) for it to call `reportResult`. If the operation doesn't respond in time, the cancel is forced. Use `overrideGraceCancelPeriodMS(ms)` to change this timeout. Invalid values throw; `0` forces cancellation on the next timer turn, and `Infinity` uses the timer ceiling.
+**Cancellation grace period:** When canceling, the runner sends an abort signal to the operation and waits up to 1000ms (default) for it to call `reportResult`. If the operation doesn't respond in time, the runner stops waiting and the cancel resolves `'abandoned'`. Use `overrideGraceCancelPeriodMS(ms)` to change this timeout. Invalid values throw; `0` forces cancellation on the next timer turn, and `Infinity` uses the timer ceiling.
 
-If the cancellation grace timer cannot be installed, cancellation completes immediately as `'forced'` and reports the timer failure on the global error channel.
+If the cancellation grace timer cannot be installed, cancellation completes immediately as `'abandoned'` and reports the timer failure on the global error channel.
 
 #### `reset()`
 
@@ -524,7 +524,7 @@ values throw `RangeError`. To restore the default, pass `1000` explicitly. `Infi
 selects the timer ceiling. A value of `0` force-cancels on the next timer turn: the zero-length timer
 is still armed, so an operation that acknowledges the abort signal before it fires - in its
 `'abort'` listener or a microtask - still settles the cancellation as `'canceled'` rather
-than `'forced'`.
+than `'abandoned'`.
 
 ### Events
 
@@ -548,7 +548,7 @@ Subscribe using the `on` method or provide handlers in the constructor.
 
 - `attemptID` - A unique [ULID](https://github.com/ulid/spec) (Universally Unique Lexicographically Sortable Identifier) generated for each attempt. ULIDs are 26-character strings that are timestamp-based and sortable by creation time (e.g., `"01ARZ3NDEKTSV4RRFFQ69G5FAV"`).
 
-> **Event ordering:** `attempt-handled` fires before the runner transitions to its terminal state and before `operation-ended`. If you need to react to the final `runnerState`, use the `operation-ended` event. During terminal outcome publication, a re-entrant `cancel()` cannot replace the committed outcome. From an `attempt-handled` listener of a running operation - which still observes `runnerState: 'running'` and `isOperationRunning: true` - it returns `'not-running'`; from an `operation-ended` listener the state is already terminal, so it returns `'not-running'` too. While a cancellation is already pending (`'stopping'`), an `attempt-handled` listener's `cancel()` instead joins it and resolves with the same result as the earlier `cancel()` callers: `'canceled'` (or `'forced'` after the grace period) when the attempt acknowledged the abort, `'not-running'` when its success or fatal report won. `run()`, `resume()` and `forceTry()` return `terminal_dispatch_in_progress` (and `canForceTry` reads `false`), and `reset()` waits for that outcome to settle. An `operation-started` listener can call `waitForCompletion()` for the operation being announced.
+> **Event ordering:** `attempt-handled` fires before the runner transitions to its terminal state and before `operation-ended`. If you need to react to the final `runnerState`, use the `operation-ended` event. During terminal outcome publication, a re-entrant `cancel()` cannot replace the committed outcome. From an `attempt-handled` listener of a running operation - which still observes `runnerState: 'running'` and `isOperationRunning: true` - it returns `'not-running'`; from an `operation-ended` listener the state is already terminal, so it returns `'not-running'` too. While a cancellation is already pending (`'stopping'`), an `attempt-handled` listener's `cancel()` instead joins it and resolves with the same result as the earlier `cancel()` callers: `'canceled'` (or `'abandoned'` after the grace period) when the attempt acknowledged the abort, `'not-running'` when its success or fatal report won. `run()`, `resume()` and `forceTry()` return `terminal_dispatch_in_progress` (and `canForceTry` reads `false`), and `reset()` waits for that outcome to settle. An `operation-started` listener can call `waitForCompletion()` for the operation being announced.
 
 > **Forcing from a non-terminal `attempt-handled` listener:** when an attempt fails and a retry is scheduled, `attempt-handled` fires with the retry timer already armed. If the attempt reported outside any `run()` / `resume()` / `forceTry()` call - asynchronously, or from an attempt the retry timer started - `forceTry()` from that listener starts the next attempt synchronously, inside the dispatch. Listeners registered after it then see the earlier attempt's `attempt-handled` only after the next attempt's `attempt-started` - and, if that attempt reports synchronously and ends the operation, after `operation-ended` too. If the attempt instead reported synchronously while the call that started it was still dispatching (an operation that calls `reportResult` before returning, on the attempt `run()`, `resume()` or `forceTry()` starts), that call still holds the operation lock: `canForceTry` reads `false`, `forceTry()` returns `lock_error`, and the retry stays on its timer. In either case, calling `forceTry()` from a `queueMicrotask()` instead runs once that dispatch has finished and released the lock, and keeps listener ordering intact.
 
@@ -729,7 +729,7 @@ The following types are exported for use in consuming code:
 | `RunnerState`                           | Union of all runner lifecycle states                                                                                                                 |
 | `ReportResult<T>`                       | Type of the `reportResult` callback passed to the operation                                                                                          |
 | `ReportResultStatus`                    | Union of report result statuses: `'success' \| 'error' \| 'fatal' \| 'skip'`                                                                         |
-| `CancelResult`                          | Return type of `cancel()`: `'canceled' \| 'forced' \| 'not-running' \| 'superseded'`                                                                 |
+| `CancelResult`                          | Return type of `cancel()`: `'canceled' \| 'abandoned' \| 'not-running' \| 'superseded'`                                                              |
 | `ForceTryOptions`                       | Options for `forceTry()`                                                                                                                             |
 | `RetryRunnerOptions<T>`                 | Options for the `RetryRunner` constructor (operation label and event handlers)                                                                       |
 | `OnOperationStartedInfo`                | Payload for the `operation-started` event                                                                                                            |

@@ -214,7 +214,7 @@ test('attempt-handled listeners for a forced cancellation cannot replace the ope
     },
   );
 
-  expect(await runner.cancel()).toBe('forced');
+  expect(await runner.cancel()).toBe('abandoned');
   expect(await runner.waitForCompletion()).toMatchObject({
     status: 'canceled',
   });
@@ -419,7 +419,7 @@ test('an old attempt cannot complete cancellation of a forced replacement', asyn
   report?.('error', new Error('first attempt failed'));
   expect(await running).toMatchObject({ status: 'canceled' });
   expect(await forced).toMatchObject({ status: 'running' });
-  expect(await cancellation).toBe('forced');
+  expect(await cancellation).toBe('abandoned');
   expect(resetting).toBeDefined();
   await resetting;
   expect(attempts).toBe(2);
