@@ -231,6 +231,8 @@ const builder = client
 const response = await builder.send();
 ```
 
+A header value of `null` or `undefined` - or such an item in an array - means no header: a request's `.headers({ authorization: undefined })` removes that client default for the request, a sub-client merging `defaultHeaders` removes the parent's the same way, and an interceptor removes one with `{ ...request.headers, authorization: undefined }`. Header names are case-insensitive and are sent lowercased.
+
 Options can also be passed directly to the method call:
 
 ```typescript

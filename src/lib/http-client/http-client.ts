@@ -12,7 +12,10 @@ import { guardAbortListeners } from '../internal/guarded-abort-signal';
 import { deepClone } from '../deep-clone';
 import { RetryPolicy } from '../retry-utils';
 import { FetchAdapter } from './adapters/fetch-adapter';
-import { assertNoBrowserRestrictedHeaders } from './internal/header-utils';
+import {
+  assertNoBrowserRestrictedHeaders,
+  presentHeaderValue,
+} from './internal/header-utils';
 import { RequestTracker } from './request-tracker';
 import type { RequestInfo } from './request-tracker';
 import { HTTPRequestBuilder } from './http-request-builder';
@@ -30,6 +33,7 @@ import {
   mergeObservedHeaders,
   mergeHeaders,
   normalizeMergedHeaderValue,
+  normalizeHTTPMethod,
   normalizeAdapterResponseHeaders,
   parseContentType,
   resolveAbsoluteURL,
@@ -3612,16 +3616,11 @@ export class BaseHTTPClient {
 
     for (const name of headerNames) {
       try {
-        const value: unknown = sourceHeaders[name];
-        // Left out, as the request itself would send it.
-        if (value === undefined || value === null) {
-          continue;
+        // Left out when unset, as the request itself would send it.
+        const value = normalizeMergedHeaderValue(sourceHeaders[name]);
+        if (value !== undefined) {
+          defineEntry(headers, name.toLowerCase(), value);
         }
-        defineEntry(
-          headers,
-          name.toLowerCase(),
-          normalizeMergedHeaderValue(value as string | string[]),
-        );
       } catch {
         // Skip only this entry.
       }
@@ -3913,15 +3912,11 @@ function snapshotInterceptedRequest(
 
   for (const [name, value] of Object.entries(candidateHeaders)) {
     // `{ ...request.headers, authorization: undefined }` (or `null`) removes a header,
-    // as the observers and the adapter already read it, rather than sending the word.
-    if (value === undefined || value === null) {
-      continue;
+    // as every other header normalizer reads it, rather than sending the word.
+    const normalized = normalizeMergedHeaderValue(value);
+    if (normalized !== undefined) {
+      defineEntry(headersSnapshot, name, normalized);
     }
-    defineEntry(
-      headersSnapshot,
-      name,
-      normalizeMergedHeaderValue(value as string | string[]),
-    );
   }
 
   return {
@@ -3930,16 +3925,6 @@ function snapshotInterceptedRequest(
     headers: headersSnapshot,
     body,
   };
-}
-
-/**
- * A method with its ASCII letters uppercased, so `'post'` is `POST` for the
- * non-idempotent check. ASCII only: `toUpperCase` would also turn `poſt` into `POST`.
- */
-function normalizeHTTPMethod(method: string): HTTPMethod {
-  return method.replace(/[a-z]/g, (letter) =>
-    letter.toUpperCase(),
-  ) as HTTPMethod;
 }
 
 /**
@@ -4055,6 +4040,15 @@ function getEffectiveRequestHeadersFromError(
  * leave later reads exposed to throwing getters. A malformed or unreadable record
  * is treated as absent.
  */
+/** A header value an adapter may report: a string, a finite number, or unset. */
+function isHeaderScalar(value: unknown): boolean {
+  return (
+    isNullish(value) ||
+    typeof value === 'string' ||
+    (typeof value === 'number' && Number.isFinite(value))
+  );
+}
+
 function snapshotHeaderRecord(
   value: unknown,
 ): Record<string, string | string[]> | undefined {
@@ -4066,25 +4060,19 @@ function snapshotHeaderRecord(
     const snapshot: Record<string, string | string[]> = {};
 
     for (const [name, headerValue] of Object.entries(value)) {
-      // As `mergeObservedHeaders` reads a record: an absent value is skipped, and a
-      // number - Node's `getHeaders()` answers `content-length` as one - is a string.
-      if (headerValue === undefined) {
-        continue;
-      }
-      if (typeof headerValue === 'string') {
-        defineEntry(snapshot, name, headerValue);
-      } else if (
-        typeof headerValue === 'number' &&
-        Number.isFinite(headerValue)
+      // As `mergeObservedHeaders` reads a record: an unset value or item is skipped,
+      // and a number - Node's `getHeaders()` answers `content-length` as one - is a
+      // string. Any other kind of value makes the record malformed.
+      if (
+        !(Array.isArray(headerValue) ? headerValue : [headerValue]).every(
+          isHeaderScalar,
+        )
       ) {
-        defineEntry(snapshot, name, String(headerValue));
-      } else if (
-        Array.isArray(headerValue) &&
-        headerValue.every((item) => typeof item === 'string')
-      ) {
-        defineEntry(snapshot, name, [...headerValue]);
-      } else {
         return undefined;
+      }
+      const present = presentHeaderValue(headerValue);
+      if (present !== undefined) {
+        defineEntry(snapshot, name, present);
       }
     }
 

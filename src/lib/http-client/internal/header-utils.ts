@@ -5,6 +5,36 @@ import {
   BROWSER_RESTRICTED_HEADER_PREFIXES,
 } from '../consts';
 import { defineEntry } from '../../internal/define-entry';
+import { isNullish } from '../../internal/is-nullish';
+
+/**
+ * A header value as every header normalizer reads it - the one rule they share, so a
+ * header is present or absent alike on the wire, to observers and in every adapter. A
+ * `null` or `undefined` value, or array item, means no header (an array left with no
+ * item is unset too); anything else is converted with `String`. `undefined` when the
+ * header is unset.
+ */
+export function presentHeaderValue(
+  value: unknown,
+): string | string[] | undefined {
+  if (isNullish(value)) {
+    return undefined;
+  }
+  // Converted as a header value always was: what a caller passes is not trusted to be
+  // a string, and a number (Node's `getHeaders()`) is one in all but type.
+  if (!Array.isArray(value)) {
+    // eslint-disable-next-line @typescript-eslint/no-base-to-string -- a caller's value, converted as a header always was
+    return String(value);
+  }
+  const items: string[] = [];
+  for (const item of value as unknown[]) {
+    if (!isNullish(item)) {
+      // eslint-disable-next-line @typescript-eslint/no-base-to-string -- as above
+      items.push(String(item));
+    }
+  }
+  return items.length === 0 ? undefined : items;
+}
 
 export function isBrowserRestrictedHeader(
   key: string,
@@ -87,20 +117,19 @@ export function materializeRequestHeaders(
   const result: Record<string, string> = {};
 
   for (const [key, value] of Object.entries(headers)) {
-    // Left out, as NodeAdapter's own snapshot leaves it.
-    const candidate: unknown = value;
-    if (candidate === undefined || candidate === null) {
+    const present = presentHeaderValue(value);
+    if (present === undefined) {
       continue;
     }
-    if (!Array.isArray(value)) {
-      defineEntry(result, key, value);
+    if (!Array.isArray(present)) {
+      defineEntry(result, key, present);
       continue;
     }
 
     defineEntry(
       result,
       key,
-      key.toLowerCase() === 'cookie' ? value.join('; ') : value.join(', '),
+      key.toLowerCase() === 'cookie' ? present.join('; ') : present.join(', '),
     );
   }
 

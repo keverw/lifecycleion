@@ -153,3 +153,93 @@ test('numeric effectiveRequestHeaders are read as strings, not discarded', async
   expect(seen[0]?.['content-length']).toBe('5');
   expect(seen[0]?.['x-added']).toBe('yes');
 });
+
+test('an undefined request header removes the client default instead of sending it', async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    defaultHeaders: { authorization: 'Bearer secret', 'x-keep': '1' },
+  });
+
+  // Dropping a default credential for one request, say to a third-party URL.
+  await client
+    .get('/x', { headers: { authorization: undefined as unknown as string } })
+    .send();
+  const sub = client.createSubClient({
+    defaultHeaders: { authorization: null as unknown as string },
+    defaultHeadersStrategy: 'merge',
+  });
+  await sub.get('/y').send();
+
+  for (const request of adapter.requests) {
+    expect(request.headers).not.toHaveProperty('authorization');
+    expect(request.headers['x-keep']).toBe('1');
+  }
+  expect(adapter.requests).toHaveLength(2);
+});
+
+test('an unset item in a header array is left out', async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+
+  await client
+    .get('/x', {
+      headers: {
+        accept: ['application/json', undefined as unknown as string],
+      },
+    })
+    .send();
+
+  expect(adapter.requests[0]?.headers.accept).toBe('application/json');
+});
+
+test('a null in effectiveRequestHeaders is skipped, not the whole record', async () => {
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () =>
+      Promise.resolve({
+        status: 200,
+        headers: {},
+        body: null,
+        effectiveRequestHeaders: {
+          'content-length': 12 as unknown as string,
+          'x-trace': null as unknown as string,
+          'user-agent': 'agent',
+        },
+      }),
+  };
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  const seen: Array<Record<string, string | string[]>> = [];
+  client.addResponseObserver((_response, request) => {
+    seen.push(request.headers);
+  });
+
+  await client.post('/x').json({ a: 1 }).send();
+
+  expect(seen[0]?.['content-length']).toBe('12');
+  expect(seen[0]?.['user-agent']).toBe('agent');
+  expect(seen[0]).not.toHaveProperty('x-trace');
+});
+
+test("a later interceptor's method filter matches an earlier interceptor's lowercase method", async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    method: 'post' as HTTPMethod,
+  }));
+  let didRun = false;
+  client.addRequestInterceptor(
+    (request) => {
+      didRun = true;
+      return request;
+    },
+    { methods: ['POST'] },
+  );
+
+  await client.get('/x').send();
+
+  expect(didRun).toBe(true);
+  expect(adapter.requests[0]?.method).toBe('POST');
+});

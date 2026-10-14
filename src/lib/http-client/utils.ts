@@ -1,5 +1,6 @@
 import qs from 'qs';
 import { defineEntry } from '../internal/define-entry';
+import { presentHeaderValue } from './internal/header-utils';
 import {
   matchesWildcardDomain,
   normalizeDomain,
@@ -9,6 +10,7 @@ import type {
   RequestPhaseName,
   HTTPClientConfig,
   AdapterType,
+  HTTPMethod,
 } from './types';
 
 /**
@@ -324,9 +326,22 @@ export function normalizeHeaders(
 }
 
 /**
+ * A method with its ASCII letters uppercased, so `'post'` is `POST` for the
+ * non-idempotent check and method filters. ASCII only: `toUpperCase` would also turn
+ * `poſt` into `POST`.
+ */
+export function normalizeHTTPMethod(method: string): HTTPMethod {
+  return method.replace(/[a-z]/g, (letter) =>
+    letter.toUpperCase(),
+  ) as HTTPMethod;
+}
+
+/**
  * Merges multiple request-header objects, normalizing keys to lowercase.
  * Later objects win on conflict. Array values replace earlier scalars/arrays
- * wholesale, and single-item arrays are collapsed back to a plain string.
+ * wholesale, and single-item arrays are collapsed back to a plain string. A later
+ * `null` or `undefined` value removes the header an earlier object set - a request
+ * dropping a client default such as `authorization` - rather than being sent.
  */
 export function mergeHeaders(
   ...headerSets: Array<Record<string, string | string[]> | undefined>
@@ -338,37 +353,36 @@ export function mergeHeaders(
     }
 
     for (const [key, value] of Object.entries(headers)) {
-      // An `undefined` or `null` value sets nothing, rather than sending the word.
-      const candidate: unknown = value;
-      if (candidate === undefined || candidate === null) {
+      const name = key.toLowerCase();
+      const normalized = normalizeMergedHeaderValue(value);
+      if (normalized === undefined) {
+        delete result[name];
         continue;
       }
-      defineEntry(result, key.toLowerCase(), normalizeMergedHeaderValue(value));
+      defineEntry(result, name, normalized);
     }
   }
 
   return result;
 }
 
-/** One header value as {@link mergeHeaders} stores it. Throws if conversion does. */
+/**
+ * One header value as {@link mergeHeaders} stores it, or `undefined` when it is unset
+ * (see `presentHeaderValue`). Throws if conversion does.
+ */
 export function normalizeMergedHeaderValue(
-  value: string | string[],
-): string | string[] {
-  return Array.isArray(value)
-    ? normalizeMergedHeaderArray(value)
-    : String(value);
-}
-
-function normalizeMergedHeaderArray(value: string[]): string | string[] {
-  const normalized = value.map((item) => String(item));
-  return normalized.length === 1 ? normalized[0] : normalized;
+  value: unknown,
+): string | string[] | undefined {
+  const present = presentHeaderValue(value);
+  return Array.isArray(present) && present.length === 1 ? present[0] : present;
 }
 
 /**
  * Merges header records as observers see them, normalizing keys to lowercase. Later
  * objects win on conflict. Unlike {@link mergeHeaders}, an array is never collapsed: it
  * is copied with each element converted to a string. A scalar is converted to a string
- * (Node's `getHeaders()` answers numbers), and an `undefined` value is skipped.
+ * (Node's `getHeaders()` answers numbers), and an unset value is skipped (see
+ * `presentHeaderValue`).
  */
 export function mergeObservedHeaders(
   ...headerSets: Array<
@@ -383,17 +397,12 @@ export function mergeObservedHeaders(
     }
 
     for (const [key, value] of Object.entries(headers)) {
-      if (value === undefined) {
+      const present = presentHeaderValue(value);
+      if (present === undefined) {
         continue;
       }
 
-      defineEntry(
-        result,
-        key.toLowerCase(),
-        Array.isArray(value)
-          ? value.map((item) => String(item))
-          : String(value),
-      );
+      defineEntry(result, key.toLowerCase(), present);
     }
   }
 
@@ -910,7 +919,11 @@ export function matchesFilter(
   }
 
   if (filter.methods && context.method) {
-    if (!filter.methods.includes(context.method)) {
+    // Compared as the request is sent: an earlier interceptor's `'post'` is `POST`.
+    const method = normalizeHTTPMethod(context.method);
+    if (
+      !filter.methods.some((entry) => normalizeHTTPMethod(entry) === method)
+    ) {
       return false;
     }
   }
