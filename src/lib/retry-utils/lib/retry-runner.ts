@@ -814,17 +814,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         shouldWaitForCompletion,
       );
       // check if in a disallowed state for this operation
-      const checkDisallowedStates = this.checkForDisallowedPerOperationStates(
-        'run',
-        [
-          'completed',
-          'running',
-          'stopping',
-          'stopped',
-          'fatal-error',
-          'exhausted',
-        ],
-      );
+      const checkDisallowedStates = this.refuseForState('run');
 
       if (checkDisallowedStates) {
         return checkDisallowedStates;
@@ -854,10 +844,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         shouldWaitForCompletion,
       );
       // check if in a disallowed state for this operation
-      const checkDisallowedStates = this.checkForDisallowedPerOperationStates(
-        'resume',
-        ['completed', 'running', 'stopping', 'fatal-error', 'exhausted'],
-      );
+      const checkDisallowedStates = this.refuseForState('resume');
 
       if (checkDisallowedStates) {
         return checkDisallowedStates;
@@ -1034,74 +1021,60 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     };
   }
 
-  private checkForDisallowedPerOperationStates(
+  /**
+   * The refusal for `run()` or `resume()` in the runner's current state, or `undefined`
+   * when it may start. `resume()` is the way out of `'stopped'`, so only `run()` is
+   * refused there; either is refused once the retry budget is spent, whatever the state.
+   */
+  private refuseForState(
     methodName: 'run' | 'resume',
-    disallowedStates: Array<
-      | 'completed'
-      | 'running'
-      | 'stopping'
-      | 'stopped'
-      | 'fatal-error'
-      | 'exhausted'
-    >,
   ): RunResult<T> | undefined {
-    // Preflight state checks to normalize errors for each entrypoint.
-    for (const checkForState of disallowedStates) {
-      if (checkForState === 'completed') {
-        const refusal = this.alreadyCompletedRefusal(methodName);
-        if (refusal) {
-          return refusal;
-        }
-      } else if (
-        checkForState === 'running' &&
-        this.currentState.runnerState === 'running'
-      ) {
+    const completed = this.alreadyCompletedRefusal(methodName);
+    if (completed) {
+      return completed;
+    }
+
+    switch (this.currentState.runnerState) {
+      case 'running':
         return {
           status: 'pre_operation_error',
           code: 'already_running',
           error: new RetryUtilsErrRunnerAlreadyRunning(methodName),
         };
-      } else if (
-        checkForState === 'stopping' &&
-        this.currentState.runnerState === 'stopping'
-      ) {
+      case 'stopping':
         return {
           status: 'pre_operation_error',
           code: 'cancel_pending',
           error: new RetryUtilsErrRunnerCancelPending(methodName),
         };
-      } else if (
-        checkForState === 'stopped' &&
-        this.currentState.runnerState === 'stopped'
-      ) {
-        return {
-          status: 'pre_operation_error',
-          code: 'retry_canceled',
-          error: new RetryUtilsErrRunnerRetryCanceled('run'),
-        };
-      } else if (
-        checkForState === 'fatal-error' &&
-        this.currentState.runnerState === 'fatal-error'
-      ) {
+      case 'stopped':
+        if (methodName === 'run') {
+          return {
+            status: 'pre_operation_error',
+            code: 'retry_canceled',
+            error: new RetryUtilsErrRunnerRetryCanceled(methodName),
+          };
+        }
+        break;
+      case 'fatal-error':
         return {
           status: 'pre_operation_error',
           code: 'fatally_failed',
           error: new RetryUtilsErrRunnerLastRetryFatallyFailed(methodName),
         };
-      } else if (
-        checkForState === 'exhausted' &&
-        (this.currentState.runnerState === 'exhausted' ||
-          this.policy.areAttemptsExhausted)
-      ) {
-        return {
-          status: 'pre_operation_error',
-          code: 'attempts_exhausted',
-          error: new RetryUtilsErrRunnerAttemptsExhausted(methodName),
-        };
-      }
     }
 
-    // if no disallowed states were found
+    if (
+      this.currentState.runnerState === 'exhausted' ||
+      this.policy.areAttemptsExhausted
+    ) {
+      return {
+        status: 'pre_operation_error',
+        code: 'attempts_exhausted',
+        error: new RetryUtilsErrRunnerAttemptsExhausted(methodName),
+      };
+    }
+
     return undefined;
   }
 

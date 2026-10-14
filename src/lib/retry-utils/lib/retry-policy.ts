@@ -166,8 +166,8 @@ export class RetryPolicy {
     const DEFAULT_MAX_TIMEOUT_MS = 30000;
     const DEFAULT_DISPERSION = 0.1;
 
-    // Duration inputs are validated before clamping. Zero keeps this policy's existing
-    // 1ms minimum, while Infinity selects the timer ceiling.
+    // Duration inputs are validated before clamping. Zero becomes the 1ms minimum, and
+    // Infinity selects the timer ceiling.
     //
     // The count, the multiplier and the dispersion share the duration rule's first half:
     // a `NaN` or a non-number throws (`assertNumberOption`) rather than being replaced. A

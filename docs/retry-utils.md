@@ -107,8 +107,8 @@ finalDelay = clamp(delay + randomOffset, minTimeoutMS, maxTimeoutMS);
 
 > Retry durations use their defaults when omitted, `null`, or `undefined`. Explicit `NaN` or
 > non-number `delayMS`, `minTimeoutMS`, or `maxTimeoutMS` values throw `TypeError` at
-> construction, and negative ones throw `RangeError` - they are not clamped. Zero keeps the
-> existing 1 ms minimum; positive `Infinity` selects the timer ceiling.
+> construction, and negative ones throw `RangeError` - they are not clamped. Zero becomes the
+> 1 ms minimum; positive `Infinity` selects the timer ceiling.
 > `maxRetryAttempts`, `factor` and `dispersion` also throw `TypeError` for an explicit
 > `NaN` or non-number value (no coercion: `'3'` throws too, and so does `null`); only
 > omitted or `undefined` uses the default. Past that check `maxRetryAttempts` and
@@ -723,7 +723,7 @@ The following types are exported for use in consuming code:
 | `RetryPolicyOptions`                    | Union of fixed and exponential strategy option interfaces                                                                                            |
 | `RetryPolicyOptionsStrategyFixed`       | Options interface for the `'fixed'` strategy                                                                                                         |
 | `RetryPolicyOptionsStrategyExponential` | Options interface for the `'exponential'` strategy                                                                                                   |
-| `RetryPolicyValidated`                  | `RequiredNonNullable<RetryPolicyOptions>` - all options resolved (narrow on `strategy` to access strategy-specific properties)                       |
+| `RetryPolicyValidated`                  | `RetryPolicyOptions` with every option resolved: required and non-null (narrow on `strategy` to access strategy-specific properties)                 |
 | `RetryQueryResult`                      | Return type of `RetryPolicy.shouldRetry()`: `{ shouldRetry: boolean, delayMS: number }`                                                              |
 | `RunAttemptStatusCodes`                 | Union of all possible `status` values in `RunResult`                                                                                                 |
 | `RunnerErrorCode`                       | Union of all possible `code` values in pre-operation errors                                                                                          |
