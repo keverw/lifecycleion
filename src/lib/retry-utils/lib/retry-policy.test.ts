@@ -117,10 +117,10 @@ describe('RetryPolicy - durations that are not finite', () => {
     },
   );
 
-  // `clamp` is `Math.max`/`Math.min`, and both pass `NaN` through, so `maxTimeoutMS: NaN`
-  // survived validation and made every computed delay `NaN`. `RetryRunner` reads
-  // `delayMS > 0` as false and retries on the same stack, so a config asking for a longer
-  // wait removed the wait entirely and busy-retried until the stack overflowed.
+  // `clamp` is `Math.max`/`Math.min`, and both pass `NaN` through, so a `maxTimeoutMS: NaN`
+  // that got past construction would make every computed delay `NaN`. The runner uses a
+  // delay as given, and a `NaN` timer runs in about 1ms: a config asking for a longer
+  // wait would remove the wait and retry almost without pause.
   test('explicit invalid timeout bounds fail at construction', () => {
     for (const value of [NaN, -1, '1000']) {
       expect(
