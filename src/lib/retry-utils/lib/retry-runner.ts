@@ -963,10 +963,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       if (this.currentState.runnerState === 'not-started') {
         // Treat as a first try so the policy tracks the initial attempt.
         this.policy.shouldDoFirstTry();
-      } else if (
-        this.currentState.runnerState === 'stopping' ||
-        this.currentState.runnerState === 'stopped'
-      ) {
+      } else if (this.isCanceledOrPendingCancel) {
         this.supersedePendingCancellation();
       }
 
