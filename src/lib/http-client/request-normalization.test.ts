@@ -63,7 +63,7 @@ test('defaultHeaders that is not a plain record is refused, not dropped', () => 
     client.createSubClient({
       defaultHeaders: new Headers({ authorization: 'Bearer x' }) as never,
     }),
-  ).toThrow('HTTPClient defaultHeaders must be a plain object');
+  ).toThrow('HTTPClient sub-client defaultHeaders must be a plain object');
 });
 
 test('an undefined header value is left out, not sent as "undefined"', async () => {
@@ -242,4 +242,38 @@ test("a later interceptor's method filter matches an earlier interceptor's lower
 
   expect(didRun).toBe(true);
   expect(adapter.requests[0]?.method).toBe('POST');
+});
+
+test('a method that is not a string is refused when the request is made', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  for (const method of [undefined, null, 42]) {
+    expect(() => client.request(method as never, '/x')).toThrow(
+      'HTTPClient request method must be a string',
+    );
+  }
+});
+
+test("an interceptor's non-string method fails clearly, even past a method filter", async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    method: 42 as unknown as HTTPMethod,
+  }));
+  client.addRequestInterceptor((request) => request, { methods: ['GET'] });
+
+  const errors: Array<{ code: string; message: string }> = [];
+  client.addErrorObserver((error) => {
+    errors.push({
+      code: error.code,
+      message: String(error.cause?.message),
+    });
+  });
+
+  const response = await client.get('/x').send();
+
+  expect(response.isFailed).toBe(true);
+  expect(errors[0]?.code).toBe('interceptor_error');
+  expect(errors[0]?.message).toContain('method is not a string');
+  expect(adapter.requests).toHaveLength(0);
 });

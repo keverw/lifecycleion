@@ -292,13 +292,17 @@ export class BaseHTTPClient {
     path: string,
     options?: HTTPRequestOptions,
   ): HTTPRequestBuilder<T> {
-    // Normalized once, here, so a JS caller's `'post'` is the non-idempotent `POST`
-    // whether or not an interceptor runs (which normalizes what it returns too).
+    // Checked and normalized once, here, so a JS caller's `'post'` is the
+    // non-idempotent `POST`, and a method that is not a string is refused, whether or not
+    // an interceptor runs (which checks and normalizes what it returns too).
     const candidateMethod: unknown = method;
+    if (typeof candidateMethod !== 'string') {
+      throw new TypeError(
+        `HTTPClient request method must be a string (got ${candidateMethod === null ? 'null' : typeof candidateMethod})`,
+      );
+    }
     return new HTTPRequestBuilder<T>(
-      typeof candidateMethod === 'string'
-        ? normalizeHTTPMethod(candidateMethod)
-        : method,
+      normalizeHTTPMethod(candidateMethod),
       path,
       (ctx) => this._execute(ctx),
       options,
@@ -441,7 +445,10 @@ export class BaseHTTPClient {
     );
     const shouldFollowRedirects =
       shouldFollowRedirectsOverride ?? this._config.followRedirects;
-    assertOptionalHeaderRecord(overrideHeaders, 'HTTPClient defaultHeaders');
+    assertOptionalHeaderRecord(
+      overrideHeaders,
+      'HTTPClient sub-client defaultHeaders',
+    );
     const defaultHeaders =
       defaultHeadersStrategy === 'merge'
         ? mergeHeaders(this._config.defaultHeaders, overrideHeaders)
@@ -2875,9 +2882,10 @@ export class BaseHTTPClient {
           };
         }
 
-        // Network / adapter / per-attempt timeout — retry if policy allows.
-        // A throw carries no adapter response, so delivery is unproven; for a
-        // non-idempotent method that means no retry.
+        // Network / adapter / per-attempt timeout — retry if policy allows. A throw
+        // carries no adapter response, so delivery is unproven - and a timed-out answer
+        // (one that arrived after the timer fired) proves it but is still a timeout.
+        // Either way a non-idempotent method is not retried.
         if (
           policy &&
           !cancelSignal.aborted &&
@@ -2987,8 +2995,8 @@ export class BaseHTTPClient {
 
           isRetriesExhausted = true;
         } else {
-          // A throw carries no adapter response, so the only thing that can have
-          // suppressed a policy-eligible retry here is the method rule.
+          // A throw (or a timed-out answer) leaves the method rule as the only thing
+          // that can have suppressed a policy-eligible retry here.
           const isSuppressedByMethod =
             isRetryAvailable() &&
             !cancelSignal.aborted &&
@@ -3009,7 +3017,14 @@ export class BaseHTTPClient {
         return {
           adapterResponse: null,
           ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
-          sentRequest,
+          // A timed-out answer still reports what the adapter said it sent.
+          sentRequest: didAdapterResolve
+            ? sentRequestForObservedAdapterError(
+                sentRequest,
+                error,
+                observedSentRequest,
+              )
+            : sentRequest,
           attemptCount: attemptNumber,
           wasCancelled: false,
           wasTimeout: didTimeoutThisAttempt,
@@ -4033,13 +4048,6 @@ function getEffectiveRequestHeadersFromError(
   );
 }
 
-/**
- * Validate and copy an adapter-provided header record into a plain object.
- *
- * Copying is part of the safety boundary: checking the outer value alone would
- * leave later reads exposed to throwing getters. A malformed or unreadable record
- * is treated as absent.
- */
 /** A header value an adapter may report: a string, a finite number, or unset. */
 function isHeaderScalar(value: unknown): boolean {
   return (
@@ -4049,6 +4057,13 @@ function isHeaderScalar(value: unknown): boolean {
   );
 }
 
+/**
+ * Validate and copy an adapter-provided header record into a plain object.
+ *
+ * Copying is part of the safety boundary: checking the outer value alone would
+ * leave later reads exposed to throwing getters. A malformed or unreadable record
+ * is treated as absent.
+ */
 function snapshotHeaderRecord(
   value: unknown,
 ): Record<string, string | string[]> | undefined {

@@ -382,7 +382,8 @@ export function normalizeMergedHeaderValue(
  * objects win on conflict. Unlike {@link mergeHeaders}, an array is never collapsed: it
  * is copied with each element converted to a string. A scalar is converted to a string
  * (Node's `getHeaders()` answers numbers), and an unset value is skipped (see
- * `presentHeaderValue`).
+ * `presentHeaderValue`): these records report what was sent, so an unset entry is one
+ * not reported, not one removed.
  */
 export function mergeObservedHeaders(
   ...headerSets: Array<
@@ -919,10 +920,20 @@ export function matchesFilter(
   }
 
   if (filter.methods && context.method) {
-    // Compared as the request is sent: an earlier interceptor's `'post'` is `POST`.
-    const method = normalizeHTTPMethod(context.method);
+    // Compared as the request is sent: an earlier interceptor's `'post'` is `POST`. A
+    // method that is not a string matches nothing here; the snapshot after the chain
+    // refuses it with its own error.
+    const candidate: unknown = context.method;
+    const method =
+      typeof candidate === 'string'
+        ? normalizeHTTPMethod(candidate)
+        : undefined;
     if (
-      !filter.methods.some((entry) => normalizeHTTPMethod(entry) === method)
+      method === undefined ||
+      !filter.methods.some(
+        (entry) =>
+          typeof entry === 'string' && normalizeHTTPMethod(entry) === method,
+      )
     ) {
       return false;
     }
