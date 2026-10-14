@@ -217,6 +217,16 @@ interface ConfirmCancellationResolveInfo<T> {
   error?: unknown;
 }
 
+/** Whether `status` is one `reportResult` accepts; a caller's value is not trusted. */
+function isReportResultStatus(status: unknown): status is ReportResultStatus {
+  return (
+    status === 'success' ||
+    status === 'error' ||
+    status === 'fatal' ||
+    status === 'skip'
+  );
+}
+
 /**
  * The value a report carried, chosen by the key it used rather than by nullishness, so
  * a reported `null` stays `null`.
@@ -1349,10 +1359,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         status:
           source !== 'report'
             ? 'throw'
-            : status === 'success' ||
-                status === 'error' ||
-                status === 'fatal' ||
-                status === 'skip'
+            : isReportResultStatus(status)
               ? status
               : 'invalid',
         // By key, so a `null` error or `throw null` is kept.
@@ -1366,12 +1373,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       return; // Ensures we only handle the result once per context
     }
 
-    if (
-      status !== 'success' &&
-      status !== 'error' &&
-      status !== 'fatal' &&
-      status !== 'skip'
-    ) {
+    if (!isReportResultStatus(status)) {
       // The reported value is kept on `cause`, so the mistake does not also lose it.
       const reportedError = reportedValueOf(valueInfo);
       status = 'fatal';
@@ -1487,6 +1489,9 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     } catch (error) {
       // Live policy/timer functions can replace or complete the operation before
       // throwing. Their failure belongs to this transition, never to its successor.
+      // Reached only through a patched built-in (the policy is the runner's own), and
+      // deliberately publishes nothing for this attempt: a successor's events have
+      // already run, so its `attempt-handled` now would arrive out of order.
       if (
         this.operationToken !== operationToken ||
         operationResolver.hasResolved
