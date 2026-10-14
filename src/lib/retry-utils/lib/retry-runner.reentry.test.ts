@@ -1304,3 +1304,25 @@ test('a force-aborted attempt that acknowledges from its abort listener reads as
     await runner.cancel();
   }
 });
+
+test('a force-abort while a forced attempt is being canceled is refused and leaves the cancel alone', async () => {
+  let attempts = 0;
+  const runner = new RetryRunner(policy, () => {
+    attempts++;
+  });
+  runner.overrideGraceCancelPeriodMS(10);
+  await runner.run();
+  await runner.forceTry({ shouldAbortRunning: true });
+  expect(runner.wasLastAttemptForced).toBe(true);
+
+  const cancellation = runner.cancel();
+  expect(runner.runnerState).toBe('stopping');
+  expect(await runner.forceTry({ shouldAbortRunning: true })).toMatchObject({
+    status: 'pre_operation_error',
+    code: 'force_try_in_progress',
+  });
+  // The forced attempt never acknowledges, so the grace period ends the cancellation.
+  expect(await cancellation).toBe('abandoned');
+  expect(runner.runnerState).toBe('stopped');
+  expect(attempts).toBe(2);
+});

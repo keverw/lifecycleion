@@ -492,3 +492,11 @@ test('policyInfo is a snapshot that cannot bypass delay validation', () => {
   }
   expect(policy.shouldRetry(new Error('retry')).delayMS).toBe(100);
 });
+
+test('a non-object policy is refused with a TypeError', () => {
+  for (const value of [undefined, null, 'fixed', 3]) {
+    expect(() => new RetryPolicy(value as never)).toThrow(
+      'Retry policy options must be an object',
+    );
+  }
+});

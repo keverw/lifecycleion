@@ -525,10 +525,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       return 'not-running';
     }
     // operation is either running or stopping (so just wait to cancel it here)
-    if (
-      this.currentState.runnerState === 'running' ||
-      this.currentState.runnerState === 'stopping'
-    ) {
+    if (this.isOperationRunning) {
       const cancellationPromiseProtectedResolver =
         new PromiseProtectedResolver<CancelResult>();
 
@@ -594,10 +591,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       }
     }
     // If an operation is running or pending stopping, cancel it first.
-    if (
-      this.currentState.runnerState === 'running' ||
-      this.currentState.runnerState === 'stopping'
-    ) {
+    if (this.isOperationRunning) {
       // Cancel any in-flight work before resetting state.
       await this.cancel();
       if (this.operationToken !== operationToken) {
@@ -965,9 +959,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // Case 2: No pending retry, start a brand-new forced attempt. startOperation()
       // gives it a new identity, since the abort above has already dispatched caller
       // code: resets from that old attempt must leave the accepted restart alone.
-      const isContinuingOperation =
-        this.currentState.runnerState === 'running' ||
-        this.currentState.runnerState === 'stopping';
+      const isContinuingOperation = this.isOperationRunning;
       if (this.currentState.runnerState === 'not-started') {
         // Treat as a first try so the policy tracks the initial attempt.
         this.policy.shouldDoFirstTry();

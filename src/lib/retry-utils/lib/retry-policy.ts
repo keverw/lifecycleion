@@ -1,4 +1,5 @@
 import { isString } from '../../strings';
+import { isObjectLike } from '../../internal/is-object-like';
 import { RetryUtilsErrPolicyConfigInvalidStrategy } from './retry-utils-errors';
 import type {
   RetryPolicyOptions,
@@ -211,6 +212,12 @@ export class RetryPolicy {
       fallback: number,
       label: string,
     ): number => Math.max(1, resolveTimeoutMS(requested, fallback, label));
+
+    // Refused as a bad value, as every option is, rather than a property read of
+    // `undefined` throwing from inside this constructor.
+    if (!isObjectLike(policy)) {
+      throw new TypeError('Retry policy options must be an object');
+    }
 
     // Caller options may be getters. Capture the discriminator once, then only the
     // fields that strategy uses; normalization must not ask for a second value.
