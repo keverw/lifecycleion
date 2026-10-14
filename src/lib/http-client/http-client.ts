@@ -1201,6 +1201,7 @@ export class BaseHTTPClient {
                 // interceptor registered: this request's headers come from the adapter's
                 // record of what it sent, not from `mergeHeaders`, so the snapshot is
                 // still what puts them in the shape the other phases' requests have.
+                // The raw result first, so a snapshot that throws still reports it.
                 failedRedirectRequest = redirectIntercept;
                 redirectIntercept =
                   snapshotInterceptedRequest(redirectIntercept);
@@ -2074,7 +2075,9 @@ export class BaseHTTPClient {
       // code, the caller's observers and attempt hooks being contained where they run,
       // with one exception: the cookie jar is the caller's, so a jar that throws on its
       // own account is reported here as an `adapter_error` too - the request was still
-      // answered, which is what rules out re-sending it.
+      // answered, which is what rules out re-sending it. Unless the attempt's timer fired
+      // first: then it is a timeout like any other, retried only where a timeout is - an
+      // idempotent method, or one the caller opted in.
       let didAdapterResolve = false;
       // Set when the caller's cookie jar is what threw, so the error says so.
       let didCookieJarFail = false;
@@ -2799,8 +2802,8 @@ export class BaseHTTPClient {
         }
 
         // A timed-out attempt is a timeout whether or not the adapter had answered:
-        // the AbortError the timeout raised, or a cookie jar that threw on the answer
-        // after the timer fired (a cancel would already have returned above).
+        // the AbortError the timeout raised, or an answer that arrived after the timer
+        // fired and could not be read (a cancel would already have returned above).
         const didTimeoutThisAttempt =
           isTimedOut && (isAbortError(error) || didAdapterResolve);
         const isNonRetryableClientCallbackFailure =
@@ -3022,7 +3025,7 @@ export class BaseHTTPClient {
    */
   private _cancellableDelay(ms: number, signal: AbortSignal): Promise<void> {
     if (signal.aborted) {
-      return Promise.resolve(undefined);
+      return Promise.resolve();
     }
 
     return new Promise<void>((resolve) => {
@@ -3609,10 +3612,15 @@ export class BaseHTTPClient {
 
     for (const name of headerNames) {
       try {
+        const value: unknown = sourceHeaders[name];
+        // Left out, as the request itself would send it.
+        if (value === undefined || value === null) {
+          continue;
+        }
         defineEntry(
           headers,
           name.toLowerCase(),
-          normalizeMergedHeaderValue(sourceHeaders[name]),
+          normalizeMergedHeaderValue(value as string | string[]),
         );
       } catch {
         // Skip only this entry.
@@ -3904,9 +3912,9 @@ function snapshotInterceptedRequest(
   const headersSnapshot: Record<string, string | string[]> = {};
 
   for (const [name, value] of Object.entries(candidateHeaders)) {
-    // `{ ...request.headers, authorization: undefined }` removes a header, as the
-    // observers and the adapter already read it, rather than sending "undefined".
-    if (value === undefined) {
+    // `{ ...request.headers, authorization: undefined }` (or `null`) removes a header,
+    // as the observers and the adapter already read it, rather than sending the word.
+    if (value === undefined || value === null) {
       continue;
     }
     defineEntry(
@@ -4058,8 +4066,18 @@ function snapshotHeaderRecord(
     const snapshot: Record<string, string | string[]> = {};
 
     for (const [name, headerValue] of Object.entries(value)) {
+      // As `mergeObservedHeaders` reads a record: an absent value is skipped, and a
+      // number - Node's `getHeaders()` answers `content-length` as one - is a string.
+      if (headerValue === undefined) {
+        continue;
+      }
       if (typeof headerValue === 'string') {
         defineEntry(snapshot, name, headerValue);
+      } else if (
+        typeof headerValue === 'number' &&
+        Number.isFinite(headerValue)
+      ) {
+        defineEntry(snapshot, name, String(headerValue));
       } else if (
         Array.isArray(headerValue) &&
         headerValue.every((item) => typeof item === 'string')

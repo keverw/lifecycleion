@@ -83,12 +83,18 @@ test('an undefined header value is left out, not sent as "undefined"', async () 
   }));
 
   await client
-    .get('/x', { headers: { 'x-extra': undefined as unknown as string } })
+    .get('/x', {
+      headers: {
+        'x-extra': undefined as unknown as string,
+        'x-null': null as unknown as string,
+      },
+    })
     .send();
 
   const sent = adapter.requests[0]?.headers ?? {};
   expect(sent).not.toHaveProperty('authorization');
   expect(sent).not.toHaveProperty('x-extra');
+  expect(sent).not.toHaveProperty('x-null');
   expect(sent['x-keep']).toBe('1');
 });
 
@@ -119,4 +125,31 @@ test('an answer that arrives after the timer fired and cannot be read is a timeo
 
   expect(response.isTimeout).toBe(true);
   expect(response.status).toBe(0);
+});
+
+test('numeric effectiveRequestHeaders are read as strings, not discarded', async () => {
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () =>
+      Promise.resolve({
+        status: 200,
+        headers: {},
+        body: null,
+        // As Node's `getHeaders()` answers them.
+        effectiveRequestHeaders: {
+          'content-length': 5 as unknown as string,
+          'x-added': 'yes',
+        },
+      }),
+  };
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  const seen: Array<Record<string, string | string[]>> = [];
+  client.addResponseObserver((_response, request) => {
+    seen.push(request.headers);
+  });
+
+  await client.post('/x').json({ a: 1 }).send();
+
+  expect(seen[0]?.['content-length']).toBe('5');
+  expect(seen[0]?.['x-added']).toBe('yes');
 });

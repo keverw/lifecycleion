@@ -87,6 +87,11 @@ export function materializeRequestHeaders(
   const result: Record<string, string> = {};
 
   for (const [key, value] of Object.entries(headers)) {
+    // Left out, as NodeAdapter's own snapshot leaves it.
+    const candidate: unknown = value;
+    if (candidate === undefined || candidate === null) {
+      continue;
+    }
     if (!Array.isArray(value)) {
       defineEntry(result, key, value);
       continue;
