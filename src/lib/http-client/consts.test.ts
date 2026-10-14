@@ -44,3 +44,9 @@ test('finite HTTP timeouts retain their value and the runtime ceiling', () => {
   expect(resolveRequestTimeoutMS(12.5)).toBe(12.5);
   expect(resolveRequestTimeoutMS(MAX_TIMER_MS + 1)).toBe(MAX_TIMER_MS);
 });
+
+test('a client-level timeout is named as one when refused', () => {
+  expect(() =>
+    resolveRequestTimeoutMS(NaN, undefined, 'HTTPClient timeout'),
+  ).toThrow('HTTPClient timeout must be a number other than NaN');
+});

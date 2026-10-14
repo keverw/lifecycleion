@@ -734,3 +734,24 @@ describe('HTTPRequestBuilder', () => {
     });
   });
 });
+
+test('headers() refuses a Headers, Map or array instead of dropping its entries', () => {
+  for (const value of [
+    new Headers({ authorization: 'Bearer t' }),
+    new Map([['authorization', 'Bearer t']]),
+    [['authorization', 'Bearer t']],
+  ]) {
+    const { sendFn } = makeSendFn();
+    const builder = new HTTPRequestBuilder('GET', '/x', sendFn);
+    expect(() => builder.headers(value as never)).toThrow(
+      'HTTPRequestBuilder headers must be a plain object',
+    );
+  }
+
+  // Nullish stays a no-op, and a null-prototype record is a plain record.
+  const { sendFn } = makeSendFn();
+  const builder = new HTTPRequestBuilder('GET', '/x', sendFn);
+  expect(builder.headers(null as never)).toBe(builder);
+  const record = Object.assign(Object.create(null) as object, { 'x-a': '1' });
+  expect(builder.headers(record as Record<string, string>)).toBe(builder);
+});

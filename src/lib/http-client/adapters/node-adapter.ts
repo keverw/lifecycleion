@@ -1006,13 +1006,8 @@ export class NodeAdapter implements HTTPAdapter {
        * setup's `failOnSocketError`, the write failure reported by
        * `reportWriteErrorAfterResponse` - still runs.
        */
-      const readIsAborted = (): boolean => {
-        try {
-          return request.signal?.aborted === true;
-        } catch {
-          return false;
-        }
-      };
+      const readIsAborted = (): boolean =>
+        readObjectMember(request.signal, 'aborted') === true;
 
       const observeTaskFailure = (
         task: Promise<void>,

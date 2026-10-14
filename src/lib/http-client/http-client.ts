@@ -1,5 +1,6 @@
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
+import { isPlainRecord } from './internal/plain-record';
 import { clampTimerDelayMS } from '../internal/timer-limits';
 import { generateID } from '../id-helpers';
 import { safeHandleCallback } from '../safe-handle-callback';
@@ -208,7 +209,11 @@ export class BaseHTTPClient {
       adapter: this._adapter,
       baseURL: snapshot.baseURL,
       defaultHeaders: snapshot.defaultHeaders ?? {},
-      timeout: resolveRequestTimeoutMS(snapshot.timeout),
+      timeout: resolveRequestTimeoutMS(
+        snapshot.timeout,
+        undefined,
+        'HTTPClient timeout',
+      ),
       cookieJar: snapshot.cookieJar,
       retryPolicy: isNullish(configuredRetryPolicy)
         ? undefined
@@ -3880,13 +3885,7 @@ function snapshotInterceptedRequest(
     );
   }
 
-  const headersPrototype = Reflect.getPrototypeOf(candidateHeaders);
-
-  if (
-    headersPrototype !== null &&
-    headersPrototype !== Object.prototype &&
-    Reflect.getPrototypeOf(headersPrototype) !== null
-  ) {
+  if (!isPlainRecord(candidateHeaders)) {
     throw new TypeError(
       '[HTTPClient] Interceptor returned a request whose headers is not a plain object (got an object with a non-Object prototype, such as Headers or Map).',
     );

@@ -78,9 +78,10 @@ export { MAX_TIMER_MS } from '../internal/timer-limits';
  */
 export function validateRequestTimeoutMS(
   requested: unknown,
+  label = 'HTTP request timeout',
 ): asserts requested is number | null | undefined {
   if (!isNullish(requested)) {
-    assertDurationMS(requested, 'HTTP request timeout');
+    assertDurationMS(requested, label);
   }
 }
 
@@ -98,8 +99,9 @@ export function validateRequestTimeoutMS(
 export function resolveRequestTimeoutMS(
   requested: unknown,
   defaultMS: number = DEFAULT_TIMEOUT_MS,
+  label?: string,
 ): number {
-  validateRequestTimeoutMS(requested);
+  validateRequestTimeoutMS(requested, label);
   if (isNullish(requested)) {
     return defaultMS;
   }

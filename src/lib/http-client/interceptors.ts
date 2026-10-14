@@ -1,9 +1,7 @@
 import { matchesFilter } from './utils';
 import { adoptPromise } from '../internal/adopt-promise';
-import {
-  CallbackRegistry,
-  type RegisteredCallback,
-} from './internal/callback-registry';
+import { CallbackRegistry } from './internal/callback-registry';
+import type { RegisteredCallback } from './internal/callback-registry';
 import type {
   RequestInterceptorFilter,
   RequestInterceptor,

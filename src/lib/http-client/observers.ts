@@ -3,10 +3,8 @@ import {
   reportCallbackError,
 } from '../safe-handle-callback';
 import { matchesFilter, scalarHeader } from './utils';
-import {
-  CallbackRegistry,
-  type RegisteredCallback,
-} from './internal/callback-registry';
+import { CallbackRegistry } from './internal/callback-registry';
+import type { RegisteredCallback } from './internal/callback-registry';
 import type {
   ResponseObserverFilter,
   ErrorObserverFilter,
