@@ -1,6 +1,9 @@
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
-import { isPlainRecord } from './internal/plain-record';
+import {
+  assertOptionalHeaderRecord,
+  isPlainRecord,
+} from './internal/plain-record';
 import { clampTimerDelayMS } from '../internal/timer-limits';
 import { generateID } from '../id-helpers';
 import { safeHandleCallback } from '../safe-handle-callback';
@@ -192,6 +195,10 @@ export class BaseHTTPClient {
     // another let a value the checks never saw through - e.g. followRedirects: true on
     // the XHR adapter. See `snapshotClientConfigFields`.
     const snapshot = snapshotClientConfigFields(config);
+    assertOptionalHeaderRecord(
+      snapshot.defaultHeaders,
+      'HTTPClient defaultHeaders',
+    );
 
     this._clientID = generateID('ulid');
     this._adapter = snapshot.adapter ?? new FetchAdapter();
@@ -281,8 +288,13 @@ export class BaseHTTPClient {
     path: string,
     options?: HTTPRequestOptions,
   ): HTTPRequestBuilder<T> {
+    // Normalized once, here, so a JS caller's `'post'` is the non-idempotent `POST`
+    // whether or not an interceptor runs (which normalizes what it returns too).
+    const candidateMethod: unknown = method;
     return new HTTPRequestBuilder<T>(
-      method,
+      typeof candidateMethod === 'string'
+        ? normalizeHTTPMethod(candidateMethod)
+        : method,
       path,
       (ctx) => this._execute(ctx),
       options,
@@ -425,6 +437,7 @@ export class BaseHTTPClient {
     );
     const shouldFollowRedirects =
       shouldFollowRedirectsOverride ?? this._config.followRedirects;
+    assertOptionalHeaderRecord(overrideHeaders, 'HTTPClient defaultHeaders');
     const defaultHeaders =
       defaultHeadersStrategy === 'merge'
         ? mergeHeaders(this._config.defaultHeaders, overrideHeaders)
@@ -2789,7 +2802,7 @@ export class BaseHTTPClient {
         // the AbortError the timeout raised, or a cookie jar that threw on the answer
         // after the timer fired (a cancel would already have returned above).
         const didTimeoutThisAttempt =
-          isTimedOut && (isAbortError(error) || didCookieJarFail);
+          isTimedOut && (isAbortError(error) || didAdapterResolve);
         const isNonRetryableClientCallbackFailure =
           isNonRetryableClientCallbackError(error);
         const isNonRetryableAdapterFailure =
@@ -3861,10 +3874,7 @@ function snapshotInterceptedRequest(
     );
   }
 
-  // ASCII letters only: `toUpperCase` would also turn `poſt` into `POST`.
-  const normalizedMethod = candidateMethod.replace(/[a-z]/g, (letter) =>
-    letter.toUpperCase(),
-  ) as HTTPMethod;
+  const normalizedMethod = normalizeHTTPMethod(candidateMethod);
 
   const candidateHeaders: unknown = headers;
 
@@ -3894,6 +3904,11 @@ function snapshotInterceptedRequest(
   const headersSnapshot: Record<string, string | string[]> = {};
 
   for (const [name, value] of Object.entries(candidateHeaders)) {
+    // `{ ...request.headers, authorization: undefined }` removes a header, as the
+    // observers and the adapter already read it, rather than sending "undefined".
+    if (value === undefined) {
+      continue;
+    }
     defineEntry(
       headersSnapshot,
       name,
@@ -3907,6 +3922,16 @@ function snapshotInterceptedRequest(
     headers: headersSnapshot,
     body,
   };
+}
+
+/**
+ * A method with its ASCII letters uppercased, so `'post'` is `POST` for the
+ * non-idempotent check. ASCII only: `toUpperCase` would also turn `poſt` into `POST`.
+ */
+function normalizeHTTPMethod(method: string): HTTPMethod {
+  return method.replace(/[a-z]/g, (letter) =>
+    letter.toUpperCase(),
+  ) as HTTPMethod;
 }
 
 /**

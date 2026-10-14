@@ -338,6 +338,10 @@ export function mergeHeaders(
     }
 
     for (const [key, value] of Object.entries(headers)) {
+      // An `undefined` value sets nothing, rather than sending the string "undefined".
+      if ((value as unknown) === undefined) {
+        continue;
+      }
       defineEntry(result, key.toLowerCase(), normalizeMergedHeaderValue(value));
     }
   }

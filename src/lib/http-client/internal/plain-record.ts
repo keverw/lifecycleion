@@ -20,3 +20,15 @@ export function isPlainRecord(
     Reflect.getPrototypeOf(prototype) === null
   );
 }
+
+/** Throw a `TypeError` naming `label` unless `value` is nullish or a plain record. */
+export function assertOptionalHeaderRecord(
+  value: unknown,
+  label: string,
+): void {
+  if (value !== undefined && value !== null && !isPlainRecord(value)) {
+    throw new TypeError(
+      `${label} must be a plain object of header names to values (not a Headers, Map or array)`,
+    );
+  }
+}
