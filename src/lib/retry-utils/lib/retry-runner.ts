@@ -1035,7 +1035,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
   }
 
   private checkForDisallowedPerOperationStates(
-    methodName: 'run' | 'resume' | 'forceTry',
+    methodName: 'run' | 'resume',
     disallowedStates: Array<
       | 'completed'
       | 'running'
@@ -1059,9 +1059,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         return {
           status: 'pre_operation_error',
           code: 'already_running',
-          error: new RetryUtilsErrRunnerAlreadyRunning(
-            methodName as 'run' | 'resume',
-          ),
+          error: new RetryUtilsErrRunnerAlreadyRunning(methodName),
         };
       } else if (
         checkForState === 'stopping' &&
@@ -1070,9 +1068,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         return {
           status: 'pre_operation_error',
           code: 'cancel_pending',
-          error: new RetryUtilsErrRunnerCancelPending(
-            methodName as 'run' | 'resume',
-          ),
+          error: new RetryUtilsErrRunnerCancelPending(methodName),
         };
       } else if (
         checkForState === 'stopped' &&
@@ -1090,9 +1086,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         return {
           status: 'pre_operation_error',
           code: 'fatally_failed',
-          error: new RetryUtilsErrRunnerLastRetryFatallyFailed(
-            methodName as 'run' | 'resume',
-          ),
+          error: new RetryUtilsErrRunnerLastRetryFatallyFailed(methodName),
         };
       } else if (
         checkForState === 'exhausted' &&
@@ -1102,9 +1096,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
         return {
           status: 'pre_operation_error',
           code: 'attempts_exhausted',
-          error: new RetryUtilsErrRunnerAttemptsExhausted(
-            methodName as 'run' | 'resume',
-          ),
+          error: new RetryUtilsErrRunnerAttemptsExhausted(methodName),
         };
       }
     }
@@ -1502,10 +1494,11 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       // Retry policy evaluation and timer installation belong to this transition.
       // If either fails, publish an outcome instead of leaving a handled attempt
       // with no successor and no completion result.
-      // Only the running path queries the policy and arms a timer - a pending cancel
-      // only records the error - so the operation is still running here and ends fatal.
-      // The failure is not recorded in the policy: `errors` counts attempts, and this
-      // one's error, if any, already is.
+      // Only the running path computes a delay and arms a timer; the rest records state
+      // and can fail only through a patched built-in. Either way this transition ends
+      // the operation fatal - a pending cancellation included, which loses its
+      // 'canceled' outcome to that failure. The failure is not recorded in the policy:
+      // `errors` counts attempts, and this one's error, if any, already is.
       this.cleanupTimers();
       terminal = {
         runnerState: 'fatal-error',
