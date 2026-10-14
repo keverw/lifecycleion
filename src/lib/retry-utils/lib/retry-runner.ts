@@ -210,7 +210,7 @@ interface RetryRunnerCurrentState {
   lastAttemptSettledAs: AttemptContext['settledAs'];
 }
 
-interface ConfirmCancellationResolveInfo<T> {
+interface TerminalOutcomeResolveInfo<T> {
   status: RunAttemptStatusCodes;
   code?: RunnerErrorCode;
   data?: T;
@@ -239,7 +239,7 @@ function reportedValueOf(valueInfo: {
 }
 
 /** The outcome of an operation ended by a failure in the runner's own machinery. */
-function unexpectedFatal<T>(error: unknown): ConfirmCancellationResolveInfo<T> {
+function unexpectedFatal<T>(error: unknown): TerminalOutcomeResolveInfo<T> {
   return { status: 'attempt_fatal', code: 'unexpected_error', error };
 }
 
@@ -660,12 +660,12 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
       return;
     }
 
-    // The scope covers `attempt-handled`, not only the `confirmCancellation` inside it
+    // The scope covers `attempt-handled`, not only the `publishTerminalOutcome` inside it
     // (which opens its own): a listener for this forced skip must not start a
     // replacement before the `'stopped'` outcome is published.
     this.withTerminalDispatch(true, () => {
       this.settleAbortedAttempt(context, 'abandoned');
-      this.confirmCancellation('stopped', { status: 'canceled' }, true);
+      this.publishTerminalOutcome('stopped', { status: 'canceled' }, true);
     });
   }
 
@@ -1169,16 +1169,16 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
    * `'canceled'` otherwise.
    */
   private confirmStoppedWithoutAttempt(): void {
-    this.confirmCancellation(
+    this.publishTerminalOutcome(
       'stopped',
       { status: 'canceled' },
       this.currentState.lastAttemptSettledAs === 'replaced',
     );
   }
 
-  private confirmCancellation(
+  private publishTerminalOutcome(
     runnerState: Exclude<RunnerState, 'running'>,
-    resolveInfo: ConfirmCancellationResolveInfo<T>,
+    resolveInfo: TerminalOutcomeResolveInfo<T>,
     wasAbandoned = false,
   ): void {
     this.withTerminalDispatch(true, () => {
@@ -1371,7 +1371,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     // The outcome this report ends the operation with, or `null` while it continues.
     let terminal: {
       runnerState: Exclude<RunnerState, 'running'>;
-      resolveInfo: ConfirmCancellationResolveInfo<T>;
+      resolveInfo: TerminalOutcomeResolveInfo<T>;
     } | null = null;
 
     try {
@@ -1484,7 +1484,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
     this.currentState.lastAttemptTimeTakenMS = attemptTimeElapsedMS;
 
     const terminalReport = terminal;
-    // Opened here rather than left to `confirmCancellation`, so `attempt-handled` for a
+    // Opened here rather than left to `publishTerminalOutcome`, so `attempt-handled` for a
     // terminal report is inside the reentry scope too.
     this.withTerminalDispatch(terminalReport !== null, () => {
       // emit the attempt handled event
@@ -1502,7 +1502,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
 
       // if a confirm cancel should run
       if (terminalReport !== null) {
-        this.confirmCancellation(
+        this.publishTerminalOutcome(
           terminalReport.runnerState,
           terminalReport.resolveInfo,
         );
@@ -1517,7 +1517,7 @@ export class RetryRunner<T = unknown> extends EventEmitterProtected {
    */
   private failAttemptSetup(error: unknown): void {
     this.cleanupTimers();
-    this.confirmCancellation('fatal-error', unexpectedFatal(error));
+    this.publishTerminalOutcome('fatal-error', unexpectedFatal(error));
   }
 
   private async attemptOperation(wasForced: boolean): Promise<void> {
