@@ -301,6 +301,9 @@ export class BaseHTTPClient {
         `HTTPClient request method must be a string (got ${candidateMethod === null ? 'null' : typeof candidateMethod})`,
       );
     }
+    if (candidateMethod === '') {
+      throw new TypeError('HTTPClient request method must not be empty');
+    }
     return new HTTPRequestBuilder<T>(
       normalizeHTTPMethod(candidateMethod),
       path,
@@ -2882,6 +2885,16 @@ export class BaseHTTPClient {
           };
         }
 
+        // A timed-out answer still reports what the adapter said it sent, to the retry
+        // phase's error observers and the final error alike.
+        const reportedSentRequest = didAdapterResolve
+          ? sentRequestForObservedAdapterError(
+              sentRequest,
+              error,
+              observedSentRequest,
+            )
+          : sentRequest;
+
         // Network / adapter / per-attempt timeout — retry if policy allows. A throw
         // carries no adapter response, so delivery is unproven - and a timed-out answer
         // (one that arrived after the timer fired) proves it but is still a timeout.
@@ -2934,7 +2947,7 @@ export class BaseHTTPClient {
 
             await this._runErrorObservers(
               retryError,
-              sentRequest,
+              reportedSentRequest,
               this._retryOutcomePhase(
                 maxAttemptNumber,
                 attemptNumber,
@@ -3017,14 +3030,7 @@ export class BaseHTTPClient {
         return {
           adapterResponse: null,
           ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
-          // A timed-out answer still reports what the adapter said it sent.
-          sentRequest: didAdapterResolve
-            ? sentRequestForObservedAdapterError(
-                sentRequest,
-                error,
-                observedSentRequest,
-              )
-            : sentRequest,
+          sentRequest: reportedSentRequest,
           attemptCount: attemptNumber,
           wasCancelled: false,
           wasTimeout: didTimeoutThisAttempt,
@@ -3896,43 +3902,39 @@ function snapshotInterceptedRequest(
     );
   }
 
+  if (candidateMethod === '') {
+    throw new TypeError(
+      '[HTTPClient] Interceptor returned a request whose method is empty.',
+    );
+  }
+
   const normalizedMethod = normalizeHTTPMethod(candidateMethod);
 
   const candidateHeaders: unknown = headers;
 
-  // An array passes `typeof === 'object'`, but `Object.entries` would turn its indices
-  // into header names, so it is refused like any other non-record. So is any object
-  // whose prototype is not a root prototype - `Object.prototype`, another realm's (a
-  // `vm` context's plain object), or `null`: a `Headers` or `Map` keeps its entries off
-  // its own properties, and `Object.entries` would answer `{}`, sending the request with
-  // every header the interceptor set silently dropped. Their prototypes inherit from
-  // `Object.prototype` in whichever realm made them, so they are never a root.
-  if (
-    typeof candidateHeaders !== 'object' ||
-    candidateHeaders === null ||
-    Array.isArray(candidateHeaders)
-  ) {
-    throw new TypeError(
-      `[HTTPClient] Interceptor returned a request whose headers is not an object (got ${candidateHeaders === null ? 'null' : Array.isArray(candidateHeaders) ? 'array' : typeof candidateHeaders}).`,
-    );
-  }
-
+  // A plain record only (see `isPlainRecord`): a `Headers` or `Map` would have every
+  // header it carries silently dropped, and an array's indices taken for names.
   if (!isPlainRecord(candidateHeaders)) {
+    const got =
+      candidateHeaders === null
+        ? 'null'
+        : Array.isArray(candidateHeaders)
+          ? 'an array'
+          : typeof candidateHeaders !== 'object'
+            ? typeof candidateHeaders
+            : 'an object with a non-Object prototype, such as Headers or Map';
     throw new TypeError(
-      '[HTTPClient] Interceptor returned a request whose headers is not a plain object (got an object with a non-Object prototype, such as Headers or Map).',
+      `[HTTPClient] Interceptor returned a request whose headers is not a plain object (got ${got}).`,
     );
   }
 
-  const headersSnapshot: Record<string, string | string[]> = {};
-
-  for (const [name, value] of Object.entries(candidateHeaders)) {
-    // `{ ...request.headers, authorization: undefined }` (or `null`) removes a header,
-    // as every other header normalizer reads it, rather than sending the word.
-    const normalized = normalizeMergedHeaderValue(value);
-    if (normalized !== undefined) {
-      defineEntry(headersSnapshot, name, normalized);
-    }
-  }
+  // Read as every other phase's headers are: names lowercased, and an unset value
+  // removing the header, whatever its capitalization -
+  // `{ ...request.headers, Authorization: undefined }` drops `authorization` rather
+  // than sending it.
+  const headersSnapshot = mergeHeaders(
+    candidateHeaders as Record<string, string | string[]>,
+  );
 
   return {
     requestURL,

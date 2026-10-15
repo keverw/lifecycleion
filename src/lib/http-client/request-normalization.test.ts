@@ -1,5 +1,6 @@
 import { expect, test } from 'bun:test';
 import { HTTPClient } from './http-client';
+import { matchesFilter } from './utils';
 import type {
   AdapterRequest,
   AdapterResponse,
@@ -276,4 +277,35 @@ test("an interceptor's non-string method fails clearly, even past a method filte
   expect(errors[0]?.code).toBe('interceptor_error');
   expect(errors[0]?.message).toContain('method is not a string');
   expect(adapter.requests).toHaveLength(0);
+});
+
+test("an interceptor's unset header removes the default whatever its capitalization", async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    defaultHeaders: { authorization: 'Bearer secret' },
+  });
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    headers: {
+      ...request.headers,
+      Authorization: undefined as unknown as string,
+    },
+  }));
+
+  await client.get('/x').send();
+
+  expect(adapter.requests[0]?.headers).not.toHaveProperty('authorization');
+  expect(adapter.requests[0]?.headers).not.toHaveProperty('Authorization');
+});
+
+test('an empty method is refused, and matches no method filter', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  expect(() => client.request('' as HTTPMethod, '/x')).toThrow(
+    'HTTPClient request method must not be empty',
+  );
+  expect(
+    matchesFilter({ methods: ['GET'] }, { method: '' }, 'initial', 'request'),
+  ).toBe(false);
 });

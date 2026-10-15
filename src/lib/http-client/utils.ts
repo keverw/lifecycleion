@@ -919,7 +919,9 @@ export function matchesFilter(
     }
   }
 
-  if (filter.methods && context.method) {
+  // Checked whenever the filter names methods and the context has one, an empty one
+  // included: `''` matches no method rather than skipping the filter.
+  if (filter.methods && context.method !== undefined) {
     // Compared as the request is sent: an earlier interceptor's `'post'` is `POST`. A
     // method that is not a string matches nothing here; the snapshot after the chain
     // refuses it with its own error.

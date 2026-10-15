@@ -3,7 +3,7 @@ import { generateID } from '../id-helpers';
 import { validateRequestTimeoutMS } from './consts';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import { defineEntry } from '../internal/define-entry';
-import { isPlainRecord } from './internal/plain-record';
+import { assertOptionalHeaderRecord } from './internal/plain-record';
 import type {
   HTTPMethod,
   HTTPResponse,
@@ -101,13 +101,9 @@ export class HTTPRequestBuilder<T = unknown> {
     // A nullish argument stays a no-op. Anything else must be a plain record: a
     // `Headers` or `Map` would otherwise send the request with every header dropped,
     // which an interceptor returning one is refused for too.
+    assertOptionalHeaderRecord(headers, 'HTTPRequestBuilder headers');
     if (isNullish(headers)) {
       return this;
-    }
-    if (!isPlainRecord(headers)) {
-      throw new TypeError(
-        'HTTPRequestBuilder headers must be a plain object of header names to values (not a Headers, Map or array)',
-      );
     }
     // Own keys, not `Object.assign`: a `__proto__` header would set the record's
     // prototype (an array value) or vanish (a string).
