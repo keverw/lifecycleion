@@ -328,13 +328,29 @@ export function normalizeHeaders(
 }
 
 /**
- * A method with its ASCII letters uppercased, so `'post'` is `POST` for the
- * non-idempotent check and method filters. ASCII only: `toUpperCase` would also turn
- * `poſt` into `POST`.
+ * The methods matched case-insensitively and sent uppercase: fetch's normalized set, plus
+ * `PATCH`, which fetch leaves as given but the non-idempotent check must still catch.
+ */
+const STANDARD_HTTP_METHODS: ReadonlySet<string> = new Set([
+  'DELETE',
+  'GET',
+  'HEAD',
+  'OPTIONS',
+  'PATCH',
+  'POST',
+  'PUT',
+]);
+
+/**
+ * A standard method in any case, uppercased - so `'post'` is `POST` for the
+ * non-idempotent check and method filters - and any other method as given, since method
+ * names are case-sensitive (RFC 9110) and a server may route `purge` and `PURGE` apart.
+ * ASCII only: `toUpperCase` would also turn `poſt` into `POST`.
  */
 export function normalizeHTTPMethod(method: string): HTTPMethod {
-  return method.replace(/[a-z]/g, (letter) =>
-    letter.toUpperCase(),
+  const uppercased = method.replace(/[a-z]/g, (letter) => letter.toUpperCase());
+  return (
+    STANDARD_HTTP_METHODS.has(uppercased) ? uppercased : method
   ) as HTTPMethod;
 }
 

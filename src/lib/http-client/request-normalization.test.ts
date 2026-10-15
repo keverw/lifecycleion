@@ -516,3 +516,73 @@ test('an attempt reports its end once, even if the retry path throws after annou
 
   expect(events).toEqual([{ attemptNumber: 1, willRetry: true }]);
 });
+
+test('a later builder header replaces an earlier one whatever their capitalization', async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+
+  await client
+    .get('/a')
+    .headers({ Authorization: 'old' })
+    .headers({ authorization: undefined })
+    .headers({ Authorization: 'new' })
+    .send();
+  await client
+    .get('/b')
+    .headers({ Authorization: 'a' })
+    .headers({ authorization: 'b' })
+    .headers({ Authorization: 'c' })
+    .send();
+
+  expect(adapter.requests[0]?.headers.authorization).toBe('new');
+  expect(adapter.requests[1]?.headers.authorization).toBe('c');
+});
+
+test('defaultHeaders is copied at construction, so later changes do not reach the client', async () => {
+  const adapter = new RecordingAdapter(200);
+  const defaultHeaders: Record<string, string | undefined> = {
+    Authorization: 'Bearer a',
+  };
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    defaultHeaders,
+  });
+  const sub = client.createSubClient({});
+  defaultHeaders.Authorization = undefined;
+  defaultHeaders['x-later'] = '1';
+
+  await client.get('/x').send();
+  await sub.get('/y').send();
+
+  for (const request of adapter.requests) {
+    expect(request.headers.authorization).toBe('Bearer a');
+    expect(request.headers).not.toHaveProperty('x-later');
+  }
+});
+
+test('a standard method is uppercased, and any other method is sent as given', async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  const filtered: string[] = [];
+  client.addRequestInterceptor(
+    (request) => {
+      filtered.push(request.method);
+      return request;
+    },
+    // A custom method matches exactly; a standard one in any case.
+    { methods: ['purge' as HTTPMethod, 'patch' as HTTPMethod] },
+  );
+
+  for (const method of ['patch', 'purge', 'PURGE', 'Options']) {
+    await client.request(method as HTTPMethod, '/x').send();
+  }
+
+  expect(adapter.requests.map((request): string => request.method)).toEqual([
+    'PATCH',
+    'purge',
+    'PURGE',
+    'OPTIONS',
+  ]);
+  expect(filtered).toEqual(['PATCH', 'purge']);
+});

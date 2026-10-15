@@ -24,13 +24,13 @@ export class RequestInterceptorManager extends CallbackRegistry<
   }
 
   /**
-   * Copy the current registrations into a chain that later `add()` and removal calls do
+   * Take the current registrations as a chain that later `add()` and removal calls do
    * not reach. A client takes its parent's snapshot and its own together when a chain run
    * begins - once per phase of a request - so a callback registered on either while the
    * other's chain is awaiting applies to the next chain run, not this one.
    */
   public snapshot(): InterceptorChain {
-    const interceptors = this.copyRegistrations();
+    const interceptors = this.currentRegistrations();
 
     return (request, phase, context) =>
       runInterceptors(interceptors, request, phase, context);

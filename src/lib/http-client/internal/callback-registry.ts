@@ -16,7 +16,7 @@ export class CallbackRegistry<
   Fn,
   Filter extends { phases?: unknown; methods?: unknown },
 > {
-  private registrations: RegisteredCallback<Fn, Filter>[] = [];
+  private registrations: ReadonlyArray<RegisteredCallback<Fn, Filter>> = [];
 
   constructor(
     private readonly defaultPhases: Filter['phases'],
@@ -33,14 +33,14 @@ export class CallbackRegistry<
         methods,
       } as Filter,
     };
-    this.registrations.push(entry);
+    // Replaced rather than changed in place, so a chain already holding the array keeps
+    // the registrations it began with, and taking one needs no copy.
+    this.registrations = [...this.registrations, entry];
 
     return () => {
-      const idx = this.registrations.indexOf(entry);
-
-      if (idx !== -1) {
-        this.registrations.splice(idx, 1);
-      }
+      this.registrations = this.registrations.filter(
+        (registered) => registered !== entry,
+      );
     };
   }
 
@@ -50,10 +50,12 @@ export class CallbackRegistry<
   }
 
   /**
-   * The current registrations, copied so that later `add()` and removal calls do not
-   * reach a chain built from them.
+   * The current registrations. Later `add()` and removal calls replace the array rather
+   * than change it, so they do not reach a chain built from this one.
    */
-  protected copyRegistrations(): RegisteredCallback<Fn, Filter>[] {
-    return this.registrations.slice();
+  protected currentRegistrations(): ReadonlyArray<
+    RegisteredCallback<Fn, Filter>
+  > {
+    return this.registrations;
   }
 }

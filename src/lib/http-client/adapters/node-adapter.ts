@@ -3087,8 +3087,10 @@ function attachWritableListener(
     // settled, or the writable was discarded before any did - is absorbed, because this
     // listener is permanent and so is the absorber for such a writable. It answers the
     // way `absorbPendingWritableError` does for one that can be detached: reported within
-    // `PENDING_WRITABLE_ERROR_WINDOW_MS` of the last request leaving, and past that left
-    // to the owner, as the detachable absorber is by then gone. Reported for the life of
+    // `PENDING_WRITABLE_ERROR_WINDOW_MS` of the last request leaving. Past that it is
+    // absorbed unreported: the owner's own `'error'` listener still hears it, but an owner
+    // with none loses it, since this listener keeps it from being unhandled (as the docs
+    // for a writable without `off` say). Reported for the life of
     // the writable instead, every error a long-lived sink's owner handles itself - an
     // hour after its last download - also landed on the host's global `'error'` channel.
     if (event === 'error' && listeners.size === 0) {

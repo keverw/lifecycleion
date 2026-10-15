@@ -221,7 +221,10 @@ export class BaseHTTPClient {
     this._config = {
       adapter: this._adapter,
       baseURL: snapshot.baseURL,
-      defaultHeaders: snapshot.defaultHeaders ?? {},
+      // Copied, as `retryPolicy` is: names lowercased and unset values dropped, read
+      // once here rather than on every request, so changing the object afterwards does
+      // not reach this client - or its sub-clients, which would share it.
+      defaultHeaders: mergeHeaders(snapshot.defaultHeaders ?? undefined),
       timeout: resolveRequestTimeoutMS(
         snapshot.timeout,
         undefined,

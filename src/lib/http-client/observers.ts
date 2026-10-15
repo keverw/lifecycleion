@@ -29,11 +29,11 @@ export class ResponseObserverManager extends CallbackRegistry<
   }
 
   /**
-   * Copy the current registrations into a chain that later `add()` and removal calls do
+   * Take the current registrations as a chain that later `add()` and removal calls do
    * not reach. See `RequestInterceptorManager.snapshot()`.
    */
   public snapshot(): ResponseObserverChain {
-    const observers = this.copyRegistrations();
+    const observers = this.currentRegistrations();
 
     return (response, request, phase) =>
       runObservers(
@@ -75,11 +75,11 @@ export class ErrorObserverManager extends CallbackRegistry<
   }
 
   /**
-   * Copy the current registrations into a chain that later `add()` and removal calls do
+   * Take the current registrations as a chain that later `add()` and removal calls do
    * not reach. See `RequestInterceptorManager.snapshot()`.
    */
   public snapshot(): ErrorObserverChain {
-    const observers = this.copyRegistrations();
+    const observers = this.currentRegistrations();
 
     return (error, request, phase) =>
       runObservers(

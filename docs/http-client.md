@@ -164,7 +164,7 @@ const client = new HTTPClient({
 | `followRedirects` | Not supported          | Not supported        | Supported             | Supported            | Supported   |
 
 The constructor throws immediately on unsupported combinations so failures are caught at startup, not at request time.
-Client `retryPolicy` is validated and copied at construction. The internal snapshot is frozen and may be shared with sub-clients. Subclasses must not mutate `this._config.retryPolicy` in place; supply a new policy through client or sub-client configuration instead. A per-request
+Client `defaultHeaders` is copied at construction - names lowercased, unset values dropped - so changing the object afterwards does not affect the client or its sub-clients; change a header for some requests with an interceptor or a sub-client. Client `retryPolicy` is validated and copied at construction. The internal snapshot is frozen and may be shared with sub-clients. Subclasses must not mutate `this._config.retryPolicy` in place; supply a new policy through client or sub-client configuration instead. A per-request
 `.retryPolicy(options)` is validated and copied when called, before request interceptors
 run. Invalid retry durations throw there, and later mutations to the supplied object do
 not change the policy. Each request starts with a fresh retry budget; `null` on the
@@ -522,8 +522,10 @@ client.addRequestInterceptor((request) => {
 the chain runs, later interceptor filters may read `method`, `requestURL`, and `body`
 from earlier interceptor results, including when those filters do not match. When
 the chain finishes, the client copies `requestURL`, `method`, `headers` and `body` into a
-request object of its own. The method's ASCII letters are uppercased, so a `post` is
-treated as `POST` by the retry and redirect rules. Header entries are copied at that
+request object of its own. A standard method (`GET`, `HEAD`, `POST`, `PUT`, `DELETE`,
+`OPTIONS`, `PATCH`) is uppercased whatever its case, so a `post` is treated as `POST` by
+the retry and redirect rules; any other method is case-sensitive and sent as given, as
+`request()` sends it too. Header entries are copied at that
 point: a single value is converted to a string, an array stays an array with each
 element converted to a string, and a one-element array becomes that element's string.
 Every later check and use (URL validation, the browser-restricted header check,
@@ -549,7 +551,7 @@ interface RequestInterceptorFilter {
 }
 ```
 
-`methods` is matched case-insensitively. It must be an array of strings (or omitted), and is checked when the callback is added, as it is for the observer filters below. All specified filter fields are ANDed together. Within each field, values are ORed. Any one match is sufficient. An empty `phases: []` matches all phases.
+A standard method in `methods` is matched case-insensitively, and any other exactly. It must be an array of method names (or omitted), and is checked when the callback is added, as it is for the observer filters below. All specified filter fields are ANDed together. Within each field, values are ORed. Any one match is sufficient. An empty `phases: []` matches all phases.
 
 ### Cancelling From an Interceptor
 

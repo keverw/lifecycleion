@@ -384,6 +384,12 @@ export interface AttemptStartEvent {
 export interface AttemptEndEvent {
   attemptNumber: number;
   isRetry: boolean;
+  /**
+   * Whether a retry was scheduled when this attempt ended. Each attempt reports its end
+   * once, so `true` is not revised: the request can still end before the retry starts -
+   * cancelled during the wait, or failed while waiting for this attempt's upload to
+   * settle - and the response says how it ended.
+   */
   willRetry: boolean;
   /**
    * Why no retry happened, when a retry was genuinely available to suppress — a
