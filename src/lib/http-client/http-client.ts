@@ -3088,7 +3088,9 @@ export class BaseHTTPClient {
    * an answer it could not read: an `adapter_error` that keeps the status, headers and
    * redirect target, with the decoding failure as `unreadableBody` for the caller to
    * record as the error's cause. Decoded only where the body is used, so a response
-   * whose body is discarded - a refused redirect, one past `maxRedirects` - never is.
+   * whose body is discarded - a refused redirect, one past `maxRedirects` - never is. A
+   * followed redirect's body is used, by the `redirect`-phase observers, and is decoded
+   * whether or not any are registered, so the same answer fails the same way either way.
    */
   private _buildAnsweredResponse<T>(
     params: Parameters<BaseHTTPClient['_buildResponse']>[0],
@@ -3890,12 +3892,14 @@ function readStringMember(
  * Header values are normalized here as `mergeHeaders` normalizes them for dispatch - a
  * single value converted to a string, an array's elements each converted, and a
  * one-element array collapsed to its string - so a value whose `toString` answers
- * differently on each call is checked and sent as one string. Names keep their case.
- * The method is uppercased, so a `post` is the `POST` the retry and redirect rules
- * check for rather than a method none of them recognize.
- * Throws on a `requestURL` or `method` that is not a string or `headers` that is not a
- * plain object (an array, a `Headers` or a `Map` is refused), and on any read or
- * conversion that throws; each phase reports that as the interceptor's failure.
+ * differently on each call is checked and sent as one string. Names are lowercased, and
+ * an unset value removes the header whatever its capitalization. A standard method is
+ * uppercased (see `normalizeHTTPMethod`), so a `post` is the `POST` the retry and
+ * redirect rules check for; any other method is kept as given.
+ * Throws on a `requestURL` that is not a string, a `method` that is not a method name
+ * (see `describeInvalidHTTPMethod`), or `headers` that is not a plain object (an array, a
+ * `Headers` or a `Map` is refused), and on any read or conversion that throws; each phase
+ * reports that as the interceptor's failure.
  */
 function snapshotInterceptedRequest(
   request: InterceptedRequest,

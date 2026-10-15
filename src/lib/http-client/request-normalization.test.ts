@@ -586,3 +586,41 @@ test('a standard method is uppercased, and any other method is sent as given', a
   ]);
   expect(filtered).toEqual(['PATCH', 'purge']);
 });
+
+test("a request interceptor's filter that throws fails the request as interceptor_error", async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  let didRun = false;
+  client.addRequestInterceptor(
+    (request) => {
+      didRun = true;
+      return request;
+    },
+    { bodyContainsKeys: ['data'] },
+  );
+  const codes: string[] = [];
+  client.addErrorObserver((error) => {
+    codes.push(error.code);
+  });
+  const body = new Proxy(
+    {},
+    {
+      get(): never {
+        throw new Error('body unreadable');
+      },
+      has(): never {
+        throw new Error('body unreadable');
+      },
+      getOwnPropertyDescriptor(): never {
+        throw new Error('body unreadable');
+      },
+    },
+  );
+
+  const response = await client.post('/x', { body }).send();
+
+  expect(response.isFailed).toBe(true);
+  expect(codes).toEqual(['interceptor_error']);
+  expect(didRun).toBe(false);
+  expect(adapter.requests).toHaveLength(0);
+});

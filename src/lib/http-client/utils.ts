@@ -382,9 +382,8 @@ export function describeInvalidHTTPMethod(
 /**
  * A filter's `methods`, checked and normalized once when its callback is registered, so
  * matching a request is a plain lookup. Nullish means no method filter. Anything else must
- * be an array of method names: a single string used to match by substring (`'POST'`
- * matched `POST`, but `'GET, POST'` matched neither), and an entry that is not a method
- * name never matched.
+ * be an array of method names, each held to the rule a request's method is; anything else
+ * throws a `TypeError` naming `label`.
  */
 export function normalizeFilterMethods(
   methods: unknown,

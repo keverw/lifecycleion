@@ -108,9 +108,7 @@ export class HTTPRequestBuilder<T = unknown> {
     }
     // Own keys, not `Object.assign`: a `__proto__` header would set the record's
     // prototype (an array value) or vanish (a string). Lowercased, as the request sends
-    // them, so a later call replaces an earlier one whatever either's capitalization -
-    // kept as given, `Authorization` then `authorization` were two entries, and the
-    // first one's position decided which won.
+    // them, so a later call replaces an earlier one whatever either's capitalization.
     for (const [key, value] of Object.entries(headers)) {
       defineEntry(this._headers, key.toLowerCase(), value);
     }
