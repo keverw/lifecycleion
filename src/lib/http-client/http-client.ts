@@ -737,6 +737,8 @@ export class BaseHTTPClient {
           // being taken - a getter that throws there is still reported best-effort -
           // and from the snapshot once it exists. With no interceptor registered there
           // is no caller object to copy; see `_runInterceptors`.
+          // Two branches, not one `||`: only the first proves the result is the
+          // already-resolved request the chain was given.
           if (!initialRun.isIntercepted) {
             interceptResult = initialRun.result;
           } else if (isInterceptorCancel(initialRun.result)) {
@@ -2840,11 +2842,12 @@ export class BaseHTTPClient {
           }
         }
 
-        // A timed-out attempt is a timeout whether or not the adapter had answered:
-        // the AbortError the timeout raised, or an answer that arrived after the timer
-        // fired and could not be read (a cancel would already have returned above).
-        const didTimeoutThisAttempt =
-          isTimedOut && (isAbortError(error) || didAdapterResolve);
+        // A timeout when the timer's own abort is what ended the attempt: the AbortError
+        // it raised, even while an answer that arrived late was being read (a cancel would
+        // already have returned above). Otherwise an answer, late or not, decides: one
+        // that reads cleanly is delivered, and one that cannot be read is the answered
+        // response's non-retryable adapter_error below, so it is not sent again.
+        const didTimeoutThisAttempt = isTimedOut && isAbortError(error);
         const isNonRetryableClientCallbackFailure =
           isNonRetryableClientCallbackError(error);
         const isNonRetryableAdapterFailure =

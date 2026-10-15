@@ -1,4 +1,8 @@
 import { captureErrorReports } from './test-helpers/capture-error-reports';
+import {
+  THROWING_FILTER_HOST,
+  makeMarkedFiltersThrow,
+} from './test-helpers/throwing-filter';
 import { describe, test, expect } from 'bun:test';
 import { ResponseObserverManager, ErrorObserverManager } from './observers';
 import type { AttemptRequest, HTTPResponse, HTTPClientError } from './types';
@@ -522,7 +526,7 @@ describe('ErrorObserverManager', () => {
 });
 
 test.each(['final', 'retry'] as const)(
-  'malformed response observer filter cannot block %s delivery',
+  'a response observer filter that throws cannot block %s delivery',
   async (phase) => {
     const manager = new ResponseObserverManager();
     let calls = 0;
@@ -530,10 +534,7 @@ test.each(['final', 'retry'] as const)(
       () => {
         throw new Error('must not run');
       },
-      {
-        phases: ['final', 'retry'],
-        statusCodes: {} as number[],
-      },
+      { phases: ['final', 'retry'], hosts: [THROWING_FILTER_HOST] },
     );
     manager.add(
       () => {
@@ -542,6 +543,7 @@ test.each(['final', 'retry'] as const)(
       { phases: ['final', 'retry'] },
     );
     const { reports, release } = captureErrorReports();
+    const filterSpy = makeMarkedFiltersThrow();
     try {
       await manager.snapshot()(
         makeResponse(),
@@ -553,6 +555,7 @@ test.each(['final', 'retry'] as const)(
       expect(calls).toBe(1);
       expect(reports.length).toBeGreaterThan(0);
     } finally {
+      filterSpy.mockRestore();
       release();
     }
   },

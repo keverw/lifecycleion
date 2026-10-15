@@ -1,3 +1,5 @@
+import { isNullish } from '../../internal/is-nullish';
+
 /**
  * Whether `value` is a record whose own properties are its entries: an object, not an
  * array, whose prototype is `null` or a root prototype - `Object.prototype`, or another
@@ -26,7 +28,7 @@ export function assertOptionalHeaderRecord(
   value: unknown,
   label: string,
 ): void {
-  if (value !== undefined && value !== null && !isPlainRecord(value)) {
+  if (!isNullish(value) && !isPlainRecord(value)) {
     throw new TypeError(
       `${label} must be a plain object of header names to values (not a Headers, Map or array)`,
     );

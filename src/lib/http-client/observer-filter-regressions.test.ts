@@ -2,9 +2,13 @@ import { expect, test } from 'bun:test';
 import { HTTPClient } from './http-client';
 import { MockAdapter } from './adapters/mock-adapter';
 import { captureErrorReports } from './test-helpers/capture-error-reports';
+import {
+  THROWING_FILTER_HOST,
+  makeMarkedFiltersThrow,
+} from './test-helpers/throwing-filter';
 
 test.each(['final', 'retry'] as const)(
-  'malformed %s response filter cannot stall send or skip later observers',
+  'a %s response filter that throws cannot stall send or skip later observers',
   async (phase) => {
     const adapter = new MockAdapter();
     let attempts = 0;
@@ -21,7 +25,7 @@ test.each(['final', 'retry'] as const)(
       () => {
         throw new Error('must not be called');
       },
-      { phases: [phase], statusCodes: {} as number[] },
+      { phases: [phase], hosts: [THROWING_FILTER_HOST] },
     );
     client.addResponseObserver(
       (_response, _request, info) => {
@@ -30,6 +34,7 @@ test.each(['final', 'retry'] as const)(
       { phases: ['retry', 'final'] },
     );
     const { reports, release } = captureErrorReports();
+    const filterSpy = makeMarkedFiltersThrow();
     try {
       const response = await client.get('/test').send();
       expect(response.status).toBe(200);
@@ -39,13 +44,14 @@ test.each(['final', 'retry'] as const)(
       );
       expect(reports.length).toBeGreaterThan(0);
     } finally {
+      filterSpy.mockRestore();
       release();
     }
   },
   1000,
 );
 
-test('malformed error observer filters preserve retries and final adapter error', async () => {
+test('an error observer filter that throws preserves retries and the final adapter error', async () => {
   const adapter = new MockAdapter();
   let attempts = 0;
   adapter.send = () => {
@@ -61,9 +67,8 @@ test('malformed error observer filters preserve retries and final adapter error'
     () => {
       throw new Error('must not be called');
     },
-    // Not an array, so matching it throws on every phase. (A malformed `methods` is
-    // refused when the observer is registered instead.)
-    { phases: { length: 1 } as never },
+    // Matching it throws on every phase.
+    { phases: ['retry', 'final'], hosts: [THROWING_FILTER_HOST] },
   );
   client.addErrorObserver(
     (_error, _request, info) => {
@@ -72,6 +77,7 @@ test('malformed error observer filters preserve retries and final adapter error'
     { phases: ['retry', 'final'] },
   );
   const { reports, release } = captureErrorReports();
+  const filterSpy = makeMarkedFiltersThrow();
   try {
     const response = await client.get('/test').send();
     expect(response.isFailed).toBe(true);
@@ -79,6 +85,7 @@ test('malformed error observer filters preserve retries and final adapter error'
     expect(observed).toEqual(['retry', 'final']);
     expect(reports.length).toBeGreaterThan(0);
   } finally {
+    filterSpy.mockRestore();
     release();
   }
 }, 1000);

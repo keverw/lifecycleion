@@ -10,6 +10,15 @@ import type {
   HTTPMethod,
 } from './types';
 
+/** A cookie jar whose storing of a response fails. */
+function failingJar(): CookieJar {
+  const jar = new CookieJar();
+  jar.processResponseHeaders = () => {
+    throw new Error('jar failed');
+  };
+  return jar;
+}
+
 /** Answers every request with `status`, recording what each attempt sent. */
 class RecordingAdapter implements HTTPAdapter {
   public readonly requests: AdapterRequest[] = [];
@@ -100,8 +109,8 @@ test('an undefined header value is left out, not sent as "undefined"', async () 
   expect(sent['x-keep']).toBe('1');
 });
 
-test('an answer that arrives after the timer fired and cannot be read is a timeout', async () => {
-  // An adapter that ignores its abort signal and answers late with headers that throw.
+test('an answer that arrives after the timer fired and cannot be read is the answered adapter_error', async () => {
+  // An adapter that ignores its abort signal and answers late; storing the answer fails.
   const adapter: HTTPAdapter = {
     getType: () => 'node',
     send: () =>
@@ -109,9 +118,7 @@ test('an answer that arrives after the timer fired and cannot be read is a timeo
         setTimeout(() => {
           resolve({
             status: 503,
-            get headers(): Record<string, string> {
-              throw new Error('headers unreadable');
-            },
+            headers: {},
             body: null,
           });
         }, 60);
@@ -121,12 +128,17 @@ test('an answer that arrives after the timer fired and cannot be read is a timeo
     adapter,
     baseURL: 'http://example.test',
     timeout: 20,
+    cookieJar: failingJar(),
   });
 
-  const response = await client.get('/slow').send();
+  const request = client.get('/slow');
+  const response = await request.send();
 
-  expect(response.isTimeout).toBe(true);
-  expect(response.status).toBe(0);
+  // As an unreadable answer that arrived in time is: the server answered, so it is not
+  // a timeout to retry. A late answer that reads cleanly is delivered.
+  expect(response.isTimeout).toBe(false);
+  expect(request.error?.code).toBe('adapter_error');
+  expect(response.status).toBe(503);
 });
 
 test('numeric effectiveRequestHeaders are read as strings, not discarded', async () => {
@@ -623,4 +635,94 @@ test("a request interceptor's filter that throws fails the request as intercepto
   expect(codes).toEqual(['interceptor_error']);
   expect(didRun).toBe(false);
   expect(adapter.requests).toHaveLength(0);
+});
+
+test('a late answer is decided by the answer: delivered if readable, never re-sent if not', async () => {
+  for (const isReadable of [true, false]) {
+    let sends = 0;
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      // Ignores its abort signal and answers after the attempt's timer fired.
+      send: () => {
+        sends++;
+        return new Promise((resolve) => {
+          setTimeout(() => {
+            resolve({
+              status: 200,
+              headers: { 'content-type': 'text/plain' },
+              body: new TextEncoder().encode('late'),
+            });
+          }, 60);
+        });
+      },
+    };
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://example.test',
+      timeout: 20,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+      // Storing the answer fails when it is to be unreadable.
+      cookieJar: isReadable ? new CookieJar() : failingJar(),
+    });
+
+    const request = client.get('/slow');
+    const response = await request.send();
+
+    expect(sends).toBe(1);
+    expect(response.status).toBe(200);
+    expect(response.isTimeout).toBe(false);
+    if (isReadable) {
+      expect(response.isFailed).toBe(false);
+      expect(response.body).toBe('late');
+    } else {
+      expect(request.error?.code).toBe('adapter_error');
+    }
+  }
+});
+
+test('a filter list that is not an array of the right entries is refused when registered', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  // A string used to match by substring: 'initial,retry' ran in both phases.
+  expect(() =>
+    client.addRequestInterceptor((request) => request, {
+      phases: 'initial,retry' as never,
+    }),
+  ).toThrow(
+    'HTTPClient request interceptor filter phases must be an array (got string)',
+  );
+  expect(() =>
+    client.addResponseObserver(() => undefined, {
+      statusCodes: ['200'] as never,
+    }),
+  ).toThrow(
+    'HTTPClient response observer filter statusCodes must contain only numbers (got string)',
+  );
+  expect(() =>
+    client.addErrorObserver(() => undefined, 'final' as never),
+  ).toThrow('HTTPClient error observer filter must be an object (got string)');
+});
+
+test('a filter is read once and copied, so later changes to it do not apply', async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  let phaseReads = 0;
+  const filter = {
+    get phases(): Array<'initial'> {
+      phaseReads++;
+      return ['initial'];
+    },
+    hosts: ['example.test'],
+  };
+  let runs = 0;
+  client.addRequestInterceptor((request) => {
+    runs++;
+    return request;
+  }, filter);
+  filter.hosts.push('other.test');
+  filter.hosts.splice(0, 1);
+
+  await client.get('/x').send();
+
+  expect(phaseReads).toBe(1);
+  expect(runs).toBe(1);
 });
