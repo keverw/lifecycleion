@@ -79,6 +79,16 @@ async function runInterceptors(
       return makeInterceptorCancel(undefined);
     }
 
+    // Refused here, before anything reads it as a request: an `in` check on a primitive
+    // throws its own obscure TypeError, and a forgotten `return request` answers
+    // `undefined`, which the next interceptor's filter would fail to read.
+    const candidate: unknown = result;
+    if (typeof candidate !== 'object') {
+      throw new TypeError(
+        `[HTTPClient] Interceptor returned a value that is not a request, a cancel or null (got ${typeof candidate}).`,
+      );
+    }
+
     // Interceptor signalled cancellation with optional reason. Only `cancel: true`
     // cancels: a request carrying `cancel: false` is passed on as a request.
     if (result && 'cancel' in result && result.cancel === true) {

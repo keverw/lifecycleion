@@ -338,3 +338,25 @@ test("a refused interceptor request's unset header is left out of what error obs
   expect(seen[0]?.['x-keep']).toBe('1');
   expect(adapter.requests).toHaveLength(0);
 });
+
+test('an interceptor that returns no request fails with a clear message', async () => {
+  for (const returned of [undefined, true, 'http://example.test/y']) {
+    const adapter = new RecordingAdapter(200);
+    const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+    // As a forgotten `return request` does, for `undefined`.
+    client.addRequestInterceptor(() => returned as never);
+    client.addRequestInterceptor((request) => request);
+    const messages: string[] = [];
+    client.addErrorObserver((error) => {
+      messages.push(`${error.code}: ${String(error.cause?.message)}`);
+    });
+
+    const response = await client.get('/x').send();
+
+    expect(response.isFailed).toBe(true);
+    expect(messages).toEqual([
+      `interceptor_error: [HTTPClient] Interceptor returned a value that is not a request, a cancel or null (got ${typeof returned}).`,
+    ]);
+    expect(adapter.requests).toHaveLength(0);
+  }
+});
