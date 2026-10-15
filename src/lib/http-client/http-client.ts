@@ -1799,6 +1799,8 @@ export class BaseHTTPClient {
       attemptNumber++;
       const isRetry = attemptNumber > startAttempt;
 
+      let didEmitAttemptEnd = false;
+
       /**
        * Emit the attempt-end event, filling in everything that is the same at
        * every exit. Callers pass only what differs between one ending and
@@ -1811,6 +1813,13 @@ export class BaseHTTPClient {
         nextRetryAt?: number;
         retrySuppressedReason?: AttemptEndEvent['retrySuppressedReason'];
       }): void => {
+        // Once per attempt: an exit reached after the event already fired - a throw from
+        // the retry path past its `willRetry: true` - must not report the attempt again.
+        if (didEmitAttemptEnd) {
+          return;
+        }
+        didEmitAttemptEnd = true;
+
         // Through `safeHandleCallback`, because this hook is purely observational and
         // must not be able to change the outcome it is describing. Called bare, a throw
         // from it escaped into the attempt loop and came back to the caller as
@@ -2574,6 +2583,17 @@ export class BaseHTTPClient {
           }
         }
 
+        // Once the adapter has answered, an exit below reports what it said it sent - to
+        // the retry phase's error observers, the final error and a cancel alike - and,
+        // through `answeredStatus`, the status it answered with.
+        const reportedSentRequest = didAdapterResolve
+          ? sentRequestForObservedAdapterError(
+              sentRequest,
+              error,
+              observedSentRequest,
+            )
+          : sentRequest;
+
         // When abort(string) is called, fetch() rejects with the string itself (per Fetch spec),
         // not an AbortError. Check cancelSignal.aborted first so string-reason cancels are caught.
         if (cancelSignal.aborted && !isAbortError(error)) {
@@ -2581,7 +2601,7 @@ export class BaseHTTPClient {
             willRetry: false,
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
-            status: 0,
+            status: answeredStatus,
           });
 
           const signalReason = getSignalCancelReason(cancelSignal);
@@ -2589,7 +2609,7 @@ export class BaseHTTPClient {
           return {
             adapterResponse: null,
             ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
-            sentRequest,
+            sentRequest: reportedSentRequest,
             attemptCount: attemptNumber,
             wasCancelled: true,
             wasTimeout: isTimedOut,
@@ -2747,14 +2767,14 @@ export class BaseHTTPClient {
               willRetry: false,
               nextRetryDelayMS: undefined,
               nextRetryAt: undefined,
-              status: 0,
+              status: answeredStatus,
             });
 
             const signalReason = getSignalCancelReason(cancelSignal);
             return {
               adapterResponse: null,
               ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
-              sentRequest,
+              sentRequest: reportedSentRequest,
               attemptCount: attemptNumber,
               wasCancelled: true,
               wasTimeout: isTimedOut,
@@ -2881,16 +2901,6 @@ export class BaseHTTPClient {
             adapterCause: normalizeError(error),
           };
         }
-
-        // A timed-out answer still reports what the adapter said it sent, to the retry
-        // phase's error observers and the final error alike.
-        const reportedSentRequest = didAdapterResolve
-          ? sentRequestForObservedAdapterError(
-              sentRequest,
-              error,
-              observedSentRequest,
-            )
-          : sentRequest;
 
         // Network / adapter / per-attempt timeout — retry if policy allows. A throw
         // carries no adapter response, so delivery is unproven - and a timed-out answer

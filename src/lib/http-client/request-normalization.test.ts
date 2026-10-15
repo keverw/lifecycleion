@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import { HTTPClient } from './http-client';
 import { matchesFilter } from './utils';
+import { CookieJar } from './cookie-jar';
 import type {
   AdapterRequest,
   AdapterResponse,
@@ -403,7 +404,7 @@ test('a filter whose methods is not an array of strings is refused when register
   expect(() =>
     client.addErrorObserver(() => undefined, { methods: [42] as never }),
   ).toThrow(
-    'HTTPClient error observer filter methods must contain only strings (got number)',
+    'HTTPClient error observer filter method is not a string (got number)',
   );
 });
 
@@ -438,4 +439,80 @@ test('a falsy headers option that is not nullish is refused, as headers() refuse
       'HTTPRequestBuilder headers must be a plain object',
     );
   }
+});
+
+test('a filter method that no request can have is refused when registered', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  for (const [entry, problem] of [
+    ['GET, POST', 'is not a valid HTTP method name'],
+    ['', 'is empty'],
+  ] as const) {
+    expect(() =>
+      client.addRequestInterceptor((request) => request, {
+        methods: [entry as HTTPMethod],
+      }),
+    ).toThrow(`HTTPClient request interceptor filter method ${problem}`);
+  }
+});
+
+test('a cancel after the adapter answered reports the answered status', async () => {
+  const controller = new AbortController();
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () =>
+      Promise.resolve({
+        status: 200,
+        headers: {},
+        body: null,
+      }),
+  };
+  // The caller cancels while the answer is being stored, and storing it then fails.
+  const cookieJar = new CookieJar();
+  cookieJar.processResponseHeaders = () => {
+    controller.abort();
+    throw new Error('jar failed');
+  };
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    cookieJar,
+  });
+  const statuses: number[] = [];
+
+  const response = await client
+    .get('/x')
+    .signal(controller.signal)
+    .onAttemptEnd((event) => {
+      statuses.push(event.status);
+    })
+    .send();
+
+  expect(response.isCancelled).toBe(true);
+  expect(statuses).toEqual([200]);
+});
+
+test('an attempt reports its end once, even if the retry path throws after announcing it', async () => {
+  const adapter = new RecordingAdapter(503);
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+  });
+  // The client's own retry wait failing - nothing in it is meant to throw.
+  (
+    client as unknown as { _cancellableDelay: () => Promise<void> }
+  )._cancellableDelay = () => Promise.reject(new Error('retry wait failed'));
+  const events: Array<{ attemptNumber: number; willRetry: boolean }> = [];
+
+  await client
+    .get('/x')
+    .onAttemptEnd((event) => {
+      events.push({
+        attemptNumber: event.attemptNumber,
+        willRetry: event.willRetry,
+      });
+    })
+    .send();
+
+  expect(events).toEqual([{ attemptNumber: 1, willRetry: true }]);
 });

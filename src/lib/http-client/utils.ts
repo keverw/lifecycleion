@@ -366,8 +366,9 @@ export function describeInvalidHTTPMethod(
 /**
  * A filter's `methods`, checked and normalized once when its callback is registered, so
  * matching a request is a plain lookup. Nullish means no method filter. Anything else must
- * be an array of strings: a single string used to match by substring (`'POST'` matched
- * `POST`, but `'GET, POST'` matched neither), and a non-string entry never matched.
+ * be an array of method names: a single string used to match by substring (`'POST'`
+ * matched `POST`, but `'GET, POST'` matched neither), and an entry that is not a method
+ * name never matched.
  */
 export function normalizeFilterMethods(
   methods: unknown,
@@ -382,12 +383,13 @@ export function normalizeFilterMethods(
     );
   }
   return (methods as unknown[]).map((entry) => {
-    if (typeof entry !== 'string') {
-      throw new TypeError(
-        `${label} filter methods must contain only strings (got ${entry === null ? 'null' : typeof entry})`,
-      );
+    // Held to the rule a request's method is, so an entry no request can have - `''`,
+    // `'GET, POST'` - is refused rather than registered to match nothing.
+    const problem = describeInvalidHTTPMethod(entry);
+    if (problem !== undefined) {
+      throw new TypeError(`${label} filter method ${problem}`);
     }
-    return normalizeHTTPMethod(entry);
+    return normalizeHTTPMethod(entry as string);
   });
 }
 

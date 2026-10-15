@@ -28,7 +28,10 @@ import {
 } from '../internal/multipart';
 import { writeRequestBodyChunked } from '../internal/request-body-writer';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
-import { materializeRequestHeaders } from '../internal/header-utils';
+import {
+  materializeRequestHeaders,
+  presentHeaderValue,
+} from '../internal/header-utils';
 import { mergeObservedHeaders, resolveDetectedRedirectURL } from '../utils';
 import { defineEntry } from '../../internal/define-entry';
 // Shared error normalization preserves Error instances and wraps other thrown values.
@@ -2689,17 +2692,35 @@ function ignoreWritableError(): void {
  * the headers from the abort listener - and those run as emitter or `AbortSignal`
  * callbacks, where a throw is an uncaught exception rather than a rejection, and the
  * request never settles. Read here, inside `send()`'s own promise, a member that throws
- * fails this send instead. `headers` is copied for the same reason, as the effective
- * request headers report it - names lowercased, each value converted to a string (an
- * array copied, its elements converted), an `undefined` value dropped: its entries are
- * read again each time the effective request headers are snapshotted, so a `toString`
- * that throws must throw now, and an array the caller changes after `send()` must not
- * change what is reported as sent.
+ * fails this send instead. `headers` is copied for the same reason - each value converted
+ * to a string (an array copied, its elements converted), an unset value dropped: its
+ * entries are read again each time the effective request headers are snapshotted, so a
+ * `toString` that throws must throw now, and an array the caller changes after `send()`
+ * must not change what is reported as sent. Names are kept as given, since Node sends
+ * them so and a server may read their case; the effective request headers lowercase
+ * them when they are reported.
  *
  * `streamResponse` is called on the caller's request rather than on this copy, so a
  * factory that is a method reading `this` - a class-instance request - sees the object it
  * belongs to. Only the member read is moved up front; the receiver is not changed.
  */
+/** A request's headers with each value read once and converted, names kept as given. */
+function copyRequestHeaders(
+  headers: Record<string, unknown> | undefined,
+): Record<string, string | string[]> {
+  const copy: Record<string, string | string[]> = {};
+  if (!headers) {
+    return copy;
+  }
+  for (const [name, value] of Object.entries(headers)) {
+    const present = presentHeaderValue(value);
+    if (present !== undefined) {
+      defineEntry(copy, name, present);
+    }
+  }
+  return copy;
+}
+
 function snapshotAdapterRequest(request: AdapterRequest): AdapterRequest {
   const {
     requestURL,
@@ -2718,7 +2739,7 @@ function snapshotAdapterRequest(request: AdapterRequest): AdapterRequest {
   return {
     requestURL,
     method,
-    headers: mergeObservedHeaders(headers),
+    headers: copyRequestHeaders(headers),
     body,
     signal,
     onUploadProgress,
