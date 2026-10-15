@@ -3,7 +3,9 @@ import type { EventEmitterProtected } from '../event-emitter';
 import type { ProcessSignalManagerStatus } from '../process-signal-manager';
 
 /**
- * Component configuration options passed to BaseComponent constructor
+ * Component configuration options passed to BaseComponent constructor.
+ * Null or omitted durations use defaults; NaN/other non-numbers and negative durations throw.
+ * Positive Infinity is capped at the runtime timer ceiling before minimums apply.
  */
 export interface ComponentOptions {
   /** Unique component name (must be kebab-case) */
@@ -12,23 +14,41 @@ export interface ComponentOptions {
   /** Names of components this one depends on (default: []) */
   dependencies?: string[];
 
-  /** If true, startup failure doesn't trigger rollback (default: false) */
-  optional?: boolean;
+  /**
+   * If true, startup failure doesn't trigger rollback (default: false). Must be a
+   * boolean: `null` or omitted selects the default, and anything else makes the
+   * constructor throw a `TypeError`.
+   */
+  optional?: boolean | null;
 
   /** Time to wait for start() in milliseconds (default: 30000, 0 = disabled) */
-  startupTimeoutMS?: number;
+  startupTimeoutMS?: number | null;
 
   /** Time to wait for graceful shutdown in milliseconds (default: 5000, minimum: 1000) */
-  shutdownGracefulTimeoutMS?: number;
+  shutdownGracefulTimeoutMS?: number | null;
 
   /** Time to wait for force shutdown in milliseconds (default: 2000, minimum: 500) */
-  shutdownForceTimeoutMS?: number;
+  shutdownForceTimeoutMS?: number | null;
 
   /** Time to wait for healthCheck() in milliseconds (default: 5000, 0 = disabled) */
-  healthCheckTimeoutMS?: number;
+  healthCheckTimeoutMS?: number | null;
 
   /** Time to wait for onReload/onInfo/onDebug in milliseconds (default: 5000, 0 = disabled) */
-  signalTimeoutMS?: number;
+  signalTimeoutMS?: number | null;
+
+  /**
+   * Whether the component cleans up after its own late start (default: false). If the
+   * manager gives up on a start it aborts the start signal - its `startupTimeoutMS`, a
+   * `startAllComponents()` / `restartAllComponents()` deadline, a shutdown's
+   * `abortPendingStarts` cue, or a `start()` promise it cannot observe - and a `start()`
+   * that completes anyway is stopped by the manager with `stop()`, unless this is
+   * `true`: the component then undoes that late start itself, with a `signal.aborted`
+   * check as the last step before `start()` returns or from an `'abort'` listener while
+   * it is still running. A shutdown's cue that lands only after `start()` settled, and a
+   * start that resolved but lost to a bulk deadline in the same moment (not aborted at
+   * all), are cleaned up by the manager even when this is `true`. Must be a boolean.
+   */
+  ownsLateStartCleanup?: boolean | null;
 }
 
 /**
@@ -175,7 +195,8 @@ export interface StartComponentOptions {
 export interface StopComponentOptions {
   /**
    * If true, force immediate shutdown without graceful period
-   * Calls onShutdownForce() directly, bypassing normal stop() flow
+   * Calls onShutdownForce(signal) directly, bypassing normal stop() flow; its signal
+   * aborts at the component's shutdownForceTimeoutMS, as in any force phase
    * (default: false)
    */
   forceImmediate?: boolean;
@@ -183,9 +204,10 @@ export interface StopComponentOptions {
   /**
    * Override the component's configured shutdown timeout in milliseconds
    * If not specified, uses the component's shutdownGracefulTimeoutMS
-   * Only applies when forceImmediate is false
+   * Only applies when forceImmediate is false. It is also when the signal passed to
+   * stop(signal) aborts if stop() is still pending.
    */
-  timeout?: number;
+  timeout?: number | null;
 
   /**
    * If true, allows stopping a component even if other running components depend on it
@@ -209,9 +231,17 @@ export interface RestartComponentOptions {
 }
 
 /**
- * Stable, machine-readable failure codes for individual component operations
+ * Stable, machine-readable failure codes for individual component operations.
+ * `invalid_options` is an expected refusal of an option the manager validates itself - an
+ * invalid timeout, or (for a start or restart) a component `ownsLateStartCleanup` that is
+ * not a boolean - not a callback crash.
+ * `error` is a component's own hook failing (`start()` or `stop()` threw or rejected,
+ * `onShutdownForce()` failed), as `error` is for every other call that runs your code.
+ * `operation_crashed` is the operation itself throwing - a bug in the manager, or a
+ * component getter that broke its contract - and is never an expected outcome.
  */
 export type ComponentOperationFailureCode =
+  | 'invalid_options'
   | 'component_not_found'
   | 'component_already_running'
   | 'component_already_starting'
@@ -228,7 +258,13 @@ export type ComponentOperationFailureCode =
   | 'component_shutdown_timeout'
   | 'restart_stop_failed'
   | 'restart_start_failed'
-  | 'unknown_error';
+  // restartComponent() skipped its start for a request to stay down.
+  | 'shutdown_requested_during_restart'
+  | 'signal_attach_failed'
+  // An auto-start refused because the active bulk startup is already rolling back.
+  | 'startup_rolled_back'
+  | 'error'
+  | 'operation_crashed';
 
 /**
  * Failure codes for unregister operations
@@ -236,13 +272,24 @@ export type ComponentOperationFailureCode =
 export type UnregisterFailureCode =
   | 'component_not_found'
   | 'component_running'
+  | 'component_starting'
+  | 'component_stopping'
   | 'stop_failed'
-  | 'bulk_operation_in_progress';
+  | 'bulk_operation_in_progress'
+  | 'invalid_options'
+  | 'operation_crashed';
 
 /**
  * Additional details for why unregister stop failed
  */
-export type UnregisterStopFailureReason = 'stalled' | 'timeout' | 'error';
+export type UnregisterStopFailureReason =
+  // Already stalled from an earlier stop: no stop was attempted. A stop the unregister
+  // runs that stalls is reported by how it failed.
+  | 'stalled'
+  | 'timeout'
+  | 'error'
+  // The stop itself crashed; the component may be left stalled or still running.
+  | 'operation_crashed';
 
 /**
  * Result of unregistering a component
@@ -257,7 +304,7 @@ export interface UnregisterComponentResult extends BaseOperationResult {
   /** More detail when stop_failed occurs */
   stopFailureReason?: UnregisterStopFailureReason;
 
-  /** Whether the component was stopped before unregistering */
+  /** Whether this call stopped the component before unregistering it */
   wasStopped: boolean;
 
   /** Whether the component was found in registry */
@@ -268,11 +315,15 @@ export interface UnregisterComponentResult extends BaseOperationResult {
  * Result of starting all components
  */
 export interface StartupResult {
-  /** True if all required components started */
+  /**
+   * True if all required components started before completion notifications.
+   * Those notifications do not reopen rollback if a component subsequently stops.
+   */
   success: boolean;
 
   /**
-   * Names of components that started successfully. When shutdown interrupts startup,
+   * Names of components that started successfully. On success, snapshots those still
+   * running after completion notifications. When shutdown interrupts startup,
    * includes only components from this pass still running when the result is returned.
    */
   startedComponents: string[];
@@ -283,8 +334,14 @@ export interface StartupResult {
     error: Error;
   }>;
 
-  /** Components skipped because their optional dependency failed */
+  /**
+   * Components skipped because a required dependency failed, stalled or was itself
+   * skipped. An optional dependency that did so does not block its dependents.
+   */
   skippedDueToDependency: string[];
+
+  /** Stalled components actually skipped with ignoreStalledComponents; absent when none were skipped. */
+  skippedDueToStall?: string[];
 
   /** Present if stalled components blocked startup */
   blockedByStalledComponents?: string[];
@@ -302,10 +359,13 @@ export interface StartupResult {
     | 'stalled_components_exist'
     | 'partial_state'
     | 'required_component_failed'
+    | 'shutdown_requested_during_restart'
+    | 'signal_attach_failed'
     | 'startup_timeout'
-    | 'unknown_error';
+    | 'invalid_options'
+    | 'operation_crashed';
 
-  /** Error object (when success is false due to dependency cycle or unknown error) */
+  /** Error object for invalid options, dependency cycles, or unexpected failures. */
   error?: Error;
 
   /** Total startup duration in milliseconds */
@@ -337,20 +397,91 @@ export interface ShutdownResult {
   /** Reason for failure (when success is false) */
   reason?: string;
 
-  /** Error code (when success is false) */
-  code?: 'already_in_progress' | 'shutdown_timeout';
+  /**
+   * Error code (when success is false).
+   * `cleanup_incomplete` means cleanup remains pending. `partial_state` can
+   * describe either a preparation refusal or a completed shutdown pass that
+   * left stalled/running components; it does not imply no shutdown ran.
+   */
+  code?:
+    | 'already_in_progress'
+    | 'partial_state'
+    | 'shutdown_timeout'
+    | 'cleanup_incomplete'
+    | 'invalid_options'
+    | 'operation_crashed';
+
+  /** The validation error or thrown value when the pass itself failed. */
+  error?: Error;
 }
 
 /**
  * Options for stopping all components
  */
 export interface StopAllOptions {
-  /** Global timeout for entire shutdown process in milliseconds (default: 30000, 0 = disabled) */
-  timeoutMS?: number;
+  /**
+   * Global shutdown timeout in milliseconds (default: 30000).
+   * Zero disables the deadline, including while joining ordinary in-flight starts
+   * and their cleanup. If an unresolved start times out during this wait, shutdown
+   * returns `cleanup_incomplete` and releases its latch, preserving dependencies.
+   * Cleanup already underway is still joined. Already timed-out unresolved starts
+   * and synchronous self-requesting start hooks are not joined; their dependencies
+   * stay protected unless allowStopWithPendingStarts is explicitly enabled. Neither is a
+   * start requesting through its component's own `lifecycle` handle, even after it has
+   * yielded. A start() that yields and then awaits the manager's own stopAllComponents()
+   * cannot be recognised as the requester: the pass joins it, so that wait lasts until
+   * this deadline - or, when this is zero, until the start's own startup timeout, if any.
+   */
+  timeoutMS?: number | null;
   /** Retry stalled components during stopAllComponents (default: true) */
   retryStalled?: boolean;
-  /** Stop processing further components after a stall (default: true) */
+  /**
+   * Stop processing further components after a stop failure or refusal (default: true).
+   * A component a concurrent stop or start already owns is not a failure: the pass
+   * skips it and its dependencies and continues with unrelated components. It then
+   * waits, within timeoutMS, for such a stop still in flight, and stops those
+   * dependencies once it has settled - unless the component requested the pass through
+   * its own `lifecycle` handle, when that stop may be awaiting the pass. Only that direct
+   * request is recognised: a stop that awaits the pass indirectly is still waited for.
+   */
   haltOnStall?: boolean;
+  /**
+   * Allow stopping dependencies while start() remains unresolved (default: false).
+   * Skips waiting for those starts so the shutdown budget is available for stops.
+   * Does not cancel start(); unfinished work still produces cleanup_incomplete.
+   * Cleanup already underway and other stop failures retain dependency protection.
+   * restartAllComponents always disables this override, including when configured globally.
+   */
+  allowStopWithPendingStarts?: boolean;
+  /**
+   * Wait for a start the manager has given up on - its `startupTimeoutMS` or a bulk
+   * deadline passed, or its promise could not be observed - while its `start()` is still
+   * unresolved, instead of answering `cleanup_incomplete` at once (default: false).
+   * Applies whether it was given up on before the pass began or while the pass waited on
+   * it, and to an earlier start of a component that a retry has since replaced.
+   * The wait is bounded by `timeoutMS` (`shutdown_timeout` when it runs out); with
+   * `timeoutMS: 0` it lasts until `start()` settles. Once it does, its late cleanup
+   * stops it and the pass goes on to its dependencies. allowStopWithPendingStarts takes
+   * precedence: with it enabled, starts are not waited for at all.
+   * restartAllComponents always disables this, including when configured globally.
+   */
+  waitForAbandonedStarts?: boolean;
+  /**
+   * Abort the start signal of each start still in flight as the pass begins, before its
+   * warning phase, with a `StartupInterruptedByShutdownError` as `signal.reason`
+   * (default: false). Only a cue to give up: nothing is marked timed out, and what the
+   * pass waits for and keeps up is exactly what it would without the option (with
+   * allowStopWithPendingStarts the starts are aborted too). It also reaches every other
+   * `start()` call of a component still running - an earlier start a newer attempt
+   * replaced, say. Skipped: a start the manager gave up on, whose signal is already
+   * aborted, and a start that requested this shutdown itself. A start that then
+   * rejects or throws with a failure linked to the abort - `signal.reason`, an
+   * `AbortError`, or an error carrying either on its `cause` chain - is answered
+   * `shutdown_in_progress`, as one that resolves is; any other failure is answered
+   * `error`, exactly as without this option.
+   * restartAllComponents always disables this, including when configured globally.
+   */
+  abortPendingStarts?: boolean;
 }
 
 /**
@@ -363,6 +494,15 @@ export interface RestartResult {
   /** Startup phase result */
   startupResult: StartupResult;
 
+  /**
+   * Present and `true` when a shutdown request arrived during the shutdown phase and
+   * the startup phase was skipped, so nothing is started again. `startupResult` then
+   * carries the `shutdown_requested_during_restart` code and `success` is false. Whether
+   * every component actually stopped is `shutdownResult`'s to say: a shutdown phase that
+   * stalled or timed out can leave some running, as any failed shutdown can.
+   */
+  startupSkippedByShutdownRequest?: boolean;
+
   /** True only if both shutdown and startup succeeded */
   success: boolean;
 }
@@ -374,10 +514,13 @@ export interface MessageResult {
   /** Was message delivered to handler */
   sent: boolean;
 
-  /** Does component exist */
+  /**
+   * Did the component exist. Like `componentRunning`, as of the last check before the
+   * handler was called: what the handler itself does to the component is not reflected.
+   */
   componentFound: boolean;
 
-  /** Is component currently running */
+  /** Was the component running, as of the last check before the handler was called */
   componentRunning: boolean;
 
   /** Does component have onMessage() method */
@@ -400,7 +543,9 @@ export interface MessageResult {
     | 'stalled'
     | 'no_handler'
     | 'timeout'
-    | 'error';
+    | 'invalid_options'
+    | 'error'
+    | 'operation_crashed';
 }
 
 /**
@@ -411,7 +556,7 @@ export interface SendMessageOptions {
    * Timeout in milliseconds for awaiting a response
    * (default: manager messageTimeoutMS, 0 = disabled)
    */
-  timeout?: number;
+  timeout?: number | null;
 
   /**
    * Include stopped (not running, not stalled) components (default: false)
@@ -445,7 +590,7 @@ export interface GetValueOptions {
  */
 export interface BroadcastOptions extends SendMessageOptions {
   /** Filter to specific component names (default: all components) */
-  componentNames?: string[];
+  componentNames?: string[] | null;
 }
 
 /**
@@ -458,7 +603,7 @@ export interface BroadcastResult {
   /** Was message delivered */
   sent: boolean;
 
-  /** Was component running */
+  /** Was the component running, as of the last check before the handler was called */
   running: boolean;
 
   /** Data returned from onMessage handler (undefined if not sent or no return) */
@@ -471,7 +616,15 @@ export interface BroadcastResult {
   timedOut: boolean;
 
   /** Machine-readable outcome code */
-  code: 'sent' | 'stopped' | 'stalled' | 'no_handler' | 'timeout' | 'error';
+  code:
+    | 'sent'
+    // Also a target unregistered while the broadcast was running.
+    | 'stopped'
+    | 'stalled'
+    | 'no_handler'
+    | 'timeout'
+    | 'error'
+    | 'operation_crashed';
 }
 
 /**
@@ -510,7 +663,7 @@ export interface HealthCheckResult {
   /** How long the check took */
   durationMS: number;
 
-  /** Error if health check threw */
+  /** Error if the health check threw or returned an invalid result */
   error: Error | null;
 
   /** True if health check timed out */
@@ -524,7 +677,9 @@ export interface HealthCheckResult {
     | 'stalled'
     | 'no_handler'
     | 'timeout'
-    | 'error';
+    | 'invalid_options'
+    | 'error'
+    | 'operation_crashed';
 }
 
 /**
@@ -547,7 +702,10 @@ export interface HealthReport {
   timedOut: boolean;
 
   /** Machine-readable outcome code */
-  code: 'ok' | 'degraded' | 'timeout' | 'error';
+  code: 'ok' | 'degraded' | 'timeout' | 'error' | 'operation_crashed';
+
+  /** The thrown value, when the check itself failed unexpectedly (`code: 'operation_crashed'`). An invalid component timeout is that component's `invalid_options` entry. */
+  error?: Error;
 }
 
 /**
@@ -564,7 +722,21 @@ export interface SignalBroadcastResult {
   timedOut: boolean;
 
   /** Machine-readable outcome code */
-  code: 'ok' | 'partial_timeout' | 'timeout' | 'partial_error' | 'error';
+  code:
+    | 'ok'
+    | 'partial_timeout'
+    | 'timeout'
+    | 'partial_error'
+    | 'error'
+    | 'operation_crashed';
+
+  /**
+   * The thrown value, when the broadcast itself failed rather than a component's handler:
+   * a custom `on*Requested` callback that threw or rejected (`code: 'error'`), or an
+   * unexpected failure of the call (`code: 'operation_crashed'`). Per-component failures,
+   * including an invalid component timeout (`invalid_options`), are on `results`.
+   */
+  error?: Error;
 }
 
 /**
@@ -577,14 +749,21 @@ export interface ComponentSignalResult {
   /** True if handler was called (component implements it) */
   called: boolean;
 
-  /** Error if handler threw */
+  /** Handler/configuration failure, or the target became unavailable before dispatch. */
   error: Error | null;
 
   /** True if handler timed out before completing */
   timedOut: boolean;
 
   /** Machine-readable outcome code */
-  code: 'called' | 'no_handler' | 'unavailable' | 'timeout' | 'error';
+  code:
+    | 'called'
+    | 'no_handler'
+    | 'unavailable'
+    | 'timeout'
+    | 'invalid_options'
+    | 'error'
+    | 'operation_crashed';
 }
 
 /**
@@ -603,16 +782,20 @@ export interface ComponentValueResult<T = unknown> {
  * Result of requesting a value from a component
  */
 export interface ValueResult<T = unknown> {
-  /** True if getValue returned non-undefined */
+  /** The strict boolean `found` returned by the component's getValue() result. */
   found: boolean;
 
   /** The returned value */
   value: T | undefined;
 
-  /** Component exists in registry */
+  /**
+   * Component exists in registry. Like `componentRunning`, as of the last check before
+   * the handler was called: what the handler itself does to the component is not
+   * reflected.
+   */
   componentFound: boolean;
 
-  /** Component is in 'running' state */
+  /** Component is in 'running' state, as of the last check before the handler was called */
   componentRunning: boolean;
 
   /** Component has getValue() method */
@@ -622,9 +805,34 @@ export interface ValueResult<T = unknown> {
   requestedBy: string | null;
 
   /** Machine-readable outcome code */
-  code: 'found' | 'not_found' | 'stopped' | 'stalled' | 'no_handler' | 'error';
+  code:
+    | 'found'
+    | 'not_found'
+    | 'stopped'
+    | 'stalled'
+    | 'no_handler'
+    | 'error'
+    | 'operation_crashed';
+
+  /**
+   * The failure behind `code: 'error'` - what the component's `getValue()` handler threw -
+   * or behind `code: 'operation_crashed'`: what its `getValue` getter or the lookup itself
+   * threw unexpectedly.
+   */
+  error?: Error;
 }
 
+/**
+ * State notifications are FIFO at the end of synchronous transitions, including failed
+ * transitions. Listener re-entry queues notifications behind those pending; promises
+ * are observed for failure, not awaited. Four control events instead run synchronously,
+ * even during another event's delivery: lifecycle-manager:signals-attached,
+ * lifecycle-manager:shutdown-initiated, signal:shutdown, and
+ * lifecycle-manager:shutdown-escalation-forced. This preserves
+ * pre-start intervention and immediate force-exit behavior; there is no global FIFO
+ * across control events and notifications. Payloads describe their originating change,
+ * while live status may reflect changes made by earlier listeners.
+ */
 type EventEmitterSurface = Pick<
   EventEmitterProtected,
   'on' | 'once' | 'hasListener' | 'hasListeners' | 'listenerCount'
@@ -729,6 +937,14 @@ export interface LifecycleInternalCallbacks {
     from: string | null,
     options?: GetValueOptions,
   ) => ValueResult<T>;
+  /** `stopAllComponents()` requested by this component, from its own handle. */
+  stopAllComponentsInternal: (
+    options?: StopAllOptions,
+  ) => Promise<ShutdownResult>;
+  /** `restartAllComponents()` requested by this component, from its own handle. */
+  restartAllComponentsInternal: (
+    options?: RestartAllOptions,
+  ) => Promise<RestartResult>;
 }
 
 /**
@@ -787,7 +1003,7 @@ export interface LifecycleManagerStatus {
  * Options for registering a component
  */
 export interface RegisterOptions {
-  /** Auto-start if manager is running/starting (default: false) */
+  /** Request auto-start (default: false); active bulk startup defers it to a batch. */
   autoStart?: boolean;
 }
 
@@ -816,7 +1032,7 @@ export interface StartupOptions {
   /** Allow bulk startup to proceed by skipping stalled components (default: false) */
   ignoreStalledComponents?: boolean;
   /** Startup time budget in milliseconds, excluding failure rollback (default: constructor's startupTimeoutMS) */
-  timeoutMS?: number;
+  timeoutMS?: number | null;
 }
 
 /**
@@ -827,7 +1043,7 @@ export interface RestartAllOptions {
   startupOptions?: StartupOptions;
 
   /** Timeout for the shutdown phase in milliseconds (default: shutdownOptions.timeoutMS) */
-  shutdownTimeoutMS?: number;
+  shutdownTimeoutMS?: number | null;
 }
 
 /**
@@ -846,13 +1062,22 @@ export type RegistrationFailureCode =
   | 'target_not_found'
   | 'invalid_position'
   | 'dependency_cycle'
-  | 'unknown_error';
+  // The component defines onStartupAborted(), onGracefulStopTimeout() or
+  // onShutdownForceAborted(), which are not supported. The reason names each one and the
+  // abort signal to use instead.
+  | 'invalid_options'
+  | 'operation_crashed';
 
 /**
  * Common result shape for component registration operations
  */
 export interface RegistrationResultBase extends BaseOperationResult {
-  /** Whether the component was added to the registry */
+  /**
+   * Whether this call added the component to the registry. It stays `true` for one that
+   * failed after it was added - an auto-start that crashed, say - and for one a listener
+   * has removed again since, whose `registrationIndexAfter` is then `null` and which has
+   * no `actualPosition`.
+   */
   registered: boolean;
 
   /** Component name */
@@ -861,20 +1086,44 @@ export interface RegistrationResultBase extends BaseOperationResult {
   /** Machine-readable failure code if !success */
   code?: RegistrationFailureCode;
 
-  /** Registration index before the operation (null if not previously registered) */
+  /**
+   * Index in the committed registry before the operation. Null for an unpublished
+   * reservation too, even when its reserved name causes a duplicate_name refusal.
+   */
   registrationIndexBefore: number | null;
 
   /** Registration index after the operation (null if not registered) */
   registrationIndexAfter: number | null;
 
-  /** Resolved startup order after applying dependency constraints */
+  /**
+   * Resolved startup order after applying dependency constraints. On a refusal it is the
+   * order of the registry as it stands, or empty when the registration was refused before
+   * it had read every registered component's dependencies - an invalid position, or a
+   * shutdown in progress. Also empty for an `operation_crashed` failure before the commit.
+   */
   startupOrder: string[];
 
   /** Whether registration occurred during startup */
   duringStartup?: boolean;
 
-  /** Whether auto-start was attempted after registration */
+  /**
+   * Whether auto-start was attempted after registration. Also `true` for one refused
+   * before `start()` ran - the bulk startup it would have joined was already rolling
+   * back - with `startResult` saying why.
+   */
   autoStartAttempted?: boolean;
+
+  /**
+   * `true` when `autoStart` was left to an upcoming restart startup or an active bulk
+   * startup batch. Registration returns immediately with `autoStartAttempted: false`
+   * and no `startResult`, so a component's `start()` can await registration without
+   * waiting on its own batch. Registrations after the initial order is fixed join a
+   * dependency-ordered follow-up batch under the same overall deadline and rollback
+   * rules. The bulk startup result reports their outcome. A canceled or failed pass
+   * can leave deferred registrations unstarted and warns about abandoned auto-starts.
+   * Final completion notifications do not extend the completed pass.
+   */
+  autoStartDeferred?: boolean;
 
   /** Whether auto-start succeeded (only present when autoStartAttempted is true) */
   autoStartSucceeded?: boolean;
@@ -886,7 +1135,7 @@ export interface RegistrationResultBase extends BaseOperationResult {
 /**
  * Stable, machine-readable failure codes for getStartupOrder()
  */
-export type StartupOrderFailureCode = 'dependency_cycle' | 'unknown_error';
+export type StartupOrderFailureCode = 'dependency_cycle' | 'operation_crashed';
 
 /**
  * Result of getStartupOrder()
@@ -933,8 +1182,8 @@ export interface InsertComponentAtResult extends RegistrationResultBase {
     description?: string;
   };
 
-  /** True if requested relative positioning was achievable under dependency constraints */
-  manualPositionRespected: boolean;
+  /** True if positioning was respected, false if reordered, undefined if order is unavailable. */
+  manualPositionRespected?: boolean;
 
   /** Present when inserting before/after a target */
   targetFound?: boolean;
@@ -948,7 +1197,7 @@ export interface InsertComponentAtResult extends RegistrationResultBase {
  * flag affects startup behavior, not whether dependencies must exist.
  */
 export interface DependencyValidationResult {
-  /** True if all dependencies are valid (no circular cycles, no missing dependencies) */
+  /** True if all dependencies are valid (no circular cycles, no missing dependencies or invalid dependency lists) */
   valid: boolean;
 
   /** Missing dependencies: components that depend on non-registered components */
@@ -965,6 +1214,25 @@ export interface DependencyValidationResult {
    */
   circularCycles: string[][];
 
+  /**
+   * Components whose `getDependencies()` threw, did not return an array, or returned a
+   * non-string entry. The component's own start fails on the same list, so any entry
+   * here makes `valid` false. An `isOptional()` that throws is not listed: it is reported
+   * and read as required, as startup reads it.
+   */
+  invalidDependencyLists: Array<{
+    componentName: string;
+    error: Error;
+  }>;
+
+  /**
+   * Set only when cycle detection itself failed unexpectedly (the walk is iterative,
+   * so chain depth alone cannot cause this). The graph could not be confirmed acyclic, so `valid`
+   * is false, and `circularCycles` is empty because nothing was found, not because
+   * nothing is there. Reported on the global error channel as well.
+   */
+  cycleCheckError?: Error;
+
   /** Summary counts for quick overview */
   summary: {
     /** Total number of missing dependencies */
@@ -975,6 +1243,8 @@ export interface DependencyValidationResult {
     optionalMissingDependencies: number;
     /** Total number of circular dependency cycles detected */
     totalCircularCycles: number;
+    /** Number of `invalidDependencyLists` entries */
+    totalInvalidDependencyLists: number;
   };
 }
 
@@ -1140,6 +1410,8 @@ export interface RepeatedShutdownRequestPolicy {
    * Only escalation requests received after shutdown has already started count
    * toward this threshold. The initial request that starts graceful shutdown
    * does not count.
+   * Finite values are clamped to at least 1; non-finite or non-number values use 3.
+   * Fractions are accepted: force runs once the integer count reaches the threshold.
    * @default 3
    */
   forceAfterCount?: number;
@@ -1150,18 +1422,19 @@ export interface RepeatedShutdownRequestPolicy {
    * Requests outside the window start a new escalation window.
    * @default 2000
    */
-  withinMS?: number;
+  withinMS?: number | null;
 
   /**
    * How long escalation should remain armed after an unsuccessful shutdown
-   * returns. When omitted, the manager derives it as `withinMS * forceAfterCount`.
-   * The effective duration is capped at 2,147,483,647 ms (the timer limit).
+   * returns. When omitted, the manager derives it as `withinMS * forceAfterCount`,
+   * using the default 2000 ms window when `withinMS` is `0`. The effective
+   * duration is capped at 2,147,483,647 ms (the timer limit).
    * Set to `0` to disable post-failure arming entirely — the escalation window
    * will not persist once a shutdown attempt returns, and each new request will
    * start a fresh escalation cycle. (Note: `withinMS = 0` is a separate option
    * that controls the width of the active-shutdown escalation window, not this.)
    */
-  armedAfterFailureMS?: number;
+  armedAfterFailureMS?: number | null;
 
   /**
    * If true, manual `stopAllComponents()` retries that happen while the
@@ -1180,7 +1453,10 @@ export interface RepeatedShutdownRequestPolicy {
 }
 
 /**
- * Configuration options for LifecycleManager
+ * Configuration options for LifecycleManager.
+ * Null or omitted timeout values use defaults. Invalid numeric durations throw at
+ * construction; negative warning timeouts retain their documented skip meaning.
+ * Per-call invalid durations instead use the public operation's failure result.
  */
 export interface LifecycleManagerOptions {
   /** Name for logger scope (default: 'lifecycle-manager') */
@@ -1190,16 +1466,19 @@ export interface LifecycleManagerOptions {
   logger: Logger;
 
   /** Global timeout for startup in ms (default: 60000, 0 = disabled) */
-  startupTimeoutMS?: number;
+  startupTimeoutMS?: number | null;
 
-  /** Default stopAllComponents options used by signal and logger hooks */
+  /**
+   * Defaults for every stopAllComponents() pass - manual calls as well as signal and
+   * logger hooks. A call's own options override them field by field.
+   */
   shutdownOptions?: StopAllOptions;
 
   /** Global warning phase timeout in ms (default: 500, 0 = fire-and-forget, <0 = skip) */
-  shutdownWarningTimeoutMS?: number;
+  shutdownWarningTimeoutMS?: number | null;
 
   /** Default message timeout in ms (default: 5000, 0 = disabled) */
-  messageTimeoutMS?: number;
+  messageTimeoutMS?: number | null;
 
   /** Auto-attach signals before startAllComponents()/startComponent() begins work, even if startup later fails (default: false) */
   attachSignalsBeforeStartup?: boolean;
@@ -1230,7 +1509,7 @@ export interface LifecycleManagerOptions {
 
   /**
    * Optional policy for escalating repeated shutdown requests received while a
-   * graceful shutdown is already in progress.
+   * graceful shutdown is already in progress. `null` or omitted means no policy.
    */
-  repeatedShutdownRequestPolicy?: RepeatedShutdownRequestPolicy;
+  repeatedShutdownRequestPolicy?: RepeatedShutdownRequestPolicy | null;
 }
