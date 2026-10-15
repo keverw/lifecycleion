@@ -68,7 +68,6 @@ import type {
   HTTPResponse,
   HTTPClientError,
   InterceptedRequest,
-  RequestHeadersInput,
   AttemptRequest,
   RequestInterceptorFilter,
   RequestInterceptor,
@@ -562,7 +561,7 @@ export class BaseHTTPClient {
     }
 
     // Build intercepted request context
-    const interceptedRequest: InterceptedRequest = {
+    const interceptedRequest: ResolvedRequest = {
       requestURL: url,
       method,
       headers: baseHeaders,
@@ -691,7 +690,7 @@ export class BaseHTTPClient {
        * a throw between hops reports the hop it happened on, as every other terminal path
        * does, rather than presenting a failure on hop two as the first request.
        */
-      let currentInterceptedRequest: InterceptedRequest | undefined;
+      let currentInterceptedRequest: ResolvedRequest | undefined;
       let redirectHistory: string[] = [];
 
       try {
@@ -718,7 +717,7 @@ export class BaseHTTPClient {
 
         // Run interceptors (initial phase)
         const initialPhase: InterceptorPhase = { type: 'initial' };
-        let interceptResult: InterceptedRequest | InterceptorCancel;
+        let interceptResult: ResolvedRequest | InterceptorCancel;
         let initialRequestCandidate: InterceptedRequest = finalRequest;
 
         try {
@@ -733,21 +732,22 @@ export class BaseHTTPClient {
             },
           );
 
-          interceptResult = initialRun.result;
+          // Taken for the rest of the phase through `snapshotInterceptedRequest`. A
+          // failure below reports from what the chain returned while the snapshot is
+          // being taken - a getter that throws there is still reported best-effort -
+          // and from the snapshot once it exists. With no interceptor registered there
+          // is no caller object to copy; see `_runInterceptors`.
+          if (!initialRun.isIntercepted) {
+            interceptResult = initialRun.result;
+          } else if (isInterceptorCancel(initialRun.result)) {
+            interceptResult = initialRun.result;
+          } else {
+            initialRequestCandidate = initialRun.result;
+            interceptResult = snapshotInterceptedRequest(initialRun.result);
+          }
 
           if (!isInterceptorCancel(interceptResult)) {
-            // Taken for the rest of the phase through `snapshotInterceptedRequest`. A
-            // failure below reports from what the chain returned while the snapshot is
-            // being taken - a getter that throws there is still reported best-effort -
-            // and from the snapshot once it exists. With no interceptor registered there
-            // is no caller object to copy; see `_runInterceptors`.
             initialRequestCandidate = interceptResult;
-
-            if (initialRun.isIntercepted) {
-              interceptResult = snapshotInterceptedRequest(interceptResult);
-              initialRequestCandidate = interceptResult;
-            }
-
             this._assertRequestIsSupported(interceptResult);
             initialRequestURL = interceptResult.requestURL;
             this._assertInterceptorResolvedURL(initialRequestURL);
@@ -1195,12 +1195,12 @@ export class BaseHTTPClient {
             // for the new target (e.g. refresh auth tokens). Retry-phase
             // interceptors run inside _dispatchRequestAttempts if the hop itself
             // needs retrying.
-            let redirectIntercept: InterceptedRequest | InterceptorCancel;
+            let redirectIntercept: ResolvedRequest | InterceptorCancel;
             let failedRedirectRequest: InterceptedRequest = redirectRequest;
             let redirectInterceptURL = redirectURL;
 
             try {
-              ({ result: redirectIntercept } = await this._runInterceptors(
+              const { result: redirectRunResult } = await this._runInterceptors(
                 redirectRequest,
                 { type: 'redirect', ...hopInfo },
                 {
@@ -1209,17 +1209,21 @@ export class BaseHTTPClient {
                   requestID,
                   attemptNumber: lastAttemptNumber + 1,
                 },
-              ));
-              if (!isInterceptorCancel(redirectIntercept)) {
+              );
+              if (isInterceptorCancel(redirectRunResult)) {
+                redirectIntercept = redirectRunResult;
+              } else {
                 // Snapshotted as the initial phase does; see there. Even with no
                 // interceptor registered: this request's headers come from the adapter's
                 // record of what it sent, not from `mergeHeaders`, so the snapshot is
                 // still what puts them in the shape the other phases' requests have.
                 // The raw result first, so a snapshot that throws still reports it.
-                failedRedirectRequest = redirectIntercept;
+                failedRedirectRequest = redirectRunResult;
                 redirectIntercept =
-                  snapshotInterceptedRequest(redirectIntercept);
+                  snapshotInterceptedRequest(redirectRunResult);
                 failedRedirectRequest = redirectIntercept;
+              }
+              if (!isInterceptorCancel(redirectIntercept)) {
                 this._assertRequestIsSupported(redirectIntercept);
                 redirectInterceptURL = redirectIntercept.requestURL;
 
@@ -1554,12 +1558,12 @@ export class BaseHTTPClient {
   }
 
   private _sanitizeRedirectRequest(
-    request: InterceptedRequest,
+    request: ResolvedRequest,
     params: {
       fromURL: string;
       cookieJar?: CookieJar | null;
     },
-  ): InterceptedRequest {
+  ): ResolvedRequest {
     const { fromURL, cookieJar } = params;
     const isCrossOrigin = this._isCrossOriginRedirect(
       fromURL,
@@ -1584,10 +1588,10 @@ export class BaseHTTPClient {
       ? stripURLCredentials(request.requestURL)
       : request.requestURL;
 
-    let headers: RequestHeadersInput;
+    let headers: Record<string, string | string[]>;
 
     if (isCrossOrigin) {
-      const safeHeaders: RequestHeadersInput = {};
+      const safeHeaders: Record<string, string | string[]> = {};
       // Cross-origin safety: strip ALL headers except CORS-safelisted ones
       // when the redirect crosses origins (scheme + host + port). Matches
       // Chromium/fetch behavior — Authorization, X-API-Key, etc. must not
@@ -1671,7 +1675,7 @@ export class BaseHTTPClient {
    * _execute, so retries during redirect hops eat into the same budget.
    */
   private async _dispatchRequestAttempts<T>(params: {
-    request: InterceptedRequest;
+    request: ResolvedRequest;
     /** Latest destination explicitly selected by the caller or a retry interceptor. */
     credentialScope: { url: string };
     /** Per-attempt timeout in ms. Each attempt gets its own independent timer — NOT a total deadline across all retries. */
@@ -1977,7 +1981,7 @@ export class BaseHTTPClient {
       // simpler than relying on them surviving cross-origin header stripping
       // during redirects. Both are always re-applied here so the redirect
       // loop doesn't need to worry about re-attaching them.
-      let attemptRequest: InterceptedRequest = baseRequest;
+      let attemptRequest: ResolvedRequest = baseRequest;
 
       // Run retry-phase interceptors before each reattempt so they can refresh
       // headers or rewrite the request. On redirect hops, the phase includes
@@ -1989,7 +1993,7 @@ export class BaseHTTPClient {
           maxAttempts: maxAttemptNumber,
           ...(hopContext?.redirect ? { redirect: hopContext.redirect } : {}),
         };
-        let retryIntercept: InterceptedRequest | InterceptorCancel;
+        let retryIntercept: ResolvedRequest | InterceptorCancel;
         let failedRetryRequest: InterceptedRequest = baseRequest;
 
         try {
@@ -2006,18 +2010,19 @@ export class BaseHTTPClient {
             { initialURL, redirectHistory, requestID, attemptNumber },
           );
 
-          retryIntercept = retryRun.result;
+          // Snapshotted as the initial phase in `_execute` does, and skipped on the
+          // same condition; see there.
+          if (!retryRun.isIntercepted) {
+            retryIntercept = retryRun.result;
+          } else if (isInterceptorCancel(retryRun.result)) {
+            retryIntercept = retryRun.result;
+          } else {
+            failedRetryRequest = retryRun.result;
+            retryIntercept = snapshotInterceptedRequest(retryRun.result);
+          }
 
           if (!isInterceptorCancel(retryIntercept)) {
-            // Snapshotted as the initial phase in `_execute` does, and skipped on the
-            // same condition; see there.
             failedRetryRequest = retryIntercept;
-
-            if (retryRun.isIntercepted) {
-              retryIntercept = snapshotInterceptedRequest(retryIntercept);
-              failedRetryRequest = retryIntercept;
-            }
-
             this._assertRequestIsSupported(retryIntercept);
             this._assertInterceptorResolvedURL(retryIntercept.requestURL);
           }
@@ -3468,14 +3473,14 @@ export class BaseHTTPClient {
    * which normalizes them exactly as the snapshot would, so there is nothing caller-owned
    * to take a copy of. The redirect phase snapshots regardless; see there.
    */
-  private async _runInterceptors(
-    request: InterceptedRequest,
+  private async _runInterceptors<R extends InterceptedRequest>(
+    request: R,
     phase: InterceptorPhase,
     context: RequestInterceptorContext,
-  ): Promise<{
-    result: InterceptedRequest | InterceptorCancel;
-    isIntercepted: boolean;
-  }> {
+  ): Promise<
+    | { result: R; isIntercepted: false }
+    | { result: InterceptedRequest | InterceptorCancel; isIntercepted: true }
+  > {
     const parentManager = this._parentClient?._requestInterceptors;
 
     // Decided from the same registrations the chains below are taken from: nothing
@@ -3529,11 +3534,13 @@ export class BaseHTTPClient {
   }
 
   private _withInternalRequestHeaders(
-    headers: RequestHeadersInput,
+    headers: Record<string, string | string[]>,
     requestID: string,
     attemptNumber?: number,
   ): Record<string, string | string[]> {
-    const nextHeaders = mergeHeaders(headers);
+    // A copy, so the internal headers added below stay off the request the next attempt
+    // starts from. Not normalized again: only a `ResolvedRequest`'s headers reach here.
+    const nextHeaders = { ...headers };
 
     if (this._config.includeRequestID) {
       nextHeaders[DEFAULT_REQUEST_ID_HEADER] = requestID;
@@ -3547,7 +3554,7 @@ export class BaseHTTPClient {
   }
 
   private _buildAttemptRequest(
-    request: InterceptedRequest,
+    request: ResolvedRequest,
     observedBodies: ObservedAttemptBodies,
     params: {
       requestID: string;
@@ -3559,8 +3566,8 @@ export class BaseHTTPClient {
     const { requestID, timeout, attemptNumber, cookieJar } = params;
 
     // Build the finalized attempt snapshot before adapter-specific transport
-    // materialization. Header names are normalized to lowercase here, and adapters
-    // may further materialize repeated header values at send time. The bodies are
+    // materialization. Header names are already lowercase (see `ResolvedRequest`), and
+    // adapters may further materialize repeated header values at send time. The bodies are
     // built by the caller, so a setup failure's snapshot can reuse them.
     const { contentType } = observedBodies;
     const headers = this._withInternalRequestHeaders(
@@ -3903,7 +3910,7 @@ function readStringMember(
  */
 function snapshotInterceptedRequest(
   request: InterceptedRequest,
-): InterceptedRequest {
+): ResolvedRequest {
   const { requestURL, method, headers, body } = request;
 
   if (typeof requestURL !== 'string') {
@@ -3955,6 +3962,17 @@ function snapshotInterceptedRequest(
     body,
   };
 }
+
+/**
+ * A request as the client holds it once its headers are normalized - names lowercased,
+ * values strings or arrays, unset ones removed: what `snapshotInterceptedRequest` returns
+ * and what the attempt loop sends. Typed apart from {@link InterceptedRequest}, whose
+ * headers may still carry an interceptor's `undefined`, so a step that only copies
+ * headers can rely on that without normalizing them again.
+ */
+type ResolvedRequest = Omit<InterceptedRequest, 'headers'> & {
+  headers: Record<string, string | string[]>;
+};
 
 /**
  * Read every documented {@link HTTPClientConfig} field once, through its original
