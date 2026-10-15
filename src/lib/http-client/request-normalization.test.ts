@@ -309,3 +309,32 @@ test('an empty method is refused, and matches no method filter', () => {
     matchesFilter({ methods: ['GET'] }, { method: '' }, 'initial', 'request'),
   ).toBe(false);
 });
+
+test("a refused interceptor request's unset header is left out of what error observers see", async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    defaultHeaders: { authorization: 'Bearer secret', 'x-keep': '1' },
+  });
+  // Refused for its method, so error observers get a best-effort copy of it.
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    method: 42 as unknown as HTTPMethod,
+    headers: {
+      ...request.headers,
+      Authorization: undefined as unknown as string,
+    },
+  }));
+  const seen: Array<Record<string, string | string[]>> = [];
+  client.addErrorObserver((_error, request) => {
+    seen.push(request.headers);
+  });
+
+  await client.get('/x').send();
+
+  expect(seen).toHaveLength(1);
+  expect(seen[0]).not.toHaveProperty('authorization');
+  expect(seen[0]?.['x-keep']).toBe('1');
+  expect(adapter.requests).toHaveLength(0);
+});

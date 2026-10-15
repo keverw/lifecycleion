@@ -3637,10 +3637,14 @@ export class BaseHTTPClient {
 
     for (const name of headerNames) {
       try {
-        // Left out when unset, as the request itself would send it.
+        // As `mergeHeaders` reads a record: an unset value removes the header, whatever
+        // the capitalization of the entry that set it, as the request itself would.
         const value = normalizeMergedHeaderValue(sourceHeaders[name]);
-        if (value !== undefined) {
-          defineEntry(headers, name.toLowerCase(), value);
+        const lowerName = name.toLowerCase();
+        if (value === undefined) {
+          delete headers[lowerName];
+        } else {
+          defineEntry(headers, lowerName, value);
         }
       } catch {
         // Skip only this entry.
