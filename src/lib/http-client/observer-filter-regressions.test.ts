@@ -1,7 +1,6 @@
 import { expect, test } from 'bun:test';
 import { HTTPClient } from './http-client';
 import { MockAdapter } from './adapters/mock-adapter';
-import type { HTTPMethod } from './types';
 import { captureErrorReports } from './test-helpers/capture-error-reports';
 
 test.each(['final', 'retry'] as const)(
@@ -62,7 +61,9 @@ test('malformed error observer filters preserve retries and final adapter error'
     () => {
       throw new Error('must not be called');
     },
-    { phases: ['retry', 'final'], methods: {} as HTTPMethod[] },
+    // Not an array, so matching it throws on every phase. (A malformed `methods` is
+    // refused when the observer is registered instead.)
+    { phases: { length: 1 } as never },
   );
   client.addErrorObserver(
     (_error, _request, info) => {

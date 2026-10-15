@@ -126,7 +126,7 @@ console.log(created.status); // 201
 interface HTTPClientConfig {
   adapter?: HTTPAdapter; // Default: FetchAdapter
   baseURL?: string; // Origin / prefix for relative paths. If set, MockAdapter, NodeAdapter, and server-side FetchAdapter require an absolute http(s):// URL.
-  defaultHeaders?: Record<string, string | string[]>;
+  defaultHeaders?: RequestHeadersInput; // Values may be null/undefined: no header
   timeout?: number | null; // Default: 30,000 ms; <= 0 disables the per-attempt timeout.
   // NaN or a non-number throws; Infinity disables it like 0 does.
   // Same rules for the per-request override, whose default is this value.
@@ -231,7 +231,7 @@ const builder = client
 const response = await builder.send();
 ```
 
-A header value of `null` or `undefined` - or such an item in an array - means no header: a request's `.headers({ authorization: undefined })` removes that client default for the request, a sub-client merging `defaultHeaders` removes the parent's the same way, and an interceptor removes one with `{ ...request.headers, authorization: undefined }`. Header names are case-insensitive and are sent lowercased.
+A header value of `null` or `undefined` - or such an item in an array - means no header: a request's `.headers({ authorization: undefined })` removes that client default for the request, a sub-client merging `defaultHeaders` removes the parent's the same way, and an interceptor removes one with `{ ...request.headers, authorization: undefined }`. Header names are case-insensitive and are sent lowercased. The client's own `user-agent` is applied after a request's headers, so a request's `headers` neither change nor remove it: set `userAgent` on the client, or change or remove it in an interceptor. The request-ID and attempt headers are added to every attempt and follow `includeRequestID` and `includeAttemptHeader` only.
 
 Options can also be passed directly to the method call:
 
@@ -501,7 +501,7 @@ client.addRequestInterceptor((req) => {
 interface InterceptedRequest {
   requestURL: string; // Absolute before dispatch
   method: HTTPMethod;
-  headers: Record<string, string | string[]>;
+  headers: RequestHeadersInput; // A null/undefined value is a header an earlier interceptor removed
   body?: unknown; // Pre-serialization
 }
 ```
@@ -549,7 +549,7 @@ interface RequestInterceptorFilter {
 }
 ```
 
-All specified filter fields are ANDed together. Within each field, values are ORed. Any one match is sufficient. An empty `phases: []` matches all phases.
+`methods` is matched case-insensitively. It must be an array of strings (or omitted), and is checked when the callback is added, as it is for the observer filters below. All specified filter fields are ANDed together. Within each field, values are ORed. Any one match is sufficient. An empty `phases: []` matches all phases.
 
 ### Cancelling From an Interceptor
 

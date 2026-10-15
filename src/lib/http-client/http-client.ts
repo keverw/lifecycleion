@@ -34,6 +34,7 @@ import {
   mergeHeaders,
   normalizeMergedHeaderValue,
   normalizeHTTPMethod,
+  describeInvalidHTTPMethod,
   normalizeAdapterResponseHeaders,
   parseContentType,
   resolveAbsoluteURL,
@@ -67,6 +68,7 @@ import type {
   HTTPResponse,
   HTTPClientError,
   InterceptedRequest,
+  RequestHeadersInput,
   AttemptRequest,
   RequestInterceptorFilter,
   RequestInterceptor,
@@ -293,19 +295,14 @@ export class BaseHTTPClient {
     options?: HTTPRequestOptions,
   ): HTTPRequestBuilder<T> {
     // Checked and normalized once, here, so a JS caller's `'post'` is the
-    // non-idempotent `POST`, and a method that is not a string is refused, whether or not
-    // an interceptor runs (which checks and normalizes what it returns too).
-    const candidateMethod: unknown = method;
-    if (typeof candidateMethod !== 'string') {
-      throw new TypeError(
-        `HTTPClient request method must be a string (got ${candidateMethod === null ? 'null' : typeof candidateMethod})`,
-      );
-    }
-    if (candidateMethod === '') {
-      throw new TypeError('HTTPClient request method must not be empty');
+    // non-idempotent `POST`, and a method no adapter would send is refused now, whether
+    // or not an interceptor runs (which checks and normalizes what it returns too).
+    const methodProblem = describeInvalidHTTPMethod(method);
+    if (methodProblem !== undefined) {
+      throw new TypeError(`HTTPClient request method ${methodProblem}`);
     }
     return new HTTPRequestBuilder<T>(
-      normalizeHTTPMethod(candidateMethod),
+      normalizeHTTPMethod(method),
       path,
       (ctx) => this._execute(ctx),
       options,
@@ -1584,10 +1581,10 @@ export class BaseHTTPClient {
       ? stripURLCredentials(request.requestURL)
       : request.requestURL;
 
-    let headers: Record<string, string | string[]>;
+    let headers: RequestHeadersInput;
 
     if (isCrossOrigin) {
-      const safeHeaders: Record<string, string | string[]> = {};
+      const safeHeaders: RequestHeadersInput = {};
       // Cross-origin safety: strip ALL headers except CORS-safelisted ones
       // when the redirect crosses origins (scheme + host + port). Matches
       // Chromium/fetch behavior — Authorization, X-API-Key, etc. must not
@@ -3517,7 +3514,7 @@ export class BaseHTTPClient {
   }
 
   private _withInternalRequestHeaders(
-    headers: Record<string, string | string[]>,
+    headers: RequestHeadersInput,
     requestID: string,
     attemptNumber?: number,
   ): Record<string, string | string[]> {
@@ -3898,21 +3895,15 @@ function snapshotInterceptedRequest(
     );
   }
 
-  const candidateMethod: unknown = method;
+  const methodProblem = describeInvalidHTTPMethod(method);
 
-  if (typeof candidateMethod !== 'string') {
+  if (methodProblem !== undefined) {
     throw new TypeError(
-      `[HTTPClient] Interceptor returned a request whose method is not a string (got ${candidateMethod === null ? 'null' : typeof candidateMethod}).`,
+      `[HTTPClient] Interceptor returned a request whose method ${methodProblem}.`,
     );
   }
 
-  if (candidateMethod === '') {
-    throw new TypeError(
-      '[HTTPClient] Interceptor returned a request whose method is empty.',
-    );
-  }
-
-  const normalizedMethod = normalizeHTTPMethod(candidateMethod);
+  const normalizedMethod = normalizeHTTPMethod(method);
 
   const candidateHeaders: unknown = headers;
 

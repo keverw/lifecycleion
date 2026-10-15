@@ -6,6 +6,7 @@ import {
 } from '../consts';
 import { defineEntry } from '../../internal/define-entry';
 import { isNullish } from '../../internal/is-nullish';
+import type { RequestHeadersInput } from '../types';
 
 /**
  * A header value as every header normalizer reads it - the one rule they share, so a
@@ -76,14 +77,19 @@ export function isBrowserRestrictedHeader(
  * Used by Fetch and XHR adapters to fail fast during development.
  */
 export function assertNoBrowserRestrictedHeaders(
-  headers: Record<string, string | string[]>,
+  headers: RequestHeadersInput,
   adapterName: string,
 ): void {
   for (const [key, value] of Object.entries(headers)) {
+    const present = presentHeaderValue(value);
+    // An unset header is not sent, so it is not refused either.
+    if (present === undefined) {
+      continue;
+    }
     if (
       isBrowserRestrictedHeader(
         key,
-        Array.isArray(value) ? value.join(', ') : value,
+        Array.isArray(present) ? present.join(', ') : present,
       )
     ) {
       throw new Error(

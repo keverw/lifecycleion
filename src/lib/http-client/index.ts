@@ -31,6 +31,7 @@ export type {
   ResponseObserver,
   ErrorObserver,
   InterceptedRequest,
+  RequestHeadersInput,
   AttemptRequest,
   RequestPhase,
   RequestPhaseName,

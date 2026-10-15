@@ -79,15 +79,15 @@ test('an undefined header value is left out, not sent as "undefined"', async () 
     ...request,
     headers: {
       ...request.headers,
-      authorization: undefined as unknown as string,
+      authorization: undefined,
     },
   }));
 
   await client
     .get('/x', {
       headers: {
-        'x-extra': undefined as unknown as string,
-        'x-null': null as unknown as string,
+        'x-extra': undefined,
+        'x-null': null,
       },
     })
     .send();
@@ -164,11 +164,9 @@ test('an undefined request header removes the client default instead of sending 
   });
 
   // Dropping a default credential for one request, say to a third-party URL.
-  await client
-    .get('/x', { headers: { authorization: undefined as unknown as string } })
-    .send();
+  await client.get('/x', { headers: { authorization: undefined } }).send();
   const sub = client.createSubClient({
-    defaultHeaders: { authorization: null as unknown as string },
+    defaultHeaders: { authorization: null },
     defaultHeadersStrategy: 'merge',
   });
   await sub.get('/y').send();
@@ -187,7 +185,7 @@ test('an unset item in a header array is left out', async () => {
   await client
     .get('/x', {
       headers: {
-        accept: ['application/json', undefined as unknown as string],
+        accept: ['application/json', undefined],
       },
     })
     .send();
@@ -249,7 +247,7 @@ test('a method that is not a string is refused when the request is made', () => 
   const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
   for (const method of [undefined, null, 42]) {
     expect(() => client.request(method as never, '/x')).toThrow(
-      'HTTPClient request method must be a string',
+      'HTTPClient request method is not a string',
     );
   }
 });
@@ -290,7 +288,7 @@ test("an interceptor's unset header removes the default whatever its capitalizat
     ...request,
     headers: {
       ...request.headers,
-      Authorization: undefined as unknown as string,
+      Authorization: undefined,
     },
   }));
 
@@ -303,7 +301,7 @@ test("an interceptor's unset header removes the default whatever its capitalizat
 test('an empty method is refused, and matches no method filter', () => {
   const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
   expect(() => client.request('' as HTTPMethod, '/x')).toThrow(
-    'HTTPClient request method must not be empty',
+    'HTTPClient request method is empty',
   );
   expect(
     matchesFilter({ methods: ['GET'] }, { method: '' }, 'initial', 'request'),
@@ -323,7 +321,7 @@ test("a refused interceptor request's unset header is left out of what error obs
     method: 42 as unknown as HTTPMethod,
     headers: {
       ...request.headers,
-      Authorization: undefined as unknown as string,
+      Authorization: undefined,
     },
   }));
   const seen: Array<Record<string, string | string[]>> = [];
@@ -358,5 +356,86 @@ test('an interceptor that returns no request fails with a clear message', async 
       `interceptor_error: [HTTPClient] Interceptor returned a value that is not a request, a cancel or null (got ${typeof returned}).`,
     ]);
     expect(adapter.requests).toHaveLength(0);
+  }
+});
+
+test('a method that is not a valid HTTP method name is refused before dispatch', async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  for (const method of ['GE T', 'GET\n', ' ']) {
+    expect(() => client.request(method as HTTPMethod, '/x')).toThrow(
+      'HTTPClient request method is not a valid HTTP method name',
+    );
+  }
+  // A custom method made of token characters is still accepted.
+  expect(() => client.request('PROPFIND' as HTTPMethod, '/x')).not.toThrow();
+
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    method: 'GET\r\n' as HTTPMethod,
+  }));
+  const messages: string[] = [];
+  client.addErrorObserver((error) => {
+    messages.push(String(error.cause?.message));
+  });
+
+  await client.get('/x').send();
+
+  expect(messages).toEqual([
+    '[HTTPClient] Interceptor returned a request whose method is not a valid HTTP method name (got "GET\\r\\n").',
+  ]);
+  expect(adapter.requests).toHaveLength(0);
+});
+
+test('a filter whose methods is not an array of strings is refused when registered', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  // As a JS caller might write it; it used to match by substring.
+  expect(() =>
+    client.addRequestInterceptor((request) => request, {
+      methods: 'POST' as never,
+    }),
+  ).toThrow(
+    'HTTPClient request interceptor filter methods must be an array of method names (got string)',
+  );
+  expect(() =>
+    client.addResponseObserver(() => undefined, { methods: 'POST' as never }),
+  ).toThrow('HTTPClient response observer filter methods must be an array');
+  expect(() =>
+    client.addErrorObserver(() => undefined, { methods: [42] as never }),
+  ).toThrow(
+    'HTTPClient error observer filter methods must contain only strings (got number)',
+  );
+});
+
+test("a filter's lowercase method matches, and a nullish methods means no filter", async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  const ran: string[] = [];
+  client.addRequestInterceptor(
+    (request) => {
+      ran.push('lowercase');
+      return request;
+    },
+    { methods: ['post' as HTTPMethod] },
+  );
+  client.addRequestInterceptor(
+    (request) => {
+      ran.push('nullish');
+      return request;
+    },
+    { methods: null as never },
+  );
+
+  await client.post('/x').send();
+
+  expect(ran).toEqual(['lowercase', 'nullish']);
+});
+
+test('a falsy headers option that is not nullish is refused, as headers() refuses it', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  for (const headers of ['', 0, false]) {
+    expect(() => client.get('/x', { headers: headers as never })).toThrow(
+      'HTTPRequestBuilder headers must be a plain object',
+    );
   }
 });

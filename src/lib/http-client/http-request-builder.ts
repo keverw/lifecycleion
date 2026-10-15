@@ -14,6 +14,7 @@ import type {
   RequestState,
   HTTPClientError,
   StreamResponseFactory,
+  RequestHeadersInput,
 } from './types';
 import type { RetryPolicyOptions } from '../retry-utils';
 
@@ -37,7 +38,7 @@ export interface BuilderSendContext<T = unknown> {
 }
 
 export interface ResolvedBuilderOptions extends HTTPRequestOptions {
-  headers: Record<string, string | string[]>;
+  headers: RequestHeadersInput;
 }
 
 type SendFn<T> = (context: BuilderSendContext<T>) => Promise<HTTPResponse<T>>;
@@ -49,7 +50,7 @@ type SendFn<T> = (context: BuilderSendContext<T>) => Promise<HTTPResponse<T>>;
 export class HTTPRequestBuilder<T = unknown> {
   private _method: HTTPMethod;
   private _path: string;
-  private _headers: Record<string, string | string[]> = {};
+  private _headers: RequestHeadersInput = {};
   private _params?: Record<string, unknown>;
   private _body?: unknown;
   private _timeout?: number | null;
@@ -96,7 +97,7 @@ export class HTTPRequestBuilder<T = unknown> {
 
   // --- Fluent builder methods ---
 
-  public headers(headers: Record<string, string | string[]>): this {
+  public headers(headers: RequestHeadersInput): this {
     this._assertNotSent('headers');
     // A nullish argument stays a no-op. Anything else must be a plain record: a
     // `Headers` or `Map` would otherwise send the request with every header dropped,
@@ -402,8 +403,9 @@ export class HTTPRequestBuilder<T = unknown> {
     // Options may be getters. Capture each value once, then apply it before reading
     // the next: validation failures must not run later getters as a side effect.
     // Request headers merged on top of any defaults
+    // Every value but a nullish one is checked, a falsy `''` or `0` included.
     const headers = opts.headers;
-    if (headers) {
+    if (!isNullish(headers)) {
       this.headers(headers);
     }
 

@@ -1,5 +1,6 @@
 import qs from 'qs';
 import { defineEntry } from '../internal/define-entry';
+import { isNullish } from '../internal/is-nullish';
 import { presentHeaderValue } from './internal/header-utils';
 import {
   matchesWildcardDomain,
@@ -11,6 +12,7 @@ import type {
   HTTPClientConfig,
   AdapterType,
   HTTPMethod,
+  RequestHeadersInput,
 } from './types';
 
 /**
@@ -336,6 +338,59 @@ export function normalizeHTTPMethod(method: string): HTTPMethod {
   ) as HTTPMethod;
 }
 
+/** RFC 9110's `token`: the characters a method name is made of. */
+const HTTP_METHOD_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+/**
+ * What is wrong with `candidate` as a request method - completing "the method …" - or
+ * `undefined` when nothing is. A method is a non-empty string of RFC 9110 token
+ * characters; every adapter refuses anything else, but only at dispatch, where a
+ * caller's typo reads as a failed send. Shared by `request()` and the interceptor
+ * snapshot, so neither accepts what the other refuses.
+ */
+export function describeInvalidHTTPMethod(
+  candidate: unknown,
+): string | undefined {
+  if (typeof candidate !== 'string') {
+    return `is not a string (got ${candidate === null ? 'null' : typeof candidate})`;
+  }
+  if (candidate === '') {
+    return 'is empty';
+  }
+  if (!HTTP_METHOD_TOKEN.test(candidate)) {
+    return `is not a valid HTTP method name (got ${JSON.stringify(candidate)})`;
+  }
+  return undefined;
+}
+
+/**
+ * A filter's `methods`, checked and normalized once when its callback is registered, so
+ * matching a request is a plain lookup. Nullish means no method filter. Anything else must
+ * be an array of strings: a single string used to match by substring (`'POST'` matched
+ * `POST`, but `'GET, POST'` matched neither), and a non-string entry never matched.
+ */
+export function normalizeFilterMethods(
+  methods: unknown,
+  label: string,
+): HTTPMethod[] | undefined {
+  if (isNullish(methods)) {
+    return undefined;
+  }
+  if (!Array.isArray(methods)) {
+    throw new TypeError(
+      `${label} filter methods must be an array of method names (got ${typeof methods})`,
+    );
+  }
+  return (methods as unknown[]).map((entry) => {
+    if (typeof entry !== 'string') {
+      throw new TypeError(
+        `${label} filter methods must contain only strings (got ${entry === null ? 'null' : typeof entry})`,
+      );
+    }
+    return normalizeHTTPMethod(entry);
+  });
+}
+
 /**
  * Merges multiple request-header objects, normalizing keys to lowercase.
  * Later objects win on conflict. Array values replace earlier scalars/arrays
@@ -344,7 +399,7 @@ export function normalizeHTTPMethod(method: string): HTTPMethod {
  * dropping a client default such as `authorization` - rather than being sent.
  */
 export function mergeHeaders(
-  ...headerSets: Array<Record<string, string | string[]> | undefined>
+  ...headerSets: Array<RequestHeadersInput | undefined>
 ): Record<string, string | string[]> {
   const result: Record<string, string | string[]> = {};
   for (const headers of headerSets) {
@@ -925,17 +980,11 @@ export function matchesFilter(
     // Compared as the request is sent: an earlier interceptor's `'post'` is `POST`. A
     // method that is not a string matches nothing here; the snapshot after the chain
     // refuses it with its own error.
+    // The filter's own entries were normalized when it was registered.
     const candidate: unknown = context.method;
-    const method =
-      typeof candidate === 'string'
-        ? normalizeHTTPMethod(candidate)
-        : undefined;
     if (
-      method === undefined ||
-      !filter.methods.some(
-        (entry) =>
-          typeof entry === 'string' && normalizeHTTPMethod(entry) === method,
-      )
+      typeof candidate !== 'string' ||
+      !filter.methods.includes(normalizeHTTPMethod(candidate))
     ) {
       return false;
     }

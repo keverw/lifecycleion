@@ -430,7 +430,7 @@ export interface HTTPClientConfig {
    * `BaseHTTPClient.request` and `buildURL` in `utils.ts`.
    */
   baseURL?: string;
-  defaultHeaders?: Record<string, string | string[]>;
+  defaultHeaders?: RequestHeadersInput;
   /**
    * Null or undefined selects `DEFAULT_TIMEOUT_MS`. In `createSubClient` overrides,
    * either inherits the parent client's timeout instead.
@@ -474,8 +474,19 @@ export interface SubClientConfig extends Partial<HTTPClientConfig> {
 
 // --- Request ---
 
+/**
+ * Request headers as a caller supplies them: client `defaultHeaders`, a request's
+ * `headers`, and an interceptor's request. A `null` or `undefined` value, or such an
+ * item in an array, means no header, so it removes one an earlier layer set. Names are
+ * case-insensitive.
+ */
+export type RequestHeadersInput = Record<
+  string,
+  string | Array<string | null | undefined> | null | undefined
+>;
+
 export interface HTTPRequestOptions {
-  headers?: Record<string, string | string[]>;
+  headers?: RequestHeadersInput;
   params?: Record<string, unknown>;
   body?: unknown;
   /** Null or undefined inherits the client's configured `timeout`. */
@@ -965,7 +976,11 @@ export interface InterceptedRequest {
    */
   requestURL: string;
   method: HTTPMethod;
-  headers: Record<string, string | string[]>;
+  /**
+   * An earlier interceptor's result is passed on as it returned it, so a header it
+   * removed with `undefined` reaches the next one as such.
+   */
+  headers: RequestHeadersInput;
   body?: unknown;
 }
 

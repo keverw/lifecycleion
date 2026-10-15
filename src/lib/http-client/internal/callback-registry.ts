@@ -1,3 +1,5 @@
+import { normalizeFilterMethods } from '../utils';
+
 type RemoveFn = () => void;
 
 /** One registered callback and the filter it was added with, `phases` defaulted. */
@@ -10,17 +12,25 @@ export interface RegisteredCallback<Fn, Filter> {
  * The registrations behind a request-interceptor or observer manager, kept in the order
  * they were added. Each manager adds the chain it runs them as through `snapshot()`.
  */
-export class CallbackRegistry<Fn, Filter extends { phases?: unknown }> {
+export class CallbackRegistry<
+  Fn,
+  Filter extends { phases?: unknown; methods?: unknown },
+> {
   private registrations: RegisteredCallback<Fn, Filter>[] = [];
 
-  constructor(private readonly defaultPhases: Filter['phases']) {}
+  constructor(
+    private readonly defaultPhases: Filter['phases'],
+    private readonly label: string,
+  ) {}
 
   public add(fn: Fn, filter?: Filter): RemoveFn {
+    const methods = normalizeFilterMethods(filter?.methods, this.label);
     const entry: RegisteredCallback<Fn, Filter> = {
       fn,
       filter: {
         ...filter,
         phases: filter?.phases ?? this.defaultPhases,
+        methods,
       } as Filter,
     };
     this.registrations.push(entry);
