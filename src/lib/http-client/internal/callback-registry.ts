@@ -23,6 +23,15 @@ const FILTER_LISTS: Record<
 };
 
 /**
+ * What one kind of callback's filter may hold: its list fields besides `methods` (the
+ * ones `matchesFilter` has a value to test for that kind), and the phases it is reached in.
+ */
+export interface FilterKind {
+  readonly fields: readonly string[];
+  readonly phases: readonly string[];
+}
+
+/**
  * The lists of `filter`, each read once, checked and copied - so a getter is not read
  * again, and a list the caller changes later does not change what matches. Nullish means
  * the list is absent. Throws a `TypeError` naming `label` for anything else that is not
@@ -32,10 +41,23 @@ const FILTER_LISTS: Record<
 function copyFilterLists(
   filter: Record<string, unknown>,
   label: string,
-  allowedPhases: readonly string[],
+  kind: FilterKind,
 ): Record<string, unknown[]> {
+  // A field this kind of callback never sees is refused, as a misnamed one is: a
+  // `statusCodes` on an error observer would be ignored, so it matched every error, and a
+  // `contentTypes` on an interceptor would match nothing.
+  for (const field of Object.keys(filter)) {
+    if (field !== 'methods' && !kind.fields.includes(field)) {
+      throw new TypeError(
+        `${label} filter has no ${JSON.stringify(field)} field (it takes ${['methods', ...kind.fields].join(', ')})`,
+      );
+    }
+  }
   const lists: Record<string, unknown[]> = {};
   for (const [field, rule] of Object.entries(FILTER_LISTS)) {
+    if (!kind.fields.includes(field)) {
+      continue;
+    }
     const value = filter[field];
     if (isNullish(value)) {
       continue;
@@ -45,7 +67,7 @@ function copyFilterLists(
         `${label} filter ${field} must be an array (got ${typeof value})`,
       );
     }
-    const allowed = field === 'phases' ? allowedPhases : rule.allowed;
+    const allowed = field === 'phases' ? kind.phases : rule.allowed;
     const list = [...(value as unknown[])];
     for (const entry of list) {
       if (typeof entry !== rule.entryType) {
@@ -85,8 +107,8 @@ export class CallbackRegistry<
   constructor(
     private readonly defaultPhases: Filter['phases'],
     private readonly label: string,
-    /** The phases this kind of callback is reached in, which its filter may name. */
-    private readonly allowedPhases: readonly string[],
+    /** The filter fields this kind of callback takes, and the phases it is reached in. */
+    private readonly kind: FilterKind,
   ) {}
 
   public add(fn: Fn, filter?: Filter): RemoveFn {
@@ -108,7 +130,7 @@ export class CallbackRegistry<
     // Each field read once, into a filter of the client's own: only the fields
     // `matchesFilter` reads are kept.
     const methods = normalizeFilterMethods(source.methods, this.label);
-    const lists = copyFilterLists(source, this.label, this.allowedPhases);
+    const lists = copyFilterLists(source, this.label, this.kind);
     const entry: RegisteredCallback<Fn, Filter> = {
       fn,
       filter: {

@@ -530,7 +530,7 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
     test('rejects cookieJar usage', () => {
       expect(() =>
         assertSupportedAdapterRuntimeAndConfig(
-          { cookieJar: {} as never },
+          { cookieJar: new CookieJar() },
           'fetch',
           true,
         ),
@@ -580,7 +580,7 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
 
       expect(() =>
         assertSupportedAdapterRuntimeAndConfig(
-          { cookieJar: {} as never },
+          { cookieJar: new CookieJar() },
           'xhr',
           true,
         ),
@@ -615,7 +615,7 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
       expect(() =>
         assertSupportedAdapterRuntimeAndConfig(
           {
-            cookieJar: {} as never,
+            cookieJar: new CookieJar(),
             followRedirects: true,
             maxRedirects: 5,
           },

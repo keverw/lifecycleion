@@ -1311,6 +1311,10 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             let writable: WritableLike | null | StreamResponseCancel;
+            // Whether the factory's return is a cancel, decided once: a `cancel` getter
+            // that answers differently on a later read cannot carry a non-sink past the
+            // shape check below and into `streamResponseBody`.
+            let isCancelReturn = false;
             const setupFailed = (error: Error): void => {
               pendingStreamSetup?.failOnSocketError?.(error);
             };
@@ -1392,9 +1396,11 @@ export class NodeAdapter implements HTTPAdapter {
               // something with callable `write` and `end` - `{}`, or `{ cancel: false }` -
               // which would get as far as the first `write` and settle as a
               // `stream_write_error` on a 200, blaming the sink for the factory's mistake.
+              isCancelReturn =
+                writable !== null && isStreamResponseCancel(writable);
               if (
                 writable !== null &&
-                !isStreamResponseCancel(writable) &&
+                !isCancelReturn &&
                 !isWritableShaped(writable)
               ) {
                 throw new TypeError(
@@ -1430,14 +1436,14 @@ export class NodeAdapter implements HTTPAdapter {
             // cancel object, or nothing - so it is the one that must cover the
             // writable's `'error'` itself: see `discardUnstreamedWritable`.
             if (streamAbort.signal.aborted) {
-              if (writable && !isStreamResponseCancel(writable)) {
-                discardUnstreamedWritable(writable);
+              if (writable && !isCancelReturn) {
+                discardUnstreamedWritable(writable as WritableLike);
               }
 
               return;
             }
 
-            if (writable === null || isStreamResponseCancel(writable)) {
+            if (writable === null || isCancelReturn) {
               // Factory declined to stream — user-initiated cancel. Fire the stream
               // signal so any cleanup listeners wired in the factory run, then throw
               // AbortError so the client's cancel path takes over (isCancelled: true).
@@ -1459,10 +1465,13 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
+            // A sink from here on: neither `null` nor a cancel, and checked for shape.
+            const sink = writable as WritableLike;
+
             activeResponseStream = {
               status,
               headers,
-              writable,
+              writable: sink,
               abortStream,
             };
 
@@ -1475,7 +1484,7 @@ export class NodeAdapter implements HTTPAdapter {
             // writable error when the local sink fails (disk full, etc.).
             const streamResult = await streamResponseBody(
               res,
-              writable,
+              sink,
               totalBytes,
               guardedDownloadProgress,
             );
@@ -1500,7 +1509,7 @@ export class NodeAdapter implements HTTPAdapter {
               //   - The stream signal fires so factory cleanup listeners run
               //   - Non-retryable once streaming has started
               abortStream();
-              destroyWritableQuietly(writable);
+              destroyWritableQuietly(sink);
               destroyRequestQuietly(req);
               settleResponse({
                 status,

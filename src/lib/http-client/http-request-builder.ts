@@ -66,6 +66,7 @@ export class HTTPRequestBuilder<T = unknown> {
 
   private _sendFn: SendFn<T>;
   private _sent = false;
+  private _isCancelRequested = false;
 
   // Post-send state (public read-only after send)
   private _requestID: string = generateID('ulid');
@@ -311,7 +312,11 @@ export class HTTPRequestBuilder<T = unknown> {
       return true;
     }
 
-    if (this._cancelFn) {
+    // Only the first cancel of a request in flight is the one applied: a second, while
+    // the first is still taking effect, changes nothing, so it answers `false` as a
+    // cancel after the request has ended does.
+    if (this._cancelFn && !this._isCancelRequested) {
+      this._isCancelRequested = true;
       this._cancelFn(reason);
       return true;
     }

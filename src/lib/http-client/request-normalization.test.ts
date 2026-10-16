@@ -1,7 +1,9 @@
 import { expect, test } from 'bun:test';
+import vm from 'node:vm';
 import { HTTPClient } from './http-client';
 import { matchesFilter } from './utils';
 import { CookieJar } from './cookie-jar';
+import { MockAdapter } from './adapters/mock-adapter';
 import type {
   AdapterRequest,
   AdapterResponse,
@@ -797,4 +799,118 @@ test('a filter naming a phase, scheme or content type that cannot occur is refus
       contentTypes: ['xml' as never],
     }),
   ).toThrow('HTTPClient response observer filter contentTypes has "xml"');
+});
+
+test('a filter field that kind of callback cannot use is refused when registered', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  // Ignored, an error observer filtered to 500 would see every error.
+  expect(() =>
+    client.addErrorObserver(() => undefined, {
+      statusCodes: [500],
+    } as never),
+  ).toThrow('HTTPClient error observer filter has no "statusCodes" field');
+  // An interceptor has no response content type to match, so it would never run.
+  expect(() =>
+    client.addRequestInterceptor((request) => request, {
+      contentTypes: ['json'],
+    } as never),
+  ).toThrow(
+    'HTTPClient request interceptor filter has no "contentTypes" field',
+  );
+  // A misspelled field is refused the same way.
+  expect(() =>
+    client.addResponseObserver(() => undefined, { phase: ['final'] } as never),
+  ).toThrow('HTTPClient response observer filter has no "phase" field');
+});
+
+test("a callback cannot change the request's redirect history", async () => {
+  const adapter = new MockAdapter();
+  let hits = 0;
+  adapter.routes.get('/start', () => ({
+    status: 302,
+    headers: { location: '/end' },
+  }));
+  adapter.routes.get('/end', () =>
+    ++hits < 2 ? { status: 503 } : { status: 200, body: 'ok' },
+  );
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    followRedirects: true,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+  });
+  client.addRequestInterceptor(
+    (request, _phase, context) => {
+      context.redirectHistory.push('http://elsewhere.test/');
+      return request;
+    },
+    { phases: ['retry', 'redirect'] },
+  );
+  client.addResponseObserver(
+    (response) => {
+      response.redirectHistory.push('http://elsewhere.test/');
+    },
+    { phases: ['redirect', 'retry'] },
+  );
+
+  const response = await client.get('/start').send();
+
+  expect(response.redirectHistory).toEqual(['http://example.test/end']);
+});
+
+test('boolean options and cookieJar are checked by type at construction', () => {
+  const adapter = new RecordingAdapter(200);
+  // An environment variable's string would otherwise be read as `true`.
+  expect(
+    () => new HTTPClient({ adapter, followRedirects: 'false' as never }),
+  ).toThrow('HTTPClient followRedirects must be a boolean (got string)');
+  expect(
+    () => new HTTPClient({ adapter, includeRequestID: 1 as never }),
+  ).toThrow('HTTPClient includeRequestID must be a boolean (got number)');
+  expect(() => new HTTPClient({ adapter, cookieJar: {} as never })).toThrow(
+    'HTTPClient cookieJar must be a CookieJar',
+  );
+  expect(
+    () =>
+      new HTTPClient({
+        adapter,
+        followRedirects: null as never,
+        cookieJar: null,
+      }),
+  ).not.toThrow();
+});
+
+test('a plain object from another realm is accepted as a JSON body', async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  const body = vm.runInNewContext('({ a: 1 })') as Record<string, unknown>;
+
+  const response = await client.post('/x').json(body).send();
+
+  expect(response.isFailed).toBe(false);
+  expect(adapter.requests[0]?.body).toBe('{"a":1}');
+});
+
+test('only the first cancel of a request in flight returns true', async () => {
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) =>
+      new Promise((_resolve, reject) => {
+        request.signal?.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      }),
+  };
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  const builder = client.get('/x');
+  const sending = builder.send();
+  await Promise.resolve();
+
+  expect(builder.cancel('first')).toBe(true);
+  expect(builder.cancel('second')).toBe(false);
+
+  const response = await sending;
+  expect(response.isCancelled).toBe(true);
+  expect(builder.error?.cancelReason).toBe('first');
+  expect(builder.cancel()).toBe(false);
 });

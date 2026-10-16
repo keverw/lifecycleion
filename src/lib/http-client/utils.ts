@@ -1,6 +1,8 @@
 import qs from 'qs';
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
+import { isPlainRecord } from './internal/plain-record';
+import { readUnknownMember } from '../internal/read-member';
 import { presentHeaderValue } from './internal/header-utils';
 import {
   matchesWildcardDomain,
@@ -515,6 +517,35 @@ export function assertSupportedAdapterRuntimeAndConfig(
   adapterType: AdapterType,
   isBrowserRuntime: boolean,
 ): void {
+  // Checked by type before anything below compares them with `=== true`: the client
+  // reads them by truthiness, so `followRedirects: 'false'` (an environment variable,
+  // say) would pass a check for `true` and still follow redirects. Nullish reads as false.
+  for (const name of [
+    'followRedirects',
+    'retryNonIdempotentMethods',
+    'includeRequestID',
+    'includeAttemptHeader',
+  ] as const) {
+    const value: unknown = config[name];
+    if (!isNullish(value) && typeof value !== 'boolean') {
+      throw new TypeError(
+        `HTTPClient ${name} must be a boolean (got ${typeof value})`,
+      );
+    }
+  }
+
+  // A jar the client cannot call fails here rather than on every request.
+  const jar: unknown = config.cookieJar;
+  if (
+    !isNullish(jar) &&
+    (typeof readUnknownMember(jar, 'getCookieHeaderString') !== 'function' ||
+      typeof readUnknownMember(jar, 'processResponseHeaders') !== 'function')
+  ) {
+    throw new TypeError(
+      'HTTPClient cookieJar must be a CookieJar (or null to disable cookies)',
+    );
+  }
+
   if (
     config.baseURL !== undefined &&
     requiresAbsoluteBaseURL(adapterType, isBrowserRuntime)
@@ -839,12 +870,8 @@ export function assertSupportedRequestBody(body: unknown): void {
 export function isPlainJSONBodyObject(
   value: unknown,
 ): value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    return false;
-  }
-
-  const prototype = Reflect.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
+  // The same rule as a header record's, another realm's plain object included.
+  return isPlainRecord(value);
 }
 
 /**

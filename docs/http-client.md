@@ -164,7 +164,7 @@ const client = new HTTPClient({
 | `followRedirects` | Not supported          | Not supported        | Supported             | Supported            | Supported   |
 
 The constructor throws immediately on unsupported combinations so failures are caught at startup, not at request time.
-Client `defaultHeaders` is copied at construction - names lowercased, unset values dropped - so changing the object afterwards does not affect the client or its sub-clients; change a header for some requests with an interceptor or a sub-client. Client `retryPolicy` is validated and copied at construction. The internal snapshot is frozen and may be shared with sub-clients. Subclasses must not mutate `this._config.retryPolicy` in place; supply a new policy through client or sub-client configuration instead. A per-request
+`followRedirects`, `retryNonIdempotentMethods`, `includeRequestID` and `includeAttemptHeader` must be booleans (or omitted), and `cookieJar` a `CookieJar` (or `null`); anything else throws a `TypeError`. Client `defaultHeaders` is copied at construction - names lowercased, unset values dropped - so changing the object afterwards does not affect the client or its sub-clients; change a header for some requests with an interceptor or a sub-client. Client `retryPolicy` is validated and copied at construction. The internal snapshot is frozen and may be shared with sub-clients. Subclasses must not mutate `this._config.retryPolicy` in place; supply a new policy through client or sub-client configuration instead. A per-request
 `.retryPolicy(options)` is validated and copied when called, before request interceptors
 run. Invalid retry durations throw there, and later mutations to the supplied object do
 not change the policy. Each request starts with a fresh retry budget; `null` on the
@@ -1020,7 +1020,7 @@ const response = await builder.send();
 builder.cancel('timeout_budget_exceeded');
 ```
 
-`cancel()` returns `true` if the cancel was applied, `false` if it was a no-op (the request had already completed, been cancelled, or failed).
+`cancel()` returns `true` if the request was still in flight and its cancel signal was raised, `false` if it was a no-op (the request had already completed, been cancelled - or had a cancel requested - or failed). `true` does not promise a cancelled outcome: once the last attempt has its answer - from that attempt's `onAttemptEnd`, say - nothing is left for the signal to stop, and the request completes with that answer. Check `isCancelled` on the response for how it ended.
 
 Calling `cancel()` before `send()` marks the builder so that `send()` throws a plain `Error` (not an `HTTPClientError`) immediately rather than dispatching the request. In this case `builder.error` is `null`. No `HTTPClientError` is produced and `cancelReason` is not accessible programmatically (the reason string, if any, appears only in the thrown `Error` message).
 

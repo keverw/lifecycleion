@@ -25,11 +25,18 @@ export class ResponseObserverManager extends CallbackRegistry<
   ResponseObserverFilter
 > {
   constructor() {
-    super(DEFAULT_OBSERVER_PHASES, 'HTTPClient response observer', [
-      'retry',
-      'redirect',
-      'final',
-    ]);
+    super(DEFAULT_OBSERVER_PHASES, 'HTTPClient response observer', {
+      fields: [
+        'phases',
+        'hosts',
+        'schemes',
+        'statusCodes',
+        'contentTypes',
+        'contentTypeHeaders',
+        'bodyContainsKeys',
+      ],
+      phases: ['retry', 'redirect', 'final'],
+    });
   }
 
   /**
@@ -75,10 +82,10 @@ export class ErrorObserverManager extends CallbackRegistry<
   ErrorObserverFilter
 > {
   constructor() {
-    super(DEFAULT_ERROR_OBSERVER_PHASES, 'HTTPClient error observer', [
-      'retry',
-      'final',
-    ]);
+    super(DEFAULT_ERROR_OBSERVER_PHASES, 'HTTPClient error observer', {
+      fields: ['phases', 'hosts', 'schemes'],
+      phases: ['retry', 'final'],
+    });
   }
 
   /**

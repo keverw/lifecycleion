@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import * as http from 'node:http';
 import { NodeAdapter } from './node-adapter';
+import { HTTPClient } from '../http-client';
 import type { WritableLike } from '../types';
 
 test('NodeAdapter driven directly sends header names as given', async () => {
@@ -78,6 +79,33 @@ test('a signal whose aborted getter throws counts as not aborted when a response
 
     expect(response.isStreamed).toBe(true);
     expect(chunks.join('')).toBe('streamed');
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("a streamResponse factory's return is classified by one read of its cancel", async () => {
+  const server = http.createServer((_req, res) => {
+    res.end('body');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as { port: number };
+  let cancelReads = 0;
+  // Answers `true` once, then `false`: read again, it would pass for a sink.
+  const flipping = {
+    get cancel(): boolean {
+      return cancelReads++ === 0;
+    },
+  };
+
+  try {
+    const builder = new HTTPClient({ adapter: new NodeAdapter() })
+      .get(`http://127.0.0.1:${port}/`)
+      .streamResponse(() => flipping as never);
+    const response = await builder.send();
+
+    expect(cancelReads).toBe(1);
+    expect(response.isCancelled).toBe(true);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }

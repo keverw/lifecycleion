@@ -3169,11 +3169,13 @@ export class BaseHTTPClient {
       adapterType,
       initialURL,
       requestURL,
-      redirectHistory,
       isNetworkErrorOverride,
       requestBodySettled,
       answeredResponse,
     } = params;
+    // Each response its own copy: the loop's history is the client's, and an observer
+    // handed this response must not be able to rewrite the history of the request.
+    const redirectHistory = [...params.redirectHistory];
 
     const wasRedirectFollowed = redirectHistory.length > 0;
     const redirectFields: RedirectFields = adapterResponse
@@ -3502,9 +3504,15 @@ export class BaseHTTPClient {
     const parentChain = parentManager?.snapshot();
     const ownChain = this._requestInterceptors.snapshot();
     let current: InterceptedRequest | InterceptorCancel = request;
+    // The interceptors' own copy of the history, as each response has its own: an
+    // interceptor that pushes to it does not change the request's.
+    const chainContext: RequestInterceptorContext = {
+      ...context,
+      redirectHistory: [...context.redirectHistory],
+    };
 
     if (parentChain) {
-      current = await parentChain(request, phase, context);
+      current = await parentChain(request, phase, chainContext);
 
       if (isInterceptorCancel(current)) {
         return { result: current, isIntercepted: true };
@@ -3512,7 +3520,7 @@ export class BaseHTTPClient {
     }
 
     return {
-      result: await ownChain(current, phase, context),
+      result: await ownChain(current, phase, chainContext),
       isIntercepted: true,
     };
   }
@@ -4029,13 +4037,7 @@ function cloneBodyValue(body: unknown): unknown {
     return cloned;
   } else if (body instanceof Uint8Array) {
     return new Uint8Array(body);
-  } else if (
-    Array.isArray(body) ||
-    (body !== null &&
-      typeof body === 'object' &&
-      (Object.getPrototypeOf(body) === Object.prototype ||
-        Object.getPrototypeOf(body) === null))
-  ) {
+  } else if (Array.isArray(body) || isPlainRecord(body)) {
     return deepClone(body);
   }
 
