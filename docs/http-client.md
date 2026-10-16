@@ -525,11 +525,14 @@ the chain runs, later interceptor filters may read `method`, `requestURL`, and `
 from earlier interceptor results, including when those filters do not match. When
 the chain finishes, the client copies `requestURL`, `method`, `headers` and `body` into a
 request object of its own. A standard method (`GET`, `HEAD`, `POST`, `PUT`, `DELETE`,
-`OPTIONS`, `PATCH`) is uppercased whatever its case, so a `post` is treated as `POST` by
+`OPTIONS`, `PATCH`, `TRACE`) is uppercased whatever its case, so a `post` is treated as `POST` by
 the retry and redirect rules; any other method is case-sensitive and passed to the
-adapter as given, as `request()` passes it too (some transports uppercase it on the wire:
-Node's `http` and Bun's `fetch` do, Node's `fetch` does not). In a browser, `CONNECT`,
-`TRACE` and `TRACK` are refused before dispatch, since browsers refuse them. Header entries are copied at that
+adapter as given, as `request()` passes it too. What goes on the wire depends on the
+transport: Node's `http` uppercases it, Node's `fetch` sends it as given, and Bun's
+`fetch` sends a method it does not know as `GET` - so use `NodeAdapter` for a custom
+method on Bun. `CONNECT` is refused on every adapter (it opens a tunnel), and
+`TRACE` and `TRACK` are refused before dispatch through `FetchAdapter`, and through
+`XHRAdapter` in a browser, since those refuse them. Header entries are copied at that
 point: a single value is converted to a string, an array stays an array with each
 element converted to a string, and a one-element array becomes that element's string.
 Every later check and use (URL validation, the browser-restricted header check,

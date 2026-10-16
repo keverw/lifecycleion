@@ -19,6 +19,7 @@ export type HTTPMethod =
   | 'DELETE'
   | 'HEAD'
   | 'OPTIONS'
+  | 'TRACE'
   // `string & {}` rather than `string`, which would absorb the names above and drop
   // them from autocompletion.
   | (string & {});

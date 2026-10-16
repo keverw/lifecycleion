@@ -194,6 +194,7 @@ export const HTTP_METHODS: ReadonlyArray<HTTPMethod> = [
   'DELETE',
   'HEAD',
   'OPTIONS',
+  'TRACE',
 ];
 
 /**

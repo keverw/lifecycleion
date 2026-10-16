@@ -1380,3 +1380,77 @@ test('a redirect past maxRedirects still reports where it pointed', async () => 
   expect(response.wasRedirectDetected).toBe(true);
   expect(response.detectedRedirectURL).toBe('http://example.test/a');
 });
+
+test('CONNECT is refused on every adapter, and TRACE through fetch on any runtime', async () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  expect(() => client.request('CONNECT', 'http://example.test/')).toThrow(
+    'HTTPClient request method is CONNECT, which opens a tunnel and is not supported',
+  );
+
+  let fetchCalls = 0;
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = (() => {
+    fetchCalls++;
+    return Promise.resolve(new Response('ok'));
+  }) as unknown as typeof fetch;
+  try {
+    const fetchClient = new HTTPClient({
+      baseURL: 'http://example.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    });
+    const builder = fetchClient.request('TRACE', '/x');
+
+    await builder.send();
+
+    expect(fetchCalls).toBe(0);
+    expect(builder.error?.code).toBe('request_setup_error');
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test('a lowercase trace is the standard, idempotent TRACE', async () => {
+  const methods: string[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      methods.push(request.method);
+      return Promise.resolve({ status: 503, headers: {}, body: null });
+    },
+  };
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+  });
+
+  await client.request('trace', '/x').send();
+
+  expect(methods).toEqual(['TRACE', 'TRACE']);
+});
+
+test('a redirect interceptor that cancels reports the hop as it was before it ran', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/start', () => ({
+    status: 302,
+    headers: { location: '/next' },
+  }));
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    followRedirects: true,
+  });
+  client.addRequestInterceptor(
+    (request) => {
+      request.requestURL = 'http://user:pw@elsewhere.test/zzz';
+      return null;
+    },
+    { phases: ['redirect'] },
+  );
+
+  const response = await client.get('/start').send();
+
+  expect(response.isCancelled).toBe(true);
+  expect(response.requestURL).toBe('http://example.test/next');
+  expect(response.redirectHistory).toEqual(['http://example.test/next']);
+});

@@ -342,6 +342,7 @@ const STANDARD_HTTP_METHODS: ReadonlySet<string> = new Set([
   'PATCH',
   'POST',
   'PUT',
+  'TRACE',
 ]);
 
 /**
@@ -376,6 +377,11 @@ export function describeInvalidHTTPMethod(
   }
   if (!HTTP_METHOD_TOKEN.test(candidate)) {
     return `is not a valid HTTP method name (got ${JSON.stringify(candidate)})`;
+  }
+  // CONNECT asks for a tunnel rather than a response, which no adapter here handles:
+  // NodeAdapter would wait on it until the attempt timed out, or forever.
+  if (candidate.toUpperCase() === 'CONNECT') {
+    return 'is CONNECT, which opens a tunnel and is not supported';
   }
   return undefined;
 }

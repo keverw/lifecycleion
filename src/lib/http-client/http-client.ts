@@ -1057,7 +1057,6 @@ export class BaseHTTPClient {
                 initialURL: initialRequestURL,
                 requestURL: attemptResult.sentRequest.requestURL,
                 redirectHistory,
-                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
               errorCode = 'redirect_loop';
               break;
@@ -1311,7 +1310,9 @@ export class BaseHTTPClient {
             }
 
             if (isInterceptorCancel(redirectIntercept)) {
-              const cancelledRequestURL = redirectRequest.requestURL;
+              // The target as it was before the interceptors ran, not re-read from the
+              // request they were handed, which they may have changed.
+              const cancelledRequestURL = redirectTargetURL;
               observerRequest = this._bestEffortAttemptRequestFromPending(
                 redirectRequest,
                 timeout,
@@ -3897,25 +3898,27 @@ export class BaseHTTPClient {
   private _assertRequestIsSupported(request: InterceptedRequest): void {
     assertSupportedRequestBody(request.body);
 
+    const adapterType = this._adapter.getType();
+    const adapterName =
+      adapterType === 'fetch' ? 'FetchAdapter' : 'XHR adapter';
     if (
       this._isBrowserRuntime &&
-      (this._adapter.getType() === 'fetch' || this._adapter.getType() === 'xhr')
+      (adapterType === 'fetch' || adapterType === 'xhr')
     ) {
-      const adapterName =
-        this._adapter.getType() === 'fetch' ? 'FetchAdapter' : 'XHR adapter';
       assertNoBrowserRestrictedHeaders(request.headers, adapterName);
-      // Refused here, as the method-override headers that tunnel them are: a browser
-      // refuses these methods on every attempt, so letting one through only spends the
-      // retry budget on a transport failure.
-      if (
-        BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES.has(
-          request.method.toLowerCase(),
-        )
-      ) {
-        throw new Error(
-          `[${adapterName}] Cannot send a ${request.method} request: browsers refuse the CONNECT, TRACE and TRACK methods.`,
-        );
-      }
+    }
+    // Refused here, as the method-override headers that tunnel them are: `fetch` refuses
+    // these methods on every runtime (the Fetch Standard forbids them), and XHR in a
+    // browser does, on every attempt - letting one through only spends the retry budget
+    // on a transport failure.
+    if (
+      (adapterType === 'fetch' ||
+        (adapterType === 'xhr' && this._isBrowserRuntime)) &&
+      BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES.has(request.method.toLowerCase())
+    ) {
+      throw new Error(
+        `[${adapterName}] Cannot send a ${request.method} request: fetch and browsers refuse the CONNECT, TRACE and TRACK methods.`,
+      );
     }
   }
 
