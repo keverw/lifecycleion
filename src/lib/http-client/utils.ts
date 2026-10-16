@@ -927,7 +927,9 @@ function hasNestedKey(obj: Record<string, unknown>, path: string): boolean {
       return false;
     }
 
-    if (!(part in (current as Record<string, unknown>))) {
+    // Own keys only: `in` also finds inherited names, so `constructor` or `a.toString`
+    // matched every object body.
+    if (!Object.hasOwn(current, part)) {
       return false;
     }
 

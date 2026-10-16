@@ -4,6 +4,7 @@ import { HTTPClient } from './http-client';
 import { matchesFilter } from './utils';
 import { CookieJar } from './cookie-jar';
 import { MockAdapter } from './adapters/mock-adapter';
+import { NodeAdapter } from './adapters/node-adapter';
 import type {
   AdapterRequest,
   AdapterResponse,
@@ -1069,4 +1070,82 @@ test("a request the caller's signal aborted is not counted by the client's cance
   expect(client.cancelAll()).toBe(0);
   expect(builder.cancel()).toBe(false);
   await sending;
+});
+
+test('bodyContainsKeys matches own keys only, not inherited names', async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  const ran: string[] = [];
+  for (const key of ['constructor', 'a.toString', 'a.b']) {
+    client.addRequestInterceptor(
+      (request) => {
+        ran.push(key);
+        return request;
+      },
+      { bodyContainsKeys: [key] },
+    );
+  }
+
+  await client
+    .post('/x')
+    .json({ a: { b: 1 } })
+    .send();
+
+  expect(ran).toEqual(['a.b']);
+});
+
+test("a redirect interceptor that rewrites the hop's URL in place still loses cross-origin credentials", async () => {
+  const adapter = new MockAdapter();
+  const received: Array<Record<string, string | string[]>> = [];
+  adapter.routes.get('/start', () => ({
+    status: 302,
+    headers: { location: '/land' },
+  }));
+  adapter.routes.get('/land', (request) => {
+    received.push(request.headers);
+    return { status: 200, body: 'ok' };
+  });
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://a.test',
+    followRedirects: true,
+    defaultHeaders: { authorization: 'Bearer secret' },
+  });
+  client.addRequestInterceptor(
+    (request) => {
+      // Mutated rather than copied.
+      request.requestURL = 'http://c.test/land';
+      return request;
+    },
+    { phases: ['redirect'] },
+  );
+
+  await client.get('/start').send();
+
+  expect(received).toHaveLength(1);
+  expect(received[0]).not.toHaveProperty('authorization');
+});
+
+test("an error's cause does not carry the request headers when serialized", async () => {
+  const server = Bun.serve({
+    port: 0,
+    fetch: () => new Response('body'),
+  });
+  try {
+    const failure = new Error('factory failed');
+    const builder = new HTTPClient({ adapter: new NodeAdapter() })
+      .get(`http://127.0.0.1:${server.port}/`)
+      .headers({ authorization: 'Bearer secret' })
+      .streamResponse(() => {
+        throw failure;
+      });
+
+    await builder.send();
+
+    expect(builder.error?.code).toBe('stream_setup_error');
+    expect(JSON.stringify(failure)).not.toContain('secret');
+    expect(Object.keys(failure)).toEqual([]);
+  } finally {
+    await server.stop(true);
+  }
 });

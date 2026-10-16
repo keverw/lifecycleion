@@ -1124,9 +1124,13 @@ export class BaseHTTPClient {
               redirectMethod = 'GET';
             }
 
+            // The URL this hop was sent to, read before any callback runs: the
+            // cross-origin checks below compare against it, and observers and
+            // interceptors are handed objects they could change.
+            const hopFromURL = attemptResult.sentRequest.requestURL;
             const hopInfo: RedirectHopInfo = {
               hop: hopCount,
-              from: attemptResult.sentRequest.requestURL,
+              from: hopFromURL,
               to: redirectURL,
               statusCode: adapterResponse.status,
             };
@@ -1208,10 +1212,11 @@ export class BaseHTTPClient {
                 body: redirectMethod === 'GET' ? undefined : sentBody.value,
               },
               {
-                fromURL: attemptResult.sentRequest.requestURL,
+                fromURL: hopFromURL,
                 cookieJar: jar ?? undefined,
               },
             );
+            const redirectTargetURL = redirectRequest.requestURL;
 
             // Run redirect-phase request interceptors so they can update headers
             // for the new target (e.g. refresh auth tokens). Retry-phase
@@ -1359,7 +1364,11 @@ export class BaseHTTPClient {
                 // If the interceptor kept the URL (normal case), from and to are the
                 // same origin and nothing is stripped, preserving any headers the
                 // interceptor added (e.g. Authorization for the redirect target).
-                fromURL: redirectRequest.requestURL,
+                //
+                // The target as it was before the interceptors ran, not re-read from the
+                // request they were handed: one that rewrote that object in place would
+                // otherwise compare its new host with itself and keep the credentials.
+                fromURL: redirectTargetURL,
                 cookieJar: jar ?? undefined,
               },
             );

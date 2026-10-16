@@ -3265,6 +3265,22 @@ const PRE_CONNECTION_ERROR_CODES: ReadonlySet<string> = new Set([
   'EADDRNOTAVAIL',
 ]);
 
+/**
+ * Define `tags` on `target` as own, non-enumerable data properties: read back by name
+ * (`readObjectMember`), but left out of `JSON.stringify`, `Object.keys` and spreads.
+ * Throws as `Object.defineProperty` does on a frozen or sealed target.
+ */
+function defineHiddenTags(target: object, tags: Record<string, unknown>): void {
+  for (const [key, value] of Object.entries(tags)) {
+    Object.defineProperty(target, key, {
+      value,
+      writable: true,
+      configurable: true,
+      enumerable: false,
+    });
+  }
+}
+
 /** Whether an error proves the request never left for a connected peer. */
 function isPreConnectionError(error: unknown): boolean {
   const code = readObjectMember(error, 'code');
@@ -3298,9 +3314,11 @@ function markStreamFactoryError(
   };
 
   // Tagged in place when possible, so the caller still sees the error its own
-  // `streamResponse` factory threw, with its identity and stack intact.
+  // `streamResponse` factory threw, with its identity and stack intact. Non-enumerable,
+  // so a logger that serializes the error - or its `cause` - does not write the request's
+  // headers, its credentials among them.
   try {
-    Object.assign(normalized, marks);
+    defineHiddenTags(normalized, marks);
 
     return normalized;
   } catch {
@@ -3324,7 +3342,7 @@ function markStreamFactoryError(
     carrier.name = originalName;
   }
 
-  Object.assign(carrier, marks);
+  defineHiddenTags(carrier, marks);
 
   return carrier;
 }
@@ -3359,15 +3377,17 @@ function makeResponseStreamAbortError(
       streamAbortHeaders?: Record<string, string | string[]>;
     };
 
-  // Keep the flag sourced from consts while avoiding eslint's false-positive
-  // on direct computed assignment into an Error-typed value.
-  Object.assign(tagged, { [RESPONSE_STREAM_ABORT_FLAG]: true });
-  tagged.effectiveRequestHeaders = snapshotEffectiveRequestHeaders(
-    req,
-    fallbackHeaders,
-  );
-  tagged.streamAbortStatus = status;
-  tagged.streamAbortHeaders = headers;
+  // Hidden, as `markStreamFactoryError`'s tags are: the request's headers carry its
+  // credentials, and a serialized error must not.
+  defineHiddenTags(tagged, {
+    [RESPONSE_STREAM_ABORT_FLAG]: true,
+    effectiveRequestHeaders: snapshotEffectiveRequestHeaders(
+      req,
+      fallbackHeaders,
+    ),
+    streamAbortStatus: status,
+    streamAbortHeaders: headers,
+  });
 
   return error;
 }
