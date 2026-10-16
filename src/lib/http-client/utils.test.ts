@@ -812,13 +812,15 @@ describe('normalizeAdapterResponseHeaders', () => {
     });
   });
 
-  test('last scalar wins when keys collide after lowercasing', () => {
+  test('keys that collide after lowercasing are read as a repeated header', () => {
     expect(
       normalizeAdapterResponseHeaders({
         'Content-Type': 'text/plain',
         'CONTENT-TYPE': 'application/json',
+        Link: '<a>',
+        LINK: '<b>',
       }),
-    ).toEqual({ 'content-type': 'application/json' });
+    ).toEqual({ 'content-type': 'text/plain', link: '<a>, <b>' });
   });
 
   test('merges set-cookie lines from keys that differ only by case', () => {

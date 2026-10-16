@@ -1957,3 +1957,42 @@ test('a filter field a callback kind does not take is allowed when it is nullish
     client.addErrorObserver(() => {}, { statusCodes: [500] } as never),
   ).toThrow(TypeError);
 });
+
+test('parseContentType reads the first media type of a joined header', () => {
+  expect(parseContentType('application/json, application/json')).toBe('json');
+  expect(parseContentType('text/plain;charset=utf-8, text/html')).toBe('text');
+});
+
+test('a contentTypeHeaders entry with a partial wildcard or a list is refused', () => {
+  const client = new HTTPClient();
+  for (const pattern of [
+    'application/*+json',
+    '*/json',
+    'application/json, application/problem+json',
+  ]) {
+    expect(() =>
+      client.addResponseObserver(() => {}, { contentTypeHeaders: [pattern] }),
+    ).toThrow(TypeError);
+  }
+});
+
+test('response header keys that differ only in case are combined as a repeat', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/h', () => ({
+    status: 200,
+    headers: {
+      Link: '<a>',
+      link: '<b>',
+      'Content-Type': 'text/plain',
+      'content-type': 'application/json',
+    },
+    body: 'hi',
+  }));
+
+  const response = await new HTTPClient({ adapter, baseURL: 'http://a.test' })
+    .get('/h')
+    .send();
+
+  expect(response.headers.link).toBe('<a>, <b>');
+  expect(response.headers['content-type']).toBe('text/plain');
+});

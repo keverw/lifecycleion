@@ -55,8 +55,18 @@ function describeUnmatchableMediaTypePattern(
 ): string | undefined {
   const mediaType = entry.split(';', 1)[0].trim();
   const slash = mediaType.indexOf('/');
-  if (slash <= 0 || slash === mediaType.length - 1) {
-    return "is not a media type such as 'application/json', 'image/*' or '*/*'";
+  const type = mediaType.slice(0, slash);
+  const subtype = mediaType.slice(slash + 1);
+  if (
+    entry.includes(',') ||
+    slash <= 0 ||
+    subtype === '' ||
+    subtype.includes('/') ||
+    // `*` only as a whole subtype (`image/*`) or as `*/*`.
+    (subtype.includes('*') && subtype !== '*') ||
+    (type.includes('*') && mediaType !== '*/*')
+  ) {
+    return "is not one media type such as 'application/json', 'image/*' or '*/*'";
   }
   return undefined;
 }

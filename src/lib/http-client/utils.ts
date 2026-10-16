@@ -750,16 +750,19 @@ export function normalizeAdapterResponseHeaders(
         result[lower] = [...existingLines, ...chunk];
       }
     } else {
-      // As Node's `res.headers` reads a repeated header: the first value of one that
-      // can hold only one (`location`, `content-type`), and the rest joined.
+      // As Node's `res.headers` reads a repeated header - an array, or keys that
+      // differ only by case: the first value of one that can hold only one
+      // (`location`, `content-type`), and the rest joined.
+      const values = Array.isArray(value) ? value : [value];
+      const existing = Object.hasOwn(result, lower) ? result[lower] : undefined;
+      const all =
+        existing === undefined ? values : [existing as string, ...values];
       defineEntry(
         result,
         lower,
-        Array.isArray(value)
-          ? SINGLE_VALUE_RESPONSE_HEADERS.has(lower)
-            ? (value[0] ?? '')
-            : value.join(', ')
-          : value,
+        SINGLE_VALUE_RESPONSE_HEADERS.has(lower)
+          ? (all[0] ?? '')
+          : all.join(', '),
       );
     }
   }
@@ -978,8 +981,10 @@ function hasNestedKey(obj: Record<string, unknown>, path: string): boolean {
   return true;
 }
 
+// The first media type of a header fetch or XHR joined from repeats
+// (`application/json, application/json`), without its parameters.
 function normalizeMimeType(value: string): string {
-  return value.split(';', 1)[0].trim().toLowerCase();
+  return value.split(',', 1)[0].split(';', 1)[0].trim().toLowerCase();
 }
 
 function matchesContentTypePattern(
