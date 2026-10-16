@@ -124,12 +124,15 @@ describe('NodeAdapter: a sink returned after its request was torn down', () => {
     lateSinks = [];
   });
 
-  const lateMissingFile = async (): Promise<WritableLike> => {
-    await sleep(80);
+  const lateMissingFileAfter = async (
+    delayMS: number,
+  ): Promise<WritableLike> => {
+    await sleep(delayMS);
     const sink = fs.createWriteStream(missingDirectoryPath());
     lateSinks.push(sink);
     return sink;
   };
+  const lateMissingFile = (): Promise<WritableLike> => lateMissingFileAfter(80);
 
   // Waits for the late sink to exist and close, rather than for a fixed time: on a slow
   // runner the failed open can land after any fixed sleep, and the assertions then ran
@@ -169,10 +172,13 @@ describe('NodeAdapter: a sink returned after its request was torn down', () => {
       baseURL: url,
     });
 
-    const builder = client.get('/').streamResponse(lateMissingFile);
-    const pending = builder.send();
-    setTimeout(() => builder.cancel('bye'), 20);
-    const response = await pending;
+    // Cancelled from inside the factory, so the cancel always lands while it is still
+    // setting up, however slowly the response arrives.
+    const builder = client.get('/').streamResponse(() => {
+      builder.cancel('bye');
+      return lateMissingFileAfter(80);
+    });
+    const response = await builder.send();
     await settleLateSink();
 
     expect(response.isCancelled).toBe(true);
@@ -192,9 +198,11 @@ describe('NodeAdapter: a sink returned after its request was torn down', () => {
       baseURL: url,
     });
 
+    // The factory outlasts the timeout by a wide margin, so the timer fires during it
+    // even when the response is slow to arrive.
     const response = await client
-      .get('/', { timeout: 30 })
-      .streamResponse(lateMissingFile)
+      .get('/', { timeout: 150 })
+      .streamResponse(() => lateMissingFileAfter(400))
       .send();
     await settleLateSink();
 

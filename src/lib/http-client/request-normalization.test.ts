@@ -1154,8 +1154,13 @@ test('a retry-phase interceptor does not spend the attempt timeout', async () =>
   let sends = 0;
   const adapter: HTTPAdapter = {
     getType: () => 'node',
-    send: () => {
+    // Honors its signal, as a real adapter does: an attempt whose timer already fired is
+    // refused, so a timer armed before the interceptor would fail the retry.
+    send: (request) => {
       sends++;
+      if (request.signal?.aborted) {
+        return Promise.reject(new DOMException('aborted', 'AbortError'));
+      }
       return Promise.resolve({
         status: sends === 1 ? 503 : 200,
         headers: {},
@@ -1181,6 +1186,7 @@ test('a retry-phase interceptor does not spend the attempt timeout', async () =>
   const response = await client.get('/x').send();
 
   expect(sends).toBe(2);
+  expect(response.isTimeout).toBe(false);
   expect(response.status).toBe(200);
 });
 
@@ -1204,4 +1210,90 @@ test('a builder whose send() rejects is left failed, not sending', async () => {
   expect(() => client.get('/x').signal({ aborted: false } as never)).toThrow(
     'HTTPRequestBuilder signal must be an AbortSignal',
   );
+});
+
+test("a redirect observer that rewrites the hop's URL in place still loses cross-origin credentials", async () => {
+  const adapter = new MockAdapter();
+  const received: Array<Record<string, string | string[]>> = [];
+  adapter.routes.get('/start', () => ({
+    status: 302,
+    headers: { location: 'http://c.test/land' },
+  }));
+  adapter.routes.get('/land', (request) => {
+    received.push(request.headers);
+    return { status: 200, body: 'ok' };
+  });
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://a.test',
+    followRedirects: true,
+    defaultHeaders: { authorization: 'Bearer secret' },
+  });
+  client.addResponseObserver(
+    (_response, request) => {
+      // Made to look as if the hop had been sent to the redirect's target already.
+      (request as { requestURL: string }).requestURL = 'http://c.test/land';
+    },
+    { phases: ['redirect'] },
+  );
+
+  await client.get('/start').send();
+
+  expect(received).toHaveLength(1);
+  expect(received[0]).not.toHaveProperty('authorization');
+});
+
+test('a cancel from a final observer neither cancels nor counts the decided request', async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  const counts: number[] = [];
+  client.addResponseObserver(
+    () => {
+      counts.push(client.cancelAll('late'));
+    },
+    { phases: ['final'] },
+  );
+  const builder = client.get('/x');
+
+  const response = await builder.send();
+
+  expect(counts).toEqual([0]);
+  expect(response.isCancelled).toBe(false);
+  expect(builder.state).toBe('completed');
+});
+
+test('a signal whose aborted getter throws is read as not aborted when the request starts', async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  const controller = new AbortController();
+  // A real AbortSignal, so it is accepted, with an `aborted` that cannot be read.
+  Object.defineProperty(controller.signal, 'aborted', {
+    get(): boolean {
+      throw new Error('aborted unreadable');
+    },
+  });
+
+  const response = await client.get('/x').signal(controller.signal).send();
+
+  expect(response.status).toBe(200);
+});
+
+test('a sub-client whose retryPolicy is null does not retry', async () => {
+  let sends = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () => {
+      sends++;
+      return Promise.resolve({ status: 503, headers: {}, body: null });
+    },
+  };
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 1 },
+  });
+
+  await client.createSubClient({ retryPolicy: null }).get('/x').send();
+
+  expect(sends).toBe(1);
 });

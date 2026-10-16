@@ -112,7 +112,42 @@ test("a streamResponse factory's return is classified by one read of its cancel"
 });
 
 test('a CRL with no complete block is refused at construction', () => {
-  for (const crl of ['', '  \n', Buffer.from('\n')]) {
-    expect(() => new NodeAdapter({ crl })).toThrow();
+  for (const crl of ['', '  \n']) {
+    expect(() => new NodeAdapter({ crl })).toThrow(
+      'NodeAdapter: the `crl` value holds no -----BEGIN X509 CRL----- block',
+    );
+  }
+  // Binary with no block is refused as not PEM.
+  expect(() => new NodeAdapter({ crl: Buffer.from('\n') })).toThrow(
+    'NodeAdapter crl must be PEM',
+  );
+});
+
+test('an error for a body cut off mid-stream does not carry the request headers when serialized', async () => {
+  // Headers, part of the body, then nothing: the attempt's timer cuts the body off.
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-length': '1000' });
+    res.write('part');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as { port: number };
+
+  try {
+    const builder = new HTTPClient({ adapter: new NodeAdapter(), timeout: 50 })
+      .get(`http://127.0.0.1:${port}/`)
+      .headers({ authorization: 'Bearer secret' });
+
+    await builder.send();
+
+    const cause = builder.error?.cause;
+    expect(builder.error?.code).toBe('stream_response_error');
+    expect(cause).toBeDefined();
+    expect(JSON.stringify(cause)).not.toContain('secret');
+    expect(Object.keys(cause as object)).not.toContain(
+      'effectiveRequestHeaders',
+    );
+  } finally {
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });

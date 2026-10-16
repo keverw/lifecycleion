@@ -49,7 +49,7 @@ test('inherited null retry policy disables parent retries', () => {
   ).toBeUndefined();
 });
 
-test('invalid client retry policy fails before requests or interceptors', () => {
+test('invalid client retry policy fails at construction', () => {
   const adapter = new MockAdapter();
   expect(
     () =>
@@ -63,22 +63,15 @@ test('invalid client retry policy fails before requests or interceptors', () => 
 test('invalid builder retry policy fails at the setter', () => {
   const adapter = new MockAdapter();
   const client = new HTTPClient({ adapter });
-  let intercepted = 0;
-  client.addRequestInterceptor((request) => {
-    intercepted++;
-    return request;
-  });
   const builder = client.get('/test');
   expect(() =>
     builder.retryPolicy({ strategy: 'fixed', delayMS: NaN }),
   ).toThrow(TypeError);
-  expect(intercepted).toBe(0);
   expect(() =>
     client.get('/test', {
       retryPolicy: { strategy: 'fixed', delayMS: NaN },
     }),
   ).toThrow(TypeError);
-  expect(intercepted).toBe(0);
 });
 
 test('client policy is snapshotted and each request gets a fresh retry budget', async () => {

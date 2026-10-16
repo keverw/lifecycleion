@@ -158,9 +158,10 @@ test('a socket error before a response behind a refusing signal fails with the s
 
 test('an unexpected response-task failure aborts the stream and frees the connection', async () => {
   // Nothing on the response path is meant to throw past its own `catch`, so the failure
-  // is injected: the shared-listener registry refuses this writable. That handler only
-  // rejected, which left the socket open with the response still streaming in and the
-  // factory's signal unfired, so its cleanup listeners never ran.
+  // is injected: the shared-listener registry refuses this writable. The response task's
+  // failure handler fires the factory's signal, so its cleanup listeners run; the socket
+  // is freed too, by it or by `send()`'s own teardown of a rejected request - this test
+  // checks the outcome, not which of the two did it.
   let closedResponses = 0;
   const server = http.createServer((_req, res) => {
     res.on('close', () => {

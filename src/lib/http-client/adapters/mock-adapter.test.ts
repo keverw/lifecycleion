@@ -967,16 +967,21 @@ describe('MockAdapter.send() — low-level contract', () => {
     expect(download).toContain(1);
   });
 
-  test('throws AbortError if signal already aborted', () => {
+  test('throws AbortError if signal already aborted', async () => {
     adapter.routes.get('/item', () => ({ status: 200 }));
     const controller = new AbortController();
     controller.abort();
 
-    expect(
-      adapter.send(
+    const rejection = await adapter
+      .send(
         makeAdapterRequest({ requestURL: '/item', signal: controller.signal }),
-      ),
-    ).rejects.toThrow(/aborted/i);
+      )
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toMatch(/aborted/i);
   });
 
   test('throws AbortError when signal fires during delay and resolves early', async () => {
@@ -1162,15 +1167,22 @@ describe('MockAdapter.send() — low-level contract', () => {
     expect(Array.from(res.body as Uint8Array)).toEqual(Array.from(bytes));
   });
 
-  test('unsupported response body type throws (aligned with request serializeBody)', () => {
+  test('unsupported response body type throws (aligned with request serializeBody)', async () => {
     adapter.routes.get('/map', () => ({
       status: 200,
       body: new Map([['a', 1]]),
     }));
 
-    expect(
-      adapter.send(makeAdapterRequest({ requestURL: '/map' })),
-    ).rejects.toThrow(/Unsupported mock response body type/);
+    const rejection = await adapter
+      .send(makeAdapterRequest({ requestURL: '/map' }))
+      .then(
+        () => undefined,
+        (error: unknown) => error,
+      );
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toMatch(
+      /Unsupported mock response body type/,
+    );
   });
 
   test('3xx response sets wasRedirectDetected on AdapterResponse', async () => {
