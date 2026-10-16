@@ -218,6 +218,14 @@ export interface MockAdapterRoutes {
   patch(path: string, handler: MockRouteHandler): void;
   delete(path: string, handler: MockRouteHandler): void;
   head(path: string, handler: MockRouteHandler): void;
+  options(path: string, handler: MockRouteHandler): void;
+  /**
+   * Register a route for any method Node's `http` knows - `TRACE`, WebDAV's `PROPFIND` or
+   * `LOCK`, `PURGE`. A route matches the method exactly as the request sends it, so
+   * register a custom method in the case your requests use. Throws for a method name
+   * the router does not know.
+   */
+  on(method: string, path: string, handler: MockRouteHandler): void;
   /** Remove all registered routes. */
   clear(): void;
 }
@@ -389,6 +397,17 @@ export class MockAdapter implements HTTPAdapter {
       }
     }
 
+    // The route has run: a handler that returned no response (a forgotten `return`) is a
+    // mistake in the test's own setup, so it is not retried - a retry would only run the
+    // route, and its side effects, again.
+    if (typeof mockResponse !== 'object' || mockResponse === null) {
+      const error = new TypeError(
+        `MockAdapter route for ${method} ${path} returned no MockResponse (got ${mockResponse === null ? 'null' : typeof mockResponse})`,
+      );
+      markNonRetryableAdapterError(error);
+      throw error;
+    }
+
     // --- 5. Delay ---
     // Simulates network latency. Per-response delay takes priority over the
     // adapter default. When a signal is present, the sleep is abort-aware and
@@ -467,9 +486,17 @@ export class MockAdapter implements HTTPAdapter {
     // What the server would have put on the wire. HEAD / 204 / 304 never expose
     // a body to consumers, even if the handler returned one. This keeps the mock
     // transport aligned with real HTTP.
-    const intendedBody = shouldOmitResponseBody(method, mockResponse.status)
-      ? null
-      : serializeResponseBody(mockResponse);
+    let intendedBody: ReturnType<typeof serializeResponseBody> | null;
+    try {
+      intendedBody = shouldOmitResponseBody(method, mockResponse.status)
+        ? null
+        : serializeResponseBody(mockResponse);
+    } catch (error) {
+      // A body the mock cannot serialize is the route's mistake, after it has run; not
+      // retried, for the reason a bad delay is not.
+      markNonRetryableAdapterError(error);
+      throw error;
+    }
 
     // A simulated stream error loses the body, but it strikes after headers
     // arrived, so the headers still stand — Content-Type included. Header
@@ -600,6 +627,9 @@ function buildRoutes(
     patch: (path, handler) => on('PATCH', path, handler),
     delete: (path, handler) => on('DELETE', path, handler),
     head: (path, handler) => on('HEAD', path, handler),
+    options: (path, handler) => on('OPTIONS', path, handler),
+    on: (method, path, handler) =>
+      on(method as Router.HTTPMethod, path, handler),
     clear: () => router.reset(),
   };
 }
@@ -645,7 +675,9 @@ function parseCookieHeader(
     const name = part.slice(0, eqIdx).trim();
     const value = part.slice(eqIdx + 1).trim();
 
-    if (name) {
+    // The first of a repeated name wins, as common server parsers (the `cookie` package
+    // behind Express and Fastify) read it: the client sends the most specific path first.
+    if (name && !Object.hasOwn(cookies, name)) {
       // Defined, not assigned: a `__proto__` cookie would otherwise vanish.
       defineEntry(cookies, name, value);
     }
@@ -682,7 +714,15 @@ function serializeMockCookieOptions(
     `Path=${cookie.path ?? '/'}`,
   ];
 
-  appendCookieAttribute(parts, 'Max-Age', cookie.maxAge);
+  // Whole seconds, as `Max-Age` is: a fraction would make the cookie jar ignore the
+  // attribute, so `0.01` would never expire and `-0.5` would not delete the cookie.
+  appendCookieAttribute(
+    parts,
+    'Max-Age',
+    typeof cookie.maxAge === 'number' && Number.isFinite(cookie.maxAge)
+      ? Math.trunc(cookie.maxAge)
+      : cookie.maxAge,
+  );
   appendCookieAttribute(parts, 'Domain', cookie.domain);
 
   if (cookie.httpOnly) {

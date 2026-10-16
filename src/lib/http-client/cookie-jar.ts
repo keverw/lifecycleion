@@ -684,8 +684,14 @@ export class CookieJar {
 
   // --- Private helpers ---
 
+  /**
+   * A cookie's identity (RFC 6265 §5.3: name, domain and path) as one unambiguous key.
+   * Encoded as a JSON array rather than joined: a name may contain `@` and `/` and a path
+   * `@`, so `a@x.example.com/` with path `/` and `a` on `x.example.com` with path
+   * `/@...` must not become the same key, or one site's cookie could replace another's.
+   */
   private cookieKey(name: string, domain: string, path: string): string {
-    return `${name}@${domain}${path}`;
+    return JSON.stringify([name, domain, path]);
   }
 
   /** Canonical form for stored cookie domains: no leading dot, ASCII/IDNA DNS names;

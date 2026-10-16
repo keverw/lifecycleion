@@ -1454,3 +1454,94 @@ test('a redirect interceptor that cancels reports the hop as it was before it ra
   expect(response.requestURL).toBe('http://example.test/next');
   expect(response.redirectHistory).toEqual(['http://example.test/next']);
 });
+
+test('MockAdapter serves OPTIONS and other methods through routes.on', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.options('/x', () => ({ status: 204 }));
+  adapter.routes.on('PROPFIND', '/x', () => ({ status: 207 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+
+  expect((await client.request('OPTIONS', '/x').send()).status).toBe(204);
+  expect((await client.request('PROPFIND', '/x').send()).status).toBe(207);
+  expect(() =>
+    adapter.routes.on('NOT_A_METHOD', '/x', () => ({ status: 200 })),
+  ).toThrow();
+});
+
+test("a MockAdapter route's own mistake is not retried", async () => {
+  const adapter = new MockAdapter();
+  let calls = 0;
+  adapter.routes.get('/no-return', () => {
+    calls++;
+    return undefined as never;
+  });
+  adapter.routes.get('/bad-body', () => {
+    calls++;
+    return { status: 200, body: new Map() as never };
+  });
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+  });
+
+  for (const path of ['/no-return', '/bad-body']) {
+    calls = 0;
+    const builder = client.get(path);
+    const response = await builder.send();
+
+    expect(calls).toBe(1);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(response.isNetworkError).toBe(false);
+  }
+});
+
+test('MockAdapter reads the first of two same-named cookies, and truncates maxAge', async () => {
+  const adapter = new MockAdapter();
+  let seen: string | undefined;
+  adapter.routes.get('/c', (request) => {
+    seen = request.cookies.s;
+    return {
+      status: 200,
+      cookies: { gone: { value: 'x', maxAge: -0.5 } },
+    };
+  });
+  const jar = new CookieJar();
+  jar.processResponseHeaders(
+    { 'set-cookie': ['gone=1; Path=/'] },
+    'http://example.test/',
+  );
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    cookieJar: jar,
+  });
+
+  await client.get('/c').headers({ cookie: 'ignored=1' }).send();
+  // The jar replaces the request's own cookie header; check parsing directly too.
+  await adapter.send({
+    requestURL: 'http://example.test/c',
+    method: 'GET',
+    headers: { cookie: 's=api; s=root' },
+  });
+
+  expect(seen).toBe('api');
+  // A fractional negative Max-Age deletes the cookie rather than keeping it empty.
+  expect(jar.getCookieHeaderString('http://example.test/')).toBe('');
+});
+
+test("one site's cookie cannot replace another's through a crafted name and path", () => {
+  const jar = new CookieJar();
+  jar.processResponseHeaders(
+    { 'set-cookie': ['a=victim; Secure; Path=/@y.example.com/'] },
+    'https://x.example.com/',
+  );
+  jar.processResponseHeaders(
+    { 'set-cookie': ['a@x.example.com/=attacker; Path=/'] },
+    'http://y.example.com/',
+  );
+
+  expect(
+    jar.getCookieHeaderString('https://x.example.com/@y.example.com/'),
+  ).toBe('a=victim');
+});

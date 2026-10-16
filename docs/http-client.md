@@ -817,7 +817,7 @@ const client = new HTTPClient({
 
 When a `CookieJar` is attached to the client:
 
-1. Before each adapter attempt (including retries) the jar's cookies for the request URL are added to the `cookie` header.
+1. Before each adapter attempt (including retries) the `cookie` header is set from the jar's cookies for the request URL. The jar is authoritative: a `cookie` header the request or an interceptor set is replaced, or removed when the jar has nothing for that URL.
 2. After every response the `set-cookie` headers are parsed and stored in the jar.
 3. Cookies are maintained across redirect hops.
 
@@ -1432,6 +1432,8 @@ const response = await client.get('/users/1').send();
 expect(response.status).toBe(200);
 expect(response.body).toEqual({ id: '1', name: 'Alice' });
 ```
+
+Routes are registered with `get`, `post`, `put`, `patch`, `delete`, `head` and `options`, or `routes.on(method, path, handler)` for any other method Node's `http` knows (`TRACE`, `PROPFIND`, `LOCK`, `PURGE`). A route matches the method exactly as the request sends it, and a `HEAD` request needs its own `head` route - it is not answered from a `get` route. A path parameter longer than 100 characters does not match its route, so that request gets a `404`. A handler that returns no response, or a body the mock cannot serialize, fails the request as a non-retryable `adapter_error`. When a request carries two cookies with the same name, `req.cookies` holds the first, as common server parsers do.
 
 **MockAdapterConfig:**
 
