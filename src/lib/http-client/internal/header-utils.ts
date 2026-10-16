@@ -10,7 +10,9 @@ import type { RequestHeadersInput } from '../types';
 
 /**
  * A header value as every header normalizer reads it - the one rule they share, so a
- * header is present or absent alike on the wire, to observers and in every adapter. A
+ * header is present or absent alike on the wire and to observers. HTTPClient applies it
+ * before any adapter sees a request; driven directly, NodeAdapter and MockAdapter apply
+ * it too, while FetchAdapter and XHRAdapter pass the values they are given on as is. A
  * `null` or `undefined` value, or array item, means no header (an array left with no
  * item is unset too); anything else is converted with `String`. `undefined` when the
  * header is unset.

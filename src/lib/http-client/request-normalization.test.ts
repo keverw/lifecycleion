@@ -1319,3 +1319,39 @@ test('only RFC 9110 idempotent methods are retried; a custom method is not', asy
 
   expect(calls).toEqual({ LOCK: 1, MKCOL: 1, POST: 1, PUT: 3, OPTIONS: 3 });
 });
+
+test('an adapter answer without a valid status is the answered adapter_error', async () => {
+  for (const status of [undefined, '503', Number.NaN, -1, 200.5]) {
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: () => Promise.resolve({ status, headers: {}, body: null } as never),
+    };
+    const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+    const builder = client.get('/x');
+
+    const response = await builder.send();
+
+    expect(response.isFailed).toBe(true);
+    expect(builder.error?.code).toBe('adapter_error');
+  }
+  // A class-instance answer whose fields are prototype getters is read whole.
+  class Answer {
+    public get status(): number {
+      return 201;
+    }
+    public get headers(): Record<string, string> {
+      return {};
+    }
+    public get body(): null {
+      return null;
+    }
+  }
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'node',
+      send: () => Promise.resolve(new Answer()),
+    },
+    baseURL: 'http://example.test',
+  });
+  expect((await client.get('/x').send()).status).toBe(201);
+});

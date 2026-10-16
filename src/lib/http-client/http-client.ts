@@ -1739,7 +1739,7 @@ export class BaseHTTPClient {
     hopContext?: { hopNumber: number; redirect: RedirectHopInfo };
     /**
      * If set: each adapter response updates the jar from `Set-Cookie` before retry/backoff,
-     * and each outbound attempt rebuilds the `Cookie` header from the jar for `attemptTarget`.
+     * and each outbound attempt rebuilds the `Cookie` header from the jar for its target URL.
      */
     cookieJar?: CookieJar | null;
   }): Promise<{
@@ -2007,10 +2007,9 @@ export class BaseHTTPClient {
         };
       };
 
-      // Set internal headers unconditionally on every attempt — this is
-      // simpler than relying on them surviving cross-origin header stripping
-      // during redirects. Both are always re-applied here so the redirect
-      // loop doesn't need to worry about re-attaching them.
+      // The request this attempt sends; a retry interceptor may replace it below. The
+      // internal headers are applied to it per attempt, in `_buildAttemptRequest`, so they
+      // need not survive a redirect's cross-origin header stripping.
       let attemptRequest: ResolvedRequest = baseRequest;
 
       // Run retry-phase interceptors before each reattempt so they can refresh
@@ -2271,9 +2270,35 @@ export class BaseHTTPClient {
             );
           }
         }
-        if (typeof adapterResponse.status === 'number') {
-          answeredStatus = adapterResponse.status;
+        // `status` and `body` are read through the receiver when they are not own fields,
+        // as `headers` is: a class-instance answer whose fields are prototype getters is
+        // read whole rather than as a status-less success.
+        for (const key of ['status', 'body'] as const) {
+          if (!Object.hasOwn(adapterResponse, key)) {
+            const value: unknown = Reflect.get(rawAdapterResponse, key);
+            if (value !== undefined) {
+              defineEntry(
+                adapterResponse as unknown as Record<string, unknown>,
+                key,
+                value,
+              );
+            }
+          }
         }
+        // Refused as the adapter's malformed answer - the answered request's non-retryable
+        // adapter_error - rather than delivered as a success with no real status.
+        const candidateStatus: unknown = adapterResponse.status;
+        if (
+          typeof candidateStatus !== 'number' ||
+          !Number.isInteger(candidateStatus) ||
+          candidateStatus < 0 ||
+          candidateStatus > 999
+        ) {
+          throw new TypeError(
+            `HTTPClient adapter answered with an invalid status (got ${typeof candidateStatus === 'number' ? String(candidateStatus) : typeof candidateStatus})`,
+          );
+        }
+        answeredStatus = candidateStatus;
         answeredRedirectFields = adapterResponse;
         adapterResponse.headers = normalizeAdapterResponseHeaders(headers);
         answeredHeaders = adapterResponse.headers;
@@ -3678,9 +3703,11 @@ export class BaseHTTPClient {
   ): AttemptRequest {
     // Best-effort snapshot for observers when a request fails before any adapter
     // attempt is dispatched (interceptor throw, pre-send cancel, setup error, etc.).
-    // Jar cookies and internal headers (x-local-client-request-id, x-local-client-request-attempt) are omitted
-    // intentionally — they are applied at dispatch time, and since no attempt ever
-    // went out, including them would be misleading. Unsupported body types are caught
+    // Jar cookies and internal headers (x-local-client-request-id,
+    // x-local-client-request-attempt) are not added here - they are applied at dispatch
+    // time, and no attempt went out. A request that already carries them (a redirect
+    // hop's, built from the previous hop's sent headers, or a retry interceptor's input)
+    // keeps them, as it would have sent them. Unsupported body types are caught
     // and swallowed here; the real error is reported via request_setup_error instead.
     // Headers are merged one at a time for the same reason, rather than through
     // `mergeHeaders`, which fails as a whole: this runs inside failure handlers and
@@ -4374,8 +4401,8 @@ interface UploadActivity {
  *
  * Never throws and never rejects, whatever the adapter handed over: adoption happens at
  * the attempt runner, and this wait observes the adopted outcome's settlement either way,
- * never its value. A cancel ends the wait rather than the request - the dispatch that
- * follows sees the signal for itself.
+ * never its value. A cancel ends the wait, answering `'cancelled'`, and the caller ends
+ * the request as cancelled rather than dispatching.
  *
  * Bounded by `stallMS`, the request's own per-attempt timeout, as a *stall* bound: the
  * clock restarts every time the upload reports progress, so what fails is an upload that

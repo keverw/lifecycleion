@@ -3090,9 +3090,8 @@ function attachWritableListener(
   if (getWritableListenerRemover(writable) !== null) {
     // Guarded like every other interaction with a caller-supplied `WritableLike` in this
     // file. `on` is the sink's own method and free to throw, and an unguarded throw here
-    // left `writeToWritable` reporting a *request* failure for a response that had
-    // arrived intact - a `streamResponse` factory's writable misclassified as a network
-    // error. Losing the listener costs this writable its `'drain'` or `'error'` channel,
+    // would report a *request* failure for a response that had arrived intact - a
+    // `streamResponse` factory's writable misclassified as a network error. Losing the listener costs this writable its `'drain'` or `'error'` channel,
     // which the write loop already tolerates; raising out of the attach does not.
     try {
       if (event === 'error') {

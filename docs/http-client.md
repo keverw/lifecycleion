@@ -1322,7 +1322,7 @@ auth, while Fetch remains subject to the runtime's URL-credential restrictions.
 TLS trust settings (`ca`, `mtls.ca`, `crl`, and `rejectUnauthorized`) apply on every
 connection. A target requiring the withheld client certificate can fail TLS or reject
 the request. This does not guarantee one particular HTTP status. Address that origin
-directly, or explicitly select it in an interceptor, if it should receive the configured
+directly, or explicitly select it in an initial- or retry-phase interceptor (a redirect-phase rewrite does not), if it should receive the configured
 identity. For direct adapter calls, omitting `initialURL` applies the configured identity, while
 an unparseable `initialURL` is treated as cross-origin.
 
@@ -1875,7 +1875,7 @@ builder.requestID; // ULID assigned at construction time - available before and 
 builder.state; // Current RequestState
 builder.response; // HTTPResponse<T> | null
 builder.error; // HTTPClientError | null
-builder.attemptCount; // Attempts begun, including one a retry interceptor or request setup ended before dispatch (null before send)
+builder.attemptCount; // Attempts begun, including one a retry interceptor or request setup ended before dispatch (null before send and when an initial-phase interceptor ends the request; 0 for a signal already aborted at send or a setup failure before any attempt)
 builder.nextRetryDelayMS; // Scheduled delay for next retry (ms), or null
 builder.nextRetryAt; // Epoch ms for next retry, or null
 builder.startedAt; // Epoch ms when the first attempt began (null before send, and null when the request ended before its first attempt began - e.g. pre-send cancel(), pre-aborted AbortSignal, request setup error raised before the first attempt such as an unresolvable URL, or request interceptor cancel/error). A setup failure inside an attempt (body serialization, or a cookie jar that throws while building the Cookie header) happens after the attempt began, so startedAt is set and attemptCount counts it
