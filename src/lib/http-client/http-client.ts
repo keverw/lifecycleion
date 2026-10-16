@@ -16,7 +16,7 @@ import {
   assertNoBrowserRestrictedHeaders,
   presentHeaderValue,
 } from './internal/header-utils';
-import { RequestTracker, isEntryCancelled } from './request-tracker';
+import { RequestTracker, isEntryPastCancel } from './request-tracker';
 import type { RequestInfo, TrackedRequest } from './request-tracker';
 import { HTTPRequestBuilder } from './http-request-builder';
 import { RequestInterceptorManager, isInterceptorCancel } from './interceptors';
@@ -582,7 +582,8 @@ export class BaseHTTPClient {
 
     // Short-circuit already-aborted external signals so we do not run
     // interceptors, tracking, retries, or adapter dispatch at all.
-    if (options.signal?.aborted) {
+    // Read guarded: an `aborted` getter that throws is not aborted.
+    if (readObjectMember(options.signal, 'aborted') === true) {
       callbacks.setAttemptCount(0);
       callbacks.setNextRetryDelayMS(null);
       callbacks.setNextRetryAt(null);
@@ -647,7 +648,7 @@ export class BaseHTTPClient {
     // cancelled the request: not once it already is - by an earlier `cancel()`, a client
     // or tracker cancel of the same controller, or the caller's own signal.
     trackedCallbacks.setCancelFn((reason?: string): boolean => {
-      if (isEntryCancelled(trackedRequest)) {
+      if (isEntryPastCancel(trackedRequest)) {
         return false;
       }
       abortController.abort(reason);
@@ -1971,18 +1972,9 @@ export class BaseHTTPClient {
       // fresh signal (see `_composeSignals`), so nothing has listened on it yet.
       guardAbortListeners(attemptSignal, 'HTTPClient attempt abort listener');
 
-      // Armed once the attempt's signal is built and guarded, so a throw from either
-      // leaves no timer behind.
-      if (timeout > 0) {
-        timeoutID = setTimeout(() => {
-          isTimedOut = true;
-          timeoutController.abort();
-        }, timeout);
-      }
-
       // End an attempt that never reached the adapter - a retry interceptor that
-      // cancelled or threw, or request setup that failed. Its timer and start event
-      // already belong to it, and the prior upload outcome carries over.
+      // cancelled or threw, or request setup that failed. Its start event (and, once
+      // armed, its timer) already belong to it, and the prior upload outcome carries over.
       const endBeforeDispatch = (
         pendingRequest: InterceptedRequest,
         outcome: {
@@ -2083,6 +2075,16 @@ export class BaseHTTPClient {
         }
 
         attemptRequest = retryIntercept;
+      }
+
+      // Armed after the retry-phase interceptors, as the initial phase's run before any
+      // attempt is timed: one that refreshes a token on a retry does not spend the
+      // attempt's timeout, and cannot time the attempt out before it is sent.
+      if (timeout > 0) {
+        timeoutID = setTimeout(() => {
+          isTimedOut = true;
+          timeoutController.abort();
+        }, timeout);
       }
 
       let sentRequest: AttemptRequest;
@@ -4466,10 +4468,11 @@ async function settleUploadBeforeNextDispatch(
 }
 
 /**
- * Say, on the global `'error'` channel, that an adapter broke the `requestBodySettled`
- * contract. The request itself fails as a timeout; this names the cause, which the
- * timeout error cannot, and lands where every other library-consumer bug - a throwing
- * callback, a non-function hook - is already reported.
+ * Say, on the global `'error'` channel, why a request failed as a timeout between attempts
+ * or hops: the previous attempt's upload made no progress for the whole wait. That is a
+ * server that answered early and stopped reading the body as often as an adapter whose
+ * `requestBodySettled` never settles, so the report names both rather than blaming the
+ * adapter. The timeout error alone cannot say which wait it was.
  */
 function reportUploadSettleDeadline(
   adapterType: AdapterType,
@@ -4478,7 +4481,7 @@ function reportUploadSettleDeadline(
 ): void {
   reportToHost(
     new Error(
-      `HTTPClient waited for the previous attempt's upload to settle before the next ${nextDispatch}, and it reported no progress for ${String(deadlineMS)}ms without settling; the '${adapterType}' adapter's requestBodySettled must settle in bounded time. The request failed as a timeout rather than dispatching a second upload beside the first.`,
+      `HTTPClient waited for the previous attempt's upload to settle before the next ${nextDispatch}, and it made no progress for ${String(deadlineMS)}ms without settling - the server may have stopped reading the body after answering, or the '${adapterType}' adapter's requestBodySettled does not settle. The request failed as a timeout rather than dispatching a second upload beside the first.`,
     ),
   );
 }

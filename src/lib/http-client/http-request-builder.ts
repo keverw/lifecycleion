@@ -156,6 +156,14 @@ export class HTTPRequestBuilder<T = unknown> {
 
   public signal(abortSignal: AbortSignal): this {
     this._assertNotSent('signal');
+    // Refused now: it is composed with the client's own signal, which only a real
+    // `AbortSignal` can be, and would otherwise reject `send()`.
+    const candidate: unknown = abortSignal;
+    if (!(candidate instanceof AbortSignal)) {
+      throw new TypeError(
+        `HTTPRequestBuilder signal must be an AbortSignal (got ${candidate === null ? 'null' : typeof candidate})`,
+      );
+    }
     this._signal = abortSignal;
     return this;
   }
@@ -346,6 +354,28 @@ export class HTTPRequestBuilder<T = unknown> {
 
     this._sent = true;
 
+    try {
+      return await this._sendRequest<U>();
+    } catch (error) {
+      // `send()` rejects only when a value the caller supplied throws while the request is
+      // set up, before it can become a response. The builder is not left `sending`, and
+      // `cancel()` has nothing left to cancel.
+      this._cancelFn = null;
+      // Through the getter, read afresh: `_sendRequest` changes it through its callbacks.
+      const { state } = this;
+      if (
+        state !== 'completed' &&
+        state !== 'cancelled' &&
+        state !== 'failed'
+      ) {
+        this._state = 'failed';
+        this._completedAt = Date.now();
+      }
+      throw error;
+    }
+  }
+
+  private async _sendRequest<U>(): Promise<HTTPResponse<U>> {
     const response = await this._sendFn({
       method: this._method,
       path: this._path,

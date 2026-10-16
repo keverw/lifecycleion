@@ -1149,3 +1149,59 @@ test("an error's cause does not carry the request headers when serialized", asyn
     await server.stop(true);
   }
 });
+
+test('a retry-phase interceptor does not spend the attempt timeout', async () => {
+  let sends = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () => {
+      sends++;
+      return Promise.resolve({
+        status: sends === 1 ? 503 : 200,
+        headers: {},
+        body: null,
+      });
+    },
+  };
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    timeout: 30,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+  });
+  // A token refresh slower than the attempt timeout.
+  client.addRequestInterceptor(
+    async (request) => {
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      return request;
+    },
+    { phases: ['retry'] },
+  );
+
+  const response = await client.get('/x').send();
+
+  expect(sends).toBe(2);
+  expect(response.status).toBe(200);
+});
+
+test('a builder whose send() rejects is left failed, not sending', async () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  const params = {
+    get page(): string {
+      throw new Error('params unreadable');
+    },
+  };
+  const builder = client.get('http://example.test/x').params(params);
+
+  const rejection = await builder.send().then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+
+  expect(rejection).toBeInstanceOf(Error);
+  expect(builder.state).toBe('failed');
+  expect(builder.cancel()).toBe(false);
+  expect(() => client.get('/x').signal({ aborted: false } as never)).toThrow(
+    'HTTPRequestBuilder signal must be an AbortSignal',
+  );
+});

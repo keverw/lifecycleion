@@ -1125,7 +1125,7 @@ describe('HTTPClient — basic HTTP methods', () => {
       // The timeout error cannot say why; this does, and names the adapter.
       expect(reports).toHaveLength(1);
       expect((reports[0]?.error as Error).message).toContain(
-        "'fetch' adapter's requestBodySettled must settle in bounded time",
+        "'fetch' adapter's requestBodySettled does not settle",
       );
       expect((reports[0]?.error as Error).message).toContain('redirect');
     } finally {

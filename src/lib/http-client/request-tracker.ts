@@ -168,14 +168,14 @@ export interface RequestInfo {
 
 /**
  * Cancel one tracked request, answering whether this call is what cancelled it. One
- * already cancelled - by its builder, or an earlier cancel here - is left as it is and not
- * counted, so the cancel methods count requests they cancelled, not requests they saw.
+ * already settled or cancelled is left as it is and not counted, so the cancel methods
+ * count requests they cancelled, not requests they saw.
  */
 function cancelEntry(
   entry: TrackedRequest,
   reason: string | undefined,
 ): boolean {
-  if (isEntryCancelled(entry)) {
+  if (isEntryPastCancel(entry)) {
     return false;
   }
   entry.state = 'cancelled';
@@ -184,12 +184,17 @@ function cancelEntry(
 }
 
 /**
- * Whether a tracked request is cancelled already: by its own controller - a cancel here or
- * from its builder - or by the caller's signal. Shared with the builder's `cancel()`, so
- * both answer the same. The caller's `aborted` is read guarded: unreadable is not aborted.
+ * Whether a tracked request is past cancelling: settled - its outcome decided, though its
+ * final observers may still be running - or cancelled already, by its own controller (a
+ * cancel here or from its builder) or by the caller's signal. Shared with the builder's
+ * `cancel()`, so both answer the same. The caller's `aborted` is read guarded: unreadable
+ * is not aborted.
  */
-export function isEntryCancelled(entry: TrackedRequest): boolean {
+export function isEntryPastCancel(entry: TrackedRequest): boolean {
   return (
+    entry.state === 'completed' ||
+    entry.state === 'failed' ||
+    entry.state === 'cancelled' ||
     entry.abortController.signal.aborted ||
     readUnknownMember(entry.callerSignal, 'aborted') === true
   );
