@@ -378,8 +378,8 @@ export class NodeAdapter implements HTTPAdapter {
 
   public async send(adapterRequest: AdapterRequest): Promise<AdapterResponse> {
     // Every member read once, here, where a getter that throws rejects this send. Read
-    // later, from an emitter or `AbortSignal` callback, the same throw was an uncaught
-    // exception and the send never settled. See `snapshotAdapterRequest`.
+    // later, from an emitter or `AbortSignal` callback, the same throw would be an
+    // uncaught exception and the send would never settle. See `snapshotAdapterRequest`.
     const request = snapshotAdapterRequest(adapterRequest);
 
     // Guarded once, at the boundary, so every call site below is covered - including the
@@ -1293,7 +1293,7 @@ export class NodeAdapter implements HTTPAdapter {
 
               // Already cancelled: the request's own abort listener has settled it, so
               // the factory is not asked to open a sink nothing will write to.
-              if (signal.aborted) {
+              if (readIsAborted()) {
                 abortStream();
                 return;
               }
@@ -1385,12 +1385,12 @@ export class NodeAdapter implements HTTPAdapter {
 
               // A factory that forgot its `return` hands back `undefined`, which is neither
               // a cancel nor a sink. Refused here, as a setup failure of the factory's own,
-              // rather than let through to `streamResponseBody`: there the first use of it
-              // threw inside a promise executor, and the failure reached the caller as a
-              // retryable error - the factory called again on every attempt, each leaving
-              // its connection open behind it. The same goes for an object that is neither
-              // a cancel object nor something with callable `write` and `end` - `{}`, or
-              // `{ cancel: false }` - which got as far as the first `write` and settled as a
+              // rather than let through to `streamResponseBody`: there its first use would
+              // throw inside a promise executor and reach the caller as a retryable error,
+              // calling the factory again on every attempt, each leaving its connection
+              // open. The same goes for an object that is neither a cancel object nor
+              // something with callable `write` and `end` - `{}`, or `{ cancel: false }` -
+              // which would get as far as the first `write` and settle as a
               // `stream_write_error` on a 200, blaming the sink for the factory's mistake.
               if (
                 writable !== null &&
@@ -1629,10 +1629,10 @@ export class NodeAdapter implements HTTPAdapter {
 
           failRequest(normalizeError(error));
 
-          // Every exit the task means to take tears down what it opened. One it did not
-          // mean to take - a throw out of code with no `catch` of its own - left the
-          // socket open and the factory's signal unfired, so its cleanup listeners never
-          // ran. Torn down after the reject, so neither can stand in for the failure.
+          // Every exit the task means to take tears down what it opened. This one - a
+          // throw out of code with no `catch` of its own - tears them down here, so the
+          // socket is not left open and the factory's cleanup listeners run. Torn down
+          // after the reject, so neither can stand in for the failure.
           abortResponseStream?.();
           destroyRequestQuietly(req);
         });
@@ -1785,9 +1785,9 @@ export class NodeAdapter implements HTTPAdapter {
             destroyWritableQuietly(writable);
             // Fired here rather than left to the relay, for the reason the pending
             // factory is notified above: `failRequest` takes the relay off within this
-            // dispatch. Waiting for `streamResponseBody` to report back instead hung on
-            // a destroyed writable that never calls its `end` callback, and the
-            // factory's cleanup never ran.
+            // dispatch. Waiting for `streamResponseBody` to report back instead would
+            // hang on a destroyed writable that never calls its `end` callback, and the
+            // factory's cleanup would never run.
             abortStream();
             // Guarded, as its writable sibling one line up already is, and for the
             // reason the stall watchdog's destroy is: this whole listener runs from an
@@ -2652,8 +2652,8 @@ function absorbPendingWritableError(writable: WritableLike): void {
  * `destroy()` does not stop an error the stream is already on its way to emitting: a
  * `fs.createWriteStream()` into a missing directory fails its asynchronous `open` and
  * emits `'error'` whether or not it has been destroyed in the meantime. This sink never
- * reached `streamResponseBody`, so nothing of ours was listening, and that event was an
- * uncaught exception. The same bounded absorber a settled request leaves covers it -
+ * reached `streamResponseBody`, so nothing of ours is listening, and that event would be
+ * an uncaught exception. The same bounded absorber a settled request leaves covers it -
  * reported through the host error reporter, since the request it belonged to has already
  * answered - and a writable with no listener-removal method joins the permanent fan-out
  * from {@link attachWritableListener} instead, exactly as a streamed request leaves it.
@@ -2850,14 +2850,25 @@ function normalizeCRLEntry(entry: string | Buffer): string | Buffer | string[] {
 
   // Refused as this adapter's own validation error, so a refreshed value of the wrong
   // kind - a cache cleared to `null`, say - is terminal like bad framing rather than
-  // retried as whatever its `toString` throws.
+  // retried as whatever its `toString` throws. Any binary view is accepted, as Node's
+  // `tls` accepts one: a plain `Uint8Array` (Bun's `file().bytes()`) is read as a Buffer
+  // over the same bytes for the PEM check, and passed through as given when it is DER.
   const candidate: unknown = entry;
   if (!Buffer.isBuffer(candidate)) {
-    const error = new TypeError(
-      `NodeAdapter crl must be a string, a Buffer, or an array of them (got ${candidate === null ? 'null' : typeof candidate})`,
+    if (!ArrayBuffer.isView(candidate)) {
+      const error = new TypeError(
+        `NodeAdapter crl must be a string, binary data such as a Buffer, or an array of them (got ${candidate === null ? 'null' : typeof candidate})`,
+      );
+      crlValidationErrors.add(error);
+      throw error;
+    }
+    const bytes = Buffer.from(
+      candidate.buffer,
+      candidate.byteOffset,
+      candidate.byteLength,
     );
-    crlValidationErrors.add(error);
-    throw error;
+    const split = normalizeCRLEntry(bytes);
+    return split === bytes ? entry : split;
   }
 
   // latin1 is a byte-for-byte mapping, so PEM (which is ASCII) survives
@@ -3102,9 +3113,9 @@ function attachWritableListener(
     // `PENDING_WRITABLE_ERROR_WINDOW_MS` of the last request leaving. Past that it is
     // absorbed unreported: the owner's own `'error'` listener still hears it, but an owner
     // with none loses it, since this listener keeps it from being unhandled (as the docs
-    // for a writable without `off` say). Reported for the life of
-    // the writable instead, every error a long-lived sink's owner handles itself - an
-    // hour after its last download - also landed on the host's global `'error'` channel.
+    // for a writable without `off` say). Not reported for the life of the writable, or
+    // every error a long-lived sink's owner handles itself - an hour after its last
+    // download - would also land on the host's global `'error'` channel.
     if (event === 'error' && listeners.size === 0) {
       if (Date.now() <= entry.reportUnclaimedUntil) {
         reportUnclaimedWritableError(argument);

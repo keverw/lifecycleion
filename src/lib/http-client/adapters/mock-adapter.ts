@@ -837,7 +837,7 @@ function awaitAbortable<T>(
 ): Promise<PromiseResultBox<Awaited<T>>> {
   // `adoptPromise()`, not `Promise.resolve()`, for a handler's promise here and below:
   // `Promise.resolve()` hands a native promise back with its own `then`, and a no-op one
-  // hung the request.
+  // would hang the request.
   const adopted = adoptPromise(value);
   if (!signal) {
     return adopted;

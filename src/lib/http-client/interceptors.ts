@@ -74,7 +74,7 @@ async function runInterceptors(
     }
 
     // Adopted, not awaited as it is: an interceptor is caller code, and one returning
-    // a native promise with its own `constructor` and a no-op `then` hung the
+    // a native promise with its own `constructor` and a no-op `then` would hang the
     // request. See `adoptPromise()`.
     const { value: result } = await adoptPromise(fn(current, phase, context));
 

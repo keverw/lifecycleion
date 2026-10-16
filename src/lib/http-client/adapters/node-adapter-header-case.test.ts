@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import * as http from 'node:http';
 import { NodeAdapter } from './node-adapter';
+import type { WritableLike } from '../types';
 
 test('NodeAdapter driven directly sends header names as given', async () => {
   let receivedRawHeaders: string[] = [];
@@ -23,6 +24,60 @@ test('NodeAdapter driven directly sends header names as given', async () => {
     expect(receivedRawHeaders).toContain('X-Api-Key');
     // What is reported as sent stays lowercased, as every effective header is.
     expect(response.effectiveRequestHeaders?.['x-api-key']).toBe('k');
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test('a signal whose aborted getter throws counts as not aborted when a response streams', async () => {
+  let isGetterBroken = false;
+  const server = http.createServer((_req, res) => {
+    // From here on - the response arriving - the caller's signal cannot be read.
+    isGetterBroken = true;
+    res.end('streamed');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as { port: number };
+  // A signal-like object of the caller's whose `aborted` read throws.
+  const signal = Object.defineProperty(new EventTarget(), 'aborted', {
+    get(): boolean {
+      if (isGetterBroken) {
+        throw new Error('aborted unreadable');
+      }
+      return false;
+    },
+  }) as unknown as AbortSignal;
+  const chunks: string[] = [];
+
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${port}/`,
+      method: 'GET',
+      headers: {},
+      signal,
+      streamResponse: (): WritableLike => ({
+        write: (chunk: unknown) => {
+          chunks.push(String(chunk));
+          return true;
+        },
+        end: (callback?: () => void) => {
+          callback?.();
+        },
+        on() {
+          return this;
+        },
+        once() {
+          return this;
+        },
+        off() {
+          return this;
+        },
+        destroy: () => {},
+      }),
+    });
+
+    expect(response.isStreamed).toBe(true);
+    expect(chunks.join('')).toBe('streamed');
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
