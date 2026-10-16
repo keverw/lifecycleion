@@ -6021,15 +6021,15 @@ describe('HTTPClient — disable/enable', () => {
     const client = makeClient();
     client.disable();
 
-    const error = await client
+    const rejection = await client
       .get('/api/test')
       .send()
       .then(
         () => undefined,
-        (error_: unknown) => error_,
+        (error: unknown) => error,
       );
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toMatch(/disabled/);
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toMatch(/disabled/);
     client.enable();
   });
 
@@ -6038,15 +6038,15 @@ describe('HTTPClient — disable/enable', () => {
     const sub = root.createSubClient();
     root.disable();
 
-    const error = await sub
+    const rejection = await sub
       .get('/api/test')
       .send()
       .then(
         () => undefined,
-        (error_: unknown) => error_,
+        (error: unknown) => error,
       );
-    expect(error).toBeInstanceOf(Error);
-    expect((error as Error).message).toMatch(/disabled/);
+    expect(rejection).toBeInstanceOf(Error);
+    expect((rejection as Error).message).toMatch(/disabled/);
     root.enable();
   });
 });
