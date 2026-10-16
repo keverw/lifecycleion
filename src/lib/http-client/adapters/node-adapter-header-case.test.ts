@@ -110,3 +110,9 @@ test("a streamResponse factory's return is classified by one read of its cancel"
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
 });
+
+test('a CRL with no complete block is refused at construction', () => {
+  for (const crl of ['', '  \n', Buffer.from('\n')]) {
+    expect(() => new NodeAdapter({ crl })).toThrow();
+  }
+});

@@ -1020,7 +1020,7 @@ const response = await builder.send();
 builder.cancel('timeout_budget_exceeded');
 ```
 
-`cancel()` returns `true` if the request was still in flight and its cancel signal was raised, `false` if it was a no-op (the request had already completed, been cancelled - or had a cancel requested - or failed). `true` does not promise a cancelled outcome: once the last attempt has its answer - from that attempt's `onAttemptEnd`, say - nothing is left for the signal to stop, and the request completes with that answer. Check `isCancelled` on the response for how it ended.
+`cancel()` returns `true` if this call is what cancelled the request in flight, `false` if it was a no-op (the request had already completed or failed, or was cancelled already - by an earlier `cancel()`, `client.cancel()` or its own signal). `true` does not promise a cancelled outcome: once the last attempt has its answer - from that attempt's `onAttemptEnd`, say - nothing is left for the signal to stop, and the request completes with that answer. Check `isCancelled` on the response for how it ended.
 
 Calling `cancel()` before `send()` marks the builder so that `send()` throws a plain `Error` (not an `HTTPClientError`) immediately rather than dispatching the request. In this case `builder.error` is `null`. No `HTTPClientError` is produced and `cancelReason` is not accessible programmatically (the reason string, if any, appears only in the thrown `Error` message).
 
@@ -1304,7 +1304,7 @@ interface NodeAdapterConfig {
     key: string | Buffer;
     ca?: string | Buffer | Array<string | Buffer>; // Trust anchor for the server. Applies on every hop, like `ca`.
   };
-  crl?: string | Buffer | Array<string | Buffer>; // Certificate revocation list(s). A concatenated PEM bundle is split for you - see below.
+  crl?: string | ArrayBufferView | Array<string | ArrayBufferView>; // PEM certificate revocation list(s). A concatenated PEM bundle is split for you - see below.
   rejectUnauthorized?: boolean; // Default: true
 }
 ```

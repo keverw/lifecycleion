@@ -327,8 +327,10 @@ export interface NodeAdapterConfig {
    * concatenated CRLs — the format Apache's `SSLCARevocationFile`, nginx's
    * `ssl_crl` and HAProxy's `crl-file` all expect, and what `openssl ca
    * -gencrl` output is usually assembled into — is split into the array Node
-   * requires. A single CRL, a DER `Buffer`, or an array you built yourself is
-   * passed through untouched.
+   * requires, as is each string or binary element of an array. Only PEM is
+   * read: Node's `tls` does not read DER CRLs, so DER bytes - or a value with
+   * no complete CRL block at all - are refused when the adapter is constructed.
+   * Binary data may be any `ArrayBuffer` view, and is passed on as a `Buffer`.
    *
    * The split exists because Node reads only the FIRST CRL of a concatenated
    * string and silently ignores the rest, unlike `ca`, which reads every
@@ -2817,12 +2819,11 @@ const RESIDUE_OUTSIDE_PEM_BLOCKS = /\S/;
  * otherwise contribute one CRL where it should contribute three. A string
  * inside an array is treated exactly like a string passed on its own.
  *
- * Anything that is not a multi-CRL string is returned untouched: a Buffer may
- * be DER, and a string with exactly one match is passed through so Node
- * reports its own error rather than having one masked here.
+ * A string with exactly one complete block is passed through as it is, and a
+ * single block in binary data as the Buffer over it.
  *
- * A string with NO complete block does not reach that pass-through: unless it
- * is entirely whitespace, the residue check below throws. That is the case a
+ * A string with NO complete block is refused: by the residue check below, or,
+ * when it is empty or whitespace, by the check after it. That is the case a
  * caller hits when a download truncated to nothing or a path pointed at a file
  * with no CRL in it, and the explicit error names the problem where Node would
  * only report `UNABLE_TO_GET_CRL` at handshake time.
@@ -2849,8 +2850,7 @@ function normalizeCRL(
  *
  * So the question is not "string or Buffer" but "PEM or DER". A Buffer holding
  * PEM goes through the same splitting and validation as a string; a Buffer
- * holding DER — which has no armour to look for — is passed through untouched,
- * since DER encodes exactly one CRL and there is nothing to split.
+ * holding DER is refused, since Node's `tls` reads PEM CRLs only.
  */
 function normalizeCRLEntry(
   entry: string | ArrayBufferView,
@@ -2939,6 +2939,17 @@ function splitCRLString(crl: string): string | string[] {
 
     crlValidationErrors.add(error);
     throw error;
+  }
+
+  // Nothing at all, or only whitespace: Node's `tls` fails to parse that on every HTTPS
+  // request, so it is refused here like any other value it cannot read.
+  if (blocks.length === 0) {
+    throw crlValidationError(
+      new Error(
+        'NodeAdapter: the `crl` value holds no -----BEGIN X509 CRL----- block. ' +
+          'Leave `crl` unset for no revocation list.',
+      ),
+    );
   }
 
   return blocks.length > 1 ? blocks : crl;

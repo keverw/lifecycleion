@@ -979,3 +979,46 @@ test('userAgent and a sub-client defaultHeadersStrategy are checked at construct
     `HTTPClient sub-client defaultHeadersStrategy must be 'replace' or 'merge' (got "MERGE")`,
   );
 });
+
+test('a cancel counts only when it is what cancels the request', async () => {
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) =>
+      new Promise((_resolve, reject) => {
+        request.signal?.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      }),
+  };
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  const builder = client.get('/x');
+  const sending = builder.send();
+  await Promise.resolve();
+
+  expect(client.cancel(builder.requestID, 'by client')).toBe(1);
+  // Already cancelled, by the client.
+  expect(builder.cancel('by builder')).toBe(false);
+  expect(client.cancelAll()).toBe(0);
+
+  await sending;
+  expect(builder.error?.cancelReason).toBe('by client');
+});
+
+test("a JSON body's nested toJSON values are sent as JSON.stringify sends them", async () => {
+  const adapter = new RecordingAdapter(200);
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  class Money {
+    public toJSON(): string {
+      return '1.00 USD';
+    }
+  }
+  const body = {
+    url: new URL('http://a.test/'),
+    price: new Money(),
+    inner: vm.runInNewContext('({ when: new Date(0) })') as unknown,
+  };
+
+  await client.post('/x').json(body).send();
+
+  expect(adapter.requests[0]?.body).toBe(JSON.stringify(body));
+});

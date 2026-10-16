@@ -26,7 +26,7 @@ export interface BuilderCallbacks<T> {
   setNextRetryDelayMS: (delayMS: number | null) => void;
   setNextRetryAt: (timestampMS: number | null) => void;
   setStartedAt: (timestampMS: number) => void;
-  setCancelFn: (fn: (reason?: string) => void) => void;
+  setCancelFn: (fn: (reason?: string) => boolean) => void;
 }
 
 export interface BuilderSendContext<T = unknown> {
@@ -66,7 +66,6 @@ export class HTTPRequestBuilder<T = unknown> {
 
   private _sendFn: SendFn<T>;
   private _sent = false;
-  private _isCancelRequested = false;
 
   // Post-send state (public read-only after send)
   private _requestID: string = generateID('ulid');
@@ -78,7 +77,7 @@ export class HTTPRequestBuilder<T = unknown> {
   private _nextRetryAt: number | null = null;
   private _startedAt: number | null = null;
   private _completedAt: number | null = null;
-  private _cancelFn: ((reason?: string) => void) | null = null;
+  private _cancelFn: ((reason?: string) => boolean) | null = null;
   private _preSendCancelReason: string | undefined = undefined;
 
   constructor(
@@ -320,16 +319,10 @@ export class HTTPRequestBuilder<T = unknown> {
       return true;
     }
 
-    // Only the first cancel of a request in flight is the one applied: a second, while
-    // the first is still taking effect, changes nothing, so it answers `false` as a
-    // cancel after the request has ended does.
-    if (this._cancelFn && !this._isCancelRequested) {
-      this._isCancelRequested = true;
-      this._cancelFn(reason);
-      return true;
-    }
-
-    return false;
+    // `true` only when this call is what cancelled a request in flight: one already
+    // cancelled - by an earlier call, `client.cancel()` or the caller's own signal - is
+    // left as it is, and answers `false` as a cancel after the request has ended does.
+    return this._cancelFn ? this._cancelFn(reason) : false;
   }
 
   // --- Execute ---

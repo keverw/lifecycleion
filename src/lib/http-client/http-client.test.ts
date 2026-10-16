@@ -6017,20 +6017,36 @@ describe('HTTPClient — options shorthand', () => {
 });
 
 describe('HTTPClient — disable/enable', () => {
-  test('disabled client throws on .send()', () => {
+  test('disabled client throws on .send()', async () => {
     const client = makeClient();
     client.disable();
 
-    expect(client.get('/api/test').send()).rejects.toThrow(/disabled/);
+    const error = await client
+      .get('/api/test')
+      .send()
+      .then(
+        () => undefined,
+        (error_: unknown) => error_,
+      );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/disabled/);
     client.enable();
   });
 
-  test('disabled parent causes sub-client to throw', () => {
+  test('disabled parent causes sub-client to throw', async () => {
     const root = makeClient();
     const sub = root.createSubClient();
     root.disable();
 
-    expect(sub.get('/api/test').send()).rejects.toThrow(/disabled/);
+    const error = await sub
+      .get('/api/test')
+      .send()
+      .then(
+        () => undefined,
+        (error_: unknown) => error_,
+      );
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toMatch(/disabled/);
     root.enable();
   });
 });

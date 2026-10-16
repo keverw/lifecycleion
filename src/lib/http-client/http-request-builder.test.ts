@@ -626,6 +626,7 @@ describe('HTTPRequestBuilder', () => {
       const { builder } = makeBuilder(undefined, (ctx) => {
         ctx.callbacks.setCancelFn(() => {
           wasCancelCalled = true;
+          return true;
         });
       });
 
@@ -640,6 +641,7 @@ describe('HTTPRequestBuilder', () => {
       const { builder } = makeBuilder(undefined, (ctx) => {
         ctx.callbacks.setCancelFn((reason) => {
           capturedReason = reason;
+          return true;
         });
       });
 
@@ -654,6 +656,7 @@ describe('HTTPRequestBuilder', () => {
       const { builder } = makeBuilder(undefined, (ctx) => {
         ctx.callbacks.setCancelFn((reason) => {
           capturedReason = reason;
+          return true;
         });
       });
 
@@ -695,6 +698,7 @@ describe('HTTPRequestBuilder', () => {
         ctx.callbacks.setState('completed');
         ctx.callbacks.setCancelFn(() => {
           wasCancelCalled = true;
+          return true;
         });
       });
 
@@ -710,6 +714,7 @@ describe('HTTPRequestBuilder', () => {
         ctx.callbacks.setState('cancelled');
         ctx.callbacks.setCancelFn(() => {
           wasCancelCalled = true;
+          return true;
         });
       });
 
@@ -725,6 +730,7 @@ describe('HTTPRequestBuilder', () => {
         ctx.callbacks.setState('failed');
         ctx.callbacks.setCancelFn(() => {
           wasCancelCalled = true;
+          return true;
         });
       });
 

@@ -641,9 +641,18 @@ export class BaseHTTPClient {
       },
     };
 
-    // Wire builder.cancel() to our abort controller
-    trackedCallbacks.setCancelFn((reason?: string) => {
+    // Wire builder.cancel() to our abort controller. It answers whether this call is what
+    // cancelled the request: not once it already is - by an earlier `cancel()`, a client
+    // or tracker cancel of the same controller, or the caller's own signal.
+    trackedCallbacks.setCancelFn((reason?: string): boolean => {
+      if (
+        abortController.signal.aborted ||
+        readObjectMember(options.signal, 'aborted') === true
+      ) {
+        return false;
+      }
       abortController.abort(reason);
+      return true;
     });
 
     // Compose user signal with our internal abort controller. Every composition made
@@ -4031,7 +4040,14 @@ function buildObservedAttemptBodies(rawBody: unknown): ObservedAttemptBodies {
   // Blob, etc.) fail explicitly instead of being deep-cloned into `{}`.
   assertSupportedRequestBody(rawBody);
   const rawBodySnapshot = cloneBodyValue(rawBody);
-  const { body, contentType } = serializeBody(rawBodySnapshot);
+  // A JSON body is serialized from the caller's value itself, as `JSON.stringify` would:
+  // the snapshot is a deep copy for observers, and a copy keeps no prototypes, so what
+  // JSON reads from one - a nested `URL`'s or class instance's `toJSON`, another realm's
+  // `Date` - would be sent as `{}`. Bytes and form data are sent as the copy.
+  const isJSONBody = Array.isArray(rawBody) || isPlainJSONBodyObject(rawBody);
+  const { body, contentType } = serializeBody(
+    isJSONBody ? rawBody : rawBodySnapshot,
+  );
 
   return {
     body,
@@ -4052,17 +4068,7 @@ function cloneBodyValue(body: unknown): unknown {
   } else if (body instanceof Uint8Array) {
     return new Uint8Array(body);
   } else if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
-    // `deepClone` knows built-ins such as `Date` by `instanceof`, which another realm's
-    // fail - its `Date` would be copied as `{}`. A body from another realm is copied
-    // through JSON instead, which is what is sent for it anyway.
-    const prototype: unknown = Reflect.getPrototypeOf(body);
-    const isThisRealm =
-      prototype === null ||
-      prototype === Object.prototype ||
-      prototype === Array.prototype;
-    return isThisRealm
-      ? deepClone(body)
-      : (JSON.parse(JSON.stringify(body)) as unknown);
+    return deepClone(body);
   }
 
   return body;

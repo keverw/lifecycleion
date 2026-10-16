@@ -7598,7 +7598,7 @@ test('rejects malformed initial CRLs before any request or retry', () => {
 test('a refreshed CRL that fails validation is a non-retryable adapter_error', async () => {
   // Whitespace passes the constructor's check; the refresh is what is malformed. It is
   // normalized per request, and its failure used to be retried as a network error.
-  const config: NodeAdapterConfig = { crl: '' };
+  const config: NodeAdapterConfig = { crl: getRevocationFixtures().crlEmpty };
   const adapter = new NodeAdapter(config);
   const requestSpy = spyOn(https, 'request');
   let attempts = 0;
@@ -7632,7 +7632,7 @@ test('a caller throw while a refreshed CRL is normalized stays retryable and unt
   // It keeps the usual retryable adapter-error path, and the caller's error object is
   // not given the adapter's terminal flag.
   const failure = new Error('crl source not ready');
-  const config: NodeAdapterConfig = { crl: '' };
+  const config: NodeAdapterConfig = { crl: getRevocationFixtures().crlEmpty };
   const adapter = new NodeAdapter(config);
   const requestSpy = spyOn(https, 'request');
   let attempts = 0;
@@ -7671,7 +7671,7 @@ test('a caller throw while a refreshed CRL is normalized stays retryable and unt
 });
 
 test('a refreshed CRL of the wrong kind is refused as configuration, not retried', async () => {
-  const config: NodeAdapterConfig = { crl: '' };
+  const config: NodeAdapterConfig = { crl: getRevocationFixtures().crlEmpty };
   const adapter = new NodeAdapter(config);
   const requestSpy = spyOn(https, 'request');
   let attempts = 0;

@@ -41,13 +41,7 @@ export class RequestTracker {
   public cancel(requestID: string, reason?: string): number {
     const entry = this.requests.get(requestID);
 
-    if (entry) {
-      entry.state = 'cancelled';
-      entry.abortController.abort(reason);
-      return 1;
-    }
-
-    return 0;
+    return entry && cancelEntry(entry, reason) ? 1 : 0;
   }
 
   /**
@@ -58,9 +52,9 @@ export class RequestTracker {
     let count = 0;
 
     for (const entry of this.requests.values()) {
-      entry.state = 'cancelled';
-      entry.abortController.abort(reason);
-      count++;
+      if (cancelEntry(entry, reason)) {
+        count++;
+      }
     }
 
     return count;
@@ -75,9 +69,9 @@ export class RequestTracker {
 
     for (const entry of this.requests.values()) {
       if (entry.clientID === clientID) {
-        entry.state = 'cancelled';
-        entry.abortController.abort(reason);
-        count++;
+        if (cancelEntry(entry, reason)) {
+          count++;
+        }
       }
     }
 
@@ -93,9 +87,9 @@ export class RequestTracker {
 
     for (const entry of this.requests.values()) {
       if (entry.label === label) {
-        entry.state = 'cancelled';
-        entry.abortController.abort(reason);
-        count++;
+        if (cancelEntry(entry, reason)) {
+          count++;
+        }
       }
     }
 
@@ -115,9 +109,9 @@ export class RequestTracker {
 
     for (const entry of this.requests.values()) {
       if (entry.clientID === clientID && entry.label === label) {
-        entry.state = 'cancelled';
-        entry.abortController.abort(reason);
-        count++;
+        if (cancelEntry(entry, reason)) {
+          count++;
+        }
       }
     }
 
@@ -163,4 +157,21 @@ export interface RequestInfo {
   clientID: string;
   label?: string;
   state: RequestState;
+}
+
+/**
+ * Cancel one tracked request, answering whether this call is what cancelled it. One
+ * already cancelled - by its builder, or an earlier cancel here - is left as it is and not
+ * counted, so the cancel methods count requests they cancelled, not requests they saw.
+ */
+function cancelEntry(
+  entry: { state: RequestState; abortController: AbortController },
+  reason: string | undefined,
+): boolean {
+  if (entry.abortController.signal.aborted) {
+    return false;
+  }
+  entry.state = 'cancelled';
+  entry.abortController.abort(reason);
+  return true;
 }
