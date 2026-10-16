@@ -1,3 +1,4 @@
+import { HTTP_METHODS } from './consts';
 import qs from 'qs';
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
@@ -331,19 +332,11 @@ export function normalizeHeaders(
 }
 
 /**
- * The methods matched case-insensitively and sent uppercase: fetch's normalized set, plus
- * `PATCH`, which fetch leaves as given but the non-idempotent check must still catch.
+ * The methods matched case-insensitively and sent uppercase - the exported `HTTP_METHODS`:
+ * fetch's normalized set, plus `PATCH`, which fetch leaves as given but the
+ * non-idempotent check must still catch, and `TRACE`.
  */
-const STANDARD_HTTP_METHODS: ReadonlySet<string> = new Set([
-  'DELETE',
-  'GET',
-  'HEAD',
-  'OPTIONS',
-  'PATCH',
-  'POST',
-  'PUT',
-  'TRACE',
-]);
+const STANDARD_HTTP_METHODS: ReadonlySet<string> = new Set(HTTP_METHODS);
 
 /**
  * A standard method in any case, uppercased - so `'post'` is `POST` for the

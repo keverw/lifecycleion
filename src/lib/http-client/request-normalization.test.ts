@@ -1545,3 +1545,19 @@ test("one site's cookie cannot replace another's through a crafted name and path
     jar.getCookieHeaderString('https://x.example.com/@y.example.com/'),
   ).toBe('a=victim');
 });
+
+test('MockAdapter matches a lowercase method uppercased, and names onHandlerError when it returns nothing', async () => {
+  const adapter = new MockAdapter({ onHandlerError: () => undefined as never });
+  adapter.routes.on('lock', '/x', () => ({ status: 200 }));
+  adapter.routes.get('/throws', () => {
+    throw new Error('route failed');
+  });
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+
+  expect((await client.request('lock', '/x').send()).status).toBe(200);
+  const builder = client.get('/throws');
+  await builder.send();
+  expect(builder.error?.cause?.message).toContain(
+    'MockAdapter onHandlerError for GET /throws returned no MockResponse',
+  );
+});

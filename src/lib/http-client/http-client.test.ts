@@ -5340,7 +5340,8 @@ describe('HTTPClient — redirect', () => {
     const res = await builder.send();
 
     expect(res.status).toBe(0);
-    expect(res.isNetworkError).toBe(true);
+    // The server answered every hop: not a network error, as for redirect_disabled.
+    expect(res.isNetworkError).toBe(false);
     expect(res.isCancelled).toBe(false);
     expect(res.isTimeout).toBe(false);
     expect(res.isFailed).toBe(true);

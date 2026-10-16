@@ -529,7 +529,7 @@ request object of its own. A standard method (`GET`, `HEAD`, `POST`, `PUT`, `DEL
 the retry and redirect rules; any other method is case-sensitive and passed to the
 adapter as given, as `request()` passes it too. What goes on the wire depends on the
 transport: Node's `http` uppercases it, Node's `fetch` sends it as given, and Bun's
-`fetch` sends a method it does not know as `GET` - so use `NodeAdapter` for a custom
+`fetch` uppercases a method it knows and sends one it does not know as `GET` - so use `NodeAdapter` for a custom
 method on Bun. `CONNECT` is refused on every adapter (it opens a tunnel), and
 `TRACE` and `TRACK` are refused before dispatch through `FetchAdapter`, and through
 `XHRAdapter` in a browser, since those refuse them. Header entries are copied at that
@@ -1433,7 +1433,7 @@ expect(response.status).toBe(200);
 expect(response.body).toEqual({ id: '1', name: 'Alice' });
 ```
 
-Routes are registered with `get`, `post`, `put`, `patch`, `delete`, `head` and `options`, or `routes.on(method, path, handler)` for any other method Node's `http` knows (`TRACE`, `PROPFIND`, `LOCK`, `PURGE`). A route matches the method exactly as the request sends it, and a `HEAD` request needs its own `head` route - it is not answered from a `get` route. A path parameter longer than 100 characters does not match its route, so that request gets a `404`. A handler that returns no response, or a body the mock cannot serialize, fails the request as a non-retryable `adapter_error`. When a request carries two cookies with the same name, `req.cookies` holds the first, as common server parsers do.
+Routes are registered with `get`, `post`, `put`, `patch`, `delete`, `head` and `options`, or `routes.on(method, path, handler)` for any other method Node's `http` knows (`TRACE`, `PROPFIND`, `LOCK`, `PURGE`). A request's method is matched uppercased, as a server receives it from Node's `http`, and a `HEAD` request needs its own `head` route - it is not answered from a `get` route. A path parameter longer than 100 characters does not match its route, so that request gets a `404`. A handler that returns no response, or a body the mock cannot serialize, fails the request as a non-retryable `adapter_error`. When a request carries two cookies with the same name, `req.cookies` holds the first, as common server parsers do.
 
 **MockAdapterConfig:**
 

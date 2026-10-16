@@ -221,14 +221,17 @@ export interface MockAdapterRoutes {
   options(path: string, handler: MockRouteHandler): void;
   /**
    * Register a route for any method Node's `http` knows - `TRACE`, WebDAV's `PROPFIND` or
-   * `LOCK`, `PURGE`. A route matches the method exactly as the request sends it, so
-   * register a custom method in the case your requests use. Throws for a method name
-   * the router does not know.
+   * `LOCK`, `PURGE` - in any case. A request's method is matched uppercased, as a real
+   * server receives it from Node's `http`. Throws for a method name the router does not
+   * know.
    */
   on(method: string, path: string, handler: MockRouteHandler): void;
   /** Remove all registered routes. */
   clear(): void;
 }
+
+/** The longest cookie lifetime a `Max-Age` is written with: 400 days (RFC 6265bis). */
+const MAX_COOKIE_AGE_SECONDS = 400 * 24 * 60 * 60;
 
 // find-my-way requires a handler function; the actual MockRouteHandler lives in store.
 const noop: Router.Handler<Router.HTTPVersion.V1> = () => {};
@@ -315,9 +318,11 @@ export class MockAdapter implements HTTPAdapter {
     // the raw header is still available on req.headers.cookie.
     const query = qs.parse(queryString) as QueryObject;
     const cookies = parseCookieHeader(materializedHeaders['cookie']);
-    // The router's own method type is a fixed list; a custom method it does not know
-    // finds no route, as an unregistered path does.
-    const match = this.router.find(method as RouterHTTPMethod, path);
+    // Matched uppercased, as a real server sees it: Node's `http` sends any method it
+    // knows uppercase, so `lock` arrives as `LOCK`. The router's own method type is a
+    // fixed list; a method it does not know finds no route, as an unregistered path does.
+    const routeMethod = method.toUpperCase();
+    const match = this.router.find(routeMethod as RouterHTTPMethod, path);
     const params = (match?.params ?? {}) as Record<string, string>;
 
     const mockRequest: MockRequest = {
@@ -342,6 +347,8 @@ export class MockAdapter implements HTTPAdapter {
     // then falls back to default 500 if onHandlerError is unset or also throws.
 
     let mockResponse: MockResponse;
+    // Which callback produced `mockResponse`, so a missing one names the right culprit.
+    let responseSource: 'route' | 'onHandlerError' = 'route';
 
     if (match === null) {
       mockResponse = { status: 404, body: { message: 'Not Found' } };
@@ -361,6 +368,7 @@ export class MockAdapter implements HTTPAdapter {
 
         const onHandlerError = this.config.onHandlerError;
         if (onHandlerError) {
+          responseSource = 'onHandlerError';
           try {
             mockResponse = (
               await awaitAbortable(
@@ -402,7 +410,7 @@ export class MockAdapter implements HTTPAdapter {
     // route, and its side effects, again.
     if (typeof mockResponse !== 'object' || mockResponse === null) {
       const error = new TypeError(
-        `MockAdapter route for ${method} ${path} returned no MockResponse (got ${mockResponse === null ? 'null' : typeof mockResponse})`,
+        `MockAdapter ${responseSource} for ${method} ${path} returned no MockResponse (got ${mockResponse === null ? 'null' : typeof mockResponse})`,
       );
       markNonRetryableAdapterError(error);
       throw error;
@@ -629,7 +637,7 @@ function buildRoutes(
     head: (path, handler) => on('HEAD', path, handler),
     options: (path, handler) => on('OPTIONS', path, handler),
     on: (method, path, handler) =>
-      on(method as Router.HTTPMethod, path, handler),
+      on(method.toUpperCase() as Router.HTTPMethod, path, handler),
     clear: () => router.reset(),
   };
 }
@@ -714,14 +722,17 @@ function serializeMockCookieOptions(
     `Path=${cookie.path ?? '/'}`,
   ];
 
-  // Whole seconds, as `Max-Age` is: a fraction would make the cookie jar ignore the
-  // attribute, so `0.01` would never expire and `-0.5` would not delete the cookie.
+  // Whole seconds within the cookie lifetime cap (400 days, RFC 6265bis), as `Max-Age`
+  // is read: a fraction, or a number too large to print as digits, would make the
+  // cookie jar ignore the attribute, so `0.01` would never expire, `-0.5` would not
+  // delete the cookie, and `Infinity` would leave a session cookie.
+  const maxAge = cookie.maxAge;
   appendCookieAttribute(
     parts,
     'Max-Age',
-    typeof cookie.maxAge === 'number' && Number.isFinite(cookie.maxAge)
-      ? Math.trunc(cookie.maxAge)
-      : cookie.maxAge,
+    typeof maxAge === 'number' && !Number.isNaN(maxAge)
+      ? Math.max(-1, Math.min(Math.trunc(maxAge), MAX_COOKIE_AGE_SECONDS))
+      : maxAge,
   );
   appendCookieAttribute(parts, 'Domain', cookie.domain);
 

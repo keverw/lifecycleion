@@ -1057,6 +1057,8 @@ export class BaseHTTPClient {
                 initialURL: initialRequestURL,
                 requestURL: attemptResult.sentRequest.requestURL,
                 redirectHistory,
+                // The server answered every hop, so this is no network error.
+                isNetworkErrorOverride: false,
               });
               errorCode = 'redirect_loop';
               break;
