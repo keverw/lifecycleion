@@ -8,8 +8,10 @@ export type AdapterType = 'fetch' | 'xhr' | 'node' | 'mock';
 /**
  * A request method. The standard ones are named for autocompletion, and are sent uppercase
  * whatever case they are given in; any other RFC 9110 method name - `PROPFIND`, `purge` -
- * is accepted too, case-sensitive and sent as given. So code switching over a request's
- * method should keep a default branch.
+ * is accepted too, and is case-sensitive to the client (its filters and retry rules).
+ * What goes on the wire depends on the transport: Node's `http` (and so `NodeAdapter`)
+ * uppercases it, `fetch` sends it as given. So code switching over a request's method
+ * should keep a default branch.
  */
 export type HTTPMethod =
   | 'GET'

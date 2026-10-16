@@ -84,9 +84,14 @@ function copyFilterLists(
 ): Record<string, unknown[]> {
   // A field this kind of callback never sees is refused, as a misnamed one is: a
   // `statusCodes` on an error observer would be ignored, so it would match every error,
-  // and a `contentTypes` on an interceptor would match nothing.
+  // and a `contentTypes` on an interceptor would match nothing. Nullish is absent here as
+  // it is below, so a filter object shared between kinds may leave the field undefined.
   for (const field of Object.keys(filter)) {
-    if (field !== 'methods' && !kind.fields.includes(field)) {
+    if (
+      field !== 'methods' &&
+      !kind.fields.includes(field) &&
+      !isNullish(filter[field])
+    ) {
       throw new TypeError(
         `${label} filter has no ${JSON.stringify(field)} field (it takes ${['methods', ...kind.fields].join(', ')})`,
       );

@@ -891,7 +891,8 @@ function lowercaseHeaderNames(
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) {
     const lower = key.toLowerCase();
-    const existing = result[lower];
+    // Own entries only: `constructor` and `__proto__` are headers here, not members.
+    const existing = Object.hasOwn(result, lower) ? result[lower] : undefined;
     defineEntry(
       result,
       lower,

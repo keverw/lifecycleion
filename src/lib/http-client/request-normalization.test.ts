@@ -1893,3 +1893,67 @@ test('parseContentType reads the media type, not a substring of the header', () 
   expect(parseContentType(' Application/JSON ')).toBe('json');
   expect(parseContentType('application/x-www-form-urlencoded')).toBe('text');
 });
+
+test('MockAdapter hands a constructor or __proto__ request header through as sent', async () => {
+  const adapter = new MockAdapter();
+  let seen: Record<string, string> | undefined;
+  adapter.routes.get('/x', (req) => {
+    seen = req.headers;
+    return { status: 200 };
+  });
+
+  await adapter.send({
+    requestURL: 'http://a.test/x',
+    method: 'GET',
+    headers: JSON.parse('{"constructor": "abc", "__proto__": "v"}') as Record<
+      string,
+      string
+    >,
+  });
+
+  expect(Object.getOwnPropertyDescriptor(seen, 'constructor')?.value).toBe(
+    'abc',
+  );
+  expect(Object.getOwnPropertyDescriptor(seen, '__proto__')?.value).toBe('v');
+});
+
+test('an array response header Node keeps once keeps its first value; others are joined', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/r', () => ({
+    status: 302,
+    headers: { location: ['/a', '/b'] },
+  }));
+  adapter.routes.get('/a', () => ({
+    status: 200,
+    headers: {
+      'content-type': ['application/json', 'application/json'],
+      link: ['<a>', '<b>'],
+    },
+    body: '{"ok":true}',
+  }));
+  const response = await new HTTPClient({
+    adapter,
+    baseURL: 'http://a.test',
+    followRedirects: true,
+  })
+    .get('/r')
+    .send();
+
+  expect(response.status).toBe(200);
+  expect(response.body).toEqual({ ok: true });
+  expect(response.headers.link).toBe('<a>, <b>');
+});
+
+test('a filter field a callback kind does not take is allowed when it is nullish', () => {
+  const client = new HTTPClient();
+  client.addErrorObserver(() => {}, {
+    hosts: ['a.test'],
+    statusCodes: undefined,
+  } as never)();
+  client.addRequestInterceptor((request) => request, {
+    contentTypes: null,
+  } as never)();
+  expect(() =>
+    client.addErrorObserver(() => {}, { statusCodes: [500] } as never),
+  ).toThrow(TypeError);
+});

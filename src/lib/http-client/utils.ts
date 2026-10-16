@@ -691,12 +691,40 @@ export function extractFetchHeaders(
 }
 
 /**
+ * The response headers Node's `http` keeps only the first of when one repeats, rather
+ * than joining: each can hold a single value, so a joined `location` or `content-type`
+ * would be no value at all.
+ */
+const SINGLE_VALUE_RESPONSE_HEADERS: ReadonlySet<string> = new Set([
+  'age',
+  'authorization',
+  'content-length',
+  'content-type',
+  'etag',
+  'expires',
+  'from',
+  'host',
+  'if-modified-since',
+  'if-unmodified-since',
+  'last-modified',
+  'location',
+  'max-forwards',
+  'proxy-authorization',
+  'referer',
+  'retry-after',
+  'server',
+  'user-agent',
+]);
+
+/**
  * Lowercases all keys on adapter/response header objects. `HTTPClient` runs
  * this on each adapter response before {@link CookieJar.processResponseHeaders}.
  * The jar also normalizes so the same shapes work when feeding headers directly.
  *
  * - Non–`set-cookie` values: an array (a mock or custom adapter's repeated
- *   header) is joined with `', '`, as Node and fetch join one.
+ *   header) is read as Node's `res.headers` reads a repeated header - the first
+ *   value of a header that holds one ({@link SINGLE_VALUE_RESPONSE_HEADERS}),
+ *   the others joined with `', '`.
  * - `set-cookie`: stored as `string[]` — each array entry is one full
  *   `Set-Cookie` header line (one cookie). A single string value becomes a
  *   one-element array. If the same header appears under keys that differ only
@@ -722,12 +750,16 @@ export function normalizeAdapterResponseHeaders(
         result[lower] = [...existingLines, ...chunk];
       }
     } else {
-      // Joined, as Node's `res.headers` and fetch's `Headers` join a repeated header,
-      // rather than keeping the first value and dropping the rest.
+      // As Node's `res.headers` reads a repeated header: the first value of one that
+      // can hold only one (`location`, `content-type`), and the rest joined.
       defineEntry(
         result,
         lower,
-        Array.isArray(value) ? value.join(', ') : value,
+        Array.isArray(value)
+          ? SINGLE_VALUE_RESPONSE_HEADERS.has(lower)
+            ? (value[0] ?? '')
+            : value.join(', ')
+          : value,
       );
     }
   }
