@@ -58,7 +58,7 @@ import {
   STREAM_FACTORY_ERROR_FLAG,
   XHR_BROWSER_TIMEOUT_FLAG,
   RETRYABLE_STATUS_CODES,
-  NON_IDEMPOTENT_METHODS,
+  IDEMPOTENT_METHODS,
   REDIRECT_STATUS_CODES,
   DEFAULT_MAX_REDIRECTS,
 } from './consts';
@@ -2357,7 +2357,7 @@ export class BaseHTTPClient {
 
         const isMethodReplayable =
           allowNonIdempotentRetry ||
-          !NON_IDEMPOTENT_METHODS.has(sentRequest.method) ||
+          IDEMPOTENT_METHODS.has(sentRequest.method) ||
           (isTransportOutcome && adapterResponse.wasDefinitelyNotSent === true);
 
         // Why a retry did not happen, for observers. Only meaningful when the
@@ -2964,7 +2964,7 @@ export class BaseHTTPClient {
           policy &&
           !cancelSignal.aborted &&
           (allowNonIdempotentRetry ||
-            !NON_IDEMPOTENT_METHODS.has(sentRequest.method))
+            IDEMPOTENT_METHODS.has(sentRequest.method))
         ) {
           const { shouldRetry, delayMS } = policy.shouldRetry(
             normalizeError(error),
@@ -3075,7 +3075,7 @@ export class BaseHTTPClient {
             isRetryAvailable() &&
             !cancelSignal.aborted &&
             !allowNonIdempotentRetry &&
-            NON_IDEMPOTENT_METHODS.has(sentRequest.method);
+            !IDEMPOTENT_METHODS.has(sentRequest.method);
 
           emitAttemptEnd({
             willRetry: false,

@@ -1,3 +1,4 @@
+import { defineHiddenTags } from '../internal/adapter-error';
 import {
   extractFetchHeaders,
   resolveDetectedRedirectURL,
@@ -295,7 +296,9 @@ function markResponseStreamAbort(
 
   tagged.name = typeof originalName === 'string' ? originalName : 'AbortError';
 
-  Object.assign(tagged, {
+  // Hidden, as NodeAdapter's tags are: the response headers carry its `Set-Cookie`, and a
+  // serialized error must not.
+  defineHiddenTags(tagged, {
     [RESPONSE_STREAM_ABORT_FLAG]: true,
     streamAbortStatus: status,
     streamAbortHeaders: headers,

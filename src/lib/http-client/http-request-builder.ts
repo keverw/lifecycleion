@@ -156,10 +156,16 @@ export class HTTPRequestBuilder<T = unknown> {
 
   public signal(abortSignal: AbortSignal): this {
     this._assertNotSent('signal');
-    // Refused now: it is composed with the client's own signal, which only a real
-    // `AbortSignal` can be, and would otherwise reject `send()`.
+    // Refused now when it plainly is not one: it is composed with the client's own signal,
+    // which needs an `AbortSignal`. Checked by its built-in tag rather than `instanceof`,
+    // so another realm's (an iframe's) signal is accepted, as composing it accepts it. A
+    // value that only claims the tag rejects `send()` instead, at setup.
     const candidate: unknown = abortSignal;
-    if (!(candidate instanceof AbortSignal)) {
+    if (
+      typeof candidate !== 'object' ||
+      candidate === null ||
+      Object.prototype.toString.call(candidate) !== '[object AbortSignal]'
+    ) {
       throw new TypeError(
         `HTTPRequestBuilder signal must be an AbortSignal (got ${candidate === null ? 'null' : typeof candidate})`,
       );
@@ -191,7 +197,7 @@ export class HTTPRequestBuilder<T = unknown> {
 
   /**
    * Allow or forbid retrying this request when its method is not idempotent
-   * (`POST`, `PATCH`). Overrides the client config for this request only.
+   * (`POST`, `PATCH`, a custom method). Overrides the client config for this request only.
    */
   public retryNonIdempotentMethods(allow: boolean): this {
     this._assertNotSent('retryNonIdempotentMethods');

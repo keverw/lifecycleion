@@ -1297,3 +1297,25 @@ test('a sub-client whose retryPolicy is null does not retry', async () => {
 
   expect(sends).toBe(1);
 });
+
+test('only RFC 9110 idempotent methods are retried; a custom method is not', async () => {
+  const calls: Record<string, number> = {};
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      calls[request.method] = (calls[request.method] ?? 0) + 1;
+      return Promise.resolve({ status: 503, headers: {}, body: null });
+    },
+  };
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+  });
+
+  for (const method of ['LOCK', 'MKCOL', 'POST', 'PUT', 'OPTIONS']) {
+    await client.request(method, '/x').send();
+  }
+
+  expect(calls).toEqual({ LOCK: 1, MKCOL: 1, POST: 1, PUT: 3, OPTIONS: 3 });
+});

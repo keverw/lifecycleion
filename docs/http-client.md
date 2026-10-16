@@ -761,7 +761,7 @@ Status `0` covers adapter-level "no real HTTP response" conditions (network unre
 
 ### Method Safety
 
-A retryable status is necessary but not sufficient. `POST` and `PATCH`, the methods RFC 9110 does not define as idempotent, are **not** retried by default, because a status like `500` means the server responded, so the handler ran and may have committed. `PUT` and `DELETE` are unaffected: both mutate, but repeating either leaves the resource in the same state, which is what makes replay safe.
+A retryable status is necessary but not sufficient. A method RFC 9110 does not define as idempotent - `POST`, `PATCH`, or any custom method such as WebDAV's `LOCK` - is **not** retried by default (only `GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT` and `DELETE` are), because a status like `500` means the server responded, so the handler ran and may have committed. `PUT` and `DELETE` are unaffected: both mutate, but repeating either leaves the resource in the same state, which is what makes replay safe.
 
 Set `retryNonIdempotentMethods: true` on the client, or `.retryNonIdempotentMethods(true)` per request, when writes are guarded by an idempotency key. See [Non-Idempotent Methods](#non-idempotent-methods) for the full rules, including how transport failures are treated.
 
@@ -1795,11 +1795,11 @@ Since the client treats anything other than `false` as retryable, an unset value
 
 `willRetry: false` on an `onAttemptEnd` event does not say whether a retry was declined by the policy or suppressed by a safety rule. When the status alone would have allowed one, `retrySuppressedReason` names which rule stopped it:
 
-| Value                   | Meaning                                                                   |
-| ----------------------- | ------------------------------------------------------------------------- |
-| `adapter_veto`          | The adapter vetoed automatic retry for this response                      |
-| `stream_error`          | The body failed after headers arrived, so the server received the request |
-| `non_idempotent_method` | A `POST` or `PATCH` with no proof of non-delivery                         |
+| Value                   | Meaning                                                                               |
+| ----------------------- | ------------------------------------------------------------------------------------- |
+| `adapter_veto`          | The adapter vetoed automatic retry for this response                                  |
+| `stream_error`          | The body failed after headers arrived, so the server received the request             |
+| `non_idempotent_method` | A non-idempotent method (`POST`, `PATCH`, a custom one) with no proof of non-delivery |
 
 It is absent when a retry was scheduled, when no policy is configured, when the policy has no attempts left, or when the status was never retryable in the first place. In those cases nothing was suppressed, so naming a cause would misdescribe why the request stopped. It is also absent when the attempt ends as an `adapter_error`, such as a response whose body could not be decoded, even if a retry had been planned: the request failed, and the error code says why.
 

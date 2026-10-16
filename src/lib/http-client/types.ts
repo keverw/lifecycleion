@@ -127,7 +127,8 @@ export interface AdapterResponse {
    *
    * Deliberately separate from {@link AdapterResponse.isRetryable}, which is a
    * hint that says nothing about delivery. The client uses this to decide whether
-   * a `POST` or `PATCH` may be retried after a transport failure, and ignores it
+   * a non-idempotent method (`POST`, `PATCH`, a custom one) may be retried after a
+   * transport failure, and ignores it
    * when a real response came back.
    */
   wasDefinitelyNotSent?: boolean;
@@ -417,7 +418,8 @@ export interface AttemptEndEvent {
    *   reachable from `MockAdapter` and custom adapters.
    * - `stream_error` — the body failed after headers arrived, so the server
    *   received the request and the outcome is unknown.
-   * - `non_idempotent_method` — a `POST` or `PATCH` with no proof the request
+   * - `non_idempotent_method` — a non-idempotent method (`POST`, `PATCH`, any method
+   *   but `GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT` and `DELETE`) with no proof the request
    *   went undelivered. Set `retryNonIdempotentMethods` to allow it.
    *
    * Exists so a suppressed retry is self-explaining: `willRetry: false` alone is
@@ -461,8 +463,8 @@ export interface HTTPClientConfig {
   cookieJar?: CookieJar | null;
   retryPolicy?: RetryPolicyOptions;
   /**
-   * Whether a retry policy may replay `POST` and `PATCH`, the methods RFC 9110
-   * does not define as idempotent. Defaults to `false`.
+   * Whether a retry policy may replay a method RFC 9110 does not define as idempotent:
+   * `POST`, `PATCH`, or any custom method. Defaults to `false`.
    *
    * When `false`, such a request is never retried after a real HTTP response —
    * a 500 still means the handler ran and may have committed — and after a

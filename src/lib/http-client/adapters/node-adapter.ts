@@ -1,4 +1,7 @@
-import { markNonRetryableAdapterError } from '../internal/adapter-error';
+import {
+  defineHiddenTags,
+  markNonRetryableAdapterError,
+} from '../internal/adapter-error';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { observeRejection } from '../../internal/promise-reactions';
 import * as http from 'node:http';
@@ -3264,22 +3267,6 @@ const PRE_CONNECTION_ERROR_CODES: ReadonlySet<string> = new Set([
   'EAI_AGAIN',
   'EADDRNOTAVAIL',
 ]);
-
-/**
- * Define `tags` on `target` as own, non-enumerable data properties: read back by name
- * (`readObjectMember`), but left out of `JSON.stringify`, `Object.keys` and spreads.
- * Throws as `Object.defineProperty` does on a frozen or sealed target.
- */
-function defineHiddenTags(target: object, tags: Record<string, unknown>): void {
-  for (const [key, value] of Object.entries(tags)) {
-    Object.defineProperty(target, key, {
-      value,
-      writable: true,
-      configurable: true,
-      enumerable: false,
-    });
-  }
-}
 
 /** Whether an error proves the request never left for a connected peer. */
 function isPreConnectionError(error: unknown): boolean {

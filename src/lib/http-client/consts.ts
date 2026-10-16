@@ -49,15 +49,22 @@ export const RETRYABLE_STATUS_CODES: ReadonlySet<number> = new Set([
 ]);
 
 /**
- * Methods RFC 9110 does not define as idempotent, so replaying one may apply
- * the same change twice.
+ * The methods RFC 9110 defines as idempotent, so a replay lands the resource in the
+ * same state as sending it once. An allow-list: every other method - `POST`, `PATCH`,
+ * and any custom one (`LOCK`, `MKCOL`, an RPC verb) - may apply its change twice, and is
+ * replayed only as a non-idempotent method is.
  *
- * `PUT` and `DELETE` are absent on purpose: both are idempotent by definition,
- * even though they mutate. Repeating them lands the resource in the same state
- * as doing it once, which is exactly what makes a replay safe.
+ * `PUT` and `DELETE` are here on purpose: both are idempotent by definition, even though
+ * they mutate.
  */
-export const NON_IDEMPOTENT_METHODS: ReadonlySet<HTTPMethod> =
-  new Set<HTTPMethod>(['POST', 'PATCH']);
+export const IDEMPOTENT_METHODS: ReadonlySet<HTTPMethod> = new Set<HTTPMethod>([
+  'GET',
+  'HEAD',
+  'OPTIONS',
+  'TRACE',
+  'PUT',
+  'DELETE',
+]);
 
 export const DEFAULT_TIMEOUT_MS = 30_000;
 
