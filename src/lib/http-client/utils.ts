@@ -397,6 +397,11 @@ export function normalizeFilterMethods(
       `${label} filter methods must be an array of method names (got ${typeof methods})`,
     );
   }
+  if (methods.length === 0) {
+    throw new TypeError(
+      `${label} filter methods is empty, which would match no request; omit it to match every method`,
+    );
+  }
   return (methods as unknown[]).map((entry) => {
     // Held to the rule a request's method is, so an entry no request can have - `''`,
     // `'GET, POST'` - is refused rather than registered to match nothing.

@@ -58,7 +58,10 @@ export class RequestTracker {
   public cancelAll(reason?: string): number {
     let count = 0;
 
-    for (const entry of this.requests.values()) {
+    // A copy, in each of these loops: an abort listener can start a request, and walking
+    // the live map would cancel and count it too.
+
+    for (const entry of [...this.requests.values()]) {
       if (cancelEntry(entry, reason)) {
         count++;
       }
@@ -74,7 +77,7 @@ export class RequestTracker {
   public cancelOwn(clientID: string, reason?: string): number {
     let count = 0;
 
-    for (const entry of this.requests.values()) {
+    for (const entry of [...this.requests.values()]) {
       if (entry.clientID === clientID) {
         if (cancelEntry(entry, reason)) {
           count++;
@@ -92,7 +95,7 @@ export class RequestTracker {
   public cancelAllWithLabel(label: string, reason?: string): number {
     let count = 0;
 
-    for (const entry of this.requests.values()) {
+    for (const entry of [...this.requests.values()]) {
       if (entry.label === label) {
         if (cancelEntry(entry, reason)) {
           count++;
@@ -114,7 +117,7 @@ export class RequestTracker {
   ): number {
     let count = 0;
 
-    for (const entry of this.requests.values()) {
+    for (const entry of [...this.requests.values()]) {
       if (entry.clientID === clientID && entry.label === label) {
         if (cancelEntry(entry, reason)) {
           count++;
@@ -138,7 +141,7 @@ export class RequestTracker {
   } {
     const requests: RequestInfo[] = [];
 
-    for (const entry of this.requests.values()) {
+    for (const entry of [...this.requests.values()]) {
       if (filter?.clientID && entry.clientID !== filter.clientID) {
         continue;
       }

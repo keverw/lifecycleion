@@ -560,7 +560,7 @@ interface RequestInterceptorFilter {
 }
 ```
 
-A standard method in `methods` is matched case-insensitively, and any other exactly. It must be an array of method names (or omitted). The callback must be a function and the filter an object (or omitted), or adding it throws a `TypeError`; so does a filter field that kind of callback does not take (`statusCodes` on an error observer, `contentTypes` on an interceptor) or a misspelled one. Every filter field is checked when the callback is added - each list must be an array of strings (`statusCodes`: numbers), and `phases`, `schemes` and `contentTypes` may only name ones that callback can see - and the filter is copied then, so changing it afterwards has no effect. The observer filters below follow the same rules. A request interceptor's filter that throws while it is matched - a `bodyContainsKeys` reading a body whose getter throws, say - fails the request as `interceptor_error`, as the interceptor throwing would. An observer's filter that throws is reported and that observer skipped, since an observer cannot change the request. All specified filter fields are ANDed together. Within each field, values are ORed. Any one match is sufficient. An empty `phases: []` matches all phases.
+A standard method in `methods` is matched case-insensitively, and any other exactly. It must be an array of method names (or omitted). The callback must be a function and the filter an object (or omitted), or adding it throws a `TypeError`; so does a filter field that kind of callback does not take (`statusCodes` on an error observer, `contentTypes` on an interceptor) or a misspelled one. Every filter field is checked when the callback is added - each list must be an array of strings (`statusCodes`: numbers), and `phases`, `schemes` and `contentTypes` may only name ones that callback can see - and the filter is copied then, so changing it afterwards has no effect. The observer filters below follow the same rules. A request interceptor's filter that throws while it is matched - a `bodyContainsKeys` reading a body whose getter throws, say - fails the request as `interceptor_error`, as the interceptor throwing would. An observer's filter that throws is reported and that observer skipped, since an observer cannot change the request. All specified filter fields are ANDed together. Within each field, values are ORed. Any one match is sufficient. An empty `phases: []` matches all phases; any other empty list (`hosts: []`, `statusCodes: []`, ...) is refused when the callback is added, since it would either never match or match every request - omit the field to match every request.
 
 ### Cancelling From an Interceptor
 
@@ -1649,8 +1649,8 @@ Expectations for a custom writable:
   See [How long that listener stays](#how-long-that-listener-stays).
 - **Emit `'close'` when you are finished.** That is how the adapter learns nothing further
   is coming and takes the listener off at once, instead of waiting out the timers below.
-  A sink that closes before the response body is through, with no error (destroyed by its
-  owner, a proxied client that went away), fails the download as `stream_write_error`.
+  A sink that closes with no error before it has finished writing the body (destroyed by
+  its owner, a proxied client that went away) fails the download as `stream_write_error`.
 - **Set `errored` if you can, but you need not.** A Node stream records the error it failed
   with there, and the adapter reads it as a second signal when `end`'s callback reports
   success on a stream that was destroyed underneath it. It is optional, and a sink without

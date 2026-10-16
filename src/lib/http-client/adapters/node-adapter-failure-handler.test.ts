@@ -715,8 +715,9 @@ test('a response task that fails after an early-ack stream setup was answered re
 
     expect(await bodySettled).toEqual({ value: writeFailure });
     expect(abortListeners.size).toBe(0);
-    expect(reports).toHaveLength(2);
-    expect(reports[1]).toBe(writeFailure);
+    // The adapter tore the request down itself, so the write failing after it is that
+    // teardown's consequence: it settles the upload but is not reported as well.
+    expect(reports).toHaveLength(1);
   } finally {
     isHeaderRefusing = false;
     globalThis.removeEventListener('error', onError);

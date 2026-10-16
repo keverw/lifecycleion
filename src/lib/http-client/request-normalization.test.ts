@@ -1738,3 +1738,70 @@ test('FetchAdapter refuses a GET or HEAD with a body once, without retrying', as
     expect(response.isNetworkError).toBe(false);
   }
 });
+
+test('cancelAll does not count or cancel a request started while it runs', async () => {
+  let cleanup: Promise<{ isCancelled: boolean }> | undefined;
+  const client: HTTPClient = new HTTPClient({
+    baseURL: 'http://a.test',
+    adapter: {
+      getType: () => 'node',
+      send: (request: AdapterRequest) =>
+        new Promise<AdapterResponse>((resolve, reject) => {
+          if (request.requestURL.endsWith('/cleanup')) {
+            setTimeout(
+              () => resolve({ status: 200, headers: {}, body: null }),
+              5,
+            );
+            return;
+          }
+          request.signal?.addEventListener('abort', () => {
+            cleanup = client.get('/cleanup').send();
+            const error = new Error('aborted');
+            error.name = 'AbortError';
+            reject(error);
+          });
+        }),
+    },
+  });
+  const pending = client.get('/long').send();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  expect(client.cancelAll()).toBe(1);
+  expect((await pending).isCancelled).toBe(true);
+  expect((await cleanup)?.isCancelled).toBe(false);
+});
+
+test('an empty filter list is refused when the callback is added, except phases', () => {
+  const client = new HTTPClient();
+  for (const field of [
+    'statusCodes',
+    'methods',
+    'hosts',
+    'schemes',
+    'contentTypes',
+    'contentTypeHeaders',
+    'bodyContainsKeys',
+  ]) {
+    expect(() =>
+      client.addResponseObserver(() => {}, { [field]: [] }),
+    ).toThrow(/empty/);
+  }
+  expect(() =>
+    client.addRequestInterceptor((request) => request, { hosts: [] }),
+  ).toThrow(/empty/);
+
+  const remove = client.addResponseObserver(() => {}, { phases: [] });
+  remove();
+});
+
+test('MockAdapter omits a HEAD response body whatever the method case', async () => {
+  const adapter = new MockAdapter();
+  const response = await adapter.send({
+    requestURL: 'http://a.test/missing',
+    method: 'head',
+    headers: {},
+  });
+
+  expect(response.status).toBe(404);
+  expect(response.body).toBeNull();
+});

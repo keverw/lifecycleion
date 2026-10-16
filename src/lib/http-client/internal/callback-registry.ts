@@ -69,6 +69,15 @@ function copyFilterLists(
     }
     const allowed = field === 'phases' ? kind.phases : rule.allowed;
     const list = [...(value as unknown[])];
+    // Refused rather than given a meaning: an empty list read as "match nothing" leaves a
+    // callback that never runs, and read as "match everything" turns `hosts: []` from a
+    // config with no hosts into a callback that runs for every host. `phases: []` keeps
+    // its documented meaning, every phase.
+    if (list.length === 0 && field !== 'phases') {
+      throw new TypeError(
+        `${label} filter ${field} is empty; omit it to match every request`,
+      );
+    }
     for (const entry of list) {
       if (typeof entry !== rule.entryType) {
         throw new TypeError(

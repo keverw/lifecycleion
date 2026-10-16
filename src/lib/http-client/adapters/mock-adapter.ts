@@ -882,7 +882,7 @@ function throwAbortError(): never {
 }
 
 function shouldOmitResponseBody(method: string, status: number): boolean {
-  return method === 'HEAD' || status === 204 || status === 304;
+  return method.toUpperCase() === 'HEAD' || status === 204 || status === 304;
 }
 
 function awaitAbortable<T>(

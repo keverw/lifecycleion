@@ -754,6 +754,16 @@ export class NodeAdapter implements HTTPAdapter {
 
       /** Whether a post-response write failure has already been reported and scheduled. */
       let didReportWriteErrorAfterResponse = false;
+      /**
+       * Set when this adapter destroyed the request itself after the response arrived -
+       * a stream factory that cancelled, threw or failed, a stream error - so the upload
+       * failure that teardown causes is not reported to the host as a transport failure.
+       */
+      let didTearDownAfterResponse = false;
+      const tearDownAfterResponse = (): void => {
+        didTearDownAfterResponse = true;
+        destroyRequestQuietly(req);
+      };
 
       /**
        * Destroy an upload the server has stopped reading, once the response is in.
@@ -1134,6 +1144,14 @@ export class NodeAdapter implements HTTPAdapter {
 
         const failure = normalizeError(error);
 
+        // The adapter's own teardown caused this failure, and the request is already
+        // destroyed and answered: only the upload outcome is left to settle.
+        if (didTearDownAfterResponse) {
+          settleBodyOutcome(failure);
+
+          return;
+        }
+
         // This body is over, so answer `requestBodySettled` now rather than leaving it to
         // the writer. Nothing below settles it: the request is reported and then handed to
         // the grace deadline, and a writer blocked in `Blob.stream()`'s `read()` never
@@ -1347,7 +1365,7 @@ export class NodeAdapter implements HTTPAdapter {
                   // exist to prevent - and a socket already gone can answer
                   // `ERR_SOCKET_CLOSED` from `destroy()` on some runtimes, which is
                   // precisely the state this is reached in.
-                  destroyRequestQuietly(req);
+                  tearDownAfterResponse();
                   settleResponse({
                     status,
                     headers,
@@ -1423,7 +1441,7 @@ export class NodeAdapter implements HTTPAdapter {
               // interceptor throw. Abort the stream signal so any partial cleanup
               // listeners run, destroy the request, and propagate as a setup failure.
               abortStream();
-              destroyRequestQuietly(req);
+              tearDownAfterResponse();
               failRequest(markStreamFactoryError(error, req, request.headers));
               return;
             } finally {
@@ -1459,7 +1477,7 @@ export class NodeAdapter implements HTTPAdapter {
                   : undefined;
 
               abortStream();
-              destroyRequestQuietly(req);
+              tearDownAfterResponse();
               const abortErr = new Error(
                 'Request cancelled by streamResponse factory',
               );
@@ -1516,7 +1534,7 @@ export class NodeAdapter implements HTTPAdapter {
               //   - Non-retryable once streaming has started
               abortStream();
               destroyWritableQuietly(sink);
-              destroyRequestQuietly(req);
+              tearDownAfterResponse();
               settleResponse({
                 status,
                 headers,
@@ -1649,7 +1667,7 @@ export class NodeAdapter implements HTTPAdapter {
           // socket is not left open and the factory's cleanup listeners run. Torn down
           // after the reject, so neither can stand in for the failure.
           abortResponseStream?.();
-          destroyRequestQuietly(req);
+          tearDownAfterResponse();
         });
       }));
 
@@ -2165,10 +2183,16 @@ async function streamResponseBody(
     // A writable that closes with no error before the body is through - destroyed by
     // its owner, a proxied client that went away - would otherwise leave a response
     // paused for backpressure waiting on a `'drain'` that never comes, and the request
-    // open until its timeout, or forever with none. Once the response has ended, the
-    // `end` callback is the one that answers, as it does for every other writable.
+    // open until its timeout, or forever with none.
+    //
+    // After the response ended it is still a failure unless the writable finished: one
+    // destroyed with writes still queued calls neither those writes' callbacks nor
+    // `end`'s, so the `end` callback never comes to answer.
     const onWritableClose = (): void => {
-      if (didReceiveEnd) {
+      if (
+        didReceiveEnd &&
+        readObjectMember(writable, 'writableFinished') === true
+      ) {
         return;
       }
 
