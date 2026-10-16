@@ -386,7 +386,7 @@ The response `Content-Type` header determines how the body is parsed:
 
 `send()` always resolves for request outcomes handled by the client runtime. HTTP errors (4xx/5xx), timeouts, cancels, transport failures, redirect control-flow failures, and other client-managed failure states all produce a settled `HTTPResponse` with no exception. Check `response.isFailed` for client-level failures and `response.status` for HTTP errors.
 
-`send()` rejects (returns a rejected promise) only for programming errors around builder/client usage: calling it on a disabled client, calling it a second time on the same builder, or calling it after `builder.cancel()` was already called pre-send.
+`send()` rejects (returns a rejected promise) only for programming errors around builder/client usage: calling it on a disabled client, calling it a second time on the same builder, calling it after `builder.cancel()` was already called pre-send, or a value the caller supplied that throws while the request is set up, before any interceptor runs - a `params` getter, or a header value whose `toString` throws. The builder then ends `failed`, with no `error` and no error observers run.
 
 ```typescript
 const builder = client.get('/users/999');
@@ -1595,14 +1595,16 @@ The `signal` is guarded against `'abort'` listeners that throw; see [Abort Liste
 `StreamResponseFactory` can also be supplied via `HTTPRequestOptions.streamResponse` when passing options directly to `client.get(...)`, `client.post(...)`, and the other request helpers.
 
 ```typescript
-const response = await client.get('/large-file.bin', {
-  streamResponse: (info, { signal }) => {
-    const dest = createWriteStream('/tmp/large-file.bin');
+const response = await client
+  .get('/large-file.bin', {
+    streamResponse: (info, { signal }) => {
+      const dest = createWriteStream('/tmp/large-file.bin');
 
-    signal.addEventListener('abort', () => dest.destroy(), { once: true });
-    return dest;
-  },
-});
+      signal.addEventListener('abort', () => dest.destroy(), { once: true });
+      return dest;
+    },
+  })
+  .send();
 ```
 
 #### Writing Your Own `WritableLike`
@@ -1915,14 +1917,19 @@ From `lifecycleion/http-client`:
 ```typescript
 // Client
 HTTPClient;
+HTTPSubClient; // What createSubClient() returns
 HTTPRequestBuilder; // Use as a type annotation: let builder: HTTPRequestBuilder<User>
 
 // Adapter
-(HTTPAdapter, AdapterRequest, AdapterResponse, AdapterType);
+(HTTPAdapter,
+  AdapterRequest,
+  AdapterResponse,
+  AdapterType,
+  AdapterProgressEvent);
 FetchAdapter;
 
 // Request
-(HTTPMethod, ContentType, QueryValue, QueryObject);
+(HTTPMethod, ContentType, QueryValue, QueryObject, RequestHeadersInput);
 (HTTPClientConfig, SubClientConfig, HTTPRequestOptions);
 (InterceptedRequest, AttemptRequest);
 
@@ -1981,17 +1988,17 @@ MockTransportErrorOptions;
 
 From `lifecycleion/http-client`:
 
-| Constant                                   | Value / Type                       | Description                       |
-| ------------------------------------------ | ---------------------------------- | --------------------------------- |
-| `DEFAULT_TIMEOUT_MS`                       | `30_000`                           | Default request timeout           |
-| `DEFAULT_REQUEST_ID_HEADER`                | `'x-local-client-request-id'`      | Header name for request IDs       |
-| `DEFAULT_REQUEST_ATTEMPT_HEADER`           | `'x-local-client-request-attempt'` | Header name for attempt number    |
-| `DEFAULT_USER_AGENT`                       | `'lifecycleion-http-client'`       | Default User-Agent string         |
-| `DEFAULT_MAX_REDIRECTS`                    | `5`                                | Default redirect limit            |
-| `HTTP_METHODS`                             | `ReadonlyArray<HTTPMethod>`        | All supported HTTP method strings |
-| `RETRYABLE_STATUS_CODES`                   | `ReadonlySet<number>`              | Status codes that trigger a retry |
-| `REDIRECT_STATUS_CODES`                    | `ReadonlySet<number>`              | 301, 302, 303, 307, 308           |
-| `BROWSER_RESTRICTED_HEADERS`               | `ReadonlySet<string>`              | Exact headers blocked in browsers |
-| `BROWSER_RESTRICTED_HEADER_PREFIXES`       | `ReadonlyArray<string>`            | `['proxy-', 'sec-']`              |
-| `BROWSER_METHOD_OVERRIDE_HEADER_NAMES`     | `ReadonlySet<string>`              | Method override header names      |
-| `BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES` | `ReadonlySet<string>`              | `connect`, `trace`, `track`       |
+| Constant                                   | Value / Type                       | Description                          |
+| ------------------------------------------ | ---------------------------------- | ------------------------------------ |
+| `DEFAULT_TIMEOUT_MS`                       | `30_000`                           | Default request timeout              |
+| `DEFAULT_REQUEST_ID_HEADER`                | `'x-local-client-request-id'`      | Header name for request IDs          |
+| `DEFAULT_REQUEST_ATTEMPT_HEADER`           | `'x-local-client-request-attempt'` | Header name for attempt number       |
+| `DEFAULT_USER_AGENT`                       | `'lifecycleion-http-client'`       | Default User-Agent string            |
+| `DEFAULT_MAX_REDIRECTS`                    | `5`                                | Default redirect limit               |
+| `HTTP_METHODS`                             | `ReadonlyArray<HTTPMethod>`        | The standard methods, sent uppercase |
+| `RETRYABLE_STATUS_CODES`                   | `ReadonlySet<number>`              | Status codes that trigger a retry    |
+| `REDIRECT_STATUS_CODES`                    | `ReadonlySet<number>`              | 301, 302, 303, 307, 308              |
+| `BROWSER_RESTRICTED_HEADERS`               | `ReadonlySet<string>`              | Exact headers blocked in browsers    |
+| `BROWSER_RESTRICTED_HEADER_PREFIXES`       | `ReadonlyArray<string>`            | `['proxy-', 'sec-']`                 |
+| `BROWSER_METHOD_OVERRIDE_HEADER_NAMES`     | `ReadonlySet<string>`              | Method override header names         |
+| `BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES` | `ReadonlySet<string>`              | `connect`, `trace`, `track`          |

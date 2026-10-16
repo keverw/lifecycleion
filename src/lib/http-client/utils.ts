@@ -12,6 +12,7 @@ import type {
   ContentType,
   RequestPhaseName,
   HTTPClientConfig,
+  SubClientConfig,
   AdapterType,
   HTTPMethod,
   RequestHeadersInput,
@@ -351,9 +352,7 @@ const STANDARD_HTTP_METHODS: ReadonlySet<string> = new Set([
  */
 export function normalizeHTTPMethod(method: string): HTTPMethod {
   const uppercased = method.replace(/[a-z]/g, (letter) => letter.toUpperCase());
-  return (
-    STANDARD_HTTP_METHODS.has(uppercased) ? uppercased : method
-  ) as HTTPMethod;
+  return STANDARD_HTTP_METHODS.has(uppercased) ? uppercased : method;
 }
 
 /** RFC 9110's `token`: the characters a method name is made of. */
@@ -513,7 +512,7 @@ export function parseContentType(
  * with clear errors instead of surfacing later during request dispatch.
  */
 export function assertSupportedAdapterRuntimeAndConfig(
-  config: HTTPClientConfig,
+  config: HTTPClientConfig | SubClientConfig,
   adapterType: AdapterType,
   isBrowserRuntime: boolean,
 ): void {

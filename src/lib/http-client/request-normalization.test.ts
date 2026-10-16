@@ -47,7 +47,7 @@ test('a lowercase method is the non-idempotent POST without an interceptor', asy
   });
 
   const response = await client
-    .request('post' as HTTPMethod, '/orders')
+    .request('post', '/orders')
     .json({ a: 1 })
     .send();
 
@@ -316,7 +316,7 @@ test("an interceptor's unset header removes the default whatever its capitalizat
 
 test('an empty method is refused, and matches no method filter', () => {
   const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
-  expect(() => client.request('' as HTTPMethod, '/x')).toThrow(
+  expect(() => client.request('', '/x')).toThrow(
     'HTTPClient request method is empty',
   );
   expect(
@@ -379,12 +379,12 @@ test('a method that is not a valid HTTP method name is refused before dispatch',
   const adapter = new RecordingAdapter(200);
   const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
   for (const method of ['GE T', 'GET\n', ' ']) {
-    expect(() => client.request(method as HTTPMethod, '/x')).toThrow(
+    expect(() => client.request(method, '/x')).toThrow(
       'HTTPClient request method is not a valid HTTP method name',
     );
   }
   // A custom method made of token characters is still accepted.
-  expect(() => client.request('PROPFIND' as HTTPMethod, '/x')).not.toThrow();
+  expect(() => client.request('PROPFIND', '/x')).not.toThrow();
 
   client.addRequestInterceptor((request) => ({
     ...request,
@@ -432,7 +432,7 @@ test("a filter's lowercase method matches, and a nullish methods means no filter
       ran.push('lowercase');
       return request;
     },
-    { methods: ['post' as HTTPMethod] },
+    { methods: ['post'] },
   );
   client.addRequestInterceptor(
     (request) => {
@@ -586,11 +586,11 @@ test('a standard method is uppercased, and any other method is sent as given', a
       return request;
     },
     // A custom method matches exactly; a standard one in any case.
-    { methods: ['purge' as HTTPMethod, 'patch' as HTTPMethod] },
+    { methods: ['purge', 'patch'] },
   );
 
   for (const method of ['patch', 'purge', 'PURGE', 'Options']) {
-    await client.request(method as HTTPMethod, '/x').send();
+    await client.request(method, '/x').send();
   }
 
   expect(adapter.requests.map((request): string => request.method)).toEqual([

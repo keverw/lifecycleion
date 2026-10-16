@@ -178,6 +178,7 @@ export const REQUEST_BODY_SETTLED_KEY = Symbol.for(
  */
 export const XHR_BROWSER_TIMEOUT_FLAG = '_lifecycleion_xhr_browser_timeout';
 
+/** The standard methods: sent uppercase whatever case they are given in. */
 export const HTTP_METHODS: ReadonlyArray<HTTPMethod> = [
   'GET',
   'POST',
@@ -185,6 +186,7 @@ export const HTTP_METHODS: ReadonlyArray<HTTPMethod> = [
   'PATCH',
   'DELETE',
   'HEAD',
+  'OPTIONS',
 ];
 
 /**

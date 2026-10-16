@@ -9,6 +9,7 @@ export type {
   AdapterType,
   AdapterRequest,
   AdapterResponse,
+  AdapterProgressEvent,
   HTTPMethod,
   ContentType,
   QueryValue,

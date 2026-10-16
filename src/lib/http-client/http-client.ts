@@ -3752,7 +3752,7 @@ export class BaseHTTPClient {
 
     return {
       requestURL: readStringMember(request, 'requestURL', ''),
-      method: readStringMember(request, 'method', '') as HTTPMethod,
+      method: readStringMember(request, 'method', ''),
       headers,
       body: clonedBodies.body,
       rawBody: clonedBodies.rawBody,
@@ -4036,7 +4036,8 @@ type ResolvedRequest = Omit<InterceptedRequest, 'headers'> & {
  * constructor and `_buildSubClientConfig`; the `satisfies` keeps it exhaustive as
  * options grow.
  */
-function snapshotClientConfigFields(config: Partial<HTTPClientConfig>) {
+// A sub-client's config is the wider of the two (its `retryPolicy` may be `null`).
+function snapshotClientConfigFields(config: SubClientConfig) {
   return {
     adapter: config.adapter,
     baseURL: config.baseURL,

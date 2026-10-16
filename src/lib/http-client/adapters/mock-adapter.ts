@@ -2,6 +2,7 @@ import { markNonRetryableAdapterError } from '../internal/adapter-error';
 import { defineEntry } from '../../internal/define-entry';
 import { observeRejection } from '../../internal/promise-reactions';
 import Router from 'find-my-way';
+import type { HTTPMethod as RouterHTTPMethod } from 'find-my-way';
 import { guardProgressCallback } from '../internal/progress';
 import { materializeRequestHeaders } from '../internal/header-utils';
 import qs from 'qs';
@@ -306,7 +307,9 @@ export class MockAdapter implements HTTPAdapter {
     // the raw header is still available on req.headers.cookie.
     const query = qs.parse(queryString) as QueryObject;
     const cookies = parseCookieHeader(materializedHeaders['cookie']);
-    const match = this.router.find(method, path);
+    // The router's own method type is a fixed list; a custom method it does not know
+    // finds no route, as an unregistered path does.
+    const match = this.router.find(method as RouterHTTPMethod, path);
     const params = (match?.params ?? {}) as Record<string, string>;
 
     const mockRequest: MockRequest = {

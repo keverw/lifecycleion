@@ -5,7 +5,23 @@ import type { RetryPolicyOptions } from '../retry-utils';
 
 export type AdapterType = 'fetch' | 'xhr' | 'node' | 'mock';
 
-export type HTTPMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD';
+/**
+ * A request method. The standard ones are named for autocompletion, and are sent uppercase
+ * whatever case they are given in; any other RFC 9110 method name - `PROPFIND`, `purge` -
+ * is accepted too, case-sensitive and sent as given. So code switching over a request's
+ * method should keep a default branch.
+ */
+export type HTTPMethod =
+  | 'GET'
+  | 'POST'
+  | 'PUT'
+  | 'PATCH'
+  | 'DELETE'
+  | 'HEAD'
+  | 'OPTIONS'
+  // `string & {}` rather than `string`, which would absorb the names above and drop
+  // them from autocompletion.
+  | (string & {});
 
 export type ContentType = 'json' | 'text' | 'binary';
 
@@ -465,7 +481,14 @@ export interface HTTPClientConfig {
   maxRedirects?: number;
 }
 
-export interface SubClientConfig extends Partial<HTTPClientConfig> {
+export interface SubClientConfig extends Partial<
+  Omit<HTTPClientConfig, 'retryPolicy'>
+> {
+  /**
+   * Overrides the parent's retry policy. Omitted or `undefined` inherits it; `null` turns
+   * retries off for this sub-client.
+   */
+  retryPolicy?: RetryPolicyOptions | null;
   /**
    * How sub-client `defaultHeaders` should interact with inherited defaults.
    * Default: `'replace'`.
@@ -675,10 +698,12 @@ export interface HTTPClientError {
   isRetriesExhausted: boolean;
   /**
    * Optional reason string when the request was cancelled with an explicit string reason.
-   * Set by: a request interceptor returning `{ cancel: true, reason: '...' }`, a
-   * StreamResponseFactory returning `{ cancel: true, reason: '...' }`, or an AbortSignal
-   * aborted via `controller.abort('reason')`. Undefined when no explicit string reason
-   * was provided (e.g. `controller.abort()` with no argument, `builder.cancel()`).
+   * Set by: `builder.cancel('...')`, a client cancel (`client.cancel(id, '...')`,
+   * `cancelAll('...')` and the rest), a request interceptor returning
+   * `{ cancel: true, reason: '...' }`, a StreamResponseFactory returning
+   * `{ cancel: true, reason: '...' }`, or an AbortSignal aborted via
+   * `controller.abort('reason')`. Undefined when no explicit string reason was provided
+   * (e.g. `controller.abort()` or `builder.cancel()` with no argument).
    */
   cancelReason?: string;
 }

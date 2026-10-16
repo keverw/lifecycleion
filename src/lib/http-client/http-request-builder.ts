@@ -97,7 +97,7 @@ export class HTTPRequestBuilder<T = unknown> {
 
   // --- Fluent builder methods ---
 
-  public headers(headers: RequestHeadersInput): this {
+  public headers(headers: RequestHeadersInput | null | undefined): this {
     this._assertNotSent('headers');
     // A nullish argument stays a no-op. Anything else must be a plain record: a
     // `Headers` or `Map` would otherwise send the request with every header dropped,
