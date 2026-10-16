@@ -1022,3 +1022,51 @@ test("a JSON body's nested toJSON values are sent as JSON.stringify sends them",
 
   expect(adapter.requests[0]?.body).toBe(JSON.stringify(body));
 });
+
+test('a 307 replays the JSON body as the first hop sent it', async () => {
+  const adapter = new MockAdapter();
+  const received: unknown[] = [];
+  adapter.routes.post('/start', (request) => {
+    received.push(request.body);
+    return { status: 307, headers: { location: '/end' } };
+  });
+  adapter.routes.post('/end', (request) => {
+    received.push(request.body);
+    return { status: 200, body: 'ok' };
+  });
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    followRedirects: true,
+  });
+  const body = { url: new URL('http://a.test/'), when: new Date(0) };
+
+  await client.post('/start').json(body).send();
+
+  expect(received).toHaveLength(2);
+  expect(received[1]).toEqual(received[0]);
+});
+
+test("a request the caller's signal aborted is not counted by the client's cancels", async () => {
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) =>
+      new Promise((_resolve, reject) => {
+        request.signal?.addEventListener('abort', () => {
+          reject(new DOMException('aborted', 'AbortError'));
+        });
+      }),
+  };
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+  const controller = new AbortController();
+  const builder = client.get('/x').signal(controller.signal);
+  const sending = builder.send();
+  await Promise.resolve();
+
+  controller.abort('by caller');
+
+  expect(client.cancel(builder.requestID)).toBe(0);
+  expect(client.cancelAll()).toBe(0);
+  expect(builder.cancel()).toBe(false);
+  await sending;
+});

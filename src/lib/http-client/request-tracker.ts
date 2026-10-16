@@ -1,3 +1,4 @@
+import { readUnknownMember } from '../internal/read-member';
 import type { RequestState } from './types';
 
 export interface TrackedRequest {
@@ -6,6 +7,11 @@ export interface TrackedRequest {
   label?: string;
   state: RequestState;
   abortController: AbortController;
+  /**
+   * The caller's own signal for this request, when it gave one: a request it has aborted
+   * is cancelled already, though this controller has not fired.
+   */
+  callerSignal?: AbortSignal;
 }
 
 /**
@@ -36,7 +42,8 @@ export class RequestTracker {
   }
 
   /**
-   * Cancels a single request by ID. Returns 1 if cancelled, 0 if not found.
+   * Cancels a single request by ID. Returns 1 if this call cancelled it, 0 if it was not
+   * found or was cancelled already.
    */
   public cancel(requestID: string, reason?: string): number {
     const entry = this.requests.get(requestID);
@@ -165,13 +172,25 @@ export interface RequestInfo {
  * counted, so the cancel methods count requests they cancelled, not requests they saw.
  */
 function cancelEntry(
-  entry: { state: RequestState; abortController: AbortController },
+  entry: TrackedRequest,
   reason: string | undefined,
 ): boolean {
-  if (entry.abortController.signal.aborted) {
+  if (isEntryCancelled(entry)) {
     return false;
   }
   entry.state = 'cancelled';
   entry.abortController.abort(reason);
   return true;
+}
+
+/**
+ * Whether a tracked request is cancelled already: by its own controller - a cancel here or
+ * from its builder - or by the caller's signal. Shared with the builder's `cancel()`, so
+ * both answer the same. The caller's `aborted` is read guarded: unreadable is not aborted.
+ */
+export function isEntryCancelled(entry: TrackedRequest): boolean {
+  return (
+    entry.abortController.signal.aborted ||
+    readUnknownMember(entry.callerSignal, 'aborted') === true
+  );
 }

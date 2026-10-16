@@ -1040,7 +1040,7 @@ matched nothing is visible rather than a silent no-op:
 
 ```typescript
 if (client.cancel(someID) === 0) {
-  // no request with that id was in flight - already finished, or a stale id
+  // no request with that id was in flight - already finished or cancelled, or a stale id
 }
 ```
 

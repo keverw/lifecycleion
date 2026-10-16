@@ -16,8 +16,8 @@ import {
   assertNoBrowserRestrictedHeaders,
   presentHeaderValue,
 } from './internal/header-utils';
-import { RequestTracker } from './request-tracker';
-import type { RequestInfo } from './request-tracker';
+import { RequestTracker, isEntryCancelled } from './request-tracker';
+import type { RequestInfo, TrackedRequest } from './request-tracker';
 import { HTTPRequestBuilder } from './http-request-builder';
 import { RequestInterceptorManager, isInterceptorCancel } from './interceptors';
 import {
@@ -359,9 +359,9 @@ export class BaseHTTPClient {
   /**
    * Cancel one in-flight request by id.
    *
-   * @returns How many requests were cancelled - `1`, or `0` when no request with that id
-   *          was in flight, so a `cancel('typo')` that matched nothing is visible without
-   *          calling `listRequests()` first.
+   * @returns How many requests this call cancelled - `1`, or `0` when no request with
+   *          that id was in flight or it was cancelled already, so a `cancel('typo')` that
+   *          matched nothing is visible without calling `listRequests()` first.
    */
   public cancel(requestID: string, reason?: string): number {
     return this._tracker.cancel(requestID, reason);
@@ -625,13 +625,15 @@ export class BaseHTTPClient {
 
     // Setup AbortController + tracker
     const abortController = new AbortController();
-    this._tracker.add({
+    const trackedRequest: TrackedRequest = {
       requestID,
       clientID: this._clientID,
       label: options.label,
       state: 'sending',
       abortController,
-    });
+      ...(options.signal ? { callerSignal: options.signal } : {}),
+    };
+    this._tracker.add(trackedRequest);
 
     const trackedCallbacks: BuilderCallbacks<T> = {
       ...callbacks,
@@ -645,10 +647,7 @@ export class BaseHTTPClient {
     // cancelled the request: not once it already is - by an earlier `cancel()`, a client
     // or tracker cancel of the same controller, or the caller's own signal.
     trackedCallbacks.setCancelFn((reason?: string): boolean => {
-      if (
-        abortController.signal.aborted ||
-        readObjectMember(options.signal, 'aborted') === true
-      ) {
+      if (isEntryCancelled(trackedRequest)) {
         return false;
       }
       abortController.abort(reason);
@@ -897,6 +896,8 @@ export class BaseHTTPClient {
         const credentialScope = { url: initialRequestURL };
         currentInterceptedRequest = finalRequest;
         let hopCount = 0;
+        // The body each hop's last attempt sent, as the caller gave it; see `sentBody`.
+        const sentBody: { value: unknown } = { value: undefined };
         // Tracks the last global attempt number across all hops and retries,
         // so the next hop's attempts continue the sequence (e.g. 1,2,3 on
         // initial request → 4,5 on first redirect hop → 6 on second hop).
@@ -908,6 +909,7 @@ export class BaseHTTPClient {
           // its own call; the shared retryPolicy tracks budget across all hops.
           const attemptResult = await this._dispatchRequestAttempts({
             request: currentInterceptedRequest,
+            sentBody,
             credentialScope,
             timeout,
             cancelSignal,
@@ -1203,10 +1205,7 @@ export class BaseHTTPClient {
                   attemptResult.sentRequest.headers,
                 requestURL: redirectURL,
                 method: redirectMethod,
-                body:
-                  redirectMethod === 'GET'
-                    ? undefined
-                    : attemptResult.sentRequest.rawBody,
+                body: redirectMethod === 'GET' ? undefined : sentBody.value,
               },
               {
                 fromURL: attemptResult.sentRequest.requestURL,
@@ -1699,6 +1698,12 @@ export class BaseHTTPClient {
    */
   private async _dispatchRequestAttempts<T>(params: {
     request: ResolvedRequest;
+    /**
+     * Set to the caller's body of each attempt as it is dispatched, so a 307/308 replays
+     * that value - serialized as the attempt's was - rather than the observers' copy,
+     * which keeps no prototypes and so no `toJSON`.
+     */
+    sentBody: { value: unknown };
     /** Latest destination explicitly selected by the caller or a retry interceptor. */
     credentialScope: { url: string };
     /** Per-attempt timeout in ms. Each attempt gets its own independent timer — NOT a total deadline across all retries. */
@@ -2092,6 +2097,7 @@ export class BaseHTTPClient {
         knownBodies = 'unbuildable';
         const observedBodies = buildObservedAttemptBodies(attemptRequest.body);
         knownBodies = observedBodies;
+        params.sentBody.value = attemptRequest.body;
         sentRequest = this._buildAttemptRequest(
           attemptRequest,
           observedBodies,
