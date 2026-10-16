@@ -1036,7 +1036,19 @@ export class BaseHTTPClient {
             // Guard against infinite redirect chains
             if (hopCount > this._config.maxRedirects) {
               response = this._buildResponse<T>({
-                adapterResponse: null,
+                // A synthetic status-0 response, as for `redirect_disabled`, so the
+                // redirect this client did not follow is still reported: its
+                // `wasRedirectDetected` and `detectedRedirectURL`.
+                adapterResponse: {
+                  status: 0,
+                  wasRedirectDetected: true,
+                  detectedRedirectURL: adapterResponse.detectedRedirectURL,
+                  headers: {},
+                  body: null,
+                  ...(uploadOutcome
+                    ? { requestBodySettled: uploadOutcome }
+                    : {}),
+                },
                 requestID,
                 wasCancelled: false,
                 wasTimeout: false,

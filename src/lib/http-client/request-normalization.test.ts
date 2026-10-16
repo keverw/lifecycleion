@@ -1355,3 +1355,28 @@ test('an adapter answer without a valid status is the answered adapter_error', a
   });
   expect((await client.get('/x').send()).status).toBe(201);
 });
+
+test('a redirect past maxRedirects still reports where it pointed', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/a', () => ({
+    status: 302,
+    headers: { location: '/b' },
+  }));
+  adapter.routes.get('/b', () => ({
+    status: 302,
+    headers: { location: '/a' },
+  }));
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    followRedirects: true,
+    maxRedirects: 1,
+  });
+  const builder = client.get('/a');
+
+  const response = await builder.send();
+
+  expect(builder.error?.code).toBe('redirect_loop');
+  expect(response.wasRedirectDetected).toBe(true);
+  expect(response.detectedRedirectURL).toBe('http://example.test/a');
+});
