@@ -496,13 +496,15 @@ export function parseContentType(
   if (!contentTypeHeader) {
     return 'binary';
   } else {
-    const lower = contentTypeHeader.trim().toLowerCase();
+    // The media type alone: a parameter (`profile="x+json"`) or a longer subtype
+    // (`application/jsonl`) is not JSON.
+    const lower = normalizeMimeType(contentTypeHeader);
 
-    if (lower.includes('application/json') || lower.includes('+json')) {
+    if (lower === 'application/json' || lower.endsWith('+json')) {
       return 'json';
     } else if (lower.startsWith('text/')) {
       return 'text';
-    } else if (lower.includes('application/x-www-form-urlencoded')) {
+    } else if (lower === 'application/x-www-form-urlencoded') {
       return 'text';
     } else {
       return 'binary';
@@ -693,8 +695,8 @@ export function extractFetchHeaders(
  * this on each adapter response before {@link CookieJar.processResponseHeaders}.
  * The jar also normalizes so the same shapes work when feeding headers directly.
  *
- * - Non–`set-cookie` values: if an array appears (unexpected), the first
- *   element is kept when read via {@link scalarHeader}.
+ * - Non–`set-cookie` values: an array (a mock or custom adapter's repeated
+ *   header) is joined with `', '`, as Node and fetch join one.
  * - `set-cookie`: stored as `string[]` — each array entry is one full
  *   `Set-Cookie` header line (one cookie). A single string value becomes a
  *   one-element array. If the same header appears under keys that differ only
@@ -720,10 +722,12 @@ export function normalizeAdapterResponseHeaders(
         result[lower] = [...existingLines, ...chunk];
       }
     } else {
+      // Joined, as Node's `res.headers` and fetch's `Headers` join a repeated header,
+      // rather than keeping the first value and dropping the rest.
       defineEntry(
         result,
         lower,
-        Array.isArray(value) ? (value[0] ?? '') : value,
+        Array.isArray(value) ? value.join(', ') : value,
       );
     }
   }
@@ -955,6 +959,10 @@ function matchesContentTypePattern(
 
   if (!actual || !expected) {
     return false;
+  }
+
+  if (expected === '*/*') {
+    return actual.includes('/');
   }
 
   if (expected.endsWith('/*')) {

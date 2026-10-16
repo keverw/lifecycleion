@@ -11,16 +11,55 @@ import { normalizeFilterMethods } from '../utils';
  */
 const FILTER_LISTS: Record<
   string,
-  { entryType: 'string' | 'number'; allowed?: readonly string[] }
+  {
+    entryType: 'string' | 'number';
+    allowed?: readonly string[];
+    /** Why an entry can never match, or `undefined` when it can. */
+    check?: (entry: string) => string | undefined;
+  }
 > = {
   phases: { entryType: 'string' },
-  hosts: { entryType: 'string' },
+  hosts: { entryType: 'string', check: describeUnmatchableHostPattern },
   schemes: { entryType: 'string', allowed: ['http', 'https'] },
   bodyContainsKeys: { entryType: 'string' },
   statusCodes: { entryType: 'number' },
   contentTypes: { entryType: 'string', allowed: ['json', 'text', 'binary'] },
-  contentTypeHeaders: { entryType: 'string' },
+  contentTypeHeaders: {
+    entryType: 'string',
+    check: describeUnmatchableMediaTypePattern,
+  },
 };
+
+/**
+ * A host pattern is matched against the request URL's hostname alone, so one carrying a
+ * scheme, a path or a port - `http://api.test`, `api.test:8080` - can never match.
+ * Bare IPv6 (`::1`) has several colons and is left alone; a bracketed one may not carry
+ * a port either.
+ */
+function describeUnmatchableHostPattern(entry: string): string | undefined {
+  if (entry.trim() === '') {
+    return 'is empty';
+  }
+  if (entry.includes('/')) {
+    return 'has a scheme or path; give the hostname alone';
+  }
+  if (/^[^:]*:\d*$/.test(entry) || /\]:/.test(entry)) {
+    return 'has a port; give the hostname alone';
+  }
+  return undefined;
+}
+
+/** A media-type pattern is `type/subtype`, `type/*` or `*\/*`; anything else matches nothing. */
+function describeUnmatchableMediaTypePattern(
+  entry: string,
+): string | undefined {
+  const mediaType = entry.split(';', 1)[0].trim();
+  const slash = mediaType.indexOf('/');
+  if (slash <= 0 || slash === mediaType.length - 1) {
+    return "is not a media type such as 'application/json', 'image/*' or '*/*'";
+  }
+  return undefined;
+}
 
 /**
  * What one kind of callback's filter may hold: its list fields besides `methods` (the
@@ -82,6 +121,13 @@ function copyFilterLists(
       if (typeof entry !== rule.entryType) {
         throw new TypeError(
           `${label} filter ${field} must contain only ${rule.entryType}s (got ${entry === null ? 'null' : typeof entry})`,
+        );
+      }
+      const problem =
+        typeof entry === 'string' ? rule.check?.(entry) : undefined;
+      if (problem !== undefined) {
+        throw new TypeError(
+          `${label} filter ${field} entry ${JSON.stringify(entry)} ${problem}`,
         );
       }
       if (allowed && !allowed.includes(entry as string)) {

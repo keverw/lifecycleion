@@ -697,6 +697,14 @@ export class NodeAdapter implements HTTPAdapter {
              * destroys a writable that arrived too late.
              */
             failOnSocketError: ((error: Error) => void) | undefined;
+
+            /**
+             * Whether the response has arrived in full. A socket failure after that -
+             * an upload reset by a server that answered and closed - leaves a complete
+             * body to stream once the factory resolves, as `'close'` during the setup
+             * does.
+             */
+            isResponseComplete: () => boolean;
           }
         | undefined;
 
@@ -1355,6 +1363,7 @@ export class NodeAdapter implements HTTPAdapter {
             try {
               const setup: NonNullable<typeof pendingStreamSetup> = {
                 abort: abortStream,
+                isResponseComplete: () => res.complete,
                 failOnSocketError: (error: Error): void => {
                   setup.failOnSocketError = undefined;
                   abortStream();
@@ -1701,7 +1710,10 @@ export class NodeAdapter implements HTTPAdapter {
         if (didReceiveResponse) {
           // Except in the one window where the response side has nobody listening yet:
           // see `pendingStreamSetup`.
-          if (pendingStreamSetup?.failOnSocketError) {
+          if (
+            pendingStreamSetup?.failOnSocketError &&
+            !pendingStreamSetup.isResponseComplete()
+          ) {
             pendingStreamSetup.failOnSocketError(normalizeError(error));
 
             return;
@@ -2185,15 +2197,19 @@ async function streamResponseBody(
     // paused for backpressure waiting on a `'drain'` that never comes, and the request
     // open until its timeout, or forever with none.
     //
-    // After the response ended it is still a failure unless the writable finished: one
-    // destroyed with writes still queued calls neither those writes' callbacks nor
-    // `end`'s, so the `end` callback never comes to answer.
+    // After the response ended it is still a failure when the writable says it did not
+    // finish: a Node stream destroyed with writes still queued calls neither those
+    // writes' callbacks nor `end`'s, so the `end` callback never comes to answer. A sink
+    // that does not track `writableFinished` is left to its `end` callback - the docs
+    // ask a hand-written one to emit `'close'` when it is finished, and it may do so
+    // before calling that callback.
     const onWritableClose = (): void => {
-      if (
-        didReceiveEnd &&
-        readObjectMember(writable, 'writableFinished') === true
-      ) {
-        return;
+      if (didReceiveEnd) {
+        const finished = readObjectMember(writable, 'writableFinished');
+
+        if (finished === true || typeof finished !== 'boolean') {
+          return;
+        }
       }
 
       settle({

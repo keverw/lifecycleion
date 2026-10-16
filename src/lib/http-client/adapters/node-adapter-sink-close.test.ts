@@ -1,7 +1,10 @@
 import { expect, test } from 'bun:test';
 import * as http from 'node:http';
+import * as net from 'node:net';
 import { Writable } from 'node:stream';
 import type { AddressInfo } from 'node:net';
+import { EventEmitter } from 'node:events';
+import type { WritableLike } from '../types';
 import { NodeAdapter } from './node-adapter';
 
 test('a streamed download whose sink is destroyed during backpressure fails rather than hangs', async () => {
@@ -144,6 +147,100 @@ test('an upload the adapter tears down after a stream factory refusal is not rep
   } finally {
     globalThis.removeEventListener('error', onError);
     server.closeAllConnections();
+    server.close();
+  }
+});
+
+test('a hand-written sink that emits close before its end callback still succeeds', async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('hello');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+
+  // No `writableFinished`: it says it is finished by emitting 'close', as the docs ask.
+  const chunks: Uint8Array[] = [];
+  const emitter = new EventEmitter();
+  const sink = Object.assign(emitter, {
+    write(chunk: Uint8Array | string, cb?: (err?: Error | null) => void) {
+      chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+      cb?.();
+      return true;
+    },
+    end(cb?: (err?: Error | null) => void) {
+      emitter.emit('close');
+      setTimeout(() => cb?.(), 0);
+    },
+    destroy() {},
+  }) as unknown as WritableLike;
+
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${port}/`,
+      method: 'GET',
+      headers: {},
+      streamResponse: () => sink,
+    });
+
+    expect(response.isStreamError).toBeFalsy();
+    expect(Buffer.concat(chunks).toString()).toBe('hello');
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test('a socket reset during an async stream factory keeps a response that already arrived in full', async () => {
+  // Answers a complete 200 at once and closes without reading the large upload, so the
+  // upload side resets while the factory is still opening its sink.
+  const server = net.createServer((socket) => {
+    let received = '';
+    let hasAnswered = false;
+    socket.on('data', (data) => {
+      if (hasAnswered) {
+        return;
+      }
+      received += data.toString('latin1');
+      if (received.includes('\r\n\r\n')) {
+        hasAnswered = true;
+        socket.pause();
+        socket.write(
+          'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok',
+          () => {
+            setTimeout(() => socket.destroy(), 20);
+          },
+        );
+      }
+    });
+    socket.on('error', () => {});
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  const chunks: Buffer[] = [];
+  const sink = new Writable({
+    write(chunk: Buffer, _encoding, callback) {
+      chunks.push(chunk);
+      callback();
+    },
+  });
+
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${port}/`,
+      method: 'POST',
+      headers: {},
+      body: new Uint8Array(32 * 1024 * 1024),
+      streamResponse: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return sink;
+      },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.isStreamError).toBeFalsy();
+    expect(Buffer.concat(chunks).toString()).toBe('ok');
+  } finally {
     server.close();
   }
 });

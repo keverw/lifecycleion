@@ -331,7 +331,7 @@ describe('mergeHeaders', () => {
     expect(Object.getPrototypeOf(normalized)).toBe(Object.prototype);
     expect(
       Object.getOwnPropertyDescriptor(normalized, '__proto__')?.value,
-    ).toBe('a');
+    ).toBe('a, b');
   });
 
   test('keeps a __proto__ header as an own key', () => {

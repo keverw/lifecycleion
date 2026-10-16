@@ -560,7 +560,7 @@ interface RequestInterceptorFilter {
 }
 ```
 
-A standard method in `methods` is matched case-insensitively, and any other exactly. It must be an array of method names (or omitted). The callback must be a function and the filter an object (or omitted), or adding it throws a `TypeError`; so does a filter field that kind of callback does not take (`statusCodes` on an error observer, `contentTypes` on an interceptor) or a misspelled one. Every filter field is checked when the callback is added - each list must be an array of strings (`statusCodes`: numbers), and `phases`, `schemes` and `contentTypes` may only name ones that callback can see - and the filter is copied then, so changing it afterwards has no effect. The observer filters below follow the same rules. A request interceptor's filter that throws while it is matched - a `bodyContainsKeys` reading a body whose getter throws, say - fails the request as `interceptor_error`, as the interceptor throwing would. An observer's filter that throws is reported and that observer skipped, since an observer cannot change the request. All specified filter fields are ANDed together. Within each field, values are ORed. Any one match is sufficient. An empty `phases: []` matches all phases; any other empty list (`hosts: []`, `statusCodes: []`, ...) is refused when the callback is added, since it would either never match or match every request - omit the field to match every request.
+A standard method in `methods` is matched case-insensitively, and any other exactly. It must be an array of method names (or omitted). The callback must be a function and the filter an object (or omitted), or adding it throws a `TypeError`; so does a filter field that kind of callback does not take (`statusCodes` on an error observer, `contentTypes` on an interceptor) or a misspelled one. Every filter field is checked when the callback is added - each list must be an array of strings (`statusCodes`: numbers), and `phases`, `schemes` and `contentTypes` may only name ones that callback can see - and the filter is copied then, so changing it afterwards has no effect. The observer filters below follow the same rules. A request interceptor's filter that throws while it is matched - a `bodyContainsKeys` reading a body whose getter throws, say - fails the request as `interceptor_error`, as the interceptor throwing would. An observer's filter that throws is reported and that observer skipped, since an observer cannot change the request. All specified filter fields are ANDed together. Within each field, values are ORed. Any one match is sufficient. An empty `phases: []` matches all phases; any other empty list (`hosts: []`, `statusCodes: []`, ...) is refused when the callback is added, since it would either never match or match every request - omit the field to match every request. So is an entry that can never match: a `hosts` entry with a scheme, path or port (`api.test:8080` - give the hostname alone), or a `contentTypeHeaders` entry that is not a media type (`json`; `*/*` matches any type).
 
 ### Cancelling From an Interceptor
 
@@ -1437,7 +1437,7 @@ expect(response.status).toBe(200);
 expect(response.body).toEqual({ id: '1', name: 'Alice' });
 ```
 
-Routes are registered with `get`, `post`, `put`, `patch`, `delete`, `head` and `options`, or `routes.on(method, path, handler)` for any other method Node's `http` knows (`TRACE`, `PROPFIND`, `LOCK`, `PURGE`). A request's method is matched uppercased, as a server receives it from Node's `http`, and a `HEAD` request needs its own `head` route - it is not answered from a `get` route. A path parameter longer than 100 characters does not match its route, so that request gets a `404`. A handler that returns no response, or a body the mock cannot serialize, fails the request as a non-retryable `adapter_error`. When a request carries two cookies with the same name, `req.cookies` holds the first, as common server parsers do.
+Routes are registered with `get`, `post`, `put`, `patch`, `delete`, `head` and `options`, or `routes.on(method, path, handler)` for any other method Node's `http` knows (`TRACE`, `PROPFIND`, `LOCK`, `PURGE`). A request's method is matched, and handed to the handler as `req.method`, uppercased, as a server receives it from Node's `http`; header names in `req.headers` are lowercase, and a `HEAD` request needs its own `head` route - it is not answered from a `get` route. A path parameter longer than 100 characters does not match its route, so that request gets a `404`. A handler that returns no response, or a body the mock cannot serialize, fails the request as a non-retryable `adapter_error`. When a request carries two cookies with the same name, `req.cookies` holds the first, as common server parsers do.
 
 **MockAdapterConfig:**
 
@@ -1649,8 +1649,11 @@ Expectations for a custom writable:
   See [How long that listener stays](#how-long-that-listener-stays).
 - **Emit `'close'` when you are finished.** That is how the adapter learns nothing further
   is coming and takes the listener off at once, instead of waiting out the timers below.
-  A sink that closes with no error before it has finished writing the body (destroyed by
-  its owner, a proxied client that went away) fails the download as `stream_write_error`.
+  A sink that closes with no error before the response has ended (destroyed by its owner,
+  a proxied client that went away) fails the download as `stream_write_error`. After the
+  response has ended, a `'close'` is a failure only when the sink reports
+  `writableFinished: false`, as a Node stream destroyed with writes still queued does;
+  otherwise `end`'s callback answers.
 - **Set `errored` if you can, but you need not.** A Node stream records the error it failed
   with there, and the adapter reads it as a second signal when `end`'s callback reports
   success on a stream that was destroyed underneath it. It is optional, and a sink without

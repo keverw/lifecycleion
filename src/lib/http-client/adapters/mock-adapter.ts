@@ -276,7 +276,11 @@ export class MockAdapter implements HTTPAdapter {
     );
 
     const { requestURL, method, headers, body } = request;
-    const materializedHeaders = materializeRequestHeaders(headers);
+    // Names lowercased, as a Node server receives them, so a request driven straight at
+    // the adapter with `Content-Type` is read like one the client sent.
+    const materializedHeaders = lowercaseHeaderNames(
+      materializeRequestHeaders(headers),
+    );
 
     // --- 1. Pre-flight abort check ---
     // Throw immediately if the signal was already cancelled before we even start.
@@ -326,7 +330,7 @@ export class MockAdapter implements HTTPAdapter {
     const params = (match?.params ?? {}) as Record<string, string>;
 
     const mockRequest: MockRequest = {
-      method,
+      method: routeMethod,
       path,
       params,
       query,
@@ -879,6 +883,24 @@ function throwAbortError(): never {
   const err = new Error('The operation was aborted.');
   err.name = 'AbortError';
   throw err;
+}
+
+function lowercaseHeaderNames(
+  headers: Record<string, string>,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const lower = key.toLowerCase();
+    const existing = result[lower];
+    defineEntry(
+      result,
+      lower,
+      existing === undefined
+        ? value
+        : `${existing}${lower === 'cookie' ? '; ' : ', '}${value}`,
+    );
+  }
+  return result;
 }
 
 function shouldOmitResponseBody(method: string, status: number): boolean {

@@ -1,7 +1,7 @@
 import { expect, test } from 'bun:test';
 import vm from 'node:vm';
 import { HTTPClient } from './http-client';
-import { matchesFilter } from './utils';
+import { matchesFilter, parseContentType } from './utils';
 import { CookieJar } from './cookie-jar';
 import { MockAdapter } from './adapters/mock-adapter';
 import { NodeAdapter } from './adapters/node-adapter';
@@ -1804,4 +1804,92 @@ test('MockAdapter omits a HEAD response body whatever the method case', async ()
 
   expect(response.status).toBe(404);
   expect(response.body).toBeNull();
+});
+
+test('MockAdapter driven directly reads request header names case-insensitively, uppercases the method', async () => {
+  const adapter = new MockAdapter();
+  let seen: unknown;
+  adapter.routes.on('PURGE', '/p', (req) => {
+    seen = [req.method, req.body, req.cookies, req.headers['content-type']];
+    return { status: 200 };
+  });
+
+  await adapter.send({
+    requestURL: 'http://a.test/p',
+    method: 'purge',
+    headers: { 'Content-Type': 'application/json', Cookie: 'a=1' },
+    body: '{"x":1}',
+  });
+
+  expect(seen).toEqual(['PURGE', { x: 1 }, { a: '1' }, 'application/json']);
+});
+
+test('a response header given as an array keeps every value, joined', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/l', () => ({
+    status: 200,
+    headers: { Link: ['<a>', '<b>'] },
+  }));
+
+  const response = await new HTTPClient({ adapter, baseURL: 'http://a.test' })
+    .get('/l')
+    .send();
+
+  expect(response.headers.link).toBe('<a>, <b>');
+});
+
+test('contentTypeHeaders */* matches any type, and an entry with no slash is refused', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/j', () => ({ status: 200, body: { a: 1 } }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://a.test' });
+  let calls = 0;
+  client.addResponseObserver(
+    () => {
+      calls++;
+    },
+    { contentTypeHeaders: ['*/*'] },
+  );
+
+  await client.get('/j').send();
+
+  expect(calls).toBe(1);
+  for (const pattern of ['json', '*', '']) {
+    expect(() =>
+      client.addResponseObserver(() => {}, { contentTypeHeaders: [pattern] }),
+    ).toThrow(TypeError);
+  }
+});
+
+test('a host filter entry with a scheme, port or nothing is refused', () => {
+  const client = new HTTPClient();
+  for (const pattern of [
+    'api.test:8080',
+    'http://api.test',
+    'api.test/v1',
+    '',
+    '[::1]:8080',
+  ]) {
+    expect(() =>
+      client.addResponseObserver(() => {}, { hosts: [pattern] }),
+    ).toThrow(TypeError);
+  }
+  for (const pattern of [
+    'api.test',
+    '*.api.test',
+    '::1',
+    '[::1]',
+    '127.0.0.1',
+  ]) {
+    client.addResponseObserver(() => {}, { hosts: [pattern] })();
+  }
+});
+
+test('parseContentType reads the media type, not a substring of the header', () => {
+  expect(parseContentType('application/jsonl')).toBe('binary');
+  expect(parseContentType('text/plain; profile="x+json"')).toBe('text');
+  expect(parseContentType('application/vnd.api+json; charset=utf-8')).toBe(
+    'json',
+  );
+  expect(parseContentType(' Application/JSON ')).toBe('json');
+  expect(parseContentType('application/x-www-form-urlencoded')).toBe('text');
 });
