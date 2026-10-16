@@ -188,6 +188,14 @@ export class HTTPRequestBuilder<T = unknown> {
    */
   public retryNonIdempotentMethods(allow: boolean): this {
     this._assertNotSent('retryNonIdempotentMethods');
+    // Checked by type, as the client option is: read by truthiness, `'false'` would
+    // allow replaying a `POST`.
+    const candidate: unknown = allow;
+    if (typeof candidate !== 'boolean') {
+      throw new TypeError(
+        `HTTPRequestBuilder retryNonIdempotentMethods must be a boolean (got ${candidate === null ? 'null' : typeof candidate})`,
+      );
+    }
     this._retryNonIdempotentMethods = allow;
     return this;
   }
@@ -447,7 +455,7 @@ export class HTTPRequestBuilder<T = unknown> {
     }
 
     const allowRetryNonIdempotentMethods = opts.retryNonIdempotentMethods;
-    if (allowRetryNonIdempotentMethods !== undefined) {
+    if (!isNullish(allowRetryNonIdempotentMethods)) {
       this.retryNonIdempotentMethods(allowRetryNonIdempotentMethods);
     }
 

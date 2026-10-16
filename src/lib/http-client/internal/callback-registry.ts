@@ -44,8 +44,8 @@ function copyFilterLists(
   kind: FilterKind,
 ): Record<string, unknown[]> {
   // A field this kind of callback never sees is refused, as a misnamed one is: a
-  // `statusCodes` on an error observer would be ignored, so it matched every error, and a
-  // `contentTypes` on an interceptor would match nothing.
+  // `statusCodes` on an error observer would be ignored, so it would match every error,
+  // and a `contentTypes` on an interceptor would match nothing.
   for (const field of Object.keys(filter)) {
     if (field !== 'methods' && !kind.fields.includes(field)) {
       throw new TypeError(

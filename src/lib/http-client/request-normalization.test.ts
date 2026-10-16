@@ -883,12 +883,18 @@ test('boolean options and cookieJar are checked by type at construction', () => 
 test('a plain object from another realm is accepted as a JSON body', async () => {
   const adapter = new RecordingAdapter(200);
   const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
-  const body = vm.runInNewContext('({ a: 1 })') as Record<string, unknown>;
+  const body = vm.runInNewContext('({ a: 1, when: new Date(0) })') as Record<
+    string,
+    unknown
+  >;
 
   const response = await client.post('/x').json(body).send();
 
   expect(response.isFailed).toBe(false);
-  expect(adapter.requests[0]?.body).toBe('{"a":1}');
+  // Its `Date` is sent as this realm's would be, not as `{}`.
+  expect(adapter.requests[0]?.body).toBe(
+    '{"a":1,"when":"1970-01-01T00:00:00.000Z"}',
+  );
 });
 
 test('only the first cancel of a request in flight returns true', async () => {
@@ -913,4 +919,63 @@ test('only the first cancel of a request in flight returns true', async () => {
   expect(response.isCancelled).toBe(true);
   expect(builder.error?.cancelReason).toBe('first');
   expect(builder.cancel()).toBe(false);
+});
+
+test('a per-request retryNonIdempotentMethods must be a boolean', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  // Read by truthiness, 'false' would let a POST be replayed.
+  expect(() =>
+    client.post('/x', { retryNonIdempotentMethods: 'false' as never }),
+  ).toThrow(
+    'HTTPRequestBuilder retryNonIdempotentMethods must be a boolean (got string)',
+  );
+  expect(() => client.post('/x').retryNonIdempotentMethods(1 as never)).toThrow(
+    'HTTPRequestBuilder retryNonIdempotentMethods must be a boolean',
+  );
+  expect(() =>
+    client.post('/x', { retryNonIdempotentMethods: null as never }),
+  ).not.toThrow();
+});
+
+test("an error observer cannot change the response's redirect history", async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/start', () => ({
+    status: 302,
+    headers: { location: '/end' },
+  }));
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://example.test',
+    followRedirects: true,
+  });
+  client.addRequestInterceptor(
+    () => {
+      throw new Error('refused');
+    },
+    { phases: ['redirect'] },
+  );
+  client.addErrorObserver((error) => {
+    error.redirectHistory.push('http://elsewhere.test/');
+  });
+
+  const response = await client.get('/start').send();
+
+  expect(response.redirectHistory).toEqual(['http://example.test/end']);
+});
+
+test('userAgent and a sub-client defaultHeadersStrategy are checked at construction', () => {
+  const adapter = new RecordingAdapter(200);
+  expect(() => new HTTPClient({ adapter, userAgent: 123 as never })).toThrow(
+    'HTTPClient userAgent must be a string (got number)',
+  );
+  const client = new HTTPClient({
+    adapter,
+    defaultHeaders: { authorization: 'Bearer a' },
+  });
+  // Read as 'replace', a typo would drop the inherited authorization.
+  expect(() =>
+    client.createSubClient({ defaultHeadersStrategy: 'MERGE' as never }),
+  ).toThrow(
+    `HTTPClient sub-client defaultHeadersStrategy must be 'replace' or 'merge' (got "MERGE")`,
+  );
 });

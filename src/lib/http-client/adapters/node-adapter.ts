@@ -2861,42 +2861,39 @@ function normalizeCRLEntry(
 
   // Refused as this adapter's own validation error, so a refreshed value of the wrong
   // kind - a cache cleared to `null`, say - is terminal like bad framing rather than
-  // retried as whatever its `toString` throws. Any binary view is accepted, as Node's
-  // `tls` accepts one: a plain `Uint8Array` (Bun's `file().bytes()`) is read as a Buffer
-  // over the same bytes for the PEM check, and passed through as given when it is DER.
+  // retried as whatever its `toString` throws. Any binary view is read, as a Buffer over
+  // the same bytes - a plain `Uint8Array` (Bun's `file().bytes()`) included - and that
+  // Buffer is what is passed on, since not every runtime's `tls` takes another view.
   const candidate: unknown = entry;
-  if (!Buffer.isBuffer(candidate)) {
-    if (!ArrayBuffer.isView(candidate)) {
-      const error = new TypeError(
+  if (!Buffer.isBuffer(candidate) && !ArrayBuffer.isView(candidate)) {
+    throw crlValidationError(
+      new TypeError(
         `NodeAdapter crl must be a string, binary data such as a Buffer, or an array of them (got ${candidate === null ? 'null' : typeof candidate})`,
-      );
-      crlValidationErrors.add(error);
-      throw error;
-    }
-    const bytes = Buffer.from(
-      candidate.buffer,
-      candidate.byteOffset,
-      candidate.byteLength,
+      ),
     );
-    const split = normalizeCRLEntry(bytes);
-    // As given when it needed no splitting; Node's `tls` takes any binary view.
-    return split === bytes ? (entry as Buffer) : split;
   }
+  const bytes = Buffer.isBuffer(candidate)
+    ? candidate
+    : Buffer.from(candidate.buffer, candidate.byteOffset, candidate.byteLength);
 
-  // latin1 is a byte-for-byte mapping, so PEM (which is ASCII) survives
-  // exactly and DER cannot be corrupted by the round trip — it is only being
-  // inspected, and is returned as the original Buffer either way.
-  const text = candidate.toString('latin1');
+  // latin1 is a byte-for-byte mapping, so PEM (which is ASCII) survives exactly; the
+  // bytes are only inspected here.
+  const text = bytes.toString('latin1');
 
+  // Node's `tls` reads PEM CRLs only, so DER bytes would fail every HTTPS request when
+  // the context is built. Refused here instead, at construction or for a refreshed value.
   if (!text.includes(PEM_CRL_HEADER)) {
-    return candidate;
+    throw crlValidationError(
+      new TypeError(
+        `NodeAdapter crl must be PEM ("${PEM_CRL_HEADER}" blocks); DER is not read by Node's tls. Convert it with \`openssl crl -inform DER -outform PEM\`.`,
+      ),
+    );
   }
 
   const split = splitCRLString(text);
 
-  // A single block stays a Buffer: it needed no splitting, so hand back what
-  // the caller gave rather than a re-encoded copy of it.
-  return Array.isArray(split) ? split : candidate;
+  // A single block stays the Buffer: it needed no splitting.
+  return Array.isArray(split) ? split : bytes;
 }
 
 /**
@@ -2905,6 +2902,12 @@ function normalizeCRLEntry(
  * runs - an array element's getter, an entry's `toString` - which stays retryable.
  */
 const crlValidationErrors = new WeakSet<Error>();
+
+/** Mark `error` as this adapter's own CRL refusal (see `crlValidationErrors`). */
+function crlValidationError(error: Error): Error {
+  crlValidationErrors.add(error);
+  return error;
+}
 
 function splitCRLString(crl: string): string | string[] {
   const blocks = crl.match(PEM_CRL_BLOCK) ?? [];

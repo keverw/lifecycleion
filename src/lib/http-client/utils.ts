@@ -534,6 +534,13 @@ export function assertSupportedAdapterRuntimeAndConfig(
     }
   }
 
+  const userAgent: unknown = config.userAgent;
+  if (!isNullish(userAgent) && typeof userAgent !== 'string') {
+    throw new TypeError(
+      `HTTPClient userAgent must be a string (got ${typeof userAgent})`,
+    );
+  }
+
   // A jar the client cannot call fails here rather than on every request.
   const jar: unknown = config.cookieJar;
   if (
@@ -870,7 +877,8 @@ export function assertSupportedRequestBody(body: unknown): void {
 export function isPlainJSONBodyObject(
   value: unknown,
 ): value is Record<string, unknown> {
-  // The same rule as a header record's, another realm's plain object included.
+  // The header record's rule, so a plain object is one in either place - another
+  // realm's (a `vm` context's) included. See `cloneBodyValue` for how one is copied.
   return isPlainRecord(value);
 }
 

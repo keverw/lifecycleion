@@ -35,6 +35,7 @@ import {
   normalizeMergedHeaderValue,
   normalizeHTTPMethod,
   describeInvalidHTTPMethod,
+  isPlainJSONBodyObject,
   normalizeAdapterResponseHeaders,
   parseContentType,
   resolveAbsoluteURL,
@@ -447,6 +448,17 @@ export class BaseHTTPClient {
     );
     const shouldFollowRedirects =
       shouldFollowRedirectsOverride ?? this._config.followRedirects;
+    // Anything but the two strategies would silently mean `'replace'`, dropping the
+    // inherited defaults - an `authorization` among them.
+    if (
+      !isNullish(defaultHeadersStrategy) &&
+      defaultHeadersStrategy !== 'replace' &&
+      defaultHeadersStrategy !== 'merge'
+    ) {
+      throw new TypeError(
+        `HTTPClient sub-client defaultHeadersStrategy must be 'replace' or 'merge' (got ${JSON.stringify(defaultHeadersStrategy)})`,
+      );
+    }
     assertOptionalHeaderRecord(
       overrideHeaders,
       'HTTPClient sub-client defaultHeaders',
@@ -3459,7 +3471,9 @@ export class BaseHTTPClient {
       wasRedirectDetected: response.wasRedirectDetected,
       wasRedirectFollowed: response.wasRedirectFollowed,
       detectedRedirectURL: response.detectedRedirectURL,
-      redirectHistory: response.redirectHistory,
+      // Its own copy, as each response has: an error observer changing it does not
+      // change the response's.
+      redirectHistory: [...response.redirectHistory],
       requestID,
       isTimeout: response.isTimeout,
       isRetriesExhausted,
@@ -4037,8 +4051,18 @@ function cloneBodyValue(body: unknown): unknown {
     return cloned;
   } else if (body instanceof Uint8Array) {
     return new Uint8Array(body);
-  } else if (Array.isArray(body) || isPlainRecord(body)) {
-    return deepClone(body);
+  } else if (Array.isArray(body) || isPlainJSONBodyObject(body)) {
+    // `deepClone` knows built-ins such as `Date` by `instanceof`, which another realm's
+    // fail - its `Date` would be copied as `{}`. A body from another realm is copied
+    // through JSON instead, which is what is sent for it anyway.
+    const prototype: unknown = Reflect.getPrototypeOf(body);
+    const isThisRealm =
+      prototype === null ||
+      prototype === Object.prototype ||
+      prototype === Array.prototype;
+    return isThisRealm
+      ? deepClone(body)
+      : (JSON.parse(JSON.stringify(body)) as unknown);
   }
 
   return body;
