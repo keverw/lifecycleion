@@ -197,8 +197,8 @@ export class BaseHTTPClient {
   ) {
     // Read every documented field exactly once, then validate and keep that snapshot.
     // A getter can answer differently on each read, so validating one read and storing
-    // another let a value the checks never saw through - e.g. followRedirects: true on
-    // the XHR adapter. See `snapshotClientConfigFields`.
+    // another would let a value the checks never saw through - e.g. followRedirects: true
+    // on the XHR adapter. See `snapshotClientConfigFields`.
     const snapshot = snapshotClientConfigFields(config);
     assertOptionalHeaderRecord(
       snapshot.defaultHeaders,
@@ -2130,7 +2130,8 @@ export class BaseHTTPClient {
       try {
         // Adopted, not awaited as it is: `HTTPAdapter` is a public extension point, and
         // an adapter answering with a native promise carrying its own `constructor` and
-        // a no-op `then` hung the request, its rejection unhandled. See `adoptPromise()`.
+        // a no-op `then` would hang the request, its rejection unhandled. See
+        // `adoptPromise()`.
         const adapterPromise = adoptPromise(
           this._adapter.send({
             requestURL: sentRequest.requestURL,
@@ -3678,8 +3679,8 @@ export class BaseHTTPClient {
 
     // The remaining fields follow the same rule: each is read once, and one that cannot
     // be read is left empty rather than failing the snapshot - a retry interceptor's
-    // request with a throwing `body` getter otherwise turned its `interceptor_error`
-    // into a `request_setup_error` and dropped the attempt it had already ended.
+    // request with a throwing `body` getter would otherwise turn its `interceptor_error`
+    // into a `request_setup_error` and drop the attempt it had already ended.
     let clonedBodies: Pick<AttemptRequest, 'body' | 'rawBody'>;
 
     if (knownBodies !== undefined && knownBodies !== 'unbuildable') {

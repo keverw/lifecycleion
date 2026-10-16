@@ -347,7 +347,7 @@ export interface NodeAdapterConfig {
    * Both failures are fail-closed, so a stale CRL never silently stops
    * enforcing — but both can take out healthy connections.
    */
-  crl?: string | Buffer | Array<string | Buffer>;
+  crl?: string | ArrayBufferView | Array<string | ArrayBufferView>;
 
   /**
    * Set to false to accept self-signed certificates in dev/test environments.
@@ -507,8 +507,8 @@ export class NodeAdapter implements HTTPAdapter {
           httpsOptions.crl = normalizeCRL(crl);
         } catch (error) {
           // A refreshed value that fails validation is configuration, not transport:
-          // retrying reads the same bad value again, and reporting it as a network error
-          // hid what was wrong. Terminal, as the constructor's own check is. Only this
+          // retrying would read the same bad value again, and a network error would hide
+          // what is wrong. Terminal, as the constructor's own check is. Only this
           // adapter's own refusal is: a throw from caller code read while normalizing
           // keeps its usual retryable adapter-error behavior, and its error is not tagged.
           if (crlValidationErrors.has(error as Error)) {
@@ -2819,7 +2819,7 @@ const RESIDUE_OUTSIDE_PEM_BLOCKS = /\S/;
  * only report `UNABLE_TO_GET_CRL` at handshake time.
  */
 function normalizeCRL(
-  crl: string | Buffer | Array<string | Buffer>,
+  crl: string | ArrayBufferView | Array<string | ArrayBufferView>,
 ): string | Buffer | Array<string | Buffer> {
   if (Array.isArray(crl)) {
     return crl.flatMap((entry) => normalizeCRLEntry(entry));
@@ -2843,7 +2843,9 @@ function normalizeCRL(
  * holding DER — which has no armour to look for — is passed through untouched,
  * since DER encodes exactly one CRL and there is nothing to split.
  */
-function normalizeCRLEntry(entry: string | Buffer): string | Buffer | string[] {
+function normalizeCRLEntry(
+  entry: string | ArrayBufferView,
+): string | Buffer | string[] {
   if (typeof entry === 'string') {
     return splitCRLString(entry);
   }
@@ -2868,23 +2870,24 @@ function normalizeCRLEntry(entry: string | Buffer): string | Buffer | string[] {
       candidate.byteLength,
     );
     const split = normalizeCRLEntry(bytes);
-    return split === bytes ? entry : split;
+    // As given when it needed no splitting; Node's `tls` takes any binary view.
+    return split === bytes ? (entry as Buffer) : split;
   }
 
   // latin1 is a byte-for-byte mapping, so PEM (which is ASCII) survives
   // exactly and DER cannot be corrupted by the round trip — it is only being
   // inspected, and is returned as the original Buffer either way.
-  const text = entry.toString('latin1');
+  const text = candidate.toString('latin1');
 
   if (!text.includes(PEM_CRL_HEADER)) {
-    return entry;
+    return candidate;
   }
 
   const split = splitCRLString(text);
 
   // A single block stays a Buffer: it needed no splitting, so hand back what
   // the caller gave rather than a re-encoded copy of it.
-  return Array.isArray(split) ? split : entry;
+  return Array.isArray(split) ? split : candidate;
 }
 
 /**

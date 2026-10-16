@@ -864,7 +864,7 @@ function awaitAbortable<T>(
 
     // Observed before anything else here can throw. A signal whose
     // `addEventListener` throws rejects this wait from the executor, and the
-    // handler's promise, not yet observed, was then an unhandled rejection.
+    // handler's promise, not yet observed, would then be an unhandled rejection.
     observeRejection(
       adopted.then(
         (result) => {

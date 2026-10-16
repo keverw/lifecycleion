@@ -7685,19 +7685,13 @@ test('a refreshed CRL of the wrong kind is refused as configuration, not retried
 
 test('a CRL given as a plain Uint8Array is accepted, and a PEM bundle in one is split', () => {
   const der = new Uint8Array([0x30, 0x82, 0x01, 0x00]);
-  expect(
-    () => new NodeAdapter({ crl: der as unknown as Buffer }),
-  ).not.toThrow();
-  expect(
-    () => new NodeAdapter({ crl: [der as unknown as Buffer] }),
-  ).not.toThrow();
+  expect(() => new NodeAdapter({ crl: der })).not.toThrow();
+  expect(() => new NodeAdapter({ crl: [der] })).not.toThrow();
   // A truncated PEM block inside a Uint8Array is refused, as it is in a Buffer.
   const truncated = new TextEncoder().encode(
     '-----BEGIN X509 CRL-----\nAAAA\n',
   );
-  expect(
-    () => new NodeAdapter({ crl: truncated as unknown as Buffer }),
-  ).toThrow();
+  expect(() => new NodeAdapter({ crl: truncated })).toThrow();
 });
 
 describe('NodeAdapter upload finalization', () => {

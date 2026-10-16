@@ -548,9 +548,10 @@ export interface HTTPResponse<T = unknown> {
    * `adapter_error` for an answered response the client could not read keep
    * the real status, and an adapter-reported `isTransportError` keeps whatever
    * status the adapter gave. Any of them can be `isFailed: true` with a 2xx or
-   * 3xx `status`. A timeout reports `status: 0`, even for an attempt whose
-   * answer arrived after its timer fired and then could not be read; only a
-   * body that timed out mid-stream keeps its status, as a stream error.
+   * 3xx `status`. A timeout reports `status: 0`; only a body that timed out
+   * mid-stream keeps its status, as a stream error. An answer that arrived
+   * after its attempt's timer fired is handled as any answer is: delivered if
+   * it can be read, an `adapter_error` keeping its status if not.
    *
    * Ordinary HTTP responses, including HTTP error statuses like 4xx/5xx,
    * remain `false`. This tracks client-level failure handling, not HTTP
