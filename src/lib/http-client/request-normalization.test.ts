@@ -1782,9 +1782,9 @@ test('an empty filter list is refused when the callback is added, except phases'
     'contentTypeHeaders',
     'bodyContainsKeys',
   ]) {
-    expect(() =>
-      client.addResponseObserver(() => {}, { [field]: [] }),
-    ).toThrow(/empty/);
+    expect(() => client.addResponseObserver(() => {}, { [field]: [] })).toThrow(
+      /empty/,
+    );
   }
   expect(() =>
     client.addRequestInterceptor((request) => request, { hosts: [] }),
