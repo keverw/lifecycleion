@@ -1969,6 +1969,8 @@ test('a contentTypeHeaders entry with a partial wildcard or a list is refused', 
     'application/*+json',
     '*/json',
     'application/json, application/problem+json',
+    'application/ json',
+    'application /json',
   ]) {
     expect(() =>
       client.addResponseObserver(() => {}, { contentTypeHeaders: [pattern] }),

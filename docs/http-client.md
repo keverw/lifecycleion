@@ -371,14 +371,14 @@ client waits to dispatch another hop is a separate request failure.
 
 ### Content-Type Detection and Body Parsing
 
-The response `Content-Type` header determines how the body is parsed:
+The response `Content-Type` header determines how the body is parsed. Only its media type is read - the first one, when fetch or XHR joined a repeated header, and without its parameters, case-insensitively:
 
-| Content-Type value                     | `contentType` | Body type                 |
-| -------------------------------------- | ------------- | ------------------------- |
-| Contains `application/json` or `+json` | `'json'`      | Parsed via `JSON.parse()` |
-| Starts with `text/`                    | `'text'`      | UTF-8 decoded string      |
-| `application/x-www-form-urlencoded`    | `'text'`      | UTF-8 decoded string      |
-| Absent or anything else                | `'binary'`    | Raw `Uint8Array`          |
+| Media type                                    | `contentType` | Body type                 |
+| --------------------------------------------- | ------------- | ------------------------- |
+| `application/json`, or ends with `+json`      | `'json'`      | Parsed via `JSON.parse()` |
+| Starts with `text/`                           | `'text'`      | UTF-8 decoded string      |
+| `application/x-www-form-urlencoded`           | `'text'`      | UTF-8 decoded string      |
+| Absent or anything else (`application/jsonl`) | `'binary'`    | Raw `Uint8Array`          |
 
 `isText` mirrors `contentType === 'text'`. `isJSON` is `true` only when JSON parsing actually succeeded, and it stays `false` on a parse failure. `isParseError` is `true` when the server sent a JSON `Content-Type` but the body could not be parsed. In that case `contentType` is still `'json'`, `isJSON` is `false`, and `body` falls back to the raw string.
 
@@ -1914,9 +1914,9 @@ type RequestState =
 
 ## Headers
 
-**Internal representation:** All header keys are lowercased. `set-cookie` is always `string[]`. Other multi-value headers that arrive as comma-joined strings remain as `string`.
+**Internal representation:** All header keys are lowercased. `set-cookie` is always `string[]`. Other multi-value headers that arrive as comma-joined strings remain as `string`. A response header an adapter reports more than once - as an array, or under keys that differ only by case - is read as Node reads a repeated header: joined with `', '`, except one that holds a single value (`location`, `content-type`, `content-length`, ...), which keeps its first.
 
-**Merging:** When multiple sources set the same header (default headers, request headers, interceptors), later values win wholesale. A `string[]` value replaces a `string` value entirely rather than being appended. A single-element `string[]` is normalized to a plain `string` when merging outgoing request headers and when normalizing response headers. Observer-facing `AttemptRequest.headers` may still contain `string[]` values when an adapter reports repeated effective request headers, but array preservation is not guaranteed. Do not rely on `Array.isArray()` checks on header values in any context.
+**Merging:** When multiple sources set the same header (default headers, request headers, interceptors), later values win wholesale. A `string[]` value replaces a `string` value entirely rather than being appended. A single-element `string[]` is normalized to a plain `string` when merging outgoing request headers. Observer-facing `AttemptRequest.headers` may still contain `string[]` values when an adapter reports repeated effective request headers, but array preservation is not guaranteed. Do not rely on `Array.isArray()` checks on header values in any context.
 
 **Browser-restricted headers** (applying to FetchAdapter and XHRAdapter):
 

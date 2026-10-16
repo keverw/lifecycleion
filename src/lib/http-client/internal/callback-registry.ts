@@ -59,6 +59,7 @@ function describeUnmatchableMediaTypePattern(
   const subtype = mediaType.slice(slash + 1);
   if (
     entry.includes(',') ||
+    /\s/.test(mediaType) ||
     slash <= 0 ||
     subtype === '' ||
     subtype.includes('/') ||
