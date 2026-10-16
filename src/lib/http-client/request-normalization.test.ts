@@ -1561,3 +1561,180 @@ test('MockAdapter matches a lowercase method uppercased, and names onHandlerErro
     'MockAdapter onHandlerError for GET /throws returned no MockResponse',
   );
 });
+
+test('a 307/308 keeps a GET request body and its content-type', async () => {
+  for (const status of [307, 308]) {
+    const adapter = new MockAdapter();
+    const seen: unknown[] = [];
+    adapter.routes.get('/old/_search', () => ({
+      status,
+      headers: { location: '/new/_search' },
+    }));
+    adapter.routes.get('/new/_search', (req) => {
+      seen.push([req.headers['content-type'], req.body]);
+      return { status: 200 };
+    });
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://es.test',
+      followRedirects: true,
+    });
+
+    const response = await client
+      .get('/old/_search', { body: { query: { match_all: {} } } })
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(seen).toEqual([
+      ['application/json; charset=utf-8', { query: { match_all: {} } }],
+    ]);
+  }
+});
+
+test('a 303 rewrite to GET still drops the body and its headers', async () => {
+  const adapter = new MockAdapter();
+  const seen: unknown[] = [];
+  adapter.routes.put('/a', () => ({
+    status: 303,
+    headers: { location: '/b' },
+  }));
+  adapter.routes.get('/b', (req) => {
+    seen.push([
+      req.headers['content-type'],
+      req.headers['content-encoding'],
+      req.body,
+    ]);
+    return { status: 200 };
+  });
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://a.test',
+    followRedirects: true,
+  });
+
+  await client
+    .put('/a', {
+      body: new Uint8Array([31, 139, 8]),
+      headers: { 'content-encoding': 'gzip' },
+    })
+    .send();
+
+  expect(seen).toEqual([[undefined, undefined, undefined]]);
+});
+
+test('a cross-origin 307 keeps the content-encoding of the body it replays', async () => {
+  const adapter = new MockAdapter();
+  const seen: unknown[] = [];
+  adapter.routes.put('/a', () => ({
+    status: 307,
+    headers: { location: 'http://b.test/x' },
+  }));
+  adapter.routes.put('/x', (req) => {
+    seen.push([
+      req.headers['content-encoding'],
+      req.headers['content-type'],
+      req.headers['x-api-key'],
+    ]);
+    return { status: 200 };
+  });
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://a.test',
+    followRedirects: true,
+  });
+
+  await client
+    .put('/a', {
+      body: new Uint8Array([31, 139, 8]),
+      headers: {
+        'content-encoding': 'gzip',
+        'content-type': 'application/json',
+        'x-api-key': 'secret',
+      },
+    })
+    .send();
+
+  expect(seen).toEqual([['gzip', 'application/json', undefined]]);
+});
+
+test('a class-instance answer is read whole, its error flags included', async () => {
+  class StreamErrorAnswer {
+    public get status() {
+      return 200;
+    }
+    public get headers() {
+      return {};
+    }
+    public get body() {
+      return new Uint8Array([1, 2]);
+    }
+    public get isStreamError() {
+      return true;
+    }
+    public get streamErrorCode() {
+      return 'stream_response_error' as const;
+    }
+  }
+  class TransportErrorAnswer {
+    public get status() {
+      return 0;
+    }
+    public get headers() {
+      return {};
+    }
+    public get body() {
+      return null;
+    }
+    public get isTransportError() {
+      return true;
+    }
+  }
+  const adapterOf = (make: () => unknown): HTTPAdapter => ({
+    getType: () => 'node',
+    send: (_request: AdapterRequest) =>
+      Promise.resolve(make() as AdapterResponse),
+  });
+
+  const streamResponse = await new HTTPClient({
+    adapter: adapterOf(() => new StreamErrorAnswer()),
+    baseURL: 'http://a.test',
+  })
+    .get('/x')
+    .send();
+
+  expect(streamResponse.isFailed).toBe(true);
+  expect(streamResponse.isStreamError).toBe(true);
+
+  const transportResponse = await new HTTPClient({
+    adapter: adapterOf(() => new TransportErrorAnswer()),
+    baseURL: 'http://a.test',
+  })
+    .get('/x')
+    .send();
+
+  expect(transportResponse.isNetworkError).toBe(true);
+});
+
+test('FetchAdapter refuses a GET or HEAD with a body once, without retrying', async () => {
+  for (const method of ['GET', 'HEAD'] as const) {
+    let sends = 0;
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'fetch',
+        send: () => {
+          sends++;
+          return Promise.reject(new TypeError('cannot have body'));
+        },
+      },
+      baseURL: 'http://a.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 1 },
+    });
+    const builder = client.request(method, '/x', { body: { a: 1 } });
+
+    const response = await builder.send();
+
+    expect(sends).toBe(0);
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(response.isNetworkError).toBe(false);
+  }
+});

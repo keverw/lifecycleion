@@ -6899,6 +6899,31 @@ describe('NodeAdapter — crl option (normalization)', () => {
     );
   });
 
+  test('a clipped CRL followed by a complete one is refused, at construction too', async () => {
+    // The clipped block's BEGIN pairs with the next block's END, so the framing
+    // check alone sees two complete-looking blocks and no residue. Node then
+    // fails to parse it on every HTTPS request, retried as a network error.
+    const lines = fixtures.unrelatedCRL.trim().split('\n');
+    const clippedBundle =
+      lines.slice(0, 3).join('\n') + '\n' + fixtures.crlRevoked;
+
+    expect(() => new NodeAdapter({ crl: clippedBundle })).toThrow(
+      /could not be parsed/,
+    );
+
+    let rejection: unknown;
+
+    try {
+      await captureCRL({ crl: clippedBundle });
+    } catch (error) {
+      rejection = error;
+    }
+
+    expect((rejection as Error | undefined)?.message).toMatch(
+      /could not be parsed/,
+    );
+  });
+
   test('a DAMAGED delimiter is refused, not just an exact one', async () => {
     // The check cannot be a search for well-formed armour. A delimiter that
     // lost or gained a hyphen still marks a CRL that was cut short, but it

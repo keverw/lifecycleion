@@ -7,6 +7,7 @@ import { observeRejection } from '../../internal/promise-reactions';
 import * as http from 'node:http';
 import { guardProgressCallback } from '../internal/progress';
 import * as https from 'node:https';
+import * as tls from 'node:tls';
 import { urlToHttpOptions } from 'node:url';
 import type {
   HTTPAdapter,
@@ -2112,6 +2113,7 @@ async function streamResponseBody(
 
       detachWritableListener(writable, 'drain', onWritableDrain);
       detachWritableListener(writable, 'error', onWritableError);
+      detachWritableListener(writable, 'close', onWritableClose);
 
       res.off('data', onResponseData);
       res.off('end', onResponseEnd);
@@ -2157,6 +2159,24 @@ async function streamResponseBody(
       settle({
         code: 'stream_write_error',
         cause: normalizeError(error),
+      });
+    };
+
+    // A writable that closes with no error before the body is through - destroyed by
+    // its owner, a proxied client that went away - would otherwise leave a response
+    // paused for backpressure waiting on a `'drain'` that never comes, and the request
+    // open until its timeout, or forever with none. Once the response has ended, the
+    // `end` callback is the one that answers, as it does for every other writable.
+    const onWritableClose = (): void => {
+      if (didReceiveEnd) {
+        return;
+      }
+
+      settle({
+        code: 'stream_write_error',
+        cause: new Error(
+          'Writable closed before the response body was fully written',
+        ),
       });
     };
 
@@ -2340,6 +2360,7 @@ async function streamResponseBody(
     // retained request closure behind each of them, request after request.
     attachWritableListener(writable, 'drain', onWritableDrain);
     attachWritableListener(writable, 'error', onWritableError);
+    attachWritableListener(writable, 'close', onWritableClose);
 
     res.on('data', onResponseData);
     res.on('end', onResponseEnd);
@@ -2834,11 +2855,49 @@ const RESIDUE_OUTSIDE_PEM_BLOCKS = /\S/;
 function normalizeCRL(
   crl: string | ArrayBufferView | Array<string | ArrayBufferView>,
 ): string | Buffer | Array<string | Buffer> {
-  if (Array.isArray(crl)) {
-    return crl.flatMap((entry) => normalizeCRLEntry(entry));
+  const normalized = Array.isArray(crl)
+    ? crl.flatMap((entry) => normalizeCRLEntry(entry))
+    : normalizeCRLEntry(crl);
+
+  assertCRLParses(normalized);
+
+  return normalized;
+}
+
+/** The text of the last `crl` set that parsed, so a value read per request is parsed once. */
+let lastParsedCRLText: string | undefined;
+
+/**
+ * Parse the normalized set the way the TLS context will, so a value the framing check
+ * cannot see is broken - a clipped CRL whose `BEGIN` pairs with the next block's `END`,
+ * corrupted base64 inside intact armour - is refused here rather than failing every HTTPS
+ * request when the context is built, retried as a network error.
+ */
+function assertCRLParses(crl: string | Buffer | Array<string | Buffer>): void {
+  const text = (Array.isArray(crl) ? crl : [crl])
+    .map((entry) =>
+      typeof entry === 'string' ? entry : entry.toString('latin1'),
+    )
+    .join('\n');
+
+  if (text === lastParsedCRLText) {
+    return;
   }
 
-  return normalizeCRLEntry(crl);
+  try {
+    tls.createSecureContext({ crl });
+  } catch (error) {
+    throw crlValidationError(
+      new Error(
+        'NodeAdapter: the `crl` value could not be parsed as a CRL. Common causes: ' +
+          "a CRL clipped mid-body (its BEGIN line pairs with the next block's END) " +
+          'or corrupted base64 inside a block.',
+        { cause: error },
+      ),
+    );
+  }
+
+  lastParsedCRLText = text;
 }
 
 /**
@@ -3084,7 +3143,7 @@ interface SharedWritableListenerEntry {
 
 function attachWritableListener(
   writable: WritableLike,
-  event: 'drain' | 'error',
+  event: 'drain' | 'error' | 'close',
   listener: (() => void) | ((error: Error) => void),
 ): void {
   if (getWritableListenerRemover(writable) !== null) {
@@ -3096,6 +3155,8 @@ function attachWritableListener(
     try {
       if (event === 'error') {
         writable.on('error', listener);
+      } else if (event === 'close') {
+        writable.on('close', listener as () => void);
       } else {
         writable.on('drain', listener as () => void);
       }
@@ -3169,6 +3230,12 @@ function attachWritableListener(
       return;
     }
 
+    if (event === 'close') {
+      writable.on('close', dispatch as unknown as () => void);
+
+      return;
+    }
+
     writable.on('drain', dispatch as unknown as () => void);
   } catch {
     // The entry goes, so a later request attaches a fresh `dispatch` rather than joining a
@@ -3182,7 +3249,7 @@ function attachWritableListener(
 
 function detachWritableListener(
   writable: WritableLike,
-  event: 'drain' | 'error',
+  event: 'drain' | 'error' | 'close',
   listener: (() => void) | ((error: Error) => void),
 ): void {
   if (getWritableListenerRemover(writable) !== null) {
@@ -3237,7 +3304,7 @@ function getWritableListenerRemover(
 
 function removeWritableListener(
   writable: WritableLike,
-  event: 'drain' | 'error',
+  event: 'drain' | 'error' | 'close',
   listener: (() => void) | ((error: Error) => void),
 ): void {
   try {

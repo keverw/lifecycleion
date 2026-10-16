@@ -113,6 +113,25 @@ type RemoveFn = () => void;
 const COOKIE_JAR_FAILURE_MESSAGE =
   'Cookie jar failed to process response headers';
 
+/**
+ * The adapter-answer fields read through the receiver when the answer does not own them
+ * (a class instance's prototype getters). `headers`, `effectiveRequestHeaders` and
+ * `requestBodySettled` are read on their own before these.
+ */
+const ADAPTER_RESPONSE_FIELDS = [
+  'status',
+  'body',
+  'wasRedirectDetected',
+  'detectedRedirectURL',
+  'isTransportError',
+  'isRetryable',
+  'wasDefinitelyNotSent',
+  'isStreamed',
+  'isStreamError',
+  'streamErrorCode',
+  'errorCause',
+] as const satisfies readonly (keyof AdapterResponse)[];
+
 type RedirectFields = Pick<
   AdapterResponse,
   'wasRedirectDetected' | 'detectedRedirectURL'
@@ -1224,7 +1243,12 @@ export class BaseHTTPClient {
                   attemptResult.sentRequest.headers,
                 requestURL: redirectURL,
                 method: redirectMethod,
-                body: redirectMethod === 'GET' ? undefined : sentBody.value,
+                // Dropped only when this hop rewrote the method: a 307/308 replays a
+                // GET's body as it replays any other method's.
+                body:
+                  redirectMethod === attemptResult.sentRequest.method
+                    ? sentBody.value
+                    : undefined,
               },
               {
                 fromURL: hopFromURL,
@@ -1645,9 +1669,14 @@ export class BaseHTTPClient {
       // Chromium/fetch behavior — Authorization, X-API-Key, etc. must not
       // leak to a different host. Cookies and internal headers are re-attached
       // later as needed.
+      //
+      // `content-encoding` is kept with them: it describes the body a 307/308 replays,
+      // not the caller, and that body arrives unreadable without it. It is dropped
+      // below with the body when the hop does not carry one.
       const safelisted = new Set([
         'accept',
         'accept-language',
+        'content-encoding',
         'content-language',
         'content-type',
         'user-agent',
@@ -1669,10 +1698,18 @@ export class BaseHTTPClient {
       headers = { ...request.headers };
     }
 
-    if (request.method === 'GET') {
-      // Drop body-related headers when method was rewritten to GET.
+    if (
+      request.method === 'GET' &&
+      (request.body === undefined || request.body === null)
+    ) {
+      // Drop body-related headers when the method was rewritten to GET and the body
+      // with it. A 307/308 GET that replays its body keeps them.
       for (const key of Object.keys(headers)) {
-        if (['content-type', 'content-length'].includes(key.toLowerCase())) {
+        if (
+          ['content-type', 'content-length', 'content-encoding'].includes(
+            key.toLowerCase(),
+          )
+        ) {
           delete headers[key];
         }
       }
@@ -2286,10 +2323,11 @@ export class BaseHTTPClient {
             );
           }
         }
-        // `status` and `body` are read through the receiver when they are not own fields,
-        // as `headers` is: a class-instance answer whose fields are prototype getters is
-        // read whole rather than as a status-less success.
-        for (const key of ['status', 'body'] as const) {
+        // The other answer fields are read through the receiver when they are not own
+        // fields, as `headers` is: a class-instance answer whose fields are prototype
+        // getters is read whole - its status, and its error flags with it - rather than
+        // as a status-less or error-free success.
+        for (const key of ADAPTER_RESPONSE_FIELDS) {
           if (!Object.hasOwn(adapterResponse, key)) {
             const value: unknown = Reflect.get(rawAdapterResponse, key);
             if (value !== undefined) {
@@ -3908,6 +3946,19 @@ export class BaseHTTPClient {
       (adapterType === 'fetch' || adapterType === 'xhr')
     ) {
       assertNoBrowserRestrictedHeaders(request.headers, adapterName);
+    }
+    // `fetch` refuses a GET or HEAD with a body on every attempt, on every runtime.
+    // Refused here for the same reason as the methods below.
+    if (
+      adapterType === 'fetch' &&
+      request.body !== undefined &&
+      request.body !== null &&
+      (request.method.toUpperCase() === 'GET' ||
+        request.method.toUpperCase() === 'HEAD')
+    ) {
+      throw new Error(
+        `[FetchAdapter] Cannot send a ${request.method} request with a body: fetch refuses one. Use NodeAdapter, or send the body with POST.`,
+      );
     }
     // Refused here, as the method-override headers that tunnel them are: `fetch` refuses
     // these methods on every runtime (the Fetch Standard forbids them), and XHR in a

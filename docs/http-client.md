@@ -532,7 +532,9 @@ transport: Node's `http` uppercases it, Node's `fetch` sends it as given, and Bu
 `fetch` uppercases a method it knows and sends one it does not know as `GET` - so use `NodeAdapter` for a custom
 method on Bun. `CONNECT` is refused on every adapter (it opens a tunnel), and
 `TRACE` and `TRACK` are refused before dispatch through `FetchAdapter`, and through
-`XHRAdapter` in a browser, since those refuse them. Header entries are copied at that
+`XHRAdapter` in a browser, since those refuse them. A `GET` or `HEAD` with a body is
+refused before dispatch through `FetchAdapter` too, since `fetch` refuses one; use
+`NodeAdapter` to send it. Header entries are copied at that
 point: a single value is converted to a string, an array stays an array with each
 element converted to a string, and a one-element array becomes that element's string.
 Every later check and use (URL validation, the browser-restricted header check,
@@ -976,6 +978,8 @@ const client = new HTTPClient({
 
 Cross-origin redirects strip unsafe headers (Authorization, Cookie, etc.) from the forwarded request.
 
+A `307` or `308` replays the body, a `GET`'s included, with its `Content-Type` and `Content-Encoding`, across origins too. A hop rewritten to `GET` drops the body and those headers.
+
 With `NodeAdapter`, URL-based Basic auth follows the resolved redirect URL: from `https://user:pass@example.com/start`, a relative `Location: /next` retains those credentials, while an absolute `Location: https://example.com/next` without userinfo does not. An explicitly supplied `Authorization` header still carries through same-origin redirects.
 
 **Credentials in the `Location` URL are stripped too, on the same rule.** `user:pass@` in a URL is `Authorization: Basic` by another name. `NodeAdapter` copies it onto `options.auth`. A redirect target is the remote server's choice, so `Location: https://admin:secret@other.host/` does not authenticate this client to a host you never named. The userinfo is removed before the hop is recorded, so `redirectHistory`, the followed `requestURL`, and the observers and errors built from them do not carry it either. Same-origin userinfo is left alone. Fetch treats the same shape as fatal (a cross-origin `locationURL` that includes credentials is a network error). Stripping keeps the redirect followable and matches what this client already does to every other credential on a cross-origin hop.
@@ -1351,7 +1355,7 @@ const client = new HTTPClient({
 
 The value is read and normalized on **every request**, so refreshing a revocation set means passing a new value. **Construct a new `NodeAdapter`.** That is the intended way, and it is cheap precisely because the adapter owns no connection pool, so there is nothing to release and nothing to leak. There is no update method, and none is needed. Mutating the config object you handed the adapter also takes effect, but rebuilding keeps the CRL and the client that uses it visibly in step. How often to refresh is yours to decide. The library has no timer.
 
-**Bundles are split for you.** A PEM string or Buffer holding several concatenated CRLs, the format Apache's `SSLCARevocationFile`, nginx's `ssl_crl`, and HAProxy's `crl-file` all expect and CA tooling exports, is split into the array Node requires. This includes Buffers: `fs.readFileSync('bundle.pem')` without an encoding returns one, and its contents are PEM like any other bundle, so it would otherwise be truncated exactly as a string would. Strings and Buffers nested inside an array are split too, so `[bundleOfTwo, oneMore]` contributes three CRLs rather than two. Any binary view is read as a `Buffer` over the same bytes and passed on as one. Only PEM is accepted: Node's `tls` does not read DER CRLs, so DER bytes are refused when the adapter is constructed (convert them with `openssl crl -inform DER -outform PEM`).
+**Bundles are split for you.** A PEM string or Buffer holding several concatenated CRLs, the format Apache's `SSLCARevocationFile`, nginx's `ssl_crl`, and HAProxy's `crl-file` all expect and CA tooling exports, is split into the array Node requires. This includes Buffers: `fs.readFileSync('bundle.pem')` without an encoding returns one, and its contents are PEM like any other bundle, so it would otherwise be truncated exactly as a string would. Strings and Buffers nested inside an array are split too, so `[bundleOfTwo, oneMore]` contributes three CRLs rather than two. Any binary view is read as a `Buffer` over the same bytes and passed on as one. Only PEM is accepted: Node's `tls` does not read DER CRLs, so DER bytes are refused when the adapter is constructed (convert them with `openssl crl -inform DER -outform PEM`). The CRLs are also parsed then, and when a changed value is read for a request, so a CRL clipped mid-body or with corrupted base64 is refused as a non-retryable error rather than failing every HTTPS request.
 
 **Only PEM blocks and whitespace are accepted.** Initial CRL framing is validated when `NodeAdapter` is constructed, before any request or retry, including for clients using plain HTTP. The CRL is still read and normalized per HTTPS request so callers can refresh it; a refreshed value that is badly framed, or is not a string, binary data (a `Buffer`, `Uint8Array` or other `ArrayBuffer` view) or an array of them, fails that request without a retry. Anything else in the string, such as a truncated or corrupted CRL, a damaged delimiter, or decoded text from `openssl ... -text`, is refused with an error rather than split. The rule is exact rather than a best guess: a parser cannot tell a half-written CRL from a line of commentary, so admitting commentary would mean silently dropping the truncated entry and enforcing a revocation set you never supplied. Strip any annotation before passing a bundle here. A refreshed value that fails this check fails the request with `adapter_error` and the validation error as its cause, without retrying.
 
@@ -1645,6 +1649,8 @@ Expectations for a custom writable:
   See [How long that listener stays](#how-long-that-listener-stays).
 - **Emit `'close'` when you are finished.** That is how the adapter learns nothing further
   is coming and takes the listener off at once, instead of waiting out the timers below.
+  A sink that closes before the response body is through, with no error (destroyed by its
+  owner, a proxied client that went away), fails the download as `stream_write_error`.
 - **Set `errored` if you can, but you need not.** A Node stream records the error it failed
   with there, and the adapter reads it as a second signal when `end`'s callback reports
   success on a stream that was destroyed underneath it. It is optional, and a sink without
