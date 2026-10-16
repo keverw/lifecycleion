@@ -2105,9 +2105,9 @@ export class BaseHTTPClient {
       // code, the caller's observers and attempt hooks being contained where they run,
       // with one exception: the cookie jar is the caller's, so a jar that throws on its
       // own account is reported here as an `adapter_error` too - the request was still
-      // answered, which is what rules out re-sending it. Unless the attempt's timer fired
-      // first: then it is a timeout like any other, retried only where a timeout is - an
-      // idempotent method, or one the caller opted in.
+      // answered, which is what rules out re-sending it. So is one whose answer arrived
+      // after the attempt's timer fired: only the timer's own `AbortError` surfacing while
+      // the answer is read makes it a timeout, retried only where a timeout is.
       let didAdapterResolve = false;
       // Set when the caller's cookie jar is what threw, so the error says so.
       let didCookieJarFail = false;
@@ -2497,7 +2497,8 @@ export class BaseHTTPClient {
         // body, which a redirect interceptor may replace or remove. Carry only
         // authored values forward and infer the rest again for the next body.
         // Use the latest intercepted request, before Content-Type inference.
-        const authoredHeaders = mergeHeaders(attemptRequest.headers);
+        // Already normalized (a `ResolvedRequest`), and only read here.
+        const authoredHeaders = attemptRequest.headers;
         for (const key of ['content-length', 'content-type']) {
           if (Object.hasOwn(authoredHeaders, key)) {
             redirectRequestHeaders[key] = authoredHeaders[key];
@@ -2551,8 +2552,10 @@ export class BaseHTTPClient {
               sentRequest.requestURL,
             );
           } catch (jarError) {
-            // A cancel or timeout wins, as on the resolved path: the branches below
-            // report that outcome instead, and the jar's failure is not reported.
+            // A cancel or timeout wins: here the stream was cut, by the cancel or the
+            // attempt's timer, so the branches below report that outcome and the jar's
+            // failure is not reported. (On the resolved path the answer was whole, so a
+            // jar failure there is the answered response's adapter_error, timer or not.)
             if (!cancelSignal.aborted && !isTimedOut) {
               // The jar threw on headers the server did send, so this ends as the
               // answered response's adapter_error, named for the jar, as on the
@@ -4249,6 +4252,15 @@ function adoptRequestBodySettled(
  * Either way the promise resolves with a fresh Error whose `then` lookup reaches only
  * the built-in prototypes.
  */
+const UPLOAD_ERROR_FIELDS = [
+  'code',
+  'errno',
+  'syscall',
+  'address',
+  'port',
+  'path',
+] as const;
+
 function stableUploadError(value: unknown): Error {
   if (!isErrorValue(value)) {
     return normalizeError(value);
@@ -4268,13 +4280,20 @@ function stableUploadError(value: unknown): Error {
     });
   }
   // Wrapping is required for safe promise resolution, but the upload's diagnostic
-  // code and original stack still describe the failure better than this wrapper's
-  // construction site. Snapshot only these known fields with guarded reads; copying
-  // arbitrary properties would run unrelated getters and could copy then back in.
+  // fields and original stack still describe the failure better than this wrapper's
+  // construction site. Snapshot only known fields - `code` and the rest of a Node system
+  // error's (`errno`, `syscall`, `address`, `port`, `path`) - with guarded reads; copying
+  // arbitrary properties would run unrelated getters and could copy `then` back in.
   // Define own data properties so inherited setters cannot intercept the copies.
-  const code = readObjectMember(error, 'code');
-  if (code !== undefined) {
-    defineEntry(wrapped as unknown as Record<string, unknown>, 'code', code);
+  for (const field of UPLOAD_ERROR_FIELDS) {
+    const fieldValue = readObjectMember(error, field);
+    if (fieldValue !== undefined) {
+      defineEntry(
+        wrapped as unknown as Record<string, unknown>,
+        field,
+        fieldValue,
+      );
+    }
   }
   // Not `defineEntry`: `stack` stays non-enumerable, as a native Error's own is.
   const stack = readObjectMember(error, 'stack');

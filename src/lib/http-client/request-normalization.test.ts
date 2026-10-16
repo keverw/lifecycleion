@@ -726,3 +726,50 @@ test('a filter is read once and copied, so later changes to it do not apply', as
   expect(phaseReads).toBe(1);
   expect(runs).toBe(1);
 });
+
+test('a callback that is not a function is refused when registered', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  expect(() => client.addRequestInterceptor(null as never)).toThrow(
+    'HTTPClient request interceptor must be a function (got null)',
+  );
+  expect(() => client.addResponseObserver('log' as never)).toThrow(
+    'HTTPClient response observer must be a function (got string)',
+  );
+  expect(() => client.addErrorObserver({} as never)).toThrow(
+    'HTTPClient error observer must be a function (got object)',
+  );
+});
+
+test("an upload Error keeps a Node system error's fields, with the original as cause", async () => {
+  const original = Object.assign(new Error('write ECONNRESET'), {
+    code: 'ECONNRESET',
+    errno: -54,
+    syscall: 'write',
+    address: '127.0.0.1',
+    port: 8080,
+  });
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () =>
+      Promise.resolve({
+        status: 200,
+        headers: {},
+        body: null,
+        requestBodySettled: Promise.resolve(original),
+      }),
+  };
+  const client = new HTTPClient({ adapter, baseURL: 'http://example.test' });
+
+  const response = await client.post('/x').json({ a: 1 }).send();
+  const uploadError = await response.requestBodySettled;
+
+  expect(uploadError?.cause).toBe(original);
+  expect(uploadError?.message).toBe('write ECONNRESET');
+  expect(uploadError).toMatchObject({
+    code: 'ECONNRESET',
+    errno: -54,
+    syscall: 'write',
+    address: '127.0.0.1',
+    port: 8080,
+  });
+});

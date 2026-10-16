@@ -318,7 +318,9 @@ response arrives after the upload has finished. It does not prove that the serve
 processed or committed the data. The same outcome is shared by the attempt's retry,
 redirect, and response handling. An upload Error is always a wrapper, on every runtime:
 the adapter's original Error is its `cause`, and it copies the original's readable
-`message`, `name`, `code`, and `stack`. A rejection with a non-Error value is normalized
+`message`, `name`, `stack`, and `code`, plus a Node system error's `errno`, `syscall`,
+`address`, `port` and `path`, so `error.syscall === 'write'` still reads as it would on
+the original. `instanceof` does not: check `error.cause` for the original's class. A rejection with a non-Error value is normalized
 into an Error that likewise carries the value as `cause`. Inspect `cause` for the
 original's identity, class, or other custom fields.
 

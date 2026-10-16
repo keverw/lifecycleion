@@ -75,6 +75,14 @@ export class CallbackRegistry<
   ) {}
 
   public add(fn: Fn, filter?: Filter): RemoveFn {
+    // Refused now, as a malformed filter is, rather than failing - or, for an observer,
+    // being reported and skipped - on every request it would have run for.
+    const callback: unknown = fn;
+    if (typeof callback !== 'function') {
+      throw new TypeError(
+        `${this.label} must be a function (got ${callback === null ? 'null' : typeof callback})`,
+      );
+    }
     const candidate: unknown = filter;
     if (!isNullish(candidate) && typeof candidate !== 'object') {
       throw new TypeError(
