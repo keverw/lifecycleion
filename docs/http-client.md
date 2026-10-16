@@ -526,8 +526,10 @@ from earlier interceptor results, including when those filters do not match. Whe
 the chain finishes, the client copies `requestURL`, `method`, `headers` and `body` into a
 request object of its own. A standard method (`GET`, `HEAD`, `POST`, `PUT`, `DELETE`,
 `OPTIONS`, `PATCH`) is uppercased whatever its case, so a `post` is treated as `POST` by
-the retry and redirect rules; any other method is case-sensitive and sent as given, as
-`request()` sends it too. Header entries are copied at that
+the retry and redirect rules; any other method is case-sensitive and passed to the
+adapter as given, as `request()` passes it too (some transports uppercase it on the wire:
+Node's `http` and Bun's `fetch` do, Node's `fetch` does not). In a browser, `CONNECT`,
+`TRACE` and `TRACK` are refused before dispatch, since browsers refuse them. Header entries are copied at that
 point: a single value is converted to a string, an array stays an array with each
 element converted to a string, and a one-element array becomes that element's string.
 Every later check and use (URL validation, the browser-restricted header check,

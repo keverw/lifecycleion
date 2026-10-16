@@ -445,6 +445,29 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(errorCodes).toEqual(['request_setup_error']);
   });
 
+  test('a browser-forbidden method is refused before dispatch, not retried', async () => {
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).document = {};
+
+    let fetchCalls = 0;
+    globalThis.fetch = (() => {
+      fetchCalls++;
+      return Promise.resolve(new Response('ok'));
+    }) as unknown as typeof fetch;
+
+    const client = new HTTPClient({
+      baseURL: 'https://local.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    });
+    const builder = client.request('TRACE', '/users');
+    const res = await builder.send();
+
+    expect(fetchCalls).toBe(0);
+    expect(res.isFailed).toBe(true);
+    expect(builder.error?.code).toBe('request_setup_error');
+    expect(builder.error?.cause?.message).toMatch(/browsers refuse/);
+  });
+
   test('browser-restricted header from interceptor becomes interceptor_error', async () => {
     (globalThis as Record<string, unknown>).window = {};
     (globalThis as Record<string, unknown>).document = {};

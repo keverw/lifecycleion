@@ -50,6 +50,7 @@ import {
   DEFAULT_REQUEST_ID_HEADER,
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_USER_AGENT,
+  BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   REQUEST_BODY_SETTLED_KEY,
@@ -3900,10 +3901,21 @@ export class BaseHTTPClient {
       this._isBrowserRuntime &&
       (this._adapter.getType() === 'fetch' || this._adapter.getType() === 'xhr')
     ) {
-      assertNoBrowserRestrictedHeaders(
-        request.headers,
-        this._adapter.getType() === 'fetch' ? 'FetchAdapter' : 'XHR adapter',
-      );
+      const adapterName =
+        this._adapter.getType() === 'fetch' ? 'FetchAdapter' : 'XHR adapter';
+      assertNoBrowserRestrictedHeaders(request.headers, adapterName);
+      // Refused here, as the method-override headers that tunnel them are: a browser
+      // refuses these methods on every attempt, so letting one through only spends the
+      // retry budget on a transport failure.
+      if (
+        BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES.has(
+          request.method.toLowerCase(),
+        )
+      ) {
+        throw new Error(
+          `[${adapterName}] Cannot send a ${request.method} request: browsers refuse the CONNECT, TRACE and TRACK methods.`,
+        );
+      }
     }
   }
 
