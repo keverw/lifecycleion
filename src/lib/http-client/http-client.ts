@@ -1701,7 +1701,8 @@ export class BaseHTTPClient {
     /**
      * Set to the caller's body of each attempt as it is dispatched, so a 307/308 replays
      * that value - serialized as the attempt's was - rather than the observers' copy,
-     * which keeps no prototypes and so no `toJSON`.
+     * which rebuilds plain objects and class instances as plain objects, losing their
+     * `toJSON`.
      */
     sentBody: { value: unknown };
     /** Latest destination explicitly selected by the caller or a retry interceptor. */
@@ -4047,9 +4048,9 @@ function buildObservedAttemptBodies(rawBody: unknown): ObservedAttemptBodies {
   assertSupportedRequestBody(rawBody);
   const rawBodySnapshot = cloneBodyValue(rawBody);
   // A JSON body is serialized from the caller's value itself, as `JSON.stringify` would:
-  // the snapshot is a deep copy for observers, and a copy keeps no prototypes, so what
-  // JSON reads from one - a nested `URL`'s or class instance's `toJSON`, another realm's
-  // `Date` - would be sent as `{}`. Bytes and form data are sent as the copy.
+  // the snapshot is a deep copy for observers, which rebuilds class instances and objects
+  // it does not recognize as plain objects, so what JSON reads from their prototypes - a
+  // nested `URL`'s or class instance's `toJSON`, another realm's `Date` - would be lost. Bytes and form data are sent as the copy.
   const isJSONBody = Array.isArray(rawBody) || isPlainJSONBodyObject(rawBody);
   const { body, contentType } = serializeBody(
     isJSONBody ? rawBody : rawBodySnapshot,
