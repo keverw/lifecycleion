@@ -773,3 +773,28 @@ test("an upload Error keeps a Node system error's fields, with the original as c
     port: 8080,
   });
 });
+
+test('a filter naming a phase, scheme or content type that cannot occur is refused', () => {
+  const client = new HTTPClient({ adapter: new RecordingAdapter(200) });
+  // An interceptor never runs in the final phase, so this would match nothing.
+  expect(() =>
+    client.addRequestInterceptor((request) => request, {
+      phases: ['final' as never],
+    }),
+  ).toThrow(
+    `HTTPClient request interceptor filter phases has "final", which is not one of 'initial', 'retry', 'redirect'`,
+  );
+  expect(() =>
+    client.addErrorObserver(() => undefined, { phases: ['redirect' as never] }),
+  ).toThrow('HTTPClient error observer filter phases has "redirect"');
+  expect(() =>
+    client.addRequestInterceptor((request) => request, {
+      schemes: ['HTTPS' as never],
+    }),
+  ).toThrow('HTTPClient request interceptor filter schemes has "HTTPS"');
+  expect(() =>
+    client.addResponseObserver(() => undefined, {
+      contentTypes: ['xml' as never],
+    }),
+  ).toThrow('HTTPClient response observer filter contentTypes has "xml"');
+});

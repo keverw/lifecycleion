@@ -2,33 +2,40 @@ import { isNullish } from '../../internal/is-nullish';
 import { normalizeFilterMethods } from '../utils';
 
 /**
- * Every list a filter can carry besides `methods`, with the type each entry must have.
- * `matchesFilter` tests membership with `includes`/`some`, so a string in place of a list
- * would match by substring - `phases: 'initial,retry'` matching both - and anything else
- * would throw on every request.
+ * Every list a filter can carry besides `methods`: the type each entry must have and, for
+ * a list of fixed names, the names allowed (`phases` is allowed per registry, since each
+ * kind of callback is reached in its own phases). `matchesFilter` tests membership with
+ * `includes`/`some`, so a string in place of a list would match by substring -
+ * `phases: 'initial,retry'` matching both - and a name no request can have would match
+ * nothing, silently.
  */
-const FILTER_LISTS = {
-  phases: 'string',
-  hosts: 'string',
-  schemes: 'string',
-  bodyContainsKeys: 'string',
-  statusCodes: 'number',
-  contentTypes: 'string',
-  contentTypeHeaders: 'string',
-} as const;
+const FILTER_LISTS: Record<
+  string,
+  { entryType: 'string' | 'number'; allowed?: readonly string[] }
+> = {
+  phases: { entryType: 'string' },
+  hosts: { entryType: 'string' },
+  schemes: { entryType: 'string', allowed: ['http', 'https'] },
+  bodyContainsKeys: { entryType: 'string' },
+  statusCodes: { entryType: 'number' },
+  contentTypes: { entryType: 'string', allowed: ['json', 'text', 'binary'] },
+  contentTypeHeaders: { entryType: 'string' },
+};
 
 /**
  * The lists of `filter`, each read once, checked and copied - so a getter is not read
  * again, and a list the caller changes later does not change what matches. Nullish means
  * the list is absent. Throws a `TypeError` naming `label` for anything else that is not
- * an array of the right kind of entry.
+ * an array of the right kind of entry, or that names a phase, scheme or content type that
+ * does not exist.
  */
 function copyFilterLists(
   filter: Record<string, unknown>,
   label: string,
+  allowedPhases: readonly string[],
 ): Record<string, unknown[]> {
   const lists: Record<string, unknown[]> = {};
-  for (const [field, entryType] of Object.entries(FILTER_LISTS)) {
+  for (const [field, rule] of Object.entries(FILTER_LISTS)) {
     const value = filter[field];
     if (isNullish(value)) {
       continue;
@@ -38,11 +45,17 @@ function copyFilterLists(
         `${label} filter ${field} must be an array (got ${typeof value})`,
       );
     }
+    const allowed = field === 'phases' ? allowedPhases : rule.allowed;
     const list = [...(value as unknown[])];
     for (const entry of list) {
-      if (typeof entry !== entryType) {
+      if (typeof entry !== rule.entryType) {
         throw new TypeError(
-          `${label} filter ${field} must contain only ${entryType}s (got ${entry === null ? 'null' : typeof entry})`,
+          `${label} filter ${field} must contain only ${rule.entryType}s (got ${entry === null ? 'null' : typeof entry})`,
+        );
+      }
+      if (allowed && !allowed.includes(entry as string)) {
+        throw new TypeError(
+          `${label} filter ${field} has ${JSON.stringify(entry)}, which is not one of ${allowed.map((name) => `'${name}'`).join(', ')}`,
         );
       }
     }
@@ -72,6 +85,8 @@ export class CallbackRegistry<
   constructor(
     private readonly defaultPhases: Filter['phases'],
     private readonly label: string,
+    /** The phases this kind of callback is reached in, which its filter may name. */
+    private readonly allowedPhases: readonly string[],
   ) {}
 
   public add(fn: Fn, filter?: Filter): RemoveFn {
@@ -93,7 +108,7 @@ export class CallbackRegistry<
     // Each field read once, into a filter of the client's own: only the fields
     // `matchesFilter` reads are kept.
     const methods = normalizeFilterMethods(source.methods, this.label);
-    const lists = copyFilterLists(source, this.label);
+    const lists = copyFilterLists(source, this.label, this.allowedPhases);
     const entry: RegisteredCallback<Fn, Filter> = {
       fn,
       filter: {

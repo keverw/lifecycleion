@@ -20,7 +20,11 @@ export class RequestInterceptorManager extends CallbackRegistry<
   RequestInterceptorFilter
 > {
   constructor() {
-    super(DEFAULT_INTERCEPTOR_PHASES, 'HTTPClient request interceptor');
+    super(DEFAULT_INTERCEPTOR_PHASES, 'HTTPClient request interceptor', [
+      'initial',
+      'retry',
+      'redirect',
+    ]);
   }
 
   /**

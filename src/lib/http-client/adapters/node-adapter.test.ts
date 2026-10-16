@@ -7621,13 +7621,14 @@ test('a caller throw while a refreshed CRL is normalized stays retryable and unt
   const requestSpy = spyOn(https, 'request');
   let attempts = 0;
 
-  config.crl = [
-    {
-      toString(): string {
-        throw failure;
-      },
-    } as unknown as Buffer,
-  ];
+  // A real Buffer, so it passes the type check, whose `toString` is caller code.
+  const throwingBuffer = Buffer.from('crl');
+  Object.defineProperty(throwingBuffer, 'toString', {
+    value: (): string => {
+      throw failure;
+    },
+  });
+  config.crl = [throwingBuffer];
 
   try {
     const builder = new HTTPClient({ adapter })
@@ -7647,6 +7648,35 @@ test('a caller throw while a refreshed CRL is normalized stays retryable and unt
         NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
       ),
     ).toBe(false);
+    expect(requestSpy).not.toHaveBeenCalled();
+  } finally {
+    requestSpy.mockRestore();
+  }
+});
+
+test('a refreshed CRL of the wrong kind is refused as configuration, not retried', async () => {
+  const config: NodeAdapterConfig = { crl: '' };
+  const adapter = new NodeAdapter(config);
+  const requestSpy = spyOn(https, 'request');
+  let attempts = 0;
+  // A cache cleared to `null` between requests.
+  config.crl = null as unknown as string;
+
+  try {
+    const builder = new HTTPClient({ adapter })
+      .get('https://crl.test/api')
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 })
+      .onAttemptEnd(() => {
+        attempts++;
+      });
+
+    const res = await builder.send();
+
+    expect(res.isFailed).toBe(true);
+    expect(attempts).toBe(1);
+    expect(builder.error?.cause?.message).toBe(
+      'NodeAdapter crl must be a string, a Buffer, or an array of them (got null)',
+    );
     expect(requestSpy).not.toHaveBeenCalled();
   } finally {
     requestSpy.mockRestore();

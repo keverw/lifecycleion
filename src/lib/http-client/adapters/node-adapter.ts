@@ -2682,6 +2682,23 @@ function ignoreWritableError(): void {
   // Intentionally empty.
 }
 
+/** A request's headers with each value read once and converted, names kept as given. */
+function copyRequestHeaders(
+  headers: Record<string, unknown> | undefined,
+): Record<string, string | string[]> {
+  const copy: Record<string, string | string[]> = {};
+  if (!headers) {
+    return copy;
+  }
+  for (const [name, value] of Object.entries(headers)) {
+    const present = presentHeaderValue(value);
+    if (present !== undefined) {
+      defineEntry(copy, name, present);
+    }
+  }
+  return copy;
+}
+
 /**
  * Read every member of an {@link AdapterRequest} once, into a plain object this adapter
  * owns.
@@ -2704,23 +2721,6 @@ function ignoreWritableError(): void {
  * factory that is a method reading `this` - a class-instance request - sees the object it
  * belongs to. Only the member read is moved up front; the receiver is not changed.
  */
-/** A request's headers with each value read once and converted, names kept as given. */
-function copyRequestHeaders(
-  headers: Record<string, unknown> | undefined,
-): Record<string, string | string[]> {
-  const copy: Record<string, string | string[]> = {};
-  if (!headers) {
-    return copy;
-  }
-  for (const [name, value] of Object.entries(headers)) {
-    const present = presentHeaderValue(value);
-    if (present !== undefined) {
-      defineEntry(copy, name, present);
-    }
-  }
-  return copy;
-}
-
 function snapshotAdapterRequest(request: AdapterRequest): AdapterRequest {
   const {
     requestURL,
@@ -2846,6 +2846,18 @@ function normalizeCRL(
 function normalizeCRLEntry(entry: string | Buffer): string | Buffer | string[] {
   if (typeof entry === 'string') {
     return splitCRLString(entry);
+  }
+
+  // Refused as this adapter's own validation error, so a refreshed value of the wrong
+  // kind - a cache cleared to `null`, say - is terminal like bad framing rather than
+  // retried as whatever its `toString` throws.
+  const candidate: unknown = entry;
+  if (!Buffer.isBuffer(candidate)) {
+    const error = new TypeError(
+      `NodeAdapter crl must be a string, a Buffer, or an array of them (got ${candidate === null ? 'null' : typeof candidate})`,
+    );
+    crlValidationErrors.add(error);
+    throw error;
   }
 
   // latin1 is a byte-for-byte mapping, so PEM (which is ASCII) survives

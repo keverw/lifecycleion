@@ -3013,7 +3013,7 @@ export class BaseHTTPClient {
               return {
                 adapterResponse: null,
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
-                sentRequest,
+                sentRequest: reportedSentRequest,
                 attemptCount: attemptNumber,
                 wasCancelled: wait === 'cancelled',
                 wasTimeout: wait === 'deadline',
@@ -4242,6 +4242,16 @@ function adoptRequestBodySettled(
   );
 }
 
+/** The fields an upload Error's wrapper copies from it; see `stableUploadError`. */
+const UPLOAD_ERROR_FIELDS = [
+  'code',
+  'errno',
+  'syscall',
+  'address',
+  'port',
+  'path',
+] as const;
+
 /**
  * Avoid invoking a caller Error's `then` while resolving the public outcome promise.
  *
@@ -4252,15 +4262,6 @@ function adoptRequestBodySettled(
  * Either way the promise resolves with a fresh Error whose `then` lookup reaches only
  * the built-in prototypes.
  */
-const UPLOAD_ERROR_FIELDS = [
-  'code',
-  'errno',
-  'syscall',
-  'address',
-  'port',
-  'path',
-] as const;
-
 function stableUploadError(value: unknown): Error {
   if (!isErrorValue(value)) {
     return normalizeError(value);

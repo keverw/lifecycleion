@@ -25,7 +25,11 @@ export class ResponseObserverManager extends CallbackRegistry<
   ResponseObserverFilter
 > {
   constructor() {
-    super(DEFAULT_OBSERVER_PHASES, 'HTTPClient response observer');
+    super(DEFAULT_OBSERVER_PHASES, 'HTTPClient response observer', [
+      'retry',
+      'redirect',
+      'final',
+    ]);
   }
 
   /**
@@ -71,7 +75,10 @@ export class ErrorObserverManager extends CallbackRegistry<
   ErrorObserverFilter
 > {
   constructor() {
-    super(DEFAULT_ERROR_OBSERVER_PHASES, 'HTTPClient error observer');
+    super(DEFAULT_ERROR_OBSERVER_PHASES, 'HTTPClient error observer', [
+      'retry',
+      'final',
+    ]);
   }
 
   /**
