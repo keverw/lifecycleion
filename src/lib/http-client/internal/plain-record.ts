@@ -16,10 +16,21 @@ export function isPlainRecord(
   }
 
   const prototype = Reflect.getPrototypeOf(value);
+  return prototype === null || isRealmRootPrototype(prototype);
+}
+
+/**
+ * Whether `value` is a realm's `Object.prototype` - this one, or another realm's (a `vm`
+ * context's, an iframe's). Read by shape, not identity: no prototype of its own, and the
+ * `Object.prototype` methods as its own properties, which a caller's null-prototype
+ * object used as a base does not have.
+ */
+export function isRealmRootPrototype(value: object): boolean {
   return (
-    prototype === null ||
-    prototype === Object.prototype ||
-    Reflect.getPrototypeOf(prototype) === null
+    value === Object.prototype ||
+    (Reflect.getPrototypeOf(value) === null &&
+      Object.hasOwn(value, 'hasOwnProperty') &&
+      Object.hasOwn(value, 'isPrototypeOf'))
   );
 }
 

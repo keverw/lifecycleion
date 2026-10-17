@@ -1,4 +1,5 @@
 import { isNullish } from '../../internal/is-nullish';
+import { isRealmRootPrototype } from './plain-record';
 import { normalizeFilterMethods } from '../utils';
 import { validateConfigEntry } from '../../domain-utils/domain-utils';
 import { isIPAddress, normalizeDomain } from '../../domain-utils/helpers';
@@ -147,22 +148,23 @@ export interface FilterKind {
  * prototype of the caller's, since the lists are read with `filter[field]`, which finds
  * a class instance's getters and a prototype's fields too.
  *
- * The walk stops at a realm's root prototype - any inherited object with no prototype of
- * its own, so a plain object from a `vm` context or an iframe stops at that realm's
- * `Object.prototype` as one from this realm stops at ours - and skips methods, which are
- * behaviour rather than fields.
+ * The walk stops at a realm's root prototype (see `isRealmRootPrototype`), so a plain
+ * object from a `vm` context or an iframe stops at that realm's `Object.prototype` as one
+ * from this realm stops at ours. An inherited method is behaviour rather than a field and
+ * is skipped; an own field is a field whatever its value.
  */
 function filterFieldNames(filter: object): Set<string> {
   const names = new Set<string>();
   for (
     let current: object | null = filter;
-    current !== null &&
-    (current === filter || Object.getPrototypeOf(current) !== null);
+    current !== null && !isRealmRootPrototype(current);
     current = Object.getPrototypeOf(current) as object | null
   ) {
     for (const name of Object.getOwnPropertyNames(current)) {
       const descriptor = Object.getOwnPropertyDescriptor(current, name);
-      if (name !== 'constructor' && typeof descriptor?.value !== 'function') {
+      const isInheritedMethod =
+        current !== filter && typeof descriptor?.value === 'function';
+      if (name !== 'constructor' && !isInheritedMethod) {
         names.add(name);
       }
     }

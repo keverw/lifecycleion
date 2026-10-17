@@ -2431,3 +2431,22 @@ test('a hosts entry with surrounding whitespace is read as the matcher reads it'
     client.addResponseObserver(() => {}, { hosts: [pattern] })();
   }
 });
+
+test('a caller null-prototype base is not taken for a realm root', () => {
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+  const base = Object.create(null) as Record<string, unknown>;
+  base.statusCodes = [500];
+
+  expect(() =>
+    client.addErrorObserver(() => {}, Object.create(base) as never),
+  ).toThrow(TypeError);
+  expect(() =>
+    client.addErrorObserver(() => {}, { statusCodes: () => true } as never),
+  ).toThrow(TypeError);
+
+  const shared = Object.create(null) as Record<string, string>;
+  shared.authorization = 'Bearer t';
+  expect(() =>
+    client.get('/x').headers(Object.create(shared) as Record<string, string>),
+  ).toThrow(TypeError);
+});
