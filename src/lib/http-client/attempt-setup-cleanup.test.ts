@@ -390,12 +390,10 @@ test.each([
     );
     expect(ends).toEqual([1, 2]);
     expect(request.attemptCount).toBe(2);
-    // The snapshot keeps every field it could read.
+    // The snapshot keeps every field it could read, and an unreadable URL falls back
+    // to the hop's own.
     expect(observed).toEqual([
-      {
-        code: expectedCode,
-        requestURL: field === 'requestURL' ? '' : 'https://example.com/',
-      },
+      { code: expectedCode, requestURL: 'https://example.com/' },
     ]);
   },
 );

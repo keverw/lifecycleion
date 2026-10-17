@@ -2099,3 +2099,50 @@ test('a hosts entry whose wildcard is not a whole leading label, or with an empt
     client.addErrorObserver(() => {}, { hosts: [pattern] })();
   }
 });
+
+test('a retry interceptor that makes the URL unreadable reports the hop URL to errors and host filters', async () => {
+  const adapter = new MockAdapter();
+  let calls = 0;
+  adapter.routes.get('/x', () => ({ status: calls++ === 0 ? 503 : 200 }));
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+  });
+  const seen: string[] = [];
+  client.addErrorObserver(
+    (_error, request) => {
+      seen.push(request.requestURL);
+    },
+    { hosts: ['api.test'] },
+  );
+  client.addRequestInterceptor(
+    (request) => ({ ...request, requestURL: 42 as unknown as string }),
+    { phases: ['retry'] },
+  );
+
+  const builder = client.get('/x');
+  const response = await builder.send();
+
+  expect(builder.error?.code).toBe('interceptor_error');
+  expect(response.requestURL).toBe('http://api.test/x');
+  expect(seen).toEqual(['http://api.test/x']);
+});
+
+test('with redirects off, a 3xx with no Location is the final response, not redirect_disabled', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/n', () => ({
+    status: 302,
+    body: { info: 'no location' },
+  }));
+  const builder = new HTTPClient({ adapter, baseURL: 'http://a.test' }).get(
+    '/n',
+  );
+
+  const response = await builder.send();
+
+  expect(response.status).toBe(302);
+  expect(response.isFailed).toBe(false);
+  expect(response.body).toEqual({ info: 'no location' });
+  expect(builder.error).toBeNull();
+});

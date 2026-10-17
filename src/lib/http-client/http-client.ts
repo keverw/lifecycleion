@@ -1002,10 +1002,13 @@ export class BaseHTTPClient {
           callbacks.setAttemptCount(attemptResult.attemptCount);
           observerRequest = attemptResult.sentRequest;
 
+          // A 3xx with no `Location` is no redirect to refuse - nothing to follow - so it
+          // is delivered as the final response, as it is with redirects on.
           if (
             !this._config.followRedirects &&
             adapterResponse &&
-            REDIRECT_STATUS_CODES.has(adapterResponse.status)
+            REDIRECT_STATUS_CODES.has(adapterResponse.status) &&
+            scalarHeader(adapterResponse.headers, 'location')
           ) {
             response = this._buildResponse<T>({
               // Pass a synthetic status-0 response so wasRedirectDetected is
@@ -2058,6 +2061,9 @@ export class BaseHTTPClient {
             timeout,
             requestID,
             knownBodies,
+            // The hop's own URL when the pending request's cannot be read, so the
+            // response, the error and host-filtered observers name a real one.
+            baseRequest.requestURL,
           ),
           attemptCount: attemptNumber,
           wasCancelled: false,
