@@ -109,7 +109,6 @@ import {
 
 type RemoveFn = () => void;
 
-/** The `adapter_error` message when the caller's cookie jar threw on a response. */
 /** The refusals of a method the adapter cannot send (see `_assertRequestIsSupported`). */
 const methodRefusals = new WeakSet<Error>();
 
@@ -119,6 +118,7 @@ function methodRefusal(message: string): Error {
   return error;
 }
 
+/** The `adapter_error` message when the caller's cookie jar threw on a response. */
 const COOKIE_JAR_FAILURE_MESSAGE =
   'Cookie jar failed to process response headers';
 
@@ -779,7 +779,6 @@ export class BaseHTTPClient {
           }
           callerMethodRefusal = error as Error;
         }
-        let setupRefusal: Error | undefined;
 
         // Run interceptors (initial phase)
         const initialPhase: InterceptorPhase = { type: 'initial' };
@@ -816,16 +815,7 @@ export class BaseHTTPClient {
 
           if (!isInterceptorCancel(interceptResult)) {
             initialRequestCandidate = interceptResult;
-            if (
-              callerMethodRefusal !== undefined &&
-              interceptResult.method === interceptedRequest.method &&
-              isNullish(interceptResult.body) ===
-                isNullish(interceptedRequest.body)
-            ) {
-              setupRefusal = callerMethodRefusal;
-            } else {
-              this._assertRequestIsSupported(interceptResult);
-            }
+            this._assertRequestIsSupported(interceptResult);
             initialRequestURL = interceptResult.requestURL;
             this._assertInterceptorResolvedURL(initialRequestURL);
           }
@@ -849,11 +839,21 @@ export class BaseHTTPClient {
             isNetworkErrorOverride: false,
           });
 
+          // A method refusal the caller's own request already had, which no interceptor
+          // changed - same method, a body or none as before - is the caller's mistake,
+          // reported as the `request_setup_error` it is with no interceptor registered.
+          const isCallersOwnRefusal =
+            callerMethodRefusal !== undefined &&
+            methodRefusals.has(error as Error) &&
+            readStringMember(initialRequestCandidate, 'method', '') ===
+              interceptedRequest.method &&
+            isNullish(readObjectMember(initialRequestCandidate, 'body')) ===
+              isNullish(interceptedRequest.body);
           const normalizedError = this._makeError(
             response,
             requestID,
             false,
-            'interceptor_error',
+            isCallersOwnRefusal ? 'request_setup_error' : 'interceptor_error',
             normalizeError(error),
           );
 
@@ -876,12 +876,6 @@ export class BaseHTTPClient {
           );
 
           return response;
-        }
-
-        // The caller's own method mistake, which no interceptor changed: reported as the
-        // `request_setup_error` it is with no interceptor registered.
-        if (setupRefusal !== undefined) {
-          throw setupRefusal;
         }
 
         if (isInterceptorCancel(interceptResult)) {
@@ -1632,6 +1626,24 @@ export class BaseHTTPClient {
           },
         );
         return response;
+      }
+
+      // A cancel that landed after the answer arrived but before the request settled -
+      // from the final `onAttemptEnd`, say - told its caller it cancelled the request, so
+      // it does: the request ends cancelled rather than completing under that answer.
+      if (!response.isFailed && cancelSignal.aborted) {
+        response = this._buildResponse<T>({
+          adapterResponse: null,
+          requestID,
+          wasCancelled: true,
+          wasTimeout: false,
+          adapterType: this._adapter.getType(),
+          initialURL: initialRequestURL,
+          requestURL: response.requestURL,
+          redirectHistory,
+          ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
+        });
+        cancelReason = getSignalCancelReason(cancelSignal);
       }
 
       // Run response or error observers. Phase `final` means this `send()` has finished.

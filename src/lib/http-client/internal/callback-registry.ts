@@ -137,13 +137,6 @@ export interface FilterKind {
 }
 
 /**
- * The lists of `filter`, each read once, checked and copied - so a getter is not read
- * again, and a list the caller changes later does not change what matches. Nullish means
- * the list is absent. Throws a `TypeError` naming `label` for anything else that is not
- * an array of the right kind of entry, or that names a phase, scheme or content type that
- * does not exist.
- */
-/**
  * Every field name a filter answers to: its own, and those it inherits from a class or
  * prototype of the caller's, since the lists are read with `filter[field]`, which finds
  * a class instance's getters and a prototype's fields too.
@@ -172,6 +165,13 @@ function filterFieldNames(filter: object): Set<string> {
   return names;
 }
 
+/**
+ * The lists of `filter`, each read once, checked and copied - so a getter is not read
+ * again, and a list the caller changes later does not change what matches. Nullish means
+ * the list is absent. Throws a `TypeError` naming `label` for anything else that is not
+ * an array of the right kind of entry, or that names a phase, scheme or content type that
+ * does not exist.
+ */
 function copyFilterLists(
   filter: Record<string, unknown>,
   label: string,

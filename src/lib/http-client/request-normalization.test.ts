@@ -2525,3 +2525,65 @@ test('a cancel between redirect hops is not overwritten to sending', async () =>
   expect(response.isCancelled).toBe(true);
   expect(states).toEqual(['sending', 'cancelled']);
 });
+
+test('an interceptor body mistake on a refused GET is the interceptor error; observers see its URL', async () => {
+  const client = new HTTPClient({
+    baseURL: 'http://api.test',
+    adapter: {
+      getType: () => 'fetch',
+      send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
+    },
+  });
+  const seen: string[] = [];
+  client.addErrorObserver(
+    (_error, request) => {
+      seen.push(request.requestURL);
+    },
+    { hosts: ['other.test'] },
+  );
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    requestURL: 'http://other.test/x',
+  }));
+  const own = client.get('/x', { body: 'x' });
+  await own.send();
+
+  expect(own.error?.code).toBe('request_setup_error');
+  expect(seen).toEqual(['http://other.test/x']);
+
+  const badBodyClient = new HTTPClient({
+    baseURL: 'http://api.test',
+    adapter: {
+      getType: () => 'fetch',
+      send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
+    },
+  });
+  badBodyClient.addRequestInterceptor((request) => ({
+    ...request,
+    body: new URLSearchParams('a=1') as unknown as string,
+  }));
+  const bad = badBodyClient.get('/x', { body: 'x' });
+  await bad.send();
+
+  expect(bad.error?.code).toBe('interceptor_error');
+});
+
+test('a cancel that lands after the answer but before the request settles is honoured', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  let didCancel: boolean | undefined;
+  const builder = client.get('/x', {
+    onAttemptEnd: () => {
+      didCancel = builder.cancel('late');
+    },
+  });
+
+  const response = await builder.send();
+
+  expect(didCancel).toBe(true);
+  expect(response.isCancelled).toBe(true);
+  expect(builder.state).toBe('cancelled');
+  expect(builder.error?.cancelReason).toBe('late');
+  expect(builder.cancel()).toBe(false);
+});
