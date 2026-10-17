@@ -1,7 +1,16 @@
+import { markNonRetryableAdapterError } from '../internal/adapter-error';
+import { defineEntry } from '../../internal/define-entry';
+import { observeRejection } from '../../internal/promise-reactions';
 import Router from 'find-my-way';
+import type { HTTPMethod as RouterHTTPMethod } from 'find-my-way';
 import { guardProgressCallback } from '../internal/progress';
+import { materializeRequestHeaders } from '../internal/header-utils';
 import qs from 'qs';
 import { sleep } from '../../sleep';
+import {
+  adoptPromise,
+  type PromiseResultBox,
+} from '../../internal/adopt-promise';
 import { REDIRECT_STATUS_CODES } from '../consts';
 import {
   isPlainJSONBodyObject,
@@ -17,12 +26,13 @@ import type {
   ContentType,
   QueryObject,
 } from '../types';
-// Shared error normalization preserves Error instances and wraps other thrown values.
-// Non-Error values receive a "Non-error value thrown: <description>" message, with the
-// original value retained on cause for consumers of the normalized error.
-import { isErrorValue, toError as normalizeError } from '../../to-error';
+import { isErrorValue } from '../../to-error';
 import { reportCallbackError } from '../../safe-handle-callback';
 import { readUnknownMember as readObjectMember } from '../../internal/read-member';
+import {
+  isTimeoutValidationError,
+  resolveTimeoutMS,
+} from '../../internal/timer-limits';
 
 export interface MockFormData {
   /** String fields from the multipart body */
@@ -86,7 +96,8 @@ export interface MockResponse {
    */
   headers?: Record<string, string | string[]>;
   contentType?: ContentType;
-  delay?: number;
+  /** Null or undefined uses the adapter default delay. */
+  delay?: number | null;
   /**
    * Shorthand for setting / deleting cookies without writing raw Set-Cookie
    * strings. Merged with any `set-cookie` entries already in `headers`.
@@ -154,9 +165,12 @@ export type MockRouteHandler = (
 ) => MockResponse | Promise<MockResponse>;
 
 export interface MockAdapterConfig {
-  defaultDelay?: number;
+  /** Default latency in milliseconds; null or undefined uses zero. */
+  defaultDelay?: number | null;
   /**
-   * Called when a route handler throws. Return a `MockResponse` to customize
+   * Called when a route handler throws or rejects. The original rejection reason
+   * is preserved, including non-Error values, with or without an AbortSignal.
+   * Return a `MockResponse` to customize
    * the error response — similar to Fastify's `setErrorHandler`. Falls back to
    * the default `{ status: 500, body: { message: 'Internal Server Error' } }`
    * if this handler is not set or if it also throws.
@@ -204,9 +218,20 @@ export interface MockAdapterRoutes {
   patch(path: string, handler: MockRouteHandler): void;
   delete(path: string, handler: MockRouteHandler): void;
   head(path: string, handler: MockRouteHandler): void;
+  options(path: string, handler: MockRouteHandler): void;
+  /**
+   * Register a route for any method Node's `http` knows - `TRACE`, WebDAV's `PROPFIND` or
+   * `LOCK`, `PURGE` - in any case. A request's method is matched uppercased, as a real
+   * server receives it from Node's `http`. Throws for a method name the router does not
+   * know.
+   */
+  on(method: string, path: string, handler: MockRouteHandler): void;
   /** Remove all registered routes. */
   clear(): void;
 }
+
+/** The longest cookie lifetime a `Max-Age` is written with: 400 days (RFC 6265bis). */
+const MAX_COOKIE_AGE_SECONDS = 400 * 24 * 60 * 60;
 
 // find-my-way requires a handler function; the actual MockRouteHandler lives in store.
 const noop: Router.Handler<Router.HTTPVersion.V1> = () => {};
@@ -217,7 +242,10 @@ export class MockAdapter implements HTTPAdapter {
   private readonly config: MockAdapterConfig;
 
   constructor(config?: MockAdapterConfig) {
+    // Preserve inherited handlers, their receiver, and live config updates.
+    // Validate now and again when a response selects the current default delay.
     this.config = config ?? {};
+    resolveTimeoutMS(this.config.defaultDelay, 0, 'MockAdapter defaultDelay');
 
     this.router = Router({
       ignoreTrailingSlash: true,
@@ -248,7 +276,11 @@ export class MockAdapter implements HTTPAdapter {
     );
 
     const { requestURL, method, headers, body } = request;
-    const materializedHeaders = materializeMockRequestHeaders(headers);
+    // Names lowercased, as a Node server receives them, so a request driven straight at
+    // the adapter with `Content-Type` is read like one the client sent.
+    const materializedHeaders = lowercaseHeaderNames(
+      materializeRequestHeaders(headers),
+    );
 
     // --- 1. Pre-flight abort check ---
     // Throw immediately if the signal was already cancelled before we even start.
@@ -290,11 +322,15 @@ export class MockAdapter implements HTTPAdapter {
     // the raw header is still available on req.headers.cookie.
     const query = qs.parse(queryString) as QueryObject;
     const cookies = parseCookieHeader(materializedHeaders['cookie']);
-    const match = this.router.find(method, path);
+    // Matched uppercased, as a real server sees it: Node's `http` sends any method it
+    // knows uppercase, so `lock` arrives as `LOCK`. The router's own method type is a
+    // fixed list; a method it does not know finds no route, as an unregistered path does.
+    const routeMethod = method.toUpperCase();
+    const match = this.router.find(routeMethod as RouterHTTPMethod, path);
     const params = (match?.params ?? {}) as Record<string, string>;
 
     const mockRequest: MockRequest = {
-      method,
+      method: routeMethod,
       path,
       params,
       query,
@@ -315,6 +351,8 @@ export class MockAdapter implements HTTPAdapter {
     // then falls back to default 500 if onHandlerError is unset or also throws.
 
     let mockResponse: MockResponse;
+    // Which callback produced `mockResponse`, so a missing one names the right culprit.
+    let responseSource: 'route' | 'onHandlerError' = 'route';
 
     if (match === null) {
       mockResponse = { status: 404, body: { message: 'Not Found' } };
@@ -324,21 +362,27 @@ export class MockAdapter implements HTTPAdapter {
       try {
         // Match real network semantics more closely: once the caller aborts,
         // stop waiting on an async mock handler and reject immediately.
-        mockResponse = await awaitAbortable(
-          handler(mockRequest),
-          request.signal,
-        );
+        mockResponse = (
+          await awaitAbortable(handler(mockRequest), request.signal)
+        ).value;
       } catch (handlerError) {
         if (isInternalAbortError(handlerError)) {
           throwAbortError();
         }
 
-        if (this.config.onHandlerError) {
+        const onHandlerError = this.config.onHandlerError;
+        if (onHandlerError) {
+          responseSource = 'onHandlerError';
           try {
-            mockResponse = await awaitAbortable(
-              this.config.onHandlerError(mockRequest, handlerError),
-              request.signal,
-            );
+            mockResponse = (
+              await awaitAbortable(
+                Reflect.apply(onHandlerError, this.config, [
+                  mockRequest,
+                  handlerError,
+                ]),
+                request.signal,
+              )
+            ).value;
           } catch (error) {
             if (isInternalAbortError(error)) {
               throwAbortError();
@@ -365,11 +409,44 @@ export class MockAdapter implements HTTPAdapter {
       }
     }
 
+    // The route has run: a handler that returned no response (a forgotten `return`) is a
+    // mistake in the test's own setup, so it is not retried - a retry would only run the
+    // route, and its side effects, again.
+    if (typeof mockResponse !== 'object' || mockResponse === null) {
+      const error = new TypeError(
+        `MockAdapter ${responseSource} for ${method} ${path} returned no MockResponse (got ${mockResponse === null ? 'null' : typeof mockResponse})`,
+      );
+      markNonRetryableAdapterError(error);
+      throw error;
+    }
+
     // --- 5. Delay ---
     // Simulates network latency. Per-response delay takes priority over the
     // adapter default. When a signal is present, the sleep is abort-aware and
     // throws AbortError immediately instead of waiting out the full duration.
-    const delay = mockResponse.delay ?? this.config.defaultDelay ?? 0;
+    const requestedDelay = mockResponse.delay;
+    // Name the setting that was actually used, so a bad live `defaultDelay` update
+    // is not blamed on a route that never set a delay.
+    const isDefaultDelay =
+      requestedDelay === undefined || requestedDelay === null;
+    let delay: number;
+    try {
+      delay = resolveTimeoutMS(
+        isDefaultDelay ? this.config.defaultDelay : requestedDelay,
+        0,
+        isDefaultDelay
+          ? 'MockAdapter defaultDelay'
+          : 'MockAdapter response delay',
+      );
+    } catch (error) {
+      // The route has already run. Retrying a bad delay would repeat its side effects
+      // without repairing the configuration. Only our validation error is terminal;
+      // the caller-owned delay getter above keeps its usual adapter-error behavior.
+      if (isTimeoutValidationError(error)) {
+        markNonRetryableAdapterError(error);
+      }
+      throw error;
+    }
 
     if (delay > 0) {
       // Use abort-aware sleep when a signal is present so cancellation throws
@@ -421,9 +498,17 @@ export class MockAdapter implements HTTPAdapter {
     // What the server would have put on the wire. HEAD / 204 / 304 never expose
     // a body to consumers, even if the handler returned one. This keeps the mock
     // transport aligned with real HTTP.
-    const intendedBody = shouldOmitResponseBody(method, mockResponse.status)
-      ? null
-      : serializeResponseBody(mockResponse);
+    let intendedBody: ReturnType<typeof serializeResponseBody> | null;
+    try {
+      intendedBody = shouldOmitResponseBody(method, mockResponse.status)
+        ? null
+        : serializeResponseBody(mockResponse);
+    } catch (error) {
+      // A body the mock cannot serialize is the route's mistake, after it has run; not
+      // retried, for the reason a bad delay is not.
+      markNonRetryableAdapterError(error);
+      throw error;
+    }
 
     // A simulated stream error loses the body, but it strikes after headers
     // arrived, so the headers still stand — Content-Type included. Header
@@ -554,6 +639,9 @@ function buildRoutes(
     patch: (path, handler) => on('PATCH', path, handler),
     delete: (path, handler) => on('DELETE', path, handler),
     head: (path, handler) => on('HEAD', path, handler),
+    options: (path, handler) => on('OPTIONS', path, handler),
+    on: (method, path, handler) =>
+      on(method.toUpperCase() as Router.HTTPMethod, path, handler),
     clear: () => router.reset(),
   };
 }
@@ -599,28 +687,15 @@ function parseCookieHeader(
     const name = part.slice(0, eqIdx).trim();
     const value = part.slice(eqIdx + 1).trim();
 
-    if (name) {
-      cookies[name] = value;
+    // The first of a repeated name wins, as common server parsers (the `cookie` package
+    // behind Express and Fastify) read it: the client sends the most specific path first.
+    if (name && !Object.hasOwn(cookies, name)) {
+      // Defined, not assigned: a `__proto__` cookie would otherwise vanish.
+      defineEntry(cookies, name, value);
     }
   }
 
   return cookies;
-}
-
-function materializeMockRequestHeaders(
-  headers: Record<string, string | string[]>,
-): Record<string, string> {
-  const result: Record<string, string> = {};
-
-  for (const [key, value] of Object.entries(headers)) {
-    result[key] = Array.isArray(value)
-      ? key.toLowerCase() === 'cookie'
-        ? value.join('; ')
-        : value.join(', ')
-      : value;
-  }
-
-  return result;
 }
 
 function cookiesToSetCookieHeaders(
@@ -651,7 +726,18 @@ function serializeMockCookieOptions(
     `Path=${cookie.path ?? '/'}`,
   ];
 
-  appendCookieAttribute(parts, 'Max-Age', cookie.maxAge);
+  // Whole seconds within the cookie lifetime cap (400 days, RFC 6265bis), as `Max-Age`
+  // is read: a fraction, or a number too large to print as digits, would make the
+  // cookie jar ignore the attribute, so `0.01` would never expire, `-0.5` would not
+  // delete the cookie, and `Infinity` would leave a session cookie.
+  const maxAge = cookie.maxAge;
+  appendCookieAttribute(
+    parts,
+    'Max-Age',
+    typeof maxAge === 'number' && !Number.isNaN(maxAge)
+      ? Math.max(-1, Math.min(Math.trunc(maxAge), MAX_COOKIE_AGE_SECONDS))
+      : maxAge,
+  );
   appendCookieAttribute(parts, 'Domain', cookie.domain);
 
   if (cookie.httpOnly) {
@@ -682,10 +768,12 @@ function extractFormData(fd: FormData): MockFormData {
   const files: Record<string, File> = {};
 
   for (const [key, value] of fd.entries()) {
+    // Defined, not assigned: a `__proto__` field would otherwise vanish, and a
+    // `__proto__` file would become the record's prototype.
     if (typeof value === 'string') {
-      fields[key] = value;
+      defineEntry(fields, key, value);
     } else {
-      files[key] = value;
+      defineEntry(files, key, value);
     }
   }
 
@@ -783,7 +871,12 @@ class InternalMockAbortError extends Error {
 }
 
 function isInternalAbortError(error: unknown): error is InternalMockAbortError {
-  return error instanceof InternalMockAbortError;
+  try {
+    return error instanceof InternalMockAbortError;
+  } catch {
+    // Rejection reasons can be proxies whose prototype inspection throws.
+    return false;
+  }
 }
 
 function throwAbortError(): never {
@@ -792,44 +885,99 @@ function throwAbortError(): never {
   throw err;
 }
 
+function lowercaseHeaderNames(
+  headers: Record<string, string>,
+): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers)) {
+    const lower = key.toLowerCase();
+    // Own entries only: `constructor` and `__proto__` are headers here, not members.
+    const existing = Object.hasOwn(result, lower) ? result[lower] : undefined;
+    defineEntry(
+      result,
+      lower,
+      existing === undefined
+        ? value
+        : `${existing}${lower === 'cookie' ? '; ' : ', '}${value}`,
+    );
+  }
+  return result;
+}
+
 function shouldOmitResponseBody(method: string, status: number): boolean {
-  return method === 'HEAD' || status === 204 || status === 304;
+  return method.toUpperCase() === 'HEAD' || status === 204 || status === 304;
 }
 
 function awaitAbortable<T>(
   value: T | Promise<T>,
   signal: AbortSignal | undefined,
-): Promise<T> {
+): Promise<PromiseResultBox<Awaited<T>>> {
+  // `adoptPromise()`, not `Promise.resolve()`, for a handler's promise here and below:
+  // `Promise.resolve()` hands a native promise back with its own `then`, and a no-op one
+  // would hang the request.
+  const adopted = adoptPromise(value);
   if (!signal) {
-    return Promise.resolve(value);
+    return adopted;
   }
 
-  if (signal.aborted) {
-    throw new InternalMockAbortError();
-  }
+  return new Promise<PromiseResultBox<Awaited<T>>>((resolve, reject) => {
+    // Guarded: a signal that is not a native `AbortSignal` may refuse the removal, and
+    // a throw from the reactions below would reject their derived promise - unhandled
+    // - and leave this wait settled by nothing.
+    const detach = (): void => {
+      try {
+        signal.removeEventListener('abort', onAbort);
+      } catch {
+        // The listener stays, and is inert: the wait it ends has already settled.
+      }
+    };
 
-  return new Promise<T>((resolve, reject) => {
     // Cancellation should reject immediately with AbortError, even if the
     // wrapped handler/onHandlerError promise is still pending.
     const onAbort = () => {
-      signal.removeEventListener('abort', onAbort);
+      detach();
       reject(new InternalMockAbortError());
     };
 
+    // Observed before anything else here can throw. A signal whose
+    // `addEventListener` throws rejects this wait from the executor, and the
+    // handler's promise, not yet observed, would then be an unhandled rejection.
+    observeRejection(
+      adopted.then(
+        (result) => {
+          detach();
+          // Cancellation changes the wait, not adoption of the handler's data, which
+          // stays boxed.
+          resolve(result);
+        },
+        (error: unknown) => {
+          detach();
+          // onHandlerError receives the original reason with or without a signal.
+          // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+          reject(error);
+        },
+      ),
+      () => undefined,
+    );
+
     signal.addEventListener('abort', onAbort, { once: true });
 
-    Promise.resolve(value).then(
-      (result) => {
-        signal.removeEventListener('abort', onAbort);
-        resolve(result);
-      },
-      (error) => {
-        signal.removeEventListener('abort', onAbort);
-        // Preserve real handler failures, only normalize non-Error rejections
-        // so promise rejection values stay lint-safe and predictable.
-        reject(normalizeError(error));
-      },
-    );
+    // A handler can abort synchronously before returning its promise. Observe
+    // that promise before ending the wait so its rejection is still consumed.
+    let isAborted: boolean;
+
+    try {
+      isAborted = signal.aborted;
+    } catch (error) {
+      // The executor rejects with this, and nothing will settle the wait again, so the
+      // listener just attached is removed rather than left on the signal for good.
+      detach();
+      throw error;
+    }
+
+    if (isAborted) {
+      onAbort();
+    }
   });
 }
 
@@ -850,10 +998,22 @@ function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
     };
 
     const id = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
+      // Resolved first and the removal guarded: this runs from a timer, where a throw
+      // from a non-native signal's `removeEventListener` is an uncaught exception.
       resolve();
+      try {
+        signal.removeEventListener('abort', onAbort);
+      } catch {
+        // The listener stays, and is inert: the sleep has already ended.
+      }
     }, ms);
 
-    signal.addEventListener('abort', onAbort, { once: true });
+    try {
+      signal.addEventListener('abort', onAbort, { once: true });
+    } catch (error) {
+      // The executor rejects with this; the timer has nothing left to end.
+      clearTimeout(id);
+      throw error;
+    }
   });
 }

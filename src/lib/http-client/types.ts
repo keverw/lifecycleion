@@ -5,7 +5,26 @@ import type { RetryPolicyOptions } from '../retry-utils';
 
 export type AdapterType = 'fetch' | 'xhr' | 'node' | 'mock';
 
-export type HTTPMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'HEAD';
+/**
+ * A request method. The standard ones are named for autocompletion, and are sent uppercase
+ * whatever case they are given in; any other RFC 9110 method name - `PROPFIND`, `purge` -
+ * is accepted too, and is case-sensitive to the client (its filters and retry rules).
+ * What goes on the wire depends on the transport: Node's `http` (and so `NodeAdapter`)
+ * uppercases it, `fetch` sends it as given. So code switching over a request's method
+ * should keep a default branch.
+ */
+export type HTTPMethod =
+  | 'GET'
+  | 'POST'
+  | 'PUT'
+  | 'PATCH'
+  | 'DELETE'
+  | 'HEAD'
+  | 'OPTIONS'
+  | 'TRACE'
+  // `string & {}` rather than `string`, which would absorb the names above and drop
+  // them from autocompletion.
+  | (string & {});
 
 export type ContentType = 'json' | 'text' | 'binary';
 
@@ -111,7 +130,8 @@ export interface AdapterResponse {
    *
    * Deliberately separate from {@link AdapterResponse.isRetryable}, which is a
    * hint that says nothing about delivery. The client uses this to decide whether
-   * a `POST` or `PATCH` may be retried after a transport failure, and ignores it
+   * a non-idempotent method (`POST`, `PATCH`, a custom one) may be retried after a
+   * transport failure, and ignores it
    * when a real response came back.
    */
   wasDefinitelyNotSent?: boolean;
@@ -384,6 +404,12 @@ export interface AttemptStartEvent {
 export interface AttemptEndEvent {
   attemptNumber: number;
   isRetry: boolean;
+  /**
+   * Whether a retry was scheduled when this attempt ended. Each attempt reports its end
+   * once, so `true` is not revised: the request can still end before the retry starts -
+   * cancelled during the wait, or failed while waiting for this attempt's upload to
+   * settle - and the response says how it ended.
+   */
   willRetry: boolean;
   /**
    * Why no retry happened, when a retry was genuinely available to suppress — a
@@ -395,7 +421,8 @@ export interface AttemptEndEvent {
    *   reachable from `MockAdapter` and custom adapters.
    * - `stream_error` — the body failed after headers arrived, so the server
    *   received the request and the outcome is unknown.
-   * - `non_idempotent_method` — a `POST` or `PATCH` with no proof the request
+   * - `non_idempotent_method` — a non-idempotent method (`POST`, `PATCH`, any method
+   *   but `GET`, `HEAD`, `OPTIONS`, `TRACE`, `PUT` and `DELETE`) with no proof the request
    *   went undelivered. Set `retryNonIdempotentMethods` to allow it.
    *
    * Exists so a suppressed retry is self-explaining: `willRetry: false` alone is
@@ -430,13 +457,17 @@ export interface HTTPClientConfig {
    * `BaseHTTPClient.request` and `buildURL` in `utils.ts`.
    */
   baseURL?: string;
-  defaultHeaders?: Record<string, string | string[]>;
-  timeout?: number;
+  defaultHeaders?: RequestHeadersInput;
+  /**
+   * Null or undefined selects `DEFAULT_TIMEOUT_MS`. In `createSubClient` overrides,
+   * either inherits the parent client's timeout instead.
+   */
+  timeout?: number | null;
   cookieJar?: CookieJar | null;
   retryPolicy?: RetryPolicyOptions;
   /**
-   * Whether a retry policy may replay `POST` and `PATCH`, the methods RFC 9110
-   * does not define as idempotent. Defaults to `false`.
+   * Whether a retry policy may replay a method RFC 9110 does not define as idempotent:
+   * `POST`, `PATCH`, or any custom method. Defaults to `false`.
    *
    * When `false`, such a request is never retried after a real HTTP response —
    * a 500 still means the handler ran and may have committed — and after a
@@ -455,7 +486,14 @@ export interface HTTPClientConfig {
   maxRedirects?: number;
 }
 
-export interface SubClientConfig extends Partial<HTTPClientConfig> {
+export interface SubClientConfig extends Partial<
+  Omit<HTTPClientConfig, 'retryPolicy'>
+> {
+  /**
+   * Overrides the parent's retry policy. Omitted or `undefined` inherits it; `null` turns
+   * retries off for this sub-client.
+   */
+  retryPolicy?: RetryPolicyOptions | null;
   /**
    * How sub-client `defaultHeaders` should interact with inherited defaults.
    * Default: `'replace'`.
@@ -470,11 +508,23 @@ export interface SubClientConfig extends Partial<HTTPClientConfig> {
 
 // --- Request ---
 
+/**
+ * Request headers as a caller supplies them: client `defaultHeaders`, a request's
+ * `headers`, and an interceptor's request. A `null` or `undefined` value, or such an
+ * item in an array, means no header, so it removes one an earlier layer set. Names are
+ * case-insensitive.
+ */
+export type RequestHeadersInput = Record<
+  string,
+  string | Array<string | null | undefined> | null | undefined
+>;
+
 export interface HTTPRequestOptions {
-  headers?: Record<string, string | string[]>;
+  headers?: RequestHeadersInput;
   params?: Record<string, unknown>;
   body?: unknown;
-  timeout?: number;
+  /** Null or undefined inherits the client's configured `timeout`. */
+  timeout?: number | null;
   signal?: AbortSignal;
   retryPolicy?: RetryPolicyOptions | null;
   /**
@@ -521,6 +571,15 @@ export interface HTTPResponse<T = unknown> {
    * control-flow failures). For adapter-originated transport failures,
    * `isTransportError` is the explicit signal; bare `status: 0` is also
    * treated as a transport failure by the client.
+   *
+   * Three failures can carry a nonzero status: a stream error and an
+   * `adapter_error` for an answered response the client could not read keep
+   * the real status, and an adapter-reported `isTransportError` keeps whatever
+   * status the adapter gave. Any of them can be `isFailed: true` with a 2xx or
+   * 3xx `status`. A timeout reports `status: 0`; only a body that timed out
+   * mid-stream keeps its status, as a stream error. An answer that arrived
+   * after its attempt's timer fired is handled as any answer is: delivered if
+   * it can be read, an `adapter_error` keeping its status if not.
    *
    * Ordinary HTTP responses, including HTTP error statuses like 4xx/5xx,
    * remain `false`. This tracks client-level failure handling, not HTTP
@@ -636,14 +695,20 @@ export interface HTTPClientError {
   redirectHistory: string[];
   requestID: string;
   isTimeout: boolean;
-  /** True when a retry policy was active and all attempts were exhausted before a response was received. */
+  /**
+   * True when a retry policy was active and all of its attempts were spent. The
+   * last attempt may still have received a response: a retryable status whose
+   * body then could not be read ends as an `adapter_error` with its status.
+   */
   isRetriesExhausted: boolean;
   /**
    * Optional reason string when the request was cancelled with an explicit string reason.
-   * Set by: a request interceptor returning `{ cancel: true, reason: '...' }`, a
-   * StreamResponseFactory returning `{ cancel: true, reason: '...' }`, or an AbortSignal
-   * aborted via `controller.abort('reason')`. Undefined when no explicit string reason
-   * was provided (e.g. `controller.abort()` with no argument, `builder.cancel()`).
+   * Set by: `builder.cancel('...')`, a client cancel (`client.cancel(id, '...')`,
+   * `cancelAll('...')` and the rest), a request interceptor returning
+   * `{ cancel: true, reason: '...' }`, a StreamResponseFactory returning
+   * `{ cancel: true, reason: '...' }`, or an AbortSignal aborted via
+   * `controller.abort('reason')`. Undefined when no explicit string reason was provided
+   * (e.g. `controller.abort()` or `builder.cancel()` with no argument).
    */
   cancelReason?: string;
 }
@@ -948,7 +1013,11 @@ export interface InterceptedRequest {
    */
   requestURL: string;
   method: HTTPMethod;
-  headers: Record<string, string | string[]>;
+  /**
+   * An earlier interceptor's result is passed on as it returned it, so a header it
+   * removed with `undefined` reaches the next one as such.
+   */
+  headers: RequestHeadersInput;
   body?: unknown;
 }
 

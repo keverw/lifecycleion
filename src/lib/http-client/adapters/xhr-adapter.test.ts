@@ -387,6 +387,29 @@ describe('XHRAdapter', () => {
     }
   });
 
+  test('keeps a __proto__ response header as an own key', async () => {
+    const adapter = new XHRAdapter();
+    const promise = adapter.send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.status = 200;
+    lastXHR.response = textBody('{}');
+    lastXHR.getAllResponseHeadersResult = '__proto__: x\r\nX-Custom: value\r\n';
+    lastXHR.simulateLoad();
+
+    const response = await promise;
+
+    expect(Object.hasOwn(response.headers, '__proto__')).toBe(true);
+    expect(
+      Object.getOwnPropertyDescriptor(response.headers, '__proto__')?.value,
+    ).toBe('x');
+    expect(Object.getPrototypeOf(response.headers)).toBe(Object.prototype);
+    expect(response.headers['x-custom']).toBe('value');
+  });
+
   test('collects set-cookie headers as string[]', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({

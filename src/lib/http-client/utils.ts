@@ -1,4 +1,10 @@
+import { HTTP_METHODS } from './consts';
 import qs from 'qs';
+import { defineEntry } from '../internal/define-entry';
+import { isNullish } from '../internal/is-nullish';
+import { isPlainRecord } from './internal/plain-record';
+import { readUnknownMember } from '../internal/read-member';
+import { presentHeaderValue } from './internal/header-utils';
 import {
   matchesWildcardDomain,
   normalizeDomain,
@@ -7,7 +13,10 @@ import type {
   ContentType,
   RequestPhaseName,
   HTTPClientConfig,
+  SubClientConfig,
   AdapterType,
+  HTTPMethod,
+  RequestHeadersInput,
 } from './types';
 
 /**
@@ -316,19 +325,103 @@ export function normalizeHeaders(
   const result: Record<string, string> = {};
 
   for (const [key, value] of Object.entries(headers)) {
-    result[key.toLowerCase()] = value;
+    defineEntry(result, key.toLowerCase(), value);
   }
 
   return result;
 }
 
 /**
+ * The methods matched case-insensitively and sent uppercase - the exported `HTTP_METHODS`:
+ * fetch's normalized set, plus `PATCH`, which fetch leaves as given but the
+ * non-idempotent check must still catch, and `TRACE`.
+ */
+const STANDARD_HTTP_METHODS: ReadonlySet<string> = new Set(HTTP_METHODS);
+
+/**
+ * A standard method in any case, uppercased - so `'post'` is `POST` for the
+ * non-idempotent check and method filters - and any other method as given, since method
+ * names are case-sensitive (RFC 9110) and a server may route `purge` and `PURGE` apart.
+ * ASCII only: `toUpperCase` would also turn `poſt` into `POST`.
+ */
+export function normalizeHTTPMethod(method: string): HTTPMethod {
+  const uppercased = method.replace(/[a-z]/g, (letter) => letter.toUpperCase());
+  return STANDARD_HTTP_METHODS.has(uppercased) ? uppercased : method;
+}
+
+/** RFC 9110's `token`: the characters a method name is made of. */
+const HTTP_METHOD_TOKEN = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
+
+/**
+ * What is wrong with `candidate` as a request method - completing "the method …" - or
+ * `undefined` when nothing is. A method is a non-empty string of RFC 9110 token
+ * characters; every adapter refuses anything else, but only at dispatch, where a
+ * caller's typo reads as a failed send. Shared by `request()` and the interceptor
+ * snapshot, so neither accepts what the other refuses.
+ */
+export function describeInvalidHTTPMethod(
+  candidate: unknown,
+): string | undefined {
+  if (typeof candidate !== 'string') {
+    return `is not a string (got ${candidate === null ? 'null' : typeof candidate})`;
+  }
+  if (candidate === '') {
+    return 'is empty';
+  }
+  if (!HTTP_METHOD_TOKEN.test(candidate)) {
+    return `is not a valid HTTP method name (got ${JSON.stringify(candidate)})`;
+  }
+  // CONNECT asks for a tunnel rather than a response, which no adapter here handles:
+  // NodeAdapter would wait on it until the attempt timed out, or forever.
+  if (candidate.toUpperCase() === 'CONNECT') {
+    return 'is CONNECT, which opens a tunnel and is not supported';
+  }
+  return undefined;
+}
+
+/**
+ * A filter's `methods`, checked and normalized once when its callback is registered, so
+ * matching a request is a plain lookup. Nullish means no method filter. Anything else must
+ * be an array of method names, each held to the rule a request's method is; anything else
+ * throws a `TypeError` naming `label`.
+ */
+export function normalizeFilterMethods(
+  methods: unknown,
+  label: string,
+): HTTPMethod[] | undefined {
+  if (isNullish(methods)) {
+    return undefined;
+  }
+  if (!Array.isArray(methods)) {
+    throw new TypeError(
+      `${label} filter methods must be an array of method names (got ${typeof methods})`,
+    );
+  }
+  if (methods.length === 0) {
+    throw new TypeError(
+      `${label} filter methods is empty, which would match no request; omit it to match every method`,
+    );
+  }
+  return (methods as unknown[]).map((entry) => {
+    // Held to the rule a request's method is, so an entry no request can have - `''`,
+    // `'GET, POST'` - is refused rather than registered to match nothing.
+    const problem = describeInvalidHTTPMethod(entry);
+    if (problem !== undefined) {
+      throw new TypeError(`${label} filter method ${problem}`);
+    }
+    return normalizeHTTPMethod(entry as string);
+  });
+}
+
+/**
  * Merges multiple request-header objects, normalizing keys to lowercase.
  * Later objects win on conflict. Array values replace earlier scalars/arrays
- * wholesale, and single-item arrays are collapsed back to a plain string.
+ * wholesale, and single-item arrays are collapsed back to a plain string. A later
+ * `null` or `undefined` value removes the header an earlier object set - a request
+ * dropping a client default such as `authorization` - rather than being sent.
  */
 export function mergeHeaders(
-  ...headerSets: Array<Record<string, string | string[]> | undefined>
+  ...headerSets: Array<RequestHeadersInput | undefined>
 ): Record<string, string | string[]> {
   const result: Record<string, string | string[]> = {};
   for (const headers of headerSets) {
@@ -337,22 +430,42 @@ export function mergeHeaders(
     }
 
     for (const [key, value] of Object.entries(headers)) {
-      result[key.toLowerCase()] = Array.isArray(value)
-        ? normalizeMergedHeaderArray(value)
-        : String(value);
+      const name = key.toLowerCase();
+      const normalized = normalizeMergedHeaderValue(value);
+      if (normalized === undefined) {
+        delete result[name];
+        continue;
+      }
+      defineEntry(result, name, normalized);
     }
   }
 
   return result;
 }
 
-function normalizeMergedHeaderArray(value: string[]): string | string[] {
-  const normalized = value.map((item) => String(item));
-  return normalized.length === 1 ? normalized[0] : normalized;
+/**
+ * One header value as {@link mergeHeaders} stores it, or `undefined` when it is unset
+ * (see `presentHeaderValue`). Throws if conversion does.
+ */
+export function normalizeMergedHeaderValue(
+  value: unknown,
+): string | string[] | undefined {
+  const present = presentHeaderValue(value);
+  return Array.isArray(present) && present.length === 1 ? present[0] : present;
 }
 
+/**
+ * Merges header records as observers see them, normalizing keys to lowercase. Later
+ * objects win on conflict. Unlike {@link mergeHeaders}, an array is never collapsed: it
+ * is copied with each element converted to a string. A scalar is converted to a string
+ * (Node's `getHeaders()` answers numbers), and an unset value is skipped (see
+ * `presentHeaderValue`): these records report what was sent, so an unset entry is one
+ * not reported, not one removed.
+ */
 export function mergeObservedHeaders(
-  ...headerSets: Array<Record<string, string | string[]> | undefined>
+  ...headerSets: Array<
+    Record<string, string | string[] | number | undefined> | undefined
+  >
 ): Record<string, string | string[]> {
   const result: Record<string, string | string[]> = {};
 
@@ -362,9 +475,12 @@ export function mergeObservedHeaders(
     }
 
     for (const [key, value] of Object.entries(headers)) {
-      result[key.toLowerCase()] = Array.isArray(value)
-        ? value.map((item) => String(item))
-        : String(value);
+      const present = presentHeaderValue(value);
+      if (present === undefined) {
+        continue;
+      }
+
+      defineEntry(result, key.toLowerCase(), present);
     }
   }
 
@@ -380,13 +496,15 @@ export function parseContentType(
   if (!contentTypeHeader) {
     return 'binary';
   } else {
-    const lower = contentTypeHeader.trim().toLowerCase();
+    // The media type alone: a parameter (`profile="x+json"`) or a longer subtype
+    // (`application/jsonl`) is not JSON.
+    const lower = normalizeMimeType(contentTypeHeader);
 
-    if (lower.includes('application/json') || lower.includes('+json')) {
+    if (lower === 'application/json' || lower.endsWith('+json')) {
       return 'json';
     } else if (lower.startsWith('text/')) {
       return 'text';
-    } else if (lower.includes('application/x-www-form-urlencoded')) {
+    } else if (lower === 'application/x-www-form-urlencoded') {
       return 'text';
     } else {
       return 'binary';
@@ -400,10 +518,46 @@ export function parseContentType(
  * with clear errors instead of surfacing later during request dispatch.
  */
 export function assertSupportedAdapterRuntimeAndConfig(
-  config: HTTPClientConfig,
+  config: HTTPClientConfig | SubClientConfig,
   adapterType: AdapterType,
   isBrowserRuntime: boolean,
 ): void {
+  // Checked by type before anything below compares them with `=== true`: the client
+  // reads them by truthiness, so `followRedirects: 'false'` (an environment variable,
+  // say) would pass a check for `true` and still follow redirects. Nullish reads as false.
+  for (const name of [
+    'followRedirects',
+    'retryNonIdempotentMethods',
+    'includeRequestID',
+    'includeAttemptHeader',
+  ] as const) {
+    const value: unknown = config[name];
+    if (!isNullish(value) && typeof value !== 'boolean') {
+      throw new TypeError(
+        `HTTPClient ${name} must be a boolean (got ${typeof value})`,
+      );
+    }
+  }
+
+  const userAgent: unknown = config.userAgent;
+  if (!isNullish(userAgent) && typeof userAgent !== 'string') {
+    throw new TypeError(
+      `HTTPClient userAgent must be a string (got ${typeof userAgent})`,
+    );
+  }
+
+  // A jar the client cannot call fails here rather than on every request.
+  const jar: unknown = config.cookieJar;
+  if (
+    !isNullish(jar) &&
+    (typeof readUnknownMember(jar, 'getCookieHeaderString') !== 'function' ||
+      typeof readUnknownMember(jar, 'processResponseHeaders') !== 'function')
+  ) {
+    throw new TypeError(
+      'HTTPClient cookieJar must be a CookieJar (or null to disable cookies)',
+    );
+  }
+
   if (
     config.baseURL !== undefined &&
     requiresAbsoluteBaseURL(adapterType, isBrowserRuntime)
@@ -507,7 +661,7 @@ export function extractFetchHeaders(
     const lower = key.toLowerCase();
 
     if (lower !== 'set-cookie') {
-      result[lower] = value;
+      defineEntry(result, lower, value);
     }
   }
 
@@ -537,12 +691,40 @@ export function extractFetchHeaders(
 }
 
 /**
+ * The response headers Node's `http` keeps only the first of when one repeats, rather
+ * than joining: each can hold a single value, so a joined `location` or `content-type`
+ * would be no value at all.
+ */
+const SINGLE_VALUE_RESPONSE_HEADERS: ReadonlySet<string> = new Set([
+  'age',
+  'authorization',
+  'content-length',
+  'content-type',
+  'etag',
+  'expires',
+  'from',
+  'host',
+  'if-modified-since',
+  'if-unmodified-since',
+  'last-modified',
+  'location',
+  'max-forwards',
+  'proxy-authorization',
+  'referer',
+  'retry-after',
+  'server',
+  'user-agent',
+]);
+
+/**
  * Lowercases all keys on adapter/response header objects. `HTTPClient` runs
  * this on each adapter response before {@link CookieJar.processResponseHeaders}.
  * The jar also normalizes so the same shapes work when feeding headers directly.
  *
- * - Non–`set-cookie` values: if an array appears (unexpected), the first
- *   element is kept when read via {@link scalarHeader}.
+ * - Non–`set-cookie` values: an array (a mock or custom adapter's repeated
+ *   header) is read as Node's `res.headers` reads a repeated header - the first
+ *   value of a header that holds one ({@link SINGLE_VALUE_RESPONSE_HEADERS}),
+ *   the others joined with `', '`.
  * - `set-cookie`: stored as `string[]` — each array entry is one full
  *   `Set-Cookie` header line (one cookie). A single string value becomes a
  *   one-element array. If the same header appears under keys that differ only
@@ -554,8 +736,21 @@ export function normalizeAdapterResponseHeaders(
 ): Record<string, string | string[]> {
   const result: Record<string, string | string[]> = {};
 
-  for (const [key, value] of Object.entries(headers)) {
+  for (const [key, rawValue] of Object.entries(headers)) {
     const lower = key.toLowerCase();
+    // As every header normalizer reads an unset value: a `null` or `undefined` value or
+    // array item is no header, so an adapter's `undefined` is not reported as `''`. Other
+    // values are left as they are, for the checks downstream to read.
+    if (isNullish(rawValue)) {
+      continue;
+    }
+    const value = Array.isArray(rawValue)
+      ? rawValue.filter((item) => !isNullish(item))
+      : rawValue;
+
+    if (Array.isArray(value) && value.length === 0) {
+      continue;
+    }
 
     if (lower === 'set-cookie') {
       const chunk = Array.isArray(value) ? value : [value];
@@ -568,7 +763,20 @@ export function normalizeAdapterResponseHeaders(
         result[lower] = [...existingLines, ...chunk];
       }
     } else {
-      result[lower] = Array.isArray(value) ? (value[0] ?? '') : value;
+      // As Node's `res.headers` reads a repeated header - an array, or keys that
+      // differ only by case: the first value of one that can hold only one
+      // (`location`, `content-type`), and the rest joined.
+      const values = Array.isArray(value) ? value : [value];
+      const existing = Object.hasOwn(result, lower) ? result[lower] : undefined;
+      const all =
+        existing === undefined ? values : [existing as string, ...values];
+      defineEntry(
+        result,
+        lower,
+        SINGLE_VALUE_RESPONSE_HEADERS.has(lower)
+          ? (all[0] ?? '')
+          : all.join(', '),
+      );
     }
   }
 
@@ -724,12 +932,10 @@ export function assertSupportedRequestBody(body: unknown): void {
 export function isPlainJSONBodyObject(
   value: unknown,
 ): value is Record<string, unknown> {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
-    return false;
-  }
-
-  const prototype = Reflect.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
+  // The header record's rule, so a plain object is one in either place - another
+  // realm's (a `vm` context's) included. It is sent as `JSON.stringify` serializes it;
+  // see `buildObservedAttemptBodies`.
+  return isPlainRecord(value);
 }
 
 /**
@@ -776,7 +982,9 @@ function hasNestedKey(obj: Record<string, unknown>, path: string): boolean {
       return false;
     }
 
-    if (!(part in (current as Record<string, unknown>))) {
+    // Own keys only: `in` also finds inherited names, so `constructor` or `a.toString`
+    // matched every object body.
+    if (!Object.hasOwn(current, part)) {
       return false;
     }
 
@@ -786,8 +994,10 @@ function hasNestedKey(obj: Record<string, unknown>, path: string): boolean {
   return true;
 }
 
+// The first media type of a header fetch or XHR joined from repeats
+// (`application/json, application/json`), without its parameters.
 function normalizeMimeType(value: string): string {
-  return value.split(';', 1)[0].trim().toLowerCase();
+  return value.split(',', 1)[0].split(';', 1)[0].trim().toLowerCase();
 }
 
 function matchesContentTypePattern(
@@ -799,6 +1009,10 @@ function matchesContentTypePattern(
 
   if (!actual || !expected) {
     return false;
+  }
+
+  if (expected === '*/*') {
+    return actual.includes('/');
   }
 
   if (expected.endsWith('/*')) {
@@ -876,8 +1090,18 @@ export function matchesFilter(
     }
   }
 
-  if (filter.methods && context.method) {
-    if (!filter.methods.includes(context.method)) {
+  // Checked whenever the filter names methods and the context has one, an empty one
+  // included: `''` matches no method rather than skipping the filter.
+  if (filter.methods && context.method !== undefined) {
+    // Compared as the request is sent: an earlier interceptor's `'post'` is `POST`. A
+    // method that is not a string matches nothing here; the snapshot after the chain
+    // refuses it with its own error.
+    // The filter's own entries were normalized when it was registered.
+    const candidate: unknown = context.method;
+    if (
+      typeof candidate !== 'string' ||
+      !filter.methods.includes(normalizeHTTPMethod(candidate))
+    ) {
       return false;
     }
   }
@@ -922,7 +1146,10 @@ export function matchesFilter(
     }
   }
 
-  if (filter.hosts && context.requestURL) {
+  // Checked whenever the context has a URL, an empty one included, as `methods` is: a
+  // request whose URL could not be read (`''`) matches no host or scheme rather than
+  // skipping the filter, so a host-scoped observer does not hear about other hosts.
+  if (filter.hosts && context.requestURL !== undefined) {
     const hostname = extractHostname(context.requestURL);
 
     if (
@@ -934,7 +1161,11 @@ export function matchesFilter(
     }
   }
 
-  if (filter.schemes && filter.schemes.length > 0 && context.requestURL) {
+  if (
+    filter.schemes &&
+    filter.schemes.length > 0 &&
+    context.requestURL !== undefined
+  ) {
     let scheme: 'http' | 'https' | null = null;
 
     try {

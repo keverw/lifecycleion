@@ -1,3 +1,4 @@
+import { readUnknownMember } from '../internal/read-member';
 import type { RequestState } from './types';
 
 export interface TrackedRequest {
@@ -6,6 +7,11 @@ export interface TrackedRequest {
   label?: string;
   state: RequestState;
   abortController: AbortController;
+  /**
+   * The caller's own signal for this request, when it gave one: a request it has aborted
+   * is cancelled already, though this controller has not fired.
+   */
+  callerSignal?: AbortSignal;
 }
 
 /**
@@ -36,18 +42,13 @@ export class RequestTracker {
   }
 
   /**
-   * Cancels a single request by ID. Returns 1 if cancelled, 0 if not found.
+   * Cancels a single request by ID. Returns 1 if this call cancelled it, 0 if it was not
+   * found or was cancelled already.
    */
   public cancel(requestID: string, reason?: string): number {
     const entry = this.requests.get(requestID);
 
-    if (entry) {
-      entry.state = 'cancelled';
-      entry.abortController.abort(reason);
-      return 1;
-    }
-
-    return 0;
+    return entry && cancelEntry(entry, reason) ? 1 : 0;
   }
 
   /**
@@ -57,10 +58,13 @@ export class RequestTracker {
   public cancelAll(reason?: string): number {
     let count = 0;
 
-    for (const entry of this.requests.values()) {
-      entry.state = 'cancelled';
-      entry.abortController.abort(reason);
-      count++;
+    // A copy, in each of these loops: an abort listener can start a request, and walking
+    // the live map would cancel and count it too.
+
+    for (const entry of [...this.requests.values()]) {
+      if (cancelEntry(entry, reason)) {
+        count++;
+      }
     }
 
     return count;
@@ -73,11 +77,11 @@ export class RequestTracker {
   public cancelOwn(clientID: string, reason?: string): number {
     let count = 0;
 
-    for (const entry of this.requests.values()) {
+    for (const entry of [...this.requests.values()]) {
       if (entry.clientID === clientID) {
-        entry.state = 'cancelled';
-        entry.abortController.abort(reason);
-        count++;
+        if (cancelEntry(entry, reason)) {
+          count++;
+        }
       }
     }
 
@@ -91,11 +95,11 @@ export class RequestTracker {
   public cancelAllWithLabel(label: string, reason?: string): number {
     let count = 0;
 
-    for (const entry of this.requests.values()) {
+    for (const entry of [...this.requests.values()]) {
       if (entry.label === label) {
-        entry.state = 'cancelled';
-        entry.abortController.abort(reason);
-        count++;
+        if (cancelEntry(entry, reason)) {
+          count++;
+        }
       }
     }
 
@@ -113,11 +117,11 @@ export class RequestTracker {
   ): number {
     let count = 0;
 
-    for (const entry of this.requests.values()) {
+    for (const entry of [...this.requests.values()]) {
       if (entry.clientID === clientID && entry.label === label) {
-        entry.state = 'cancelled';
-        entry.abortController.abort(reason);
-        count++;
+        if (cancelEntry(entry, reason)) {
+          count++;
+        }
       }
     }
 
@@ -137,7 +141,7 @@ export class RequestTracker {
   } {
     const requests: RequestInfo[] = [];
 
-    for (const entry of this.requests.values()) {
+    for (const entry of [...this.requests.values()]) {
       if (filter?.clientID && entry.clientID !== filter.clientID) {
         continue;
       }
@@ -163,4 +167,38 @@ export interface RequestInfo {
   clientID: string;
   label?: string;
   state: RequestState;
+}
+
+/**
+ * Cancel one tracked request, answering whether this call is what cancelled it. One
+ * already settled or cancelled is left as it is and not counted, so the cancel methods
+ * count requests they cancelled, not requests they saw.
+ */
+export function cancelEntry(
+  entry: TrackedRequest,
+  reason: string | undefined,
+): boolean {
+  if (isEntryPastCancel(entry)) {
+    return false;
+  }
+  entry.state = 'cancelled';
+  entry.abortController.abort(reason);
+  return true;
+}
+
+/**
+ * Whether a tracked request is past cancelling: settled - its outcome decided, though its
+ * final observers may still be running - or cancelled already, by its own controller (a
+ * cancel here or from its builder) or by the caller's signal. Shared with the builder's
+ * `cancel()`, so both answer the same. The caller's `aborted` is read guarded: unreadable
+ * is not aborted.
+ */
+export function isEntryPastCancel(entry: TrackedRequest): boolean {
+  return (
+    entry.state === 'completed' ||
+    entry.state === 'failed' ||
+    entry.state === 'cancelled' ||
+    entry.abortController.signal.aborted ||
+    readUnknownMember(entry.callerSignal, 'aborted') === true
+  );
 }

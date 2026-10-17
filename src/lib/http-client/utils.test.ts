@@ -20,6 +20,7 @@ import {
   serializeBody,
   stripCrossOriginURLCredentials,
 } from './utils';
+import { materializeRequestHeaders } from './internal/header-utils';
 
 const originalXMLHttpRequest = (globalThis as Record<string, unknown>)
   .XMLHttpRequest;
@@ -313,6 +314,39 @@ describe('mergeHeaders', () => {
     });
   });
 
+  test('response header records keep a __proto__ header as an own key', () => {
+    const fetchHeaders = extractFetchHeaders(
+      new Headers([
+        ['__proto__', 'a'],
+        ['x-ok', '1'],
+      ]),
+    );
+    expect(
+      Object.getOwnPropertyDescriptor(fetchHeaders, '__proto__')?.value,
+    ).toBe('a');
+
+    const normalized = normalizeAdapterResponseHeaders(
+      JSON.parse('{"__proto__": ["a", "b"]}') as Record<string, string[]>,
+    );
+    expect(Object.getPrototypeOf(normalized)).toBe(Object.prototype);
+    expect(
+      Object.getOwnPropertyDescriptor(normalized, '__proto__')?.value,
+    ).toBe('a, b');
+  });
+
+  test('keeps a __proto__ header as an own key', () => {
+    const source = JSON.parse(
+      '{"__proto__": ["a", "b"], "x-ok": "1"}',
+    ) as Record<string, string | string[]>;
+    const merged = mergeHeaders(source);
+
+    expect(Object.getPrototypeOf(merged)).toBe(Object.prototype);
+    expect(Object.getOwnPropertyDescriptor(merged, '__proto__')?.value).toEqual(
+      ['a', 'b'],
+    );
+    expect(merged['x-ok']).toBe('1');
+  });
+
   test('skips undefined sets', () => {
     expect(mergeHeaders({ 'content-type': 'text/plain' }, undefined)).toEqual({
       'content-type': 'text/plain',
@@ -377,6 +411,37 @@ describe('mergeObservedHeaders', () => {
     ).toEqual({
       accept: ['text/plain'],
     });
+  });
+
+  test('coerces scalars to strings and skips undefined values', () => {
+    expect(
+      mergeObservedHeaders({
+        'Content-Type': 'application/json',
+        'X-Count': 3,
+        'X-Skip': undefined,
+      }),
+    ).toEqual({
+      'content-type': 'application/json',
+      'x-count': '3',
+    });
+  });
+
+  test('a __proto__ header stays an own key through materialization', () => {
+    const source = JSON.parse('{"__proto__": ["a", "b"]}') as Record<
+      string,
+      string[]
+    >;
+    const normalized = mergeObservedHeaders(source);
+    const materialized = materializeRequestHeaders(normalized);
+
+    expect(Object.getPrototypeOf(normalized)).toBe(Object.prototype);
+    expect(
+      Object.getOwnPropertyDescriptor(normalized, '__proto__')?.value,
+    ).toEqual(['a', 'b']);
+    expect(Object.getPrototypeOf(materialized)).toBe(Object.prototype);
+    expect(
+      Object.getOwnPropertyDescriptor(materialized, '__proto__')?.value,
+    ).toBe('a, b');
   });
 });
 
@@ -465,7 +530,7 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
     test('rejects cookieJar usage', () => {
       expect(() =>
         assertSupportedAdapterRuntimeAndConfig(
-          { cookieJar: {} as never },
+          { cookieJar: new CookieJar() },
           'fetch',
           true,
         ),
@@ -515,7 +580,7 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
 
       expect(() =>
         assertSupportedAdapterRuntimeAndConfig(
-          { cookieJar: {} as never },
+          { cookieJar: new CookieJar() },
           'xhr',
           true,
         ),
@@ -550,7 +615,7 @@ describe('assertSupportedAdapterRuntimeAndConfig', () => {
       expect(() =>
         assertSupportedAdapterRuntimeAndConfig(
           {
-            cookieJar: {} as never,
+            cookieJar: new CookieJar(),
             followRedirects: true,
             maxRedirects: 5,
           },
@@ -747,13 +812,15 @@ describe('normalizeAdapterResponseHeaders', () => {
     });
   });
 
-  test('last scalar wins when keys collide after lowercasing', () => {
+  test('keys that collide after lowercasing are read as a repeated header', () => {
     expect(
       normalizeAdapterResponseHeaders({
         'Content-Type': 'text/plain',
         'CONTENT-TYPE': 'application/json',
+        Link: '<a>',
+        LINK: '<b>',
       }),
-    ).toEqual({ 'content-type': 'application/json' });
+    ).toEqual({ 'content-type': 'text/plain', link: '<a>, <b>' });
   });
 
   test('merges set-cookie lines from keys that differ only by case', () => {
