@@ -1,6 +1,7 @@
 import { isNullish } from '../../internal/is-nullish';
 import { normalizeFilterMethods } from '../utils';
 import { validateConfigEntry } from '../../domain-utils/domain-utils';
+import { normalizeDomain } from '../../domain-utils/helpers';
 
 /**
  * Every list a filter can carry besides `methods`: the type each entry must have and, for
@@ -32,18 +33,39 @@ const FILTER_LISTS: Record<
 };
 
 /**
- * Why a host pattern can never match, read by the validator the matcher's own rules come
- * from: a scheme, port or path (the pattern is matched against the hostname alone), an
- * empty label, a wildcard that is not a whole label, or one whose fixed tail is a public
- * suffix (`*.com`, `*.internal`), which the matcher never wildcards around.
+ * Why a host pattern can never match, by the matcher's own rules. It is compared with the
+ * request URL's hostname alone, so a scheme, path or port is refused with that said.
+ *
+ * - An exact name is compared after the matcher's normalization, so it can match exactly
+ *   when that normalization accepts it - single-label names (`backend`, `redis`) included.
+ * - A wildcard pattern is read by the validator the matcher's wildcard rules come from:
+ *   whole-label wildcards only, and never around a public suffix (`*.com`, `*.internal`).
+ *   Nor around an IP address: a hostname ending in a numeric label is one, and only `*`
+ *   alone wildcards an IP.
  */
 function describeUnmatchableHostPattern(entry: string): string | undefined {
+  if (entry.includes('/')) {
+    return 'has a scheme or path; give the hostname alone';
+  }
+  if (/^[^:]*:\d*$/.test(entry) || /\]:/.test(entry)) {
+    return 'has a port; give the hostname alone';
+  }
+  if (!entry.includes('*')) {
+    return normalizeDomain(entry) === ''
+      ? 'is not a hostname the filter can match'
+      : undefined;
+  }
   const result = validateConfigEntry(entry, 'domain', {
     allowGlobalWildcard: true,
   });
-  return result.valid
-    ? undefined
-    : `can never match (${result.info ?? 'invalid hostname pattern'}); give a hostname or a pattern such as '*.example.com'`;
+  if (!result.valid) {
+    return `can never match (${result.info ?? 'invalid hostname pattern'}); give a hostname or a pattern such as '*.example.com'`;
+  }
+  const lastLabel = entry.replace(/\.$/, '').split('.').pop() ?? '';
+  if (entry !== '*' && /^\d+$/.test(lastLabel)) {
+    return "can never match: only '*' alone matches an IP address";
+  }
+  return undefined;
 }
 
 /** A media-type pattern is `type/subtype`, `type/*` or `*\/*`; anything else matches nothing. */

@@ -2088,6 +2088,7 @@ test('a hosts entry the matcher can never match is refused; whole-label wildcard
     '.example.com',
     '*.internal',
     '**.co.uk',
+    '10.*.0.1',
   ]) {
     expect(() =>
       client.addErrorObserver(() => {}, { hosts: [pattern] }),
@@ -2100,6 +2101,8 @@ test('a hosts entry the matcher can never match is refused; whole-label wildcard
     'example.com.',
     'api.*.example.com',
     'api.**.example.com',
+    'backend',
+    'redis',
   ]) {
     client.addErrorObserver(() => {}, { hosts: [pattern] })();
   }
