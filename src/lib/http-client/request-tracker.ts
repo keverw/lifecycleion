@@ -174,7 +174,7 @@ export interface RequestInfo {
  * already settled or cancelled is left as it is and not counted, so the cancel methods
  * count requests they cancelled, not requests they saw.
  */
-function cancelEntry(
+export function cancelEntry(
   entry: TrackedRequest,
   reason: string | undefined,
 ): boolean {

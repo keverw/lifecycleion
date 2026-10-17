@@ -16,7 +16,7 @@ import {
   assertNoBrowserRestrictedHeaders,
   presentHeaderValue,
 } from './internal/header-utils';
-import { RequestTracker, isEntryPastCancel } from './request-tracker';
+import { RequestTracker, cancelEntry } from './request-tracker';
 import type { RequestInfo, TrackedRequest } from './request-tracker';
 import { HTTPRequestBuilder } from './http-request-builder';
 import { RequestInterceptorManager, isInterceptorCancel } from './interceptors';
@@ -676,13 +676,11 @@ export class BaseHTTPClient {
     // Wire builder.cancel() to our abort controller. It answers whether this call is what
     // cancelled the request: not once it already is - by an earlier `cancel()`, a client
     // or tracker cancel of the same controller, or the caller's own signal.
-    trackedCallbacks.setCancelFn((reason?: string): boolean => {
-      if (isEntryPastCancel(trackedRequest)) {
-        return false;
-      }
-      abortController.abort(reason);
-      return true;
-    });
+    // Through the tracker's own cancel, so the tracked state reads `cancelled` at once,
+    // as it does after `client.cancel()`.
+    trackedCallbacks.setCancelFn((reason?: string): boolean =>
+      cancelEntry(trackedRequest, reason),
+    );
 
     // Compose user signal with our internal abort controller. Every composition made
     // for this request - this one and one per attempt - registers how to release its
@@ -914,7 +912,8 @@ export class BaseHTTPClient {
             false,
             undefined,
             undefined,
-            interceptResult.reason,
+            // A `cancel()` made first - one that returned `true` - keeps its reason.
+            getSignalCancelReason(cancelSignal) ?? interceptResult.reason,
           );
           callbacks.setError(error);
           trackedCallbacks.setState('cancelled');
@@ -1238,6 +1237,25 @@ export class BaseHTTPClient {
               statusCode: adapterResponse.status,
             };
 
+            // Nothing more runs for a request already cancelled - from this hop's
+            // `onAttemptEnd`, say: not the redirect-phase observers, nor the interceptors.
+            if (cancelSignal.aborted) {
+              response = this._buildResponse<T>({
+                adapterResponse: null,
+                requestID,
+                wasCancelled: true,
+                wasTimeout: false,
+                adapterType: this._adapter.getType(),
+                initialURL: initialRequestURL,
+                requestURL: hopFromURL,
+                redirectHistory,
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
+              });
+              cancelReason = getSignalCancelReason(cancelSignal);
+
+              break;
+            }
+
             // Notify redirect-phase response observers (after Set-Cookie from
             // this response is applied). Same hop/from/to/statusCode as the
             // redirect-phase request interceptors that run below. They are handed the
@@ -1413,8 +1431,11 @@ export class BaseHTTPClient {
                 // See the initial phase's cancel.
                 { reportedURL: redirectTargetURL },
               );
-              if (redirectIntercept.reason !== undefined) {
-                cancelReason = redirectIntercept.reason;
+              // As the initial phase's: an earlier `cancel()` keeps its reason.
+              const redirectCancelReason =
+                getSignalCancelReason(cancelSignal) ?? redirectIntercept.reason;
+              if (redirectCancelReason !== undefined) {
+                cancelReason = redirectCancelReason;
               }
 
               response = this._buildResponse<T>({
@@ -1661,11 +1682,7 @@ export class BaseHTTPClient {
       // A cancel that landed after the answer arrived but before the request settled -
       // from the final `onAttemptEnd`, say - told its caller it cancelled the request, so
       // it does: the request ends cancelled rather than settling under that answer.
-      if (
-        cancelSignal.aborted &&
-        !response.isCancelled &&
-        !response.isTimeout
-      ) {
+      if (cancelSignal.aborted && !response.isCancelled) {
         response = this._buildResponse<T>({
           adapterResponse: null,
           requestID,
@@ -1674,7 +1691,8 @@ export class BaseHTTPClient {
           adapterType: this._adapter.getType(),
           initialURL: initialRequestURL,
           requestURL: response.requestURL,
-          redirectHistory,
+          // The response's own: a hop that failed after it was recorded carries it.
+          redirectHistory: response.redirectHistory,
           ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
         });
         // Whatever the answer was - a success, or a failure such as a final 500 - the
@@ -2232,10 +2250,13 @@ export class BaseHTTPClient {
         }
 
         if (isInterceptorCancel(retryIntercept)) {
+          // As the initial phase's: an earlier `cancel()` keeps its reason.
+          const retryCancelReason =
+            getSignalCancelReason(cancelSignal) ?? retryIntercept.reason;
           return endBeforeDispatch(baseRequest, {
             wasCancelled: true,
-            ...(retryIntercept.reason !== undefined
-              ? { cancelReason: retryIntercept.reason }
+            ...(retryCancelReason !== undefined
+              ? { cancelReason: retryCancelReason }
               : {}),
           });
         }
@@ -3063,9 +3084,10 @@ export class BaseHTTPClient {
                 STREAM_FACTORY_CANCEL_KEY,
               );
               const factoryCancelReason =
-                typeof factoryCancelValue === 'string'
+                getSignalCancelReason(cancelSignal) ??
+                (typeof factoryCancelValue === 'string'
                   ? factoryCancelValue
-                  : undefined;
+                  : undefined);
 
               emitAttemptEnd({
                 willRetry: false,

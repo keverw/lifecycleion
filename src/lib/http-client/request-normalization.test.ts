@@ -2688,3 +2688,107 @@ test('a cancel made before an early failure ends the request cancelled, as its t
   expect(jarResponse.isCancelled).toBe(true);
   expect(jarBuilder.state).toBe('cancelled');
 });
+
+test('late cancels: a timeout, a redirect hop, an earlier reason, redirect callbacks and the tracker', async () => {
+  // A late cancel after a timed-out final attempt ends the request cancelled.
+  const timeoutClient = new HTTPClient({
+    baseURL: 'http://api.test',
+    timeout: 30,
+    adapter: {
+      getType: () => 'node',
+      send: (request: AdapterRequest) =>
+        new Promise<AdapterResponse>((_resolve, reject) => {
+          request.signal?.addEventListener('abort', () => {
+            const error = new Error('aborted');
+            error.name = 'AbortError';
+            reject(error);
+          });
+        }),
+    },
+  });
+  const timed: ReturnType<HTTPClient['get']> = timeoutClient.get('/x', {
+    onAttemptEnd: () => {
+      timed.cancel('late');
+    },
+  });
+  const timedResponse = await timed.send();
+  expect(timedResponse.isCancelled).toBe(true);
+  expect(timed.error?.cancelReason).toBe('late');
+
+  // A redirect-phase interceptor that cancels and throws reports the hop's history,
+  // and the redirect observers do not run after a cancel from the hop's onAttemptEnd.
+  const adapter = new MockAdapter();
+  adapter.routes.get('/a', () => ({
+    status: 302,
+    headers: { location: '/b' },
+  }));
+  adapter.routes.get('/b', () => ({ status: 200 }));
+  const redirectClient = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+  });
+  // eslint-disable-next-line prefer-const -- assigned after the interceptor that reads it
+  let hop: ReturnType<HTTPClient['get']>;
+  redirectClient.addRequestInterceptor(
+    () => {
+      hop.cancel('mine');
+      throw new Error('refresh failed');
+    },
+    { phases: ['redirect'] },
+  );
+  hop = redirectClient.get('/a');
+  const hopResponse = await hop.send();
+  expect(hopResponse.isCancelled).toBe(true);
+  expect(hopResponse.redirectHistory).toEqual(['http://api.test/b']);
+
+  const observed: string[] = [];
+  const quietClient = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+  });
+  quietClient.addResponseObserver(
+    () => {
+      observed.push('observer');
+    },
+    { phases: ['redirect'] },
+  );
+  const quiet: ReturnType<HTTPClient['get']> = quietClient.get('/a', {
+    onAttemptEnd: () => {
+      quiet.cancel();
+    },
+  });
+  expect((await quiet.send()).isCancelled).toBe(true);
+  expect(observed).toEqual([]);
+
+  // An interceptor cancel keeps the reason of an earlier cancel() that returned true.
+  const reasonClient = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  // eslint-disable-next-line prefer-const -- assigned after the interceptor that reads it
+  let reasoned: ReturnType<HTTPClient['get']>;
+  reasonClient.addRequestInterceptor(() => {
+    reasoned.cancel('mine');
+    return { cancel: true, reason: 'theirs' };
+  });
+  reasoned = reasonClient.get('/b');
+  await reasoned.send();
+  expect(reasoned.error?.cancelReason).toBe('mine');
+
+  // builder.cancel() marks the tracked request cancelled, as client.cancel does.
+  const trackedClient = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+  });
+  const states: string[] = [];
+  const tracked: ReturnType<HTTPClient['get']> = trackedClient.get('/a', {
+    onAttemptEnd: () => {
+      tracked.cancel();
+      states.push(
+        ...trackedClient.listRequests().requests.map((entry) => entry.state),
+      );
+    },
+  });
+  await tracked.send();
+  expect(states).toEqual(['cancelled']);
+});
