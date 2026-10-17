@@ -2587,3 +2587,50 @@ test('a cancel that lands after the answer but before the request settles is hon
   expect(builder.error?.cancelReason).toBe('late');
   expect(builder.cancel()).toBe(false);
 });
+
+test('an interceptor that rewrites the caller request in place into another refusal is the interceptor error', async () => {
+  const client = new HTTPClient({
+    baseURL: 'http://api.test',
+    adapter: {
+      getType: () => 'fetch',
+      send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
+    },
+  });
+  client.addRequestInterceptor((request) => {
+    request.method = 'TRACE';
+    return request;
+  });
+  const builder = client.get('/x', { body: 'x' });
+  await builder.send();
+
+  expect(builder.error?.code).toBe('interceptor_error');
+});
+
+test('a late cancel on an answer that failed ends the request cancelled too', async () => {
+  // An answer whose JSON body is not bytes: the request fails as adapter_error.
+  const client = new HTTPClient({
+    baseURL: 'http://api.test',
+    adapter: {
+      getType: () => 'node',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: 'not bytes' as unknown as Uint8Array,
+        }),
+    },
+  });
+  let didCancel: boolean | undefined;
+  const builder = client.get('/x', {
+    onAttemptEnd: () => {
+      didCancel = builder.cancel('late');
+    },
+  });
+
+  const response = await builder.send();
+
+  expect(didCancel).toBe(true);
+  expect(response.isCancelled).toBe(true);
+  expect(builder.state).toBe('cancelled');
+  expect(builder.error?.cancelReason).toBe('late');
+});

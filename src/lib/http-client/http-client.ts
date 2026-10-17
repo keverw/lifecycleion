@@ -768,6 +768,10 @@ export class BaseHTTPClient {
         // If none did, the refusal is still the caller's own, reported as it would be with
         // no interceptor registered.
         let callerMethodRefusal: Error | undefined;
+        // Read now: the interceptors are handed this very object, and one may rewrite it
+        // in place before the comparison below.
+        const callerMethod = interceptedRequest.method;
+        const hasCallerBody = !isNullish(interceptedRequest.body);
         try {
           this._assertRequestIsSupported(interceptedRequest);
         } catch (error) {
@@ -846,9 +850,9 @@ export class BaseHTTPClient {
             callerMethodRefusal !== undefined &&
             methodRefusals.has(error as Error) &&
             readStringMember(initialRequestCandidate, 'method', '') ===
-              interceptedRequest.method &&
-            isNullish(readObjectMember(initialRequestCandidate, 'body')) ===
-              isNullish(interceptedRequest.body);
+              callerMethod &&
+            !isNullish(readObjectMember(initialRequestCandidate, 'body')) ===
+              hasCallerBody;
           const normalizedError = this._makeError(
             response,
             requestID,
@@ -1630,8 +1634,12 @@ export class BaseHTTPClient {
 
       // A cancel that landed after the answer arrived but before the request settled -
       // from the final `onAttemptEnd`, say - told its caller it cancelled the request, so
-      // it does: the request ends cancelled rather than completing under that answer.
-      if (!response.isFailed && cancelSignal.aborted) {
+      // it does: the request ends cancelled rather than settling under that answer.
+      if (
+        cancelSignal.aborted &&
+        !response.isCancelled &&
+        !response.isTimeout
+      ) {
         response = this._buildResponse<T>({
           adapterResponse: null,
           requestID,
@@ -1643,6 +1651,12 @@ export class BaseHTTPClient {
           redirectHistory,
           ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
         });
+        // Whatever the answer was - a success, or a failure such as a final 500 - the
+        // cancel is what ends the request, so the answer's own error goes with it.
+        errorCode = undefined;
+        adapterCause = undefined;
+        errorMessage = undefined;
+        isRetriesExhausted = false;
         cancelReason = getSignalCancelReason(cancelSignal);
       }
 
