@@ -2078,7 +2078,7 @@ test('an error observer sees the URL the error names when an interceptor made it
   expect(seen).toEqual(['https://public.test/x']);
 });
 
-test('a hosts entry whose wildcard is not a whole leading label, or with an empty label, is refused', () => {
+test('a hosts entry the matcher can never match is refused; whole-label wildcards anywhere are not', () => {
   const client = new HTTPClient();
   for (const pattern of [
     '*api.example.com',
@@ -2086,6 +2086,8 @@ test('a hosts entry whose wildcard is not a whole leading label, or with an empt
     '**',
     'api..example.com',
     '.example.com',
+    '*.internal',
+    '**.co.uk',
   ]) {
     expect(() =>
       client.addErrorObserver(() => {}, { hosts: [pattern] }),
@@ -2096,6 +2098,8 @@ test('a hosts entry whose wildcard is not a whole leading label, or with an empt
     '*.example.com',
     '**.example.com',
     'example.com.',
+    'api.*.example.com',
+    'api.**.example.com',
   ]) {
     client.addErrorObserver(() => {}, { hosts: [pattern] })();
   }
@@ -2269,4 +2273,103 @@ test('an unset response header value from an adapter means no header', async () 
 
   expect(Object.hasOwn(response.headers, 'x-unset')).toBe(false);
   expect(response.headers['x-arr']).toBe('a');
+});
+
+test('a cancel that lands while interceptors or redirect observers run ends the request before dispatch', async () => {
+  // An adapter that answers without checking its signal first.
+  const sent: string[] = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request: AdapterRequest) => {
+      sent.push(request.requestURL);
+      return Promise.resolve<AdapterResponse>(
+        request.requestURL.endsWith('/r')
+          ? { status: 302, headers: { location: '/b' }, body: null }
+          : request.requestURL.endsWith('/flaky') && sent.length === 1
+            ? { status: 503, headers: {}, body: null }
+            : { status: 200, headers: {}, body: null },
+      );
+    },
+  };
+
+  for (const phase of ['initial', 'retry', 'redirect'] as const) {
+    sent.length = 0;
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      followRedirects: true,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+    });
+    // eslint-disable-next-line prefer-const -- assigned after the callbacks that read it
+    let builder: ReturnType<HTTPClient['get']>;
+    if (phase === 'redirect') {
+      client.addResponseObserver(() => void builder.cancel('stop'), {
+        phases: ['redirect'],
+      });
+    } else {
+      client.addRequestInterceptor(
+        (request) => {
+          builder.cancel('stop');
+          return request;
+        },
+        { phases: [phase] },
+      );
+    }
+    builder = client.get(
+      phase === 'redirect' ? '/r' : phase === 'retry' ? '/flaky' : '/x',
+    );
+
+    const response = await builder.send();
+
+    expect(response.isCancelled).toBe(true);
+    expect(builder.state).toBe('cancelled');
+    expect(sent).toHaveLength(phase === 'initial' ? 0 : 1);
+  }
+});
+
+test('an interceptor that rewrites the URL in place and cancels does not move the observer off the reported URL', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/a', () => ({
+    status: 302,
+    headers: { location: 'http://b.test/b' },
+  }));
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://a.test',
+    followRedirects: true,
+  });
+  const seen: string[] = [];
+  client.addErrorObserver(
+    (_error, request) => {
+      seen.push(request.requestURL);
+    },
+    { hosts: ['b.test', 'a.test'] },
+  );
+  client.addRequestInterceptor(
+    (request) => {
+      request.requestURL = 'http://evil.test/x';
+      return { cancel: true };
+    },
+    { phases: ['redirect'] },
+  );
+  const redirected = client.get('/a');
+  const response = await redirected.send();
+
+  expect(response.requestURL).toBe('http://b.test/b');
+  expect(seen).toEqual(['http://b.test/b']);
+
+  const initialClient = new HTTPClient({ adapter, baseURL: 'http://a.test' });
+  initialClient.addErrorObserver(
+    (_error, request) => {
+      seen.push(request.requestURL);
+    },
+    { hosts: ['a.test'] },
+  );
+  initialClient.addRequestInterceptor((request) => {
+    request.requestURL = 'http://evil.test/x';
+    return { cancel: true };
+  });
+  await initialClient.get('/a').send();
+
+  expect(seen).toEqual(['http://b.test/b', 'http://a.test/a']);
 });

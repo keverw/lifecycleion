@@ -833,9 +833,8 @@ export class BaseHTTPClient {
               initialRequestCandidate,
               timeout,
               requestID,
-              undefined,
               // The URL the response and error name, so a host filter agrees with them.
-              url,
+              { fallbackURL: url },
             ),
             {
               type: 'final',
@@ -874,6 +873,9 @@ export class BaseHTTPClient {
               finalRequest,
               timeout,
               requestID,
+              // The URL the response names: `finalRequest` was handed to the
+              // interceptors, which could have rewritten it before cancelling.
+              { reportedURL: url },
             ),
             {
               type: 'final',
@@ -1322,8 +1324,7 @@ export class BaseHTTPClient {
                 failedRedirectRequest,
                 timeout,
                 requestID,
-                undefined,
-                redirectURL,
+                { fallbackURL: redirectURL },
               );
               response = this._buildResponse<T>({
                 adapterResponse: null,
@@ -1357,6 +1358,8 @@ export class BaseHTTPClient {
                 redirectRequest,
                 timeout,
                 requestID,
+                // See the initial phase's cancel.
+                { reportedURL: redirectTargetURL },
               );
               if (redirectIntercept.reason !== undefined) {
                 cancelReason = redirectIntercept.reason;
@@ -2064,10 +2067,10 @@ export class BaseHTTPClient {
             pendingRequest,
             timeout,
             requestID,
-            knownBodies,
             // The hop's own URL when the pending request's cannot be read, so the
             // response, the error and host-filtered observers name a real one.
-            baseRequest.requestURL,
+            { fallbackURL: baseRequest.requestURL },
+            knownBodies,
           ),
           attemptCount: attemptNumber,
           wasCancelled: false,
@@ -2144,6 +2147,18 @@ export class BaseHTTPClient {
         }
 
         attemptRequest = retryIntercept;
+      }
+
+      // A cancel that landed while the caller's own callbacks ran - an interceptor, a
+      // redirect-phase observer - ends the request here, as the settle wait answers one
+      // that landed during a backoff, rather than handing the adapter a signal it may
+      // not check before it answers.
+      if (cancelSignal.aborted) {
+        const signalReason = getSignalCancelReason(cancelSignal);
+        return endBeforeDispatch(attemptRequest, {
+          wasCancelled: true,
+          ...(signalReason !== undefined ? { cancelReason: signalReason } : {}),
+        });
       }
 
       // Armed after the retry-phase interceptors, as the initial phase's run before any
@@ -3770,9 +3785,16 @@ export class BaseHTTPClient {
     request: InterceptedRequest,
     timeout: number,
     requestID: string,
+    urls: {
+      /** The URL the response falls back to when `requestURL` cannot be read. */
+      fallbackURL?: string;
+      /**
+       * The URL the response and error report, used in place of `requestURL`: the request
+       * was handed to interceptors, which could have rewritten it in place.
+       */
+      reportedURL?: string;
+    } = {},
     knownBodies?: ObservedAttemptBodies | 'unbuildable',
-    /** The URL the response falls back to when `requestURL` cannot be read. */
-    fallbackURL = '',
   ): AttemptRequest {
     // Best-effort snapshot for observers when a request fails before any adapter
     // attempt is dispatched (interceptor throw, pre-send cancel, setup error, etc.).
@@ -3851,7 +3873,9 @@ export class BaseHTTPClient {
     }
 
     return {
-      requestURL: readStringMember(request, 'requestURL', fallbackURL),
+      requestURL:
+        urls.reportedURL ??
+        readStringMember(request, 'requestURL', urls.fallbackURL ?? ''),
       method: readStringMember(request, 'method', ''),
       headers,
       body: clonedBodies.body,

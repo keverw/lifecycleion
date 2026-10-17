@@ -1,5 +1,6 @@
 import { isNullish } from '../../internal/is-nullish';
 import { normalizeFilterMethods } from '../utils';
+import { validateConfigEntry } from '../../domain-utils/domain-utils';
 
 /**
  * Every list a filter can carry besides `methods`: the type each entry must have and, for
@@ -31,40 +32,18 @@ const FILTER_LISTS: Record<
 };
 
 /**
- * A host pattern is matched against the request URL's hostname alone, so one carrying a
- * scheme, a path or a port - `http://api.test`, `api.test:8080` - can never match.
- * Bare IPv6 (`::1`) has several colons and is left alone; a bracketed one may not carry
- * a port either.
+ * Why a host pattern can never match, read by the validator the matcher's own rules come
+ * from: a scheme, port or path (the pattern is matched against the hostname alone), an
+ * empty label, a wildcard that is not a whole label, or one whose fixed tail is a public
+ * suffix (`*.com`, `*.internal`), which the matcher never wildcards around.
  */
 function describeUnmatchableHostPattern(entry: string): string | undefined {
-  if (entry.trim() === '') {
-    return 'is empty';
-  }
-  if (entry.includes('/')) {
-    return 'has a scheme or path; give the hostname alone';
-  }
-  if (/^[^:]*:\d*$/.test(entry) || /\]:/.test(entry)) {
-    return 'has a port; give the hostname alone';
-  }
-  if (entry === '*') {
-    return undefined;
-  }
-  // One trailing dot is a fully qualified name; any other empty label matches nothing.
-  const labels = entry.replace(/\.$/, '').split('.');
-  if (labels.includes('')) {
-    return 'has an empty label';
-  }
-  // `*` and `**` stand for whole leading labels (`*.example.com`); anywhere else the
-  // matcher reads them literally, so the entry matches no hostname.
-  const isWildcardMisplaced = labels.some(
-    (part, index) =>
-      part.includes('*') &&
-      !(index === 0 && (part === '*' || part === '**') && labels.length > 1),
-  );
-  if (isWildcardMisplaced) {
-    return "has a wildcard that is not a whole leading label ('*.example.com', '**.example.com', or '*' alone)";
-  }
-  return undefined;
+  const result = validateConfigEntry(entry, 'domain', {
+    allowGlobalWildcard: true,
+  });
+  return result.valid
+    ? undefined
+    : `can never match (${result.info ?? 'invalid hostname pattern'}); give a hostname or a pattern such as '*.example.com'`;
 }
 
 /** A media-type pattern is `type/subtype`, `type/*` or `*\/*`; anything else matches nothing. */
