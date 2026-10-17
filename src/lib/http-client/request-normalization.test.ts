@@ -2851,7 +2851,6 @@ test('a cancel at a phase boundary starts no attempt and runs no later callbacks
   expect((await hop.send()).isCancelled).toBe(true);
   expect(hopLog).toEqual(['start 1']);
   expect(hop.attemptCount).toBe(1);
-  // The builder agrees with the tracker once a cancel returned true.
   expect(hop.state).toBe('cancelled');
 
   // A cancel from onAttemptEnd({ willRetry: true }) runs no retry-phase observer.
@@ -2876,7 +2875,7 @@ test('a cancel at a phase boundary starts no attempt and runs no later callbacks
   expect(retryLog).toEqual([]);
 });
 
-test('builder.cancel() sets the builder state cancelled at once, as the tracker reads it', async () => {
+test('builder.cancel() marks the tracked request at once; the builder settles with the request', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/slow', async () => {
     await new Promise((resolve) => setTimeout(resolve, 20));
@@ -2888,9 +2887,61 @@ test('builder.cancel() sets the builder state cancelled at once, as the tracker 
   await new Promise((resolve) => setTimeout(resolve, 5));
 
   expect(builder.cancel('x')).toBe(true);
-  expect(builder.state).toBe('cancelled');
   expect(client.listRequests().requests.map((entry) => entry.state)).toEqual([
     'cancelled',
   ]);
+  // Not terminal before the request has settled: no completion time stamped yet.
+  expect(builder.state).toBe('sending');
+
   await pending;
+  expect(builder.state).toBe('cancelled');
+});
+
+test('a cancel ends an interceptor chain, and an interceptor or factory cancel answers a later cancel() false', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/flaky', () => ({ status: 503 }));
+  const log: string[] = [];
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+  });
+  client.addRequestInterceptor(
+    (request) => {
+      log.push('first');
+      client.cancelAll('nav');
+      return request;
+    },
+    { phases: ['retry'] },
+  );
+  client.addRequestInterceptor(
+    (request) => {
+      log.push('second');
+      return request;
+    },
+    { phases: ['retry'] },
+  );
+  expect((await client.get('/flaky').send()).isCancelled).toBe(true);
+  expect(log).toEqual(['first']);
+
+  const cancelling = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+  });
+  cancelling.addRequestInterceptor(() => ({ cancel: true, reason: 'A' }), {
+    phases: ['retry'],
+  });
+  let didLateCancel: boolean | undefined;
+  const builder: ReturnType<HTTPClient['get']> = cancelling.get('/flaky', {
+    onAttemptEnd: ({ attemptNumber }) => {
+      if (attemptNumber === 2) {
+        didLateCancel = builder.cancel('B');
+      }
+    },
+  });
+  await builder.send();
+
+  expect(didLateCancel).toBe(false);
+  expect(builder.error?.cancelReason).toBe('A');
 });

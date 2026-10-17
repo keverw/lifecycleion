@@ -678,14 +678,11 @@ export class BaseHTTPClient {
     // or tracker cancel of the same controller, or the caller's own signal.
     // Through the tracker's own cancel, so the tracked state reads `cancelled` at once,
     // as it does after `client.cancel()`.
-    trackedCallbacks.setCancelFn((reason?: string): boolean => {
-      if (!cancelEntry(trackedRequest, reason)) {
-        return false;
-      }
-      // The builder reads the same, rather than `sending` until the request settles.
-      callbacks.setState('cancelled');
-      return true;
-    });
+    // The builder's own state turns `cancelled` when the request settles, with its
+    // response and error, as for every other outcome.
+    trackedCallbacks.setCancelFn((reason?: string): boolean =>
+      cancelEntry(trackedRequest, reason),
+    );
 
     // Compose user signal with our internal abort controller. Every composition made
     // for this request - this one and one per attempt - registers how to release its
@@ -802,6 +799,7 @@ export class BaseHTTPClient {
               requestID,
               attemptNumber: 1,
             },
+            () => cancelSignal.aborted,
           );
 
           // Taken for the rest of the phase through `snapshotInterceptedRequest`. A
@@ -997,6 +995,9 @@ export class BaseHTTPClient {
           // its own call; the shared retryPolicy tracks budget across all hops.
           const attemptResult = await this._dispatchRequestAttempts({
             request: currentInterceptedRequest,
+            markCancelled: (reason) => {
+              cancelEntry(trackedRequest, reason);
+            },
             sentBody,
             credentialScope,
             timeout,
@@ -1388,6 +1389,7 @@ export class BaseHTTPClient {
                   requestID,
                   attemptNumber: lastAttemptNumber + 1,
                 },
+                () => cancelSignal.aborted,
               );
               if (isInterceptorCancel(redirectRunResult)) {
                 redirectIntercept = redirectRunResult;
@@ -1925,6 +1927,12 @@ export class BaseHTTPClient {
   private async _dispatchRequestAttempts<T>(params: {
     request: ResolvedRequest;
     /**
+     * Mark the request cancelled, as `cancel()` would, when an interceptor or the stream
+     * factory cancelled it: a later `cancel()` - from that attempt's `onAttemptEnd` - then
+     * answers `false` rather than `true` for a request it did not cancel.
+     */
+    markCancelled: (reason: string | undefined) => void;
+    /**
      * Set to the caller's body of each attempt as it is dispatched, so a 307/308 replays
      * that value - serialized as the attempt's was - rather than the observers' copy,
      * which rebuilds plain objects and class instances as plain objects, losing their
@@ -2204,6 +2212,9 @@ export class BaseHTTPClient {
         knownBodies?: ObservedAttemptBodies | 'unbuildable',
       ) => {
         clearTimeout(timeoutID);
+        if (outcome.wasCancelled) {
+          params.markCancelled(outcome.cancelReason);
+        }
         emitAttemptEnd({ willRetry: false, status: 0 });
 
         return {
@@ -2258,6 +2269,7 @@ export class BaseHTTPClient {
             },
             retryPhase,
             { initialURL, redirectHistory, requestID, attemptNumber },
+            () => cancelSignal.aborted,
           );
 
           // Snapshotted as the initial phase in `_execute` does, and skipped on the
@@ -3127,6 +3139,7 @@ export class BaseHTTPClient {
                 typeof factoryCancelValue === 'string'
                   ? factoryCancelValue
                   : undefined;
+              params.markCancelled(factoryCancelReason);
 
               emitAttemptEnd({
                 willRetry: false,
@@ -3795,6 +3808,8 @@ export class BaseHTTPClient {
     request: R,
     phase: InterceptorPhase,
     context: RequestInterceptorContext,
+    /** Whether the request was cancelled, after which no further interceptor runs. */
+    isCancelled: () => boolean,
   ): Promise<
     | { result: R; isIntercepted: false }
     | { result: InterceptedRequest | InterceptorCancel; isIntercepted: true }
@@ -3821,15 +3836,15 @@ export class BaseHTTPClient {
     };
 
     if (parentChain) {
-      current = await parentChain(request, phase, chainContext);
+      current = await parentChain(request, phase, chainContext, isCancelled);
 
-      if (isInterceptorCancel(current)) {
+      if (isInterceptorCancel(current) || isCancelled()) {
         return { result: current, isIntercepted: true };
       }
     }
 
     return {
-      result: await ownChain(current, phase, chainContext),
+      result: await ownChain(current, phase, chainContext, isCancelled),
       isIntercepted: true,
     };
   }

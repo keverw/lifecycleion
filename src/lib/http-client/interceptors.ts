@@ -35,8 +35,8 @@ export class RequestInterceptorManager extends CallbackRegistry<
   public snapshot(): InterceptorChain {
     const interceptors = this.currentRegistrations();
 
-    return (request, phase, context) =>
-      runInterceptors(interceptors, request, phase, context);
+    return (request, phase, context, isCancelled) =>
+      runInterceptors(interceptors, request, phase, context, isCancelled);
   }
 }
 
@@ -44,6 +44,8 @@ export type InterceptorChain = (
   request: InterceptedRequest,
   phase: InterceptorPhase,
   context: RequestInterceptorContext,
+  /** Whether the request was cancelled, after which no further interceptor runs. */
+  isCancelled?: () => boolean,
 ) => Promise<InterceptedRequest | InterceptorCancel>;
 
 async function runInterceptors(
@@ -53,10 +55,17 @@ async function runInterceptors(
   request: InterceptedRequest,
   phase: InterceptorPhase,
   context: RequestInterceptorContext,
+  isCancelled?: () => boolean,
 ): Promise<InterceptedRequest | InterceptorCancel> {
   let current = request;
 
   for (const { fn, filter } of interceptors) {
+    // A cancel made by an earlier interceptor, or while it ran, ends the chain: the request
+    // is not dispatched, so the rest - a token refresh, say - has nothing to prepare.
+    if (isCancelled?.()) {
+      return current;
+    }
+
     if (
       !matchesFilter(
         filter ?? {},
