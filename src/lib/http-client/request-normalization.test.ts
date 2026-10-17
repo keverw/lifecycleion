@@ -2191,3 +2191,82 @@ test('a cut-off response an adapter throws is read under the rules for answers',
     expect(response.status).toBe(0);
   }
 });
+
+test('a 3xx the adapter reports as a transport failure is neither followed nor refused as a redirect', async () => {
+  for (const isFollowing of [true, false]) {
+    const sent: string[] = [];
+    const builder = new HTTPClient({
+      baseURL: 'http://api.test',
+      followRedirects: isFollowing,
+      adapter: {
+        getType: () => 'node',
+        send: (request: AdapterRequest) => {
+          sent.push(request.requestURL);
+          return Promise.resolve({
+            status: 302,
+            isTransportError: true,
+            headers: { location: '/b' },
+            body: null,
+          });
+        },
+      },
+    }).get('/a');
+
+    const response = await builder.send();
+
+    expect(sent).toEqual(['http://api.test/a']);
+    expect(response.isFailed).toBe(true);
+    expect(builder.error?.code).toBe('network_error');
+  }
+});
+
+test('a redirect observer that rewrites the method in place does not change the body replay', async () => {
+  const adapter = new MockAdapter();
+  const seen: unknown[] = [];
+  adapter.routes.post('/login', () => ({
+    status: 303,
+    headers: { location: '/landing' },
+  }));
+  adapter.routes.get('/landing', (req) => {
+    seen.push(req.body);
+    return { status: 200 };
+  });
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+  });
+  client.addResponseObserver(
+    (_response, request) => {
+      (request as { method: string }).method = 'GET';
+    },
+    { phases: ['redirect'] },
+  );
+
+  await client.post('/login', { body: { password: 'hunter2' } }).send();
+
+  expect(seen).toEqual([undefined]);
+});
+
+test('an unset response header value from an adapter means no header', async () => {
+  const response = await new HTTPClient({
+    baseURL: 'http://api.test',
+    adapter: {
+      getType: () => 'node',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: {
+            'x-unset': undefined,
+            'x-arr': ['a', null],
+          } as unknown as Record<string, string>,
+          body: null,
+        }),
+    },
+  })
+    .get('/a')
+    .send();
+
+  expect(Object.hasOwn(response.headers, 'x-unset')).toBe(false);
+  expect(response.headers['x-arr']).toBe('a');
+});

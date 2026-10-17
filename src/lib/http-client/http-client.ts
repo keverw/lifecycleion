@@ -1004,9 +1004,12 @@ export class BaseHTTPClient {
 
           // A 3xx with no `Location` is no redirect to refuse - nothing to follow - so it
           // is delivered as the final response, as it is with redirects on.
+          // Nor is a 3xx the adapter reports as a transport failure: it keeps its status
+          // but fails as the network error it is, in this branch and the next.
           if (
             !this._config.followRedirects &&
             adapterResponse &&
+            !adapterResponse.isTransportError &&
             REDIRECT_STATUS_CODES.has(adapterResponse.status) &&
             scalarHeader(adapterResponse.headers, 'location')
           ) {
@@ -1055,6 +1058,7 @@ export class BaseHTTPClient {
             this._config.followRedirects &&
             adapterResponse &&
             !adapterResponse.isStreamError &&
+            !adapterResponse.isTransportError &&
             REDIRECT_STATUS_CODES.has(adapterResponse.status)
           ) {
             // Resolve the Location header into an absolute URL. Read before the hop is
@@ -1170,6 +1174,9 @@ export class BaseHTTPClient {
             // cross-origin checks below compare against it, and observers and
             // interceptors are handed objects they could change.
             const hopFromURL = attemptResult.sentRequest.requestURL;
+            // Whether this hop keeps its body, decided now for the same reason.
+            const isMethodRewritten =
+              redirectMethod !== attemptResult.sentRequest.method;
             const hopInfo: RedirectHopInfo = {
               hop: hopCount,
               from: hopFromURL,
@@ -1253,10 +1260,7 @@ export class BaseHTTPClient {
                 method: redirectMethod,
                 // Dropped only when this hop rewrote the method: a 307/308 replays a
                 // GET's body as it replays any other method's.
-                body:
-                  redirectMethod === attemptResult.sentRequest.method
-                    ? sentBody.value
-                    : undefined,
+                body: isMethodRewritten ? undefined : sentBody.value,
               },
               {
                 fromURL: hopFromURL,

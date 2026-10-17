@@ -736,8 +736,21 @@ export function normalizeAdapterResponseHeaders(
 ): Record<string, string | string[]> {
   const result: Record<string, string | string[]> = {};
 
-  for (const [key, value] of Object.entries(headers)) {
+  for (const [key, rawValue] of Object.entries(headers)) {
     const lower = key.toLowerCase();
+    // As every header normalizer reads an unset value: a `null` or `undefined` value or
+    // array item is no header, so an adapter's `undefined` is not reported as `''`. Other
+    // values are left as they are, for the checks downstream to read.
+    if (isNullish(rawValue)) {
+      continue;
+    }
+    const value = Array.isArray(rawValue)
+      ? rawValue.filter((item) => !isNullish(item))
+      : rawValue;
+
+    if (Array.isArray(value) && value.length === 0) {
+      continue;
+    }
 
     if (lower === 'set-cookie') {
       const chunk = Array.isArray(value) ? value : [value];
