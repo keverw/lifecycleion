@@ -1,7 +1,7 @@
 import { isNullish } from '../../internal/is-nullish';
 import { normalizeFilterMethods } from '../utils';
 import { validateConfigEntry } from '../../domain-utils/domain-utils';
-import { normalizeDomain } from '../../domain-utils/helpers';
+import { isIPAddress, normalizeDomain } from '../../domain-utils/helpers';
 
 /**
  * Every list a filter can carry besides `methods`: the type each entry must have and, for
@@ -18,13 +18,22 @@ const FILTER_LISTS: Record<
     allowed?: readonly string[];
     /** Why an entry can never match, or `undefined` when it can. */
     check?: (entry: string) => string | undefined;
+    /** As `check`, for a list of numbers. */
+    checkNumber?: (entry: number) => string | undefined;
   }
 > = {
   phases: { entryType: 'string' },
   hosts: { entryType: 'string', check: describeUnmatchableHostPattern },
   schemes: { entryType: 'string', allowed: ['http', 'https'] },
   bodyContainsKeys: { entryType: 'string' },
-  statusCodes: { entryType: 'number' },
+  statusCodes: {
+    entryType: 'number',
+    // An answer's status is an integer from 0 to 999; no other number is one.
+    checkNumber: (entry) =>
+      Number.isInteger(entry) && entry >= 0 && entry <= 999
+        ? undefined
+        : 'is not an integer status from 0 to 999',
+  },
   contentTypes: { entryType: 'string', allowed: ['json', 'text', 'binary'] },
   contentTypeHeaders: {
     entryType: 'string',
@@ -51,9 +60,13 @@ function describeUnmatchableHostPattern(entry: string): string | undefined {
     return 'has a port; give the hostname alone';
   }
   if (!entry.includes('*')) {
-    return normalizeDomain(entry) === ''
-      ? 'is not a hostname the filter can match'
+    return normalizeDomain(entry) === '' || urlHostnameOf(entry) === undefined
+      ? 'is not a hostname a URL can have, so it can never match'
       : undefined;
+  }
+  // `*.` is `*` written as a fully qualified name, which the matcher reads the same way.
+  if (entry.replace(/\.$/, '') === '*') {
+    return undefined;
   }
   const result = validateConfigEntry(entry, 'domain', {
     allowGlobalWildcard: true,
@@ -61,11 +74,29 @@ function describeUnmatchableHostPattern(entry: string): string | undefined {
   if (!result.valid) {
     return `can never match (${result.info ?? 'invalid hostname pattern'}); give a hostname or a pattern such as '*.example.com'`;
   }
-  const lastLabel = entry.replace(/\.$/, '').split('.').pop() ?? '';
-  if (entry !== '*' && /^\d+$/.test(lastLabel)) {
-    return "can never match: only '*' alone matches an IP address";
+  // A hostname the pattern stands for, as the URL parser reads it: one ending in a
+  // number - decimal, hex or octal - is an IP address, or no hostname at all.
+  const sample = urlHostnameOf(
+    entry
+      .split('.')
+      .map((part) => (part === '*' || part === '**' ? 'a' : part))
+      .join('.'),
+  );
+  if (sample === undefined || isIPAddress(sample)) {
+    return "can never match: a wildcard does not match an IP address ('*' alone does)";
   }
   return undefined;
+}
+
+/** `host` as the URL parser reads it, or `undefined` when no URL can have it. */
+function urlHostnameOf(host: string): string | undefined {
+  const authority =
+    host.includes(':') && !host.startsWith('[') ? `[${host}]` : host;
+  try {
+    return new URL(`http://${authority}/`).hostname;
+  } catch {
+    return undefined;
+  }
 }
 
 /** A media-type pattern is `type/subtype`, `type/*` or `*\/*`; anything else matches nothing. */
@@ -159,7 +190,9 @@ function copyFilterLists(
         );
       }
       const problem =
-        typeof entry === 'string' ? rule.check?.(entry) : undefined;
+        typeof entry === 'string'
+          ? rule.check?.(entry)
+          : rule.checkNumber?.(entry as number);
       if (problem !== undefined) {
         throw new TypeError(
           `${label} filter ${field} entry ${JSON.stringify(entry)} ${problem}`,

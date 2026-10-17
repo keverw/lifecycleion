@@ -2089,6 +2089,9 @@ test('a hosts entry the matcher can never match is refused; whole-label wildcard
     '*.internal',
     '**.co.uk',
     '10.*.0.1',
+    '10.0.0.256',
+    'example.123',
+    '*.example.0x10',
   ]) {
     expect(() =>
       client.addErrorObserver(() => {}, { hosts: [pattern] }),
@@ -2102,6 +2105,7 @@ test('a hosts entry the matcher can never match is refused; whole-label wildcard
     'api.*.example.com',
     'api.**.example.com',
     'backend',
+    '*.',
     'redis',
   ]) {
     client.addErrorObserver(() => {}, { hosts: [pattern] })();
@@ -2375,4 +2379,14 @@ test('an interceptor that rewrites the URL in place and cancels does not move th
   await initialClient.get('/a').send();
 
   expect(seen).toEqual(['http://b.test/b', 'http://a.test/a']);
+});
+
+test('a statusCodes entry that is not an integer status is refused', () => {
+  const client = new HTTPClient();
+  for (const code of [Number.NaN, 200.5, -1, 1000]) {
+    expect(() =>
+      client.addResponseObserver(() => {}, { statusCodes: [code] }),
+    ).toThrow(TypeError);
+  }
+  client.addResponseObserver(() => {}, { statusCodes: [0, 200, 999] })();
 });
