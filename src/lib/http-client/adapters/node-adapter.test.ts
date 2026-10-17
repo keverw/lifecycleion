@@ -8,6 +8,7 @@ import * as path from 'node:path';
 import { EventEmitter } from 'node:events';
 import * as http from 'node:http';
 import * as https from 'node:https';
+import * as tls from 'node:tls';
 import type { Socket } from 'node:net';
 import { Writable } from 'node:stream';
 import { NodeAdapter } from './node-adapter';
@@ -6749,6 +6750,51 @@ describe('NodeAdapter — crl option (normalization)', () => {
       ? value.reduce<number>((total, entry) => total + blocks(entry), 0)
       : blocks(value);
   };
+
+  test('two adapters with different CRLs each parse theirs once, not per request', async () => {
+    const requestSpy = spyOn(https, 'request').mockImplementation(((
+      _options: https.RequestOptions,
+    ) => {
+      const req = new EventEmitter();
+      const stub = req as unknown as Record<string, unknown>;
+
+      stub.setHeader = () => {};
+      stub.getHeaders = () => ({});
+      stub.destroy = () => {};
+      stub.end = () => {
+        queueMicrotask(() =>
+          req.emit(
+            'error',
+            Object.assign(new Error('captured'), { code: 'ECONNRESET' }),
+          ),
+        );
+      };
+
+      return req as unknown as http.ClientRequest;
+    }) as unknown as typeof https.request);
+    const parseSpy = spyOn(tls, 'createSecureContext');
+
+    try {
+      const first = new NodeAdapter({ crl: fixtures.crlEmpty });
+      const second = new NodeAdapter({ crl: fixtures.crlRevoked });
+      const parsesAfterConstruction = parseSpy.mock.calls.length;
+
+      for (const adapter of [first, second, first, second]) {
+        await adapter
+          .send({
+            requestURL: 'https://crl.test/api',
+            method: 'GET',
+            headers: {},
+          })
+          .catch(() => undefined);
+      }
+
+      expect(parseSpy.mock.calls.length).toBe(parsesAfterConstruction);
+    } finally {
+      parseSpy.mockRestore();
+      requestSpy.mockRestore();
+    }
+  });
 
   test('a two-CRL bundle becomes a two-element array', async () => {
     const captured = await captureCRL({

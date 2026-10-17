@@ -373,7 +373,7 @@ export class NodeAdapter implements HTTPAdapter {
     // Reject malformed initial configuration before it can enter request retries.
     // Still normalize per request below so callers can refresh their revocation list.
     if (config.crl !== undefined) {
-      normalizeCRL(config.crl);
+      normalizeCRL(config.crl, this);
     }
     this._config = config;
   }
@@ -510,7 +510,7 @@ export class NodeAdapter implements HTTPAdapter {
 
       if (crl !== undefined) {
         try {
-          httpsOptions.crl = normalizeCRL(crl);
+          httpsOptions.crl = normalizeCRL(crl, this);
         } catch (error) {
           // A refreshed value that fails validation is configuration, not transport:
           // retrying would read the same bad value again, and a network error would hide
@@ -2894,6 +2894,8 @@ const RESIDUE_OUTSIDE_PEM_BLOCKS = /\S/;
  */
 function normalizeCRL(
   crl: string | ArrayBufferView | Array<string | ArrayBufferView>,
+  /** The adapter the parse is cached for. */
+  owner: object,
 ): string | Buffer | Array<string | Buffer> {
   const normalized = Array.isArray(crl)
     ? crl.flatMap((entry) => normalizeCRLEntry(entry))
@@ -2910,13 +2912,16 @@ function normalizeCRL(
     );
   }
 
-  assertCRLParses(normalized);
+  assertCRLParses(normalized, owner);
 
   return normalized;
 }
 
-/** The text of the last `crl` set that parsed, so a value read per request is parsed once. */
-let lastParsedCRLText: string | undefined;
+/**
+ * The text of the last `crl` set that parsed, per adapter, so a value read per request is
+ * parsed once - and two adapters with different CRLs do not evict each other's.
+ */
+const lastParsedCRLTexts = new WeakMap<object, string>();
 
 /**
  * Parse the normalized set the way the TLS context will, so a value the framing check
@@ -2924,14 +2929,17 @@ let lastParsedCRLText: string | undefined;
  * corrupted base64 inside intact armour - is refused here rather than failing every HTTPS
  * request when the context is built, retried as a network error.
  */
-function assertCRLParses(crl: string | Buffer | Array<string | Buffer>): void {
+function assertCRLParses(
+  crl: string | Buffer | Array<string | Buffer>,
+  owner: object,
+): void {
   const text = (Array.isArray(crl) ? crl : [crl])
     .map((entry) =>
       typeof entry === 'string' ? entry : entry.toString('latin1'),
     )
     .join('\n');
 
-  if (text === lastParsedCRLText) {
+  if (text === lastParsedCRLTexts.get(owner)) {
     return;
   }
 
@@ -2948,7 +2956,7 @@ function assertCRLParses(crl: string | Buffer | Array<string | Buffer>): void {
     );
   }
 
-  lastParsedCRLText = text;
+  lastParsedCRLTexts.set(owner, text);
 }
 
 /**

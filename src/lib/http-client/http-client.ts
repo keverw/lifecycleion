@@ -4341,7 +4341,13 @@ function getResponseStreamAbortInfo(
 ): { status: number; headers: Record<string, string | string[]> } | undefined {
   const status = readObjectMember(err, 'streamAbortStatus');
 
-  if (typeof status !== 'number') {
+  // Held to the rule a resolved answer's status is: an integer from 0 to 999.
+  if (
+    typeof status !== 'number' ||
+    !Number.isInteger(status) ||
+    status < 0 ||
+    status > 999
+  ) {
     return undefined;
   }
 
@@ -4353,9 +4359,11 @@ function getResponseStreamAbortInfo(
     return undefined;
   }
 
+  // Normalized as a resolved answer's headers are, so `Location` and the rest are read
+  // by their lowercase names like every other response's.
   return {
     status,
-    headers,
+    headers: normalizeAdapterResponseHeaders(headers),
   };
 }
 

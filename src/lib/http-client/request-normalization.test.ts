@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test';
 import vm from 'node:vm';
 import { HTTPClient } from './http-client';
 import { matchesFilter, parseContentType } from './utils';
+import { RESPONSE_STREAM_ABORT_FLAG } from './consts';
 import { CookieJar } from './cookie-jar';
 import { MockAdapter } from './adapters/mock-adapter';
 import { NodeAdapter } from './adapters/node-adapter';
@@ -2145,4 +2146,48 @@ test('with redirects off, a 3xx with no Location is the final response, not redi
   expect(response.isFailed).toBe(false);
   expect(response.body).toEqual({ info: 'no location' });
   expect(builder.error).toBeNull();
+});
+
+test('a cut-off response an adapter throws is read under the rules for answers', async () => {
+  const throwing = (status: number): HTTPAdapter => ({
+    getType: () => 'fetch',
+    send: () => {
+      const error = Object.assign(new Error('cut'), {
+        [RESPONSE_STREAM_ABORT_FLAG]: true,
+        streamAbortStatus: status,
+        streamAbortHeaders: { 'Content-Type': 'text/plain', Location: '/x' },
+      });
+      return Promise.reject(error);
+    },
+  });
+
+  const redirectBuilder = new HTTPClient({
+    adapter: throwing(302),
+    baseURL: 'http://api.test',
+  }).get('/a');
+  const redirect = await redirectBuilder.send();
+
+  expect(redirectBuilder.error?.code).toBe('redirect_disabled');
+  expect(redirect.detectedRedirectURL).toBe('http://api.test/x');
+
+  const cut = await new HTTPClient({
+    adapter: throwing(200),
+    baseURL: 'http://api.test',
+  })
+    .get('/a')
+    .send();
+
+  expect(cut.status).toBe(200);
+  expect(cut.headers['content-type']).toBe('text/plain');
+
+  for (const status of [Number.NaN, -5, 1.5, 1e9]) {
+    const response = await new HTTPClient({
+      adapter: throwing(status),
+      baseURL: 'http://api.test',
+    })
+      .get('/a')
+      .send();
+
+    expect(response.status).toBe(0);
+  }
 });
