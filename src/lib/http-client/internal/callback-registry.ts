@@ -138,6 +138,27 @@ export interface FilterKind {
  * an array of the right kind of entry, or that names a phase, scheme or content type that
  * does not exist.
  */
+/**
+ * Every field name a filter answers to: its own and inherited ones up to
+ * `Object.prototype`, since the lists are read with `filter[field]`, which finds a class
+ * instance's getters and a prototype's fields too.
+ */
+function filterFieldNames(filter: object): Set<string> {
+  const names = new Set<string>();
+  for (
+    let current: object | null = filter;
+    current !== null && current !== Object.prototype;
+    current = Object.getPrototypeOf(current) as object | null
+  ) {
+    for (const name of Object.getOwnPropertyNames(current)) {
+      if (name !== 'constructor') {
+        names.add(name);
+      }
+    }
+  }
+  return names;
+}
+
 function copyFilterLists(
   filter: Record<string, unknown>,
   label: string,
@@ -147,7 +168,7 @@ function copyFilterLists(
   // `statusCodes` on an error observer would be ignored, so it would match every error,
   // and a `contentTypes` on an interceptor would match nothing. Nullish is absent here as
   // it is below, so a filter object shared between kinds may leave the field undefined.
-  for (const field of Object.keys(filter)) {
+  for (const field of filterFieldNames(filter)) {
     if (
       field !== 'methods' &&
       !kind.fields.includes(field) &&

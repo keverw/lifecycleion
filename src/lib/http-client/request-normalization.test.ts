@@ -2390,3 +2390,22 @@ test('a statusCodes entry that is not an integer status is refused', () => {
   }
   client.addResponseObserver(() => {}, { statusCodes: [0, 200, 999] })();
 });
+
+test('an unsupported filter field is refused on a class instance or prototype too', () => {
+  class Filter {
+    public get statusCodes(): number[] {
+      return [401];
+    }
+  }
+  const client = new HTTPClient();
+
+  expect(() =>
+    client.addErrorObserver(() => {}, new Filter() as never),
+  ).toThrow(TypeError);
+  expect(() =>
+    client.addErrorObserver(
+      () => {},
+      Object.create({ statusCode: [401] }) as never,
+    ),
+  ).toThrow(TypeError);
+});
