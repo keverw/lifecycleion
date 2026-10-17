@@ -2015,7 +2015,7 @@ test('an error whose request URL could not be read matches no hosts or schemes f
     (error) => {
       seen.push(`schemes ${error.code}`);
     },
-    { schemes: ['https'] },
+    { schemes: ['http'] },
   );
   client.addRequestInterceptor((request) => ({
     ...request,
@@ -2030,4 +2030,72 @@ test('an error whose request URL could not be read matches no hosts or schemes f
   expect(
     matchesFilter({ hosts: ['*'] }, { requestURL: '' }, 'final', 'error'),
   ).toBe(false);
+});
+
+test('a 3xx with no Location on the last allowed hop is the final response, not a redirect_loop', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/a', () => ({
+    status: 302,
+    headers: { location: '/b' },
+  }));
+  adapter.routes.get('/b', () => ({ status: 302, body: 'no location' }));
+  const builder = new HTTPClient({
+    adapter,
+    baseURL: 'http://a.test',
+    followRedirects: true,
+    maxRedirects: 1,
+  }).get('/a');
+
+  const response = await builder.send();
+
+  expect(response.status).toBe(302);
+  expect(response.isFailed).toBe(false);
+  expect(builder.error).toBeNull();
+});
+
+test('an error observer sees the URL the error names when an interceptor made it unreadable', async () => {
+  const client = new HTTPClient({
+    adapter: new MockAdapter(),
+    baseURL: 'https://public.test',
+  });
+  const seen: string[] = [];
+  client.addErrorObserver(
+    (_error, request) => {
+      seen.push(request.requestURL);
+    },
+    { hosts: ['public.test'] },
+  );
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    requestURL: undefined as unknown as string,
+  }));
+
+  const builder = client.get('/x');
+  await builder.send();
+
+  expect(builder.error?.requestURL).toBe('https://public.test/x');
+  expect(seen).toEqual(['https://public.test/x']);
+});
+
+test('a hosts entry whose wildcard is not a whole leading label, or with an empty label, is refused', () => {
+  const client = new HTTPClient();
+  for (const pattern of [
+    '*api.example.com',
+    'api.*.test',
+    '**',
+    'api..example.com',
+    '.example.com',
+  ]) {
+    expect(() =>
+      client.addErrorObserver(() => {}, { hosts: [pattern] }),
+    ).toThrow(TypeError);
+  }
+  for (const pattern of [
+    '*',
+    '*.example.com',
+    '**.example.com',
+    'example.com.',
+  ]) {
+    client.addErrorObserver(() => {}, { hosts: [pattern] })();
+  }
 });

@@ -46,6 +46,24 @@ function describeUnmatchableHostPattern(entry: string): string | undefined {
   if (/^[^:]*:\d*$/.test(entry) || /\]:/.test(entry)) {
     return 'has a port; give the hostname alone';
   }
+  if (entry === '*') {
+    return undefined;
+  }
+  // One trailing dot is a fully qualified name; any other empty label matches nothing.
+  const labels = entry.replace(/\.$/, '').split('.');
+  if (labels.includes('')) {
+    return 'has an empty label';
+  }
+  // `*` and `**` stand for whole leading labels (`*.example.com`); anywhere else the
+  // matcher reads them literally, so the entry matches no hostname.
+  const isWildcardMisplaced = labels.some(
+    (part, index) =>
+      part.includes('*') &&
+      !(index === 0 && (part === '*' || part === '**') && labels.length > 1),
+  );
+  if (isWildcardMisplaced) {
+    return "has a wildcard that is not a whole leading label ('*.example.com', '**.example.com', or '*' alone)";
+  }
   return undefined;
 }
 

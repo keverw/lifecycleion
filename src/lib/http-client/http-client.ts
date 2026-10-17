@@ -833,6 +833,9 @@ export class BaseHTTPClient {
               initialRequestCandidate,
               timeout,
               requestID,
+              undefined,
+              // The URL the response and error name, so a host filter agrees with them.
+              url,
             ),
             {
               type: 'final',
@@ -1051,6 +1054,39 @@ export class BaseHTTPClient {
             !adapterResponse.isStreamError &&
             REDIRECT_STATUS_CODES.has(adapterResponse.status)
           ) {
+            // Resolve the Location header into an absolute URL. Read before the hop is
+            // counted: a 3xx with nothing to follow is the final response, not a redirect
+            // over the limit.
+            // Relative paths (e.g. "/new-path") resolve against the current request URL.
+            const location = scalarHeader(adapterResponse.headers, 'location');
+
+            if (!location) {
+              // Redirect status but no Location header — treat as final response
+              const built = this._buildAnsweredResponse<T>({
+                adapterResponse,
+                requestID,
+                wasCancelled: false,
+                wasTimeout: false,
+                adapterType: this._adapter.getType(),
+                initialURL: initialRequestURL,
+                requestURL: attemptResult.sentRequest.requestURL,
+                redirectHistory,
+                // The one terminal branch that built from the hop's own response and
+                // passed nothing: after `POST` -> `302` -> `GET` -> `302` with no
+                // `Location`, the last hop is bodiless and had nothing to adopt, so the
+                // upload from hop one read as having gone out in full.
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
+              });
+              response = built.response;
+
+              if (built.unreadableBody) {
+                errorCode = 'adapter_error';
+                adapterCause = built.unreadableBody;
+              }
+
+              break;
+            }
+
             hopCount++;
 
             // Guard against infinite redirect chains
@@ -1080,37 +1116,6 @@ export class BaseHTTPClient {
                 isNetworkErrorOverride: false,
               });
               errorCode = 'redirect_loop';
-              break;
-            }
-
-            // Resolve the Location header into an absolute URL.
-            // Relative paths (e.g. "/new-path") resolve against the current request URL.
-            const location = scalarHeader(adapterResponse.headers, 'location');
-
-            if (!location) {
-              // Redirect status but no Location header — treat as final response
-              const built = this._buildAnsweredResponse<T>({
-                adapterResponse,
-                requestID,
-                wasCancelled: false,
-                wasTimeout: false,
-                adapterType: this._adapter.getType(),
-                initialURL: initialRequestURL,
-                requestURL: attemptResult.sentRequest.requestURL,
-                redirectHistory,
-                // The one terminal branch that built from the hop's own response and
-                // passed nothing: after `POST` -> `302` -> `GET` -> `302` with no
-                // `Location`, the last hop is bodiless and had nothing to adopt, so the
-                // upload from hop one read as having gone out in full.
-                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
-              });
-              response = built.response;
-
-              if (built.unreadableBody) {
-                errorCode = 'adapter_error';
-                adapterCause = built.unreadableBody;
-              }
-
               break;
             }
 
@@ -1310,6 +1315,8 @@ export class BaseHTTPClient {
                 failedRedirectRequest,
                 timeout,
                 requestID,
+                undefined,
+                redirectURL,
               );
               response = this._buildResponse<T>({
                 adapterResponse: null,
@@ -3754,6 +3761,8 @@ export class BaseHTTPClient {
     timeout: number,
     requestID: string,
     knownBodies?: ObservedAttemptBodies | 'unbuildable',
+    /** The URL the response falls back to when `requestURL` cannot be read. */
+    fallbackURL = '',
   ): AttemptRequest {
     // Best-effort snapshot for observers when a request fails before any adapter
     // attempt is dispatched (interceptor throw, pre-send cancel, setup error, etc.).
@@ -3832,7 +3841,7 @@ export class BaseHTTPClient {
     }
 
     return {
-      requestURL: readStringMember(request, 'requestURL', ''),
+      requestURL: readStringMember(request, 'requestURL', fallbackURL),
       method: readStringMember(request, 'method', ''),
       headers,
       body: clonedBodies.body,
