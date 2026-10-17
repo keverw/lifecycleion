@@ -23,7 +23,11 @@ const FILTER_LISTS: Record<
   }
 > = {
   phases: { entryType: 'string' },
-  hosts: { entryType: 'string', check: describeUnmatchableHostPattern },
+  // Trimmed first, as the matcher trims an entry before reading it.
+  hosts: {
+    entryType: 'string',
+    check: (entry) => describeUnmatchableHostPattern(entry.trim()),
+  },
   schemes: { entryType: 'string', allowed: ['http', 'https'] },
   bodyContainsKeys: { entryType: 'string' },
   statusCodes: {
@@ -139,19 +143,26 @@ export interface FilterKind {
  * does not exist.
  */
 /**
- * Every field name a filter answers to: its own and inherited ones up to
- * `Object.prototype`, since the lists are read with `filter[field]`, which finds a class
- * instance's getters and a prototype's fields too.
+ * Every field name a filter answers to: its own, and those it inherits from a class or
+ * prototype of the caller's, since the lists are read with `filter[field]`, which finds
+ * a class instance's getters and a prototype's fields too.
+ *
+ * The walk stops at a realm's root prototype - any inherited object with no prototype of
+ * its own, so a plain object from a `vm` context or an iframe stops at that realm's
+ * `Object.prototype` as one from this realm stops at ours - and skips methods, which are
+ * behaviour rather than fields.
  */
 function filterFieldNames(filter: object): Set<string> {
   const names = new Set<string>();
   for (
     let current: object | null = filter;
-    current !== null && current !== Object.prototype;
+    current !== null &&
+    (current === filter || Object.getPrototypeOf(current) !== null);
     current = Object.getPrototypeOf(current) as object | null
   ) {
     for (const name of Object.getOwnPropertyNames(current)) {
-      if (name !== 'constructor') {
+      const descriptor = Object.getOwnPropertyDescriptor(current, name);
+      if (name !== 'constructor' && typeof descriptor?.value !== 'function') {
         names.add(name);
       }
     }

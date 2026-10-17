@@ -2409,3 +2409,25 @@ test('an unsupported filter field is refused on a class instance or prototype to
     ),
   ).toThrow(TypeError);
 });
+
+test('a filter from another realm, or a class instance with methods, is accepted', () => {
+  const client = new HTTPClient();
+  client.addResponseObserver(
+    () => {},
+    vm.runInNewContext('({ hosts: ["api.test"], methods: ["GET"] })') as never,
+  )();
+  class HostFilter {
+    public hosts = ['api.test'];
+    public describe(): string {
+      return 'api';
+    }
+  }
+  client.addResponseObserver(() => {}, new HostFilter())();
+});
+
+test('a hosts entry with surrounding whitespace is read as the matcher reads it', () => {
+  const client = new HTTPClient();
+  for (const pattern of ['api.test ', ' *.example.com', '*.example.com\n']) {
+    client.addResponseObserver(() => {}, { hosts: [pattern] })();
+  }
+});
