@@ -2474,3 +2474,54 @@ test('an initial interceptor can rewrite a GET with a body before FetchAdapter r
   expect(response.status).toBe(200);
   expect(sent).toEqual(['POST']);
 });
+
+test('a method refusal no interceptor changed is the caller request_setup_error', async () => {
+  const client = new HTTPClient({
+    baseURL: 'http://api.test',
+    adapter: {
+      getType: () => 'fetch',
+      send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
+    },
+  });
+  client.addRequestInterceptor((request) => request, {
+    hosts: ['other.test'],
+  });
+
+  for (const builder of [
+    client.request('TRACE', '/x'),
+    client.get('/x', { body: 'x' }),
+  ]) {
+    await builder.send();
+    expect(builder.error?.code).toBe('request_setup_error');
+  }
+});
+
+test('a cancel between redirect hops is not overwritten to sending', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/a', () => ({
+    status: 302,
+    headers: { location: '/b' },
+  }));
+  adapter.routes.get('/b', () => ({ status: 200 }));
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+  });
+  client.addResponseObserver(() => void client.cancelOwn(), {
+    phases: ['redirect'],
+  });
+  const states: string[] = [];
+  const builder = client.get('/a', {
+    onAttemptStart: () => {
+      states.push(
+        ...client.listRequests().requests.map((entry) => entry.state),
+      );
+    },
+  });
+
+  const response = await builder.send();
+
+  expect(response.isCancelled).toBe(true);
+  expect(states).toEqual(['sending', 'cancelled']);
+});

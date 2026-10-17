@@ -110,6 +110,15 @@ import {
 type RemoveFn = () => void;
 
 /** The `adapter_error` message when the caller's cookie jar threw on a response. */
+/** The refusals of a method the adapter cannot send (see `_assertRequestIsSupported`). */
+const methodRefusals = new WeakSet<Error>();
+
+function methodRefusal(message: string): Error {
+  const error = new Error(message);
+  methodRefusals.add(error);
+  return error;
+}
+
 const COOKIE_JAR_FAILURE_MESSAGE =
   'Cookie jar failed to process response headers';
 
@@ -756,9 +765,21 @@ export class BaseHTTPClient {
 
         // The method checks wait for the interceptors' result when there are any: one may
         // rewrite a request the adapter refuses (a GET with a body, say) into one it takes.
-        this._assertRequestIsSupported(interceptedRequest, {
-          isMethodChecked: !this._hasRequestInterceptors(),
-        });
+        // If none did, the refusal is still the caller's own, reported as it would be with
+        // no interceptor registered.
+        let callerMethodRefusal: Error | undefined;
+        try {
+          this._assertRequestIsSupported(interceptedRequest);
+        } catch (error) {
+          if (
+            !methodRefusals.has(error as Error) ||
+            !this._hasRequestInterceptors()
+          ) {
+            throw error;
+          }
+          callerMethodRefusal = error as Error;
+        }
+        let setupRefusal: Error | undefined;
 
         // Run interceptors (initial phase)
         const initialPhase: InterceptorPhase = { type: 'initial' };
@@ -795,7 +816,16 @@ export class BaseHTTPClient {
 
           if (!isInterceptorCancel(interceptResult)) {
             initialRequestCandidate = interceptResult;
-            this._assertRequestIsSupported(interceptResult);
+            if (
+              callerMethodRefusal !== undefined &&
+              interceptResult.method === interceptedRequest.method &&
+              isNullish(interceptResult.body) ===
+                isNullish(interceptedRequest.body)
+            ) {
+              setupRefusal = callerMethodRefusal;
+            } else {
+              this._assertRequestIsSupported(interceptResult);
+            }
             initialRequestURL = interceptResult.requestURL;
             this._assertInterceptorResolvedURL(initialRequestURL);
           }
@@ -846,6 +876,12 @@ export class BaseHTTPClient {
           );
 
           return response;
+        }
+
+        // The caller's own method mistake, which no interceptor changed: reported as the
+        // `request_setup_error` it is with no interceptor registered.
+        if (setupRefusal !== undefined) {
+          throw setupRefusal;
         }
 
         if (isInterceptorCancel(interceptResult)) {
@@ -1982,7 +2018,9 @@ export class BaseHTTPClient {
       // request (attempt 1). Redirect hops reuse the original start time.
       if (attemptNumber === 1) {
         callbacks.setStartedAt(Date.now());
-      } else {
+      } else if (!cancelSignal.aborted) {
+        // Not over a cancel that landed between hops, which the check before dispatch
+        // ends the request for: the state stays `cancelled` meanwhile.
         callbacks.setState('sending');
       }
 
@@ -3990,10 +4028,7 @@ export class BaseHTTPClient {
     );
   }
 
-  private _assertRequestIsSupported(
-    request: InterceptedRequest,
-    { isMethodChecked = true }: { isMethodChecked?: boolean } = {},
-  ): void {
+  private _assertRequestIsSupported(request: InterceptedRequest): void {
     assertSupportedRequestBody(request.body);
 
     const adapterType = this._adapter.getType();
@@ -4005,9 +4040,6 @@ export class BaseHTTPClient {
     ) {
       assertNoBrowserRestrictedHeaders(request.headers, adapterName);
     }
-    if (!isMethodChecked) {
-      return;
-    }
     // `fetch` refuses a GET or HEAD with a body on every attempt, on every runtime.
     // Refused here for the same reason as the methods below.
     if (
@@ -4017,7 +4049,7 @@ export class BaseHTTPClient {
       (request.method.toUpperCase() === 'GET' ||
         request.method.toUpperCase() === 'HEAD')
     ) {
-      throw new Error(
+      throw methodRefusal(
         `[FetchAdapter] Cannot send a ${request.method} request with a body: fetch refuses one. Use NodeAdapter, or send the body with POST.`,
       );
     }
@@ -4030,7 +4062,7 @@ export class BaseHTTPClient {
         (adapterType === 'xhr' && this._isBrowserRuntime)) &&
       BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES.has(request.method.toLowerCase())
     ) {
-      throw new Error(
+      throw methodRefusal(
         `[${adapterName}] Cannot send a ${request.method} request: fetch and browsers refuse the CONNECT, TRACE and TRACK methods.`,
       );
     }
