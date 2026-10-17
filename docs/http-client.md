@@ -1030,7 +1030,7 @@ const response = await builder.send();
 builder.cancel('timeout_budget_exceeded');
 ```
 
-`cancel()` returns `true` if this call is what cancelled the request in flight, `false` if it was a no-op (the request had already completed or failed, or was cancelled already - by an earlier `cancel()`, `client.cancel()` or its own signal). `true` does not promise a cancelled outcome: once the last attempt has its answer - from that attempt's `onAttemptEnd`, say - nothing is left for the signal to stop, and the request completes with that answer. Check `isCancelled` on the response for how it ended.
+`cancel()` returns `true` if this call is what cancelled the request in flight, `false` if it was a no-op (the request had already completed or failed, or was cancelled already - by an earlier `cancel()`, `client.cancel()` or its own signal). A `true` is kept: the request ends cancelled (`isCancelled: true`, with the reason given) even when the call lands after the last attempt has its answer - from that attempt's `onAttemptEnd`, say - or just before a failure, and that answer or failure is dropped. Once the request has settled, `cancel()` is a no-op and returns `false`.
 
 Calling `cancel()` before `send()` marks the builder so that `send()` throws a plain `Error` (not an `HTTPClientError`) immediately rather than dispatching the request. In this case `builder.error` is `null`. No `HTTPClientError` is produced and `cancelReason` is not accessible programmatically (the reason string, if any, appears only in the thrown `Error` message).
 

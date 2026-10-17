@@ -2634,3 +2634,57 @@ test('a late cancel on an answer that failed ends the request cancelled too', as
   expect(builder.state).toBe('cancelled');
   expect(builder.error?.cancelReason).toBe('late');
 });
+
+test('a cancel made before an early failure ends the request cancelled, as its true says', async () => {
+  // An initial interceptor that cancels, then throws.
+  const client = new HTTPClient({
+    adapter: new MockAdapter(),
+    baseURL: 'http://api.test',
+  });
+  let didCancel: boolean | undefined;
+  // eslint-disable-next-line prefer-const -- assigned after the interceptor that reads it
+  let builder: ReturnType<HTTPClient['get']>;
+  client.addRequestInterceptor(() => {
+    didCancel = builder.cancel('mine');
+    throw new Error('refresh failed');
+  });
+  builder = client.get('/x');
+  const response = await builder.send();
+
+  expect(didCancel).toBe(true);
+  expect(response.isCancelled).toBe(true);
+  expect(builder.state).toBe('cancelled');
+  expect(builder.error?.cancelReason).toBe('mine');
+
+  // A redirect observer that cancels, then a cookie jar that throws between hops.
+  const adapter = new MockAdapter();
+  adapter.routes.get('/a', () => ({
+    status: 302,
+    headers: { location: '/b' },
+  }));
+  const jar = new CookieJar();
+  const jarClient = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+    cookieJar: jar,
+  });
+  let didJarCancel: boolean | undefined;
+  // eslint-disable-next-line prefer-const -- assigned after the observer that reads it
+  let jarBuilder: ReturnType<HTTPClient['get']>;
+  jarClient.addResponseObserver(
+    () => {
+      didJarCancel = jarBuilder.cancel('mine');
+      jar.getCookieHeaderString = () => {
+        throw new Error('jar broke');
+      };
+    },
+    { phases: ['redirect'] },
+  );
+  jarBuilder = jarClient.get('/a');
+  const jarResponse = await jarBuilder.send();
+
+  expect(didJarCancel).toBe(true);
+  expect(jarResponse.isCancelled).toBe(true);
+  expect(jarBuilder.state).toBe('cancelled');
+});

@@ -824,10 +824,13 @@ export class BaseHTTPClient {
             this._assertInterceptorResolvedURL(initialRequestURL);
           }
         } catch (error) {
+          // A cancel made before the failure - by the interceptor that then threw, say -
+          // told its caller it cancelled the request, so it ends cancelled.
+          const isCancelled = cancelSignal.aborted;
           const response = this._buildResponse<T>({
             adapterResponse: null,
             requestID,
-            wasCancelled: false,
+            wasCancelled: isCancelled,
             wasTimeout: false,
             adapterType: this._adapter.getType(),
             initialURL: url,
@@ -853,16 +856,27 @@ export class BaseHTTPClient {
               callerMethod &&
             !isNullish(readObjectMember(initialRequestCandidate, 'body')) ===
               hasCallerBody;
-          const normalizedError = this._makeError(
-            response,
-            requestID,
-            false,
-            isCallersOwnRefusal ? 'request_setup_error' : 'interceptor_error',
-            normalizeError(error),
-          );
+          const normalizedError = isCancelled
+            ? this._makeError(
+                response,
+                requestID,
+                false,
+                undefined,
+                undefined,
+                getSignalCancelReason(cancelSignal),
+              )
+            : this._makeError(
+                response,
+                requestID,
+                false,
+                isCallersOwnRefusal
+                  ? 'request_setup_error'
+                  : 'interceptor_error',
+                normalizeError(error),
+              );
 
           callbacks.setError(normalizedError);
-          trackedCallbacks.setState('failed');
+          trackedCallbacks.setState(isCancelled ? 'cancelled' : 'failed');
           callbacks.setResponse(response);
 
           await this._runErrorObservers(
@@ -1585,10 +1599,13 @@ export class BaseHTTPClient {
           break;
         }
       } catch (error) {
+        // As the initial phase's interceptor failure: a cancel made before it ends the
+        // request cancelled.
+        const isCancelled = cancelSignal.aborted;
         response = this._buildResponse<T>({
           adapterResponse: null,
           requestID,
-          wasCancelled: false,
+          wasCancelled: isCancelled,
           wasTimeout: false,
           adapterType: this._adapter.getType(),
           initialURL: initialRequestURL,
@@ -1603,19 +1620,28 @@ export class BaseHTTPClient {
           ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
         });
 
-        const normalizedError = this._makeError(
-          response,
-          requestID,
-          false,
-          'request_setup_error',
-          normalizeError(error),
-        );
+        const normalizedError = isCancelled
+          ? this._makeError(
+              response,
+              requestID,
+              false,
+              undefined,
+              undefined,
+              getSignalCancelReason(cancelSignal),
+            )
+          : this._makeError(
+              response,
+              requestID,
+              false,
+              'request_setup_error',
+              normalizeError(error),
+            );
 
         callbacks.setAttemptCount(completedAttemptCount);
         callbacks.setNextRetryDelayMS(null);
         callbacks.setNextRetryAt(null);
         callbacks.setError(normalizedError);
-        trackedCallbacks.setState('failed');
+        trackedCallbacks.setState(isCancelled ? 'cancelled' : 'failed');
         callbacks.setResponse(response);
         await this._runErrorObservers(
           normalizedError,
