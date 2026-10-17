@@ -2496,7 +2496,7 @@ test('a method refusal no interceptor changed is the caller request_setup_error'
   }
 });
 
-test('a cancel between redirect hops is not overwritten to sending', async () => {
+test('a cancel between redirect hops starts no further attempt', async () => {
   const adapter = new MockAdapter();
   adapter.routes.get('/a', () => ({
     status: 302,
@@ -2523,7 +2523,9 @@ test('a cancel between redirect hops is not overwritten to sending', async () =>
   const response = await builder.send();
 
   expect(response.isCancelled).toBe(true);
-  expect(states).toEqual(['sending', 'cancelled']);
+  // The cancelled hop starts no attempt at all, so nothing can write `sending` over it.
+  expect(states).toEqual(['sending']);
+  expect(client.listRequests().requests).toEqual([]);
 });
 
 test('an interceptor body mistake on a refused GET is the interceptor error; observers see its URL', async () => {
@@ -2791,4 +2793,104 @@ test('late cancels: a timeout, a redirect hop, an earlier reason, redirect callb
   });
   await tracked.send();
   expect(states).toEqual(['cancelled']);
+});
+
+test('a cancel at a phase boundary starts no attempt and runs no later callbacks', async () => {
+  // cancelAll while an async initial interceptor awaits: no attempt begins.
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  adapter.routes.get('/a', () => ({
+    status: 302,
+    headers: { location: '/b' },
+  }));
+  adapter.routes.get('/b', () => ({ status: 200 }));
+  adapter.routes.get('/flaky', () => ({ status: 503 }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  const log: string[] = [];
+  client.addRequestInterceptor(async (request) => {
+    await Promise.resolve();
+    log.push(`cancelAll=${client.cancelAll('nav')}`);
+    return request;
+  });
+  const first = client.get('/x', {
+    onAttemptStart: () => {
+      log.push('start');
+    },
+  });
+  const firstResponse = await first.send();
+  expect(firstResponse.isCancelled).toBe(true);
+  expect(log).toEqual(['cancelAll=1']);
+  expect(first.attemptCount).toBeNull();
+
+  // A redirect observer's cancel: no redirect interceptor, no second attempt.
+  const redirectClient = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+  });
+  const hopLog: string[] = [];
+  // eslint-disable-next-line prefer-const -- assigned after the observer that reads it
+  let hop: ReturnType<HTTPClient['get']>;
+  redirectClient.addResponseObserver(
+    () => {
+      hop.cancel('x');
+    },
+    { phases: ['redirect'] },
+  );
+  redirectClient.addRequestInterceptor(
+    (request) => {
+      hopLog.push('redirect interceptor');
+      return request;
+    },
+    { phases: ['redirect'] },
+  );
+  hop = redirectClient.get('/a', {
+    onAttemptStart: ({ attemptNumber }) =>
+      hopLog.push(`start ${attemptNumber}`),
+  });
+  expect((await hop.send()).isCancelled).toBe(true);
+  expect(hopLog).toEqual(['start 1']);
+  expect(hop.attemptCount).toBe(1);
+  // The builder agrees with the tracker once a cancel returned true.
+  expect(hop.state).toBe('cancelled');
+
+  // A cancel from onAttemptEnd({ willRetry: true }) runs no retry-phase observer.
+  const retryClient = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+  });
+  const retryLog: string[] = [];
+  retryClient.addResponseObserver(
+    () => {
+      retryLog.push('retry observer');
+    },
+    { phases: ['retry'] },
+  );
+  const retried: ReturnType<HTTPClient['get']> = retryClient.get('/flaky', {
+    onAttemptEnd: () => {
+      retried.cancel('z');
+    },
+  });
+  expect((await retried.send()).isCancelled).toBe(true);
+  expect(retryLog).toEqual([]);
+});
+
+test('builder.cancel() sets the builder state cancelled at once, as the tracker reads it', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/slow', async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return { status: 200 };
+  });
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  const builder = client.get('/slow');
+  const pending = builder.send();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  expect(builder.cancel('x')).toBe(true);
+  expect(builder.state).toBe('cancelled');
+  expect(client.listRequests().requests.map((entry) => entry.state)).toEqual([
+    'cancelled',
+  ]);
+  await pending;
 });

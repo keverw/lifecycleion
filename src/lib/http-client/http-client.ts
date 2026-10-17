@@ -678,9 +678,14 @@ export class BaseHTTPClient {
     // or tracker cancel of the same controller, or the caller's own signal.
     // Through the tracker's own cancel, so the tracked state reads `cancelled` at once,
     // as it does after `client.cancel()`.
-    trackedCallbacks.setCancelFn((reason?: string): boolean =>
-      cancelEntry(trackedRequest, reason),
-    );
+    trackedCallbacks.setCancelFn((reason?: string): boolean => {
+      if (!cancelEntry(trackedRequest, reason)) {
+        return false;
+      }
+      // The builder reads the same, rather than `sending` until the request settles.
+      callbacks.setState('cancelled');
+      return true;
+    });
 
     // Compose user signal with our internal abort controller. Every composition made
     // for this request - this one and one per attempt - registers how to release its
@@ -894,7 +899,13 @@ export class BaseHTTPClient {
           return response;
         }
 
-        if (isInterceptorCancel(interceptResult)) {
+        // A cancel that landed while the interceptors ran - `cancelAll()` during an
+        // awaited token refresh, say - ends the request here as an interceptor's cancel
+        // does: before any attempt begins.
+        if (isInterceptorCancel(interceptResult) || cancelSignal.aborted) {
+          const interceptorReason = isInterceptorCancel(interceptResult)
+            ? interceptResult.reason
+            : undefined;
           const cancelledResponse = this._buildResponse<T>({
             adapterResponse: null,
             requestID,
@@ -913,7 +924,7 @@ export class BaseHTTPClient {
             undefined,
             undefined,
             // A `cancel()` made first - one that returned `true` - keeps its reason.
-            getSignalCancelReason(cancelSignal) ?? interceptResult.reason,
+            getSignalCancelReason(cancelSignal) ?? interceptorReason,
           );
           callbacks.setError(error);
           trackedCallbacks.setState('cancelled');
@@ -1294,6 +1305,24 @@ export class BaseHTTPClient {
               { type: 'redirect', ...hopInfo },
             );
 
+            // Nor the interceptors, once one of those observers cancelled it.
+            if (cancelSignal.aborted) {
+              response = this._buildResponse<T>({
+                adapterResponse: null,
+                requestID,
+                wasCancelled: true,
+                wasTimeout: false,
+                adapterType: this._adapter.getType(),
+                initialURL: initialRequestURL,
+                requestURL: hopFromURL,
+                redirectHistory,
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
+              });
+              cancelReason = getSignalCancelReason(cancelSignal);
+
+              break;
+            }
+
             // Cross-origin safety: strip ALL headers except CORS-safelisted ones
             // when the redirect crosses origins (scheme + host + port). Matches
             // Chromium/fetch behavior — Authorization, X-API-Key, etc. must not
@@ -1420,7 +1449,11 @@ export class BaseHTTPClient {
               break;
             }
 
-            if (isInterceptorCancel(redirectIntercept)) {
+            // A cancel that landed while they ran ends the hop as theirs does.
+            if (
+              isInterceptorCancel(redirectIntercept) ||
+              cancelSignal.aborted
+            ) {
               // The target as it was before the interceptors ran, not re-read from the
               // request they were handed, which they may have changed.
               const cancelledRequestURL = redirectTargetURL;
@@ -1433,7 +1466,10 @@ export class BaseHTTPClient {
               );
               // As the initial phase's: an earlier `cancel()` keeps its reason.
               const redirectCancelReason =
-                getSignalCancelReason(cancelSignal) ?? redirectIntercept.reason;
+                getSignalCancelReason(cancelSignal) ??
+                (isInterceptorCancel(redirectIntercept)
+                  ? redirectIntercept.reason
+                  : undefined);
               if (redirectCancelReason !== undefined) {
                 cancelReason = redirectCancelReason;
               }
@@ -2647,15 +2683,19 @@ export class BaseHTTPClient {
           });
 
           if (retryHTTPResponse) {
-            await this._runResponseObservers(
-              retryHTTPResponse,
-              observedSentRequest,
-              this._retryOutcomePhase(
-                maxAttemptNumber,
-                attemptNumber,
-                hopContext?.redirect,
-              ),
-            );
+            // Not for a retry a cancel from that `onAttemptEnd` has already called off;
+            // the delay below answers the cancel.
+            if (!cancelSignal.aborted) {
+              await this._runResponseObservers(
+                retryHTTPResponse,
+                observedSentRequest,
+                this._retryOutcomePhase(
+                  maxAttemptNumber,
+                  attemptNumber,
+                  hopContext?.redirect,
+                ),
+              );
+            }
 
             await this._cancellableDelay(delayMS, cancelSignal);
 
@@ -3084,10 +3124,9 @@ export class BaseHTTPClient {
                 STREAM_FACTORY_CANCEL_KEY,
               );
               const factoryCancelReason =
-                getSignalCancelReason(cancelSignal) ??
-                (typeof factoryCancelValue === 'string'
+                typeof factoryCancelValue === 'string'
                   ? factoryCancelValue
-                  : undefined);
+                  : undefined;
 
               emitAttemptEnd({
                 willRetry: false,
@@ -3233,15 +3272,17 @@ export class BaseHTTPClient {
               normalizeError(error),
             );
 
-            await this._runErrorObservers(
-              retryError,
-              reportedSentRequest,
-              this._retryOutcomePhase(
-                maxAttemptNumber,
-                attemptNumber,
-                hopContext?.redirect,
-              ),
-            );
+            if (!cancelSignal.aborted) {
+              await this._runErrorObservers(
+                retryError,
+                reportedSentRequest,
+                this._retryOutcomePhase(
+                  maxAttemptNumber,
+                  attemptNumber,
+                  hopContext?.redirect,
+                ),
+              );
+            }
 
             await this._cancellableDelay(delayMS, cancelSignal);
 
