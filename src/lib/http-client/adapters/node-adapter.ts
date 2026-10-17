@@ -2899,6 +2899,17 @@ function normalizeCRL(
     ? crl.flatMap((entry) => normalizeCRLEntry(entry))
     : normalizeCRLEntry(crl);
 
+  // An empty array adds no CRL, so revocation would be off while `crl` is set - a cached
+  // list emptied by a failed refresh, a filter that matched nothing. Refused as `''` is.
+  if (Array.isArray(normalized) && normalized.length === 0) {
+    throw crlValidationError(
+      new Error(
+        'NodeAdapter: the `crl` value holds no -----BEGIN X509 CRL----- block. ' +
+          'Leave `crl` unset for no revocation list.',
+      ),
+    );
+  }
+
   assertCRLParses(normalized);
 
   return normalized;

@@ -1998,3 +1998,36 @@ test('response header keys that differ only in case are combined as a repeat', a
   expect(response.headers.link).toBe('<a>, <b>');
   expect(response.headers['content-type']).toBe('text/plain');
 });
+
+test('an error whose request URL could not be read matches no hosts or schemes filter', async () => {
+  const client = new HTTPClient({
+    adapter: new MockAdapter(),
+    baseURL: 'https://public.test',
+  });
+  const seen: string[] = [];
+  client.addErrorObserver(
+    (error) => {
+      seen.push(`hosts ${error.code}`);
+    },
+    { hosts: ['payments.test'] },
+  );
+  client.addErrorObserver(
+    (error) => {
+      seen.push(`schemes ${error.code}`);
+    },
+    { schemes: ['https'] },
+  );
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    requestURL: 42 as unknown as string,
+  }));
+
+  const builder = client.get('/x');
+  await builder.send();
+
+  expect(builder.error?.code).toBe('interceptor_error');
+  expect(seen).toEqual([]);
+  expect(
+    matchesFilter({ hosts: ['*'] }, { requestURL: '' }, 'final', 'error'),
+  ).toBe(false);
+});

@@ -244,3 +244,21 @@ test('a socket reset during an async stream factory keeps a response that alread
     server.close();
   }
 });
+
+test('an empty crl array is refused, at construction and when read for a request', async () => {
+  expect(() => new NodeAdapter({ crl: [] })).toThrow(/no -----BEGIN X509 CRL/);
+
+  const config: { crl?: string[] } = {};
+  const adapter = new NodeAdapter(config);
+  config.crl = [];
+  const rejection = await adapter
+    .send({ requestURL: 'https://127.0.0.1:1/', method: 'GET', headers: {} })
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+
+  expect((rejection as Error | undefined)?.message).toMatch(
+    /no -----BEGIN X509 CRL/,
+  );
+});

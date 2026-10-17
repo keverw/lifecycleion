@@ -1133,7 +1133,10 @@ export function matchesFilter(
     }
   }
 
-  if (filter.hosts && context.requestURL) {
+  // Checked whenever the context has a URL, an empty one included, as `methods` is: a
+  // request whose URL could not be read (`''`) matches no host or scheme rather than
+  // skipping the filter, so a host-scoped observer does not hear about other hosts.
+  if (filter.hosts && context.requestURL !== undefined) {
     const hostname = extractHostname(context.requestURL);
 
     if (
@@ -1145,7 +1148,11 @@ export function matchesFilter(
     }
   }
 
-  if (filter.schemes && filter.schemes.length > 0 && context.requestURL) {
+  if (
+    filter.schemes &&
+    filter.schemes.length > 0 &&
+    context.requestURL !== undefined
+  ) {
     let scheme: 'http' | 'https' | null = null;
 
     try {
