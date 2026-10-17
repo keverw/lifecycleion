@@ -3091,7 +3091,16 @@ export class BaseHTTPClient {
           };
         }
 
-        if (isAbortError(error)) {
+        // An `AbortError` the stream factory threw of its own - one from the controller it
+        // opens its sink with - is its failure, `stream_setup_error` below, not a cancel:
+        // only a factory's `null` or `{ cancel: true }` carries the cancel tag.
+        const isFactoryOwnAbort =
+          isStreamFactoryClientCallbackError(error) &&
+          readObjectMember(error, STREAM_FACTORY_CANCEL_KEY) === undefined &&
+          !cancelSignal.aborted &&
+          !isTimedOut;
+
+        if (isAbortError(error) && !isFactoryOwnAbort) {
           // User/parent cancellation — never retry (even if a timeout fired in the same window).
           if (cancelSignal.aborted) {
             emitAttemptEnd({

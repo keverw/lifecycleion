@@ -6,6 +6,7 @@ import type { AddressInfo } from 'node:net';
 import { EventEmitter } from 'node:events';
 import type { WritableLike } from '../types';
 import { NodeAdapter } from './node-adapter';
+import { HTTPClient } from '../http-client';
 
 test('a streamed download whose sink is destroyed during backpressure fails rather than hangs', async () => {
   const server = http.createServer((_req, res) => {
@@ -261,4 +262,33 @@ test('an empty crl array is refused, at construction and when read for a request
   expect((rejection as Error | undefined)?.message).toMatch(
     /no -----BEGIN X509 CRL/,
   );
+});
+
+test('a stream factory that throws its own AbortError fails as stream_setup_error, not a cancel', async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('hello');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+
+  try {
+    const builder = new HTTPClient({ adapter: new NodeAdapter() })
+      .get(`http://127.0.0.1:${port}/`)
+      .streamResponse(() => {
+        const error = new Error('sink open aborted by its own controller');
+        error.name = 'AbortError';
+        throw error;
+      });
+    const response = await builder.send();
+
+    expect(response.isCancelled).toBe(false);
+    expect(builder.error?.code).toBe('stream_setup_error');
+    expect(builder.error?.cause?.message).toBe(
+      'sink open aborted by its own controller',
+    );
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
 });
