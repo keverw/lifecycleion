@@ -754,7 +754,11 @@ export class BaseHTTPClient {
           );
         }
 
-        this._assertRequestIsSupported(interceptedRequest);
+        // The method checks wait for the interceptors' result when there are any: one may
+        // rewrite a request the adapter refuses (a GET with a body, say) into one it takes.
+        this._assertRequestIsSupported(interceptedRequest, {
+          isMethodChecked: !this._hasRequestInterceptors(),
+        });
 
         // Run interceptors (initial phase)
         const initialPhase: InterceptorPhase = { type: 'initial' };
@@ -3978,7 +3982,18 @@ export class BaseHTTPClient {
     return controller.signal;
   }
 
-  private _assertRequestIsSupported(request: InterceptedRequest): void {
+  private _hasRequestInterceptors(): boolean {
+    const parentManager = this._parentClient?._requestInterceptors;
+    return (
+      (parentManager !== undefined && !parentManager.isEmpty) ||
+      !this._requestInterceptors.isEmpty
+    );
+  }
+
+  private _assertRequestIsSupported(
+    request: InterceptedRequest,
+    { isMethodChecked = true }: { isMethodChecked?: boolean } = {},
+  ): void {
     assertSupportedRequestBody(request.body);
 
     const adapterType = this._adapter.getType();
@@ -3989,6 +4004,9 @@ export class BaseHTTPClient {
       (adapterType === 'fetch' || adapterType === 'xhr')
     ) {
       assertNoBrowserRestrictedHeaders(request.headers, adapterName);
+    }
+    if (!isMethodChecked) {
+      return;
     }
     // `fetch` refuses a GET or HEAD with a body on every attempt, on every runtime.
     // Refused here for the same reason as the methods below.

@@ -2450,3 +2450,27 @@ test('a caller null-prototype base is not taken for a realm root', () => {
     client.get('/x').headers(Object.create(shared) as Record<string, string>),
   ).toThrow(TypeError);
 });
+
+test('an initial interceptor can rewrite a GET with a body before FetchAdapter refuses it', async () => {
+  const sent: string[] = [];
+  const client = new HTTPClient({
+    baseURL: 'http://api.test',
+    adapter: {
+      getType: () => 'fetch',
+      send: (request: AdapterRequest) => {
+        sent.push(request.method);
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    },
+  });
+  client.addRequestInterceptor((request) => ({
+    ...request,
+    method: 'POST',
+    headers: { ...request.headers, 'x-http-method-override': 'GET' },
+  }));
+
+  const response = await client.get('/search', { body: { q: 'x' } }).send();
+
+  expect(response.status).toBe(200);
+  expect(sent).toEqual(['POST']);
+});

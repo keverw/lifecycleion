@@ -66,7 +66,7 @@ function describeUnmatchableHostPattern(entry: string): string | undefined {
   }
   if (!entry.includes('*')) {
     return normalizeDomain(entry) === '' || urlHostnameOf(entry) === undefined
-      ? 'is not a hostname a URL can have, so it can never match'
+      ? "is not a hostname the matcher can read (it reads DNS names: letters, digits and inner hyphens, no '_'), so it can never match"
       : undefined;
   }
   // `*.` is `*` written as a fully qualified name, which the matcher reads the same way.
