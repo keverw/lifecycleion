@@ -1377,7 +1377,7 @@ test('FetchAdapter still sends where Request or URL.canParse is missing', async 
     return Promise.resolve(new Response(null, { status: 200 }));
   };
   const originalRequest = globalThis.Request;
-  const originalCanParse = URL.canParse;
+  const canParseDescriptor = Object.getOwnPropertyDescriptor(URL, 'canParse');
   try {
     delete (globalThis as { Request?: unknown }).Request;
     (URL as { canParse?: unknown }).canParse = undefined;
@@ -1390,6 +1390,8 @@ test('FetchAdapter still sends where Request or URL.canParse is missing', async 
     expect(calls).toBe(1);
   } finally {
     globalThis.Request = originalRequest;
-    URL.canParse = originalCanParse;
+    if (canParseDescriptor) {
+      Object.defineProperty(URL, 'canParse', canParseDescriptor);
+    }
   }
 });
