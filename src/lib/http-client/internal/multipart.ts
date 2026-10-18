@@ -39,6 +39,7 @@
  * http.ClientRequest satisfies the interface structurally.
  */
 
+import { markNonRetryableAdapterError } from './adapter-error';
 import type { AdapterProgressEvent } from '../types';
 import type { RequestBodyWritable } from './request-body-writable';
 
@@ -439,7 +440,7 @@ export async function serializeMultipartFormData(
       // Compare against the sizing pass, even if the source's size later changes.
       const partSize = partSizes[partIndex++];
       if (partSize === undefined) {
-        throw new Error(
+        throw sourceMismatch(
           'Multipart body changed after Content-Length was calculated',
         );
       }
@@ -498,7 +499,7 @@ export async function serializeMultipartFormData(
               // sizing pass reported tens of thousands - which sends a reader looking for
               // a write that did not happen. The post-write check below says
               // `uploadedBytes` for the same reason.
-              throw new Error(
+              throw sourceMismatch(
                 `Request body source produced more than its Content-Length of ${String(totalSize)}: ${String(uploadedBytes)} bytes written and a further ${String(chunk.byteLength)} refused`,
               );
             }
@@ -520,7 +521,7 @@ export async function serializeMultipartFormData(
       }
 
       if (!req.destroyed && partBytes !== partSize) {
-        throw new Error(
+        throw sourceMismatch(
           `Request body source did not match its Content-Length: part expected ${String(partSize)} bytes, received ${String(partBytes)}`,
         );
       }
@@ -565,7 +566,7 @@ export async function serializeMultipartFormData(
   // server reads the tail as the start of another message. Worth its own text - the one
   // above says the body stopped short, which points at exactly the wrong end of it.
   if (uploadedBytes > totalSize) {
-    throw new Error(
+    throw sourceMismatch(
       `Request body wrote ${String(uploadedBytes)} bytes against a Content-Length of ${String(totalSize)}`,
     );
   }
@@ -579,4 +580,15 @@ async function cancelReaderQuietly(
   } catch {
     // Best-effort cancellation only. Preserve the original request outcome.
   }
+}
+
+/**
+ * A body source that did not match the size it was sent with. The source is the caller's
+ * value and reads the same way again, so it fails once as a non-retryable `adapter_error`
+ * rather than being retried as a network error.
+ */
+function sourceMismatch(message: string): Error {
+  const error = new Error(message);
+  markNonRetryableAdapterError(error);
+  return error;
 }

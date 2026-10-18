@@ -19,6 +19,7 @@ import type {
   StreamResponseCancel,
 } from '../types';
 import {
+  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   REDIRECT_STATUS_CODES,
   REQUEST_BODY_SETTLED_KEY,
@@ -733,6 +734,8 @@ export class NodeAdapter implements HTTPAdapter {
        * has been read and the socket has nothing left to deliver.
        */
       let didResponseClose = false;
+      /** The response, once it has arrived; see `reportWriteErrorAfterResponse`. */
+      let receivedResponse: http.IncomingMessage | undefined;
 
       /**
        * Whether a body writer is still running.
@@ -1200,9 +1203,28 @@ export class NodeAdapter implements HTTPAdapter {
         // a response still streaming in on that socket is worth waiting for, and one that
         // has not finished by then is waiting on a body that is never coming. Tearing it
         // down settles the promise through the response path's own error handling.
-        try {
+        //
+        // Not while the response is behind its own consumer, though - fully arrived, paused
+        // under a slow sink's backpressure, or buffered for a stream factory still opening
+        // its sink. Destroying the request then dumps the bytes that have not been read
+        // yet: a download cut short and reported as a success, or a factory left waiting
+        // on a response that has already ended. That response is not waiting on the body;
+        // its `'close'` destroys the request once it has been consumed, so the deadline
+        // only looks again later.
+        const isResponseBehindItsConsumer = (): boolean =>
+          receivedResponse !== undefined &&
+          (receivedResponse.complete ||
+            receivedResponse.isPaused() ||
+            receivedResponse.readableLength > 0);
+        const armDeadline = (): void => {
           const deadline = setTimeout(() => {
             if (didResponseClose) {
+              return;
+            }
+
+            if (isResponseBehindItsConsumer()) {
+              armDeadline();
+
               return;
             }
 
@@ -1212,6 +1234,10 @@ export class NodeAdapter implements HTTPAdapter {
           // Never a reason for the process to stay up, exactly as the stall watchdog's
           // timer is not.
           deadline.unref?.();
+        };
+
+        try {
+          armDeadline();
         } catch {
           // No way to schedule it, so the request is torn down now rather than left to
           // hang. A response mid-flight is the lesser loss of the two.
@@ -1248,6 +1274,7 @@ export class NodeAdapter implements HTTPAdapter {
       // unhandled rejections back to the outer promise's reject.
       const req = (requestForCleanup = httpModule.request(options, (res) => {
         didReceiveResponse = true;
+        receivedResponse = res;
 
         // A body write that fails after the response arrived is answered by the response
         // path (see `didReceiveResponse`), which deliberately does not tear the request
@@ -1925,6 +1952,19 @@ export class NodeAdapter implements HTTPAdapter {
         }
 
         destroyRequestQuietly(req);
+
+        // A body source that did not match its size is the caller's value, and reads the
+        // same again: thrown as the non-retryable error it is tagged as, not settled as a
+        // transport failure to retry.
+        if (
+          readObjectMember(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG) ===
+          true
+        ) {
+          failRequest(normalizeError(error));
+
+          return;
+        }
+
         settleResponse({
           // No isRetryable veto: that would stop retrying an idempotent
           // PUT or DELETE. Delivery is unproven rather than disproven, so
