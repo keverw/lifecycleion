@@ -7,8 +7,10 @@ import { normalizeAdapterResponseHeaders } from './utils';
 
 // Matches bare hostnames like 'localhost', 'myapp', 'my-app' that tldts
 // won't assign a registered domain to but are still valid cookie domains.
+// `_` is allowed as the URL parser allows it: docker-compose service names (`my_service`)
+// are single-label hosts with one, and every cookie they set was discarded.
 const HOSTNAME_PATTERN =
-  /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$/;
+  /^[a-zA-Z0-9_]([a-zA-Z0-9_-]*[a-zA-Z0-9_])?(\.[a-zA-Z0-9_]([a-zA-Z0-9_-]*[a-zA-Z0-9_])?)*$/;
 
 interface ParsedCookie {
   name: string;
@@ -107,7 +109,15 @@ function isHeaderSafeCookieText(text: string, extra: string): boolean {
   for (const char of text) {
     const code = char.charCodeAt(0);
 
-    if (code <= 0x1f || code === 0x7f || char === ';' || extra.includes(char)) {
+    // Above U+00FF is refused too: no header can carry it, so a stored cookie holding
+    // one failed every request to its host, and took the host's other cookies with it.
+    if (
+      code <= 0x1f ||
+      code === 0x7f ||
+      code > 0xff ||
+      char === ';' ||
+      extra.includes(char)
+    ) {
       return false;
     }
   }
@@ -123,6 +133,103 @@ const MAX_AGE_PATTERN = /^-?\d+$/;
  * milliseconds is still a safe integer.
  */
 const MAX_COOKIE_MAX_AGE_SECONDS = Math.floor(Number.MAX_SAFE_INTEGER / 1000);
+
+/**
+ * The longest lifetime a `Set-Cookie` is given, in seconds: 400 days, RFC 6265bis §5.5's
+ * cap on both `Max-Age` and `Expires`, as browsers apply it.
+ */
+const MAX_COOKIE_LIFETIME_SECONDS = 400 * 24 * 60 * 60;
+
+/** RFC 6265bis §5.6: a cookie whose name and value together pass this is ignored. */
+const MAX_COOKIE_NAME_VALUE_BYTES = 4096;
+
+const COOKIE_DATE_DELIMITER =
+  /[\t\u0020-\u002f\u003b-\u0040\u005b-\u0060\u007b-\u007e]+/;
+const COOKIE_DATE_TIME = /^(\d{1,2}):(\d{1,2}):(\d{1,2})(?:\D.*)?$/;
+const COOKIE_DATE_DAY = /^(\d{1,2})(?:\D.*)?$/;
+const COOKIE_DATE_YEAR = /^(\d{2,4})(?:\D.*)?$/;
+const COOKIE_DATE_MONTHS = [
+  'jan',
+  'feb',
+  'mar',
+  'apr',
+  'may',
+  'jun',
+  'jul',
+  'aug',
+  'sep',
+  'oct',
+  'nov',
+  'dec',
+];
+
+/**
+ * RFC 6265 §5.1.1's cookie-date algorithm: the time, day, month and year taken from the
+ * first token of each shape, in UTC whatever zone is written. `new Date()` read a date
+ * with no zone - the asctime form - as local time, and `Expires=0` as the year 2000.
+ * `undefined` when the value is not a cookie-date, so the attribute is ignored.
+ */
+function parseCookieDate(value: string): Date | undefined {
+  let time: [number, number, number] | undefined;
+  let day: number | undefined;
+  let month: number | undefined;
+  let year: number | undefined;
+
+  for (const token of value.split(COOKIE_DATE_DELIMITER)) {
+    if (token === '') {
+      continue;
+    }
+    const timeMatch = time === undefined ? COOKIE_DATE_TIME.exec(token) : null;
+    if (timeMatch) {
+      time = [Number(timeMatch[1]), Number(timeMatch[2]), Number(timeMatch[3])];
+      continue;
+    }
+    const dayMatch = day === undefined ? COOKIE_DATE_DAY.exec(token) : null;
+    if (dayMatch) {
+      day = Number(dayMatch[1]);
+      continue;
+    }
+    if (month === undefined) {
+      const index = COOKIE_DATE_MONTHS.indexOf(token.slice(0, 3).toLowerCase());
+      if (index !== -1) {
+        month = index;
+        continue;
+      }
+    }
+    const yearMatch = year === undefined ? COOKIE_DATE_YEAR.exec(token) : null;
+    if (yearMatch) {
+      year = Number(yearMatch[1]);
+    }
+  }
+
+  if (
+    time === undefined ||
+    day === undefined ||
+    month === undefined ||
+    year === undefined
+  ) {
+    return undefined;
+  }
+  if (year >= 70 && year <= 99) {
+    year += 1900;
+  } else if (year >= 0 && year <= 69) {
+    year += 2000;
+  }
+  const [hours, minutes, seconds] = time;
+  if (
+    day < 1 ||
+    day > 31 ||
+    year < 1601 ||
+    hours > 23 ||
+    minutes > 59 ||
+    seconds > 59
+  ) {
+    return undefined;
+  }
+  const date = new Date(Date.UTC(year, month, day, hours, minutes, seconds));
+  // A day the month does not have (31 February) is not a date.
+  return date.getUTCDate() === day ? date : undefined;
+}
 
 /** Construction options for {@link CookieJar}. */
 export interface CookieJarOptions {
@@ -796,9 +903,12 @@ export class CookieJar {
             break;
           }
           case 'expires': {
-            const date = new Date(attrValue);
-            if (!isNaN(date.getTime())) {
-              cookie.expires = date;
+            const date = parseCookieDate(attrValue);
+            if (date) {
+              // Capped as `Max-Age` is, at 400 days from now.
+              const latest = Date.now() + MAX_COOKIE_LIFETIME_SECONDS * 1000;
+              cookie.expires =
+                date.getTime() > latest ? new Date(latest) : date;
             }
             break;
           }
@@ -812,6 +922,7 @@ export class CookieJar {
               cookie.maxAge = Math.min(
                 parseInt(attrValue, 10),
                 MAX_COOKIE_MAX_AGE_SECONDS,
+                MAX_COOKIE_LIFETIME_SECONDS,
               );
             }
             break;
@@ -911,6 +1022,13 @@ export class CookieJar {
   }
 
   private storeParsed(parsed: ParsedCookie, url: string): void {
+    if (
+      parsed.name.length + parsed.value.length >
+      MAX_COOKIE_NAME_VALUE_BYTES
+    ) {
+      return;
+    }
+
     let address: URL;
 
     try {

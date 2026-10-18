@@ -731,6 +731,11 @@ function serializeMockCookieOptions(
   // cookie jar ignore the attribute, so `0.01` would never expire, `-0.5` would not
   // delete the cookie, and `Infinity` would leave a session cookie.
   const maxAge = cookie.maxAge;
+  // A route mistake, not a cookie: `NaN` would print as `Max-Age=NaN`, which the jar
+  // ignores, leaving a session cookie the route never asked for.
+  if (typeof maxAge === 'number' && Number.isNaN(maxAge)) {
+    throw new TypeError(`MockAdapter cookie "${name}" maxAge is NaN`);
+  }
   appendCookieAttribute(
     parts,
     'Max-Age',

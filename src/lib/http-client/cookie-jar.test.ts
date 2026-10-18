@@ -730,14 +730,17 @@ describe('CookieJar', () => {
     });
 
     test('parses Expires attribute', () => {
-      // Use a fixed RFC date string to avoid timing sensitivity
+      // Within the 400-day lifetime cap, whole seconds as an HTTP-date carries them.
+      const expires = new Date(
+        Math.floor((Date.now() + 30 * 86_400_000) / 1000) * 1000,
+      );
       jar.parseSetCookieHeader(
-        'session=abc; Expires=Thu, 01 Jan 2099 00:00:00 GMT',
+        `session=abc; Expires=${expires.toUTCString()}`,
         'https://example.com',
       );
       const cookie = jar.getCookieFor('session', 'https://example.com');
       expect(cookie?.expires).toBeInstanceOf(Date);
-      expect(cookie?.expires?.getFullYear()).toBe(2099);
+      expect(cookie?.expires?.getTime()).toBe(expires.getTime());
     });
 
     test('parses Secure and SameSite=Strict', () => {
@@ -3114,3 +3117,83 @@ test.each(['maxAge', 'createdAt', 'expires', 'getTime'])(
     expect(jar.getAllCookies().map((cookie) => cookie.name)).toEqual(['live']);
   },
 );
+
+describe('round 62', () => {
+  test('a cookie a header cannot carry is refused, so the host keeps its other cookies', () => {
+    const jar = new CookieJar();
+    expect(
+      jar.setCookie({ name: 'pref', value: 'café→x', domain: '127.0.0.1' }),
+    ).toBe(false);
+    jar.setCookie({ name: 'session', value: 'abc', domain: '127.0.0.1' });
+
+    expect(jar.getCookieHeaderString('http://127.0.0.1/')).toBe('session=abc');
+  });
+
+  test('a single-label host with an underscore keeps its cookies', () => {
+    const jar = new CookieJar();
+    jar.parseSetCookieHeader('a=1', 'http://my_service/');
+
+    expect(jar.getCookieHeaderString('http://my_service/')).toBe('a=1');
+  });
+
+  test('Expires is read with the RFC 6265 cookie-date algorithm', () => {
+    const jar = new CookieJar();
+    const inAnHour = new Date(Date.now() + 3_600_000);
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+    const months = [
+      'Jan',
+      'Feb',
+      'Mar',
+      'Apr',
+      'May',
+      'Jun',
+      'Jul',
+      'Aug',
+      'Sep',
+      'Oct',
+      'Nov',
+      'Dec',
+    ];
+    const pad = (n: number) => String(n).padStart(2, '0');
+    // asctime form, no zone: read as UTC.
+    const asctime = `${days[inAnHour.getUTCDay()]} ${months[inAnHour.getUTCMonth()]} ${pad(inAnHour.getUTCDate())} ${pad(inAnHour.getUTCHours())}:${pad(inAnHour.getUTCMinutes())}:${pad(inAnHour.getUTCSeconds())} ${inAnHour.getUTCFullYear()}`;
+    jar.parseSetCookieHeader(`a=1; Expires=${asctime}`, 'http://example.com/');
+    const stored = jar.getAllCookies().find((cookie) => cookie.name === 'a');
+    expect(stored?.expires?.getTime()).toBe(
+      Math.floor(inAnHour.getTime() / 1000) * 1000,
+    );
+
+    // Not a cookie-date at all: the attribute is ignored, a session cookie stored.
+    jar.parseSetCookieHeader('b=1; Expires=0', 'http://example.com/');
+    expect(jar.getCookieHeaderString('http://example.com/')).toContain('b=1');
+
+    // A two-digit year below 70 is 20xx.
+    jar.parseSetCookieHeader(
+      'c=1; Expires=Wed, 01 Jan 69 00:00:00 GMT',
+      'http://example.com/',
+    );
+    expect(
+      jar.getAllCookies().find((cookie) => cookie.name === 'c')?.expires,
+    ).toBeDefined();
+    expect(jar.getCookieHeaderString('http://example.com/')).toContain('c=1');
+  });
+
+  test('a cookie lifetime is capped at 400 days, and an oversized cookie is ignored', () => {
+    const jar = new CookieJar();
+    jar.parseSetCookieHeader('a=1; Max-Age=2000000000', 'http://example.com/');
+    jar.parseSetCookieHeader(
+      'b=1; Expires=Fri, 01 Jan 2100 00:00:00 GMT',
+      'http://example.com/',
+    );
+    const cap = 400 * 24 * 60 * 60;
+    const a = jar.getAllCookies().find((cookie) => cookie.name === 'a');
+    const b = jar.getAllCookies().find((cookie) => cookie.name === 'b');
+    expect(a?.maxAge).toBe(cap);
+    expect(b?.expires?.getTime()).toBeLessThanOrEqual(Date.now() + cap * 1000);
+
+    jar.parseSetCookieHeader(`big=${'x'.repeat(5000)}`, 'http://example.com/');
+    expect(jar.getAllCookies().some((cookie) => cookie.name === 'big')).toBe(
+      false,
+    );
+  });
+});

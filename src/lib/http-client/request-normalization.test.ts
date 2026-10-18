@@ -3327,3 +3327,18 @@ test("hosts: ['*'] matches any host a URL can carry", async () => {
     'fqdn api.example.com',
   ]);
 });
+
+test('MockAdapter refuses a cookie maxAge that is not a number', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/c', () => ({
+    status: 200,
+    cookies: { s: { value: '1', maxAge: Number.NaN } },
+  }));
+  const builder = new HTTPClient({ adapter, baseURL: 'http://api.test' }).get(
+    '/c',
+  );
+
+  await builder.send();
+
+  expect(builder.error?.code).toBe('adapter_error');
+});

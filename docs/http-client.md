@@ -798,6 +798,8 @@ await client
 
 A `CookieJar` provides cookie storage with Public Suffix List domain matching, path matching, secure-flag enforcement, and expiry handling.
 
+A response cookie's lifetime is capped at 400 days, as browsers cap it (RFC 6265bis): a longer `Max-Age` or a later `Expires` is read as 400 days from now. `Expires` is read with RFC 6265's cookie-date algorithm, in UTC whatever zone is written, and a value that is not a cookie-date (`Expires=0`) is ignored, leaving a session cookie. A cookie whose name and value together pass 4096 bytes is ignored. A cookie a header cannot carry - a name or value with a character above U+00FF - is refused by `setCookie()` and `fromJSON()`. The jar does not limit how many cookies it holds; call `clearExpiredCookies()` on a long-lived jar.
+
 Cookie domains are canonicalized through IDNA to lowercase ASCII: for example, `Domain=münchen.de` matches the request host `xn--mnchen-3ya.de`. The same normalization applies to cookies stored through `setCookie()` or restored through `fromJSON()`, and to hosts passed to `clear()`. Invalid domain scopes are rejected.
 
 Fetch uses `Headers.getSetCookie()` to preserve individual response cookie lines.

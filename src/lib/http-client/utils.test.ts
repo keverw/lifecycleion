@@ -764,7 +764,11 @@ describe('extractFetchHeaders', () => {
     expect(jar.getAllCookies()).toEqual([]);
   });
 
-  test.each(['a=1', 'a=1; Expires=Wed, 21 Oct 2099 07:28:00 GMT'])(
+  // Within the 400-day cookie lifetime cap.
+  const inAMonth = new Date(
+    Math.floor((Date.now() + 30 * 86_400_000) / 1000) * 1000,
+  );
+  test.each(['a=1', `a=1; Expires=${inAMonth.toUTCString()}`])(
     'preserves an unambiguous fallback cookie: %s',
     (raw) => {
       const headers = {
@@ -781,7 +785,7 @@ describe('extractFetchHeaders', () => {
       if (raw.includes('Expires=')) {
         expect(
           jar.getCookieFor('a', 'https://example.com/')?.expires?.getTime(),
-        ).toBe(Date.parse('Wed, 21 Oct 2099 07:28:00 GMT'));
+        ).toBe(inAMonth.getTime());
       }
     },
   );
