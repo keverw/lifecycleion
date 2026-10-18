@@ -1892,7 +1892,7 @@ builder.requestID; // ULID assigned at construction time - available before and 
 builder.state; // Current RequestState
 builder.response; // HTTPResponse<T> | null
 builder.error; // HTTPClientError | null
-builder.attemptCount; // Attempts begun, including one a retry interceptor or request setup ended before dispatch (null before send and when an initial-phase interceptor ends the request; 0 for a signal already aborted at send or a setup failure before any attempt)
+builder.attemptCount; // Attempts begun, including one a retry interceptor or request setup ended before dispatch (null before send and when the request ends in its initial interceptor phase - an interceptor's cancel or error, or a cancel made during setup or while the interceptors run; 0 for a signal already aborted at send or a setup failure before any attempt)
 builder.nextRetryDelayMS; // Scheduled delay for next retry (ms), or null
 builder.nextRetryAt; // Epoch ms for next retry, or null
 builder.startedAt; // Epoch ms when the first attempt began (null before send, and null when the request ended before its first attempt began - e.g. pre-send cancel(), pre-aborted AbortSignal, request setup error raised before the first attempt such as an unresolvable URL, or request interceptor cancel/error). A setup failure inside an attempt (body serialization, or a cookie jar that throws while building the Cookie header) happens after the attempt began, so startedAt is set and attemptCount counts it

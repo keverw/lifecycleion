@@ -3147,3 +3147,46 @@ test('a cancel right after send() failed composing the caller signal answers alr
   expect(await sending).toBeInstanceOf(Error);
   expect(builder.state).toBe('failed');
 });
+
+test('a held setup cancel answers consistently, and a first cancel keeps its own (missing) reason', async () => {
+  const client = new HTTPClient({
+    adapter: new MockAdapter(),
+    baseURL: 'http://api.test',
+  });
+  const builder: ReturnType<HTTPClient['get']> = client.get('/x').headers({
+    'x-a': {
+      toString() {
+        builder.cancel('setup');
+        return 'v';
+      },
+    } as unknown as string,
+    'x-b': {
+      toString() {
+        throw new Error('boom');
+      },
+    } as unknown as string,
+  });
+  const sending = builder.send().then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  const again = builder.cancel('again');
+  await sending;
+  expect(again).toBe('already_cancelled');
+  expect(builder.cancel()).toBe('already_cancelled');
+
+  // A reasonless cancel() that came first is not given the interceptor's reason.
+  const reasonClient = new HTTPClient({
+    adapter: new MockAdapter(),
+    baseURL: 'http://api.test',
+  });
+  // eslint-disable-next-line prefer-const -- assigned after the interceptor that reads it
+  let first: ReturnType<HTTPClient['get']>;
+  reasonClient.addRequestInterceptor(() => {
+    first.cancel();
+    return { cancel: true, reason: 'I' };
+  });
+  first = reasonClient.get('/x');
+  await first.send();
+  expect(first.error?.cancelReason).toBeUndefined();
+});

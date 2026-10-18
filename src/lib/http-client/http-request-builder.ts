@@ -350,7 +350,8 @@ export class HTTPRequestBuilder<T = unknown> {
     // Setup is over and wired no cancel function: the request failed during setup (its
     // `send()` rejection is on its way), so there is nothing to cancel.
     if (this._isSetupDone) {
-      return 'already_settled';
+      // A cancel held during that setup still ends the builder cancelled; see `send()`.
+      return this._setupCancel ? 'already_cancelled' : 'already_settled';
     }
 
     // `send()` is still setting the request up - caller code such as a header value's

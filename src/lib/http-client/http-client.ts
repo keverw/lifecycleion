@@ -933,8 +933,11 @@ export class BaseHTTPClient {
             false,
             undefined,
             undefined,
-            // A `cancel()` made first - one that returned `'cancelled'` - keeps its reason.
-            getSignalCancelReason(cancelSignal) ?? interceptorReason,
+            // A `cancel()` made first - one that returned `'cancelled'` - keeps its reason, or
+            // its lack of one.
+            cancelSignal.aborted
+              ? getSignalCancelReason(cancelSignal)
+              : interceptorReason,
           );
           callbacks.setError(error);
           trackedCallbacks.setState('cancelled');
@@ -1479,11 +1482,11 @@ export class BaseHTTPClient {
                 { reportedURL: redirectTargetURL },
               );
               // As the initial phase's: an earlier `cancel()` keeps its reason.
-              const redirectCancelReason =
-                getSignalCancelReason(cancelSignal) ??
-                (isInterceptorCancel(redirectIntercept)
+              const redirectCancelReason = cancelSignal.aborted
+                ? getSignalCancelReason(cancelSignal)
+                : isInterceptorCancel(redirectIntercept)
                   ? redirectIntercept.reason
-                  : undefined);
+                  : undefined;
               // Marked as the retry phase's interceptor cancel is, which also aborts the
               // hop that answered: an early 307 to a bodied PUT may still be uploading.
               cancelEntry(trackedRequest, redirectCancelReason);
@@ -1805,7 +1808,10 @@ export class BaseHTTPClient {
       // above - and `send()` rejects with it. Marked settled at once, so a `cancel()` in
       // the moment before the builder hears of it answers `'already_settled'` rather
       // than cancelling a request that has already failed.
-      trackedRequest.state = 'failed';
+      // A request a held setup cancel already cancelled stays so.
+      if (trackedRequest.state !== 'cancelled') {
+        trackedRequest.state = 'failed';
+      }
       throw error;
     } finally {
       this._tracker.remove(requestID);
@@ -2321,8 +2327,9 @@ export class BaseHTTPClient {
 
         if (isInterceptorCancel(retryIntercept)) {
           // As the initial phase's: an earlier `cancel()` keeps its reason.
-          const retryCancelReason =
-            getSignalCancelReason(cancelSignal) ?? retryIntercept.reason;
+          const retryCancelReason = cancelSignal.aborted
+            ? getSignalCancelReason(cancelSignal)
+            : retryIntercept.reason;
           return endBeforeDispatch(baseRequest, {
             wasCancelled: true,
             ...(retryCancelReason !== undefined
