@@ -1265,3 +1265,31 @@ describe('XHRAdapter - round 58', () => {
     expect(response.headers['content-type']).toBe('text/plain');
   });
 });
+
+test('XHRAdapter keeps the redirect target when a final progress callback aborts', async () => {
+  const controller = new AbortController();
+  const promise = new XHRAdapter().send({
+    requestURL: 'https://api.test/a',
+    method: 'GET',
+    headers: {},
+    signal: controller.signal,
+    onDownloadProgress: (event) => {
+      if (event.progress === 1) {
+        controller.abort();
+      }
+    },
+  });
+  const xhr = lastXHR;
+  xhr.status = 200;
+  xhr.responseURL = 'https://api.test/b';
+  xhr.abort = () => {
+    xhr.status = 0;
+    xhr.responseURL = '';
+  };
+  xhr.simulateLoad();
+
+  const response = await promise;
+
+  expect(response.wasRedirectDetected).toBe(true);
+  expect(response.detectedRedirectURL).toBe('https://api.test/b');
+});

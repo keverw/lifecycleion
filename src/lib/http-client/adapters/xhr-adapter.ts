@@ -224,9 +224,12 @@ export class XHRAdapter implements HTTPAdapter {
         // wasRedirectDetected, which routes through HTTPClient's
         // redirect_disabled error path so callers get a consistent isFailed
         // response regardless of adapter.
+        // Read once, before any progress callback: one that aborts the signal resets this
+        // finished XHR, and `responseURL` with it.
+        const responseURL = xhr.responseURL;
         if (
-          xhr.responseURL &&
-          didBrowserFollowRedirect(xhr.responseURL, dispatchedURL)
+          responseURL &&
+          didBrowserFollowRedirect(responseURL, dispatchedURL)
         ) {
           // The browser completed the transport and surfaced the final URL even
           // though the client will treat the result as redirect_disabled, so
@@ -254,7 +257,7 @@ export class XHRAdapter implements HTTPAdapter {
             // XHR exposes the post-redirect final URL via responseURL. Browser
             // fetch opaque redirects do not, so this is intentionally
             // adapter-specific and surfaced separately from requestURL.
-            detectedRedirectURL: xhr.responseURL,
+            detectedRedirectURL: responseURL,
             headers: {},
             body: null,
           });

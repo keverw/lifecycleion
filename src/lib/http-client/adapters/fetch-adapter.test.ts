@@ -1369,3 +1369,27 @@ describe('FetchAdapter - round 58', () => {
     expect(builder.attemptCount).toBe(1);
   });
 });
+
+test('FetchAdapter still sends where Request or URL.canParse is missing', async () => {
+  let calls = 0;
+  (globalThis as any).fetch = () => {
+    calls++;
+    return Promise.resolve(new Response(null, { status: 200 }));
+  };
+  const originalRequest = globalThis.Request;
+  const originalCanParse = URL.canParse;
+  try {
+    delete (globalThis as { Request?: unknown }).Request;
+    (URL as { canParse?: unknown }).canParse = undefined;
+
+    const response = await new HTTPClient({ adapter: new FetchAdapter() })
+      .get('http://api.test/x')
+      .send();
+
+    expect(response.status).toBe(200);
+    expect(calls).toBe(1);
+  } finally {
+    globalThis.Request = originalRequest;
+    URL.canParse = originalCanParse;
+  }
+});

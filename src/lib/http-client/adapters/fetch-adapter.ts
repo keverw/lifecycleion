@@ -61,20 +61,32 @@ export class FetchAdapter implements HTTPAdapter {
     // a URL carrying credentials, on every attempt - fails once as the non-retryable
     // `adapter_error` it is, rather than as a network error retried to no end. Built
     // without the body or signal, which `fetch` below takes, so nothing is consumed.
+    //
+    // Only where it can be: an absolute URL (a relative one resolves against a browser's
+    // document, which `fetch` decides itself), and a runtime with `Request` - a test
+    // setup that polyfills only `fetch` has none. The URL is tested with `new URL` in a
+    // try of its own: `URL.canParse` is missing from older browsers and early Node 18,
+    // and a check that throws there must not fail every request.
+    let isAbsoluteURL = false;
     try {
-      // Absolute URLs only: a relative one resolves against a browser's document, which
-      // `Request` here has no notion of outside one - `fetch` decides that case itself.
-      if (URL.canParse(dispatchedURL)) {
+      new URL(dispatchedURL);
+      isAbsoluteURL = true;
+    } catch {
+      // Relative: `fetch` resolves it, or refuses it, as it always did.
+    }
+
+    if (isAbsoluteURL && typeof Request === 'function') {
+      try {
         new Request(dispatchedURL, {
           method,
           headers: materializeFetchHeaders(headers),
           redirect: 'manual',
         });
+      } catch (error) {
+        const refusal = normalizeError(error);
+        markNonRetryableAdapterError(refusal);
+        throw refusal;
       }
-    } catch (error) {
-      const refusal = normalizeError(error);
-      markNonRetryableAdapterError(refusal);
-      throw refusal;
     }
 
     let response: Response;
