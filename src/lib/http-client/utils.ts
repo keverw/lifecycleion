@@ -95,7 +95,10 @@ export function buildURL(
   }
 
   if (params && Object.keys(params).length > 0) {
-    const [urlWithoutHash, hash = ''] = url.split('#', 2);
+    // At the first `#` only: `split`'s limit drops everything after a second one.
+    const hashIndex = url.indexOf('#');
+    const urlWithoutHash = hashIndex === -1 ? url : url.slice(0, hashIndex);
+    const hash = hashIndex === -1 ? '' : url.slice(hashIndex + 1);
     const queryStartIndex = urlWithoutHash.indexOf('?');
 
     if (queryStartIndex === -1) {

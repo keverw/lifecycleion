@@ -140,27 +140,13 @@ export class HTTPRequestBuilder<T = unknown> {
   }
 
   /**
-   * A JSON body, whatever the value: an object or array is serialized as any object
-   * body is, and a string, number, boolean or `null` is sent as its JSON text with
-   * `content-type: application/json` - `.json('hello')` sends `"hello"`, not `hello`.
+   * An object or array body, sent as JSON. The same as `.body(data)`: serialization is
+   * decided by the value's type when the request is sent, so a string here is sent as
+   * `text/plain` and a number is refused - see the Body Types table in the docs for
+   * sending a JSON primitive.
    */
   public json(data: unknown): this {
     this._assertNotSent('json');
-    if (data === null || typeof data !== 'object') {
-      if (data === undefined) {
-        this._body = undefined;
-        return this;
-      }
-      this._body = JSON.stringify(data);
-      if (this._headers['content-type'] === undefined) {
-        defineEntry(
-          this._headers as Record<string, unknown>,
-          'content-type',
-          'application/json',
-        );
-      }
-      return this;
-    }
     this._body = data;
     return this;
   }

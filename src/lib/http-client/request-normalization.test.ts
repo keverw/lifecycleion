@@ -3476,20 +3476,10 @@ test('round 67: request builder validation, json(), the query kept as written, s
     expect(() => client.get('/x', options as never)).toThrow(TypeError);
   }
 
-  // json() sends JSON whatever the value.
-  const sent: unknown[] = [];
-  const adapter = new MockAdapter();
-  adapter.routes.post('/j', (req) => {
-    sent.push([req.headers['content-type'], req.body]);
-    return { status: 200 };
-  });
-  const jsonClient = new HTTPClient({ adapter, baseURL: 'http://api.test' });
-  await jsonClient.post('/j').json('hello').send();
-  await jsonClient.post('/j').json(42).send();
-  expect(sent).toEqual([
-    ['application/json', 'hello'],
-    ['application/json', 42],
-  ]);
+  // A fragment survives a second `#` when params are added.
+  expect(buildURL('http://a.test', '/x?a=1#h#i', { b: 2 })).toBe(
+    'http://a.test/x?a=1&b=2#h#i',
+  );
 
   // A second send() says once-only, even when the first ended cancelled by a signal.
   const controller = new AbortController();
