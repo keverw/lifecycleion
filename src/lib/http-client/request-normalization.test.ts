@@ -3307,9 +3307,23 @@ test("hosts: ['*'] matches any host a URL can carry", async () => {
     { hosts: ['*'] },
   );
 
+  client.addResponseObserver(
+    (_response, request) => {
+      seen.push(`fqdn ${new URL(request.requestURL).hostname}`);
+    },
+    { hosts: ['*.'] },
+  );
+
   for (const host of ['my_service', '-edge.example.com', 'api.example.com']) {
     await client.get(`http://${host}/x`).send();
   }
 
-  expect(seen).toEqual(['my_service', '-edge.example.com', 'api.example.com']);
+  expect(seen).toEqual([
+    'my_service',
+    'fqdn my_service',
+    '-edge.example.com',
+    'fqdn -edge.example.com',
+    'api.example.com',
+    'fqdn api.example.com',
+  ]);
 });

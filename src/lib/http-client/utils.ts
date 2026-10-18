@@ -963,7 +963,8 @@ export function matchesHostPattern(hostname: string, pattern: string): boolean {
   // `*` alone matches any host a request URL can carry, as documented - including one the
   // domain matcher cannot read (`my_service`, `-edge.example.com`), which every other
   // pattern still skips.
-  if (pattern.trim() === '*') {
+  // `*.` is `*` written as a fully qualified name, as registration reads it.
+  if (pattern.trim().replace(/\.$/, '') === '*') {
     return hostname !== '';
   }
 
