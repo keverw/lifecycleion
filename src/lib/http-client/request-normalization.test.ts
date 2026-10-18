@@ -900,7 +900,7 @@ test('a plain object from another realm is accepted as a JSON body', async () =>
   );
 });
 
-test('only the first cancel of a request in flight returns true', async () => {
+test("only the first cancel of a request in flight returns 'cancelled'", async () => {
   const adapter: HTTPAdapter = {
     getType: () => 'node',
     send: (request) =>
@@ -2765,7 +2765,7 @@ test('late cancels: a timeout, a redirect hop, an earlier reason, redirect callb
   expect((await quiet.send()).isCancelled).toBe(true);
   expect(observed).toEqual([]);
 
-  // An interceptor cancel keeps the reason of an earlier cancel() that returned true.
+  // An interceptor cancel keeps the reason of an earlier cancel() that returned 'cancelled'.
   const reasonClient = new HTTPClient({ adapter, baseURL: 'http://api.test' });
   // eslint-disable-next-line prefer-const -- assigned after the interceptor that reads it
   let reasoned: ReturnType<HTTPClient['get']>;
@@ -2945,4 +2945,23 @@ test('a cancel ends an interceptor chain, and an interceptor or factory cancel a
 
   expect(lateCancelResult).toBe('already_cancelled');
   expect(builder.error?.cancelReason).toBe('A');
+});
+
+test("the tracker reads cancelled once the caller's own signal aborts", async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/slow', async () => {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    return { status: 200 };
+  });
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  const controller = new AbortController();
+  const pending = client.get('/slow').signal(controller.signal).send();
+  await new Promise((resolve) => setTimeout(resolve, 5));
+
+  controller.abort('caller');
+
+  expect(client.listRequests().requests.map((entry) => entry.state)).toEqual([
+    'cancelled',
+  ]);
+  await pending;
 });

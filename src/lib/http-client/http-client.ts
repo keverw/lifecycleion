@@ -926,7 +926,7 @@ export class BaseHTTPClient {
             false,
             undefined,
             undefined,
-            // A `cancel()` made first - one that returned `true` - keeps its reason.
+            // A `cancel()` made first - one that returned `'cancelled'` - keeps its reason.
             getSignalCancelReason(cancelSignal) ?? interceptorReason,
           );
           callbacks.setError(error);
@@ -1934,7 +1934,7 @@ export class BaseHTTPClient {
     /**
      * Mark the request cancelled, as `cancel()` would, when an interceptor or the stream
      * factory cancelled it: a later `cancel()` - from that attempt's `onAttemptEnd` - then
-     * answers `false` rather than `true` for a request it did not cancel.
+     * answers `'already_cancelled'` for a request it did not cancel.
      */
     markCancelled: (reason: string | undefined) => void;
     /**

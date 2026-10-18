@@ -154,7 +154,14 @@ export class RequestTracker {
         requestID: entry.requestID,
         clientID: entry.clientID,
         label: entry.label,
-        state: entry.state,
+        // A request the caller's own signal aborted reads `cancelled` at once, as one
+        // cancelled here or from its builder does, rather than its last in-flight state.
+        state:
+          entry.state !== 'completed' &&
+          entry.state !== 'failed' &&
+          isEntryPastCancel(entry)
+            ? 'cancelled'
+            : entry.state,
       });
     }
 
