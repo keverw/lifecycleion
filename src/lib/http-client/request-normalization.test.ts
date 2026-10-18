@@ -3743,3 +3743,15 @@ test('round 76: null ca refused, nested undefined params and encoded keys', () =
     'https://x/x?c%2B%2B=2',
   );
 });
+
+test('round 78: an empty params array or object clears the path pairs for its key', () => {
+  expect(buildURL('http://x', '/s?tags=a&tags=b&page=2', { tags: [] })).toBe(
+    'http://x/s?page=2',
+  );
+  expect(buildURL('http://x', '/s?filter[a]=1&q=z', { filter: {} })).toBe(
+    'http://x/s?q=z',
+  );
+  expect(
+    buildURL('http://x', '/s?filter[a]=1', { filter: { a: undefined } }),
+  ).toBe('http://x/s?filter[a]=1');
+});

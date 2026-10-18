@@ -44,23 +44,18 @@ function tryAbsoluteWebHref(path: string): string | null {
   return null;
 }
 
-/**
- * Builds a request URL string from `baseURL`, `path`, and optional query params
- * (`qs` — nested objects and arrays supported).
- *
- * **Relative paths (usual case)** — When `baseURL` is set and `path` is not
- * absolute, `path` is joined to `baseURL` (leading slash normalized). Example:
- * `baseURL: https://api.test`, `path: /v1/users` → `https://api.test/v1/users`.
- *
- * **Absolute / protocol-relative `path` (escape hatch)** — If `path` is a full
- * `http:` or `https:` URL, it is **not** prefixed with `baseURL` (after
- * normalization via `URL#href`). The same applies to protocol-relative URLs
- * (`//cdn.example/x`): they are left for {@link resolveAbsoluteURL} to resolve
- * using the client `baseURL`’s scheme. Use this for one-off cross-origin calls,
- * CDN assets, or URLs returned by APIs; for strict per-origin clients, prefer
- * relative paths and a dedicated client or `HTTPClient.createSubClient()` per
- * origin.
- */
+/** Whether a `.params()` value names its key: not `undefined`, nor made only of it. */
+function isGivenParam(value: unknown): boolean {
+  if (value === undefined) {
+    return false;
+  }
+  if (isPlainRecord(value)) {
+    const entries = Object.values(value);
+    return entries.length === 0 || entries.some(isGivenParam);
+  }
+  return true;
+}
+
 /** The key a query pair from the wire sets at the top level, as `qs` reads it. */
 function topLevelQueryKey(pair: string): string {
   const rawKey = pair.split('=', 1)[0].replace(/\+/g, ' ');
@@ -88,6 +83,23 @@ function topLevelKeyOf(key: string): string {
   return bracket > 0 ? key.slice(0, bracket) : key;
 }
 
+/**
+ * Builds a request URL string from `baseURL`, `path`, and optional query params
+ * (`qs` — nested objects and arrays supported).
+ *
+ * **Relative paths (usual case)** — When `baseURL` is set and `path` is not
+ * absolute, `path` is joined to `baseURL` (leading slash normalized). Example:
+ * `baseURL: https://api.test`, `path: /v1/users` → `https://api.test/v1/users`.
+ *
+ * **Absolute / protocol-relative `path` (escape hatch)** — If `path` is a full
+ * `http:` or `https:` URL, it is **not** prefixed with `baseURL` (after
+ * normalization via `URL#href`). The same applies to protocol-relative URLs
+ * (`//cdn.example/x`): they are left for {@link resolveAbsoluteURL} to resolve
+ * using the client `baseURL`’s scheme. Use this for one-off cross-origin calls,
+ * CDN assets, or URLs returned by APIs; for strict per-origin clients, prefer
+ * relative paths and a dedicated client or `HTTPClient.createSubClient()` per
+ * origin.
+ */
 export function buildURL(
   baseURL: string | undefined,
   path: string,
@@ -132,12 +144,12 @@ export function buildURL(
       // left out, so the `params` value wins.
       // Top-level keys on both sides, as the docs state the rule: `page[number]` in params
       // replaces the path's `page[...]` pairs as `{ page: { number } }` would.
-      // A key whose value writes nothing - `undefined`, or an object of nothing but
-      // `undefined` - is not given, so it leaves the path's pairs alone:
-      // `.params({ page: options.page })` with no page keeps `?page=2`.
+      // A key whose value is `undefined` - or an object of nothing but `undefined` - is
+      // not given, so it leaves the path's pairs alone: `.params({ page: options.page })`
+      // with no page keeps `?page=2`. An empty array or object is given, and clears them.
       const overridden = new Set(
         Object.keys(params)
-          .filter((key) => qs.stringify({ [key]: params[key] }) !== '')
+          .filter((key) => isGivenParam(params[key]))
           .map(topLevelKeyOf),
       );
       const kept = existingQuery
