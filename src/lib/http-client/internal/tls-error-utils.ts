@@ -22,6 +22,14 @@ const CERT_ERROR_CODES = new Set([
   'SELF_SIGNED_CERT_IN_CHAIN',
   'UNABLE_TO_GET_ISSUER_CERT_LOCALLY',
   'CERT_REVOKED',
+  'CERT_UNTRUSTED',
+  'HOSTNAME_MISMATCH',
+  'INVALID_CA',
+  'PERMITTED_VIOLATION',
+  'EXCLUDED_VIOLATION',
+  'UNHANDLED_CRITICAL_EXTENSION',
+  'PATH_LENGTH_EXCEEDED',
+  'UNABLE_TO_DECODE_ISSUER_PUBLIC_KEY',
 ]);
 
 /** `CRL` or `CRLS` as an underscore-delimited token, anywhere in a code. */
@@ -141,6 +149,8 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
   const message = readMember(error, 'message');
 
   return typeof message === 'string'
-    ? /certificate|self signed|unable to verify|altname/i.test(message)
+    ? /certificate|self signed|unable to verify|altname|subtree violation|critical extension|path length constraint|issuer public key/i.test(
+        message,
+      )
     : false;
 }

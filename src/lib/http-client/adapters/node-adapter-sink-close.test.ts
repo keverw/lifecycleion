@@ -6,6 +6,7 @@ import type { AddressInfo } from 'node:net';
 import { EventEmitter } from 'node:events';
 import type { WritableLike } from '../types';
 import { NodeAdapter } from './node-adapter';
+import { isTLSCertificateError } from '../internal/tls-error-utils';
 import { HTTPClient } from '../http-client';
 
 test('a streamed download whose sink is destroyed during backpressure fails rather than hangs', async () => {
@@ -290,5 +291,28 @@ test('a stream factory that throws its own AbortError fails as stream_setup_erro
   } finally {
     server.closeAllConnections();
     server.close();
+  }
+});
+
+test('round 72: an empty ca is refused, mtls.ca adds to ca, more certificate failures are 495', () => {
+  for (const config of [
+    { ca: '' },
+    { ca: [] },
+    { ca: Buffer.alloc(0) },
+    { mtls: { cert: 'c', key: 'k', ca: [] } },
+  ]) {
+    expect(() => new NodeAdapter(config as never)).toThrow(/ca/);
+  }
+
+  for (const [code, message] of [
+    ['PERMITTED_VIOLATION', 'x'],
+    ['UNHANDLED_CRITICAL_EXTENSION', 'x'],
+    ['UNSPECIFIED', 'permitted subtree violation'],
+    ['UNSPECIFIED', 'unhandled critical extension'],
+    ['UNSPECIFIED', 'path length constraint exceeded'],
+  ]) {
+    expect(
+      isTLSCertificateError(Object.assign(new Error(message), { code })),
+    ).toBe(true);
   }
 });

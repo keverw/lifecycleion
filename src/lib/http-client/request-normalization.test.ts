@@ -3562,3 +3562,42 @@ test('round 71: a bracketed params key replaces its top-level key; single-value 
   expect(response.headers['content-length']).toBe('2');
   expect(response.status).toBe(200);
 });
+
+test('round 72: a retry interceptor changing only the scheme of a redirect target does not promote it to the credential scope', async () => {
+  const scopes: string[] = [];
+  let attemptsAtB = 0;
+  const client = new HTTPClient({
+    followRedirects: true,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+    adapter: {
+      getType: () => 'node',
+      send: (request: AdapterRequest) => {
+        if (request.requestURL.startsWith('https://a.test')) {
+          return Promise.resolve({
+            status: 302,
+            headers: { location: 'http://b.test/hop' },
+            body: null,
+          });
+        }
+        scopes.push(new URL(request.initialURL ?? '').host);
+        attemptsAtB++;
+        return Promise.resolve({
+          status: attemptsAtB === 1 ? 503 : 200,
+          headers: {},
+          body: null,
+        });
+      },
+    },
+  });
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      requestURL: request.requestURL.replace('http://', 'https://'),
+    }),
+    { phases: ['retry'] },
+  );
+
+  await client.get('https://a.test/start').send();
+
+  expect(scopes).toEqual(['a.test', 'a.test']);
+});

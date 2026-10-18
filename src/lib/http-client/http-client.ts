@@ -33,6 +33,7 @@ import {
   assertSupportedAdapterRuntimeAndConfig,
   assertSupportedRequestBody,
   buildURL,
+  extractHostname,
   isBrowserEnvironment,
   mergeObservedHeaders,
   mergeHeaders,
@@ -2374,13 +2375,14 @@ export class BaseHTTPClient {
         // Only an origin change explicitly selects a new credential destination.
         // Editing a redirected URL's path, query or fragment must not authorize the
         // server-selected origin. Preserve this scope without changing observer URLs.
+        // A change of scheme or port alone keeps the host the server chose - an "upgrade
+        // to https on retry" interceptor - so it does not hand that host the identity
+        // either; only a different host is the caller choosing a destination.
         if (
           !hopContext ||
           (isRetry &&
-            this._isCrossOriginRedirect(
-              baseRequest.requestURL,
-              attemptRequest.requestURL,
-            ))
+            extractHostname(baseRequest.requestURL).toLowerCase() !==
+              extractHostname(attemptRequest.requestURL).toLowerCase())
         ) {
           credentialScope.url = attemptRequest.requestURL;
         }

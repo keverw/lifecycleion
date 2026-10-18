@@ -1310,24 +1310,26 @@ const client = new HTTPClient({
 ```typescript
 interface NodeAdapterConfig {
   socketPath?: string; // Unix domain socket path. Used only for the origin the request addressed, never on a cross-origin redirect hop.
-  ca?: string | Buffer | Array<string | Buffer>; // Trusted CA cert(s) for servers using a private CA. Array allows multiple CAs without bundling. No client cert required - use mtls for that.
+  ca?: string | Buffer | Array<string | Buffer>; // Trusted CA cert(s) for servers using a private CA. Array allows multiple CAs without bundling. No client cert required - use mtls for that. An empty value ('', [], an empty buffer) throws: it would fall back to the runtime's public roots.
   servername?: string; // TLS SNI hostname. Required when dialing by IP but the cert SAN is a DNS name - without it, TLS verification fails because the IP does not match the DNS SAN. Sent only to the origin the request addressed, never on a cross-origin redirect hop.
   mtls?: {
     // Your TLS identity. Presented only to the origin the request addressed, never on a cross-origin redirect hop.
     cert: string | Buffer;
     key: string | Buffer;
-    ca?: string | Buffer | Array<string | Buffer>; // Trust anchor for the server. Applies on every hop, like `ca`.
+    ca?: string | Buffer | Array<string | Buffer>; // Trust anchor for the server, added to `ca`. Applies on every hop, like `ca`.
   };
   crl?: string | ArrayBufferView | Array<string | ArrayBufferView>; // PEM certificate revocation list(s). A concatenated PEM bundle is split for you - see below.
   rejectUnauthorized?: boolean; // Default: true
 }
 ```
 
-TLS certificate errors resolve as status `495` (transport error, not retryable) rather than throwing, so they flow through the normal error path. That includes every revocation failure, such as `CERT_REVOKED`, `UNABLE_TO_GET_CRL`, `CRL_HAS_EXPIRED` and friends.
+TLS certificate errors resolve as status `495` (transport error, not retryable) rather than throwing, so they flow through the normal error path - those the runtime reports as a certificate failure. A server rejecting the client certificate may only close or reset the connection on some runtimes (Bun does for TLS 1.3), which is status `0` and retried as any transport failure is. That includes every revocation failure, such as `CERT_REVOKED`, `UNABLE_TO_GET_CRL`, `CRL_HAS_EXPIRED` and friends.
 
 **URL credentials and TLS identity are scoped to the caller-selected origin.**
-`AdapterRequest.initialURL` identifies that origin, including an origin explicitly
-selected by a retry interceptor. On a hop to another origin, all network adapters
+`AdapterRequest.initialURL` identifies that origin, including one a retry interceptor
+selects by changing the host. Changing only the scheme or port of a redirect target - an
+"upgrade to https on retry" interceptor - keeps the server's choice of host, and selects
+nothing. On a hop to another origin, all network adapters
 withhold URL userinfo, and `NodeAdapter` also withholds `servername` and
 `mtls.cert` / `mtls.key`. The client strips cross-origin Location userinfo before
 recording the followed hop. Same-origin userinfo is preserved. Node uses it for Basic

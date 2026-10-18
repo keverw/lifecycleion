@@ -291,11 +291,11 @@ export interface NodeAdapterConfig {
 
   /**
    * Mutual TLS credentials. When set on an https: request, the adapter
-   * presents the client certificate to the server. Cert errors return
-   * status 495 (non-standard but widely understood for client cert failure)
-   * rather than throwing. The client treats 495 as a transport-level failure,
-   * so it resolves through the failed/error path instead of response observers
-   * and is NOT retryable.
+   * presents the client certificate to the server. A server rejecting the
+   * certificate is reported however the runtime reports it: some runtimes give a
+   * certificate alert, classified as status 495 (not retried), and others only a
+   * closed or reset connection, which is status 0 and retried as any transport
+   * failure is. `mtls.ca` adds to `ca`.
    */
   mtls?: {
     cert: string | Buffer;
@@ -379,6 +379,8 @@ export class NodeAdapter implements HTTPAdapter {
     if (config.crl !== undefined) {
       normalizeCRL(config.crl, this);
     }
+    assertTrustAnchors(config.ca, 'ca');
+    assertTrustAnchors(config.mtls?.ca, 'mtls.ca');
     this._config = config;
   }
 
@@ -474,9 +476,29 @@ export class NodeAdapter implements HTTPAdapter {
       // connection this adapter opens. The configured *identity* does not, and neither
       // does `socketPath` above: see `isCrossOriginRedirectHop`.
 
-      // custom CA trust store
-      if (this._config.ca) {
-        httpsOptions.ca = this._config.ca;
+      // custom CA trust store. An empty one is refused rather than skipped: skipped, it
+      // fell back to the public roots - a client meant to trust one private CA, whose
+      // loader came back empty, then trusted every public one.
+      const trustedCA = this._config.ca;
+      const mtlsCA = this._config.mtls?.ca;
+      assertTrustAnchors(trustedCA, 'ca');
+      assertTrustAnchors(mtlsCA, 'mtls.ca');
+      // `mtls.ca` adds to `ca` rather than replacing it, so a client that trusts a partner
+      // CA through `ca` keeps it when it also configures mTLS.
+      const anchors = [
+        ...(trustedCA === undefined
+          ? []
+          : Array.isArray(trustedCA)
+            ? trustedCA
+            : [trustedCA]),
+        ...(mtlsCA === undefined
+          ? []
+          : Array.isArray(mtlsCA)
+            ? mtlsCA
+            : [mtlsCA]),
+      ];
+      if (anchors.length > 0) {
+        httpsOptions.ca = anchors.length === 1 ? anchors[0] : anchors;
       }
 
       // SNI hostname — required when dialing by IP with a DNS-named cert. Withheld on a
@@ -500,10 +522,6 @@ export class NodeAdapter implements HTTPAdapter {
         if (!isCrossOriginHop) {
           httpsOptions.cert = this._config.mtls.cert;
           httpsOptions.key = this._config.mtls.key;
-        }
-
-        if (this._config.mtls.ca) {
-          httpsOptions.ca = this._config.mtls.ca;
         }
 
         httpsOptions.rejectUnauthorized = true;
@@ -3581,4 +3599,28 @@ function describeFactoryReturn(value: unknown): string {
   }
 
   return typeof value;
+}
+
+/**
+ * Refuse a trust store with nothing in it - `''`, `[]`, an empty buffer, entries that
+ * are all empty - as `crl` refuses an empty list: it would leave the connection on the
+ * runtime's public roots, the opposite of what a caller supplying its own CA meant.
+ */
+function assertTrustAnchors(value: unknown, name: string): void {
+  if (value === undefined) {
+    return;
+  }
+  const isEmpty = (entry: unknown): boolean =>
+    (typeof entry === 'string' && entry.trim() === '') ||
+    (ArrayBuffer.isView(entry) && entry.byteLength === 0);
+  if (
+    isEmpty(value) ||
+    (Array.isArray(value) && (value.length === 0 || value.every(isEmpty)))
+  ) {
+    const error = new TypeError(
+      `NodeAdapter ${name} holds no certificate. Leave it unset to use the runtime's default trust store.`,
+    );
+    markNonRetryableAdapterError(error);
+    throw error;
+  }
 }
