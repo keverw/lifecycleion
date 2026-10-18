@@ -754,6 +754,13 @@ export function normalizeAdapterResponseHeaders(
 
     if (lower === 'set-cookie') {
       const chunk = Array.isArray(value) ? value : [value];
+      // The adapter's malformed answer, said as one: left for the cookie jar to trip
+      // over, it was reported as the jar failing.
+      if (chunk.some((line) => typeof line !== 'string')) {
+        throw new TypeError(
+          'HTTPClient adapter answered with a set-cookie header line that is not a string',
+        );
+      }
       const existing = result[lower];
 
       if (existing === undefined) {

@@ -3342,3 +3342,65 @@ test('MockAdapter refuses a cookie maxAge that is not a number', async () => {
 
   expect(builder.error?.code).toBe('adapter_error');
 });
+
+test('round 63: transport refusals are not retried, Mock honours a 0% cancel, a bad set-cookie is the adapter', async () => {
+  // NodeAdapter: a header value Node refuses fails once.
+  let hits = 0;
+  const server = http.createServer((_req, res) => {
+    hits++;
+    res.end('ok');
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    const builder = new HTTPClient({
+      adapter: new NodeAdapter(),
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 0 },
+    })
+      .get(`http://127.0.0.1:${port}/`)
+      .headers({ authorization: 'Bearer tok\r\n' });
+    await builder.send();
+    expect(builder.attemptCount).toBe(1);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(hits).toBe(0);
+  } finally {
+    server.close();
+  }
+
+  // MockAdapter: a cancel from the 0% upload callback runs no route handler.
+  const adapter = new MockAdapter();
+  let handled = 0;
+  adapter.routes.post('/charge', () => {
+    handled++;
+    return { status: 200 };
+  });
+  const mockClient = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  const charge: ReturnType<HTTPClient['post']> = mockClient.post('/charge', {
+    body: 'x',
+    onUploadProgress: (event) => {
+      if (event.progress === 0) {
+        charge.cancel();
+      }
+    },
+  });
+  expect((await charge.send()).isCancelled).toBe(true);
+  expect(handled).toBe(0);
+
+  // A set-cookie value that is not a string is the adapter's malformed answer.
+  const jarBuilder = new HTTPClient({
+    baseURL: 'http://api.test',
+    cookieJar: new CookieJar(),
+    adapter: {
+      getType: () => 'node',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'set-cookie': 5 } as unknown as Record<string, string>,
+          body: null,
+        }),
+    },
+  }).get('/x');
+  await jarBuilder.send();
+  expect(jarBuilder.error?.code).toBe('adapter_error');
+  expect(jarBuilder.error?.cause?.message).not.toMatch(/Cookie jar/);
+});

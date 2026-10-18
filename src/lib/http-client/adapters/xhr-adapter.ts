@@ -1,6 +1,8 @@
 import { defineEntry } from '../../internal/define-entry';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 import { guardProgressCallback } from '../internal/progress';
+import { markNonRetryableAdapterError } from '../internal/adapter-error';
+import { toError as normalizeError } from '../../to-error';
 import { isArrayBufferLike } from '../../internal/binary-view';
 import type {
   HTTPAdapter,
@@ -55,34 +57,48 @@ export class XHRAdapter implements HTTPAdapter {
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
 
-      // responseType 'arraybuffer' gives us a raw ArrayBuffer on load,
-      // consistent with how FetchAdapter and NodeAdapter deliver body bytes.
-      xhr.open(request.method, dispatchedURL);
-      xhr.responseType = 'arraybuffer';
+      // Refused the same way on every attempt - a method or header value `open` or
+      // `setRequestHeader` will not take - so failed once as non-retryable, as the other
+      // adapters fail a request their transport refuses to build.
+      const refuse = (error: unknown): void => {
+        const refusal = normalizeError(error);
+        markNonRetryableAdapterError(refusal);
+        reject(refusal);
+      };
 
-      // Timeout is managed by the client via the abort signal — the client's
-      // per-attempt timer fires AbortController.abort(), which propagates to
-      // xhr.abort() through the signal listener below. We disable XHR's own
-      // timeout mechanism (0 = no timeout) so the client retains full control.
-      // The 'timeout' event listener below is kept as a defensive fallback in
-      // case a browser fires it anyway (e.g. a hard-coded internal limit).
-      xhr.timeout = 0;
+      try {
+        // responseType 'arraybuffer' gives us a raw ArrayBuffer on load,
+        // consistent with how FetchAdapter and NodeAdapter deliver body bytes.
+        xhr.open(request.method, dispatchedURL);
+        xhr.responseType = 'arraybuffer';
 
-      // --- Request headers ---
-      //
-      // Calling setRequestHeader multiple times for the same key causes XHR to
-      // combine values with ", " per spec — which is correct for all headers
-      // the browser allows scripts to set. Cookie is a forbidden header name
-      // and is silently dropped by the browser regardless; the browser manages
-      // cookies on its own.
-      for (const [key, value] of Object.entries(request.headers)) {
-        if (Array.isArray(value)) {
-          for (const v of value) {
-            xhr.setRequestHeader(key, v);
+        // Timeout is managed by the client via the abort signal — the client's
+        // per-attempt timer fires AbortController.abort(), which propagates to
+        // xhr.abort() through the signal listener below. We disable XHR's own
+        // timeout mechanism (0 = no timeout) so the client retains full control.
+        // The 'timeout' event listener below is kept as a defensive fallback in
+        // case a browser fires it anyway (e.g. a hard-coded internal limit).
+        xhr.timeout = 0;
+
+        // --- Request headers ---
+        //
+        // Calling setRequestHeader multiple times for the same key causes XHR to
+        // combine values with ", " per spec — which is correct for all headers
+        // the browser allows scripts to set. Cookie is a forbidden header name
+        // and is silently dropped by the browser regardless; the browser manages
+        // cookies on its own.
+        for (const [key, value] of Object.entries(request.headers)) {
+          if (Array.isArray(value)) {
+            for (const v of value) {
+              xhr.setRequestHeader(key, v);
+            }
+          } else {
+            xhr.setRequestHeader(key, value);
           }
-        } else {
-          xhr.setRequestHeader(key, value);
         }
+      } catch (error) {
+        refuse(error);
+        return;
       }
 
       // --- Abort signal ---

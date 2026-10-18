@@ -4610,10 +4610,16 @@ function getResponseStreamAbortInfo(
 
   // Normalized as a resolved answer's headers are, so `Location` and the rest are read
   // by their lowercase names like every other response's.
-  return {
-    status,
-    headers: normalizeAdapterResponseHeaders(headers),
-  };
+  // Read on a failure path, where a throw would replace the failure: a malformed answer
+  // here (a `set-cookie` line that is not a string) leaves the error untagged instead.
+  try {
+    return {
+      status,
+      headers: normalizeAdapterResponseHeaders(headers),
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 /**

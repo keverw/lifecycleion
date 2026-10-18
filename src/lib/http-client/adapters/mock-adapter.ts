@@ -292,6 +292,12 @@ export class MockAdapter implements HTTPAdapter {
     // progress listeners see the same shape they would from FetchAdapter.
     guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
 
+    // Again, as the real adapters do: a cancel from that callback ends the request before
+    // the route handler runs, as it would before a real request was sent.
+    if (request.signal?.aborted) {
+      throwAbortError();
+    }
+
     // --- 2. Parse URL ---
     // Strip host so routes match on path only — same behavior regardless of
     // whether the client passed an absolute URL (https://api.test/users) or a
