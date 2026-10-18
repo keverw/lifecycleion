@@ -380,9 +380,13 @@ export function normalizeDomain(domain: string): string {
 
   try {
     // Use TR46/IDNA processing for robust Unicode domain handling that mirrors browser behavior
+    // `checkHyphens` off, as the WHATWG URL parser has it: it would also refuse a `--` in
+    // a label's third and fourth characters - `r3---sn-abc.googlevideo.com`, a real CDN
+    // host any URL carries - so no pattern could match such a host. A label that starts
+    // or ends with a hyphen is still refused, below.
     const ascii = toASCII(normalized, {
       useSTD3ASCIIRules: true,
-      checkHyphens: true,
+      checkHyphens: false,
       checkBidi: true,
       checkJoiners: true,
       transitionalProcessing: false, // matches modern browser behavior (non-transitional)
@@ -390,6 +394,13 @@ export function normalizeDomain(domain: string): string {
     });
     if (!ascii) {
       throw new Error('TR46 processing failed');
+    }
+    if (
+      ascii
+        .split('.')
+        .some((label) => label.startsWith('-') || label.endsWith('-'))
+    ) {
+      return '';
     }
     // Enforce DNS length constraints post-TR46
     return checkDNSLength(ascii) ? ascii : ''; // return sentinel on invalid DNS lengths

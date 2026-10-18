@@ -3258,3 +3258,32 @@ test('round 56: numeric IPv4 host entries, label null, and a FormData changed mi
     server.close();
   }
 });
+
+test('hosts filters match a hostname with -- in a label, * included', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter });
+  const seen: string[] = [];
+  client.addResponseObserver(
+    () => {
+      seen.push('*');
+    },
+    { hosts: ['*'] },
+  );
+  client.addResponseObserver(
+    () => {
+      seen.push('exact');
+    },
+    { hosts: ['r3---sn-abc.googlevideo.com'] },
+  );
+  client.addResponseObserver(
+    () => {
+      seen.push('wildcard');
+    },
+    { hosts: ['**.googlevideo.com'] },
+  );
+
+  await client.get('http://r3---sn-abc.googlevideo.com/x').send();
+
+  expect(seen.sort()).toEqual(['*', 'exact', 'wildcard']);
+});

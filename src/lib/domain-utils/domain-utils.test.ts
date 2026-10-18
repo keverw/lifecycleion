@@ -3708,3 +3708,17 @@ describe('domain-utils', () => {
     });
   });
 });
+
+describe('hyphens in labels', () => {
+  it('accepts a -- in a label as the URL parser does, and still refuses a leading or trailing hyphen', () => {
+    expect(normalizeDomain('r3---sn-abc.googlevideo.com')).toBe(
+      'r3---sn-abc.googlevideo.com',
+    );
+    expect(normalizeDomain('ab--cd.example.com')).toBe('ab--cd.example.com');
+    expect(matchesWildcardDomain('ab--cd.example.com', '**.example.com')).toBe(
+      true,
+    );
+    expect(normalizeDomain('-bad.com')).toBe('');
+    expect(normalizeDomain('bad-.com')).toBe('');
+  });
+});
