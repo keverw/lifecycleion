@@ -960,6 +960,13 @@ export function extractHostname(url: string): string {
  * - Pseudo-TLD suffix wildcards are rejected just like PSL tails (`*.localhost`, `*.local`, etc.)
  */
 export function matchesHostPattern(hostname: string, pattern: string): boolean {
+  // `*` alone matches any host a request URL can carry, as documented - including one the
+  // domain matcher cannot read (`my_service`, `-edge.example.com`), which every other
+  // pattern still skips.
+  if (pattern.trim() === '*') {
+    return hostname !== '';
+  }
+
   if (pattern.includes('*')) {
     return matchesWildcardDomain(hostname, pattern);
   }

@@ -1395,3 +1395,27 @@ test('FetchAdapter still sends where Request or URL.canParse is missing', async 
     }
   }
 });
+
+test('FetchAdapter refuses a method the runtime fetch would rewrite, rather than sending it as another', async () => {
+  // Bun's Request reads an unknown method as GET; where the runtime keeps it, there is
+  // nothing to refuse.
+  if (
+    new Request('http://a.test', { method: 'APPROVE' }).method === 'APPROVE'
+  ) {
+    return;
+  }
+  let calls = 0;
+  (globalThis as any).fetch = () => {
+    calls++;
+    return Promise.resolve(new Response(null, { status: 200 }));
+  };
+  const builder = new HTTPClient({ adapter: new FetchAdapter() }).request(
+    'APPROVE',
+    'http://api.test/x',
+  );
+
+  await builder.send();
+
+  expect(calls).toBe(0);
+  expect(builder.error?.code).toBe('adapter_error');
+});

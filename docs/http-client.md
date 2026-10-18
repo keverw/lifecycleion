@@ -529,8 +529,8 @@ request object of its own. A standard method (`GET`, `HEAD`, `POST`, `PUT`, `DEL
 the retry and redirect rules; any other method is case-sensitive and passed to the
 adapter as given, as `request()` passes it too. What goes on the wire depends on the
 transport: Node's `http` uppercases it, Node's `fetch` sends it as given, and Bun's
-`fetch` uppercases a method it knows and sends one it does not know as `GET` - so use `NodeAdapter` for a custom
-method on Bun. `CONNECT` is refused on every adapter (it opens a tunnel), and
+`fetch` uppercases a method it knows and would send one it does not know as `GET` - `FetchAdapter` refuses that
+request as a non-retryable `adapter_error` rather than sending it, so use `NodeAdapter` for a custom method on Bun. `CONNECT` is refused on every adapter (it opens a tunnel), and
 `TRACE` and `TRACK` are refused before dispatch through `FetchAdapter`, and through
 `XHRAdapter` in a browser, since those refuse them. A `GET` or `HEAD` with a body is
 refused before dispatch through `FetchAdapter` too, since `fetch` refuses one; use

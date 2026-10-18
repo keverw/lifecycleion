@@ -3294,3 +3294,22 @@ test('hosts filters match a hostname with -- in a label, * included', async () =
 
   expect(seen.sort()).toEqual(['*', 'exact', 'wildcard']);
 });
+
+test("hosts: ['*'] matches any host a URL can carry", async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter });
+  const seen: string[] = [];
+  client.addResponseObserver(
+    (_response, request) => {
+      seen.push(new URL(request.requestURL).hostname);
+    },
+    { hosts: ['*'] },
+  );
+
+  for (const host of ['my_service', '-edge.example.com', 'api.example.com']) {
+    await client.get(`http://${host}/x`).send();
+  }
+
+  expect(seen).toEqual(['my_service', '-edge.example.com', 'api.example.com']);
+});

@@ -76,14 +76,26 @@ export class FetchAdapter implements HTTPAdapter {
     }
 
     if (isAbsoluteURL && typeof Request === 'function') {
+      let builtMethod: string;
       try {
-        new Request(dispatchedURL, {
+        builtMethod = new Request(dispatchedURL, {
           method,
           headers: materializeFetchHeaders(headers),
           redirect: 'manual',
-        });
+        }).method;
       } catch (error) {
         const refusal = normalizeError(error);
+        markNonRetryableAdapterError(refusal);
+        throw refusal;
+      }
+
+      // A runtime that rewrites the method - Bun's fetch reads one it does not know as
+      // `GET` - would send a different request than the caller's, and report its answer
+      // as a success: a state-changing custom verb landing on a GET handler. Refused.
+      if (builtMethod.toUpperCase() !== method.toUpperCase()) {
+        const refusal = new Error(
+          `[FetchAdapter] This runtime's fetch would send the ${method} request as ${builtMethod}. Use NodeAdapter for it.`,
+        );
         markNonRetryableAdapterError(refusal);
         throw refusal;
       }
