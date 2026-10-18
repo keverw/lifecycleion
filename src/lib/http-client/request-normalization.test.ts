@@ -1,5 +1,7 @@
 import { expect, test } from 'bun:test';
 import vm from 'node:vm';
+import * as http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { HTTPClient } from './http-client';
 import { matchesFilter, parseContentType } from './utils';
 import { RESPONSE_STREAM_ABORT_FLAG } from './consts';
@@ -3189,4 +3191,70 @@ test('a held setup cancel answers consistently, and a first cancel keeps its own
   first = reasonClient.get('/x');
   await first.send();
   expect(first.error?.cancelReason).toBeUndefined();
+});
+
+test('round 56: numeric IPv4 host entries, label null, and a FormData changed mid-upload', async () => {
+  const client = new HTTPClient();
+  for (const pattern of ['2130706433', '0x7f000001']) {
+    expect(() =>
+      client.addResponseObserver(() => {}, { hosts: [pattern] }),
+    ).toThrow(/127\.0\.0\.1/);
+  }
+  client.addResponseObserver(() => {}, { hosts: ['127.0.0.1'] })();
+
+  // label: null in request options means no label, as null means unset elsewhere.
+  const unlabelled = new HTTPClient({ adapter: new MockAdapter() }).get(
+    'http://api.test/x',
+    { label: null as unknown as string },
+  );
+  expect(unlabelled.state).toBe('pending');
+
+  // A FormData changed mid-upload: an overrun is refused before it reaches the wire, and
+  // a shortfall fails as the same non-retryable source mismatch.
+  const received: number[] = [];
+  const server = http.createServer((req, res) => {
+    let bytes = 0;
+    req.on('data', (chunk: Buffer) => {
+      bytes += chunk.length;
+    });
+    req.on('close', () => received.push(bytes));
+    req.on('end', () => res.end('ok'));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    for (const change of ['grow', 'shrink'] as const) {
+      const form = new FormData();
+      form.append('a', 'x'.repeat(10));
+      form.append('b', 'y'.repeat(10));
+      form.append('c', 'z'.repeat(10));
+      let hasChanged = false;
+      const rejection = await new NodeAdapter()
+        .send({
+          requestURL: `http://127.0.0.1:${port}/`,
+          method: 'POST',
+          headers: {},
+          body: form,
+          onUploadProgress: (event) => {
+            if (!hasChanged && event.loaded > 0) {
+              hasChanged = true;
+              if (change === 'grow') {
+                form.append('d', 'w'.repeat(50));
+              } else {
+                form.delete('c');
+              }
+            }
+          },
+        })
+        .then(
+          (response) => response.errorCause,
+          (error: unknown) => error as Error,
+        );
+
+      expect(rejection?.message).toMatch(/Content-Length/);
+    }
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
 });

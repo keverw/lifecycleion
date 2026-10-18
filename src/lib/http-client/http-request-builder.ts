@@ -531,8 +531,9 @@ export class HTTPRequestBuilder<T = unknown> {
     }
 
     // Tracking label for cancel/list filtering
+    // `null` is unset, as for the other options.
     const label = opts.label;
-    if (label !== undefined) {
+    if (!isNullish(label)) {
       this.label(label);
     }
 

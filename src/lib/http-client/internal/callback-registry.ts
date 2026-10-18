@@ -65,7 +65,17 @@ function describeUnmatchableHostPattern(entry: string): string | undefined {
     return 'has a port; give the hostname alone';
   }
   if (!entry.includes('*')) {
-    return normalizeDomain(entry) === '' || urlHostnameOf(entry) === undefined
+    const parsed = urlHostnameOf(entry);
+    // A name the URL parser rewrites - `2130706433` or `0x7f000001` is `127.0.0.1` - is
+    // compared as written, so it never equals a request's hostname.
+    if (
+      parsed !== undefined &&
+      normalizeDomain(entry) !== '' &&
+      normalizeDomain(parsed) !== normalizeDomain(entry)
+    ) {
+      return `is read by the URL parser as ${JSON.stringify(parsed)}, which is what a request's hostname will be; give that form`;
+    }
+    return normalizeDomain(entry) === '' || parsed === undefined
       ? "is not a hostname the matcher can read (it reads DNS names: letters, digits and inner hyphens, no '_'), so it can never match"
       : undefined;
   }

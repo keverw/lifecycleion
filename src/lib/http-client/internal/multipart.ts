@@ -288,6 +288,20 @@ export async function serializeMultipartFormData(
 
   const write = (data: string | Buffer | Uint8Array): Promise<void> =>
     new Promise<void>((resolve, reject) => {
+      // Refused before it is written: bytes past the `Content-Length` already on the wire
+      // would be read by the server as the start of another message. Reached when the
+      // FormData grew after the sizing pass - a field appended mid-upload - as the
+      // `File` check below is for a file that grew.
+      if (uploadedBytes + Buffer.byteLength(data) > totalSize) {
+        reject(
+          sourceMismatch(
+            `Request body source produced more than its Content-Length of ${String(totalSize)}: ${String(uploadedBytes)} bytes written and a further ${String(Buffer.byteLength(data))} refused`,
+          ),
+        );
+
+        return;
+      }
+
       let hasWriteReturned = false;
       let isWriteCallbackDone = false;
       let isDrainDone = true;
@@ -558,7 +572,9 @@ export async function serializeMultipartFormData(
   // the caller hangs until its own timeout rather than seeing the transport error it
   // should have.
   if (uploadedBytes < totalSize) {
-    throw new Error('Request stream closed before the body was fully written');
+    throw sourceMismatch(
+      `Request body source produced fewer bytes than its Content-Length: ${String(uploadedBytes)} of ${String(totalSize)}`,
+    );
   }
 
   // The same mismatch from the other side, and it is not the same failure: a `Blob` that
