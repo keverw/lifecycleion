@@ -402,15 +402,20 @@ export function normalizeFilterMethods(
       `${label} filter methods is empty, which would match no request; omit it to match every method`,
     );
   }
-  return (methods as unknown[]).map((entry) => {
+  // Copied first, as the other lists are: the caller's own `map` is not called, and a
+  // hole is read as the `undefined` it is, and refused.
+  const entries = [...(methods as unknown[])];
+  const normalized: HTTPMethod[] = [];
+  for (const entry of entries) {
     // Held to the rule a request's method is, so an entry no request can have - `''`,
     // `'GET, POST'` - is refused rather than registered to match nothing.
     const problem = describeInvalidHTTPMethod(entry);
     if (problem !== undefined) {
       throw new TypeError(`${label} filter method ${problem}`);
     }
-    return normalizeHTTPMethod(entry as string);
-  });
+    normalized.push(normalizeHTTPMethod(entry as string));
+  }
+  return normalized;
 }
 
 /**
@@ -993,7 +998,7 @@ function hasNestedKey(obj: Record<string, unknown>, path: string): boolean {
   let current: unknown = obj;
 
   for (const part of parts) {
-    if (!current || typeof current !== 'object' || Array.isArray(current)) {
+    if (!isPlainRecord(current)) {
       return false;
     }
 
@@ -1003,7 +1008,7 @@ function hasNestedKey(obj: Record<string, unknown>, path: string): boolean {
       return false;
     }
 
-    current = (current as Record<string, unknown>)[part];
+    current = current[part];
   }
 
   return true;
@@ -1080,7 +1085,7 @@ export function matchesFilter(
     contentTypes?: ContentType[];
     contentTypeHeaders?: string[];
   },
-  context: {
+  requestContext: {
     status?: number;
     method?: string;
     body?: unknown;
@@ -1091,6 +1096,19 @@ export function matchesFilter(
   phaseType: RequestPhaseName,
   kind: 'request' | 'response' | 'error',
 ): boolean {
+  // An interceptor's context is the previous interceptor's result, and one that dropped
+  // its `requestURL` or `method` had no host or method to skip the filter over: missing,
+  // it matches nothing, as an unreadable one does - a host-scoped interceptor adding a
+  // token does not run for a request whose host it cannot see, which a later one could
+  // still point anywhere.
+  const context =
+    kind === 'request'
+      ? {
+          ...requestContext,
+          requestURL: requestContext.requestURL ?? '',
+          method: requestContext.method ?? '',
+        }
+      : requestContext;
   if (
     filter.phases &&
     filter.phases.length > 0 &&
@@ -1146,15 +1164,13 @@ export function matchesFilter(
     filter.bodyContainsKeys &&
     filter.bodyContainsKeys.length > 0
   ) {
-    if (
-      !context.body ||
-      typeof context.body !== 'object' ||
-      Array.isArray(context.body)
-    ) {
+    // A plain object, as documented: a typed array or a boxed string has index keys,
+    // so `'0'` matched every binary body.
+    if (!isPlainRecord(context.body)) {
       return false;
     }
 
-    const body = context.body as Record<string, unknown>;
+    const body = context.body;
 
     if (!filter.bodyContainsKeys.some((k) => hasNestedKey(body, k))) {
       return false;

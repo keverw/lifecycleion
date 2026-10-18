@@ -3404,3 +3404,44 @@ test('round 63: transport refusals are not retried, Mock honours a 0% cancel, a 
   expect(jarBuilder.error?.code).toBe('adapter_error');
   expect(jarBuilder.error?.cause?.message).not.toMatch(/Cookie jar/);
 });
+
+test('round 64: a missing URL matches no host, methods are copied, bodyContainsKeys needs a plain object', () => {
+  // An interceptor whose context lost its requestURL does not pass a hosts filter.
+  expect(
+    matchesFilter({ hosts: ['api.example.com'] }, {}, 'initial', 'request'),
+  ).toBe(false);
+  expect(matchesFilter({ methods: ['GET'] }, {}, 'initial', 'request')).toBe(
+    false,
+  );
+
+  // A methods list's own map is not called; a hole is refused.
+  const client = new HTTPClient();
+  const methods = ['CONNECT'];
+  (methods as unknown as { map: unknown }).map = () => undefined;
+  expect(() =>
+    client.addRequestInterceptor((request) => request, { methods }),
+  ).toThrow(TypeError);
+  // eslint-disable-next-line no-sparse-arrays -- the hole is the point
+  const sparse = [, 'GET'] as string[];
+  expect(() =>
+    client.addRequestInterceptor((request) => request, { methods: sparse }),
+  ).toThrow(TypeError);
+
+  // A binary body has no keys a bodyContainsKeys filter can match.
+  expect(
+    matchesFilter(
+      { bodyContainsKeys: ['0'] },
+      { body: new Uint8Array([1, 2, 3]) },
+      'final',
+      'response',
+    ),
+  ).toBe(false);
+  expect(
+    matchesFilter(
+      { bodyContainsKeys: ['0'] },
+      { body: { 0: 'x' } },
+      'final',
+      'response',
+    ),
+  ).toBe(true);
+});

@@ -1201,9 +1201,12 @@ describe('matchesFilter', () => {
     ).toBe(false);
   });
 
-  test('methods — skipped when context.method is absent', () => {
-    expect(matchesFilter({ methods: ['POST'] }, {}, 'initial', 'request')).toBe(
+  test('methods — skipped for an observer without a method, refused for an interceptor', () => {
+    expect(matchesFilter({ methods: ['POST'] }, {}, 'final', 'response')).toBe(
       true,
+    );
+    expect(matchesFilter({ methods: ['POST'] }, {}, 'initial', 'request')).toBe(
+      false,
     );
   });
 
@@ -1284,10 +1287,13 @@ describe('matchesFilter', () => {
     ).toBe(false);
   });
 
-  test('hosts — skipped when context.requestURL is absent', () => {
+  test('hosts — skipped for an observer without a URL, refused for an interceptor', () => {
+    expect(
+      matchesFilter({ hosts: ['api.example.com'] }, {}, 'final', 'response'),
+    ).toBe(true);
     expect(
       matchesFilter({ hosts: ['api.example.com'] }, {}, 'initial', 'request'),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test('hosts — wildcard matches subdomain', () => {
@@ -1334,10 +1340,13 @@ describe('matchesFilter', () => {
     ).toBe(true);
   });
 
-  test('schemes — skipped when requestURL is absent', () => {
+  test('schemes — skipped for an observer without a URL, refused for an interceptor', () => {
+    expect(matchesFilter({ schemes: ['https'] }, {}, 'final', 'response')).toBe(
+      true,
+    );
     expect(
       matchesFilter({ schemes: ['https'] }, {}, 'initial', 'request'),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test('schemes — non-absolute requestURL is a non-match (no throw)', () => {
