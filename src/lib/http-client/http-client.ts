@@ -1800,6 +1800,13 @@ export class BaseHTTPClient {
 
       callbacks.setResponse(finalResponse);
       return finalResponse;
+    } catch (error) {
+      // Only a setup failure gets here - every outcome of the request itself is answered
+      // above - and `send()` rejects with it. Marked settled at once, so a `cancel()` in
+      // the moment before the builder hears of it answers `'already_settled'` rather
+      // than cancelling a request that has already failed.
+      trackedRequest.state = 'failed';
+      throw error;
     } finally {
       this._tracker.remove(requestID);
 

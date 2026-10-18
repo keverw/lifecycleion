@@ -3127,3 +3127,23 @@ test('a cancel right after send() failed during setup answers already_settled', 
   await throwingSend;
   expect(throwing.state).toBe('failed');
 });
+
+test('a cancel right after send() failed composing the caller signal answers already_settled', async () => {
+  const client = new HTTPClient({
+    adapter: new MockAdapter(),
+    baseURL: 'http://api.test',
+  });
+  const fake = {
+    aborted: false,
+    [Symbol.toStringTag]: 'AbortSignal',
+  } as unknown as AbortSignal;
+  const builder = client.get('/x').signal(fake);
+  const sending = builder.send().then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+
+  expect(builder.cancel('late')).toBe('already_settled');
+  expect(await sending).toBeInstanceOf(Error);
+  expect(builder.state).toBe('failed');
+});
