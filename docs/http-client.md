@@ -269,7 +269,7 @@ client
 // → /search?q=hello&filter%5Bactive%5D=true&tags%5B0%5D=a&tags%5B1%5D=b
 ```
 
-An existing query string in the path is kept as written, and `.params()` is added after it. When the same top-level key appears in both, the `.params()` value wins and the path's pairs for that key are left out. `.params()` takes a plain object; a `URLSearchParams`, `Map` or string throws a `TypeError`.
+An existing query string in the path is kept as written, and `.params()` is added after it. When the same top-level key appears in both, the `.params()` value wins and the path's pairs for that key are left out; a `.params()` value of `undefined` is not given, and leaves the path's pairs alone. `.params()` takes a plain object; a `URLSearchParams`, `Map` or string throws a `TypeError`.
 
 ## HTTPResponse
 

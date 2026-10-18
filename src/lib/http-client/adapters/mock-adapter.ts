@@ -773,6 +773,25 @@ function cookiesToSetCookieHeaders(
           assertCookieText(text, attribute);
         }
       }
+      // The two typed attributes, held to their types: a string in either was written
+      // into the line as it was.
+      const sameSite: unknown = value.sameSite;
+      if (
+        sameSite !== undefined &&
+        sameSite !== 'Strict' &&
+        sameSite !== 'Lax' &&
+        sameSite !== 'None'
+      ) {
+        throw new TypeError(
+          `MockAdapter cookie "${name}" sameSite must be 'Strict', 'Lax' or 'None'`,
+        );
+      }
+      const maxAge: unknown = value.maxAge;
+      if (maxAge !== undefined && typeof maxAge !== 'number') {
+        throw new TypeError(
+          `MockAdapter cookie "${name}" maxAge must be a number`,
+        );
+      }
     }
     // null pairs with the string shorthand above: both use Path=/.
     // Scoped deletes need explicit path/domain so the cookie identity matches.

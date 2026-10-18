@@ -123,7 +123,13 @@ export function buildURL(
       // left out, so the `params` value wins.
       // Top-level keys on both sides, as the docs state the rule: `page[number]` in params
       // replaces the path's `page[...]` pairs as `{ page: { number } }` would.
-      const overridden = new Set(Object.keys(params).map(topLevelQueryKey));
+      // A key whose value is `undefined` is not given, so it leaves the path's pairs
+      // alone - `.params({ page: options.page })` with no page keeps `?page=2`.
+      const overridden = new Set(
+        Object.keys(params)
+          .filter((key) => params[key] !== undefined)
+          .map(topLevelQueryKey),
+      );
       const kept = existingQuery
         .split('&')
         .filter(

@@ -3702,3 +3702,25 @@ test('round 74: MockAdapter parity with a real server', async () => {
     expect(didDownloadFinish).toBe(false);
   }
 });
+
+test('round 75: an undefined params value keeps the path pair; mock sameSite/maxAge are checked', async () => {
+  expect(buildURL('https://x', '/p?a=1&b=2', { a: undefined, b: 3 })).toBe(
+    'https://x/p?a=1&b=3',
+  );
+
+  for (const cookie of [
+    { value: 'v', sameSite: 'Lax; Path=/admin' },
+    { value: 'v', maxAge: '5; Path=/y' },
+  ]) {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/c', () => ({
+      status: 200,
+      cookies: { sid: cookie as never },
+    }));
+    const builder = new HTTPClient({ adapter, baseURL: 'http://api.test' }).get(
+      '/c',
+    );
+    await builder.send();
+    expect(builder.error?.code).toBe('adapter_error');
+  }
+});
