@@ -3538,3 +3538,27 @@ test('MockAdapter route mistakes found after the route ran are not retried', asy
     expect(result.isNetworkError).toBe(false);
   }
 });
+
+test('round 71: a bracketed params key replaces its top-level key; single-value headers are strings', async () => {
+  expect(
+    buildURL('https://a.test', '/x?page[size]=10&page[number]=1&q=z', {
+      'page[number]': 2,
+    }),
+  ).toBe('https://a.test/x?q=z&page%5Bnumber%5D=2');
+
+  const adapter = new MockAdapter();
+  adapter.routes.get('/h', () => ({
+    status: 200,
+    headers: { 'content-length': 2, 'content-type': 7 } as unknown as Record<
+      string,
+      string
+    >,
+    body: 'hi',
+  }));
+  const response = await new HTTPClient({ adapter, baseURL: 'http://api.test' })
+    .get('/h')
+    .send();
+
+  expect(response.headers['content-length']).toBe('2');
+  expect(response.status).toBe(200);
+});

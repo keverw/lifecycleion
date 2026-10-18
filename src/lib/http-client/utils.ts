@@ -116,7 +116,9 @@ export function buildURL(
       // repeated key into `tag[0]`, `%E9` into `%25E9`, `constructor=1` dropped - though
       // nothing asked to change it. Only a pair whose top-level key `params` also names is
       // left out, so the `params` value wins.
-      const overridden = new Set(Object.keys(params));
+      // Top-level keys on both sides, as the docs state the rule: `page[number]` in params
+      // replaces the path's `page[...]` pairs as `{ page: { number } }` would.
+      const overridden = new Set(Object.keys(params).map(topLevelQueryKey));
       const kept = existingQuery
         .split('&')
         .filter(
@@ -828,7 +830,7 @@ export function normalizeAdapterResponseHeaders(
         result,
         lower,
         SINGLE_VALUE_RESPONSE_HEADERS.has(lower)
-          ? (all[0] ?? '')
+          ? String(all[0] ?? '')
           : all.join(', '),
       );
     }
