@@ -3601,3 +3601,44 @@ test('round 72: a retry interceptor changing only the scheme of a redirect targe
 
   expect(scopes).toEqual(['a.test', 'a.test']);
 });
+
+test('round 73: a trailing-dot spelling of the redirect host selects no scope; a leading-bracket key is overridden', async () => {
+  expect(buildURL(undefined, '/a?[x]=1&y=2', { x: 2 })).toBe('/a?y=2&x=2');
+
+  const scopes: string[] = [];
+  let attemptsAtB = 0;
+  const client = new HTTPClient({
+    followRedirects: true,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+    adapter: {
+      getType: () => 'node',
+      send: (request: AdapterRequest) => {
+        if (request.requestURL.startsWith('https://a.test')) {
+          return Promise.resolve({
+            status: 307,
+            headers: { location: 'https://evil.example/next' },
+            body: null,
+          });
+        }
+        scopes.push(new URL(request.initialURL ?? '').host);
+        attemptsAtB++;
+        return Promise.resolve({
+          status: attemptsAtB === 1 ? 503 : 200,
+          headers: {},
+          body: null,
+        });
+      },
+    },
+  });
+  client.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      requestURL: request.requestURL.replace('evil.example/', 'evil.example./'),
+    }),
+    { phases: ['retry'] },
+  );
+
+  await client.get('https://a.test/start').send();
+
+  expect(scopes).toEqual(['a.test', 'a.test']);
+});

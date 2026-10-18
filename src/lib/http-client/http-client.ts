@@ -2381,8 +2381,8 @@ export class BaseHTTPClient {
         if (
           !hopContext ||
           (isRetry &&
-            extractHostname(baseRequest.requestURL).toLowerCase() !==
-              extractHostname(attemptRequest.requestURL).toLowerCase())
+            comparableHost(baseRequest.requestURL) !==
+              comparableHost(attemptRequest.requestURL))
         ) {
           credentialScope.url = attemptRequest.requestURL;
         }
@@ -4883,4 +4883,13 @@ function getSignalCancelReason(signal: AbortSignal): string | undefined {
   const reason = readObjectMember(signal, 'reason');
 
   return typeof reason === 'string' ? reason : undefined;
+}
+
+/**
+ * A request URL's host as the credential-scope rule compares it: lowercased, and with a
+ * fully qualified name's trailing dot dropped, so `evil.example.` is the same host the
+ * server chose as `evil.example`, not the caller choosing a new one.
+ */
+function comparableHost(url: string): string {
+  return extractHostname(url).toLowerCase().replace(/\.$/, '');
 }

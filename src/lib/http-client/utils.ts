@@ -70,6 +70,11 @@ function topLevelQueryKey(pair: string): string {
   } catch {
     key = rawKey;
   }
+  // A key that opens with a bracket (`[x]=1`) is read by `qs` as the name inside it.
+  if (key.startsWith('[')) {
+    const close = key.indexOf(']');
+    return close > 1 ? key.slice(1, close) : key;
+  }
   const bracket = key.indexOf('[');
   return bracket > 0 ? key.slice(0, bracket) : key;
 }
