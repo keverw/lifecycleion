@@ -196,7 +196,13 @@ export class PublicSuffixResolver {
       return false;
     }
 
-    const result = parse(normalized, { allowPrivateDomains: true });
+    // Without tldts's hostname check, as `apexFor` reads it: with the check, a label
+    // starting or ending with a hyphen (`x-.ck` under `*.ck`) was read as no suffix at all,
+    // so a `Domain=x-.ck` cookie was stored for every tenant under it.
+    const result = parse(normalized, {
+      allowPrivateDomains: true,
+      validateHostname: false,
+    });
 
     if (result.isIp) {
       return false;

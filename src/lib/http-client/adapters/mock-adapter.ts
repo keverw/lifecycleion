@@ -1138,10 +1138,13 @@ function asRouteMistake<R>(step: () => R): R {
   }
 }
 
-/** Throw when `text` would change a `Set-Cookie` line's framing, or fails `pattern`. */
+/**
+ * Throw when `text` would change a `Set-Cookie` line's framing, fails `pattern`, or holds a
+ * character above U+00FF, which a real server's `setHeader` refuses and the jar drops.
+ */
 function assertCookieText(text: string, part: string, pattern?: RegExp): void {
   // eslint-disable-next-line no-control-regex -- control characters are what is refused
-  const isUnsafe = /[;\u0000-\u001f\u007f]/.test(text);
+  const isUnsafe = /[;\u0000-\u001f\u007f\u0100-\uffff]/.test(text);
   if (isUnsafe || (pattern !== undefined && !pattern.test(text))) {
     throw new TypeError(
       `MockAdapter cookie ${part} ${JSON.stringify(text)} cannot be written into a Set-Cookie line`,

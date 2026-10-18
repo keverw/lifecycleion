@@ -3,7 +3,12 @@ import vm from 'node:vm';
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { HTTPClient } from './http-client';
-import { buildURL, matchesFilter, parseContentType } from './utils';
+import {
+  buildURL,
+  extractFetchHeaders,
+  matchesFilter,
+  parseContentType,
+} from './utils';
 import {
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_ABORT_HEADERS_KEY,
@@ -3754,4 +3759,27 @@ test('round 78: an empty params array or object clears the path pairs for its ke
   expect(
     buildURL('http://x', '/s?filter[a]=1', { filter: { a: undefined } }),
   ).toBe('http://x/s?filter[a]=1');
+});
+
+test('round 80: undefined-only params arrays, repeated fetch Location, mock non-Latin-1 cookie, edge-hyphen public suffix', async () => {
+  expect(buildURL('https://x.test', '/p?ids=7&x=1', { ids: [undefined] })).toBe(
+    'https://x.test/p?ids=7&x=1',
+  );
+
+  const headers = new Headers();
+  headers.append('location', '/a');
+  headers.append('location', '/b');
+  expect(extractFetchHeaders(headers).location).toBe('/a');
+
+  const adapter = new MockAdapter();
+  adapter.routes.get('/c', () => ({ status: 200, cookies: { sid: 'v€' } }));
+  const builder = new HTTPClient({ adapter, baseURL: 'http://api.test' }).get(
+    '/c',
+  );
+  await builder.send();
+  expect(builder.error?.code).toBe('adapter_error');
+
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader('s=1; Domain=x-.ck', 'https://x-.ck/');
+  expect(jar.getCookieHeaderString('https://victim.x-.ck/')).toBe('');
 });

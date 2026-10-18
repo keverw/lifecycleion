@@ -49,8 +49,10 @@ function isGivenParam(value: unknown): boolean {
   if (value === undefined) {
     return false;
   }
-  if (isPlainRecord(value)) {
-    const entries = Object.values(value);
+  // An array or object is given when empty (it clears the key) or when anything in it
+  // is; one made only of `undefined` - `[maybeId]` with no id - writes nothing, and is not.
+  if (Array.isArray(value) || isPlainRecord(value)) {
+    const entries = Object.values(value as object);
     return entries.length === 0 || entries.some(isGivenParam);
   }
   return true;
@@ -743,7 +745,14 @@ export function extractFetchHeaders(
     const lower = key.toLowerCase();
 
     if (lower !== 'set-cookie') {
-      defineEntry(result, lower, value);
+      // A repeated `Location` arrives joined as `a, b`, which no URL can be - a URL
+      // carries no raw space - so its first value is kept, as Node's `res.headers` keeps
+      // it, rather than followed as the one mangled URL `a,%20b`.
+      defineEntry(
+        result,
+        lower,
+        lower === 'location' ? value.split(', ', 1)[0] : value,
+      );
     }
   }
 
