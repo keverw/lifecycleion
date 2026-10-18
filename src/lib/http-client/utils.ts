@@ -1059,16 +1059,20 @@ function matchesContentTypePattern(
  * - `phases`: **OR** allowlist on `phaseType` ({@link RequestPhaseName}). Skipped when
  *   `filter.phases` is omitted or empty.
  * - `statusCodes`: skipped if `context.status` is absent.
- * - `methods`: skipped if `context.method` is absent.
+ * - `methods`: skipped if `context.method` is absent for an observer; for an interceptor
+ *   (`kind === 'request'`) a missing method matches nothing.
  * - `hosts`: supports exact hostnames and wildcard patterns. `*.example.com` matches
  *   exactly one subdomain label; `**.example.com` matches any depth. Neither matches the
  *   apex — list it explicitly. PSL tail guard prevents `*.com`-style patterns. `*` is a
- *   global wildcard that matches any valid hostname. Skipped if `context.requestURL` is absent.
+ *   global wildcard that matches any hostname a URL can carry. Skipped if
+ *   `context.requestURL` is absent for an observer; for an interceptor a missing URL
+ *   matches nothing.
  * - `schemes`: `'http'` or `'https'`. `requestURL` is absolute whenever the
  *   request could be resolved before dispatch. For `MockAdapter`, path-only
  *   requests without a client `baseURL` are materialized as `http://localhost/...`;
  *   browser adapters fall back to `window.location`, and the Node adapter requires
- *   absolute URLs. Skipped only when `requestURL` is absent.
+ *   absolute URLs. Skipped only when `requestURL` is absent for an observer; for an
+ *   interceptor a missing URL matches nothing.
  * - `bodyContainsKeys`: supports dot paths (e.g. `data.results`). Each segment in
  *   the path must resolve to a plain object for traversal to continue — the final
  *   value can be anything (array, string, null, etc). Array indexing is not supported.
