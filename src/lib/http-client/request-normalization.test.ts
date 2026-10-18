@@ -3492,3 +3492,24 @@ test('round 67: request builder validation, json(), the query kept as written, s
   );
   expect(second?.message).toMatch(/only be called once/);
 });
+
+test('round 69: baseURL must be a string without a query or fragment', () => {
+  for (const baseURL of [
+    new URL('https://api.example.com'),
+    123,
+    'https://api.example.com/v1?key=abc',
+    'https://api.example.com/#x',
+  ]) {
+    expect(
+      () =>
+        new HTTPClient({
+          adapter: new MockAdapter(),
+          baseURL: baseURL as string,
+        }),
+    ).toThrow();
+  }
+  const client = new HTTPClient({ adapter: new MockAdapter() });
+  expect(() =>
+    client.createSubClient({ baseURL: 'https://api.example.com?x=1' }),
+  ).toThrow();
+});

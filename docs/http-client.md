@@ -125,7 +125,7 @@ console.log(created.status); // 201
 ```typescript
 interface HTTPClientConfig {
   adapter?: HTTPAdapter; // Default: FetchAdapter
-  baseURL?: string; // Origin / prefix for relative paths. If set, MockAdapter, NodeAdapter, and server-side FetchAdapter require an absolute http(s):// URL.
+  baseURL?: string; // Origin / prefix for relative paths: a string with no query or fragment. If set, MockAdapter, NodeAdapter, and server-side FetchAdapter require an absolute http(s):// URL.
   defaultHeaders?: RequestHeadersInput; // Values may be null/undefined: no header
   timeout?: number | null; // Default: 30,000 ms; <= 0 disables the per-attempt timeout.
   // NaN or a non-number throws; Infinity disables it like 0 does.
