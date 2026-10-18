@@ -179,6 +179,23 @@ export const REQUEST_BODY_SETTLED_KEY = Symbol.for(
 );
 
 /**
+ * The header-carrying tags an adapter puts on an error it throws: the request headers it
+ * sent, and a cut-off response's status and headers. Symbols, for the reason
+ * {@link REQUEST_BODY_SETTLED_KEY} is one: `serializeError` walks every own property
+ * *name*, hidden or not, and these carry the request's credentials and the response's
+ * `Set-Cookie`. Symbol keys are skipped by that walk and by `JSON.stringify`.
+ */
+export const EFFECTIVE_REQUEST_HEADERS_KEY = Symbol.for(
+  'lifecycleion.effectiveRequestHeaders.v1',
+);
+export const STREAM_ABORT_STATUS_KEY = Symbol.for(
+  'lifecycleion.streamAbortStatus.v1',
+);
+export const STREAM_ABORT_HEADERS_KEY = Symbol.for(
+  'lifecycleion.streamAbortHeaders.v1',
+);
+
+/**
  * Set on the AbortError thrown by XHRAdapter's defensive `timeout` event
  * listener. Lets HTTPClient classify the error as a timeout (retryable) rather
  * than an unexpected abort (non-retryable cancel).

@@ -28,6 +28,9 @@ import {
   STREAM_FACTORY_CANCEL_KEY,
   STREAM_FACTORY_ERROR_FLAG,
   XHR_BROWSER_TIMEOUT_FLAG,
+  EFFECTIVE_REQUEST_HEADERS_KEY,
+  STREAM_ABORT_HEADERS_KEY,
+  STREAM_ABORT_STATUS_KEY,
 } from './consts';
 import { MockAdapter } from './adapters/mock-adapter';
 import type {
@@ -2910,8 +2913,8 @@ describe('HTTPClient — adapter marker flags', () => {
 
   /** Response metadata of the kind a genuine tagged abort carries. */
   const staleMetadata = {
-    streamAbortStatus: 503,
-    streamAbortHeaders: { 'set-cookie': ['stale=1; Path=/'] },
+    [STREAM_ABORT_STATUS_KEY]: 503,
+    [STREAM_ABORT_HEADERS_KEY]: { 'set-cookie': ['stale=1; Path=/'] },
   };
 
   test('a marker set to false is not a stream abort, and its cookies are not stored', async () => {
@@ -3007,9 +3010,9 @@ describe('HTTPClient — adapter marker flags', () => {
 
   test('throwing stream metadata getters cannot replace a caller cancellation', async () => {
     const hostileFields = [
-      'streamAbortStatus',
-      'streamAbortHeaders',
-      'effectiveRequestHeaders',
+      STREAM_ABORT_STATUS_KEY,
+      STREAM_ABORT_HEADERS_KEY,
+      EFFECTIVE_REQUEST_HEADERS_KEY,
     ] as const;
 
     for (const hostileField of hostileFields) {
@@ -3017,13 +3020,13 @@ describe('HTTPClient — adapter marker flags', () => {
       const abortError = Object.assign(new Error('Request aborted'), {
         name: 'AbortError',
         [RESPONSE_STREAM_ABORT_FLAG]: true,
-        streamAbortStatus: 200,
-        streamAbortHeaders: {},
+        [STREAM_ABORT_STATUS_KEY]: 200,
+        [STREAM_ABORT_HEADERS_KEY]: {},
       });
 
       Object.defineProperty(abortError, hostileField, {
         get(): never {
-          throw new Error(`hostile ${hostileField} getter`);
+          throw new Error(`hostile ${String(hostileField)} getter`);
         },
         configurable: true,
       });
@@ -3061,8 +3064,8 @@ describe('HTTPClient — adapter marker flags', () => {
     const tagged = Object.assign(new Error('body aborted'), {
       name: 'AbortError',
       [RESPONSE_STREAM_ABORT_FLAG]: true,
-      streamAbortStatus: 503,
-      streamAbortHeaders: hostileHeaders,
+      [STREAM_ABORT_STATUS_KEY]: 503,
+      [STREAM_ABORT_HEADERS_KEY]: hostileHeaders,
     });
     const client = new HTTPClient({
       adapter: makeThrowingAdapter(tagged),
@@ -5436,8 +5439,8 @@ describe('HTTPClient — redirect', () => {
 
           throw Object.assign(error, {
             [RESPONSE_STREAM_ABORT_FLAG]: true,
-            streamAbortStatus: 302,
-            streamAbortHeaders: { location: '/next' },
+            [STREAM_ABORT_STATUS_KEY]: 302,
+            [STREAM_ABORT_HEADERS_KEY]: { location: '/next' },
           });
         }
 
@@ -5489,8 +5492,8 @@ describe('HTTPClient — redirect', () => {
 
         throw Object.assign(error, {
           [RESPONSE_STREAM_ABORT_FLAG]: true,
-          streamAbortStatus: 302,
-          streamAbortHeaders: { location: '/next' },
+          [STREAM_ABORT_STATUS_KEY]: 302,
+          [STREAM_ABORT_HEADERS_KEY]: { location: '/next' },
         });
       },
     };
@@ -9799,8 +9802,11 @@ test('a cookie jar that throws on a stream aborted after headers ends as the jar
       return Promise.reject(
         Object.assign(new Error('terminated'), {
           [RESPONSE_STREAM_ABORT_FLAG]: true,
-          streamAbortStatus: 200,
-          streamAbortHeaders: { 'set-cookie': ['a=b'], 'x-answer': 'yes' },
+          [STREAM_ABORT_STATUS_KEY]: 200,
+          [STREAM_ABORT_HEADERS_KEY]: {
+            'set-cookie': ['a=b'],
+            'x-answer': 'yes',
+          },
         }),
       );
     },
@@ -9856,8 +9862,8 @@ describe('a cancel or timeout wins over a cookie jar that throws', () => {
               Object.assign(new Error('aborted'), {
                 name: 'AbortError',
                 [RESPONSE_STREAM_ABORT_FLAG]: true,
-                streamAbortStatus: 200,
-                streamAbortHeaders: { 'set-cookie': ['a=b'] },
+                [STREAM_ABORT_STATUS_KEY]: 200,
+                [STREAM_ABORT_HEADERS_KEY]: { 'set-cookie': ['a=b'] },
               }),
             );
           });

@@ -1,4 +1,7 @@
-import { defineHiddenTags } from '../internal/adapter-error';
+import {
+  defineHiddenTags,
+  markNonRetryableAdapterError,
+} from '../internal/adapter-error';
 import {
   extractFetchHeaders,
   resolveDetectedRedirectURL,
@@ -6,7 +9,12 @@ import {
 } from '../utils';
 import { guardProgressCallback } from '../internal/progress';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
-import { REDIRECT_STATUS_CODES, RESPONSE_STREAM_ABORT_FLAG } from '../consts';
+import {
+  REDIRECT_STATUS_CODES,
+  RESPONSE_STREAM_ABORT_FLAG,
+  STREAM_ABORT_HEADERS_KEY,
+  STREAM_ABORT_STATUS_KEY,
+} from '../consts';
 import type {
   HTTPAdapter,
   AdapterRequest,
@@ -48,6 +56,26 @@ export class FetchAdapter implements HTTPAdapter {
 
     // Fire 0% upload progress
     guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
+
+    // Checked before it is sent, so a request fetch refuses to build - Node's fetch refuses
+    // a URL carrying credentials, on every attempt - fails once as the non-retryable
+    // `adapter_error` it is, rather than as a network error retried to no end. Built
+    // without the body or signal, which `fetch` below takes, so nothing is consumed.
+    try {
+      // Absolute URLs only: a relative one resolves against a browser's document, which
+      // `Request` here has no notion of outside one - `fetch` decides that case itself.
+      if (URL.canParse(dispatchedURL)) {
+        new Request(dispatchedURL, {
+          method,
+          headers: materializeFetchHeaders(headers),
+          redirect: 'manual',
+        });
+      }
+    } catch (error) {
+      const refusal = normalizeError(error);
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
+    }
 
     let response: Response;
 
@@ -300,8 +328,8 @@ function markResponseStreamAbort(
   // serialized error must not.
   defineHiddenTags(tagged, {
     [RESPONSE_STREAM_ABORT_FLAG]: true,
-    streamAbortStatus: status,
-    streamAbortHeaders: headers,
+    [STREAM_ABORT_STATUS_KEY]: status,
+    [STREAM_ABORT_HEADERS_KEY]: headers,
     cause: error,
   });
 

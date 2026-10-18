@@ -4,7 +4,11 @@ import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { HTTPClient } from './http-client';
 import { matchesFilter, parseContentType } from './utils';
-import { RESPONSE_STREAM_ABORT_FLAG } from './consts';
+import {
+  RESPONSE_STREAM_ABORT_FLAG,
+  STREAM_ABORT_HEADERS_KEY,
+  STREAM_ABORT_STATUS_KEY,
+} from './consts';
 import { CookieJar } from './cookie-jar';
 import { MockAdapter } from './adapters/mock-adapter';
 import { NodeAdapter } from './adapters/node-adapter';
@@ -2168,8 +2172,11 @@ test('a cut-off response an adapter throws is read under the rules for answers',
     send: () => {
       const error = Object.assign(new Error('cut'), {
         [RESPONSE_STREAM_ABORT_FLAG]: true,
-        streamAbortStatus: status,
-        streamAbortHeaders: { 'Content-Type': 'text/plain', Location: '/x' },
+        [STREAM_ABORT_STATUS_KEY]: status,
+        [STREAM_ABORT_HEADERS_KEY]: {
+          'Content-Type': 'text/plain',
+          Location: '/x',
+        },
       });
       return Promise.reject(error);
     },

@@ -19,11 +19,14 @@ import type {
   StreamResponseCancel,
 } from '../types';
 import {
+  EFFECTIVE_REQUEST_HEADERS_KEY,
   NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   REDIRECT_STATUS_CODES,
   REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
+  STREAM_ABORT_HEADERS_KEY,
+  STREAM_ABORT_STATUS_KEY,
   STREAM_FACTORY_CANCEL_KEY,
   STREAM_FACTORY_ERROR_FLAG,
 } from '../consts';
@@ -3459,7 +3462,7 @@ function markStreamFactoryError(
   const marks = {
     [NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG]: true,
     [STREAM_FACTORY_ERROR_FLAG]: true,
-    effectiveRequestHeaders: snapshotEffectiveRequestHeaders(
+    [EFFECTIVE_REQUEST_HEADERS_KEY]: snapshotEffectiveRequestHeaders(
       req,
       fallbackHeaders,
     ),
@@ -3522,23 +3525,16 @@ function makeResponseStreamAbortError(
   const error = new Error('Request aborted during response streaming');
   error.name = 'AbortError';
 
-  const tagged = error as Error &
-    Partial<Record<typeof RESPONSE_STREAM_ABORT_FLAG, boolean>> & {
-      effectiveRequestHeaders?: Record<string, string | string[]>;
-      streamAbortStatus?: number;
-      streamAbortHeaders?: Record<string, string | string[]>;
-    };
-
   // Hidden, as `markStreamFactoryError`'s tags are: the request's headers carry its
   // credentials, and a serialized error must not.
-  defineHiddenTags(tagged, {
+  defineHiddenTags(error, {
     [RESPONSE_STREAM_ABORT_FLAG]: true,
-    effectiveRequestHeaders: snapshotEffectiveRequestHeaders(
+    [EFFECTIVE_REQUEST_HEADERS_KEY]: snapshotEffectiveRequestHeaders(
       req,
       fallbackHeaders,
     ),
-    streamAbortStatus: status,
-    streamAbortHeaders: headers,
+    [STREAM_ABORT_STATUS_KEY]: status,
+    [STREAM_ABORT_HEADERS_KEY]: headers,
   });
 
   return error;

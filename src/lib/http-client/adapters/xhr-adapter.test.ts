@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import vm from 'node:vm';
 import { XHRAdapter } from './xhr-adapter';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 
@@ -1189,5 +1190,78 @@ describe('XHRAdapter', () => {
     const response = await promise;
 
     expect(response.headers).toEqual({});
+  });
+});
+
+describe('XHRAdapter - round 58', () => {
+  test('a cancel from the 0% upload progress callback stops the request before it is sent', async () => {
+    const controller = new AbortController();
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/orders',
+      method: 'POST',
+      headers: {},
+      body: 'x',
+      signal: controller.signal,
+      onUploadProgress: (event) => {
+        if (event.progress === 0) {
+          controller.abort('stop');
+        }
+      },
+    });
+
+    const rejection = await promise.then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+
+    expect(rejection?.name).toBe('AbortError');
+    expect(lastXHR.sentBody).toBeNull();
+  });
+
+  test('a response buffer from another realm is read as the body', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/x',
+      method: 'GET',
+      headers: {},
+    });
+    lastXHR.status = 200;
+    lastXHR.response = vm.runInNewContext(
+      'new Uint8Array([104, 105]).buffer',
+    ) as ArrayBuffer;
+    lastXHR.simulateLoad();
+
+    const response = await promise;
+
+    expect(response.body).toEqual(new Uint8Array([104, 105]));
+  });
+
+  test('an abort from a final progress callback does not wipe the status and headers', async () => {
+    const controller = new AbortController();
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/x',
+      method: 'GET',
+      headers: {},
+      signal: controller.signal,
+      onDownloadProgress: (event) => {
+        if (event.progress === 1) {
+          controller.abort();
+        }
+      },
+    });
+    const xhr = lastXHR;
+    xhr.status = 200;
+    xhr.getAllResponseHeadersResult = 'content-type: text/plain\r\n';
+    xhr.response = new Uint8Array([104, 105]).buffer;
+    // As a real XHR does when aborted once done: reset to UNSENT.
+    xhr.abort = () => {
+      xhr.status = 0;
+      xhr.getAllResponseHeadersResult = '';
+    };
+    xhr.simulateLoad();
+
+    const response = await promise;
+
+    expect(response.status).toBe(200);
+    expect(response.headers['content-type']).toBe('text/plain');
   });
 });

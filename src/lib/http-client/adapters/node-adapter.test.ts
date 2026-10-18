@@ -21,6 +21,9 @@ import {
   REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_FACTORY_ERROR_FLAG,
+  EFFECTIVE_REQUEST_HEADERS_KEY,
+  STREAM_ABORT_HEADERS_KEY,
+  STREAM_ABORT_STATUS_KEY,
 } from '../consts';
 import type {
   AdapterRequest,
@@ -411,7 +414,7 @@ describe('NodeAdapter observer request headers', () => {
         abortError.name = 'AbortError';
         Object.assign(abortError, {
           [RESPONSE_STREAM_ABORT_FLAG]: true,
-          effectiveRequestHeaders: {
+          [EFFECTIVE_REQUEST_HEADERS_KEY]: {
             ...request.headers,
             'content-type': 'multipart/form-data; boundary=simulated',
             'content-length': '999',
@@ -490,8 +493,8 @@ describe('post-header stream aborts report why the retry stopped', () => {
           [RESPONSE_STREAM_ABORT_FLAG]: true,
           ...(metadata
             ? {
-                streamAbortStatus: metadata.status,
-                streamAbortHeaders: metadata.headers,
+                [STREAM_ABORT_STATUS_KEY]: metadata.status,
+                [STREAM_ABORT_HEADERS_KEY]: metadata.headers,
               }
             : {}),
         });
@@ -575,8 +578,10 @@ describe('post-header stream aborts report why the retry stopped', () => {
         abortError.name = 'AbortError';
         Object.assign(abortError, {
           [RESPONSE_STREAM_ABORT_FLAG]: true,
-          streamAbortStatus: 200,
-          streamAbortHeaders: { 'set-cookie': 'session=abc123; Path=/' },
+          [STREAM_ABORT_STATUS_KEY]: 200,
+          [STREAM_ABORT_HEADERS_KEY]: {
+            'set-cookie': 'session=abc123; Path=/',
+          },
         });
 
         return Promise.reject(abortError);
@@ -609,8 +614,8 @@ describe('post-header stream aborts report why the retry stopped', () => {
         // writes to the cookie jar.
         const untagged = new Error('ordinary adapter failure');
         Object.assign(untagged, {
-          streamAbortStatus: 200,
-          streamAbortHeaders: { 'set-cookie': 'injected=evil; Path=/' },
+          [STREAM_ABORT_STATUS_KEY]: 200,
+          [STREAM_ABORT_HEADERS_KEY]: { 'set-cookie': 'injected=evil; Path=/' },
         });
 
         return Promise.reject(untagged);
@@ -1017,7 +1022,7 @@ describe('NodeAdapter streamResponse factory failures', () => {
           tagged[NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG] = true;
           Object.assign(normalized, { [STREAM_FACTORY_ERROR_FLAG]: true });
           Object.assign(normalized, {
-            effectiveRequestHeaders: {
+            [EFFECTIVE_REQUEST_HEADERS_KEY]: {
               ...request.headers,
               'content-type': 'multipart/form-data; boundary=simulated',
               'content-length': '999',

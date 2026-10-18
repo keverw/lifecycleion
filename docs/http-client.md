@@ -1384,6 +1384,8 @@ It is Node diverging from the library it links, not an OpenSSL limitation: `open
 
 Uses `XMLHttpRequest` for real per-chunk progress tracking in browsers where `fetch` progress is unavailable.
 
+The adapter listens for upload progress on every request with a body, which the client uses to track the upload. In a browser that makes a cross-origin upload a non-simple request, so the server must answer a CORS preflight (`OPTIONS`) even for a `text/plain`, urlencoded or `FormData` body; `FetchAdapter` sends such a body without one.
+
 ```typescript
 import { XHRAdapter } from 'lifecycleion/http-client-xhr';
 import { HTTPClient } from 'lifecycleion/http-client';

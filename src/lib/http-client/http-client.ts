@@ -56,10 +56,13 @@ import {
   DEFAULT_USER_AGENT,
   BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
+  EFFECTIVE_REQUEST_HEADERS_KEY,
   NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   REQUEST_BODY_SETTLED_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_FACTORY_CANCEL_KEY,
+  STREAM_ABORT_HEADERS_KEY,
+  STREAM_ABORT_STATUS_KEY,
   STREAM_FACTORY_ERROR_FLAG,
   XHR_BROWSER_TIMEOUT_FLAG,
   RETRYABLE_STATUS_CODES,
@@ -4502,7 +4505,7 @@ function getEffectiveRequestHeadersFromError(
   error: unknown,
 ): Record<string, string | string[]> | undefined {
   return snapshotHeaderRecord(
-    readObjectMember(error, 'effectiveRequestHeaders'),
+    readObjectMember(error, EFFECTIVE_REQUEST_HEADERS_KEY),
   );
 }
 
@@ -4585,7 +4588,7 @@ function isXHRBrowserTimeout(err: unknown): boolean {
 function getResponseStreamAbortInfo(
   err: unknown,
 ): { status: number; headers: Record<string, string | string[]> } | undefined {
-  const status = readObjectMember(err, 'streamAbortStatus');
+  const status = readObjectMember(err, STREAM_ABORT_STATUS_KEY);
 
   // Held to the rule a resolved answer's status is: an integer from 0 to 999.
   if (
@@ -4598,7 +4601,7 @@ function getResponseStreamAbortInfo(
   }
 
   const headers = snapshotHeaderRecord(
-    readObjectMember(err, 'streamAbortHeaders'),
+    readObjectMember(err, STREAM_ABORT_HEADERS_KEY),
   );
 
   if (headers === undefined) {

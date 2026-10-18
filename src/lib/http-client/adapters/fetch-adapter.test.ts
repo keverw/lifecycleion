@@ -7,9 +7,13 @@ import {
   test,
 } from 'bun:test';
 import { FetchAdapter } from './fetch-adapter';
+import { serializeError } from '../../serialize-error';
 import { HTTPClient } from '../http-client';
 import { startTestServer, type TestServer } from '../test-helpers/test-server';
-import { RESPONSE_STREAM_ABORT_FLAG } from '../consts';
+import {
+  RESPONSE_STREAM_ABORT_FLAG,
+  STREAM_ABORT_HEADERS_KEY,
+} from '../consts';
 
 let server: TestServer;
 const decoder = new TextDecoder();
@@ -1263,7 +1267,7 @@ describe('FetchAdapter aborts while reading the body', () => {
     // A signal hands the same reason to every consumer, so tagging it in place
     // would let concurrent requests overwrite each other's response metadata.
     expect(RESPONSE_STREAM_ABORT_FLAG in sharedReason).toBe(false);
-    expect('streamAbortHeaders' in sharedReason).toBe(false);
+    expect(STREAM_ABORT_HEADERS_KEY in sharedReason).toBe(false);
   }, 15_000);
 
   test('survives a frozen abort reason', async () => {
@@ -1314,4 +1318,54 @@ describe('FetchAdapter aborts while reading the body', () => {
     expect(response.isCancelled).toBe(true);
     expect(response.isStreamError).toBe(false);
   }, 15_000);
+});
+
+describe('FetchAdapter - round 58', () => {
+  test("a cut-off response's Set-Cookie is not written by serializeError", async () => {
+    (globalThis as any).fetch = (_url: string, init?: RequestInit) =>
+      Promise.resolve(
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              init?.signal?.addEventListener('abort', () => {
+                controller.error(new DOMException('aborted', 'AbortError'));
+              });
+            },
+          }),
+          { status: 200, headers: { 'set-cookie': 'session=SECRET123' } },
+        ),
+      );
+    const builder = new HTTPClient({
+      adapter: new FetchAdapter(),
+      timeout: 30,
+    }).get('http://api.test/x');
+
+    await builder.send();
+
+    expect(builder.error?.code).toBe('stream_response_error');
+    expect(JSON.stringify(serializeError(builder.error?.cause))).not.toContain(
+      'SECRET123',
+    );
+  });
+
+  test('a request fetch refuses to build fails once as adapter_error, not a retried network error', async () => {
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 200 }));
+    };
+    const builder = new HTTPClient({
+      adapter: new FetchAdapter(),
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 0 },
+    })
+      .get('http://api.test/x')
+      .headers({ 'x-bad': 'a\nb' });
+
+    const response = await builder.send();
+
+    expect(calls).toBe(0);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(response.isNetworkError).toBe(false);
+    expect(builder.attemptCount).toBe(1);
+  });
 });

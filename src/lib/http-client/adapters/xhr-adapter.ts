@@ -1,6 +1,7 @@
 import { defineEntry } from '../../internal/define-entry';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 import { guardProgressCallback } from '../internal/progress';
+import { isArrayBufferLike } from '../../internal/binary-view';
 import type {
   HTTPAdapter,
   AdapterRequest,
@@ -260,6 +261,14 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
+        // Read before the progress callbacks below: one that aborts the signal makes
+        // `xhr.abort()` reset this finished XHR, wiping its status and headers.
+        const status = xhr.status;
+        const responseHeaders = parseXHRResponseHeaders(
+          xhr.getAllResponseHeaders(),
+        );
+        const body = readResponseBody(request.method, xhr);
+
         // Fallback: upload.load didn't fire (no request body, or the browser
         // skipped the event). Ensure callers always see a 100% upload event,
         // unless upload.progress already reported it.
@@ -270,8 +279,6 @@ export class XHRAdapter implements HTTPAdapter {
             progress: 1,
           });
         }
-
-        const body = readResponseBody(request.method, xhr);
 
         // Final 100% download progress — skip if a progress event already
         // fired exactly 100% (Content-Length known and final chunk completed it).
@@ -284,8 +291,8 @@ export class XHRAdapter implements HTTPAdapter {
         }
 
         resolve({
-          status: xhr.status,
-          headers: parseXHRResponseHeaders(xhr.getAllResponseHeaders()),
+          status,
+          headers: responseHeaders,
           body,
         });
       });
@@ -330,6 +337,14 @@ export class XHRAdapter implements HTTPAdapter {
         reject(new DOMException('Request aborted', 'AbortError'));
       });
 
+      // Checked again here: a cancel from the 0% upload progress callback above aborts the
+      // signal while the XHR is opened but not sent, where `xhr.abort()` does nothing and
+      // fires no event - so the request would go out regardless, its one-shot listener spent.
+      if (request.signal?.aborted) {
+        reject(new DOMException('Request aborted', 'AbortError'));
+        return;
+      }
+
       xhr.send(prepareBody(request.body));
     });
   }
@@ -351,8 +366,15 @@ function readResponseBody(
     return null;
   }
 
-  if (xhr.response instanceof ArrayBuffer) {
-    return new Uint8Array(xhr.response);
+  // Recognized without `instanceof`, which is realm-bound: a test shim's XHR may hand
+  // back a buffer made in another realm (see `isArrayBufferLike`).
+  const response: unknown = xhr.response;
+  if (
+    typeof response === 'object' &&
+    response !== null &&
+    isArrayBufferLike(response)
+  ) {
+    return new Uint8Array(response as ArrayBuffer);
   }
 
   return null;

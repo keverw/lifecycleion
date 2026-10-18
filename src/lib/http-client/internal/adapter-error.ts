@@ -21,11 +21,12 @@ export function markNonRetryableAdapterError(error: unknown): void {
  */
 export function defineHiddenTags(
   target: object,
-  tags: Record<string, unknown>,
+  tags: Record<PropertyKey, unknown>,
 ): void {
-  for (const [key, value] of Object.entries(tags)) {
+  // `Reflect.ownKeys`, not `Object.entries`: the header-carrying tags are symbols.
+  for (const key of Reflect.ownKeys(tags)) {
     Object.defineProperty(target, key, {
-      value,
+      value: tags[key],
       writable: true,
       configurable: true,
       enumerable: false,

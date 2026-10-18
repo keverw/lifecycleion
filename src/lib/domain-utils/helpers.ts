@@ -1,4 +1,4 @@
-import { toASCII } from 'tr46';
+import { toASCII, toUnicode } from 'tr46';
 
 // Defense-in-depth: cap label processing to avoid pathological patterns
 export const MAX_LABELS = 32;
@@ -395,10 +395,15 @@ export function normalizeDomain(domain: string): string {
     if (!ascii) {
       throw new Error('TR46 processing failed');
     }
+    // On the Unicode form of each label: an IDN label starting or ending with a hyphen
+    // (`-ñ`) is `xn----rga` once encoded, which hides the hyphen from a check on `ascii`.
+    const unicodeLabels = toUnicode(ascii, {
+      useSTD3ASCIIRules: true,
+    }).domain.split('.');
     if (
-      ascii
-        .split('.')
-        .some((label) => label.startsWith('-') || label.endsWith('-'))
+      unicodeLabels.some(
+        (label) => label.startsWith('-') || label.endsWith('-'),
+      )
     ) {
       return '';
     }

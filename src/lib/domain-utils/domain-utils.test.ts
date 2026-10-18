@@ -3722,3 +3722,11 @@ describe('hyphens in labels', () => {
     expect(normalizeDomain('bad-.com')).toBe('');
   });
 });
+
+describe('hyphens in IDN labels', () => {
+  it('refuses a Unicode label that starts or ends with a hyphen', () => {
+    expect(normalizeDomain('-ñ.com')).toBe('');
+    expect(normalizeDomain('ñ-.com')).toBe('');
+    expect(normalizeDomain('a-ñ.com')).not.toBe('');
+  });
+});
