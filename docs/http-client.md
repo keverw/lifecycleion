@@ -269,7 +269,7 @@ client
 // → /search?q=hello&filter%5Bactive%5D=true&tags%5B0%5D=a&tags%5B1%5D=b
 ```
 
-Existing query strings in the path are preserved and merged. When the same key appears in both the path string and `.params()`, the `.params()` value wins.
+An existing query string in the path is kept as written, and `.params()` is added after it. When the same top-level key appears in both, the `.params()` value wins and the path's pairs for that key are left out. `.params()` takes a plain object; a `URLSearchParams`, `Map` or string throws a `TypeError`.
 
 ## HTTPResponse
 
@@ -1898,7 +1898,7 @@ builder.requestID; // ULID assigned at construction time - available before and 
 builder.state; // Current RequestState
 builder.response; // HTTPResponse<T> | null
 builder.error; // HTTPClientError | null
-builder.attemptCount; // Attempts begun, including one a retry interceptor or request setup ended before dispatch (null before send and when the request ends in its initial interceptor phase - an interceptor's cancel or error, or a cancel made during setup or while the interceptors run; 0 for a signal already aborted at send or a setup failure before any attempt)
+builder.attemptCount; // Attempts begun, including one a retry interceptor or request setup ended before dispatch (null before send and when the request ends in its initial interceptor phase - an interceptor's cancel or error, or a cancel made during setup or while the interceptors run; 0 for a signal already aborted at send or a `request_setup_error` before any attempt, such as an unresolvable URL; a value that throws during setup, so that `send()` rejects, leaves it null)
 builder.nextRetryDelayMS; // Scheduled delay for next retry (ms), or null
 builder.nextRetryAt; // Epoch ms for next retry, or null
 builder.startedAt; // Epoch ms when the first attempt began (null before send, and null when the request ended before its first attempt began - e.g. pre-send cancel(), pre-aborted AbortSignal, request setup error raised before the first attempt such as an unresolvable URL, or request interceptor cancel/error). A setup failure inside an attempt (body serialization, or a cookie jar that throws while building the Cookie header) happens after the attempt began, so startedAt is set and attemptCount counts it

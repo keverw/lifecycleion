@@ -4,7 +4,10 @@ import { generateID } from '../id-helpers';
 import { validateRequestTimeoutMS } from './consts';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import { defineEntry } from '../internal/define-entry';
-import { assertOptionalHeaderRecord } from './internal/plain-record';
+import {
+  assertOptionalHeaderRecord,
+  isPlainRecord,
+} from './internal/plain-record';
 import type {
   HTTPMethod,
   HTTPResponse,
@@ -125,12 +128,39 @@ export class HTTPRequestBuilder<T = unknown> {
 
   public params(params: Record<string, unknown>): this {
     this._assertNotSent('params');
+    // A plain object, as for headers: a `URLSearchParams` or `Map` keeps its entries off
+    // its own properties, so it was sent as no query at all, and a string as `0=a&1=b`.
+    if (!isPlainRecord(params)) {
+      throw new TypeError(
+        'HTTPRequestBuilder params must be a plain object of query names to values (not a URLSearchParams, Map or string)',
+      );
+    }
     this._params = params;
     return this;
   }
 
+  /**
+   * A JSON body, whatever the value: an object or array is serialized as any object
+   * body is, and a string, number, boolean or `null` is sent as its JSON text with
+   * `content-type: application/json` - `.json('hello')` sends `"hello"`, not `hello`.
+   */
   public json(data: unknown): this {
     this._assertNotSent('json');
+    if (data === null || typeof data !== 'object') {
+      if (data === undefined) {
+        this._body = undefined;
+        return this;
+      }
+      this._body = JSON.stringify(data);
+      if (this._headers['content-type'] === undefined) {
+        defineEntry(
+          this._headers as Record<string, unknown>,
+          'content-type',
+          'application/json',
+        );
+      }
+      return this;
+    }
     this._body = data;
     return this;
   }
@@ -185,6 +215,13 @@ export class HTTPRequestBuilder<T = unknown> {
   public label(label: string): this {
     this._assertNotSent('label');
 
+    const candidate: unknown = label;
+    if (typeof candidate !== 'string') {
+      throw new TypeError(
+        `HTTPRequestBuilder label must be a string (got ${candidate === null ? 'null' : typeof candidate})`,
+      );
+    }
+
     if (label.trim().length === 0) {
       throw new Error(
         'HTTPRequestBuilder.label() requires a non-empty, non-whitespace label.',
@@ -223,24 +260,28 @@ export class HTTPRequestBuilder<T = unknown> {
 
   public onUploadProgress(fn: (event: HTTPProgressEvent) => void): this {
     this._assertNotSent('onUploadProgress');
+    assertCallback(fn, 'onUploadProgress');
     this._onUploadProgress = fn;
     return this;
   }
 
   public onDownloadProgress(fn: (event: HTTPProgressEvent) => void): this {
     this._assertNotSent('onDownloadProgress');
+    assertCallback(fn, 'onDownloadProgress');
     this._onDownloadProgress = fn;
     return this;
   }
 
   public onAttemptStart(fn: (event: AttemptStartEvent) => void): this {
     this._assertNotSent('onAttemptStart');
+    assertCallback(fn, 'onAttemptStart');
     this._onAttemptStart = fn;
     return this;
   }
 
   public onAttemptEnd(fn: (event: AttemptEndEvent) => void): this {
     this._assertNotSent('onAttemptEnd');
+    assertCallback(fn, 'onAttemptEnd');
     this._onAttemptEnd = fn;
     return this;
   }
@@ -267,6 +308,7 @@ export class HTTPRequestBuilder<T = unknown> {
    */
   public streamResponse(fn: StreamResponseFactory): this {
     this._assertNotSent('streamResponse');
+    assertCallback(fn, 'streamResponse');
     this._streamResponse = fn;
     return this;
   }
@@ -372,6 +414,14 @@ export class HTTPRequestBuilder<T = unknown> {
   // --- Execute ---
 
   public async send<U = T>(): Promise<HTTPResponse<U>> {
+    // Once-only first: a request that ended cancelled - by a signal, `client.cancel()` -
+    // was sent, and a second send is refused for that, not for a `cancel()` never made.
+    if (this._sent) {
+      throw new Error(
+        'HTTPRequestBuilder.send() can only be called once per builder instance.',
+      );
+    }
+
     if (this._state === 'cancelled') {
       const reasonSuffix =
         this._preSendCancelReason !== undefined
@@ -379,12 +429,6 @@ export class HTTPRequestBuilder<T = unknown> {
           : '';
       throw new Error(
         `HTTPRequestBuilder.send() cannot be called after cancel() has been called.${reasonSuffix}`,
-      );
-    }
-
-    if (this._sent) {
-      throw new Error(
-        'HTTPRequestBuilder.send() can only be called once per builder instance.',
       );
     }
 
@@ -496,7 +540,7 @@ export class HTTPRequestBuilder<T = unknown> {
 
     // URL query params
     const params = opts.params;
-    if (params) {
+    if (!isNullish(params)) {
       this.params(params);
     }
 
@@ -515,7 +559,7 @@ export class HTTPRequestBuilder<T = unknown> {
 
     // External abort signal — merged with the internal one so both can cancel
     const signal = opts.signal;
-    if (signal) {
+    if (!isNullish(signal)) {
       this.signal(signal);
     }
 
@@ -539,31 +583,31 @@ export class HTTPRequestBuilder<T = unknown> {
 
     // Progress callbacks - upload
     const onUploadProgress = opts.onUploadProgress;
-    if (onUploadProgress) {
+    if (!isNullish(onUploadProgress)) {
       this.onUploadProgress(onUploadProgress);
     }
 
     // Progress callbacks - download
     const onDownloadProgress = opts.onDownloadProgress;
-    if (onDownloadProgress) {
+    if (!isNullish(onDownloadProgress)) {
       this.onDownloadProgress(onDownloadProgress);
     }
 
     // Called before each attempt (including retries)
     const onAttemptStart = opts.onAttemptStart;
-    if (onAttemptStart) {
+    if (!isNullish(onAttemptStart)) {
       this.onAttemptStart(onAttemptStart);
     }
 
     // Called after each attempt (including retries)
     const onAttemptEnd = opts.onAttemptEnd;
-    if (onAttemptEnd) {
+    if (!isNullish(onAttemptEnd)) {
       this.onAttemptEnd(onAttemptEnd);
     }
 
     // NodeAdapter response streaming factory
     const streamResponse = opts.streamResponse;
-    if (streamResponse) {
+    if (!isNullish(streamResponse)) {
       this.streamResponse(streamResponse);
     }
   }
@@ -574,5 +618,14 @@ export class HTTPRequestBuilder<T = unknown> {
         `Cannot call .${method}() after .send() has been called. Builders are single-use.`,
       );
     }
+  }
+}
+
+/** Refused when it is set, as an interceptor that is not a function is when it is added. */
+function assertCallback(fn: unknown, name: string): void {
+  if (typeof fn !== 'function') {
+    throw new TypeError(
+      `HTTPRequestBuilder ${name} must be a function (got ${fn === null ? 'null' : typeof fn})`,
+    );
   }
 }

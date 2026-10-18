@@ -104,7 +104,7 @@ describe('buildURL', () => {
       buildURL('https://example.com', '/search?existing=1&keep=yes', {
         existing: '2',
       }),
-    ).toBe('https://example.com/search?existing=2&keep=yes');
+    ).toBe('https://example.com/search?keep=yes&existing=2');
   });
 
   test('preserves hash fragments while merging query params', () => {

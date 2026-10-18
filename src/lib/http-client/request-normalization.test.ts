@@ -3,7 +3,7 @@ import vm from 'node:vm';
 import * as http from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { HTTPClient } from './http-client';
-import { matchesFilter, parseContentType } from './utils';
+import { buildURL, matchesFilter, parseContentType } from './utils';
 import {
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_ABORT_HEADERS_KEY,
@@ -3444,4 +3444,61 @@ test('round 64: a missing URL matches no host, methods are copied, bodyContainsK
       'response',
     ),
   ).toBe(true);
+});
+
+test('round 67: request builder validation, json(), the query kept as written, send() order', async () => {
+  // A query already in the path is kept as written; params add to it, and override
+  // only the keys they name.
+  expect(
+    buildURL('https://a.test', '/s?tag=a&tag=b&x[]=1&a=%E9&constructor=1', {
+      page: 2,
+    }),
+  ).toBe('https://a.test/s?tag=a&tag=b&x[]=1&a=%E9&constructor=1&page=2');
+  expect(buildURL('https://a.test', '/s?page=1&q=x', { page: 2 })).toBe(
+    'https://a.test/s?q=x&page=2',
+  );
+
+  const client = new HTTPClient({
+    adapter: new MockAdapter(),
+    baseURL: 'http://api.test',
+  });
+  // params must be a plain object; a non-function callback and a non-string label throw.
+  for (const options of [
+    { params: new URLSearchParams('a=1') },
+    { params: 'ab' },
+    { params: 0 },
+    { signal: '' },
+    { onAttemptStart: 'nope' },
+    { onDownloadProgress: 42 },
+    { streamResponse: true },
+    { label: 5 },
+  ]) {
+    expect(() => client.get('/x', options as never)).toThrow(TypeError);
+  }
+
+  // json() sends JSON whatever the value.
+  const sent: unknown[] = [];
+  const adapter = new MockAdapter();
+  adapter.routes.post('/j', (req) => {
+    sent.push([req.headers['content-type'], req.body]);
+    return { status: 200 };
+  });
+  const jsonClient = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  await jsonClient.post('/j').json('hello').send();
+  await jsonClient.post('/j').json(42).send();
+  expect(sent).toEqual([
+    ['application/json', 'hello'],
+    ['application/json', 42],
+  ]);
+
+  // A second send() says once-only, even when the first ended cancelled by a signal.
+  const controller = new AbortController();
+  controller.abort();
+  const once = client.get('/x').signal(controller.signal);
+  await once.send();
+  const second = await once.send().then(
+    () => undefined,
+    (error: unknown) => error as Error,
+  );
+  expect(second?.message).toMatch(/only be called once/);
 });

@@ -61,6 +61,19 @@ function tryAbsoluteWebHref(path: string): string | null {
  * relative paths and a dedicated client or `HTTPClient.createSubClient()` per
  * origin.
  */
+/** The key a query pair sets at the top level, as `qs` reads it: `filter[a]=1` is `filter`. */
+function topLevelQueryKey(pair: string): string {
+  const rawKey = pair.split('=', 1)[0].replace(/\+/g, ' ');
+  let key: string;
+  try {
+    key = decodeURIComponent(rawKey);
+  } catch {
+    key = rawKey;
+  }
+  const bracket = key.indexOf('[');
+  return bracket > 0 ? key.slice(0, bracket) : key;
+}
+
 export function buildURL(
   baseURL: string | undefined,
   path: string,
@@ -94,13 +107,21 @@ export function buildURL(
       // Fragments are preserved only as part of the caller's URL string.
       // They are not transmitted in HTTP requests, but keeping them intact
       // makes buildURL safer as a general-purpose URL composition helper.
-      const mergedParams = {
-        ...qs.parse(existingQuery),
-        ...params,
-      };
-
-      const queryString = qs.stringify(mergedParams, { addQueryPrefix: true });
-      url = `${basePath}${queryString}${hash ? `#${hash}` : ''}`;
+      //
+      // The existing query is kept as written, pair by pair, rather than parsed and
+      // re-serialized: that rewrote what `qs` reads differently from the server - a
+      // repeated key into `tag[0]`, `%E9` into `%25E9`, `constructor=1` dropped - though
+      // nothing asked to change it. Only a pair whose top-level key `params` also names is
+      // left out, so the `params` value wins.
+      const overridden = new Set(Object.keys(params));
+      const kept = existingQuery
+        .split('&')
+        .filter(
+          (pair) => pair !== '' && !overridden.has(topLevelQueryKey(pair)),
+        );
+      const added = qs.stringify(params);
+      const query = [...kept, ...(added ? [added] : [])].join('&');
+      url = `${basePath}${query ? `?${query}` : ''}${hash ? `#${hash}` : ''}`;
     }
   }
 
