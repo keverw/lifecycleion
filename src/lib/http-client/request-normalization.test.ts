@@ -3513,3 +3513,28 @@ test('round 69: baseURL must be a string without a query or fragment', () => {
     client.createSubClient({ baseURL: 'https://api.example.com?x=1' }),
   ).toThrow();
 });
+
+test('MockAdapter route mistakes found after the route ran are not retried', async () => {
+  for (const response of [
+    { status: 200, cookies: { a: { value: '1', maxAge: Number.NaN } } },
+    { status: 200, headers: { 'set-cookie': [123] as unknown as string[] } },
+  ]) {
+    const adapter = new MockAdapter();
+    let runs = 0;
+    adapter.routes.get('/x', () => {
+      runs++;
+      return response;
+    });
+    const builder = new HTTPClient({
+      adapter,
+      baseURL: 'http://api.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 3, delayMS: 0 },
+    }).get('/x');
+
+    const result = await builder.send();
+
+    expect(runs).toBe(1);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(result.isNetworkError).toBe(false);
+  }
+});

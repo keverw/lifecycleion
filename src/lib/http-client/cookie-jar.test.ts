@@ -3208,3 +3208,17 @@ test('a host with a hyphen at a label edge keeps its cookies', () => {
   );
   expect(jar.getCookieHeaderString('http://edge-.internal/')).toBe('a=1');
 });
+
+test('an edge-hyphen host keeps its Domain cookies and is cleared with its domain', () => {
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader(
+    'edge=1; Domain=example.com',
+    'https://-edge.example.com/',
+  );
+  jar.parseSetCookieHeader('a=1', 'https://-edge.example.com/');
+
+  expect(jar.getCookieHeaderString('https://www.example.com/')).toBe('edge=1');
+
+  jar.clear('example.com', 'domain');
+  expect(jar.getAllCookies()).toEqual([]);
+});

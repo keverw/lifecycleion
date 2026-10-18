@@ -266,8 +266,27 @@ export class PublicSuffixResolver {
     // from quietly re-bucketing every unrelated internal name in the jar: the walk would
     // have filed `host.notcorp.acme` under itself and `notcorp.acme` under a second
     // bucket, so a cookie stored from one was invisible to the other.
-    return (
-      parse(normalized, { allowPrivateDomains: true }).domain ?? normalized
-    );
+    const domain = parse(normalized, { allowPrivateDomains: true }).domain;
+    if (domain !== null) {
+      return domain;
+    }
+
+    // tldts reads no domain for a host with a hyphen at a label's edge
+    // (`-edge.example.com`), which the URL parser accepts and the jar keeps. Read the
+    // same labels with those hyphens stood in for, and take as many of the real ones:
+    // without it such a host was its own apex, so its `Domain=example.com` cookies were
+    // refused and a domain clear of `example.com` passed it by.
+    const hostLabels = normalized.split('.');
+    const standIn = hostLabels
+      .map((label) =>
+        label
+          .replace(/^-+/, (run) => 'x'.repeat(run.length))
+          .replace(/-+$/, (run) => 'x'.repeat(run.length)),
+      )
+      .join('.');
+    const standInDomain = parse(standIn, { allowPrivateDomains: true }).domain;
+    return standInDomain === null
+      ? normalized
+      : hostLabels.slice(-standInDomain.split('.').length).join('.');
   }
 }

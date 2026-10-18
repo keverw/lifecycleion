@@ -546,7 +546,9 @@ export class MockAdapter implements HTTPAdapter {
     // shorthand entry wins because it appears last (last Set-Cookie header for a
     // given name takes precedence in browsers and CookieJar).
     if (mockResponse.cookies) {
-      const setCookieEntries = cookiesToSetCookieHeaders(mockResponse.cookies);
+      const setCookieEntries = asRouteMistake(() =>
+        cookiesToSetCookieHeaders(mockResponse.cookies ?? {}),
+      );
 
       if (setCookieEntries.length > 0) {
         const existing = responseHeaders['set-cookie'];
@@ -575,8 +577,9 @@ export class MockAdapter implements HTTPAdapter {
       }
     }
 
-    const normalizedResponseHeaders =
-      normalizeAdapterResponseHeaders(responseHeaders);
+    const normalizedResponseHeaders = asRouteMistake(() =>
+      normalizeAdapterResponseHeaders(responseHeaders),
+    );
 
     const detectedRedirectURL = resolveDetectedRedirectURL(
       request.requestURL,
@@ -1027,4 +1030,17 @@ function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
       throw error;
     }
   });
+}
+
+/**
+ * Run a step that reads what the route returned, failing it as the route's mistake -
+ * non-retryable, as a missing response is - so a retry does not run the route again.
+ */
+function asRouteMistake<R>(step: () => R): R {
+  try {
+    return step();
+  } catch (error) {
+    markNonRetryableAdapterError(error);
+    throw error;
+  }
 }
