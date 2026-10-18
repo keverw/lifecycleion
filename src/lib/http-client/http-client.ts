@@ -633,13 +633,20 @@ export class BaseHTTPClient {
         redirectHistory: [],
       });
 
+      // A cancel the builder held during setup came first, so its reason stands; the
+      // signal can only have aborted after it, or the builder would have refused to hold it.
+      const setupCancel = callbacks.getSetupCancel();
       const error = this._makeError(
         response,
         requestID,
         false,
         undefined,
         undefined,
-        options.signal ? getSignalCancelReason(options.signal) : undefined,
+        setupCancel
+          ? setupCancel.reason
+          : options.signal
+            ? getSignalCancelReason(options.signal)
+            : undefined,
       );
       callbacks.setError(error);
       callbacks.setState('cancelled');

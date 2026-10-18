@@ -3024,3 +3024,71 @@ test('a redirect-phase interceptor cancel aborts the hop that answered', async (
   expect(response.isCancelled).toBe(true);
   expect(signals.map((signal) => signal.aborted)).toEqual([true]);
 });
+
+test('a cancel held during setup holds against a setup throw and a caller signal', async () => {
+  const client = new HTTPClient({
+    adapter: new MockAdapter(),
+    baseURL: 'http://api.test',
+  });
+
+  // A later setup value throws: send() still rejects, but the builder ends cancelled.
+  let held: CancelResult | undefined;
+  const throwing: ReturnType<HTTPClient['get']> = client.get('/x').headers({
+    'x-a': {
+      toString() {
+        held ??= throwing.cancel('setup');
+        return 'v';
+      },
+    } as unknown as string,
+    'x-b': {
+      toString() {
+        throw new Error('boom');
+      },
+    } as unknown as string,
+  });
+  const rejection = await throwing.send().then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  expect(held).toBe('cancelled');
+  expect((rejection as Error).message).toBe('boom');
+  expect(throwing.state).toBe('cancelled');
+
+  // The caller's signal already aborted: the setup cancel answers already_cancelled.
+  const controller = new AbortController();
+  controller.abort('sig');
+  let answer: CancelResult | undefined;
+  const signalled: ReturnType<HTTPClient['get']> = client
+    .get('/x')
+    .signal(controller.signal)
+    .headers({
+      'x-a': {
+        toString() {
+          answer ??= signalled.cancel('setup');
+          return 'v';
+        },
+      } as unknown as string,
+    });
+  await signalled.send();
+  expect(answer).toBe('already_cancelled');
+  expect(signalled.error?.cancelReason).toBe('sig');
+
+  // The signal aborts after the held cancel: the held cancel's reason stands.
+  const later = new AbortController();
+  const ordered: ReturnType<HTTPClient['get']> = client
+    .get('/x')
+    .signal(later.signal)
+    .headers({
+      'x-a': {
+        toString() {
+          if (!later.signal.aborted) {
+            ordered.cancel('setup');
+            later.abort('sig');
+          }
+          return 'v';
+        },
+      } as unknown as string,
+    });
+  await ordered.send();
+  expect(ordered.error?.cancelReason).toBe('setup');
+});

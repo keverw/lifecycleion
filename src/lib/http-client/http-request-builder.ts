@@ -1,4 +1,5 @@
 import { isNullish } from '../internal/is-nullish';
+import { readUnknownMember } from '../internal/read-member';
 import { generateID } from '../id-helpers';
 import { validateRequestTimeoutMS } from './consts';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
@@ -28,6 +29,8 @@ export interface BuilderCallbacks<T> {
   setNextRetryAt: (timestampMS: number | null) => void;
   setStartedAt: (timestampMS: number) => void;
   setCancelFn: (fn: (reason?: string) => CancelResult) => void;
+  /** A cancel the builder held while `send()` set the request up; see `cancel()`. */
+  getSetupCancel: () => { reason: string | undefined } | null;
 }
 
 export interface BuilderSendContext<T = unknown> {
@@ -345,7 +348,12 @@ export class HTTPRequestBuilder<T = unknown> {
     // `send()` is still setting the request up - caller code such as a header value's
     // `toString` runs before the request can be cancelled - so the cancel is held and
     // applied the moment it can be. Only the first is held; a later one finds it.
-    if (this._setupCancel) {
+    // A caller signal that has aborted already ends the request as cancelled once setup
+    // is done, so there is nothing left for this call to cancel.
+    if (
+      this._setupCancel ||
+      readUnknownMember(this._signal, 'aborted') === true
+    ) {
       return 'already_cancelled';
     }
     this._setupCancel = { reason };
@@ -387,7 +395,9 @@ export class HTTPRequestBuilder<T = unknown> {
         state !== 'cancelled' &&
         state !== 'failed'
       ) {
-        this._state = 'failed';
+        // A cancel held during setup answered `'cancelled'`, so the builder ends that way
+        // even though setup then failed; `send()` still rejects with the setup's error.
+        this._state = this._setupCancel ? 'cancelled' : 'failed';
         this._completedAt = Date.now();
       }
       throw error;
@@ -444,6 +454,7 @@ export class HTTPRequestBuilder<T = unknown> {
         setStartedAt: (timestampMS) => {
           this._startedAt = timestampMS;
         },
+        getSetupCancel: () => this._setupCancel,
         setCancelFn: (fn) => {
           this._cancelFn = fn;
           // A cancel made while the request was being set up; see `cancel()`.
