@@ -84,6 +84,8 @@ export class HTTPRequestBuilder<T = unknown> {
   private _cancelFn: ((reason?: string) => CancelResult) | null = null;
   /** A cancel made after `send()` began but before the request could be cancelled. */
   private _setupCancel: { reason: string | undefined } | null = null;
+  /** Set once `send()`'s synchronous setup has returned; see `_sendRequest`. */
+  private _isSetupDone = false;
   private _preSendCancelReason: string | undefined = undefined;
 
   constructor(
@@ -345,6 +347,12 @@ export class HTTPRequestBuilder<T = unknown> {
       return this._cancelFn(reason);
     }
 
+    // Setup is over and wired no cancel function: the request failed during setup (its
+    // `send()` rejection is on its way), so there is nothing to cancel.
+    if (this._isSetupDone) {
+      return 'already_settled';
+    }
+
     // `send()` is still setting the request up - caller code such as a header value's
     // `toString` runs before the request can be cancelled - so the cancel is held and
     // applied the moment it can be. Only the first is held; a later one finds it.
@@ -405,7 +413,7 @@ export class HTTPRequestBuilder<T = unknown> {
   }
 
   private async _sendRequest<U>(): Promise<HTTPResponse<U>> {
-    const response = await this._sendFn({
+    const pending = this._sendFn({
       method: this._method,
       path: this._path,
       requestID: this._requestID,
@@ -464,6 +472,11 @@ export class HTTPRequestBuilder<T = unknown> {
         },
       },
     });
+    // The client's setup runs synchronously inside that call, up to wiring the request's
+    // cancel function - so once it returns, a request with none has already failed (or
+    // was cancelled), and `cancel()` holds nothing.
+    this._isSetupDone = true;
+    const response = await pending;
 
     return response as unknown as HTTPResponse<U>;
   }

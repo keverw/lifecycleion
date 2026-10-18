@@ -3092,3 +3092,38 @@ test('a cancel held during setup holds against a setup throw and a caller signal
   await ordered.send();
   expect(ordered.error?.cancelReason).toBe('setup');
 });
+
+test('a cancel right after send() failed during setup answers already_settled', async () => {
+  const disabled = new HTTPClient({
+    adapter: new MockAdapter(),
+    baseURL: 'http://api.test',
+  });
+  disabled.disable();
+  const blocked = disabled.get('/x');
+  const blockedSend = blocked.send().then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  expect(blocked.cancel('late')).toBe('already_settled');
+  await blockedSend;
+  expect(blocked.state).toBe('failed');
+
+  const client = new HTTPClient({
+    adapter: new MockAdapter(),
+    baseURL: 'http://api.test',
+  });
+  const throwing = client.get('/x').headers({
+    'x-b': {
+      toString() {
+        throw new Error('boom');
+      },
+    } as unknown as string,
+  });
+  const throwingSend = throwing.send().then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  expect(throwing.cancel('late')).toBe('already_settled');
+  await throwingSend;
+  expect(throwing.state).toBe('failed');
+});
