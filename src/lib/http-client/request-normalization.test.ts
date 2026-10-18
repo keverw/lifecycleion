@@ -11,6 +11,7 @@ import {
 } from './consts';
 import { CookieJar } from './cookie-jar';
 import { MockAdapter } from './adapters/mock-adapter';
+import type { MockRequest } from './adapters/mock-adapter';
 import { NodeAdapter } from './adapters/node-adapter';
 import type {
   AdapterRequest,
@@ -3641,4 +3642,63 @@ test('round 73: a trailing-dot spelling of the redirect host selects no scope; a
   await client.get('https://a.test/start').send();
 
   expect(scopes).toEqual(['a.test', 'a.test']);
+});
+
+test('round 74: MockAdapter parity with a real server', async () => {
+  const adapter = new MockAdapter();
+  let seen: MockRequest | undefined;
+  adapter.routes.post('/p', (req) => {
+    seen = req;
+    return { status: 200 };
+  });
+  adapter.routes.head('/h', () => ({ status: 200, body: { x: 1 } }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+
+  const form = new FormData();
+  form.append('tag', 'a');
+  form.append('tag', 'b');
+  await client
+    .post('/p', {
+      body: form,
+      params: {
+        ids: Array.from({ length: 25 }, (_, i) => i),
+        constructor: 'x',
+      },
+      headers: { cookie: 'a=hello%20world; b="quoted"' },
+    })
+    .send();
+
+  expect(seen?.body).toMatchObject({ allFields: { tag: ['a', 'b'] } });
+  expect(Array.isArray(seen?.query.ids)).toBe(true);
+  expect(Object.hasOwn(seen?.query ?? {}, 'constructor')).toBe(true);
+  expect(seen?.headers.host).toBe('api.test');
+  expect(seen?.headers['content-type']).toMatch(
+    /^multipart\/form-data; boundary=/,
+  );
+  expect(seen?.cookies).toEqual({ a: 'hello world', b: 'quoted' });
+
+  const head = await client.request('HEAD', '/h').send();
+  expect(head.headers['content-type']).toBe('application/json');
+
+  // Route mistakes: an injecting cookie shorthand, an impossible status.
+  for (const response of [
+    { status: 200, cookies: { session: 'abc; Domain=other.test' } },
+    { status: 200, cookies: { 'x=y': 'z' } },
+    { status: 50 },
+  ]) {
+    const bad = new MockAdapter();
+    let didDownloadFinish = false;
+    bad.routes.get('/b', () => response as never);
+    const builder = new HTTPClient({
+      adapter: bad,
+      baseURL: 'http://api.test',
+    }).get('/b', {
+      onDownloadProgress: (event) => {
+        didDownloadFinish ||= event.progress === 1;
+      },
+    });
+    await builder.send();
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(didDownloadFinish).toBe(false);
+  }
 });

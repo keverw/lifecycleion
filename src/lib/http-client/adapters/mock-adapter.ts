@@ -35,10 +35,14 @@ import {
 } from '../../internal/timer-limits';
 
 export interface MockFormData {
-  /** String fields from the multipart body */
+  /** String fields from the multipart body - the last value of a repeated name */
   fields: Record<string, string>;
-  /** File fields from the multipart body */
+  /** File fields from the multipart body - the last file of a repeated name */
   files: Record<string, File>;
+  /** Every value of each string field, in order, as a server receives a repeated one */
+  allFields: Record<string, string[]>;
+  /** Every file of each file field, in order (`<input type="file" multiple>`) */
+  allFiles: Record<string, File[]>;
 }
 
 export interface MockRequest {
@@ -281,6 +285,25 @@ export class MockAdapter implements HTTPAdapter {
     const materializedHeaders = lowercaseHeaderNames(
       materializeRequestHeaders(headers),
     );
+    // Headers every real server receives and the client does not set itself: `host`,
+    // and a FormData body's multipart `content-type` (the boundary is the mock's own).
+    if (!Object.hasOwn(materializedHeaders, 'host')) {
+      try {
+        defineEntry(materializedHeaders, 'host', new URL(requestURL).host);
+      } catch {
+        // A path-only URL driven straight at the adapter has no host to report.
+      }
+    }
+    if (
+      body instanceof FormData &&
+      !Object.hasOwn(materializedHeaders, 'content-type')
+    ) {
+      defineEntry(
+        materializedHeaders,
+        'content-type',
+        'multipart/form-data; boundary=----lifecycleion-mock-boundary',
+      );
+    }
 
     // --- 1. Pre-flight abort check ---
     // Throw immediately if the signal was already cancelled before we even start.
@@ -326,7 +349,13 @@ export class MockAdapter implements HTTPAdapter {
     // qs handles nested bracket notation (e.g. ?where[active]=true).
     // cookies are pre-parsed from the `cookie` header for convenience —
     // the raw header is still available on req.headers.cookie.
-    const query = qs.parse(queryString) as QueryObject;
+    // As a server's `qs` reads it (Express parses with `allowPrototypes: true`): a key
+    // named like an `Object.prototype` member (`constructor`) is kept, and an array the
+    // client sent with more than 20 indices stays an array. `__proto__` is still dropped.
+    const query = qs.parse(queryString, {
+      allowPrototypes: true,
+      arrayLimit: 1000,
+    }) as QueryObject;
     const cookies = parseCookieHeader(materializedHeaders['cookie']);
     // Matched uppercased, as a real server sees it: Node's `http` sends any method it
     // knows uppercase, so `lock` arrives as `LOCK`. The router's own method type is a
@@ -495,6 +524,18 @@ export class MockAdapter implements HTTPAdapter {
       };
     }
 
+    // A status no server can send - Node's `writeHead` refuses one under 100 or past
+    // 999 - is the route's mistake, not retried. `0` is not a status: use
+    // `transportError` for a network failure.
+    asRouteMistake(() => {
+      const { status } = mockResponse;
+      if (!Number.isInteger(status) || status < 100 || status > 999) {
+        throw new TypeError(
+          `MockAdapter route returned status ${String(status)}; a response status is an integer from 100 to 999 (use transportError for a network failure)`,
+        );
+      }
+    });
+
     // A simulated post-header body failure loses the body the same way a real
     // one does, so the handler's body is never serialized.
     const streamErrorCode = resolveMockStreamErrorCode(
@@ -520,20 +561,6 @@ export class MockAdapter implements HTTPAdapter {
     // arrived, so the headers still stand — Content-Type included. Header
     // inference below reads `intendedBody` for that reason.
     const responseBody = streamErrorCode !== undefined ? null : intendedBody;
-
-    // Signal upload complete, then report download size based on serialised body.
-    guardedUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
-
-    // A simulated stream error reports no terminal download progress: real
-    // adapters fail the body read before that point, so `progress: 1` here would
-    // signal a completed download for a body that never arrived.
-    if (streamErrorCode === undefined) {
-      guardedDownloadProgress?.({
-        loaded: responseBody?.length ?? 0,
-        total: responseBody?.length ?? 0,
-        progress: 1,
-      });
-    }
 
     // --- 7. Build response headers ---
     const responseHeaders: AdapterResponse['headers'] = {
@@ -566,7 +593,13 @@ export class MockAdapter implements HTTPAdapter {
     // Binary responses are intentionally skipped — content-type for binary is
     // format-specific (image/png, application/pdf, etc.) so the handler is
     // responsible for setting it via `headers` when it matters.
-    if (!hasHeader(responseHeaders, 'content-type') && intendedBody !== null) {
+    // A HEAD response carries the content-type its GET would, body or no body.
+    const hasRouteBody =
+      intendedBody !== null ||
+      (routeMethod === 'HEAD' &&
+        mockResponse.body !== undefined &&
+        mockResponse.body !== null);
+    if (!hasHeader(responseHeaders, 'content-type') && hasRouteBody) {
       const ct =
         mockResponse.contentType ?? inferContentType(mockResponse.body);
 
@@ -580,6 +613,22 @@ export class MockAdapter implements HTTPAdapter {
     const normalizedResponseHeaders = asRouteMistake(() =>
       normalizeAdapterResponseHeaders(responseHeaders),
     );
+
+    // After the headers are built and checked, as a real adapter has the headers before
+    // any body progress: a route mistake found there does not follow a completed download.
+    // Signal upload complete, then report download size based on serialised body.
+    guardedUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
+
+    // A simulated stream error reports no terminal download progress: real
+    // adapters fail the body read before that point, so `progress: 1` here would
+    // signal a completed download for a body that never arrived.
+    if (streamErrorCode === undefined) {
+      guardedDownloadProgress?.({
+        loaded: responseBody?.length ?? 0,
+        total: responseBody?.length ?? 0,
+        progress: 1,
+      });
+    }
 
     const detectedRedirectURL = resolveDetectedRedirectURL(
       request.requestURL,
@@ -694,7 +743,7 @@ function parseCookieHeader(
     }
 
     const name = part.slice(0, eqIdx).trim();
-    const value = part.slice(eqIdx + 1).trim();
+    const value = decodeCookieValue(part.slice(eqIdx + 1).trim());
 
     // The first of a repeated name wins, as common server parsers (the `cookie` package
     // behind Express and Fastify) read it: the client sends the most specific path first.
@@ -711,6 +760,20 @@ function cookiesToSetCookieHeaders(
   cookies: Record<string, string | MockCookieOptions | null>,
 ): string[] {
   return Object.entries(cookies).map(([name, value]) => {
+    // A `;` or `=` in a name, or a `;` in a value or attribute, would rewrite the line -
+    // `abc; Domain=other.test` sets a Domain the route never asked for. A route mistake.
+    assertCookieText(name, 'name', /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/);
+    if (typeof value === 'string') {
+      assertCookieText(value, 'value');
+    } else if (value !== null) {
+      assertCookieText(String(value.value), 'value');
+      for (const attribute of ['path', 'domain'] as const) {
+        const text = value[attribute];
+        if (text !== undefined) {
+          assertCookieText(text, attribute);
+        }
+      }
+    }
     // null pairs with the string shorthand above: both use Path=/.
     // Scoped deletes need explicit path/domain so the cookie identity matches.
     if (value === null) {
@@ -732,7 +795,7 @@ function serializeMockCookieOptions(
 ): string {
   const parts: string[] = [
     `${name}=${cookie.value}`,
-    `Path=${cookie.path ?? '/'}`,
+    `Path=${cookie.path || '/'}`,
   ];
 
   // Whole seconds within the cookie lifetime cap (400 days, RFC 6265bis), as `Max-Age`
@@ -780,18 +843,28 @@ function appendCookieAttribute(
 function extractFormData(fd: FormData): MockFormData {
   const fields: Record<string, string> = {};
   const files: Record<string, File> = {};
+  const allFields: Record<string, string[]> = {};
+  const allFiles: Record<string, File[]> = {};
 
   for (const [key, value] of fd.entries()) {
     // Defined, not assigned: a `__proto__` field would otherwise vanish, and a
     // `__proto__` file would become the record's prototype.
     if (typeof value === 'string') {
       defineEntry(fields, key, value);
+      defineEntry(allFields, key, [
+        ...(Object.hasOwn(allFields, key) ? allFields[key] : []),
+        value,
+      ]);
     } else {
       defineEntry(files, key, value);
+      defineEntry(allFiles, key, [
+        ...(Object.hasOwn(allFiles, key) ? allFiles[key] : []),
+        value,
+      ]);
     }
   }
 
-  return { fields, files };
+  return { fields, files, allFields, allFiles };
 }
 
 function parseRequestBody(
@@ -1042,5 +1115,32 @@ function asRouteMistake<R>(step: () => R): R {
   } catch (error) {
     markNonRetryableAdapterError(error);
     throw error;
+  }
+}
+
+/** Throw when `text` would change a `Set-Cookie` line's framing, or fails `pattern`. */
+function assertCookieText(text: string, part: string, pattern?: RegExp): void {
+  // eslint-disable-next-line no-control-regex -- control characters are what is refused
+  const isUnsafe = /[;\u0000-\u001f\u007f]/.test(text);
+  if (isUnsafe || (pattern !== undefined && !pattern.test(text))) {
+    throw new TypeError(
+      `MockAdapter cookie ${part} ${JSON.stringify(text)} cannot be written into a Set-Cookie line`,
+    );
+  }
+}
+
+/** A cookie value as the `cookie` package reads it: unquoted, then percent-decoded. */
+function decodeCookieValue(raw: string): string {
+  const unquoted =
+    raw.length >= 2 && raw.startsWith('"') && raw.endsWith('"')
+      ? raw.slice(1, -1)
+      : raw;
+  if (!unquoted.includes('%')) {
+    return unquoted;
+  }
+  try {
+    return decodeURIComponent(unquoted);
+  } catch {
+    return unquoted;
   }
 }

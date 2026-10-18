@@ -1489,10 +1489,10 @@ interface MockRequest {
   method: string;
   path: string;
   params: Record<string, string>; // Path params from :paramName segments
-  query: QueryObject; // Parsed query string
-  headers: Record<string, string>;
-  cookies: Record<string, string>; // Pre-parsed from cookie header
-  body?: unknown; // Parsed: JSON object, string, Uint8Array, or MockFormData
+  query: QueryObject; // Parsed query string, as Express's qs reads it (keys like `constructor` kept, arrays of any length)
+  headers: Record<string, string>; // Lowercase names, with `host` and a FormData body's multipart `content-type` added as a server receives them
+  cookies: Record<string, string>; // Pre-parsed from cookie header: unquoted and percent-decoded, the first of a repeated name
+  body?: unknown; // Parsed: JSON object, string, Uint8Array, or MockFormData ({ fields, files } with the last value of a name, { allFields, allFiles } with every value)
 }
 ```
 
