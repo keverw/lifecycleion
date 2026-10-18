@@ -349,12 +349,13 @@ export class MockAdapter implements HTTPAdapter {
     // qs handles nested bracket notation (e.g. ?where[active]=true).
     // cookies are pre-parsed from the `cookie` header for convenience —
     // the raw header is still available on req.headers.cookie.
-    // As a server's `qs` reads it (Express parses with `allowPrototypes: true`): a key
-    // named like an `Object.prototype` member (`constructor`) is kept, and an array the
-    // client sent with more than 20 indices stays an array. `__proto__` is still dropped.
+    // As Express's extended query parser reads it - `qs.parse(query, { allowPrototypes:
+    // true })`, the Express 4 default: a key named like
+    // an `Object.prototype` member (`constructor`) is kept, `__proto__` is still dropped,
+    // and qs's own limits apply as they do in production, so an array with more than 20
+    // indices arrives as an object there and here alike.
     const query = qs.parse(queryString, {
       allowPrototypes: true,
-      arrayLimit: 1000,
     }) as QueryObject;
     const cookies = parseCookieHeader(materializedHeaders['cookie']);
     // Matched uppercased, as a real server sees it: Node's `http` sends any method it

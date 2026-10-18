@@ -3669,7 +3669,8 @@ test('round 74: MockAdapter parity with a real server', async () => {
     .send();
 
   expect(seen?.body).toMatchObject({ allFields: { tag: ['a', 'b'] } });
-  expect(Array.isArray(seen?.query.ids)).toBe(true);
+  // As Express reads it: qs's 20-item array limit applies.
+  expect(Array.isArray(seen?.query.ids)).toBe(false);
   expect(Object.hasOwn(seen?.query ?? {}, 'constructor')).toBe(true);
   expect(seen?.headers.host).toBe('api.test');
   expect(seen?.headers['content-type']).toMatch(
@@ -3723,4 +3724,22 @@ test('round 75: an undefined params value keeps the path pair; mock sameSite/max
     await builder.send();
     expect(builder.error?.code).toBe('adapter_error');
   }
+});
+
+test('round 76: null ca refused, nested undefined params and encoded keys', () => {
+  for (const config of [
+    { ca: null },
+    { ca: [null] },
+    { mtls: { cert: 'c', key: 'k', ca: null } },
+  ]) {
+    expect(() => new NodeAdapter(config as never)).toThrow(/ca/);
+  }
+  expect(
+    buildURL('https://x', '/x?filter[status]=active&page=2', {
+      filter: { status: undefined },
+    }),
+  ).toBe('https://x/x?filter[status]=active&page=2');
+  expect(buildURL('https://x', '/x?c%2B%2B=1', { 'c++': 2 })).toBe(
+    'https://x/x?c%2B%2B=2',
+  );
 });

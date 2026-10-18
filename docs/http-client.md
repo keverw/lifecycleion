@@ -1489,7 +1489,7 @@ interface MockRequest {
   method: string;
   path: string;
   params: Record<string, string>; // Path params from :paramName segments
-  query: QueryObject; // Parsed query string, as Express's qs reads it (keys like `constructor` kept, arrays of any length)
+  query: QueryObject; // Parsed with qs, as Express's extended query parser reads it (the Express 4 default): nested `a[b]=1` keys, keys like `constructor` kept, qs's limits apply (an array past 20 items is an object). Express 5's and Fastify's default parsers read nested keys flat.
   headers: Record<string, string>; // Lowercase names, with `host` and a FormData body's multipart `content-type` added as a server receives them
   cookies: Record<string, string>; // Pre-parsed from cookie header: unquoted and percent-decoded, the first of a repeated name
   body?: unknown; // Parsed: JSON object, string, Uint8Array, or MockFormData ({ fields, files } with the last value of a name, { allFields, allFiles } with every value)

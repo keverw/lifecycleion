@@ -3610,12 +3610,16 @@ function assertTrustAnchors(value: unknown, name: string): void {
   if (value === undefined) {
     return;
   }
+  // `null` too, and a `null` entry: a loader that came back with nothing is no trust
+  // store, and Node reads `ca: null` as "use the public roots".
   const isEmpty = (entry: unknown): boolean =>
+    entry === null ||
+    entry === undefined ||
     (typeof entry === 'string' && entry.trim() === '') ||
     (ArrayBuffer.isView(entry) && entry.byteLength === 0);
   if (
     isEmpty(value) ||
-    (Array.isArray(value) && (value.length === 0 || value.every(isEmpty)))
+    (Array.isArray(value) && (value.length === 0 || value.some(isEmpty)))
   ) {
     const error = new TypeError(
       `NodeAdapter ${name} holds no certificate. Leave it unset to use the runtime's default trust store.`,

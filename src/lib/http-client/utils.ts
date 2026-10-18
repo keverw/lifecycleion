@@ -61,7 +61,7 @@ function tryAbsoluteWebHref(path: string): string | null {
  * relative paths and a dedicated client or `HTTPClient.createSubClient()` per
  * origin.
  */
-/** The key a query pair sets at the top level, as `qs` reads it: `filter[a]=1` is `filter`. */
+/** The key a query pair from the wire sets at the top level, as `qs` reads it. */
 function topLevelQueryKey(pair: string): string {
   const rawKey = pair.split('=', 1)[0].replace(/\+/g, ' ');
   let key: string;
@@ -70,6 +70,15 @@ function topLevelQueryKey(pair: string): string {
   } catch {
     key = rawKey;
   }
+  return topLevelKeyOf(key);
+}
+
+/**
+ * The top-level name of a decoded key: `filter[a]` is `filter`, and a key that opens with
+ * a bracket (`[x]`) is the name inside it, as `qs` reads both. A `.params()` key goes
+ * straight here - it is a name `qs` will encode, not one to decode.
+ */
+function topLevelKeyOf(key: string): string {
   // A key that opens with a bracket (`[x]=1`) is read by `qs` as the name inside it.
   if (key.startsWith('[')) {
     const close = key.indexOf(']');
@@ -125,10 +134,13 @@ export function buildURL(
       // replaces the path's `page[...]` pairs as `{ page: { number } }` would.
       // A key whose value is `undefined` is not given, so it leaves the path's pairs
       // alone - `.params({ page: options.page })` with no page keeps `?page=2`.
+      // A key whose value writes nothing - `undefined`, or an object of nothing but
+      // `undefined` - is not given, so it leaves the path's pairs alone:
+      // `.params({ page: options.page })` with no page keeps `?page=2`.
       const overridden = new Set(
         Object.keys(params)
-          .filter((key) => params[key] !== undefined)
-          .map(topLevelQueryKey),
+          .filter((key) => qs.stringify({ [key]: params[key] }) !== '')
+          .map(topLevelKeyOf),
       );
       const kept = existingQuery
         .split('&')
