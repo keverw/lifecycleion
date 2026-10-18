@@ -7,10 +7,10 @@ import { normalizeAdapterResponseHeaders } from './utils';
 
 // Matches bare hostnames like 'localhost', 'myapp', 'my-app' that tldts
 // won't assign a registered domain to but are still valid cookie domains.
-// `_` is allowed as the URL parser allows it: docker-compose service names (`my_service`)
-// are single-label hosts with one, and every cookie they set was discarded.
-const HOSTNAME_PATTERN =
-  /^[a-zA-Z0-9_]([a-zA-Z0-9_-]*[a-zA-Z0-9_])?(\.[a-zA-Z0-9_]([a-zA-Z0-9_-]*[a-zA-Z0-9_])?)*$/;
+// `_` and a hyphen anywhere in a label are allowed as the URL parser allows them, and as
+// `normalizeStoredDomain` keeps them: docker-compose service names (`my_service`) and
+// hosts like `-edge.example.com` set cookies the jar otherwise discarded.
+const HOSTNAME_PATTERN = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
 
 interface ParsedCookie {
   name: string;

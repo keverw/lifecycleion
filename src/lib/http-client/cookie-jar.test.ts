@@ -3197,3 +3197,14 @@ describe('round 62', () => {
     );
   });
 });
+
+test('a host with a hyphen at a label edge keeps its cookies', () => {
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader('sid=abc; Path=/', 'http://-edge.example.com/');
+  jar.parseSetCookieHeader('a=1', 'http://edge-.internal/');
+
+  expect(jar.getCookieHeaderString('http://-edge.example.com/')).toBe(
+    'sid=abc',
+  );
+  expect(jar.getCookieHeaderString('http://edge-.internal/')).toBe('a=1');
+});
