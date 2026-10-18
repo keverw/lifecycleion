@@ -1076,6 +1076,17 @@ export type ErrorObserver = (
 
 // --- Builder state ---
 
+/**
+ * What `HTTPRequestBuilder.cancel()` did:
+ * - `'cancelled'`: this call cancelled the request (before `send()`, or in flight), and it
+ *   ends cancelled.
+ * - `'already_cancelled'`: it was cancelled already - by an earlier `cancel()`,
+ *   `client.cancel()`, an interceptor, the stream factory or the caller's signal.
+ * - `'already_settled'`: it had already completed or failed; nothing was cancelled.
+ */
+export type CancelResult =
+  'cancelled' | 'already_cancelled' | 'already_settled';
+
 export type RequestState =
   | 'pending'
   | 'sending'

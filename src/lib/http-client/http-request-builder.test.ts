@@ -620,18 +620,18 @@ describe('HTTPRequestBuilder', () => {
   });
 
   describe('cancel()', () => {
-    test('calls cancelFn and returns true when in-flight', async () => {
+    test('calls cancelFn and returns its result when in-flight', async () => {
       let wasCancelCalled = false;
 
       const { builder } = makeBuilder(undefined, (ctx) => {
         ctx.callbacks.setCancelFn(() => {
           wasCancelCalled = true;
-          return true;
+          return 'cancelled';
         });
       });
 
       await builder.send();
-      expect(builder.cancel()).toBe(true);
+      expect(builder.cancel()).toBe('cancelled');
       expect(wasCancelCalled).toBe(true);
     });
 
@@ -641,7 +641,7 @@ describe('HTTPRequestBuilder', () => {
       const { builder } = makeBuilder(undefined, (ctx) => {
         ctx.callbacks.setCancelFn((reason) => {
           capturedReason = reason;
-          return true;
+          return 'cancelled';
         });
       });
 
@@ -656,7 +656,7 @@ describe('HTTPRequestBuilder', () => {
       const { builder } = makeBuilder(undefined, (ctx) => {
         ctx.callbacks.setCancelFn((reason) => {
           capturedReason = reason;
-          return true;
+          return 'cancelled';
         });
       });
 
@@ -665,9 +665,9 @@ describe('HTTPRequestBuilder', () => {
       expect(capturedReason).toBeUndefined();
     });
 
-    test('before send: sets state to cancelled and returns true', () => {
+    test('before send: sets state to cancelled and returns cancelled', () => {
       const { builder } = makeBuilder();
-      expect(builder.cancel()).toBe(true);
+      expect(builder.cancel()).toBe('cancelled');
       expect(builder.state).toBe('cancelled');
     });
 
@@ -691,51 +691,51 @@ describe('HTTPRequestBuilder', () => {
       );
     });
 
-    test('returns false when state is completed', async () => {
+    test('returns already_settled when state is completed', async () => {
       let wasCancelCalled = false;
 
       const { builder } = makeBuilder(undefined, (ctx) => {
         ctx.callbacks.setState('completed');
         ctx.callbacks.setCancelFn(() => {
           wasCancelCalled = true;
-          return true;
+          return 'cancelled';
         });
       });
 
       await builder.send();
-      expect(builder.cancel()).toBe(false);
+      expect(builder.cancel()).toBe('already_settled');
       expect(wasCancelCalled).toBe(false);
     });
 
-    test('returns false when state is cancelled', async () => {
+    test('returns already_cancelled when state is cancelled', async () => {
       let wasCancelCalled = false;
 
       const { builder } = makeBuilder(undefined, (ctx) => {
         ctx.callbacks.setState('cancelled');
         ctx.callbacks.setCancelFn(() => {
           wasCancelCalled = true;
-          return true;
+          return 'cancelled';
         });
       });
 
       await builder.send();
-      expect(builder.cancel()).toBe(false);
+      expect(builder.cancel()).toBe('already_cancelled');
       expect(wasCancelCalled).toBe(false);
     });
 
-    test('returns false when state is failed', async () => {
+    test('returns already_settled when state is failed', async () => {
       let wasCancelCalled = false;
 
       const { builder } = makeBuilder(undefined, (ctx) => {
         ctx.callbacks.setState('failed');
         ctx.callbacks.setCancelFn(() => {
           wasCancelCalled = true;
-          return true;
+          return 'cancelled';
         });
       });
 
       await builder.send();
-      expect(builder.cancel()).toBe(false);
+      expect(builder.cancel()).toBe('already_settled');
       expect(wasCancelCalled).toBe(false);
     });
   });

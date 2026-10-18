@@ -16,7 +16,11 @@ import {
   assertNoBrowserRestrictedHeaders,
   presentHeaderValue,
 } from './internal/header-utils';
-import { RequestTracker, cancelEntry } from './request-tracker';
+import {
+  RequestTracker,
+  cancelEntry,
+  cancelTrackedRequest,
+} from './request-tracker';
 import type { RequestInfo, TrackedRequest } from './request-tracker';
 import { HTTPRequestBuilder } from './http-request-builder';
 import { RequestInterceptorManager, isInterceptorCancel } from './interceptors';
@@ -87,6 +91,7 @@ import type {
   InterceptorPhase,
   ResponseObserverPhase,
   ErrorObserverPhase,
+  CancelResult,
 } from './types';
 import type {
   BuilderCallbacks,
@@ -680,8 +685,8 @@ export class BaseHTTPClient {
     // as it does after `client.cancel()`.
     // The builder's own state turns `cancelled` when the request settles, with its
     // response and error, as for every other outcome.
-    trackedCallbacks.setCancelFn((reason?: string): boolean =>
-      cancelEntry(trackedRequest, reason),
+    trackedCallbacks.setCancelFn((reason?: string): CancelResult =>
+      cancelTrackedRequest(trackedRequest, reason),
     );
 
     // Compose user signal with our internal abort controller. Every composition made

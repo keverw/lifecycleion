@@ -8,6 +8,7 @@ import { MockAdapter } from './adapters/mock-adapter';
 import { NodeAdapter } from './adapters/node-adapter';
 import type {
   AdapterRequest,
+  CancelResult,
   AdapterResponse,
   AdapterType,
   HTTPAdapter,
@@ -914,13 +915,13 @@ test('only the first cancel of a request in flight returns true', async () => {
   const sending = builder.send();
   await Promise.resolve();
 
-  expect(builder.cancel('first')).toBe(true);
-  expect(builder.cancel('second')).toBe(false);
+  expect(builder.cancel('first')).toBe('cancelled');
+  expect(builder.cancel('second')).toBe('already_cancelled');
 
   const response = await sending;
   expect(response.isCancelled).toBe(true);
   expect(builder.error?.cancelReason).toBe('first');
-  expect(builder.cancel()).toBe(false);
+  expect(builder.cancel()).toBe('already_cancelled');
 });
 
 test('a per-request retryNonIdempotentMethods must be a boolean', () => {
@@ -999,7 +1000,7 @@ test('a cancel counts only when it is what cancels the request', async () => {
 
   expect(client.cancel(builder.requestID, 'by client')).toBe(1);
   // Already cancelled, by the client.
-  expect(builder.cancel('by builder')).toBe(false);
+  expect(builder.cancel('by builder')).toBe('already_cancelled');
   expect(client.cancelAll()).toBe(0);
 
   await sending;
@@ -1069,7 +1070,7 @@ test("a request the caller's signal aborted is not counted by the client's cance
 
   expect(client.cancel(builder.requestID)).toBe(0);
   expect(client.cancelAll()).toBe(0);
-  expect(builder.cancel()).toBe(false);
+  expect(builder.cancel()).toBe('already_cancelled');
   await sending;
 });
 
@@ -1207,7 +1208,7 @@ test('a builder whose send() rejects is left failed, not sending', async () => {
 
   expect(rejection).toBeInstanceOf(Error);
   expect(builder.state).toBe('failed');
-  expect(builder.cancel()).toBe(false);
+  expect(builder.cancel()).toBe('already_settled');
   expect(() => client.get('/x').signal({ aborted: false } as never)).toThrow(
     'HTTPRequestBuilder signal must be an AbortSignal',
   );
@@ -2574,20 +2575,20 @@ test('a cancel that lands after the answer but before the request settles is hon
   const adapter = new MockAdapter();
   adapter.routes.get('/x', () => ({ status: 200 }));
   const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
-  let didCancel: boolean | undefined;
+  let cancelResult: CancelResult | undefined;
   const builder = client.get('/x', {
     onAttemptEnd: () => {
-      didCancel = builder.cancel('late');
+      cancelResult = builder.cancel('late');
     },
   });
 
   const response = await builder.send();
 
-  expect(didCancel).toBe(true);
+  expect(cancelResult).toBe('cancelled');
   expect(response.isCancelled).toBe(true);
   expect(builder.state).toBe('cancelled');
   expect(builder.error?.cancelReason).toBe('late');
-  expect(builder.cancel()).toBe(false);
+  expect(builder.cancel()).toBe('already_cancelled');
 });
 
 test('an interceptor that rewrites the caller request in place into another refusal is the interceptor error', async () => {
@@ -2622,16 +2623,16 @@ test('a late cancel on an answer that failed ends the request cancelled too', as
         }),
     },
   });
-  let didCancel: boolean | undefined;
+  let cancelResult: CancelResult | undefined;
   const builder = client.get('/x', {
     onAttemptEnd: () => {
-      didCancel = builder.cancel('late');
+      cancelResult = builder.cancel('late');
     },
   });
 
   const response = await builder.send();
 
-  expect(didCancel).toBe(true);
+  expect(cancelResult).toBe('cancelled');
   expect(response.isCancelled).toBe(true);
   expect(builder.state).toBe('cancelled');
   expect(builder.error?.cancelReason).toBe('late');
@@ -2643,17 +2644,17 @@ test('a cancel made before an early failure ends the request cancelled, as its t
     adapter: new MockAdapter(),
     baseURL: 'http://api.test',
   });
-  let didCancel: boolean | undefined;
+  let cancelResult: CancelResult | undefined;
   // eslint-disable-next-line prefer-const -- assigned after the interceptor that reads it
   let builder: ReturnType<HTTPClient['get']>;
   client.addRequestInterceptor(() => {
-    didCancel = builder.cancel('mine');
+    cancelResult = builder.cancel('mine');
     throw new Error('refresh failed');
   });
   builder = client.get('/x');
   const response = await builder.send();
 
-  expect(didCancel).toBe(true);
+  expect(cancelResult).toBe('cancelled');
   expect(response.isCancelled).toBe(true);
   expect(builder.state).toBe('cancelled');
   expect(builder.error?.cancelReason).toBe('mine');
@@ -2671,12 +2672,12 @@ test('a cancel made before an early failure ends the request cancelled, as its t
     followRedirects: true,
     cookieJar: jar,
   });
-  let didJarCancel: boolean | undefined;
+  let jarCancelResult: CancelResult | undefined;
   // eslint-disable-next-line prefer-const -- assigned after the observer that reads it
   let jarBuilder: ReturnType<HTTPClient['get']>;
   jarClient.addResponseObserver(
     () => {
-      didJarCancel = jarBuilder.cancel('mine');
+      jarCancelResult = jarBuilder.cancel('mine');
       jar.getCookieHeaderString = () => {
         throw new Error('jar broke');
       };
@@ -2686,7 +2687,7 @@ test('a cancel made before an early failure ends the request cancelled, as its t
   jarBuilder = jarClient.get('/a');
   const jarResponse = await jarBuilder.send();
 
-  expect(didJarCancel).toBe(true);
+  expect(jarCancelResult).toBe('cancelled');
   expect(jarResponse.isCancelled).toBe(true);
   expect(jarBuilder.state).toBe('cancelled');
 });
@@ -2886,7 +2887,7 @@ test('builder.cancel() marks the tracked request at once; the builder settles wi
   const pending = builder.send();
   await new Promise((resolve) => setTimeout(resolve, 5));
 
-  expect(builder.cancel('x')).toBe(true);
+  expect(builder.cancel('x')).toBe('cancelled');
   expect(client.listRequests().requests.map((entry) => entry.state)).toEqual([
     'cancelled',
   ]);
@@ -2932,16 +2933,16 @@ test('a cancel ends an interceptor chain, and an interceptor or factory cancel a
   cancelling.addRequestInterceptor(() => ({ cancel: true, reason: 'A' }), {
     phases: ['retry'],
   });
-  let didLateCancel: boolean | undefined;
+  let lateCancelResult: CancelResult | undefined;
   const builder: ReturnType<HTTPClient['get']> = cancelling.get('/flaky', {
     onAttemptEnd: ({ attemptNumber }) => {
       if (attemptNumber === 2) {
-        didLateCancel = builder.cancel('B');
+        lateCancelResult = builder.cancel('B');
       }
     },
   });
   await builder.send();
 
-  expect(didLateCancel).toBe(false);
+  expect(lateCancelResult).toBe('already_cancelled');
   expect(builder.error?.cancelReason).toBe('A');
 });

@@ -12,6 +12,7 @@ import type {
   AttemptStartEvent,
   AttemptEndEvent,
   RequestState,
+  CancelResult,
   HTTPClientError,
   StreamResponseFactory,
   RequestHeadersInput,
@@ -26,7 +27,7 @@ export interface BuilderCallbacks<T> {
   setNextRetryDelayMS: (delayMS: number | null) => void;
   setNextRetryAt: (timestampMS: number | null) => void;
   setStartedAt: (timestampMS: number) => void;
-  setCancelFn: (fn: (reason?: string) => boolean) => void;
+  setCancelFn: (fn: (reason?: string) => CancelResult) => void;
 }
 
 export interface BuilderSendContext<T = unknown> {
@@ -77,7 +78,7 @@ export class HTTPRequestBuilder<T = unknown> {
   private _nextRetryAt: number | null = null;
   private _startedAt: number | null = null;
   private _completedAt: number | null = null;
-  private _cancelFn: ((reason?: string) => boolean) | null = null;
+  private _cancelFn: ((reason?: string) => CancelResult) | null = null;
   private _preSendCancelReason: string | undefined = undefined;
 
   constructor(
@@ -311,32 +312,31 @@ export class HTTPRequestBuilder<T = unknown> {
   }
 
   /**
-   * Cancels the request. Returns true if the cancel was applied, false if it
-   * was a no-op (already completed, cancelled, or failed).
+   * Cancels the request, and says what that did (see {@link CancelResult}):
+   * `'cancelled'` when this call cancelled it, `'already_cancelled'` when something else
+   * had, and `'already_settled'` when it had already completed or failed.
    *
    * Calling cancel() before send() marks the builder as cancelled so that
    * send() throws instead of dispatching the request.
    */
-  public cancel(reason?: string): boolean {
-    if (
-      this._state === 'completed' ||
-      this._state === 'cancelled' ||
-      this._state === 'failed'
-    ) {
-      return false;
+  public cancel(reason?: string): CancelResult {
+    if (this._state === 'completed' || this._state === 'failed') {
+      return 'already_settled';
+    }
+    if (this._state === 'cancelled') {
+      return 'already_cancelled';
     }
 
     // Pre-send cancel: mark as cancelled so send() is blocked
     if (!this._sent) {
       this._state = 'cancelled';
       this._preSendCancelReason = reason;
-      return true;
+      return 'cancelled';
     }
 
-    // `true` only when this call is what cancelled a request in flight: one already
-    // cancelled - by an earlier call, `client.cancel()` or the caller's own signal - is
-    // left as it is, and answers `false` as a cancel after the request has ended does.
-    return this._cancelFn ? this._cancelFn(reason) : false;
+    // Answered by the request itself while it is in flight: `'cancelled'` only when this
+    // call is what cancelled it. With no cancel function left, the request has settled.
+    return this._cancelFn ? this._cancelFn(reason) : 'already_settled';
   }
 
   // --- Execute ---

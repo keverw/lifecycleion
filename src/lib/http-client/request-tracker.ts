@@ -1,5 +1,5 @@
 import { readUnknownMember } from '../internal/read-member';
-import type { RequestState } from './types';
+import type { CancelResult, RequestState } from './types';
 
 export interface TrackedRequest {
   requestID: string;
@@ -178,12 +178,23 @@ export function cancelEntry(
   entry: TrackedRequest,
   reason: string | undefined,
 ): boolean {
+  return cancelTrackedRequest(entry, reason) === 'cancelled';
+}
+
+/** As {@link cancelEntry}, saying why nothing was cancelled when nothing was. */
+export function cancelTrackedRequest(
+  entry: TrackedRequest,
+  reason: string | undefined,
+): CancelResult {
+  if (entry.state === 'completed' || entry.state === 'failed') {
+    return 'already_settled';
+  }
   if (isEntryPastCancel(entry)) {
-    return false;
+    return 'already_cancelled';
   }
   entry.state = 'cancelled';
   entry.abortController.abort(reason);
-  return true;
+  return 'cancelled';
 }
 
 /**
