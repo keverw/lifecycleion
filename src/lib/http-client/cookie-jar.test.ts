@@ -3222,3 +3222,10 @@ test('an edge-hyphen host keeps its Domain cookies and is cleared with its domai
   jar.clear('example.com', 'domain');
   expect(jar.getAllCookies()).toEqual([]);
 });
+
+test('an edge-hyphen host whose stand-in would read as a public suffix still gets its real apex', () => {
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader('t=1; Domain=prgmr.com', 'https://a.-en.prgmr.com/');
+
+  expect(jar.getCookieHeaderString('https://www.prgmr.com/')).toBe('t=1');
+});

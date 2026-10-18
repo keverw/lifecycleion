@@ -132,7 +132,7 @@ interface HTTPClientConfig {
   // Same rules for the per-request override, whose default is this value.
   cookieJar?: CookieJar | null; // Cookie management (null disables)
   retryPolicy?: RetryPolicyOptions; // Retry strategy (disabled by default)
-  retryNonIdempotentMethods?: boolean; // Default: false - do not retry POST/PATCH. See Non-Idempotent Methods
+  retryNonIdempotentMethods?: boolean; // Default: false - retry only the RFC 9110 idempotent methods (GET, HEAD, OPTIONS, TRACE, PUT, DELETE), not POST, PATCH or a custom one such as LOCK. See Non-Idempotent Methods
   includeRequestID?: boolean; // Default: false - sends x-local-client-request-id header
   includeAttemptHeader?: boolean; // Default: false - sends x-local-client-request-attempt header with the 1-based attempt number as a decimal string. The counter is global across redirect hops: attempt 2 on a redirect hop follows attempt 1 on the initial request, not reset per hop.
   userAgent?: string; // Auto-set to 'lifecycleion-http-client' for NodeAdapter and MockAdapter, and for FetchAdapter on server runtimes. Browsers block this header - constructor throws if set with FetchAdapter or XHRAdapter in a browser.

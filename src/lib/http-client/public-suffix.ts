@@ -272,21 +272,13 @@ export class PublicSuffixResolver {
     }
 
     // tldts reads no domain for a host with a hyphen at a label's edge
-    // (`-edge.example.com`), which the URL parser accepts and the jar keeps. Read the
-    // same labels with those hyphens stood in for, and take as many of the real ones:
-    // without it such a host was its own apex, so its `Domain=example.com` cookies were
-    // refused and a domain clear of `example.com` passed it by.
-    const hostLabels = normalized.split('.');
-    const standIn = hostLabels
-      .map((label) =>
-        label
-          .replace(/^-+/, (run) => 'x'.repeat(run.length))
-          .replace(/-+$/, (run) => 'x'.repeat(run.length)),
-      )
-      .join('.');
-    const standInDomain = parse(standIn, { allowPrivateDomains: true }).domain;
-    return standInDomain === null
-      ? normalized
-      : hostLabels.slice(-standInDomain.split('.').length).join('.');
+    // (`-edge.example.com`), which the URL parser accepts and the jar keeps: its hostname
+    // check refuses it. Read again without that check - the suffix lookup itself is the
+    // same - so such a host is under `example.com`, not its own apex: its
+    // `Domain=example.com` cookies are kept and a domain clear of `example.com` reaches it.
+    return (
+      parse(normalized, { allowPrivateDomains: true, validateHostname: false })
+        .domain ?? normalized
+    );
   }
 }
