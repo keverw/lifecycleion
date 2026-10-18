@@ -386,7 +386,7 @@ The response `Content-Type` header determines how the body is parsed. Only its m
 
 `send()` always resolves for request outcomes handled by the client runtime. HTTP errors (4xx/5xx), timeouts, cancels, transport failures, redirect control-flow failures, and other client-managed failure states all produce a settled `HTTPResponse` with no exception. Check `response.isFailed` for client-level failures and `response.status` for HTTP errors.
 
-`send()` rejects (returns a rejected promise) only for programming errors around builder/client usage: calling it on a disabled client, calling it a second time on the same builder, calling it after `builder.cancel()` was already called pre-send, or a value the caller supplied that throws while the request is set up, before any interceptor runs - a `params` getter, or a header value whose `toString` throws. The builder then ends `failed`, with no `error` and no error observers run.
+`send()` rejects (returns a rejected promise) only for programming errors around builder/client usage: calling it on a disabled client, calling it a second time on the same builder, calling it after `builder.cancel()` was already called pre-send, or a value the caller supplied that throws while the request is set up, before any interceptor runs - a `params` getter, or a header value whose `toString` throws. For a disabled client or a value that throws during setup, the builder then ends `failed`, with no `error` and no error observers run; the other two leave its state as it was.
 
 ```typescript
 const builder = client.get('/users/999');

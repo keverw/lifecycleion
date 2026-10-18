@@ -79,6 +79,8 @@ export class HTTPRequestBuilder<T = unknown> {
   private _startedAt: number | null = null;
   private _completedAt: number | null = null;
   private _cancelFn: ((reason?: string) => CancelResult) | null = null;
+  /** A cancel made after `send()` began but before the request could be cancelled. */
+  private _setupCancel: { reason: string | undefined } | null = null;
   private _preSendCancelReason: string | undefined = undefined;
 
   constructor(
@@ -335,8 +337,19 @@ export class HTTPRequestBuilder<T = unknown> {
     }
 
     // Answered by the request itself while it is in flight: `'cancelled'` only when this
-    // call is what cancelled it. With no cancel function left, the request has settled.
-    return this._cancelFn ? this._cancelFn(reason) : 'already_settled';
+    // call is what cancelled it.
+    if (this._cancelFn) {
+      return this._cancelFn(reason);
+    }
+
+    // `send()` is still setting the request up - caller code such as a header value's
+    // `toString` runs before the request can be cancelled - so the cancel is held and
+    // applied the moment it can be. Only the first is held; a later one finds it.
+    if (this._setupCancel) {
+      return 'already_cancelled';
+    }
+    this._setupCancel = { reason };
+    return 'cancelled';
   }
 
   // --- Execute ---
@@ -433,6 +446,10 @@ export class HTTPRequestBuilder<T = unknown> {
         },
         setCancelFn: (fn) => {
           this._cancelFn = fn;
+          // A cancel made while the request was being set up; see `cancel()`.
+          if (this._setupCancel) {
+            fn(this._setupCancel.reason);
+          }
         },
       },
     });

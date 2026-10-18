@@ -2965,3 +2965,62 @@ test("the tracker reads cancelled once the caller's own signal aborts", async ()
   ]);
   await pending;
 });
+
+test('a cancel made while send() sets the request up is applied, not dropped', async () => {
+  const sent: string[] = [];
+  const client = new HTTPClient({
+    baseURL: 'http://api.test',
+    adapter: {
+      getType: () => 'node',
+      send: (request: AdapterRequest) => {
+        sent.push(request.requestURL);
+        return Promise.resolve({ status: 200, headers: {}, body: null });
+      },
+    },
+  });
+  let cancelResult: CancelResult | undefined;
+  const builder: ReturnType<HTTPClient['get']> = client.get('/x').headers({
+    'x-a': {
+      toString() {
+        cancelResult ??= builder.cancel('setup');
+        return 'v';
+      },
+    } as unknown as string,
+  });
+
+  const response = await builder.send();
+
+  expect(cancelResult).toBe('cancelled');
+  expect(response.isCancelled).toBe(true);
+  expect(builder.error?.cancelReason).toBe('setup');
+  expect(sent).toEqual([]);
+});
+
+test('a redirect-phase interceptor cancel aborts the hop that answered', async () => {
+  const signals: AbortSignal[] = [];
+  const client = new HTTPClient({
+    baseURL: 'http://api.test',
+    followRedirects: true,
+    adapter: {
+      getType: () => 'node',
+      send: (request: AdapterRequest) => {
+        if (request.signal) {
+          signals.push(request.signal);
+        }
+        return Promise.resolve({
+          status: 307,
+          headers: { location: '/b' },
+          body: null,
+        });
+      },
+    },
+  });
+  client.addRequestInterceptor(() => ({ cancel: true }), {
+    phases: ['redirect'],
+  });
+
+  const response = await client.put('/a', { body: 'x' }).send();
+
+  expect(response.isCancelled).toBe(true);
+  expect(signals.map((signal) => signal.aborted)).toEqual([true]);
+});

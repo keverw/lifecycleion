@@ -1477,6 +1477,9 @@ export class BaseHTTPClient {
                 (isInterceptorCancel(redirectIntercept)
                   ? redirectIntercept.reason
                   : undefined);
+              // Marked as the retry phase's interceptor cancel is, which also aborts the
+              // hop that answered: an early 307 to a bodied PUT may still be uploading.
+              cancelEntry(trackedRequest, redirectCancelReason);
               if (redirectCancelReason !== undefined) {
                 cancelReason = redirectCancelReason;
               }
