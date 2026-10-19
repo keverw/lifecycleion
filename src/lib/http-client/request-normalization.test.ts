@@ -4430,3 +4430,22 @@ test('round 92: IPv4 entries read by the URL parser in origins and shorthand; up
   expect(validateConfigEntry('[::FFFF:127.0.0.1]', 'domain').valid).toBe(true);
   expect(validateConfigEntry('::FFFF:127.0.0.1', 'domain').valid).toBe(true);
 });
+
+test('round 93: IPv4-looking entries with userinfo or a path are refused; a padded default port matches', () => {
+  for (const entry of [
+    'user@10.0.0.1',
+    '10.0.0.1/x.5',
+    '10.0.0.1?a.1',
+    '10.0.0.1#.1',
+    '10.0.0.1\\x.1',
+  ]) {
+    expect(validateConfigEntry(entry, 'domain').valid).toBe(false);
+    expect(validateConfigEntry(`http://${entry}`, 'origin').valid).toBe(false);
+  }
+  expect(
+    matchesOriginList('http://example.com', ['http://example.com:080']),
+  ).toBe(true);
+  expect(matchesOriginList('http://10.0.0.1', ['http://10.0.0.1:080'])).toBe(
+    true,
+  );
+});

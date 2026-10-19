@@ -148,13 +148,13 @@ export function normalizeOrigin(origin: string): string {
       let portMatch = authority.match(/^(?:[^@]*@)?\[[^\]]+\]:(\d+)$/);
 
       if (portMatch) {
-        const explicit = portMatch[1];
+        const explicit = canonicalPortText(portMatch[1]);
         port = explicit === defaultPort ? '' : `:${explicit}`;
       } else {
         // Fallback for non-IPv6 authorities: detect :port after host
         portMatch = authority.match(/^(?:[^@]*@)?([^:]+):(\d+)$/);
         if (portMatch) {
-          const explicit = portMatch[2];
+          const explicit = canonicalPortText(portMatch[2]);
           port = explicit === defaultPort ? '' : `:${explicit}`;
         }
       }
@@ -1435,6 +1435,14 @@ export function isApexDomain(domain: string): boolean {
 }
 
 /**
+ * A port as the URL parser writes it - leading zeros dropped (`080` is `80`) - so the
+ * fallback below compares it with the default port as `url.port` would have.
+ */
+function canonicalPortText(digits: string): string {
+  return String(Number(digits));
+}
+
+/**
  * How the URL parser reads a host entry it takes for an IPv4 address, or `undefined` for
  * one it does not (a name, or IPv6).
  *
@@ -1449,7 +1457,11 @@ export function isApexDomain(domain: string): boolean {
 function readIPv4Entry(
   host: string,
 ): { address?: string; info?: string } | undefined {
-  if (host.includes(':') || host.startsWith('[')) {
+  // Only a bare host. The parse below reads a whole authority and keeps just its host, so
+  // `user@10.0.0.1`, `10.0.0.1/x.5` or `10.0.0.1?a.1` came back as a clean `10.0.0.1` -
+  // accepted, though the entry is no host and matches nothing. Left to the checks that
+  // refuse such characters.
+  if (host.includes(':') || host.startsWith('[') || /[@/\\?#\s]/.test(host)) {
     return undefined;
   }
 
