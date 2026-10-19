@@ -581,7 +581,7 @@ export class BaseHTTPClient {
     // Stamped by the upload-progress wrapper each attempt hands the adapter, and read by
     // the wait on `requestBodySettled` before the next dispatch: the bound on that wait
     // is a *stall* bound, not a deadline, so an upload that is still moving is never cut.
-    const uploadActivity: UploadActivity = { at: Date.now() };
+    const uploadActivity: UploadActivity = { at: performance.now() };
 
     // Merge headers
     const baseHeaders = mergeHeaders(
@@ -2445,7 +2445,7 @@ export class BaseHTTPClient {
       // the request. The wait checks the clock on entry (see
       // `settleUploadBeforeNextDispatch`), and without this stamp a progress-less
       // adapter's second hop was already "quiet" for the whole of the first.
-      uploadActivity.at = Date.now();
+      uploadActivity.at = performance.now();
 
       try {
         // Adopted, not awaited as it is: `HTTPAdapter` is a public extension point, and
@@ -2482,7 +2482,7 @@ export class BaseHTTPClient {
             onUploadProgress:
               onUploadProgress || (sentRequest.body ?? null) !== null
                 ? (e) => {
-                    uploadActivity.at = Date.now();
+                    uploadActivity.at = performance.now();
 
                     if (onUploadProgress) {
                       safeHandleCallback('onUploadProgress', onUploadProgress, {
@@ -4824,6 +4824,7 @@ type UploadSettleWait = 'settled' | 'cancelled' | 'deadline';
 
 /** When a request's upload last reported progress, as epoch ms. One per request. */
 interface UploadActivity {
+  /** `performance.now()` of the last upload progress, so a wall-clock step cannot fake a stall or hide one. */
   at: number;
 }
 
@@ -4887,7 +4888,7 @@ async function settleUploadBeforeNextDispatch(
     // measured from that report, and the timer sleeps for the remainder.
     const arm = (sinceMS: number): void => {
       deadlineID = setTimeout(() => {
-        const quietForMS = Date.now() - lastActivityAt();
+        const quietForMS = performance.now() - lastActivityAt();
 
         if (quietForMS >= stallMS) {
           resolve('deadline');
@@ -4903,7 +4904,7 @@ async function settleUploadBeforeNextDispatch(
     // runs through the timer: an already-completed upload must get its promise callbacks
     // processed before we declare it stalled. A pending upload is checked next tick,
     // without granting it another full stall window.
-    const quietOnEntryMS = Date.now() - lastActivityAt();
+    const quietOnEntryMS = performance.now() - lastActivityAt();
     arm(stallMS - Math.max(0, quietOnEntryMS));
   });
 

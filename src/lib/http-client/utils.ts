@@ -730,6 +730,13 @@ function hasXMLHttpRequestGlobal(): boolean {
   );
 }
 
+/** The first of a `Location` that fetch joined from repeated headers, or the value whole. */
+function firstJoinedLocation(value: string): string {
+  const separator = value.search(/, (?:\/|[a-z][a-z\d+.-]*:)/i);
+
+  return separator === -1 ? value : value.slice(0, separator);
+}
+
 /**
  * Converts a Headers object (from fetch) into AdapterResponse headers.
  * `set-cookie` is extracted as `string[]` via `getSetCookie()` — the Fetch API
@@ -745,13 +752,15 @@ export function extractFetchHeaders(
     const lower = key.toLowerCase();
 
     if (lower !== 'set-cookie') {
-      // A repeated `Location` arrives joined as `a, b`, which no URL can be - a URL
-      // carries no raw space - so its first value is kept, as Node's `res.headers` keeps
-      // it, rather than followed as the one mangled URL `a,%20b`.
+      // A repeated `Location` arrives joined as `a, b`; its first value is kept, as Node's
+      // `res.headers` keeps it, rather than followed as the one mangled URL `a,%20b`. Only
+      // when what follows the `, ` starts as a URL target does - a path or a scheme: a
+      // single value with a raw space (`/files/Smith, John.pdf`) is kept whole and
+      // percent-encoded when followed, as NodeAdapter and browsers follow it.
       defineEntry(
         result,
         lower,
-        lower === 'location' ? value.split(', ', 1)[0] : value,
+        lower === 'location' ? firstJoinedLocation(value) : value,
       );
     }
   }

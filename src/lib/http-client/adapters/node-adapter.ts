@@ -1668,10 +1668,12 @@ export class NodeAdapter implements HTTPAdapter {
             });
 
             res.on('end', () => {
-              activeBufferedResponse = undefined;
-
               // Final 100% download event — skipped when the last `data` chunk
               // already reported it (Content-Length known, body filled exactly).
+              // Sent while the response is still the active one, as the `data` handler's
+              // is: a cancel from it then fails the request with the answer's status and
+              // headers, so its `Set-Cookie` is stored whether or not a Content-Length
+              // let the 100% event fire from a chunk.
               if (!didFireDownload100) {
                 guardedDownloadProgress?.({
                   loaded: loadedBytes,
@@ -1679,6 +1681,8 @@ export class NodeAdapter implements HTTPAdapter {
                   progress: 1,
                 });
               }
+
+              activeBufferedResponse = undefined;
 
               const body =
                 chunks.length > 0

@@ -4017,3 +4017,43 @@ test('round 83: a stream factory that fails after headers keeps the cookie and s
     globalThis.removeEventListener('error', onError);
   }
 });
+
+test('round 84: a cancel from the final download event of a chunked body keeps its cookie; a single Location with ", " is kept whole', async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'set-cookie': 'sid=abc; Path=/' });
+    res.write('he');
+    res.end('llo');
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const jar = new CookieJar();
+    const builder = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      cookieJar: jar,
+    }).get('/chunked');
+    builder.onDownloadProgress((event) => {
+      if (event.progress === 1) {
+        builder.cancel();
+      }
+    });
+    await builder.send();
+    expect(builder.error?.code).toBe('cancelled');
+    expect(jar.getCookieHeaderString(`${baseURL}/`)).toBe('sid=abc');
+  } finally {
+    server.close();
+  }
+
+  const single = new Headers({ location: '/files/Smith, John.pdf' });
+  expect(extractFetchHeaders(single).location).toBe('/files/Smith, John.pdf');
+  for (const [first, second] of [
+    ['/a', '/b'],
+    ['https://x.test/a', 'https://y.test/b'],
+  ]) {
+    const repeated = new Headers();
+    repeated.append('location', first);
+    repeated.append('location', second);
+    expect(extractFetchHeaders(repeated).location).toBe(first);
+  }
+});
