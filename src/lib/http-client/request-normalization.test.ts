@@ -18,6 +18,7 @@ import { CookieJar } from './cookie-jar';
 import { MockAdapter } from './adapters/mock-adapter';
 import type { MockRequest } from './adapters/mock-adapter';
 import { NodeAdapter } from './adapters/node-adapter';
+import { FetchAdapter } from './adapters/fetch-adapter';
 import type {
   AdapterRequest,
   CancelResult,
@@ -4152,4 +4153,65 @@ test('round 85: undispatched redirects, cross-origin Range, 303 body, Location h
   await disabled.send();
   expect(disabled.error?.code).toBe('redirect_disabled');
   expect(disabled.error?.detectedRedirectURL).toBe('http://a.test/x');
+});
+
+test('round 86: multipart names as fetch sends them, an unreadable file is not retried, Transfer-Encoding refused', async () => {
+  const received: Array<{ field: string; filename: string }> = [];
+  const server = http.createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on('data', (chunk: Buffer) => chunks.push(chunk));
+    req.on('error', () => {});
+    req.on('end', () => {
+      void new Response(Buffer.concat(chunks), {
+        headers: { 'content-type': req.headers['content-type'] ?? '' },
+      })
+        .formData()
+        .then((form) => {
+          for (const [field, value] of form.entries()) {
+            received.push({
+              field,
+              filename: typeof value === 'string' ? '' : (value as File).name,
+            });
+          }
+          res.end('ok');
+        })
+        .catch(() => res.end('bad'));
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const client = new HTTPClient({ adapter: new NodeAdapter(), baseURL });
+    const form = new FormData();
+    form.append('a"b\\c', new File(['x'], '日本語 "v2".pdf'));
+    form.append('cv', new File(['y'], 'résumé.pdf'));
+    await client.post('/upload').formData(form).send();
+    const viaNode = received.splice(0);
+    await new HTTPClient({ adapter: new FetchAdapter(), baseURL })
+      .post('/upload')
+      .formData(form)
+      .send();
+    expect(viaNode).toEqual(received);
+    expect(viaNode[1]).toEqual({ field: 'cv', filename: 'résumé.pdf' });
+
+    const missing = new FormData();
+    missing.append('f', Bun.file('/nonexistent/round-86'));
+    const unreadable = client
+      .put('/upload')
+      .formData(missing)
+      .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 3, delayMS: 1 });
+    await unreadable.send();
+    expect(unreadable.error?.code).toBe('adapter_error');
+    expect(unreadable.attemptCount).toBe(1);
+
+    const framed = client
+      .post('/upload')
+      .headers({ 'transfer-encoding': 'chunked' })
+      .text('hello');
+    await framed.send();
+    expect(framed.error?.code).toBe('adapter_error');
+    expect(framed.attemptCount).toBe(1);
+  } finally {
+    server.close();
+  }
 });

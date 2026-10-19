@@ -44,117 +44,35 @@ import type { AdapterProgressEvent } from '../types';
 import type { RequestBodyWritable } from './request-body-writable';
 
 /**
- * Formats the filename parameter for a multipart Content-Disposition header.
+ * Escape a field name or filename for its quoted Content-Disposition parameter, as the
+ * WHATWG multipart/form-data encoding does and as `fetch` sends a `FormData` (undici,
+ * Bun, browsers): `"`, CR and LF are percent-encoded, nothing is backslash-escaped, and
+ * the name is otherwise sent as UTF-8.
  *
- * Every filename includes a quoted `filename="<fallback>"` parameter so older
- * multipart parsers still see a usable name.
- *
- * When the original name is not already safe printable ASCII, we also emit an
- * RFC 5987 `filename*=` parameter carrying the exact UTF-8 filename:
- *
- *   filename*=UTF-8''<percent-encoded-name>
- *
- * Including both forms maximizes compatibility: RFC 5987-aware parsers use
- * `filename*=` to recover the exact original filename, while older or lenient
- * parsers can still fall back to the sanitized ASCII `filename=` value.
- * Servers that normalize, strip, or rename uploads on their side will use
- * whichever form they support.
- *
- * The quoted `filename=` fallback is intentionally ASCII-safe and lossy when
- * needed. That avoids parser-dependent handling of quoted-string escaping while
- * still preserving a broadly compatible fallback for runtimes that ignore
- * `filename*=`.
- *
- * The RFC 5987 encoding here is `encodeURIComponent(...)` plus escaping for
- * `'`, `(`, `)`, and `*`, which must also be percent-encoded.
+ * Matched exactly rather than improved on, because the servers on the other end parse
+ * what browsers send. RFC 7578 4.2 forbids `filename*=` in multipart/form-data and the
+ * WHATWG parsers (Bun, undici/Node, Deno, Workers) ignore it, so the RFC 5987 form and
+ * the lossy ASCII fallback this used to send turned `résumé.pdf` into `resume.pdf` and
+ * `日本語.pdf` into `.pdf` there; and a backslash-escaped `a\"b` reached them as `a\\"b`.
+ * With CR and LF encoded a name still cannot start a header of its own.
  */
-function formatFilename(filename: string): string {
-  const fallback = toSafeASCIIQuotedFilenameFallback(filename);
-  const base = isSafeASCIIQuotedFilename(filename)
-    ? `filename="${filename}"`
-    : `filename="${fallback}"`;
-
-  if (isSafeASCIIQuotedFilename(filename)) {
-    return base;
-  }
-
-  const encoded = encodeURIComponent(filename)
-    .replace(/'/g, '%27')
-    .replace(/\(/g, '%28')
-    .replace(/\)/g, '%29')
-    .replace(/\*/g, '%2A');
-
-  return `${base}; filename*=UTF-8''${encoded}`;
+function escapeDispositionValue(value: string): string {
+  return value.replace(/\n/g, '%0A').replace(/\r/g, '%0D').replace(/"/g, '%22');
 }
 
-function isSafeASCIIQuotedFilename(value: string): boolean {
-  return /^[\u0020-\u007E]+$/.test(value) && !/["\\]/.test(value);
+/** Line breaks as CRLF, as the WHATWG encoding writes field names and string values. */
+function normalizeLinefeeds(value: string): string {
+  return value.replace(/\r?\n|\r/g, '\r\n');
 }
 
-function toSafeASCIIQuotedFilenameFallback(value: string): string {
-  const normalized = value.normalize('NFKD');
-  let result = '';
-  let wasUnderscore = false;
-
-  for (const char of normalized) {
-    const code = char.charCodeAt(0);
-
-    // Drop combining marks introduced by NFKD decomposition.
-    if (code >= 0x0300 && code <= 0x036f) {
-      continue;
-    }
-
-    // Allow a narrow filename-safe ASCII subset in the quoted fallback.
-    // Everything else collapses to `_` so older parsers still get a stable,
-    // unambiguous name without needing quoted-string escaping.
-    const isSafeASCII =
-      // 0-9
-      (code >= 0x30 && code <= 0x39) ||
-      // A-Z
-      (code >= 0x41 && code <= 0x5a) ||
-      // a-z
-      (code >= 0x61 && code <= 0x7a) ||
-      char === '.' ||
-      char === '-' ||
-      char === '_';
-
-    if (isSafeASCII) {
-      result += char;
-      wasUnderscore = false;
-    } else if (!wasUnderscore) {
-      result += '_';
-      wasUnderscore = true;
-    }
-  }
-
-  result = result.replace(/^_+|_+$/g, '');
-
-  // Avoid an empty fallback if every character was replaced.
-  return result.length > 0 ? result : 'file';
-}
-
-/**
- * Formats a multipart field name for the quoted `name="..."` parameter.
- *
- * Field names are not lossy-sanitized like filenames because servers typically
- * expect the original key. We preserve the name while making it safe for a
- * quoted-string parameter by:
- *   1. Collapsing CRLF / CR / LF sequences to a single space so a malicious
- *      key cannot inject new headers
- *   2. Stripping remaining control characters (0x00–0x08, 0x0B, 0x0C,
- *      0x0E–0x1F, 0x7F) that are invalid inside a quoted-string per
- *      RFC 7230 §3.2.6
- *   3. Escaping `\` and `"` per quoted-string rules
- */
+/** A field name as the WHATWG encoding writes it: line breaks normalized, then escaped. */
 function formatFieldName(name: string): string {
-  return (
-    name
-      .replace(/\r\n|\r|\n/g, ' ')
-      // eslint-disable-next-line no-control-regex
-      .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, '')
-      .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"')
-  );
+  return escapeDispositionValue(normalizeLinefeeds(name));
+}
+
+/** A filename as the WHATWG encoding writes it: escaped, never renamed. */
+function formatFilename(filename: string): string {
+  return `filename="${escapeDispositionValue(filename)}"`;
 }
 
 /**
@@ -224,7 +142,7 @@ function measureMultipartFormData(
       //   raw string value
       //   trailing CRLF before the next boundary
       size += Buffer.byteLength(
-        `Content-Disposition: form-data; name="${fieldName}"\r\n\r\n${value}\r\n`,
+        `Content-Disposition: form-data; name="${fieldName}"\r\n\r\n${normalizeLinefeeds(value)}\r\n`,
       );
     } else {
       const filename = (value as File).name || 'blob';
@@ -439,7 +357,7 @@ export async function serializeMultipartFormData(
     if (typeof value === 'string') {
       // Simple field: one header, blank line, then the field value.
       await write(
-        `Content-Disposition: form-data; name="${fieldName}"\r\n\r\n${value}\r\n`,
+        `Content-Disposition: form-data; name="${fieldName}"\r\n\r\n${normalizeLinefeeds(value)}\r\n`,
       );
     } else {
       const filename = (value as File).name || 'blob';
@@ -462,9 +380,16 @@ export async function serializeMultipartFormData(
 
       // Blob.stream() lets us forward large files piece-by-piece instead of
       // concatenating the whole payload into a single upload buffer.
-      const reader = (value as Blob)
-        .stream()
-        .getReader() as ReadableStreamDefaultReader<Uint8Array>;
+      // Opening it can fail as a read can (Bun opens a missing file here): see
+      // `sourceReadFailure` below.
+      let reader: ReadableStreamDefaultReader<Uint8Array>;
+      try {
+        reader = (value as Blob)
+          .stream()
+          .getReader() as ReadableStreamDefaultReader<Uint8Array>;
+      } catch (error) {
+        throw sourceReadFailure(error);
+      }
 
       try {
         while (true) {
@@ -480,6 +405,12 @@ export async function serializeMultipartFormData(
 
           try {
             ({ done: isDone, value: chunk } = await reader.read());
+          } catch (error) {
+            // The caller's source failed - a `File` whose backing file is gone or
+            // unreadable - and it fails the same way on every attempt, as a source that
+            // changed size does: not a network error to retry, re-sending the headers
+            // and first boundary each time.
+            throw sourceReadFailure(error);
           } finally {
             onSourceWait?.(false);
           }
@@ -605,6 +536,13 @@ async function cancelReaderQuietly(
  */
 function sourceMismatch(message: string): Error {
   const error = new Error(message);
+  markNonRetryableAdapterError(error);
+  return error;
+}
+
+/** A body source whose read failed, with that failure as its `cause`. Non-retryable. */
+function sourceReadFailure(cause: unknown): Error {
+  const error = new Error('Request body source could not be read', { cause });
   markNonRetryableAdapterError(error);
   return error;
 }

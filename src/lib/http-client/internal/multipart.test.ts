@@ -189,7 +189,7 @@ describe('serializeMultipartFormData', () => {
     expect(body).toContain('alice');
   });
 
-  test('escapes quoted field names and strips CRLF from multipart headers', async () => {
+  test('percent-encodes quotes and line breaks in field names, as fetch does', async () => {
     const fd = new FormData();
     fd.append('meta"\r\nX-Bad: yes', 'value');
     const { req, getBody } = makeCapture();
@@ -198,7 +198,7 @@ describe('serializeMultipartFormData', () => {
     await serializeMultipartFormData(fd, req, boundary);
 
     const body = getBody().toString('utf8');
-    expect(body).toContain('name="meta\\" X-Bad: yes"');
+    expect(body).toContain('name="meta%22%0D%0AX-Bad: yes"');
     expect(body).not.toContain('name="meta"\r\nX-Bad: yes"');
   });
 
@@ -232,10 +232,10 @@ describe('serializeMultipartFormData', () => {
     await serializeMultipartFormData(fd, req, boundary);
 
     const body = getBody().toString('utf8');
-    expect(body).toContain('name="up\\" load"; filename="photo.jpg"');
+    expect(body).toContain('name="up%22%0D%0Aload"; filename="photo.jpg"');
   });
 
-  test('non-ASCII filename uses ASCII fallback plus RFC 5987 filename* form', async () => {
+  test('non-ASCII filename is sent as UTF-8 with no filename* form', async () => {
     const fd = new FormData();
     fd.append(
       'cv',
@@ -248,8 +248,8 @@ describe('serializeMultipartFormData', () => {
     await serializeMultipartFormData(fd, req, boundary);
 
     const body = getBody().toString('utf8');
-    expect(body).toContain('filename="resume.pdf"');
-    expect(body).toContain("filename*=UTF-8''r%C3%A9sum%C3%A9.pdf");
+    expect(body).toContain('filename="résumé.pdf"');
+    expect(body).not.toContain('filename*=');
   });
 
   test('non-ASCII filename: size matches actual byte length', async () => {
@@ -302,7 +302,7 @@ describe('serializeMultipartFormData', () => {
     expect(body).not.toContain('filename*=UTF-8');
   });
 
-  test('quoted filenames use sanitized fallback plus filename*', async () => {
+  test('quotes in filenames are percent-encoded, as fetch does', async () => {
     const fd = new FormData();
     fd.append(
       'doc',
@@ -315,8 +315,8 @@ describe('serializeMultipartFormData', () => {
     await serializeMultipartFormData(fd, req, boundary);
 
     const body = getBody().toString('utf8');
-    expect(body).toContain('filename="my_draft_.txt"');
-    expect(body).toContain("filename*=UTF-8''my%20%22draft%22.txt");
+    expect(body).toContain('filename="my %22draft%22.txt"');
+    expect(body).not.toContain('filename*=');
   });
 
   test('file with no type defaults to application/octet-stream', async () => {
@@ -667,7 +667,7 @@ describe('serializeMultipartFormData', () => {
     expect(caught?.message).toBe('Simulated write error');
   });
 
-  test('strips control characters from field names', async () => {
+  test('keeps other control characters in field names, as fetch does', async () => {
     const fd = new FormData();
     fd.append('field\u0000\u0001\u0008name', 'value');
     const { req, getBody } = makeCapture();
@@ -676,12 +676,10 @@ describe('serializeMultipartFormData', () => {
     await serializeMultipartFormData(fd, req, boundary);
 
     const body = getBody().toString('utf8');
-    expect(body).toContain('name="fieldname"');
-    expect(body).not.toContain('\u0000');
-    expect(body).not.toContain('\u0001');
+    expect(body).toContain('name="field\u0000\u0001\u0008name"');
   });
 
-  test('strips control characters from field names: size matches byte length', async () => {
+  test('control characters in field names: size matches byte length', async () => {
     const fd = new FormData();
     fd.append('field\u0000\u007Fname', 'value');
 

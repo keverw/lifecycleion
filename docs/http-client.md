@@ -257,6 +257,10 @@ const response = await client
 
 > **Note:** Passing `null` or `undefined` to any body method, including `.json()`, always results in no body and no `Content-Type`. This applies across all methods since serialization is type-based, not method-based. To send a JSON primitive - `null`, a string, a number - serialize it yourself and say what it is: `.body(JSON.stringify(value)).headers({ 'content-type': 'application/json' })`.
 
+**The body is held by reference, not copied.** Request interceptors are handed it unserialized, so it is serialized when each attempt is dispatched, as axios serializes after its interceptors. Changing the object, `Uint8Array` or `FormData` you passed before the request settles changes what is sent - including on a retry or a `307`/`308` replay. Pass a fresh value per request (or `structuredClone` it) if you reuse one.
+
+`NodeAdapter` writes a `FormData` body as `fetch` does (the WHATWG multipart encoding): field names and filenames as UTF-8, with `"`, CR and LF percent-encoded, and no `filename*=`, so a server reads the same names whichever adapter sent them. A file part whose `File` cannot be read (missing, a directory, no permission) fails the request as a non-retryable `adapter_error` with the read failure as its cause. A caller-set `Transfer-Encoding` header is refused by `NodeAdapter`, which frames every body with a `Content-Length` itself.
+
 ### Query Parameters
 
 Parameters passed via `.params()` are merged into the URL query string using the `qs` library, which supports nested objects and arrays.

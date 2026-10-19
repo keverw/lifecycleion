@@ -394,6 +394,21 @@ export class NodeAdapter implements HTTPAdapter {
     // uncaught exception and the send would never settle. See `snapshotAdapterRequest`.
     const request = snapshotAdapterRequest(adapterRequest);
 
+    // This adapter frames every body itself with a `Content-Length`. A caller's
+    // `Transfer-Encoding` went out beside it - both on one message, which RFC 9112 6.1
+    // forbids a sender to do: strict servers answer 400, and a lenient proxy chain can
+    // read the two framings differently (request smuggling). Refused, as undici refuses
+    // it, and not retried: every attempt carries the same header.
+    for (const name of Object.keys(request.headers)) {
+      if (name.toLowerCase() === 'transfer-encoding') {
+        const refusal = new TypeError(
+          'NodeAdapter frames request bodies itself; a Transfer-Encoding request header is not supported',
+        );
+        markNonRetryableAdapterError(refusal);
+        throw refusal;
+      }
+    }
+
     // Guarded once, at the boundary, so every call site below is covered - including the
     // ones handed to `streamResponseBody`, `writeRequestBodyChunked` and
     // `serializeMultipartFormData`. Progress reporting is advisory and must not be able to

@@ -4896,7 +4896,7 @@ describe('NodeAdapter via HTTPClient', () => {
     expect(res.body.fields.avatar).toBe('[File: avatar.png]');
   });
 
-  test('FormData with non-ASCII filename falls back to sanitized filename in Bun parser', async () => {
+  test('FormData with non-ASCII filename reaches the Bun parser intact', async () => {
     const fd = new FormData();
     fd.append(
       'cv',
@@ -4909,7 +4909,7 @@ describe('NodeAdapter via HTTPClient', () => {
       .send<{ received: boolean; fields: Record<string, string> }>();
 
     expect(res.status).toBe(200);
-    expect(res.body.fields.cv).toBe('[File: resume.pdf]');
+    expect(res.body.fields.cv).toBe('[File: résumé.pdf]');
   });
 
   // --- redirects ---
