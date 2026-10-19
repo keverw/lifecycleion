@@ -130,7 +130,13 @@ export function readURLParserIPv4(
     return undefined;
   }
 
-  const lastLabel = mapped.slice(0, -'.a'.length).split('.').at(-1) ?? '';
+  // WHATWG's "ends in a number" drops one empty last label first: a trailing dot that
+  // appears only once decoded (`127.0.0.1%2e`) still leaves `1` as the last label.
+  const labels = mapped.slice(0, -'.a'.length).split('.');
+  if (labels.length > 1 && labels.at(-1) === '') {
+    labels.pop();
+  }
+  const lastLabel = labels.at(-1) ?? '';
 
   if (!/^(?:\d+|0x[0-9a-f]*)$/i.test(lastLabel)) {
     return undefined;

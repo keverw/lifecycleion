@@ -119,6 +119,19 @@ export function normalizeOrigin(origin: string): string {
     return '';
   }
 
+  // A percent-encoded host (`https://ex%61mple.com`) is refused, as `validateConfigEntry`
+  // refuses it: no browser sends one in an `Origin`, and reading it decoded here made an
+  // entry the validator rejects match all the same. An IPv6 literal's `%25` zone is left
+  // to the IPv6 handling below.
+  const earlySchemeSep = normalizedOrigin.indexOf('://');
+  if (earlySchemeSep !== -1) {
+    const earlyAuthority = extractAuthority(normalizedOrigin, earlySchemeSep);
+    const earlyHost = earlyAuthority.slice(earlyAuthority.lastIndexOf('@') + 1);
+    if (!earlyHost.startsWith('[') && earlyHost.includes('%')) {
+      return '';
+    }
+  }
+
   const url = safeParseURL(normalizedOrigin);
   if (url) {
     // Only normalize bare origins. Allow a single trailing slash so callers
@@ -980,7 +993,17 @@ export function validateConfigEntry(
     return { valid: true, info, wildcardKind: 'subdomain' };
   }
 
-  // Exact origin: allow any scheme; validate host as domain or IP
+  // Exact origin: allow any scheme; validate host as domain or IP. Every acceptance
+  // below is held to what the matcher can match - see `exactOriginVerdict`.
+  const exactOriginVerdict = (result: ValidationResult): ValidationResult =>
+    result.valid && normalizeOrigin(raw) === ''
+      ? {
+          valid: false,
+          info: 'origin is not one the URL parser reads as written (it can never match)',
+          wildcardKind: 'none',
+        }
+      : result;
+
   if (host.startsWith('[')) {
     const bracketContent = host.slice(1, -1);
 
@@ -997,7 +1020,7 @@ export function validateConfigEntry(
         ? undefined
         : 'non-http(s) scheme; CORS may not match';
 
-    return { valid: true, info, wildcardKind: 'none' };
+    return exactOriginVerdict({ valid: true, info, wildcardKind: 'none' });
   }
 
   const hostDots = toAsciiDots(host);
@@ -1029,11 +1052,11 @@ export function validateConfigEntry(
     const notes = [hostIPv4?.info, schemeInfo].filter(
       (note): note is string => note !== undefined,
     );
-    return {
+    return exactOriginVerdict({
       valid: true,
       info: notes.length > 0 ? notes.join('; ') : undefined,
       wildcardKind: 'none',
-    };
+    });
   }
 
   // Domain host
@@ -1060,7 +1083,7 @@ export function validateConfigEntry(
     scheme === 'http' || scheme === 'https'
       ? undefined
       : 'non-http(s) scheme; CORS may not match';
-  return { valid: true, info, wildcardKind: 'none' };
+  return exactOriginVerdict({ valid: true, info, wildcardKind: 'none' });
 }
 
 /**

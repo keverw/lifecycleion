@@ -4558,3 +4558,23 @@ test('round 100: an opaque origin with Unicode dots is refused before the IP bra
   expect(validateConfigEntry('foo://1.2.3.4', 'origin').valid).toBe(true);
   expect(matchesOriginList('foo://1.2.3.4', ['foo://1.2.3.4'])).toBe(true);
 });
+
+test('round 101: a decoded trailing dot after an IPv4 address, file: origins, percent-encoded origin hosts', () => {
+  expect(normalizeDomain('127.0.0.1%2e')).toBe('127.0.0.1');
+  expect(matchesDomainList('127.0.0.1', ['127.0.0.1%2e'])).toBe(true);
+  expect(validateConfigEntry('1.2.3.%34%2e', 'domain').valid).toBe(true);
+
+  for (const entry of ['file://localhost', 'file://a.com:8080']) {
+    expect(validateConfigEntry(entry, 'origin').valid).toBe(false);
+    expect(matchesOriginList(entry, [entry])).toBe(false);
+  }
+
+  for (const entry of ['https://%31.b', 'https://ex%61mple.com']) {
+    expect(validateConfigEntry(entry, 'origin').valid).toBe(false);
+    expect(matchesOriginList(entry, [entry])).toBe(false);
+  }
+  expect(validateConfigEntry('https://example.com', 'origin').valid).toBe(true);
+  expect(
+    matchesOriginList('https://example.com', ['https://example.com']),
+  ).toBe(true);
+});
