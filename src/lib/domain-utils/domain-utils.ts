@@ -4,6 +4,7 @@ import {
   hasPartialLabelWildcard,
   checkDNSLength,
   normalizeDomain,
+  normalizeDomainLabel,
   isIPv6,
   toAsciiDots,
   canonicalizeBracketedIPv6Content,
@@ -530,7 +531,7 @@ export function validateConfigEntry(
         return false;
       }
 
-      const nd = normalizeDomain(lbl);
+      const nd = normalizeDomainLabel(lbl);
 
       if (nd === '') {
         return false;
@@ -1079,7 +1080,7 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
         return false;
       }
 
-      const nd = normalizeDomain(lbl);
+      const nd = normalizeDomainLabel(lbl);
       if (nd === '') {
         return false;
       }
@@ -1455,8 +1456,12 @@ function canonicalPortText(digits: string): string {
  * never be a URL's host and comes back with no `address`: it is invalid.
  */
 function readIPv4Entry(
-  host: string,
+  rawHost: string,
 ): { address?: string; info?: string } | undefined {
+  // Mapped as the URL parser maps a host before reading it: fullwidth digits are ASCII
+  // digits to it, so `192.168.1.0８` is the refused `192.168.1.08`.
+  const host = rawHost.normalize('NFKC');
+
   // Only a bare host. The parse below reads a whole authority and keeps just its host, so
   // `user@10.0.0.1`, `10.0.0.1/x.5` or `10.0.0.1?a.1` came back as a clean `10.0.0.1` -
   // accepted, though the entry is no host and matches nothing. Left to the checks that

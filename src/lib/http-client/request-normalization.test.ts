@@ -3214,10 +3214,9 @@ test('a held setup cancel answers consistently, and a first cancel keeps its own
 
 test('round 56: numeric IPv4 host entries, label null, and a FormData changed mid-upload', async () => {
   const client = new HTTPClient();
+  // Read as the URL parser reads them - `127.0.0.1` - by the matcher too, so accepted.
   for (const pattern of ['2130706433', '0x7f000001']) {
-    expect(() =>
-      client.addResponseObserver(() => {}, { hosts: [pattern] }),
-    ).toThrow(/127\.0\.0\.1/);
+    client.addResponseObserver(() => {}, { hosts: [pattern] })();
   }
   client.addResponseObserver(() => {}, { hosts: ['127.0.0.1'] })();
 
@@ -4448,4 +4447,20 @@ test('round 93: IPv4-looking entries with userinfo or a path are refused; a padd
   expect(matchesOriginList('http://10.0.0.1', ['http://10.0.0.1:080'])).toBe(
     true,
   );
+});
+
+test('round 94: single-number and fullwidth IPv4 entries are read as the URL parser reads them', () => {
+  for (const entry of ['2130706433', '0x7f000001', '017700000001']) {
+    expect(validateConfigEntry(entry, 'domain').info).toContain('127.0.0.1');
+    expect(normalizeDomain(entry)).toBe('127.0.0.1');
+    expect(matchesOriginList('http://127.0.0.1', [entry])).toBe(true);
+  }
+  expect(validateConfigEntry('*.127.0.0.1', 'origin').valid).toBe(false);
+  expect(validateConfigEntry('*.127.0.0.1', 'domain').valid).toBe(false);
+  expect(
+    validateConfigEntry('１９２.１６８.００１.０１０', 'domain').info,
+  ).toContain('192.168.1.8');
+  expect(validateConfigEntry('192.168.1.0８', 'domain').valid).toBe(false);
+  expect(validateConfigEntry('example.com', 'domain').valid).toBe(true);
+  expect(normalizeDomain('example.com')).toBe('example.com');
 });

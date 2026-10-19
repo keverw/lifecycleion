@@ -98,11 +98,19 @@ export function isIPAddress(str: string): boolean {
   return isIPv4(str) || isIPv6(str);
 }
 
-function canonicalizeIPAddressLiteral(host: string): string | null {
+function canonicalizeIPAddressLiteral(rawHost: string): string | null {
+  // Read as the URL parser reads a host: its IDNA mapping turns fullwidth digits and dots
+  // into ASCII before it asks whether the host is an address, and a single label that is
+  // a number (`2130706433`, `0x7f000001`) is an IPv4 address to it as much as a dotted one
+  // - `http://2130706433/` is `127.0.0.1`. Only for a whole host: the labels of a wildcard
+  // pattern go through `normalizeDomainLabel`, which never asks, so the `127` of
+  // `*.127.0.0.1` stays a label rather than becoming the address `0.0.0.127`.
+  const host = rawHost.normalize('NFKC');
   const isIPAddressLike =
     host.includes('.') ||
     host.includes(':') ||
-    (host.startsWith('[') && host.endsWith(']'));
+    (host.startsWith('[') && host.endsWith(']')) ||
+    /^(?:\d+|0x[0-9a-f]*)$/i.test(host);
 
   if (!isIPAddressLike) {
     return null;
@@ -367,6 +375,19 @@ export function toAsciiDots(s: string): string {
  * IP literals are canonicalized to a stable WHATWG URL-compatible form.
  */
 export function normalizeDomain(domain: string): string {
+  return normalizeHostText(domain, true);
+}
+
+/**
+ * One label of a wildcard pattern, normalized as {@link normalizeDomain} normalizes a
+ * name but never read as an IP address: a label is not a host, and `127` alone is the
+ * address `0.0.0.127` to the URL parser.
+ */
+export function normalizeDomainLabel(label: string): string {
+  return normalizeHostText(label, false);
+}
+
+function normalizeHostText(domain: string, isWholeHost: boolean): string {
   let trimmed = domain.trim();
 
   // Normalize Unicode dots BEFORE checking IP for consistent behavior
@@ -382,7 +403,9 @@ export function normalizeDomain(domain: string): string {
   }
 
   // Canonicalize IP literals up front so exact host checks line up with WHATWG URL parsing.
-  const canonicalIPAddress = canonicalizeIPAddressLiteral(trimmed);
+  const canonicalIPAddress = isWholeHost
+    ? canonicalizeIPAddressLiteral(trimmed)
+    : null;
   if (canonicalIPAddress !== null) {
     return canonicalIPAddress;
   }
@@ -469,7 +492,7 @@ export function normalizeWildcardPattern(pattern: string): string {
       return ''; // sentinel for invalid pattern
     }
 
-    const nd = normalizeDomain(lbl);
+    const nd = normalizeDomainLabel(lbl);
 
     if (nd === '') {
       // Invalid label after normalization

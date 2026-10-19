@@ -66,8 +66,9 @@ function describeUnmatchableHostPattern(entry: string): string | undefined {
   }
   if (!entry.includes('*')) {
     const parsed = urlHostnameOf(entry);
-    // A name the URL parser rewrites - `2130706433` or `0x7f000001` is `127.0.0.1` - is
-    // compared as written, so it never equals a request's hostname.
+    // A guard for any name the URL parser reads differently from the matcher, which would
+    // be compared as written and so never equal a request's hostname. The matcher reads IP
+    // literals as the parser does - `2130706433` is `127.0.0.1` to both - so those match.
     if (
       parsed !== undefined &&
       normalizeDomain(entry) !== '' &&
