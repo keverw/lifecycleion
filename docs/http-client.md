@@ -806,7 +806,7 @@ A `CookieJar` provides cookie storage with Public Suffix List domain matching, p
 
 A response cookie's lifetime is capped at 400 days, as browsers cap it (RFC 6265bis): a longer `Max-Age` or a later `Expires` is read as 400 days from now. `Expires` is read with RFC 6265's cookie-date algorithm, in UTC whatever zone is written, and a value that is not a cookie-date (`Expires=0`) is ignored, leaving a session cookie. A cookie whose name and value together pass 4096 bytes is ignored. A cookie a header cannot carry - a name or value with a character above U+00FF - is refused by `setCookie()` and `fromJSON()`. The jar does not limit how many cookies it holds; call `clearExpiredCookies()` on a long-lived jar.
 
-Cookie domains are canonicalized through IDNA to lowercase ASCII: for example, `Domain=münchen.de` matches the request host `xn--mnchen-3ya.de`. The same normalization applies to cookies stored through `setCookie()` or restored through `fromJSON()`, and to hosts passed to `clear()`. Invalid domain scopes are rejected.
+Cookie domains are canonicalized through IDNA to lowercase ASCII: for example, `Domain=münchen.de` matches the request host `xn--mnchen-3ya.de`. The same normalization applies to cookies stored through `setCookie()` or restored through `fromJSON()`, and to hosts passed to `clear()`. Invalid domain scopes are rejected. A trailing dot is dropped, so `example.com.` and `example.com` are the same host to the jar, as they are to the client's credential scope.
 
 Fetch uses `Headers.getSetCookie()` to preserve individual response cookie lines.
 On legacy implementations without it, the fallback accepts a single unambiguous
@@ -896,7 +896,7 @@ unaffected. They are validated once in the constructor and a bad entry throws a 
 rather than being ignored - an empty suffix, a wildcard, an empty label, a non-string, or a
 suffix named in both lists or added beneath a removed suffix. A removed ancestor
 allows shared cookies, which conflicts with an added child's tenant isolation. A typo that silently did nothing would be a scoping hole you
-would only discover as a cookie going somewhere it should not.
+would only discover as a cookie going somewhere it should not. A `remove` entry the bundled list does not treat as a suffix (`a.example.com`, or one a later list has dropped) changes nothing.
 
 **SameSite is stored, not enforced.** The `SameSite` attribute is parsed and kept on the stored cookie for callers to read, but `getCookiesFor()` does not consult it. This jar serves a client, not a browser: there is no navigation, no top-level "site" to compare against, and no notion of a cross-site request, so every cookie whose domain, path, expiry and `Secure` rules match is sent, whatever its `SameSite` value.
 
@@ -946,6 +946,7 @@ jar.clearExpiredCookies(); // Returns count removed
 jar.clear(); // Remove all cookies - returns count removed
 jar.clear('api.example.com', 'hostname'); // Remove cookies for exactly that hostname only - returns count removed
 jar.clear('example.com', 'domain'); // Remove example.com and all its subdomains (the entire apex bucket) - returns count removed
+jar.clear('github.io', 'domain'); // On a public suffix, every site beneath it; any scope other than 'hostname' / 'domain' throws
 
 // Inspection
 jar.getAllCookies(); // Live stored objects, including expired - prefer setCookie() for updates

@@ -15,6 +15,11 @@ import {
   STREAM_ABORT_STATUS_KEY,
 } from './consts';
 import { CookieJar } from './cookie-jar';
+import {
+  matchesOriginList,
+  validateConfigEntry,
+} from '../domain-utils/domain-utils';
+import { normalizeDomain } from '../domain-utils/helpers';
 import { MockAdapter } from './adapters/mock-adapter';
 import type { MockRequest } from './adapters/mock-adapter';
 import { NodeAdapter } from './adapters/node-adapter';
@@ -4324,4 +4329,43 @@ test('round 89: a followed hop that redirects to its own URL still counts as fol
   expect(response.redirectHistory).toEqual(['http://api.test/b']);
   expect(response.wasRedirectFollowed).toBe(true);
   expect(response.detectedRedirectURL).toBe('http://api.test/b');
+});
+
+test('round 90: IP literals with a port or path are no host, removals below a domain widen nothing, domain clears reach suffix tenants', () => {
+  for (const entry of [
+    '127.0.0.1:8080',
+    'x@127.0.0.1',
+    '127.0.0.1/evil.com',
+    '127.0.0.1#x',
+    '[::1]:8080',
+  ]) {
+    expect(normalizeDomain(entry)).toBe('');
+  }
+  expect(normalizeDomain('127.0.0.1')).toBe('127.0.0.1');
+  expect(normalizeDomain('[::1]')).toBe('::1');
+  expect(
+    matchesOriginList('https://192.168.1.10:9999', ['192.168.1.10:8080']),
+  ).toBe(false);
+  expect(validateConfigEntry('192.168.001.010', 'domain').info).toContain(
+    '192.168.1.8',
+  );
+
+  const narrowed = new CookieJar({
+    publicSuffixes: { remove: ['a.example.com'] },
+  });
+  narrowed.parseSetCookieHeader(
+    'a=1; Domain=example.com',
+    'https://x.a.example.com/',
+  );
+  expect(narrowed.getCookieHeaderString('https://x.a.example.com/')).toBe(
+    'a=1',
+  );
+  expect(narrowed.clear('example.com', 'domain')).toBe(1);
+
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader('s=1', 'https://a.github.io/');
+  jar.parseSetCookieHeader('t=1', 'http://sub.localhost/');
+  expect(jar.clear('github.io', 'domain')).toBe(1);
+  expect(jar.clear('localhost', 'domain')).toBe(1);
+  expect(() => jar.clear('example.com', 'Domain' as never)).toThrow(TypeError);
 });

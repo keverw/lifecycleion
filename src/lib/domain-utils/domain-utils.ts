@@ -656,7 +656,19 @@ export function validateConfigEntry(
     // Normalize Unicode dots for consistent IP detection
     const sDots = toAsciiDots(s);
     if (isIPAddress(sDots)) {
-      return { valid: true, wildcardKind: 'none' };
+      // Said when the URL parser reads it as another address - `192.168.001.010` is the
+      // octal `192.168.1.8` to it, and to every match against this entry - rather than
+      // accepted silently and then never matching the address it looks like.
+      const canonical = normalizeDomain(sDots);
+      const written = sDots.toLowerCase().replace(/^\[|\]$/g, '');
+
+      return canonical !== '' && canonical !== written
+        ? {
+            valid: true,
+            info: `IP address is read as ${canonical}`,
+            wildcardKind: 'none',
+          }
+        : { valid: true, wildcardKind: 'none' };
     }
 
     // For non-IP addresses, reject URL-like characters

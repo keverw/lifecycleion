@@ -620,11 +620,27 @@ export class CookieJar {
    *   does not touch cookies stored for `example.com`.
    * - `clear(host, 'domain')` — removes all cookies for the entire domain family
    *   (apex + all subdomains). e.g. `clear('api.example.com', 'domain')` clears
-   *   everything in the `example.com` apex bucket.
+   *   everything in the `example.com` apex bucket, and `clear('github.io', 'domain')`
+   *   every `*.github.io` site's cookies.
+   *
+   * Any other `scope` throws.
    */
   public clear(): number;
   public clear(host: string, scope: 'hostname' | 'domain'): number;
   public clear(host?: string, scope?: 'hostname' | 'domain'): number {
+    // Refused rather than read loosely: any other value - `'Domain'`, a typo - cleared
+    // by hostname and quietly left the domain's other cookies in place.
+    const candidateScope: unknown = scope;
+    if (
+      candidateScope !== undefined &&
+      candidateScope !== 'hostname' &&
+      candidateScope !== 'domain'
+    ) {
+      throw new TypeError(
+        `CookieJar.clear() scope must be 'hostname' or 'domain' (got ${typeof candidateScope === 'string' ? `'${candidateScope}'` : candidateScope === null ? 'null' : typeof candidateScope})`,
+      );
+    }
+
     if (host === undefined) {
       const count = this.getAllCookies().length;
       this.buckets.clear();
@@ -640,8 +656,20 @@ export class CookieJar {
     const apex = this.apexFor(normalizedHost);
 
     if (scope === 'domain') {
-      const count = this.buckets.get(apex)?.size ?? 0;
-      this.buckets.delete(apex);
+      let count = 0;
+
+      // The apex bucket, and every bucket filed beneath it. Under an ordinary domain
+      // there are none - its subdomains share the apex's bucket - but a public suffix or
+      // a bare name has no registrable part, so each host under it is its own bucket:
+      // `clear('github.io', 'domain')` or `clear('localhost', 'domain')` cleared only the
+      // suffix's own and left `a.github.io` and `sub.localhost` in place.
+      for (const [key, bucket] of [...this.buckets.entries()]) {
+        if (key === apex || key.endsWith(`.${apex}`)) {
+          count += bucket.size;
+          this.buckets.delete(key);
+        }
+      }
+
       return count;
     } else {
       const bucket = this.buckets.get(apex);

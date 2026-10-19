@@ -196,30 +196,7 @@ export class PublicSuffixResolver {
       return false;
     }
 
-    // Without tldts's hostname check, as `apexFor` reads it: with the check, a label
-    // starting or ending with a hyphen (`x-.ck` under `*.ck`) was read as no suffix at all,
-    // so a `Domain=x-.ck` cookie was stored for every tenant under it.
-    const result = parse(normalized, {
-      allowPrivateDomains: true,
-      validateHostname: false,
-    });
-
-    if (result.isIp) {
-      return false;
-    }
-
-    if (labels.length === 1) {
-      return true;
-    }
-
-    // `domain === null` says no registrable name sits under this hostname, which is true
-    // both for a listed suffix and for a bare name the list has never heard of. The
-    // section flags separate them: `com` and `co.uk` are ICANN, `github.io` and
-    // `herokuapp.com` are private, and `localhost` is neither.
-    return (
-      result.domain === null &&
-      (result.isIcann === true || result.isPrivate === true)
-    );
+    return isBundledPublicSuffix(normalized);
   }
 
   /** Whether the caller explicitly removed this exact suffix from the bundled list. */
@@ -243,10 +220,15 @@ export class PublicSuffixResolver {
       // with `com` removed, a `Domain=com` cookie must still be reachable from a host
       // below a more-specific bundled suffix such as `app.blogspot.com`. Stopping at
       // `blogspot.com` first would admit the cookie but file the request elsewhere.
+      //
+      // Only a removal of something the bundled list does treat as a suffix: one below
+      // a registrable domain (`a.example.com`, or a suffix a later list dropped) widened
+      // nothing, and filing its hosts under it narrowed them - `Domain=example.com` from
+      // `x.a.example.com` was refused, and a domain clear of `example.com` missed them.
       for (let i = labels.length - 1; i >= 0; i--) {
         const candidate = labels.slice(i).join('.');
 
-        if (this.removed.has(candidate)) {
+        if (this.removed.has(candidate) && isBundledPublicSuffix(candidate)) {
           return candidate;
         }
       }
@@ -292,4 +274,34 @@ export class PublicSuffixResolver {
         .domain ?? normalized
     );
   }
+}
+
+/** Whether the bundled list, without the caller's overrides, reads `normalized` as a public suffix. */
+function isBundledPublicSuffix(normalized: string): boolean {
+  const labels = normalized.split('.');
+
+  // Without tldts's hostname check, as `apexFor` reads it: with the check, a label
+  // starting or ending with a hyphen (`x-.ck` under `*.ck`) was read as no suffix at all,
+  // so a `Domain=x-.ck` cookie was stored for every tenant under it.
+  const result = parse(normalized, {
+    allowPrivateDomains: true,
+    validateHostname: false,
+  });
+
+  if (result.isIp) {
+    return false;
+  }
+
+  if (labels.length === 1) {
+    return true;
+  }
+
+  // `domain === null` says no registrable name sits under this hostname, which is true
+  // both for a listed suffix and for a bare name the list has never heard of. The
+  // section flags separate them: `com` and `co.uk` are ICANN, `github.io` and
+  // `herokuapp.com` are private, and `localhost` is neither.
+  return (
+    result.domain === null &&
+    (result.isIcann === true || result.isPrivate === true)
+  );
 }

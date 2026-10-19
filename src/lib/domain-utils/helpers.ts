@@ -112,6 +112,18 @@ function canonicalizeIPAddressLiteral(host: string): string | null {
     return canonicalizeBracketedIPv6Content(host.replace(/^\[|\]$/g, ''));
   }
 
+  // Only a bare address is an IP literal. The URL parser below reads a whole authority,
+  // so `127.0.0.1:8080`, `x@127.0.0.1`, `127.0.0.1/evil.com` and `[::1]:8080` came back
+  // as their address with the port, userinfo or path dropped - an allowlist entry written
+  // as `IP:port` then matched every port on that address, where `example.com:8080` is
+  // refused. A port, a path, a query, a fragment or userinfo makes it no host at all.
+  if (
+    /[@/\\?#]/.test(host) ||
+    (host.includes(':') && !(host.startsWith('[') && host.endsWith(']')))
+  ) {
+    return null;
+  }
+
   try {
     const url = new URL(`http://${host}/`);
     const canonicalHostname = url.hostname.toLowerCase();
