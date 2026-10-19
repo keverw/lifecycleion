@@ -4215,3 +4215,62 @@ test('round 86: multipart names as fetch sends them, an unreadable file is not r
     server.close();
   }
 });
+
+test('round 87: a cancel before a detected redirect is followed names it; a 303 HEAD drops body headers', async () => {
+  for (const cancelFrom of ['observer', 'attemptEnd'] as const) {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/p', () => ({
+      status: 302,
+      headers: { location: '/next' },
+    }));
+    const client = new HTTPClient({
+      adapter,
+      baseURL: 'https://a.test',
+      followRedirects: true,
+    });
+    const builder = client.get('/p');
+    if (cancelFrom === 'observer') {
+      client.addResponseObserver(
+        () => {
+          builder.cancel();
+        },
+        {
+          phases: ['redirect'],
+        },
+      );
+    } else {
+      builder.onAttemptEnd(() => {
+        builder.cancel();
+      });
+    }
+    const response = await builder.send();
+    expect(response.isCancelled).toBe(true);
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.wasRedirectFollowed).toBe(false);
+    expect(response.detectedRedirectURL).toBe('https://a.test/next');
+  }
+
+  const requests: AdapterRequest[] = [];
+  await new HTTPClient({
+    adapter: {
+      getType: () => 'node',
+      send: (request) => {
+        requests.push(request);
+        return Promise.resolve<AdapterResponse>(
+          requests.length === 1
+            ? { status: 303, headers: { location: '/y' }, body: null }
+            : { status: 200, headers: {}, body: null },
+        );
+      },
+    },
+    baseURL: 'https://a.test',
+    followRedirects: true,
+  })
+    .request('HEAD', '/p', {
+      body: 'abc',
+      headers: { 'content-encoding': 'gzip', 'content-length': '3' },
+    })
+    .send();
+  expect(requests[1].headers['content-encoding']).toBeUndefined();
+  expect(requests[1].headers['content-length']).toBeUndefined();
+});

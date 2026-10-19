@@ -860,7 +860,7 @@ export class NodeAdapter implements HTTPAdapter {
             if (
               uploadedBytesSeen === bytesAtLastTick &&
               sourceWaitSince !== undefined &&
-              Date.now() - sourceWaitSince < UPLOAD_SOURCE_STALL_GRACE_MS
+              performance.now() - sourceWaitSince < UPLOAD_SOURCE_STALL_GRACE_MS
             ) {
               // Not the socket's fault. Watched on, so a source that never answers is still
               // caught below once its own grace runs out.
@@ -2075,7 +2075,7 @@ export class NodeAdapter implements HTTPAdapter {
               boundary,
               reportUploadProgress,
               (isWaiting) => {
-                sourceWaitSince = isWaiting ? Date.now() : undefined;
+                sourceWaitSince = isWaiting ? performance.now() : undefined;
               },
             ),
           );
@@ -2723,7 +2723,7 @@ function absorbPendingWritableError(writable: WritableLike): void {
   // that finds it already in place, so the window each of them gets is its own full one
   // rather than the remainder of the first request's.
   let backstop: ReturnType<typeof setTimeout> | undefined;
-  const attachedAt = Date.now();
+  const attachedAt = performance.now();
 
   // Bumped by every renewal, so a `detach` already queued by `scheduleDetach` knows
   // its answer is stale. See `scheduleDetach`.
@@ -2738,7 +2738,7 @@ function absorbPendingWritableError(writable: WritableLike): void {
    */
   const extend = (isRenewal: boolean = false): boolean => {
     const remainingLifetime =
-      MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS - (Date.now() - attachedAt);
+      MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS - (performance.now() - attachedAt);
 
     // Out of lifetime, so this is the last word rather than another window: see
     // `MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS` for why an unconditional restart is a
@@ -3386,7 +3386,7 @@ function attachWritableListener(
     // every error a long-lived sink's owner handles itself - an hour after its last
     // download - would also land on the host's global `'error'` channel.
     if (event === 'error' && listeners.size === 0) {
-      if (Date.now() <= entry.reportUnclaimedUntil) {
+      if (performance.now() <= entry.reportUnclaimedUntil) {
         reportUnclaimedWritableError(argument);
       }
 
@@ -3448,7 +3448,8 @@ function detachWritableListener(
 
   // The last request has gone, so the reporting window `dispatch` honours starts now.
   if (entry.listeners.size === 0) {
-    entry.reportUnclaimedUntil = Date.now() + PENDING_WRITABLE_ERROR_WINDOW_MS;
+    entry.reportUnclaimedUntil =
+      performance.now() + PENDING_WRITABLE_ERROR_WINDOW_MS;
   }
 }
 

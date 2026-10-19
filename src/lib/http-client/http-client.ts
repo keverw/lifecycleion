@@ -1297,6 +1297,8 @@ export class BaseHTTPClient {
                 initialURL: initialRequestURL,
                 requestURL: hopFromURL,
                 redirectHistory,
+                // The redirect this hop answered with, detected and never followed.
+                undispatchedRedirectURL: redirectURL,
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
               cancelReason = getSignalCancelReason(cancelSignal);
@@ -1353,6 +1355,8 @@ export class BaseHTTPClient {
                 initialURL: initialRequestURL,
                 requestURL: hopFromURL,
                 redirectHistory,
+                // The redirect this hop answered with, detected and never followed.
+                undispatchedRedirectURL: redirectURL,
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
               cancelReason = getSignalCancelReason(cancelSignal);
@@ -1780,6 +1784,11 @@ export class BaseHTTPClient {
           requestURL: response.requestURL,
           // The response's own: a hop that failed after it was recorded carries it.
           redirectHistory: response.redirectHistory,
+          // And the redirect it detected and did not follow (`redirect_disabled`, say),
+          // which this rebuild would otherwise drop.
+          ...(response.detectedRedirectURL !== undefined
+            ? { undispatchedRedirectURL: response.detectedRedirectURL }
+            : {}),
           ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
         });
         // Whatever the answer was - a success, or a failure such as a final 500 - the
@@ -1933,11 +1942,12 @@ export class BaseHTTPClient {
     }
 
     if (
-      request.method === 'GET' &&
+      (request.method === 'GET' || request.method === 'HEAD') &&
       (request.body === undefined || request.body === null)
     ) {
-      // Drop body-related headers when the method was rewritten to GET and the body
-      // with it. A 307/308 GET that replays its body keeps them.
+      // Drop body-related headers when the hop dropped the body: a method rewritten to
+      // GET, or a 303, which leaves a HEAD a HEAD. A 307/308 GET that replays its body
+      // keeps them.
       for (const key of Object.keys(headers)) {
         if (
           ['content-type', 'content-length', 'content-encoding'].includes(
@@ -3633,9 +3643,10 @@ export class BaseHTTPClient {
      */
     answeredResponse?: AnsweredResponse;
     /**
-     * A redirect target recorded as the last `redirectHistory` entry but never
-     * dispatched - refused, cancelled or failed before its hop went out. It is the
-     * redirect detected and not followed, so it is not counted as a followed hop.
+     * A redirect target detected but never dispatched - refused, cancelled or failed
+     * before its hop went out. It is the redirect detected and not followed: reported
+     * as `detectedRedirectURL`, and not counted as a followed hop when it was already
+     * recorded as the last `redirectHistory` entry.
      */
     undispatchedRedirectURL?: string;
   }): HTTPResponse<T> {
@@ -3656,9 +3667,11 @@ export class BaseHTTPClient {
     // handed this response must not be able to rewrite the history of the request.
     const redirectHistory = [...params.redirectHistory];
 
+    const isUndispatchedRecorded =
+      undispatchedRedirectURL !== undefined &&
+      redirectHistory.at(-1) === undispatchedRedirectURL;
     const wasRedirectFollowed =
-      redirectHistory.length - (undispatchedRedirectURL === undefined ? 0 : 1) >
-      0;
+      redirectHistory.length - (isUndispatchedRecorded ? 1 : 0) > 0;
     const redirectFields: RedirectFields =
       undispatchedRedirectURL !== undefined
         ? {

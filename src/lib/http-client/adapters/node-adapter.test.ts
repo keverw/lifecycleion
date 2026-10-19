@@ -3855,8 +3855,8 @@ describe('NodeAdapter.send() — unit branches without server', () => {
       reports.push(event as ErrorEvent);
       event.preventDefault();
     };
-    const realNow = Date.now();
-    const nowSpy = spyOn(Date, 'now').mockImplementation(
+    const realNow = performance.now();
+    const nowSpy = spyOn(performance, 'now').mockImplementation(
       () => realNow + 60_000,
     );
 
