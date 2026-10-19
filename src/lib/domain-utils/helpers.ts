@@ -150,7 +150,7 @@ export function readURLParserIPv4(
  * is not an IP literal and is read as a name.
  *
  * Only for a whole host: the labels of a wildcard pattern go through
- * `normalizeDomainLabel`, which never asks, so the `127` of `*.127.0.0.1` stays a label
+ * `normalizeDomainName`, which never asks, so the `127` of `*.127.0.0.1` stays a label
  * rather than becoming the address `0.0.0.127`.
  */
 function canonicalizeIPAddressLiteral(host: string): string | null {
@@ -423,11 +423,13 @@ export function normalizeDomain(domain: string): string {
 }
 
 /**
- * One label of a wildcard pattern, normalized as {@link normalizeDomain} normalizes a
- * name but never read as an IP address: a label is not a host, and `127` alone is the
- * address `0.0.0.127` to the URL parser.
+ * A name normalized as {@link normalizeDomain} normalizes one, but never read as an IP
+ * address. For text the URL parser does not read as a host of a special scheme: a label
+ * of a wildcard pattern (`127` alone is the address `0.0.0.127` to the parser, but it is
+ * a label here), or the opaque host of a non-special scheme (`foo://a.2.3.4`), which the
+ * parser keeps as written.
  */
-export function normalizeDomainLabel(label: string): string {
+export function normalizeDomainName(label: string): string {
   return normalizeHostText(label, false);
 }
 
@@ -536,7 +538,7 @@ export function normalizeWildcardPattern(pattern: string): string {
       return ''; // sentinel for invalid pattern
     }
 
-    const nd = normalizeDomainLabel(lbl);
+    const nd = normalizeDomainName(lbl);
 
     if (nd === '') {
       // Invalid label after normalization

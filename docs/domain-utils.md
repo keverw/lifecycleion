@@ -153,7 +153,7 @@ safeParseURL('not-a-url'); // null
 
 ### normalizeOrigin
 
-Normalizes a bare origin for consistent comparison. Returns the canonical origin form with a normalized hostname, lowercase scheme, no trailing slash, and default ports removed (80 for `http`, 443 for `https`). Returns `""` on invalid input or failed hostname normalization. Preserves the literal `"null"` origin. Like `normalizeDomain()`, it accepts only the canonical bare form plus one optional trailing separator: a single trailing `/` is normalized away, but repeated trailing slashes are rejected.
+Normalizes a bare origin for consistent comparison. Returns the canonical origin form with a normalized hostname, lowercase scheme, no trailing slash, and default ports removed for every special scheme (80 for `http` and `ws`, 443 for `https` and `wss`, 21 for `ftp`). A non-special scheme's host (`chrome-extension://123`) is kept opaque, as the URL parser keeps it, and never read as an IP address. Returns `""` on invalid input or failed hostname normalization. Preserves the literal `"null"` origin. Like `normalizeDomain()`, it accepts only the canonical bare form plus one optional trailing separator: a single trailing `/` is normalized away, but repeated trailing slashes are rejected.
 
 ```typescript
 normalizeOrigin('HTTPS://Example.COM:443/'); // 'https://example.com'

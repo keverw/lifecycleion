@@ -19,6 +19,7 @@ import {
   matchesDomainList,
   matchesOriginList,
   matchesWildcardDomain,
+  normalizeOrigin,
   validateConfigEntry,
 } from '../domain-utils/domain-utils';
 import { normalizeDomain } from '../domain-utils/helpers';
@@ -4497,4 +4498,22 @@ test('round 96: IPv4 read by the URL parser itself - percent and IDNA spellings,
   expect(validateConfigEntry('127.0.0.1.', 'domain').info).toBeUndefined();
   expect(normalizeDomain('example.com')).toBe('example.com');
   expect(matchesDomainList('api.example.com', ['*.example.com'])).toBe(true);
+});
+
+test('round 97: non-special schemes keep opaque hosts; every special scheme drops its default port', () => {
+  expect(matchesOriginList('foo://a.2.3.4', ['foo://a.2.3.4'])).toBe(true);
+  expect(matchesOriginList('foo://127.0.0.1', ['foo://2130706433'])).toBe(
+    false,
+  );
+  expect(validateConfigEntry('foo://a.2.3.4', 'origin').valid).toBe(true);
+  expect(normalizeOrigin('chrome-extension://123')).toBe(
+    'chrome-extension://123',
+  );
+  expect(normalizeOrigin('http://2130706433')).toBe('http://127.0.0.1');
+
+  expect(normalizeOrigin('wss://x.com:443')).toBe('wss://x.com');
+  expect(normalizeOrigin('wss://x.com:0443')).toBe('wss://x.com');
+  expect(normalizeOrigin('ws://x.com:80')).toBe('ws://x.com');
+  expect(matchesOriginList('wss://x.com', ['wss://x.com:443'])).toBe(true);
+  expect(normalizeOrigin('wss://x.com:8443')).toBe('wss://x.com:8443');
 });

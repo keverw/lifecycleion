@@ -4,7 +4,7 @@ import {
   hasPartialLabelWildcard,
   checkDNSLength,
   normalizeDomain,
-  normalizeDomainLabel,
+  normalizeDomainName,
   readURLParserIPv4,
   isIPv6,
   toAsciiDots,
@@ -56,6 +56,23 @@ function hasDanglingPortInAuthority(input: string): boolean {
   return hostPort.endsWith(':');
 }
 
+/** The default port of each special URL scheme, which the URL parser drops. */
+const SPECIAL_SCHEME_DEFAULT_PORTS: Readonly<Record<string, string>> = {
+  'http:': '80',
+  'https:': '443',
+  'ws:': '80',
+  'wss:': '443',
+  'ftp:': '21',
+};
+
+/** Whether the URL parser treats `protocol` (with its colon) as a special scheme. */
+function isSpecialScheme(protocol: string): boolean {
+  return (
+    Object.hasOwn(SPECIAL_SCHEME_DEFAULT_PORTS, protocol) ||
+    protocol === 'file:'
+  );
+}
+
 /**
  * Normalize a bare origin for consistent comparison.
  * Returns the canonical origin form with a normalized hostname,
@@ -89,8 +106,14 @@ export function normalizeOrigin(origin: string): string {
       return '';
     }
 
-    // Normalize hostname with punycode
-    const normalizedHostname = normalizeDomain(url.hostname);
+    // Normalize hostname with punycode. Read as an IP address only for a special scheme:
+    // the URL parser keeps a non-special scheme's host opaque (`foo://a.2.3.4`), so
+    // reading it as IPv4 refused hosts the parser accepts and merged `foo://2130706433`
+    // with `foo://127.0.0.1`.
+    const protocolLower = url.protocol.toLowerCase();
+    const normalizedHostname = isSpecialScheme(protocolLower)
+      ? normalizeDomain(url.hostname)
+      : normalizeDomainName(url.hostname);
 
     // If hostname normalization fails (pathological IDN), return original origin
     // to avoid emitting values like "https://" with an empty host.
@@ -127,15 +150,10 @@ export function normalizeOrigin(origin: string): string {
       host = normalizedHostname;
     }
 
-    // Normalize default ports for http/https
+    // Normalize default ports - every special scheme's, as the URL parser drops them: a
+    // `wss://x.com:443` kept its port when only http and https were known.
     let port = '';
-    const protocolLower = url.protocol.toLowerCase();
-    const defaultPort =
-      protocolLower === 'https:'
-        ? '443'
-        : protocolLower === 'http:'
-          ? '80'
-          : '';
+    const defaultPort = SPECIAL_SCHEME_DEFAULT_PORTS[protocolLower] ?? '';
 
     if (url.port) {
       // Remove default ports for known protocols
@@ -531,7 +549,7 @@ export function validateConfigEntry(
         return false;
       }
 
-      const nd = normalizeDomainLabel(lbl);
+      const nd = normalizeDomainName(lbl);
 
       if (nd === '') {
         return false;
@@ -957,7 +975,9 @@ export function validateConfigEntry(
   }
 
   const hostDots = toAsciiDots(host);
-  const hostIPv4 = readIPv4Entry(hostDots);
+  // A non-special scheme's host is opaque to the URL parser, never an address.
+  const isOpaqueHost = !isSpecialScheme(`${scheme.toLowerCase()}:`);
+  const hostIPv4 = isOpaqueHost ? undefined : readIPv4Entry(hostDots);
   if (hostIPv4 !== undefined || isIPAddress(hostDots)) {
     if (hostIPv4 !== undefined && hostIPv4.address === undefined) {
       return { valid: false, info: hostIPv4.info, wildcardKind: 'none' };
@@ -978,7 +998,7 @@ export function validateConfigEntry(
   }
 
   // Domain host
-  const nd = normalizeDomain(host);
+  const nd = isOpaqueHost ? normalizeDomainName(host) : normalizeDomain(host);
 
   if (nd === '') {
     return {
@@ -1052,7 +1072,10 @@ function parseExactOriginForMatching(entry: string): {
 
   return {
     normalizedOrigin,
-    normalizedHostname: normalizeDomain(url.hostname),
+    // Read as `normalizeOrigin` reads it: as an address only for a special scheme.
+    normalizedHostname: isSpecialScheme(url.protocol.toLowerCase())
+      ? normalizeDomain(url.hostname)
+      : normalizeDomainName(url.hostname),
   };
 }
 
@@ -1087,7 +1110,7 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
         return false;
       }
 
-      const nd = normalizeDomainLabel(lbl);
+      const nd = normalizeDomainName(lbl);
       if (nd === '') {
         return false;
       }
