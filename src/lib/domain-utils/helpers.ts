@@ -99,70 +99,99 @@ export function isIPAddress(str: string): boolean {
 }
 
 /**
- * Fullwidth ASCII forms (U+FF01-U+FF5E) as the ASCII they stand for - `１２７` as `127`.
+ * How the URL parser reads `host` as an IPv4 address, asked of the parser itself:
+ * `undefined` when it does not take the host for one, `{ address }` when it does, and
+ * `{}` when it takes it for one and refuses it - such a host is no URL's host at all.
  *
- * The URL parser's IDNA mapping does this to a host before it asks whether the host is an
- * address, and this is only for asking the same question of the text. Narrower than NFKC
- * on purpose: NFKC also folds `․` (U+2024), `﹒` and `⒈` into dots, which the URL parser
- * refuses, so a host it can never carry read as `127.0.0.1`.
+ * The parser reads a host as IPv4 when, after percent-decoding and IDNA mapping, its last
+ * label is a number (decimal, or `0x` hex): `2130706433` and `0x7f.1` are `127.0.0.1`,
+ * and so are `127.0.0.%31`, `127.0.0.①` and `１２７.0.0.1`; `192.168.1.08` (an octal
+ * label with an 8) and `a.2.3.4` are refused. Imitating that mapping here missed one
+ * spelling after another, so the mapping is the parser's: a host parsed with a label
+ * appended (`<host>.a`) comes back mapped but never read as an address, which shows the
+ * last label as the parser sees it, and the plain parse then gives the address or throws.
+ *
+ * Only a bare host is asked about. The parser reads a whole authority, so a port,
+ * userinfo, path, query or fragment would be dropped from the answer rather than refused.
  */
-export function toHalfwidthASCII(text: string): string {
-  return text.replace(/[\uFF01-\uFF5E]/g, (char) =>
-    String.fromCharCode(char.charCodeAt(0) - 0xfee0),
-  );
+export function readURLParserIPv4(
+  host: string,
+): { address?: string } | undefined {
+  const text = host.endsWith('.') ? host.slice(0, -1) : host;
+
+  if (text === '' || /[@/\\?#:[\]\s]/.test(text)) {
+    return undefined;
+  }
+
+  let mapped: string;
+  try {
+    mapped = new URL(`http://${text}.a/`).hostname;
+  } catch {
+    return undefined;
+  }
+
+  const lastLabel = mapped.slice(0, -'.a'.length).split('.').at(-1) ?? '';
+
+  if (!/^(?:\d+|0x[0-9a-f]*)$/i.test(lastLabel)) {
+    return undefined;
+  }
+
+  try {
+    const address = new URL(`http://${text}/`).hostname;
+    return isIPv4(address) ? { address } : {};
+  } catch {
+    return {};
+  }
 }
 
+/**
+ * `host` as the canonical IP address the URL parser reads it as; `''` for a host the
+ * parser takes for an IPv4 address and refuses, which is no host at all; `null` when it
+ * is not an IP literal and is read as a name.
+ *
+ * Only for a whole host: the labels of a wildcard pattern go through
+ * `normalizeDomainLabel`, which never asks, so the `127` of `*.127.0.0.1` stays a label
+ * rather than becoming the address `0.0.0.127`.
+ */
 function canonicalizeIPAddressLiteral(host: string): string | null {
-  // Read as the URL parser reads a host, and by it - the parse below is the authority.
-  // A single label that is a number (`2130706433`, `0x7f000001`) is an IPv4 address to it
-  // as much as a dotted one: `http://2130706433/` is `127.0.0.1`. Only for a whole host:
-  // the labels of a wildcard pattern go through `normalizeDomainLabel`, which never asks,
-  // so the `127` of `*.127.0.0.1` stays a label rather than becoming `0.0.0.127`.
-  // Fullwidth digits are asked about as their ASCII (see `toHalfwidthASCII`); IPv6 is not,
-  // since the parser maps nothing in an IPv6 literal.
-  const asked = toHalfwidthASCII(host);
-  const isIPAddressLike =
-    host.includes('.') ||
-    host.includes(':') ||
-    (host.startsWith('[') && host.endsWith(']')) ||
-    /^(?:\d+|0x[0-9a-f]*)$/i.test(asked);
-
-  if (!isIPAddressLike) {
-    return null;
-  }
+  const isBracketed = host.startsWith('[') && host.endsWith(']');
 
   if (isIPv6(host)) {
     return canonicalizeBracketedIPv6Content(host.replace(/^\[|\]$/g, ''));
   }
 
-  // Only a bare address is an IP literal. The URL parser below reads a whole authority,
-  // so `127.0.0.1:8080`, `x@127.0.0.1`, `127.0.0.1/evil.com` and `[::1]:8080` came back
-  // as their address with the port, userinfo or path dropped - an allowlist entry written
-  // as `IP:port` then matched every port on that address, where `example.com:8080` is
+  // Only a bare address is an IP literal. The URL parser reads a whole authority, so
+  // `127.0.0.1:8080`, `x@127.0.0.1`, `127.0.0.1/evil.com` and `[::1]:8080` came back as
+  // their address with the port, userinfo or path dropped - an allowlist entry written as
+  // `IP:port` then matched every port on that address, where `example.com:8080` is
   // refused. A port, a path, a query, a fragment or userinfo makes it no host at all.
-  if (
-    /[@/\\?#]/.test(host) ||
-    (host.includes(':') && !(host.startsWith('[') && host.endsWith(']')))
-  ) {
+  if (/[@/\\?#]/.test(host) || (host.includes(':') && !isBracketed)) {
     return null;
   }
 
-  try {
-    const url = new URL(`http://${host}/`);
-    const canonicalHostname = url.hostname.toLowerCase();
+  if (isBracketed) {
+    try {
+      const hostname = new URL(`http://${host}/`).hostname;
 
-    if (isIPv4(canonicalHostname)) {
-      return canonicalHostname;
+      if (isIPv6(hostname)) {
+        return hostname.replace(/^\[|\]$/g, '').toLowerCase();
+      }
+    } catch {
+      // Fall through to regular domain normalization, which refuses the brackets.
     }
 
-    if (isIPv6(canonicalHostname)) {
-      return canonicalHostname.replace(/^\[|\]$/g, '');
-    }
-  } catch {
-    // Fall through to regular domain normalization.
+    return null;
   }
 
-  return null;
+  const ipv4 = readURLParserIPv4(host);
+
+  if (ipv4 === undefined) {
+    return null;
+  }
+
+  // Refused by the parser: `''`, not a name. Read as a name it was matched as one -
+  // `1.2.3.08` against itself - though no request can ever carry it.
+  return ipv4.address ?? '';
 }
 
 /**

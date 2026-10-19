@@ -16,7 +16,9 @@ import {
 } from './consts';
 import { CookieJar } from './cookie-jar';
 import {
+  matchesDomainList,
   matchesOriginList,
+  matchesWildcardDomain,
   validateConfigEntry,
 } from '../domain-utils/domain-utils';
 import { normalizeDomain } from '../domain-utils/helpers';
@@ -4479,4 +4481,20 @@ test('round 95: only fullwidth ASCII is mapped before reading an IP; fullwidth-o
   expect(validateConfigEntry('*.2.3.4', 'domain').valid).toBe(false);
   expect(validateConfigEntry('*.0.0.1', 'domain').valid).toBe(false);
   expect(validateConfigEntry('*.example.com', 'domain').valid).toBe(true);
+});
+
+test('round 96: IPv4 read by the URL parser itself - percent and IDNA spellings, refused hosts match nothing', () => {
+  for (const entry of ['127.0.0.%31', '127.0.0.①', '127.0.0.𝟏']) {
+    expect(validateConfigEntry(entry, 'domain').info).toContain('127.0.0.1');
+    expect(normalizeDomain(entry)).toBe('127.0.0.1');
+  }
+  expect(validateConfigEntry('127.0.0.𝟎𝟖', 'domain').valid).toBe(false);
+  for (const host of ['1.2.3.08', 'a.2.3.4']) {
+    expect(normalizeDomain(host)).toBe('');
+    expect(matchesDomainList(host, [host])).toBe(false);
+  }
+  expect(matchesWildcardDomain('a.2.3.4', '*.2.3.4')).toBe(false);
+  expect(validateConfigEntry('127.0.0.1.', 'domain').info).toBeUndefined();
+  expect(normalizeDomain('example.com')).toBe('example.com');
+  expect(matchesDomainList('api.example.com', ['*.example.com'])).toBe(true);
 });

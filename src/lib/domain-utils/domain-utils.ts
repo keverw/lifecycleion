@@ -5,14 +5,13 @@ import {
   checkDNSLength,
   normalizeDomain,
   normalizeDomainLabel,
-  toHalfwidthASCII,
+  readURLParserIPv4,
   isIPv6,
   toAsciiDots,
   canonicalizeBracketedIPv6Content,
   matchesMultiLabelPattern,
   extractFixedTailAfterLastWildcard,
   isIPAddress,
-  isIPv4,
   normalizeWildcardPattern,
   INTERNAL_PSEUDO_TLDS,
   INVALID_DOMAIN_CHARS,
@@ -1466,41 +1465,23 @@ function canonicalPortText(digits: string): string {
 function readIPv4Entry(
   rawHost: string,
 ): { address?: string; info?: string } | undefined {
-  // Asked about as the URL parser asks before reading it: fullwidth digits are ASCII
-  // digits to it, so `192.168.1.0８` is the refused `192.168.1.08`. The parse itself is
-  // of the text as written, so the parser does its own mapping and refuses what it refuses.
-  const host = toHalfwidthASCII(rawHost);
+  const ipv4 = readURLParserIPv4(rawHost);
 
-  // Only a bare host. The parse below reads a whole authority and keeps just its host, so
-  // `user@10.0.0.1`, `10.0.0.1/x.5` or `10.0.0.1?a.1` came back as a clean `10.0.0.1` -
-  // accepted, though the entry is no host and matches nothing. Left to the checks that
-  // refuse such characters.
-  if (host.includes(':') || host.startsWith('[') || /[@/\\?#\s]/.test(host)) {
+  if (ipv4 === undefined) {
     return undefined;
   }
 
-  const labels = host.replace(/\.$/, '').split('.');
-  const last = labels[labels.length - 1] ?? '';
-
-  if (!/^(?:\d+|0x[0-9a-f]*)$/i.test(last)) {
-    return undefined;
-  }
-
-  let address: string;
-  try {
-    address = new URL(`http://${rawHost}/`).hostname;
-  } catch {
+  if (ipv4.address === undefined) {
     return { info: 'IP address is not one the URL parser accepts' };
   }
 
-  if (!isIPv4(address)) {
-    return { info: 'IP address is not one the URL parser accepts' };
-  }
+  // Against what was written - but for a trailing dot, which the domain path does not
+  // remark on either - so an entry that differs only by its spelling says so.
+  const written = rawHost.replace(/\.$/, '').toLowerCase();
 
-  // Against what was written, so an entry that differs only by fullwidth digits says so.
-  return address === rawHost.toLowerCase()
-    ? { address }
-    : { address, info: `IP address is read as ${address}` };
+  return ipv4.address === written
+    ? { address: ipv4.address }
+    : { address: ipv4.address, info: `IP address is read as ${ipv4.address}` };
 }
 
 export {
