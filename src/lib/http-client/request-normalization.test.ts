@@ -4415,3 +4415,18 @@ test('round 91: clear arguments checked, nested private suffixes kept, IP entry 
   expect(requests[1].headers['content-language']).toBeUndefined();
   expect(requests[1].headers['content-location']).toBeUndefined();
 });
+
+test('round 92: IPv4 entries read by the URL parser in origins and shorthand; uppercase mapped IPv6', () => {
+  expect(validateConfigEntry('http://192.168.1.08', 'origin').valid).toBe(
+    false,
+  );
+  expect(
+    validateConfigEntry('http://192.168.001.010', 'origin').info,
+  ).toContain('192.168.1.8');
+  expect(validateConfigEntry('10.1', 'domain').info).toContain('10.0.0.1');
+  expect(validateConfigEntry('0x7f.1', 'domain').info).toContain('127.0.0.1');
+  expect(validateConfigEntry('10.0.0.1', 'domain').info).toBeUndefined();
+  expect(validateConfigEntry('example.com', 'domain').valid).toBe(true);
+  expect(validateConfigEntry('[::FFFF:127.0.0.1]', 'domain').valid).toBe(true);
+  expect(validateConfigEntry('::FFFF:127.0.0.1', 'domain').valid).toBe(true);
+});

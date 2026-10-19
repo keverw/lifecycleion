@@ -2698,10 +2698,11 @@ describe('domain-utils', () => {
           wildcardKind: 'none',
         });
 
-        // Invalid IP-like strings are treated as domain names (not IPs), so they may be valid domains
-        // This is consistent with how browsers and DNS work - "999.999.999.999" could theoretically be a domain name
+        // A host whose last label is a number is IPv4 to the URL parser, and one it
+        // cannot read as an address is no URL's host at all, so it can never match.
         expect(validateConfigEntry('999.999.999.999', 'domain')).toEqual({
-          valid: true,
+          valid: false,
+          info: 'IP address is not one the URL parser accepts',
           wildcardKind: 'none',
         });
       });

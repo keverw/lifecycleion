@@ -10,6 +10,7 @@ import {
   matchesMultiLabelPattern,
   extractFixedTailAfterLastWildcard,
   isIPAddress,
+  isIPv4,
   normalizeWildcardPattern,
   INTERNAL_PSEUDO_TLDS,
   INVALID_DOMAIN_CHARS,
@@ -655,38 +656,16 @@ export function validateConfigEntry(
     // Check if it's an IP address first - if so, allow it (consistent with matchesDomainList)
     // Normalize Unicode dots for consistent IP detection
     const sDots = toAsciiDots(s);
+    const ipv4 = readIPv4Entry(sDots);
+
+    if (ipv4 !== undefined) {
+      return ipv4.address === undefined
+        ? { valid: false, info: ipv4.info, wildcardKind: 'none' }
+        : { valid: true, info: ipv4.info, wildcardKind: 'none' };
+    }
+
+    // IPv6 is not flagged: its other spellings (`2001:DB8:0:0::1`) are the same address.
     if (isIPAddress(sDots)) {
-      // An IPv4 entry is read as the URL parser reads a host, and that can differ from
-      // what is written: `192.168.001.010` is the octal `192.168.1.8` to it, and to every
-      // match against this entry, so that is said rather than accepted silently. One the
-      // parser refuses (`192.168.1.08` - an octal octet with an 8 in it) can never be a
-      // URL's host, so it is invalid. IPv6 is not flagged: its other spellings
-      // (`2001:DB8:0:0::1`) are the same address.
-      if (!isIPv6(sDots)) {
-        let parsedHost: string | undefined;
-        try {
-          parsedHost = new URL(`http://${sDots}/`).hostname;
-        } catch {
-          parsedHost = undefined;
-        }
-
-        if (parsedHost === undefined || !isIPAddress(parsedHost)) {
-          return {
-            valid: false,
-            info: 'IP address is not one the URL parser accepts',
-            wildcardKind: 'none',
-          };
-        }
-
-        if (parsedHost !== sDots) {
-          return {
-            valid: true,
-            info: `IP address is read as ${parsedHost}`,
-            wildcardKind: 'none',
-          };
-        }
-      }
-
       return { valid: true, wildcardKind: 'none' };
     }
 
@@ -970,12 +949,24 @@ export function validateConfigEntry(
   }
 
   const hostDots = toAsciiDots(host);
-  if (isIPAddress(hostDots)) {
-    const info =
+  const hostIPv4 = readIPv4Entry(hostDots);
+  if (hostIPv4 !== undefined || isIPAddress(hostDots)) {
+    if (hostIPv4 !== undefined && hostIPv4.address === undefined) {
+      return { valid: false, info: hostIPv4.info, wildcardKind: 'none' };
+    }
+
+    const schemeInfo =
       scheme === 'http' || scheme === 'https'
         ? undefined
         : 'non-http(s) scheme; CORS may not match';
-    return { valid: true, info, wildcardKind: 'none' };
+    const notes = [hostIPv4?.info, schemeInfo].filter(
+      (note): note is string => note !== undefined,
+    );
+    return {
+      valid: true,
+      info: notes.length > 0 ? notes.join('; ') : undefined,
+      wildcardKind: 'none',
+    };
   }
 
   // Domain host
@@ -1441,6 +1432,48 @@ export function isApexDomain(domain: string): boolean {
 
   // Domain is apex if it matches the parsed domain and has no subdomain
   return parsedDomain === normalizedDomain && !subdomain;
+}
+
+/**
+ * How the URL parser reads a host entry it takes for an IPv4 address, or `undefined` for
+ * one it does not (a name, or IPv6).
+ *
+ * WHATWG reads any host whose last label is a number - decimal, or `0x` hex - as IPv4,
+ * and a host matched against an entry is read that way too, so the entry means whatever
+ * the parser makes of it: `192.168.001.010` is the octal `192.168.1.8`, `10.1` is
+ * `10.0.0.1` and `0x7f.1` is `127.0.0.1`. Such an entry is accepted with an `info` naming
+ * the address it is read as, so a typo is visible rather than silently matching another
+ * address. One the parser refuses (`192.168.1.08` - an octal octet with an 8 in it) can
+ * never be a URL's host and comes back with no `address`: it is invalid.
+ */
+function readIPv4Entry(
+  host: string,
+): { address?: string; info?: string } | undefined {
+  if (host.includes(':') || host.startsWith('[')) {
+    return undefined;
+  }
+
+  const labels = host.replace(/\.$/, '').split('.');
+  const last = labels[labels.length - 1] ?? '';
+
+  if (!/^(?:\d+|0x[0-9a-f]*)$/i.test(last)) {
+    return undefined;
+  }
+
+  let address: string;
+  try {
+    address = new URL(`http://${host}/`).hostname;
+  } catch {
+    return { info: 'IP address is not one the URL parser accepts' };
+  }
+
+  if (!isIPv4(address)) {
+    return { info: 'IP address is not one the URL parser accepts' };
+  }
+
+  return address === host.toLowerCase()
+    ? { address }
+    : { address, info: `IP address is read as ${address}` };
 }
 
 export {
