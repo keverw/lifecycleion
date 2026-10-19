@@ -4598,3 +4598,29 @@ test('round 102: one trailing empty label in all, the scheme after leading white
     matchesWildcardOrigin('https://api.example.com', 'https://*.example.com'),
   ).toBe(true);
 });
+
+test('round 103: origins read as the parser reads their text, in the scheme:// form only', () => {
+  for (const origin of [
+    'https:ex%61mple.com',
+    'https:/\t/ex%61mple.com',
+    'https:example.com',
+    'https:example.com:',
+    'https://example.com:\t',
+  ]) {
+    expect(normalizeOrigin(origin)).toBe('');
+    expect(matchesOriginList(origin, ['https://example.com'])).toBe(false);
+  }
+  expect(
+    matchesWildcardOrigin('https:api.ex%61mple.com', 'https://*.example.com'),
+  ).toBe(false);
+  expect(
+    matchesCORSCredentialsList(
+      'https:api.ex%61mple.com',
+      ['https://*.example.com'],
+      { allowWildcardSubdomains: true },
+    ),
+  ).toBe(false);
+  expect(normalizeOrigin('fo\to://a。b')).toBe('');
+  expect(normalizeOrigin(' https://Example.com ')).toBe('https://example.com');
+  expect(normalizeOrigin('https://exa\nmple.com')).toBe('https://example.com');
+});

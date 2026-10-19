@@ -73,14 +73,33 @@ function isSpecialScheme(protocol: string): boolean {
   );
 }
 
-/** `text` without the leading C0 controls and spaces the URL parser strips. */
-function stripLeadingC0AndSpace(text: string): string {
+/**
+ * An origin as the URL parser reads its text, or `undefined` when it is not written as
+ * `scheme://authority`.
+ *
+ * The parser deletes every tab, CR and LF and strips leading and trailing C0 controls and
+ * spaces before it reads anything, and it accepts a special scheme without its `//`
+ * (`https:host`, `https:/host`, `https:\\host`). The textual guards here - a dangling
+ * port, a percent-encoded host, the scheme that decides dot folding - read the text, so
+ * they read it cleaned the same way, and only in the `scheme://` form every `Origin`
+ * header takes: in any other, they never saw the host the parser then decoded.
+ */
+function toOriginText(text: string): string | undefined {
+  let cleaned = text.replace(/[\t\n\r]/g, '');
   let start = 0;
-  while (start < text.length && text.charCodeAt(start) <= 0x20) {
+  let end = cleaned.length;
+
+  while (start < end && cleaned.charCodeAt(start) <= 0x20) {
     start++;
   }
 
-  return text.slice(start);
+  while (end > start && cleaned.charCodeAt(end - 1) <= 0x20) {
+    end--;
+  }
+
+  cleaned = cleaned.slice(start, end);
+
+  return /^[a-z][a-z\d+.-]*:\/\//i.test(cleaned) ? cleaned : undefined;
 }
 
 /**
@@ -108,11 +127,8 @@ function hasPercentEncodedHost(origin: string): boolean {
  * parser keeps opaque and percent-encodes them in.
  */
 function foldOriginDots(text: string): string {
-  // After the leading C0 controls and spaces the URL parser strips, so ` foo://a。b` is
-  // still read as the opaque `foo:` host it is.
-  const scheme = /^([a-z][a-z\d+.-]*):/i.exec(
-    stripLeadingC0AndSpace(text),
-  )?.[1];
+  // `text` is already cleaned by `toOriginText`, so its scheme is where the parser sees it.
+  const scheme = /^([a-z][a-z\d+.-]*):/i.exec(text)?.[1];
 
   return scheme !== undefined && !isSpecialScheme(`${scheme.toLowerCase()}:`)
     ? text
@@ -144,10 +160,16 @@ export function normalizeOrigin(origin: string): string {
     return 'null';
   }
 
+  // Read as the parser reads its text; see `toOriginText`.
+  const originText = toOriginText(origin);
+  if (originText === undefined) {
+    return '';
+  }
+
   // Normalize Unicode dots before URL parsing for browser compatibility
   // Chrome allows URLs like https://127。0。0。1 - but only for a special scheme's host:
   // a non-special scheme's is opaque, and the parser percent-encodes those dots.
-  const normalizedOrigin = foldOriginDots(origin);
+  const normalizedOrigin = foldOriginDots(originText);
   if (hasDanglingPortInAuthority(normalizedOrigin)) {
     return '';
   }
@@ -366,8 +388,14 @@ export function matchesWildcardOrigin(
   origin: string,
   pattern: string,
 ): boolean {
+  // Read as the parser reads its text, as `normalizeOrigin` reads it; see `toOriginText`.
+  const originText = toOriginText(origin);
+  if (originText === undefined) {
+    return false;
+  }
+
   // Normalize Unicode dots before URL parsing for consistency
-  const normalizedOrigin = toAsciiDots(origin);
+  const normalizedOrigin = toAsciiDots(originText);
   const normalizedPattern = toAsciiDots(pattern);
 
   if (
@@ -1134,7 +1162,12 @@ function parseExactOriginForMatching(entry: string): {
     };
   }
 
-  const normalized = foldOriginDots(entry);
+  const entryText = toOriginText(entry);
+  if (entryText === undefined) {
+    return null;
+  }
+
+  const normalized = foldOriginDots(entryText);
   const schemeIdx = normalized.indexOf('://');
 
   if (schemeIdx !== -1) {
