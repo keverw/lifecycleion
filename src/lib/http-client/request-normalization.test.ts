@@ -3835,3 +3835,72 @@ test('round 81: a timed-out attempt is a timeout whatever the adapter rejects wi
     .send();
   expect(secondStart - nextRetryAt).toBeLessThan(150);
 });
+
+test('round 82: override apex for edge-hyphen hosts, a resolved transport error after the timer, a clock step during retry observers', async () => {
+  const jar = new CookieJar({ publicSuffixes: { add: ['amazonaws.com'] } });
+  jar.parseSetCookieHeader(
+    'a=1; Domain=foo.s3.amazonaws.com',
+    'https://-x.foo.s3.amazonaws.com/',
+  );
+  expect(jar.getCookieHeaderString('https://-x.foo.s3.amazonaws.com/')).toBe(
+    'a=1',
+  );
+
+  let sends = 0;
+  const resolving: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      sends++;
+      return new Promise((resolve) => {
+        request.signal?.addEventListener('abort', () => {
+          resolve({
+            status: 0,
+            headers: {},
+            body: null,
+            isTransportError: true,
+          });
+        });
+      });
+    },
+  };
+  const timedOut = new HTTPClient({
+    adapter: resolving,
+    baseURL: 'http://x.test',
+    timeout: 30,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+  }).get('/a');
+  const timedOutResponse = await timedOut.send();
+  expect(sends).toBe(2);
+  expect(timedOutResponse.isTimeout).toBe(true);
+  expect(timedOut.error?.code).toBe('timeout');
+
+  const client = new HTTPClient({
+    adapter: new RecordingAdapter(503),
+    baseURL: 'http://x.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 50 },
+  });
+  const realNow = Date.now.bind(Date);
+  client.addResponseObserver(
+    () => {
+      Date.now = () => realNow() - 3_600_000;
+    },
+    { phases: ['retry'] },
+  );
+  const startedAt = performance.now();
+  try {
+    const builder = client.get('/a');
+    const pending = builder.send();
+    const winner = await Promise.race([
+      pending.then(() => 'done'),
+      new Promise((resolve) => setTimeout(() => resolve('stuck'), 1000)),
+    ]);
+    if (winner === 'stuck') {
+      builder.cancel();
+      await pending;
+    }
+    expect(winner).toBe('done');
+    expect(performance.now() - startedAt).toBeGreaterThanOrEqual(40);
+  } finally {
+    Date.now = realNow;
+  }
+});

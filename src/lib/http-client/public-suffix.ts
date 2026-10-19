@@ -253,8 +253,13 @@ export class PublicSuffixResolver {
 
       // Parse the whole hostname so bundled wildcard exceptions remain in force.
       // Only caller additions may narrow that result; probing bundled suffixes
-      // individually loses the exception context (e.g. city.kawasaki.jp).
-      const bundled = parse(normalized, { allowPrivateDomains: true });
+      // individually loses the exception context (e.g. city.kawasaki.jp). Read
+      // without tldts's hostname check, as below: it finds no suffix at all for an
+      // edge-hyphen host, and an added suffix above a longer bundled one then won.
+      const bundled = parse(normalized, {
+        allowPrivateDomains: true,
+        validateHostname: false,
+      });
       const bundledLength = bundled.publicSuffix?.split('.').length ?? 0;
       for (let i = 0; i < labels.length; i++) {
         const candidate = labels.slice(i).join('.');

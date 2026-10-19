@@ -2602,6 +2602,19 @@ export class BaseHTTPClient {
             }
           : sentRequest;
 
+        // A transport failure answered once the attempt's timer had fired is that timer's
+        // abort, as a rejection then is (below): a custom adapter may resolve
+        // `isTransportError` for it rather than reject, and that was retried and
+        // reported as a network_error with `isTimeout: false`. Raised as the timer's own
+        // abort so the catch reads it as the timeout. An adapter veto stays its own.
+        if (
+          isTimedOut &&
+          adapterResponse.isTransportError === true &&
+          adapterResponse.isRetryable !== false
+        ) {
+          throw timeoutController.signal.reason;
+        }
+
         clearTimeout(timeoutID);
 
         // Store Set-Cookie before retry/backoff so the next attempt matches browsers
@@ -2698,6 +2711,10 @@ export class BaseHTTPClient {
             new Error(`HTTP ${adapterResponse.status}`),
           );
           const nextRetryAt = shouldRetry ? Date.now() + delayMS : undefined;
+          // The delay's start on the monotonic clock: what is left of it after the
+          // retry-phase observers is measured here, so a wall-clock step cannot stretch
+          // or skip it.
+          const retryDelayStartedAt = performance.now();
 
           // Built before the retry is committed or announced: building decodes the body,
           // and a body that cannot be decoded ends this attempt in the catch below as an
@@ -2747,7 +2764,7 @@ export class BaseHTTPClient {
             // published to `onAttemptEnd` and the builder before they ran, and waiting the
             // whole delay after them started the retry late by however long they took.
             await this._cancellableDelay(
-              Math.max(0, (nextRetryAt ?? 0) - Date.now()),
+              Math.max(0, delayMS - (performance.now() - retryDelayStartedAt)),
               cancelSignal,
             );
 
@@ -3309,6 +3326,10 @@ export class BaseHTTPClient {
             normalizeError(error),
           );
           const nextRetryAt = shouldRetry ? Date.now() + delayMS : undefined;
+          // The delay's start on the monotonic clock: what is left of it after the
+          // retry-phase observers is measured here, so a wall-clock step cannot stretch
+          // or skip it.
+          const retryDelayStartedAt = performance.now();
 
           if (shouldRetry) {
             callbacks.setNextRetryDelayMS(delayMS);
@@ -3359,7 +3380,7 @@ export class BaseHTTPClient {
 
             // The rest of the delay after the observers, as on the resolve path above.
             await this._cancellableDelay(
-              Math.max(0, (nextRetryAt ?? 0) - Date.now()),
+              Math.max(0, delayMS - (performance.now() - retryDelayStartedAt)),
               cancelSignal,
             );
 

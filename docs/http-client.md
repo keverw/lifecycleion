@@ -1089,7 +1089,7 @@ controller.abort();
 controller.abort('user_navigated_away');
 ```
 
-The external signal is composed with the client's cancel signal (`builder.cancel()`, `client.cancelAll()`, etc.). Either one will abort the request and set `isCancelled: true`. The per-attempt timeout is independent. It fires its own abort but sets `isTimeout: true` instead. Whatever an adapter's `send()` rejects with after that abort and before it has answered is the attempt's timeout, so a custom adapter need not reject with an `AbortError`. If `controller.abort()` is called with an explicit string reason, it appears on `HTTPClientError.cancelReason`.
+The external signal is composed with the client's cancel signal (`builder.cancel()`, `client.cancelAll()`, etc.). Either one will abort the request and set `isCancelled: true`. The per-attempt timeout is independent. It fires its own abort but sets `isTimeout: true` instead. Whatever an adapter's `send()` rejects with after that abort and before it has answered, or an `isTransportError` response it resolves then, is the attempt's timeout, so a custom adapter need not reject with an `AbortError`. If `controller.abort()` is called with an explicit string reason, it appears on `HTTPClientError.cancelReason`.
 
 ### Abort Listeners That Throw
 
