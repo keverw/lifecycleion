@@ -4057,3 +4057,99 @@ test('round 84: a cancel from the final download event of a chunked body keeps i
     expect(extractFetchHeaders(repeated).location).toBe(first);
   }
 });
+
+test('round 85: undispatched redirects, cross-origin Range, 303 body, Location heuristic, redirect request shape, adapter without detectedRedirectURL', async () => {
+  /** Answers `/start` with a redirect to `location`, anything else with 200. */
+  const redirecting = (
+    status: number,
+    location: string,
+  ): HTTPAdapter & { requests: AdapterRequest[] } => {
+    const requests: AdapterRequest[] = [];
+    return {
+      requests,
+      getType: () => 'node',
+      send: (request) => {
+        requests.push(request);
+        return Promise.resolve<AdapterResponse>(
+          new URL(request.requestURL).pathname === '/start'
+            ? { status, headers: { location }, body: null }
+            : { status: 200, headers: {}, body: null },
+        );
+      },
+    };
+  };
+
+  // A refused Location is detected, not followed.
+  const refused = new HTTPClient({
+    adapter: redirecting(302, 'ftp://files.test/x'),
+    baseURL: 'http://a.test',
+    followRedirects: true,
+  }).get('/start');
+  await refused.send();
+  expect(refused.error?.code).toBe('request_setup_error');
+  expect(refused.error?.wasRedirectFollowed).toBe(false);
+  expect(refused.error?.detectedRedirectURL).toBe('ftp://files.test/x');
+
+  // Range and conditional headers survive a cross-origin hop; a 303 drops a GET body.
+  const crossAdapter = redirecting(302, 'http://cdn.test/asset');
+  await new HTTPClient({
+    adapter: crossAdapter,
+    baseURL: 'http://a.test',
+    followRedirects: true,
+  })
+    .get('/start')
+    .headers({ range: 'bytes=1000-', 'if-none-match': '"v1"' })
+    .send();
+  expect(crossAdapter.requests[1].headers.range).toBe('bytes=1000-');
+  expect(crossAdapter.requests[1].headers['if-none-match']).toBe('"v1"');
+
+  const seeOther = redirecting(303, '/result');
+  await new HTTPClient({
+    adapter: seeOther,
+    baseURL: 'http://a.test',
+    followRedirects: true,
+  })
+    .get('/start')
+    .text('payload')
+    .send();
+  expect(seeOther.requests[1].method).toBe('GET');
+  expect(seeOther.requests[1].body ?? null).toBeNull();
+  expect(seeOther.requests[1].headers['content-type']).toBeUndefined();
+
+  // Only a scheme-and-authority or a path after ", " starts a second Location.
+  expect(
+    extractFetchHeaders(new Headers({ location: '/files/Smith, Re:notes.pdf' }))
+      .location,
+  ).toBe('/files/Smith, Re:notes.pdf');
+
+  // Redirect interceptors see the request shape the initial phase does.
+  const seen: Array<Record<string, unknown>> = [];
+  const shapeClient = new HTTPClient({
+    adapter: redirecting(302, '/next'),
+    baseURL: 'http://a.test',
+    followRedirects: true,
+    includeAttemptHeader: true,
+  });
+  shapeClient.addRequestInterceptor(
+    (request) => {
+      seen.push({ ...request });
+      return request;
+    },
+    { phases: ['initial', 'redirect'] },
+  );
+  await shapeClient.get('/start').send();
+  expect(Object.keys(seen[1]).sort()).toEqual(Object.keys(seen[0]).sort());
+  expect(Object.keys(seen[1].headers as object).sort()).toEqual(
+    Object.keys(seen[0].headers as object).sort(),
+  );
+
+  // A redirect the client does not follow still names its target.
+  const disabled = new HTTPClient({
+    adapter: redirecting(302, '/x'),
+    baseURL: 'http://a.test',
+    followRedirects: false,
+  }).get('/start');
+  await disabled.send();
+  expect(disabled.error?.code).toBe('redirect_disabled');
+  expect(disabled.error?.detectedRedirectURL).toBe('http://a.test/x');
+});

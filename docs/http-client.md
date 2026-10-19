@@ -981,9 +981,9 @@ const client = new HTTPClient({
 | 303      | Other methods                 | GET             |
 | 307, 308 | Any                           | Unchanged       |
 
-Cross-origin redirects strip unsafe headers (Authorization, Cookie, etc.) from the forwarded request.
+Cross-origin redirects carry only an allow-list of headers: `accept`, `accept-language`, `content-encoding`, `content-language`, `content-type`, `user-agent`, `range` and the conditional headers (`if-range`, `if-match`, `if-none-match`, `if-modified-since`, `if-unmodified-since`). Everything else - `Authorization`, `Cookie`, and any custom header such as `X-API-Key` that might be a credential - is stripped. This is stricter than fetch, which drops only `Authorization`; a redirect-phase interceptor can add a header back for a target it trusts. Cookies are recomputed from the jar for the target.
 
-A `307` or `308` replays the body, a `GET`'s included, with its `Content-Type` and `Content-Encoding`, across origins too. A hop rewritten to `GET` drops the body and those headers.
+A `307` or `308` replays the body, a `GET`'s included, with its `Content-Type` and `Content-Encoding`, across origins too. A hop rewritten to `GET`, and any `303` (a `GET` that carried a body included), drops the body and those headers.
 
 With `NodeAdapter`, URL-based Basic auth follows the resolved redirect URL: from `https://user:pass@example.com/start`, a relative `Location: /next` retains those credentials, while an absolute `Location: https://example.com/next` without userinfo does not. An explicitly supplied `Authorization` header still carries through same-origin redirects.
 
@@ -1005,7 +1005,7 @@ redirect interceptors, and generated body headers are recalculated after their e
 
 Note: `MockAdapter` strips the domain before route matching, so "cross-origin" redirects in tests are effectively same-origin to its router. Header stripping still applies, but test routes don't need to be registered per-domain.
 
-Redirect metadata is recorded when a redirect target is detected and enters redirect handling. That means `redirectHistory` can include the current redirect target before the follow-up adapter attempt is dispatched. During redirect-phase interception, the metadata reflects the target detected from the redirect response. If a redirect interceptor rewrites `requestURL` and redirect handling continues, later `requestURL` / `redirectHistory` values reflect the rewritten target. If redirect handling is cancelled or errors before dispatch, the response/error metadata may still reflect the originally detected target rather than a completed adapter attempt.
+Redirect metadata is recorded when a redirect target is detected and enters redirect handling. That means `redirectHistory` can include the current redirect target before the follow-up adapter attempt is dispatched. During redirect-phase interception, the metadata reflects the target detected from the redirect response. If a redirect interceptor rewrites `requestURL` and redirect handling continues, later `requestURL` / `redirectHistory` values reflect the rewritten target. If redirect handling is cancelled or errors before dispatch, the response/error metadata may still reflect the originally detected target rather than a completed adapter attempt. That target is the redirect detected and not followed: it is `detectedRedirectURL`, and it does not count toward `wasRedirectFollowed`, which says whether a hop was actually dispatched.
 
 ### Redirect Phase Info
 

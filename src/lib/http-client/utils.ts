@@ -732,7 +732,7 @@ function hasXMLHttpRequestGlobal(): boolean {
 
 /** The first of a `Location` that fetch joined from repeated headers, or the value whole. */
 function firstJoinedLocation(value: string): string {
-  const separator = value.search(/, (?:\/|[a-z][a-z\d+.-]*:)/i);
+  const separator = value.search(/, (?:\/|[a-z][a-z\d+.-]*:\/\/)/i);
 
   return separator === -1 ? value : value.slice(0, separator);
 }
@@ -754,7 +754,7 @@ export function extractFetchHeaders(
     if (lower !== 'set-cookie') {
       // A repeated `Location` arrives joined as `a, b`; its first value is kept, as Node's
       // `res.headers` keeps it, rather than followed as the one mangled URL `a,%20b`. Only
-      // when what follows the `, ` starts as a URL target does - a path or a scheme: a
+      // when what follows the `, ` starts as a URL target does - a path or `scheme://`: a
       // single value with a raw space (`/files/Smith, John.pdf`) is kept whole and
       // percent-encoded when followed, as NodeAdapter and browsers follow it.
       defineEntry(

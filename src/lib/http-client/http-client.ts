@@ -1104,7 +1104,15 @@ export class BaseHTTPClient {
               adapterResponse: {
                 status: 0,
                 wasRedirectDetected: true,
-                detectedRedirectURL: adapterResponse.detectedRedirectURL,
+                // Resolved from `Location` when the adapter did not say: the field is
+                // optional for a custom adapter, and the client has the header.
+                detectedRedirectURL:
+                  adapterResponse.detectedRedirectURL ??
+                  derivedRedirectFields(
+                    attemptResult.sentRequest.requestURL,
+                    adapterResponse.status,
+                    adapterResponse.headers,
+                  ).detectedRedirectURL,
                 headers: {},
                 body: null,
                 // Carried onto the rebuilt response: the real one is discarded here, and
@@ -1189,7 +1197,13 @@ export class BaseHTTPClient {
                 adapterResponse: {
                   status: 0,
                   wasRedirectDetected: true,
-                  detectedRedirectURL: adapterResponse.detectedRedirectURL,
+                  detectedRedirectURL:
+                    adapterResponse.detectedRedirectURL ??
+                    derivedRedirectFields(
+                      attemptResult.sentRequest.requestURL,
+                      adapterResponse.status,
+                      adapterResponse.headers,
+                    ).detectedRedirectURL,
                   headers: {},
                   body: null,
                   ...(uploadOutcome
@@ -1258,9 +1272,12 @@ export class BaseHTTPClient {
             // cross-origin checks below compare against it, and observers and
             // interceptors are handed objects they could change.
             const hopFromURL = attemptResult.sentRequest.requestURL;
-            // Whether this hop keeps its body, decided now for the same reason.
-            const isMethodRewritten =
-              redirectMethod !== attemptResult.sentRequest.method;
+            // Whether this hop keeps its body, decided now for the same reason. A 303 is a
+            // retrieval of another resource whatever the method (RFC 9110 15.4.4, curl):
+            // a `GET` that carried a body does not send it to the See Other target.
+            const isBodyDropped =
+              redirectMethod !== attemptResult.sentRequest.method ||
+              adapterResponse.status === 303;
             const hopInfo: RedirectHopInfo = {
               hop: hopCount,
               from: hopFromURL,
@@ -1371,17 +1388,23 @@ export class BaseHTTPClient {
             const wasLocationUnsupported =
               !this._isSupportedRequestURL(redirectURL);
 
+            // Only the fields a request interceptor is handed in the other phases: the
+            // attempt that answered carries its own (`rawBody`, `timeout`, the attempt
+            // header for the attempt that is over), which are rebuilt for the next one.
+            const {
+              [DEFAULT_REQUEST_ATTEMPT_HEADER]: _staleAttemptHeader,
+              ...hopHeaders
+            } =
+              attemptResult.redirectRequestHeaders ??
+              attemptResult.sentRequest.headers;
             const redirectRequest = this._sanitizeRedirectRequest(
               {
-                ...attemptResult.sentRequest,
-                headers:
-                  attemptResult.redirectRequestHeaders ??
-                  attemptResult.sentRequest.headers,
+                headers: hopHeaders,
                 requestURL: redirectURL,
                 method: redirectMethod,
-                // Dropped only when this hop rewrote the method: a 307/308 replays a
-                // GET's body as it replays any other method's.
-                body: isMethodRewritten ? undefined : sentBody.value,
+                // Dropped when this hop rewrote the method or is a 303: a 307/308 replays
+                // a GET's body as it replays any other method's.
+                body: isBodyDropped ? undefined : sentBody.value,
               },
               {
                 fromURL: hopFromURL,
@@ -1460,6 +1483,7 @@ export class BaseHTTPClient {
                   redirectURL,
                 ),
                 redirectHistory: nextRedirectHistory,
+                undispatchedRedirectURL: redirectURL,
                 isNetworkErrorOverride: false,
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
@@ -1507,6 +1531,7 @@ export class BaseHTTPClient {
                 initialURL: initialRequestURL,
                 requestURL: cancelledRequestURL,
                 redirectHistory: [...redirectHistory, cancelledRequestURL],
+                undispatchedRedirectURL: cancelledRequestURL,
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
 
@@ -1532,6 +1557,7 @@ export class BaseHTTPClient {
                 initialURL: initialRequestURL,
                 requestURL: redirectInterceptURL,
                 redirectHistory: nextRedirectHistory,
+                undispatchedRedirectURL: redirectURL,
                 isNetworkErrorOverride: false,
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
@@ -1632,6 +1658,7 @@ export class BaseHTTPClient {
                   initialURL: initialRequestURL,
                   requestURL: redirectedRequestURL,
                   redirectHistory,
+                  undispatchedRedirectURL: redirectedRequestURL,
                   ...(uploadOutcome
                     ? { requestBodySettled: uploadOutcome }
                     : {}),
@@ -1861,15 +1888,19 @@ export class BaseHTTPClient {
 
     if (isCrossOrigin) {
       const safeHeaders: Record<string, string | string[]> = {};
-      // Cross-origin safety: strip ALL headers except CORS-safelisted ones
-      // when the redirect crosses origins (scheme + host + port). Matches
-      // Chromium/fetch behavior — Authorization, X-API-Key, etc. must not
-      // leak to a different host. Cookies and internal headers are re-attached
-      // later as needed.
+      // Cross-origin safety: strip every header outside a short allow-list when the
+      // redirect crosses origins (scheme + host + port). Stricter than fetch, which
+      // drops only `Authorization`: a caller's own credential header (`X-API-Key`) is
+      // unknown to us, so nothing that could be one is carried to a host the caller did
+      // not name. Cookies and internal headers are re-attached later as needed.
       //
       // `content-encoding` is kept with them: it describes the body a 307/308 replays,
       // not the caller, and that body arrives unreadable without it. It is dropped
       // below with the body when the hop does not carry one.
+      //
+      // `range` and the conditional headers are kept as well: they say which part or
+      // version of the resource is wanted, not who is asking, and a resumed download sent
+      // to a CDN without its `range` gets the whole body back.
       const safelisted = new Set([
         'accept',
         'accept-language',
@@ -1877,6 +1908,12 @@ export class BaseHTTPClient {
         'content-language',
         'content-type',
         'user-agent',
+        'range',
+        'if-range',
+        'if-match',
+        'if-none-match',
+        'if-modified-since',
+        'if-unmodified-since',
       ]);
 
       for (const [key, value] of Object.entries(request.headers)) {
@@ -3595,6 +3632,12 @@ export class BaseHTTPClient {
      * could not be read. See the attempt result's own `answeredResponse`.
      */
     answeredResponse?: AnsweredResponse;
+    /**
+     * A redirect target recorded as the last `redirectHistory` entry but never
+     * dispatched - refused, cancelled or failed before its hop went out. It is the
+     * redirect detected and not followed, so it is not counted as a followed hop.
+     */
+    undispatchedRedirectURL?: string;
   }): HTTPResponse<T> {
     const {
       adapterResponse,
@@ -3607,15 +3650,24 @@ export class BaseHTTPClient {
       isNetworkErrorOverride,
       requestBodySettled,
       answeredResponse,
+      undispatchedRedirectURL,
     } = params;
     // Each response its own copy: the loop's history is the client's, and an observer
     // handed this response must not be able to rewrite the history of the request.
     const redirectHistory = [...params.redirectHistory];
 
-    const wasRedirectFollowed = redirectHistory.length > 0;
-    const redirectFields: RedirectFields = adapterResponse
-      ? adapterRedirectFields(adapterResponse)
-      : (answeredResponse ?? {});
+    const wasRedirectFollowed =
+      redirectHistory.length - (undispatchedRedirectURL === undefined ? 0 : 1) >
+      0;
+    const redirectFields: RedirectFields =
+      undispatchedRedirectURL !== undefined
+        ? {
+            wasRedirectDetected: true,
+            detectedRedirectURL: undispatchedRedirectURL,
+          }
+        : adapterResponse
+          ? adapterRedirectFields(adapterResponse)
+          : (answeredResponse ?? {});
     const wasRedirectDetected =
       wasRedirectFollowed || (redirectFields.wasRedirectDetected ?? false);
     const detectedRedirectURL = redirectFields.detectedRedirectURL;
