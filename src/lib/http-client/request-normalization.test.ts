@@ -4549,3 +4549,12 @@ test('round 99: extension and other single-label opaque origins can be allowlist
   expect(validateConfigEntry('foo://a。example', 'origin').valid).toBe(false);
   expect(normalizeOrigin('https://127。0。0。1')).toBe('https://127.0.0.1');
 });
+
+test('round 100: an opaque origin with Unicode dots is refused before the IP branch', () => {
+  for (const entry of ['foo://1。2。3。4', 'chrome-extension://1。2。3。4']) {
+    expect(validateConfigEntry(entry, 'origin').valid).toBe(false);
+    expect(matchesOriginList(entry, [entry])).toBe(false);
+  }
+  expect(validateConfigEntry('foo://1.2.3.4', 'origin').valid).toBe(true);
+  expect(matchesOriginList('foo://1.2.3.4', ['foo://1.2.3.4'])).toBe(true);
+});

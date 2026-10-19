@@ -1003,6 +1003,19 @@ export function validateConfigEntry(
   const hostDots = toAsciiDots(host);
   // A non-special scheme's host is opaque to the URL parser, never an address.
   const isOpaqueHost = !isSpecialScheme(`${scheme.toLowerCase()}:`);
+
+  // An opaque host is percent-encoded by the URL parser where it is not ASCII - Unicode
+  // dots included, which are not folded for it - and a matched origin is read through
+  // `normalizeOrigin`, which refuses that: say so here, ahead of every branch below,
+  // rather than accept `foo://bücher.example` or `foo://1。2。3。4` and never match it.
+  if (isOpaqueHost && normalizeOrigin(`${scheme}://${host}`) === '') {
+    return {
+      valid: false,
+      info: 'origin host is not one a non-special scheme can match (use ASCII)',
+      wildcardKind: 'none',
+    };
+  }
+
   const hostIPv4 = isOpaqueHost ? undefined : readIPv4Entry(hostDots);
   if (hostIPv4 !== undefined || isIPAddress(hostDots)) {
     if (hostIPv4 !== undefined && hostIPv4.address === undefined) {
@@ -1025,17 +1038,6 @@ export function validateConfigEntry(
 
   // Domain host
   const nd = isOpaqueHost ? normalizeDomainName(host) : normalizeDomain(host);
-
-  // An opaque host is percent-encoded by the URL parser where it is not ASCII, and a
-  // matched origin is read through `normalizeOrigin`, which refuses that: say so here
-  // rather than accept `foo://bücher.example` and never match it.
-  if (isOpaqueHost && normalizeOrigin(`${scheme}://${host}`) === '') {
-    return {
-      valid: false,
-      info: 'origin host is not one a non-special scheme can match (use ASCII)',
-      wildcardKind: 'none',
-    };
-  }
 
   if (nd === '') {
     return {
