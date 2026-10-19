@@ -117,7 +117,9 @@ export function isIPAddress(str: string): boolean {
 export function readURLParserIPv4(
   host: string,
 ): { address?: string } | undefined {
-  const text = host.endsWith('.') ? host.slice(0, -1) : host;
+  // Not stripped of a trailing dot here: the empty last label is dropped once, below,
+  // after decoding - stripping one here as well read `1.2.3.4..` as `1.2.3.4`.
+  const text = host;
 
   if (text === '' || /[@/\\?#:[\]\s]/.test(text)) {
     return undefined;
@@ -450,13 +452,18 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
     return '';
   }
 
+  // Asked with its trailing dot, if any: the parser drops one empty last label in all,
+  // counting one that appears only once decoded, so `1.2.3.4%2e.` is the name `1.2.3.4..`
+  // to it and not the address `1.2.3.4`.
+  const hostAsWritten = trimmed;
+
   if (trimmed.endsWith('.')) {
     trimmed = trimmed.slice(0, -1);
   }
 
   // Canonicalize IP literals up front so exact host checks line up with WHATWG URL parsing.
   const canonicalIPAddress = isWholeHost
-    ? canonicalizeIPAddressLiteral(trimmed)
+    ? canonicalizeIPAddressLiteral(hostAsWritten)
     : null;
   if (canonicalIPAddress !== null) {
     return canonicalIPAddress;

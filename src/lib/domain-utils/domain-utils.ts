@@ -74,12 +74,33 @@ function isSpecialScheme(protocol: string): boolean {
 }
 
 /**
+ * Whether an origin's host is percent-encoded. No browser sends one in an `Origin`, and
+ * `validateConfigEntry` refuses one, so the matchers refuse it too rather than read it
+ * decoded and match an entry the validator rejects. An IPv6 literal's `%25` zone is left
+ * to the IPv6 handling.
+ */
+function hasPercentEncodedHost(origin: string): boolean {
+  const schemeSep = origin.indexOf('://');
+
+  if (schemeSep === -1) {
+    return false;
+  }
+
+  const authority = extractAuthority(origin, schemeSep);
+  const host = authority.slice(authority.lastIndexOf('@') + 1);
+
+  return !host.startsWith('[') && host.includes('%');
+}
+
+/**
  * `text` with Unicode dot variants folded to `.`, as the URL parser's IDNA mapping folds
  * them in a special scheme's host - but not for a non-special scheme, whose host the
  * parser keeps opaque and percent-encodes them in.
  */
 function foldOriginDots(text: string): string {
-  const scheme = /^([a-z][a-z\d+.-]*):/i.exec(text)?.[1];
+  // After the leading C0 controls and spaces the URL parser strips, so ` foo://a。b` is
+  // still read as the opaque `foo:` host it is.
+  const scheme = /^[\u0000-\u0020]*([a-z][a-z\d+.-]*):/i.exec(text)?.[1];
 
   return scheme !== undefined && !isSpecialScheme(`${scheme.toLowerCase()}:`)
     ? text
@@ -120,16 +141,9 @@ export function normalizeOrigin(origin: string): string {
   }
 
   // A percent-encoded host (`https://ex%61mple.com`) is refused, as `validateConfigEntry`
-  // refuses it: no browser sends one in an `Origin`, and reading it decoded here made an
-  // entry the validator rejects match all the same. An IPv6 literal's `%25` zone is left
-  // to the IPv6 handling below.
-  const earlySchemeSep = normalizedOrigin.indexOf('://');
-  if (earlySchemeSep !== -1) {
-    const earlyAuthority = extractAuthority(normalizedOrigin, earlySchemeSep);
-    const earlyHost = earlyAuthority.slice(earlyAuthority.lastIndexOf('@') + 1);
-    if (!earlyHost.startsWith('[') && earlyHost.includes('%')) {
-      return '';
-    }
+  // refuses it. See `hasPercentEncodedHost`.
+  if (hasPercentEncodedHost(normalizedOrigin)) {
+    return '';
   }
 
   const url = safeParseURL(normalizedOrigin);
@@ -344,7 +358,10 @@ export function matchesWildcardOrigin(
   const normalizedOrigin = toAsciiDots(origin);
   const normalizedPattern = toAsciiDots(pattern);
 
-  if (hasDanglingPortInAuthority(normalizedOrigin)) {
+  if (
+    hasDanglingPortInAuthority(normalizedOrigin) ||
+    hasPercentEncodedHost(normalizedOrigin)
+  ) {
     return false;
   }
 

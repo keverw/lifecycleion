@@ -20,6 +20,7 @@ import {
   matchesDomainList,
   matchesOriginList,
   matchesWildcardDomain,
+  matchesWildcardOrigin,
   normalizeOrigin,
   validateConfigEntry,
 } from '../domain-utils/domain-utils';
@@ -4576,5 +4577,24 @@ test('round 101: a decoded trailing dot after an IPv4 address, file: origins, pe
   expect(validateConfigEntry('https://example.com', 'origin').valid).toBe(true);
   expect(
     matchesOriginList('https://example.com', ['https://example.com']),
+  ).toBe(true);
+});
+
+test('round 102: one trailing empty label in all, the scheme after leading whitespace, percent hosts in the wildcard matcher', () => {
+  expect(validateConfigEntry('1.2.3.4..', 'domain').valid).toBe(false);
+  expect(validateConfigEntry('1.2.3.4..', 'origin').valid).toBe(false);
+  expect(matchesDomainList('1.2.3.4', ['1.2.3.4%2e.'])).toBe(false);
+  expect(normalizeDomain('1.2.3.4.')).toBe('1.2.3.4');
+  expect(normalizeDomain('127.0.0.1%2e')).toBe('127.0.0.1');
+  expect(validateConfigEntry('127.0.0.1.', 'domain').valid).toBe(true);
+
+  expect(matchesOriginList(' foo://a。b', ['foo://a.b'])).toBe(false);
+  expect(matchesOriginList('\tfoo://a。b', ['foo://a.b'])).toBe(false);
+
+  expect(
+    matchesWildcardOrigin('https://api.ex%61mple.com', 'https://*.example.com'),
+  ).toBe(false);
+  expect(
+    matchesWildcardOrigin('https://api.example.com', 'https://*.example.com'),
   ).toBe(true);
 });
