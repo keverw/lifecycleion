@@ -3867,17 +3867,22 @@ export class BaseHTTPClient {
     );
     const contentType = parseContentType(contentTypeHeader);
 
-    let body: unknown = adapterResponse.body;
+    // An empty body is no body, whichever adapter read it: NodeAdapter already answers
+    // `null` for one, while FetchAdapter and XHRAdapter hand over an empty array, which a
+    // JSON `Content-Type` then reported as a parse error - a `200` with nothing in it (a
+    // bodiless `204`-style answer) failing to parse. axios, got and ky read it as empty too.
+    const rawBody =
+      adapterResponse.body !== null && adapterResponse.body.byteLength === 0
+        ? null
+        : adapterResponse.body;
+    let body: unknown = rawBody;
     let isJSON = false;
     let isText = false;
     let isParseError = false;
     let decodedTextBody: string | null = null;
 
-    if (
-      (contentType === 'json' || contentType === 'text') &&
-      adapterResponse.body
-    ) {
-      decodedTextBody = new TextDecoder().decode(adapterResponse.body);
+    if ((contentType === 'json' || contentType === 'text') && rawBody) {
+      decodedTextBody = new TextDecoder().decode(rawBody);
     }
 
     if (contentType === 'json' && decodedTextBody !== null) {

@@ -478,8 +478,15 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
     // a label's third and fourth characters - `r3---sn-abc.googlevideo.com`, a real CDN
     // host any URL carries - so no pattern could match such a host. A label that starts
     // or ends with a hyphen is still refused, below.
+    //
+    // `useSTD3ASCIIRules` off as well, as the parser has it, so a label may carry `_`:
+    // the URL standard and DNS both allow it (`a_b.example.com`, `my_service`), browsers
+    // send such origins, and the cookie jar and the client's host filter already accept
+    // them. Off, it also lets through `!`, `*`, `$` and the rest, which no host name uses
+    // and every pattern here would misread - so the ASCII result is held to letters,
+    // digits, hyphens and `_` below.
     const ascii = toASCII(normalized, {
-      useSTD3ASCIIRules: true,
+      useSTD3ASCIIRules: false,
       checkHyphens: false,
       checkBidi: true,
       checkJoiners: true,
@@ -489,10 +496,13 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
     if (!ascii) {
       throw new Error('TR46 processing failed');
     }
+    if (!/^[a-z0-9_.-]+$/.test(ascii)) {
+      return '';
+    }
     // On the Unicode form of each label: an IDN label starting or ending with a hyphen
     // (`-ñ`) is `xn----rga` once encoded, which hides the hyphen from a check on `ascii`.
     const unicodeLabels = toUnicode(ascii, {
-      useSTD3ASCIIRules: true,
+      useSTD3ASCIIRules: false,
     }).domain.split('.');
     if (
       unicodeLabels.some(

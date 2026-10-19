@@ -3073,10 +3073,10 @@ describe('domain-utils', () => {
       });
 
       it('rejects wildcard patterns with concrete labels that fail IDN normalization', () => {
-        // Underscore is rejected by TR46 useSTD3ASCIIRules — normalizeDomain returns ''
-        // This exercises the nd === '' branch in validateConcreteLabels
+        // A character no host name uses (`!`) normalizes to '' - `_` is allowed, as the URL
+        // standard allows it. This exercises the nd === '' branch in validateConcreteLabels
         const underscoreLabel = validateConfigEntry(
-          '*.foo_bar.example.com',
+          '*.foo!bar.example.com',
           'domain',
         );
         expect(underscoreLabel.valid).toBe(false);
@@ -3084,7 +3084,7 @@ describe('domain-utils', () => {
 
         // Same check in origin context
         const underscoreOrigin = validateConfigEntry(
-          '*.foo_bar.example.com',
+          '*.foo!bar.example.com',
           'origin',
         );
         expect(underscoreOrigin.valid).toBe(false);

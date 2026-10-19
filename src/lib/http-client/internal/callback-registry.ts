@@ -77,7 +77,7 @@ function describeUnmatchableHostPattern(entry: string): string | undefined {
       return `is read by the URL parser as ${JSON.stringify(parsed)}, which is what a request's hostname will be; give that form`;
     }
     return normalizeDomain(entry) === '' || parsed === undefined
-      ? "is not a hostname the matcher can read (it reads DNS names: letters, digits and inner hyphens, no '_'), so it can never match"
+      ? "is not a hostname the matcher can read (it reads host names: letters, digits, '_' and inner hyphens), so it can never match"
       : undefined;
   }
   // `*.` is `*` written as a fully qualified name, which the matcher reads the same way.

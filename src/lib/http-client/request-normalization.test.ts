@@ -4661,3 +4661,39 @@ test('round 105: Unicode dots are folded in the authority only', () => {
     matchesWildcardOrigin('https://api.example。com', 'https://*.example.com'),
   ).toBe(true);
 });
+
+test('underscore host labels are accepted as the URL standard allows; an empty body is null on every adapter', async () => {
+  expect(normalizeDomain('a_b.example.com')).toBe('a_b.example.com');
+  expect(normalizeDomain('my_service')).toBe('my_service');
+  expect(normalizeDomain('a!b.example.com')).toBe('');
+  expect(matchesOriginList('https://a_b.example.com', ['*'])).toBe(true);
+  expect(
+    matchesWildcardOrigin('https://a_b.example.com', 'https://*.example.com'),
+  ).toBe(true);
+  expect(matchesDomainList('my_service', ['*'])).toBe(true);
+  expect(validateConfigEntry('*.foo_bar.example.com', 'domain').valid).toBe(
+    true,
+  );
+  new HTTPClient().addResponseObserver(() => {}, {
+    hosts: ['my_service'],
+  })();
+
+  const emptyJSON: HTTPAdapter = {
+    getType: () => 'fetch',
+    send: () =>
+      Promise.resolve({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+        body: new Uint8Array(0),
+      }),
+  };
+  const response = await new HTTPClient({
+    adapter: emptyJSON,
+    baseURL: 'http://a.test',
+  })
+    .get('/x')
+    .send();
+  expect(response.body).toBeNull();
+  expect(response.isParseError).toBe(false);
+  expect(response.isFailed).toBe(false);
+});
