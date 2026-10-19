@@ -420,7 +420,7 @@ interface HTTPClientError {
   redirectHistory: string[]; // Redirect target URLs recorded during redirect handling, in order
   requestID: string;
   isTimeout: boolean;
-  isRetriesExhausted: boolean; // true when all retry attempts were spent
+  isRetriesExhausted: boolean; // true when the last failure was retryable but every retry attempt was spent
   cancelReason?: string; // set when cancelled with an explicit string reason - via builder.cancel('reason'), client.cancel(id, 'reason'), client.cancelAll/Own/WithLabel('reason'), controller.abort('reason'), or an interceptor/stream factory cancel
 }
 ```
@@ -1089,7 +1089,7 @@ controller.abort();
 controller.abort('user_navigated_away');
 ```
 
-The external signal is composed with the client's cancel signal (`builder.cancel()`, `client.cancelAll()`, etc.). Either one will abort the request and set `isCancelled: true`. The per-attempt timeout is independent. It fires its own abort but sets `isTimeout: true` instead. If `controller.abort()` is called with an explicit string reason, it appears on `HTTPClientError.cancelReason`.
+The external signal is composed with the client's cancel signal (`builder.cancel()`, `client.cancelAll()`, etc.). Either one will abort the request and set `isCancelled: true`. The per-attempt timeout is independent. It fires its own abort but sets `isTimeout: true` instead. Whatever an adapter's `send()` rejects with after that abort and before it has answered is the attempt's timeout, so a custom adapter need not reject with an `AbortError`. If `controller.abort()` is called with an explicit string reason, it appears on `HTTPClientError.cancelReason`.
 
 ### Abort Listeners That Throw
 
@@ -1902,7 +1902,7 @@ builder.response; // HTTPResponse<T> | null
 builder.error; // HTTPClientError | null
 builder.attemptCount; // Attempts begun, including one a retry interceptor or request setup ended before dispatch (null before send and when the request ends in its initial interceptor phase - an interceptor's cancel or error, or a cancel made during setup or while the interceptors run; 0 for a signal already aborted at send or a `request_setup_error` before any attempt, such as an unresolvable URL; a value that throws during setup, so that `send()` rejects, leaves it null)
 builder.nextRetryDelayMS; // Scheduled delay for next retry (ms), or null
-builder.nextRetryAt; // Epoch ms for next retry, or null
+builder.nextRetryAt; // Epoch ms for next retry, or null; retry-phase observers run within the delay, not after it
 builder.startedAt; // Epoch ms when the first attempt began (null before send, and null when the request ended before its first attempt began - e.g. pre-send cancel(), pre-aborted AbortSignal, request setup error raised before the first attempt such as an unresolvable URL, or request interceptor cancel/error). A setup failure inside an attempt (body serialization, or a cookie jar that throws while building the Cookie header) happens after the attempt began, so startedAt is set and attemptCount counts it
 builder.elapsedMS; // Wall-clock ms including retry waits; freezes on completion (null when startedAt is null)
 ```

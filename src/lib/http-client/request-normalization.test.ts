@@ -3783,3 +3783,55 @@ test('round 80: undefined-only params arrays, repeated fetch Location, mock non-
   jar.parseSetCookieHeader('s=1; Domain=x-.ck', 'https://x-.ck/');
   expect(jar.getCookieHeaderString('https://victim.x-.ck/')).toBe('');
 });
+
+test('round 81: a timed-out attempt is a timeout whatever the adapter rejects with; nextRetryAt is kept', async () => {
+  let sends = 0;
+  const hanging: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      sends++;
+      return new Promise((_, reject) => {
+        request.signal?.addEventListener('abort', () => {
+          reject(new Error('socket hang up'));
+        });
+      });
+    },
+  };
+  const timedOut = new HTTPClient({
+    adapter: hanging,
+    baseURL: 'http://x.test',
+    timeout: 30,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 1 },
+  }).get('/a');
+  const timedOutResponse = await timedOut.send();
+  expect(sends).toBe(2);
+  expect(timedOutResponse.isTimeout).toBe(true);
+  expect(timedOut.error?.code).toBe('timeout');
+  expect(timedOut.error?.isRetriesExhausted).toBe(true);
+
+  const client = new HTTPClient({
+    adapter: new RecordingAdapter(503),
+    baseURL: 'http://x.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 200 },
+  });
+  client.addResponseObserver(
+    async () => {
+      await new Promise((resolve) => setTimeout(resolve, 300));
+    },
+    { phases: ['retry'] },
+  );
+  let nextRetryAt = 0;
+  let secondStart = 0;
+  await client
+    .get('/a')
+    .onAttemptEnd((event) => {
+      nextRetryAt = event.nextRetryAt ?? nextRetryAt;
+    })
+    .onAttemptStart((event) => {
+      if (event.attemptNumber === 2) {
+        secondStart = Date.now();
+      }
+    })
+    .send();
+  expect(secondStart - nextRetryAt).toBeLessThan(150);
+});

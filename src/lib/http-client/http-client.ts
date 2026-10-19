@@ -2743,7 +2743,13 @@ export class BaseHTTPClient {
               );
             }
 
-            await this._cancellableDelay(delayMS, cancelSignal);
+            // What is left of the delay once the observers are done: `nextRetryAt` was
+            // published to `onAttemptEnd` and the builder before they ran, and waiting the
+            // whole delay after them started the retry late by however long they took.
+            await this._cancellableDelay(
+              Math.max(0, (nextRetryAt ?? 0) - Date.now()),
+              cancelSignal,
+            );
 
             // Retried only once this attempt's upload has settled, for the reason the
             // redirect loop waits before its next hop: `NodeAdapter.send()` resolves
@@ -3209,16 +3215,27 @@ export class BaseHTTPClient {
 
         // A timeout when the timer's own abort is what ended the attempt: the AbortError
         // it raised, even while an answer that arrived late was being read (a cancel would
-        // already have returned above). Otherwise an answer, late or not, decides: one
-        // that reads cleanly is delivered, and one that cannot be read is the answered
+        // already have returned above). Before any answer, whatever `send()` rejects with
+        // once the timer has fired is the abort's doing: a custom adapter may reject with
+        // its own error (`socket hang up`) rather than an AbortError, and that was retried
+        // and reported as a plain adapter_error. A flagged non-retryable failure and a
+        // callback's throw are still their own. Otherwise an answer, late or not, decides:
+        // one that reads cleanly is delivered, and one that cannot be read is the answered
         // response's non-retryable adapter_error below, so it is not sent again.
-        const didTimeoutThisAttempt = isTimedOut && isAbortError(error);
         const isNonRetryableClientCallbackFailure =
           isNonRetryableClientCallbackError(error);
+        const isFlaggedNonRetryableAdapterError =
+          readObjectMember(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG) ===
+          true;
+        const didTimeoutThisAttempt =
+          isTimedOut &&
+          (isAbortError(error) ||
+            (!didAdapterResolve &&
+              !isNonRetryableClientCallbackFailure &&
+              !isFlaggedNonRetryableAdapterError));
         const isNonRetryableAdapterFailure =
           (didAdapterResolve && !didTimeoutThisAttempt) ||
-          readObjectMember(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG) ===
-            true;
+          isFlaggedNonRetryableAdapterError;
 
         if (
           isNonRetryableClientCallbackFailure ||
@@ -3340,7 +3357,11 @@ export class BaseHTTPClient {
               );
             }
 
-            await this._cancellableDelay(delayMS, cancelSignal);
+            // The rest of the delay after the observers, as on the resolve path above.
+            await this._cancellableDelay(
+              Math.max(0, (nextRetryAt ?? 0) - Date.now()),
+              cancelSignal,
+            );
 
             // Waited on as the resolve path above waits, and for the same reason. This
             // used to skip the wait on the grounds that a hop that threw has no socket
