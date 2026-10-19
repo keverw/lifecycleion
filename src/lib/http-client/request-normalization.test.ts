@@ -4624,3 +4624,21 @@ test('round 103: origins read as the parser reads their text, in the scheme:// f
   expect(normalizeOrigin(' https://Example.com ')).toBe('https://example.com');
   expect(normalizeOrigin('https://exa\nmple.com')).toBe('https://example.com');
 });
+
+test('round 104: extra slashes or a backslash after scheme:// are refused', () => {
+  for (const origin of [
+    'https:///ex%61mple.com',
+    'https:///example.com:',
+    'https://example.com:\\',
+    'https://example.com:\\?',
+    'https:/\\example.com',
+  ]) {
+    expect(normalizeOrigin(origin)).toBe('');
+    expect(matchesOriginList(origin, ['https://example.com'])).toBe(false);
+  }
+  expect(
+    matchesWildcardOrigin('https:///a.ex%61mple.com', 'https://*.example.com'),
+  ).toBe(false);
+  expect(normalizeOrigin('https://example.com/')).toBe('https://example.com');
+  expect(normalizeOrigin('https://[::1]:8443')).toBe('https://[::1]:8443');
+});

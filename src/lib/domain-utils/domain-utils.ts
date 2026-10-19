@@ -99,7 +99,19 @@ function toOriginText(text: string): string | undefined {
 
   cleaned = cleaned.slice(start, end);
 
-  return /^[a-z][a-z\d+.-]*:\/\//i.test(cleaned) ? cleaned : undefined;
+  // `scheme://` followed directly by the authority: the parser skips any further `/` or
+  // `\` after a special scheme and ends its authority at `\` too, so `https:///ex%61mple.com`
+  // and `https://example.com:\` had the guards read a host other than the parser's. No
+  // `Origin` takes either form, so they are refused rather than imitated.
+  const match = /^[a-z][a-z\d+.-]*:\/\/(.*)$/is.exec(cleaned);
+  if (match === null) {
+    return undefined;
+  }
+
+  const afterSlashes = match[1] ?? '';
+  return afterSlashes.startsWith('/') || afterSlashes.includes('\\')
+    ? undefined
+    : cleaned;
 }
 
 /**
