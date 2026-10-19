@@ -4517,3 +4517,17 @@ test('round 97: non-special schemes keep opaque hosts; every special scheme drop
   expect(matchesOriginList('wss://x.com', ['wss://x.com:443'])).toBe(true);
   expect(normalizeOrigin('wss://x.com:8443')).toBe('wss://x.com:8443');
 });
+
+test('round 98: non-special-scheme IPv6 origins match; non-ASCII opaque hosts are refused', () => {
+  expect(normalizeOrigin('foo://[::1]')).toBe('foo://[::1]');
+  expect(
+    matchesOriginList('capacitor://[2001:db8::1]', [
+      'capacitor://[2001:db8::1]',
+    ]),
+  ).toBe(true);
+  expect(validateConfigEntry('foo://bücher.example', 'origin').valid).toBe(
+    false,
+  );
+  expect(validateConfigEntry('foo://example.com', 'origin').valid).toBe(true);
+  expect(matchesOriginList('foo://a.2.3.4', ['foo://a.2.3.4'])).toBe(true);
+});

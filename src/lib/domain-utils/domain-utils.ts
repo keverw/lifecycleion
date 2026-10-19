@@ -74,6 +74,19 @@ function isSpecialScheme(protocol: string): boolean {
 }
 
 /**
+ * A URL's hostname normalized as the URL parser read it. A special scheme's host may be
+ * an IPv4 address (`2130706433` is `127.0.0.1`). A non-special scheme's is opaque - kept
+ * as written, never an IPv4 address: reading it as one refused `foo://a.2.3.4` and merged
+ * `foo://2130706433` with `foo://127.0.0.1` - except an IPv6 literal, which the parser
+ * reads for every scheme, so `foo://[::1]` keeps its brackets and matches itself.
+ */
+function normalizeOriginHostname(protocol: string, hostname: string): string {
+  return isSpecialScheme(protocol) || hostname.startsWith('[')
+    ? normalizeDomain(hostname)
+    : normalizeDomainName(hostname);
+}
+
+/**
  * Normalize a bare origin for consistent comparison.
  * Returns the canonical origin form with a normalized hostname,
  * lowercase scheme, no trailing slash, and default ports removed
@@ -106,14 +119,13 @@ export function normalizeOrigin(origin: string): string {
       return '';
     }
 
-    // Normalize hostname with punycode. Read as an IP address only for a special scheme:
-    // the URL parser keeps a non-special scheme's host opaque (`foo://a.2.3.4`), so
-    // reading it as IPv4 refused hosts the parser accepts and merged `foo://2130706433`
-    // with `foo://127.0.0.1`.
+    // Normalize hostname with punycode, as the URL parser read it. See
+    // `normalizeOriginHostname`.
     const protocolLower = url.protocol.toLowerCase();
-    const normalizedHostname = isSpecialScheme(protocolLower)
-      ? normalizeDomain(url.hostname)
-      : normalizeDomainName(url.hostname);
+    const normalizedHostname = normalizeOriginHostname(
+      protocolLower,
+      url.hostname,
+    );
 
     // If hostname normalization fails (pathological IDN), return original origin
     // to avoid emitting values like "https://" with an empty host.
@@ -1000,6 +1012,17 @@ export function validateConfigEntry(
   // Domain host
   const nd = isOpaqueHost ? normalizeDomainName(host) : normalizeDomain(host);
 
+  // An opaque host is percent-encoded by the URL parser where it is not ASCII, and a
+  // matched origin is read through `normalizeOrigin`, which refuses that: say so here
+  // rather than accept `foo://bücher.example` and never match it.
+  if (isOpaqueHost && normalizeOrigin(`${scheme}://${host}`) === '') {
+    return {
+      valid: false,
+      info: 'origin host is not one a non-special scheme can match (use ASCII)',
+      wildcardKind: 'none',
+    };
+  }
+
   if (nd === '') {
     return {
       valid: false,
@@ -1072,10 +1095,11 @@ function parseExactOriginForMatching(entry: string): {
 
   return {
     normalizedOrigin,
-    // Read as `normalizeOrigin` reads it: as an address only for a special scheme.
-    normalizedHostname: isSpecialScheme(url.protocol.toLowerCase())
-      ? normalizeDomain(url.hostname)
-      : normalizeDomainName(url.hostname),
+    // Read as `normalizeOrigin` reads it.
+    normalizedHostname: normalizeOriginHostname(
+      url.protocol.toLowerCase(),
+      url.hostname,
+    ),
   };
 }
 
