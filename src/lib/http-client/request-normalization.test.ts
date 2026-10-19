@@ -4642,3 +4642,22 @@ test('round 104: extra slashes or a backslash after scheme:// are refused', () =
   expect(normalizeOrigin('https://example.com/')).toBe('https://example.com');
   expect(normalizeOrigin('https://[::1]:8443')).toBe('https://[::1]:8443');
 });
+
+test('round 105: Unicode dots are folded in the authority only', () => {
+  for (const origin of [
+    'https://example.com/。',
+    'https://example.com/．',
+    'https://example.com/。。',
+  ]) {
+    expect(normalizeOrigin(origin)).toBe('');
+    expect(matchesOriginList(origin, ['https://example.com'])).toBe(false);
+    expect(matchesCORSCredentialsList(origin, ['https://example.com'])).toBe(
+      false,
+    );
+  }
+  expect(normalizeOrigin('https://example。com')).toBe('https://example.com');
+  expect(normalizeOrigin('https://127。0。0。1')).toBe('https://127.0.0.1');
+  expect(
+    matchesWildcardOrigin('https://api.example。com', 'https://*.example.com'),
+  ).toBe(true);
+});

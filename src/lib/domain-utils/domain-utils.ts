@@ -134,17 +134,34 @@ function hasPercentEncodedHost(origin: string): boolean {
 }
 
 /**
- * `text` with Unicode dot variants folded to `.`, as the URL parser's IDNA mapping folds
- * them in a special scheme's host - but not for a non-special scheme, whose host the
- * parser keeps opaque and percent-encodes them in.
+ * `text` with Unicode dot variants folded to `.` in its authority, as the URL parser's
+ * IDNA mapping folds them in a special scheme's host - but not for a non-special scheme,
+ * whose host the parser keeps opaque and percent-encodes them in, and never past the
+ * authority: a path of `/。` folded to `/.` was collapsed to `/` by the parser, and
+ * `https://example.com/。` read as the bare origin, where its path is `/%E3%80%82`.
  */
 function foldOriginDots(text: string): string {
   // `text` is already cleaned by `toOriginText`, so its scheme is where the parser sees it.
   const scheme = /^([a-z][a-z\d+.-]*):/i.exec(text)?.[1];
 
-  return scheme !== undefined && !isSpecialScheme(`${scheme.toLowerCase()}:`)
-    ? text
-    : toAsciiDots(text);
+  if (scheme !== undefined && !isSpecialScheme(`${scheme.toLowerCase()}:`)) {
+    return text;
+  }
+
+  const schemeSep = text.indexOf('://');
+  if (schemeSep === -1) {
+    return toAsciiDots(text);
+  }
+
+  const authorityStart = schemeSep + 3;
+  const authority = extractAuthority(text, schemeSep);
+  const authorityEnd = authorityStart + authority.length;
+
+  return (
+    text.slice(0, authorityStart) +
+    toAsciiDots(authority) +
+    text.slice(authorityEnd)
+  );
 }
 
 /**
@@ -407,7 +424,7 @@ export function matchesWildcardOrigin(
   }
 
   // Normalize Unicode dots before URL parsing for consistency
-  const normalizedOrigin = toAsciiDots(originText);
+  const normalizedOrigin = foldOriginDots(originText);
   const normalizedPattern = toAsciiDots(pattern);
 
   if (
