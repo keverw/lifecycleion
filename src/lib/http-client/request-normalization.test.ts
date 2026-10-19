@@ -16,6 +16,7 @@ import {
 } from './consts';
 import { CookieJar } from './cookie-jar';
 import {
+  matchesCORSCredentialsList,
   matchesDomainList,
   matchesOriginList,
   matchesWildcardDomain,
@@ -4530,4 +4531,21 @@ test('round 98: non-special-scheme IPv6 origins match; non-ASCII opaque hosts ar
   );
   expect(validateConfigEntry('foo://example.com', 'origin').valid).toBe(true);
   expect(matchesOriginList('foo://a.2.3.4', ['foo://a.2.3.4'])).toBe(true);
+});
+
+test('round 99: extension and other single-label opaque origins can be allowlisted; opaque hosts keep their dots', () => {
+  for (const origin of [
+    'chrome-extension://abcdefghijklmnopabcdefghijklmnop',
+    'chrome-extension://123',
+    'moz-extension://3f1b4c2a-0000-4000-8000-000000000000',
+    'app://myapp',
+  ]) {
+    expect(validateConfigEntry(origin, 'origin').valid).toBe(true);
+    expect(matchesOriginList(origin, [origin])).toBe(true);
+    expect(matchesCORSCredentialsList(origin, [origin])).toBe(true);
+  }
+  expect(validateConfigEntry('https://com', 'origin').valid).toBe(false);
+  expect(matchesOriginList('foo://a。b', ['foo://a.b'])).toBe(false);
+  expect(validateConfigEntry('foo://a。example', 'origin').valid).toBe(false);
+  expect(normalizeOrigin('https://127。0。0。1')).toBe('https://127.0.0.1');
 });

@@ -74,6 +74,19 @@ function isSpecialScheme(protocol: string): boolean {
 }
 
 /**
+ * `text` with Unicode dot variants folded to `.`, as the URL parser's IDNA mapping folds
+ * them in a special scheme's host - but not for a non-special scheme, whose host the
+ * parser keeps opaque and percent-encodes them in.
+ */
+function foldOriginDots(text: string): string {
+  const scheme = /^([a-z][a-z\d+.-]*):/i.exec(text)?.[1];
+
+  return scheme !== undefined && !isSpecialScheme(`${scheme.toLowerCase()}:`)
+    ? text
+    : toAsciiDots(text);
+}
+
+/**
  * A URL's hostname normalized as the URL parser read it. A special scheme's host may be
  * an IPv4 address (`2130706433` is `127.0.0.1`). A non-special scheme's is opaque - kept
  * as written, never an IPv4 address: reading it as one refused `foo://a.2.3.4` and merged
@@ -99,8 +112,9 @@ export function normalizeOrigin(origin: string): string {
   }
 
   // Normalize Unicode dots before URL parsing for browser compatibility
-  // Chrome allows URLs like https://127。0。0。1
-  const normalizedOrigin = toAsciiDots(origin);
+  // Chrome allows URLs like https://127。0。0。1 - but only for a special scheme's host:
+  // a non-special scheme's is opaque, and the parser percent-encodes those dots.
+  const normalizedOrigin = foldOriginDots(origin);
   if (hasDanglingPortInAuthority(normalizedOrigin)) {
     return '';
   }
@@ -1030,7 +1044,9 @@ export function validateConfigEntry(
       wildcardKind: 'none',
     };
   }
-  const ps = getPublicSuffix(nd);
+  // Not for an opaque host, which is no DNS name: tldts reads every unknown single label
+  // (`chrome-extension://<id>`, `app://myapp`) as a suffix of its own.
+  const ps = isOpaqueHost ? null : getPublicSuffix(nd);
   if (ps && ps === nd && !INTERNAL_PSEUDO_TLDS.has(nd)) {
     return {
       valid: false,
@@ -1053,12 +1069,18 @@ export function validateConfigEntry(
 function parseExactOriginForMatching(entry: string): {
   normalizedOrigin: string;
   normalizedHostname: string;
+  /** A non-special scheme's host, which the public suffix list says nothing about. */
+  isOpaqueHost: boolean;
 } | null {
   if (entry === 'null') {
-    return { normalizedOrigin: 'null', normalizedHostname: '' };
+    return {
+      normalizedOrigin: 'null',
+      normalizedHostname: '',
+      isOpaqueHost: false,
+    };
   }
 
-  const normalized = toAsciiDots(entry);
+  const normalized = foldOriginDots(entry);
   const schemeIdx = normalized.indexOf('://');
 
   if (schemeIdx !== -1) {
@@ -1100,6 +1122,9 @@ function parseExactOriginForMatching(entry: string): {
       url.protocol.toLowerCase(),
       url.hostname,
     ),
+    isOpaqueHost:
+      !isSpecialScheme(url.protocol.toLowerCase()) &&
+      !url.hostname.startsWith('['),
   };
 }
 
@@ -1245,7 +1270,13 @@ export function matchesOriginList(
       return false;
     }
 
-    if (!isAllowedExactHostname(parsedAllowed.normalizedHostname)) {
+    // Not for an opaque host: the public suffix list is about DNS names, and it reads
+    // every unknown single label as a suffix, which refused every extension origin
+    // (`chrome-extension://<id>`).
+    if (
+      !parsedAllowed.isOpaqueHost &&
+      !isAllowedExactHostname(parsedAllowed.normalizedHostname)
+    ) {
       return false;
     }
 
@@ -1319,7 +1350,11 @@ export function matchesCORSCredentialsList(
       continue;
     }
 
-    if (!isAllowedExactHostname(parsedAllowed.normalizedHostname)) {
+    // As in `matchesOriginList`: no public-suffix rule for an opaque host.
+    if (
+      !parsedAllowed.isOpaqueHost &&
+      !isAllowedExactHostname(parsedAllowed.normalizedHostname)
+    ) {
       continue;
     }
 
