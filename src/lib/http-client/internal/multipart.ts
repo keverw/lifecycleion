@@ -384,9 +384,7 @@ export async function serializeMultipartFormData(
       // `sourceReadFailure` below.
       let reader: ReadableStreamDefaultReader<Uint8Array>;
       try {
-        reader = (value as Blob)
-          .stream()
-          .getReader() as ReadableStreamDefaultReader<Uint8Array>;
+        reader = (value as Blob).stream().getReader();
       } catch (error) {
         throw sourceReadFailure(error);
       }

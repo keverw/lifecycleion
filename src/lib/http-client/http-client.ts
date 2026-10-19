@@ -1312,7 +1312,7 @@ export class BaseHTTPClient {
                 requestURL: hopFromURL,
                 redirectHistory,
                 // The redirect this hop answered with, detected and never followed.
-                undispatchedRedirectURL: redirectURL,
+                undispatchedRedirect: { url: redirectURL, isRecorded: false },
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
               cancelReason = getSignalCancelReason(cancelSignal);
@@ -1370,7 +1370,7 @@ export class BaseHTTPClient {
                 requestURL: hopFromURL,
                 redirectHistory,
                 // The redirect this hop answered with, detected and never followed.
-                undispatchedRedirectURL: redirectURL,
+                undispatchedRedirect: { url: redirectURL, isRecorded: false },
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
               cancelReason = getSignalCancelReason(cancelSignal);
@@ -1501,7 +1501,7 @@ export class BaseHTTPClient {
                   redirectURL,
                 ),
                 redirectHistory: nextRedirectHistory,
-                undispatchedRedirectURL: redirectURL,
+                undispatchedRedirect: { url: redirectURL, isRecorded: true },
                 isNetworkErrorOverride: false,
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
@@ -1549,7 +1549,10 @@ export class BaseHTTPClient {
                 initialURL: initialRequestURL,
                 requestURL: cancelledRequestURL,
                 redirectHistory: [...redirectHistory, cancelledRequestURL],
-                undispatchedRedirectURL: cancelledRequestURL,
+                undispatchedRedirect: {
+                  url: cancelledRequestURL,
+                  isRecorded: true,
+                },
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
 
@@ -1575,7 +1578,7 @@ export class BaseHTTPClient {
                 initialURL: initialRequestURL,
                 requestURL: redirectInterceptURL,
                 redirectHistory: nextRedirectHistory,
-                undispatchedRedirectURL: redirectURL,
+                undispatchedRedirect: { url: redirectURL, isRecorded: true },
                 isNetworkErrorOverride: false,
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
@@ -1676,7 +1679,10 @@ export class BaseHTTPClient {
                   initialURL: initialRequestURL,
                   requestURL: redirectedRequestURL,
                   redirectHistory,
-                  undispatchedRedirectURL: redirectedRequestURL,
+                  undispatchedRedirect: {
+                    url: redirectedRequestURL,
+                    isRecorded: true,
+                  },
                   ...(uploadOutcome
                     ? { requestBodySettled: uploadOutcome }
                     : {}),
@@ -1801,7 +1807,16 @@ export class BaseHTTPClient {
           // And the redirect it detected and did not follow (`redirect_disabled`, say),
           // which this rebuild would otherwise drop.
           ...(response.detectedRedirectURL !== undefined
-            ? { undispatchedRedirectURL: response.detectedRedirectURL }
+            ? {
+                undispatchedRedirect: {
+                  url: response.detectedRedirectURL,
+                  // Recorded exactly when the answer counted it out of its own
+                  // followed hops: a history with nothing followed is that target.
+                  isRecorded:
+                    !response.wasRedirectFollowed &&
+                    response.redirectHistory.length > 0,
+                },
+              }
             : {}),
           ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
         });
@@ -3659,10 +3674,12 @@ export class BaseHTTPClient {
     /**
      * A redirect target detected but never dispatched - refused, cancelled or failed
      * before its hop went out. It is the redirect detected and not followed: reported
-     * as `detectedRedirectURL`, and not counted as a followed hop when it was already
-     * recorded as the last `redirectHistory` entry.
+     * as `detectedRedirectURL`, and - when the caller already recorded it as the last
+     * `redirectHistory` entry (`isRecorded`) - not counted as a followed hop. Said by
+     * the caller rather than inferred by comparing URLs: a hop that redirects to its own
+     * URL makes the followed entry and the new target the same string.
      */
-    undispatchedRedirectURL?: string;
+    undispatchedRedirect?: { url: string; isRecorded: boolean };
   }): HTTPResponse<T> {
     const {
       adapterResponse,
@@ -3675,22 +3692,19 @@ export class BaseHTTPClient {
       isNetworkErrorOverride,
       requestBodySettled,
       answeredResponse,
-      undispatchedRedirectURL,
+      undispatchedRedirect,
     } = params;
     // Each response its own copy: the loop's history is the client's, and an observer
     // handed this response must not be able to rewrite the history of the request.
     const redirectHistory = [...params.redirectHistory];
 
-    const isUndispatchedRecorded =
-      undispatchedRedirectURL !== undefined &&
-      redirectHistory.at(-1) === undispatchedRedirectURL;
     const wasRedirectFollowed =
-      redirectHistory.length - (isUndispatchedRecorded ? 1 : 0) > 0;
+      redirectHistory.length - (undispatchedRedirect?.isRecorded ? 1 : 0) > 0;
     const redirectFields: RedirectFields =
-      undispatchedRedirectURL !== undefined
+      undispatchedRedirect !== undefined
         ? {
             wasRedirectDetected: true,
-            detectedRedirectURL: undispatchedRedirectURL,
+            detectedRedirectURL: undispatchedRedirect.url,
           }
         : adapterResponse
           ? adapterRedirectFields(adapterResponse)

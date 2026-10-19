@@ -4298,3 +4298,30 @@ test('round 88: label and scope arguments are checked', async () => {
   const response = await pending;
   expect(response.isCancelled).toBe(false);
 });
+
+test('round 89: a followed hop that redirects to its own URL still counts as followed when cancelled', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/a', () => ({
+    status: 302,
+    headers: { location: '/b' },
+  }));
+  adapter.routes.get('/b', () => ({
+    status: 302,
+    headers: { location: '/b' },
+  }));
+  const builder = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+  }).get('/a');
+  builder.onAttemptEnd((event) => {
+    if (event.attemptNumber === 2) {
+      builder.cancel();
+    }
+  });
+  const response = await builder.send();
+  expect(response.isCancelled).toBe(true);
+  expect(response.redirectHistory).toEqual(['http://api.test/b']);
+  expect(response.wasRedirectFollowed).toBe(true);
+  expect(response.detectedRedirectURL).toBe('http://api.test/b');
+});
