@@ -708,6 +708,10 @@ export class NodeAdapter implements HTTPAdapter {
               /** Fire the factory's stream signal, so its cleanup listeners run. */
               abort: () => void;
 
+              /** The answer the factory was called for, carried on a setup failure. */
+              status: number;
+              headers: Record<string, string | string[]>;
+
               /**
                * Settle a socket failure that lands during the setup.
                *
@@ -1417,6 +1421,8 @@ export class NodeAdapter implements HTTPAdapter {
               try {
                 const setup: NonNullable<typeof pendingStreamSetup> = {
                   abort: abortStream,
+                  status,
+                  headers,
                   isResponseComplete: () => res.complete,
                   failOnSocketError: (error: Error): void => {
                     setup.failOnSocketError = undefined;
@@ -1506,7 +1512,10 @@ export class NodeAdapter implements HTTPAdapter {
                 abortStream();
                 tearDownAfterResponse();
                 failRequest(
-                  markStreamFactoryError(error, req, request.headers),
+                  markStreamFactoryError(error, req, request.headers, {
+                    status,
+                    headers,
+                  }),
                 );
                 return;
               } finally {
@@ -1549,6 +1558,11 @@ export class NodeAdapter implements HTTPAdapter {
                 abortErr.name = 'AbortError';
                 Object.assign(abortErr, {
                   [STREAM_FACTORY_CANCEL_KEY]: cancelReason ?? true,
+                });
+                // The answer it declined, so its `Set-Cookie` is still stored.
+                defineHiddenTags(abortErr, {
+                  [STREAM_ABORT_STATUS_KEY]: status,
+                  [STREAM_ABORT_HEADERS_KEY]: headers,
                 });
                 failRequest(abortErr);
                 return;
@@ -1925,13 +1939,17 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             if (pendingStreamSetup) {
+              const { status, headers } = pendingStreamSetup;
               destroyRequestQuietly(req);
               const abortErr = new Error(
                 'Request aborted during streamResponse setup',
               );
               abortErr.name = 'AbortError';
               failRequest(
-                markStreamFactoryError(abortErr, req, request.headers),
+                markStreamFactoryError(abortErr, req, request.headers, {
+                  status,
+                  headers,
+                }),
               );
               return;
             }
@@ -2184,6 +2202,11 @@ async function streamResponseBody(
 ): Promise<StreamResponseBodyResult> {
   return await new Promise((resolve) => {
     let loadedBytes = 0;
+    // Every byte handed to `write`, whether or not its optional callback is ever called:
+    // a sink that reports failure by `'error'` alone never calls it, and the terminal
+    // event below, sent once `end` has called back clean, read only the callbacks' count
+    // and said `loaded: 0` for a body the sink had taken whole.
+    let handedBytes = 0;
 
     // Deduplication guard — same as buffered download: when Content-Length is
     // known and the last write callback fills the body exactly, progress: 1
@@ -2304,6 +2327,7 @@ async function streamResponseBody(
       }
 
       let canContinue: boolean;
+      handedBytes += chunk.length;
 
       try {
         canContinue = writable.write(chunk, (error) => {
@@ -2427,8 +2451,8 @@ async function streamResponseBody(
           // last chunk completed the body).
           if (!didFireDownload100) {
             onProgress?.({
-              loaded: loadedBytes,
-              total: loadedBytes,
+              loaded: handedBytes,
+              total: handedBytes,
               progress: 1,
             });
           }
@@ -3492,6 +3516,7 @@ function markStreamFactoryError(
   error: unknown,
   req: http.ClientRequest,
   fallbackHeaders: Record<string, string | string[]>,
+  answered: { status: number; headers: Record<string, string | string[]> },
 ): Error {
   const normalized = normalizeError(error);
   const marks = {
@@ -3501,6 +3526,10 @@ function markStreamFactoryError(
       req,
       fallbackHeaders,
     ),
+    // The answer the factory was called for: its headers had arrived, so the client
+    // stores their `Set-Cookie` and reports its status.
+    [STREAM_ABORT_STATUS_KEY]: answered.status,
+    [STREAM_ABORT_HEADERS_KEY]: answered.headers,
   };
 
   // Tagged in place when possible, so the caller still sees the error its own

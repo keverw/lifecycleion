@@ -3904,3 +3904,116 @@ test('round 82: override apex for edge-hyphen hosts, a resolved transport error 
     Date.now = realNow;
   }
 });
+
+test('round 83: a stream factory that fails after headers keeps the cookie and status; progress hooks guarded by the client; callback-less sinks report their bytes', async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, {
+      'set-cookie': 'sid=abc; Path=/',
+      'content-length': '1000',
+    });
+    if (req.url === '/now') {
+      res.end('x'.repeat(1000));
+      return;
+    }
+    res.flushHeaders();
+    setTimeout(() => res.end('x'.repeat(1000)), 400);
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+
+  try {
+    const cases: Array<{
+      factory: () => unknown;
+      code: string;
+      timeout?: number;
+    }> = [
+      {
+        factory: () => {
+          throw new Error('no disk');
+        },
+        code: 'stream_setup_error',
+      },
+      { factory: () => null, code: 'cancelled' },
+      {
+        factory: () => new Promise(() => {}),
+        code: 'stream_setup_error',
+        timeout: 100,
+      },
+    ];
+    for (const { factory, code, timeout } of cases) {
+      const jar = new CookieJar();
+      const builder = new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL,
+        cookieJar: jar,
+        ...(timeout ? { timeout } : {}),
+      })
+        .get('/slow')
+        .streamResponse(factory as never);
+      const response = await builder.send();
+      expect(builder.error?.code).toBe(code as never);
+      expect(jar.getCookieHeaderString(`${baseURL}/`)).toBe('sid=abc');
+      if (code === 'stream_setup_error') {
+        expect(response.status).toBe(200);
+      }
+    }
+
+    const events: number[] = [];
+    const chunks: unknown[] = [];
+    const streamed = await new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+    })
+      .get('/now')
+      .onDownloadProgress((event) => events.push(event.loaded))
+      .streamResponse(
+        () =>
+          ({
+            write: (chunk: unknown) => {
+              chunks.push(chunk);
+              return true;
+            },
+            end: (callback?: () => void) => callback?.(),
+          }) as never,
+      )
+      .send();
+    expect(streamed.isStreamed).toBe(true);
+    expect(events.at(-1)).toBe(1000);
+  } finally {
+    server.close();
+  }
+
+  let sends = 0;
+  const progressing: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      sends++;
+      request.onDownloadProgress?.({ loaded: 2, total: 2, progress: 1 });
+      return Promise.resolve({ status: 200, headers: {}, body: null });
+    },
+  };
+  const reported: unknown[] = [];
+  const onError = (event: Event): void => {
+    reported.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onError);
+  try {
+    const response = await new HTTPClient({
+      adapter: progressing,
+      baseURL: 'http://x.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    })
+      .get('/a')
+      .onDownloadProgress(() => {
+        throw new Error('hook failed');
+      })
+      .send();
+    expect(sends).toBe(1);
+    expect(response.status).toBe(200);
+    expect(response.isFailed).toBe(false);
+    expect(reported).toHaveLength(1);
+  } finally {
+    globalThis.removeEventListener('error', onError);
+  }
+});

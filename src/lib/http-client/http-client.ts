@@ -2476,29 +2476,33 @@ export class BaseHTTPClient {
             // progress: the stamp is what lets the wait on `requestBodySettled` tell an
             // upload that is still moving from one that has stalled. A bodiless request
             // has no upload to watch, so the adapter is told nothing it was not told before.
+            // The caller's hooks are guarded here, as `onAttemptStart`/`onAttemptEnd`
+            // are, not left to the adapter: a custom adapter that calls them bare had a
+            // throwing hook fail - and retry - a request that succeeded.
             onUploadProgress:
               onUploadProgress || (sentRequest.body ?? null) !== null
                 ? (e) => {
                     uploadActivity.at = Date.now();
 
-                    // Returned, so a caller's `async` hook that rejects still reaches the
-                    // adapter's guard as a promise and is reported, not dropped here.
-                    return onUploadProgress?.({
-                      ...e,
-                      attemptNumber,
-                      ...(hopContext
-                        ? { hopNumber: hopContext.hopNumber }
-                        : {}),
-                    });
+                    if (onUploadProgress) {
+                      safeHandleCallback('onUploadProgress', onUploadProgress, {
+                        ...e,
+                        attemptNumber,
+                        ...(hopContext
+                          ? { hopNumber: hopContext.hopNumber }
+                          : {}),
+                      });
+                    }
                   }
                 : undefined,
             onDownloadProgress: onDownloadProgress
-              ? (e) =>
-                  onDownloadProgress({
+              ? (e) => {
+                  safeHandleCallback('onDownloadProgress', onDownloadProgress, {
                     ...e,
                     attemptNumber,
                     ...(hopContext ? { hopNumber: hopContext.hopNumber } : {}),
-                  })
+                  });
+                }
               : undefined,
           }),
         );
@@ -2919,11 +2923,25 @@ export class BaseHTTPClient {
         const abortedResponse = isResponseStreamAbortError(error)
           ? getResponseStreamAbortInfo(error)
           : undefined;
+        // A `streamResponse` factory that failed, declined or was cut off while setting up
+        // its sink was called for an answer whose headers had arrived, and the adapter
+        // carries that answer on the error: its `Set-Cookie` is stored as a cut stream's
+        // is, and a setup failure reports its status. The tag alone is not the gate - the
+        // factory's own markers are, as the stream-abort marker is above.
+        const isFactoryCancel =
+          readObjectMember(error, STREAM_FACTORY_CANCEL_KEY) !== undefined;
+        const factoryAnsweredResponse =
+          abortedResponse === undefined &&
+          (isFactoryCancel || isStreamFactoryClientCallbackError(error))
+            ? getResponseStreamAbortInfo(error)
+            : undefined;
+        const answeredBeforeFailure =
+          abortedResponse ?? factoryAnsweredResponse;
 
-        if (cookieJar && abortedResponse) {
+        if (cookieJar && answeredBeforeFailure) {
           try {
             cookieJar.processResponseHeaders(
-              abortedResponse.headers,
+              answeredBeforeFailure.headers,
               sentRequest.requestURL,
             );
           } catch (jarError) {
@@ -2931,7 +2949,8 @@ export class BaseHTTPClient {
             // attempt's timer, so the branches below report that outcome and the jar's
             // failure is not reported. (On the resolved path the answer was whole, so a
             // jar failure there is the answered response's adapter_error, timer or not.)
-            if (!cancelSignal.aborted && !isTimedOut) {
+            // A factory's own cancel is a cancel too.
+            if (!cancelSignal.aborted && !isTimedOut && !isFactoryCancel) {
               // The jar threw on headers the server did send, so this ends as the
               // answered response's adapter_error, named for the jar, as on the
               // resolved path - not as a stream error, and never re-sent.
@@ -2939,7 +2958,7 @@ export class BaseHTTPClient {
                 willRetry: false,
                 nextRetryDelayMS: undefined,
                 nextRetryAt: undefined,
-                status: abortedResponse.status,
+                status: answeredBeforeFailure.status,
               });
 
               return {
@@ -2956,11 +2975,11 @@ export class BaseHTTPClient {
                 isRetriesExhausted: false,
                 isNetworkErrorOverride: false,
                 answeredResponse: {
-                  ...abortedResponse,
+                  ...answeredBeforeFailure,
                   ...derivedRedirectFields(
                     sentRequest.requestURL,
-                    abortedResponse.status,
-                    abortedResponse.headers,
+                    answeredBeforeFailure.status,
+                    answeredBeforeFailure.headers,
                   ),
                 },
                 errorMessage: COOKIE_JAR_FAILURE_MESSAGE,
@@ -3262,7 +3281,7 @@ export class BaseHTTPClient {
             willRetry: false,
             nextRetryDelayMS: undefined,
             nextRetryAt: undefined,
-            status: answeredStatus,
+            status: factoryAnsweredResponse?.status ?? answeredStatus,
           });
 
           const isStreamFactoryError =
@@ -3302,7 +3321,18 @@ export class BaseHTTPClient {
                         )),
                   },
                 }
-              : {}),
+              : factoryAnsweredResponse
+                ? {
+                    answeredResponse: {
+                      ...factoryAnsweredResponse,
+                      ...derivedRedirectFields(
+                        sentRequest.requestURL,
+                        factoryAnsweredResponse.status,
+                        factoryAnsweredResponse.headers,
+                      ),
+                    },
+                  }
+                : {}),
             errorCode: isNonRetryableAdapterFailure
               ? 'adapter_error'
               : isStreamFactoryError

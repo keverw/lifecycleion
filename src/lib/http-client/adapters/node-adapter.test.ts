@@ -4238,7 +4238,8 @@ describe('NodeAdapter.send() — unit branches without server', () => {
 
       const res = await builder.send();
 
-      expect(res.status).toBe(0);
+      // The answer the factory was called for, carried through its setup failure.
+      expect(res.status).toBe(200);
       expect(res.isFailed).toBe(true);
       expect(res.isTimeout).toBe(true);
       expect(builder.attemptCount).toBe(1);

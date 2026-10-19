@@ -1721,7 +1721,7 @@ after the last request touching it settled is yours to handle. On a Node stream 
 stream you own, and the reason the two points above ask for an `'error'` or a `'close'`
 rather than silence.
 
-Return `null` or `{ cancel: true, reason? }` from the factory to cancel the request (produces `isCancelled: true`, error code `cancelled`). The `reason` string is surfaced on `HTTPClientError.cancelReason`. If the factory throws, or returns anything other than a writable, `null`, or a cancel object (such as `undefined` from a forgotten `return`), the error code is `stream_setup_error` instead.
+Return `null` or `{ cancel: true, reason? }` from the factory to cancel the request (produces `isCancelled: true`, error code `cancelled`). The `reason` string is surfaced on `HTTPClientError.cancelReason`. If the factory throws, or returns anything other than a writable, `null`, or a cancel object (such as `undefined` from a forgotten `return`), the error code is `stream_setup_error` instead. The factory is only called once the response's headers have arrived, so in every one of these cases - a cancel, a setup failure, or a timeout while an async factory is still setting up - the response's `Set-Cookie` is stored, and a `stream_setup_error` response carries the answer's real status.
 
 When streaming is active on a retry attempt (before headers arrive), the factory is called again for the new attempt. The `signal` from the previous attempt will have fired, allowing cleanup code to run before the new stream is set up.
 
@@ -1761,7 +1761,7 @@ Two things deliberately do **not** set the flag. A caller's own `AbortSignal` fi
 
 `FetchAdapter` is not limited to server runtimes here. Headers have already arrived when the body read starts, so the status is readable in a browser exactly as it is under Node or Bun, and a truncated body rejects the same way.
 
-A per-attempt timeout that fires _during_ the body read counts as a post-header failure too, and is reported with the real status rather than as a plain timeout. The adapter cannot tell that abort apart from a caller cancellation because both arrive on the same signal, so it carries the response metadata out with the error and the client decides: a cancellation stays `isCancelled`, a timeout becomes a terminal stream failure.
+A per-attempt timeout that fires _during_ the body read counts as a post-header failure too, and is reported with the real status rather than as a plain timeout. The adapter cannot tell that abort apart from a caller cancellation because both arrive on the same signal, so it carries the response metadata out with the error and the client decides: a cancellation stays `isCancelled`, a timeout becomes a terminal stream failure (`stream_response_error`, even when a slow sink rather than the server is what held the body up).
 
 `XHRAdapter` is the one real gap, and it is a spec-level limitation rather than a browser inconsistency: setting the error flag sets the response to a network error, which forces `status` to `0`. There is no surviving signal that headers ever arrived, so a mid-body truncation is indistinguishable from a connection refused. It arrives as an ordinary transport failure (`status: 0`, `isStreamError: false`), which for an **idempotent** method is eligible for retry, so a truncated `GET` is silently re-fetched where `NodeAdapter` and `FetchAdapter` would report the real status and stop.
 
