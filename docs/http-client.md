@@ -1080,6 +1080,8 @@ client.cancelAllWithLabel('upload', 'quota_exceeded');
 client.cancelOwnWithLabel('poll', 'tab_hidden');
 ```
 
+A label argument is held to the rule `builder.label()` holds a label to - a non-empty string - so `cancelAllWithLabel(undefined)` throws rather than matching every unlabeled request. The client and tracker cancel methods see a request once its `send()` has set it up; caller code that runs during that synchronous setup (a header value's `toString`, say) and calls `client.cancelAll()` does not reach it, while a `builder.cancel()` there is held and applied.
+
 ### AbortSignal Integration
 
 ```typescript
@@ -1154,7 +1156,7 @@ const { count, requests } = client.listRequests({
 // { requestID: string; clientID: string; label?: string; state: RequestState }
 ```
 
-`scope: 'all'` includes requests from sub-clients that share the same tracker.
+`scope: 'all'` includes requests from sub-clients that share the same tracker. Any other `scope`, or a `label` that is not a non-empty string, throws.
 
 ## Sub-Client Creation
 

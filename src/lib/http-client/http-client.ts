@@ -417,11 +417,13 @@ export class BaseHTTPClient {
 
   /** @returns How many requests were cancelled. */
   public cancelAllWithLabel(label: string, reason?: string): number {
+    assertLabelArgument(label, 'cancelAllWithLabel');
     return this._tracker.cancelAllWithLabel(label, reason);
   }
 
   /** @returns How many requests were cancelled. */
   public cancelOwnWithLabel(label: string, reason?: string): number {
+    assertLabelArgument(label, 'cancelOwnWithLabel');
     return this._tracker.cancelOwnWithLabel(this._clientID, label, reason);
   }
 
@@ -432,6 +434,18 @@ export class BaseHTTPClient {
     requests: RequestInfo[];
   } {
     const scope = filter?.scope ?? 'own';
+
+    // Refused rather than read loosely: any other `scope` - a typo such as `'mine'` - was
+    // read as `'all'` and listed every client's requests.
+    if (scope !== 'own' && scope !== 'all') {
+      throw new TypeError(
+        `HTTPClient.listRequests() scope must be 'own' or 'all' (got ${describeValue(scope)})`,
+      );
+    }
+
+    if (filter?.label !== undefined) {
+      assertLabelArgument(filter.label, 'listRequests');
+    }
 
     return this._tracker.list({
       clientID: scope === 'own' ? this._clientID : undefined,
@@ -4601,6 +4615,34 @@ function cloneBodyValue(body: unknown): unknown {
   }
 
   return body;
+}
+
+/**
+ * A label argument held to the rule `builder.label()` holds a label to: a string with
+ * something in it. A label method read loosely did harm: `cancelAllWithLabel(undefined)`
+ * - a feature's unset label - matched, and cancelled, every request that had no label.
+ */
+function assertLabelArgument(label: unknown, method: string): void {
+  if (typeof label !== 'string') {
+    throw new TypeError(
+      `HTTPClient.${method}() label must be a string (got ${describeValue(label)})`,
+    );
+  }
+
+  if (label.trim().length === 0) {
+    throw new Error(
+      `HTTPClient.${method}() requires a non-empty, non-whitespace label.`,
+    );
+  }
+}
+
+/** A value for an error message: a string as written, anything else by its type. */
+function describeValue(value: unknown): string {
+  return value === null
+    ? 'null'
+    : typeof value === 'string'
+      ? `'${value}'`
+      : typeof value;
 }
 
 function isAbortError(err: unknown): err is Error {

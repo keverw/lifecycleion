@@ -4274,3 +4274,27 @@ test('round 87: a cancel before a detected redirect is followed names it; a 303 
   expect(requests[1].headers['content-encoding']).toBeUndefined();
   expect(requests[1].headers['content-length']).toBeUndefined();
 });
+
+test('round 88: label and scope arguments are checked', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/slow', async () => {
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    return { status: 200 };
+  });
+  const client = new HTTPClient({ adapter, baseURL: 'http://a.test' });
+  const unlabeled = client.get('/slow');
+  const pending = unlabeled.send();
+
+  expect(() => client.cancelAllWithLabel(undefined as never)).toThrow(
+    TypeError,
+  );
+  expect(() => client.cancelOwnWithLabel('  ')).toThrow(/non-empty/);
+  expect(() => client.listRequests({ scope: 'mine' as never })).toThrow(
+    TypeError,
+  );
+  expect(() => client.listRequests({ label: 5 as never })).toThrow(TypeError);
+  expect(client.listRequests().count).toBe(1);
+
+  const response = await pending;
+  expect(response.isCancelled).toBe(false);
+});
