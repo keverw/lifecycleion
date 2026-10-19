@@ -5,6 +5,7 @@ import {
   checkDNSLength,
   normalizeDomain,
   normalizeDomainLabel,
+  toHalfwidthASCII,
   isIPv6,
   toAsciiDots,
   canonicalizeBracketedIPv6Content,
@@ -565,6 +566,13 @@ export function validateConfigEntry(
     const tail = fixedTailLabels.join('.');
     if (isIPAddress(tail)) {
       return true; // no wildcarding around IPs
+    }
+
+    // Nor around a numeric last label (`*.2.3.4`): the URL parser reads any host ending
+    // in one as IPv4, so a host under it is an address or no URL's host at all, and the
+    // pattern can never match.
+    if (/^(?:\d+|0x[0-9a-f]*)$/i.test(fixedTailLabels.at(-1) ?? '')) {
+      return true;
     }
     const ps = getPublicSuffix(tail);
     if (INTERNAL_PSEUDO_TLDS.has(tail) || (ps && ps === tail)) {
@@ -1458,9 +1466,10 @@ function canonicalPortText(digits: string): string {
 function readIPv4Entry(
   rawHost: string,
 ): { address?: string; info?: string } | undefined {
-  // Mapped as the URL parser maps a host before reading it: fullwidth digits are ASCII
-  // digits to it, so `192.168.1.0８` is the refused `192.168.1.08`.
-  const host = rawHost.normalize('NFKC');
+  // Asked about as the URL parser asks before reading it: fullwidth digits are ASCII
+  // digits to it, so `192.168.1.0８` is the refused `192.168.1.08`. The parse itself is
+  // of the text as written, so the parser does its own mapping and refuses what it refuses.
+  const host = toHalfwidthASCII(rawHost);
 
   // Only a bare host. The parse below reads a whole authority and keeps just its host, so
   // `user@10.0.0.1`, `10.0.0.1/x.5` or `10.0.0.1?a.1` came back as a clean `10.0.0.1` -
@@ -1479,7 +1488,7 @@ function readIPv4Entry(
 
   let address: string;
   try {
-    address = new URL(`http://${host}/`).hostname;
+    address = new URL(`http://${rawHost}/`).hostname;
   } catch {
     return { info: 'IP address is not one the URL parser accepts' };
   }
@@ -1488,7 +1497,8 @@ function readIPv4Entry(
     return { info: 'IP address is not one the URL parser accepts' };
   }
 
-  return address === host.toLowerCase()
+  // Against what was written, so an entry that differs only by fullwidth digits says so.
+  return address === rawHost.toLowerCase()
     ? { address }
     : { address, info: `IP address is read as ${address}` };
 }

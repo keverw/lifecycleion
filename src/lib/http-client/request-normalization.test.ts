@@ -4464,3 +4464,19 @@ test('round 94: single-number and fullwidth IPv4 entries are read as the URL par
   expect(validateConfigEntry('example.com', 'domain').valid).toBe(true);
   expect(normalizeDomain('example.com')).toBe('example.com');
 });
+
+test('round 95: only fullwidth ASCII is mapped before reading an IP; fullwidth-only differences noted; numeric wildcard tails refused', () => {
+  for (const host of ['127․0․0․1', '1﹒2.3.4', '⒈2.3.4']) {
+    expect(normalizeDomain(host)).not.toBe('127.0.0.1');
+    expect(validateConfigEntry(host, 'domain').valid).toBe(false);
+  }
+  expect(normalizeDomain('：：1')).toBe('');
+  expect(validateConfigEntry('fe80：：1', 'domain').valid).toBe(false);
+  expect(validateConfigEntry('１２７.0.0.1', 'domain').info).toContain(
+    '127.0.0.1',
+  );
+  expect(normalizeDomain('１２７.0.0.1')).toBe('127.0.0.1');
+  expect(validateConfigEntry('*.2.3.4', 'domain').valid).toBe(false);
+  expect(validateConfigEntry('*.0.0.1', 'domain').valid).toBe(false);
+  expect(validateConfigEntry('*.example.com', 'domain').valid).toBe(true);
+});

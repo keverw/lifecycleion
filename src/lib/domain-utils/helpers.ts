@@ -98,19 +98,34 @@ export function isIPAddress(str: string): boolean {
   return isIPv4(str) || isIPv6(str);
 }
 
-function canonicalizeIPAddressLiteral(rawHost: string): string | null {
-  // Read as the URL parser reads a host: its IDNA mapping turns fullwidth digits and dots
-  // into ASCII before it asks whether the host is an address, and a single label that is
-  // a number (`2130706433`, `0x7f000001`) is an IPv4 address to it as much as a dotted one
-  // - `http://2130706433/` is `127.0.0.1`. Only for a whole host: the labels of a wildcard
-  // pattern go through `normalizeDomainLabel`, which never asks, so the `127` of
-  // `*.127.0.0.1` stays a label rather than becoming the address `0.0.0.127`.
-  const host = rawHost.normalize('NFKC');
+/**
+ * Fullwidth ASCII forms (U+FF01-U+FF5E) as the ASCII they stand for - `１２７` as `127`.
+ *
+ * The URL parser's IDNA mapping does this to a host before it asks whether the host is an
+ * address, and this is only for asking the same question of the text. Narrower than NFKC
+ * on purpose: NFKC also folds `․` (U+2024), `﹒` and `⒈` into dots, which the URL parser
+ * refuses, so a host it can never carry read as `127.0.0.1`.
+ */
+export function toHalfwidthASCII(text: string): string {
+  return text.replace(/[\uFF01-\uFF5E]/g, (char) =>
+    String.fromCharCode(char.charCodeAt(0) - 0xfee0),
+  );
+}
+
+function canonicalizeIPAddressLiteral(host: string): string | null {
+  // Read as the URL parser reads a host, and by it - the parse below is the authority.
+  // A single label that is a number (`2130706433`, `0x7f000001`) is an IPv4 address to it
+  // as much as a dotted one: `http://2130706433/` is `127.0.0.1`. Only for a whole host:
+  // the labels of a wildcard pattern go through `normalizeDomainLabel`, which never asks,
+  // so the `127` of `*.127.0.0.1` stays a label rather than becoming `0.0.0.127`.
+  // Fullwidth digits are asked about as their ASCII (see `toHalfwidthASCII`); IPv6 is not,
+  // since the parser maps nothing in an IPv6 literal.
+  const asked = toHalfwidthASCII(host);
   const isIPAddressLike =
     host.includes('.') ||
     host.includes(':') ||
     (host.startsWith('[') && host.endsWith(']')) ||
-    /^(?:\d+|0x[0-9a-f]*)$/i.test(host);
+    /^(?:\d+|0x[0-9a-f]*)$/i.test(asked);
 
   if (!isIPAddressLike) {
     return null;
