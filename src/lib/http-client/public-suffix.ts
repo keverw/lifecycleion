@@ -199,11 +199,6 @@ export class PublicSuffixResolver {
     return isBundledPublicSuffix(normalized);
   }
 
-  /** Whether the caller explicitly removed this exact suffix from the bundled list. */
-  public isRemovedSuffix(hostname: string): boolean {
-    return this.removed.has(toLabels(hostname).join('.'));
-  }
-
   /**
    * The registrable domain `hostname` belongs to - the bucket key cookies are filed under.
    *

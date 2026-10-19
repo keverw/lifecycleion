@@ -1979,9 +1979,13 @@ export class BaseHTTPClient {
       // keeps them.
       for (const key of Object.keys(headers)) {
         if (
-          ['content-type', 'content-length', 'content-encoding'].includes(
-            key.toLowerCase(),
-          )
+          [
+            'content-type',
+            'content-length',
+            'content-encoding',
+            'content-language',
+            'content-location',
+          ].includes(key.toLowerCase())
         ) {
           delete headers[key];
         }

@@ -656,19 +656,38 @@ export function validateConfigEntry(
     // Normalize Unicode dots for consistent IP detection
     const sDots = toAsciiDots(s);
     if (isIPAddress(sDots)) {
-      // Said when the URL parser reads it as another address - `192.168.001.010` is the
-      // octal `192.168.1.8` to it, and to every match against this entry - rather than
-      // accepted silently and then never matching the address it looks like.
-      const canonical = normalizeDomain(sDots);
-      const written = sDots.toLowerCase().replace(/^\[|\]$/g, '');
+      // An IPv4 entry is read as the URL parser reads a host, and that can differ from
+      // what is written: `192.168.001.010` is the octal `192.168.1.8` to it, and to every
+      // match against this entry, so that is said rather than accepted silently. One the
+      // parser refuses (`192.168.1.08` - an octal octet with an 8 in it) can never be a
+      // URL's host, so it is invalid. IPv6 is not flagged: its other spellings
+      // (`2001:DB8:0:0::1`) are the same address.
+      if (!isIPv6(sDots)) {
+        let parsedHost: string | undefined;
+        try {
+          parsedHost = new URL(`http://${sDots}/`).hostname;
+        } catch {
+          parsedHost = undefined;
+        }
 
-      return canonical !== '' && canonical !== written
-        ? {
-            valid: true,
-            info: `IP address is read as ${canonical}`,
+        if (parsedHost === undefined || !isIPAddress(parsedHost)) {
+          return {
+            valid: false,
+            info: 'IP address is not one the URL parser accepts',
             wildcardKind: 'none',
-          }
-        : { valid: true, wildcardKind: 'none' };
+          };
+        }
+
+        if (parsedHost !== sDots) {
+          return {
+            valid: true,
+            info: `IP address is read as ${parsedHost}`,
+            wildcardKind: 'none',
+          };
+        }
+      }
+
+      return { valid: true, wildcardKind: 'none' };
     }
 
     // For non-IP addresses, reject URL-like characters

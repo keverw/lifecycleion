@@ -946,7 +946,8 @@ jar.clearExpiredCookies(); // Returns count removed
 jar.clear(); // Remove all cookies - returns count removed
 jar.clear('api.example.com', 'hostname'); // Remove cookies for exactly that hostname only - returns count removed
 jar.clear('example.com', 'domain'); // Remove example.com and all its subdomains (the entire apex bucket) - returns count removed
-jar.clear('github.io', 'domain'); // On a public suffix, every site beneath it; any scope other than 'hostname' / 'domain' throws
+jar.clear('github.io', 'domain'); // On a public suffix or bare name, every site beneath it
+// A host that is not a non-empty string, or a missing or unknown scope, throws: only clear() with no arguments clears everything.
 
 // Inspection
 jar.getAllCookies(); // Live stored objects, including expired - prefer setCookie() for updates
@@ -988,7 +989,7 @@ const client = new HTTPClient({
 
 Cross-origin redirects carry only an allow-list of headers: `accept`, `accept-language`, `content-encoding`, `content-language`, `content-type`, `user-agent`, `range` and the conditional headers (`if-range`, `if-match`, `if-none-match`, `if-modified-since`, `if-unmodified-since`). Everything else - `Authorization`, `Cookie`, and any custom header such as `X-API-Key` that might be a credential - is stripped. This is stricter than fetch, which drops only `Authorization`; a redirect-phase interceptor can add a header back for a target it trusts. Cookies are recomputed from the jar for the target.
 
-A `307` or `308` replays the body, a `GET`'s included, with its `Content-Type` and `Content-Encoding`, across origins too. A hop rewritten to `GET`, and any `303` (a `GET` that carried a body included), drops the body and those headers.
+A `307` or `308` replays the body, a `GET`'s included, with its `Content-Type` and `Content-Encoding`, across origins too. A hop rewritten to `GET`, and any `303` (a `GET` that carried a body included), drops the body and those headers, with `Content-Language` and `Content-Location`.
 
 With `NodeAdapter`, URL-based Basic auth follows the resolved redirect URL: from `https://user:pass@example.com/start`, a relative `Location: /next` retains those credentials, while an absolute `Location: https://example.com/next` without userinfo does not. An explicitly supplied `Authorization` header still carries through same-origin redirects.
 

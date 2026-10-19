@@ -4369,3 +4369,49 @@ test('round 90: IP literals with a port or path are no host, removals below a do
   expect(jar.clear('localhost', 'domain')).toBe(1);
   expect(() => jar.clear('example.com', 'Domain' as never)).toThrow(TypeError);
 });
+
+test('round 91: clear arguments checked, nested private suffixes kept, IP entry info, dropped-body headers', async () => {
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader('a=1', 'https://a.example.com/');
+  jar.parseSetCookieHeader('b=1', 'https://bucket1.s3.amazonaws.com/');
+  jar.parseSetCookieHeader('c=1', 'https://www.amazonaws.com/');
+  expect(() => jar.clear(undefined as never, 'domain')).toThrow(TypeError);
+  expect(() => jar.clear(null as never, 'domain')).toThrow(TypeError);
+  expect(() => (jar.clear as (host: string) => number)('example.com')).toThrow(
+    TypeError,
+  );
+  expect(jar.getAllCookies()).toHaveLength(3);
+  expect(jar.clear('www.amazonaws.com', 'domain')).toBe(1);
+  expect(jar.getCookieHeaderString('https://bucket1.s3.amazonaws.com/')).toBe(
+    'b=1',
+  );
+
+  expect(validateConfigEntry('192.168.1.08', 'domain').valid).toBe(false);
+  expect(validateConfigEntry('2001:DB8:0:0::1', 'domain').info).toBeUndefined();
+  expect(
+    validateConfigEntry('::ffff:127.0.0.1', 'domain').info,
+  ).toBeUndefined();
+
+  const requests: AdapterRequest[] = [];
+  await new HTTPClient({
+    adapter: {
+      getType: () => 'node',
+      send: (request) => {
+        requests.push(request);
+        return Promise.resolve<AdapterResponse>(
+          requests.length === 1
+            ? { status: 302, headers: { location: '/y' }, body: null }
+            : { status: 200, headers: {}, body: null },
+        );
+      },
+    },
+    baseURL: 'https://a.test',
+    followRedirects: true,
+  })
+    .post('/p')
+    .headers({ 'content-language': 'fr', 'content-location': '/doc' })
+    .text('x')
+    .send();
+  expect(requests[1].headers['content-language']).toBeUndefined();
+  expect(requests[1].headers['content-location']).toBeUndefined();
+});

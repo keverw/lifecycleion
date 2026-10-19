@@ -623,28 +623,35 @@ export class CookieJar {
    *   everything in the `example.com` apex bucket, and `clear('github.io', 'domain')`
    *   every `*.github.io` site's cookies.
    *
-   * Any other `scope` throws.
+   * A `host` that is not a non-empty string, or a `scope` that is not one of the two,
+   * throws: only a call with no arguments at all clears everything.
    */
   public clear(): number;
   public clear(host: string, scope: 'hostname' | 'domain'): number;
-  public clear(host?: string, scope?: 'hostname' | 'domain'): number {
-    // Refused rather than read loosely: any other value - `'Domain'`, a typo - cleared
-    // by hostname and quietly left the domain's other cookies in place.
-    const candidateScope: unknown = scope;
-    if (
-      candidateScope !== undefined &&
-      candidateScope !== 'hostname' &&
-      candidateScope !== 'domain'
-    ) {
-      throw new TypeError(
-        `CookieJar.clear() scope must be 'hostname' or 'domain' (got ${typeof candidateScope === 'string' ? `'${candidateScope}'` : candidateScope === null ? 'null' : typeof candidateScope})`,
-      );
-    }
-
-    if (host === undefined) {
+  public clear(
+    ...args: [] | [host: string, scope: 'hostname' | 'domain']
+  ): number {
+    if (args.length === 0) {
       const count = this.getAllCookies().length;
       this.buckets.clear();
       return count;
+    }
+
+    // Both refused rather than read loosely. A `host` that was `undefined` - a config
+    // value left unset - wiped the whole jar whatever scope came with it; a missing or
+    // misspelled `scope` (`'Domain'`) cleared by hostname and quietly left the domain's
+    // other cookies in place.
+    const [host, scope] = args as unknown[];
+    if (typeof host !== 'string' || host.trim() === '') {
+      throw new TypeError(
+        `CookieJar.clear() host must be a non-empty string (got ${describeArgument(host)})`,
+      );
+    }
+
+    if (scope !== 'hostname' && scope !== 'domain') {
+      throw new TypeError(
+        `CookieJar.clear() scope must be 'hostname' or 'domain' (got ${describeArgument(scope)})`,
+      );
     }
 
     const normalizedHost = this.normalizeStoredDomain(host);
@@ -658,13 +665,16 @@ export class CookieJar {
     if (scope === 'domain') {
       let count = 0;
 
-      // The apex bucket, and every bucket filed beneath it. Under an ordinary domain
-      // there are none - its subdomains share the apex's bucket - but a public suffix or
-      // a bare name has no registrable part, so each host under it is its own bucket:
-      // `clear('github.io', 'domain')` or `clear('localhost', 'domain')` cleared only the
-      // suffix's own and left `a.github.io` and `sub.localhost` in place.
+      // The apex bucket - and, when the host is itself a public suffix or a bare name,
+      // every bucket beneath it. Such a name has no registrable part, so each host under
+      // it is its own bucket: `clear('github.io', 'domain')` or `clear('localhost',
+      // 'domain')` cleared only the suffix's own and left `a.github.io` and
+      // `sub.localhost` in place. Only then: under an ordinary domain a bucket beneath
+      // the apex is a separate site behind a nested private suffix (`bucket.s3.amazonaws.com`
+      // under `amazonaws.com`), not part of the domain being cleared.
+      const isSuffixClear = this.isPublicSuffix(apex);
       for (const [key, bucket] of [...this.buckets.entries()]) {
-        if (key === apex || key.endsWith(`.${apex}`)) {
+        if (key === apex || (isSuffixClear && key.endsWith(`.${apex}`))) {
           count += bucket.size;
           this.buckets.delete(key);
         }
@@ -1644,4 +1654,13 @@ export class CookieJar {
       );
     }
   }
+}
+
+/** A value for an error message: a string as written, anything else by its type. */
+function describeArgument(value: unknown): string {
+  return value === null
+    ? 'null'
+    : typeof value === 'string'
+      ? `'${value}'`
+      : typeof value;
 }
