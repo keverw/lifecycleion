@@ -73,6 +73,16 @@ function isSpecialScheme(protocol: string): boolean {
   );
 }
 
+/** `text` without the leading C0 controls and spaces the URL parser strips. */
+function stripLeadingC0AndSpace(text: string): string {
+  let start = 0;
+  while (start < text.length && text.charCodeAt(start) <= 0x20) {
+    start++;
+  }
+
+  return text.slice(start);
+}
+
 /**
  * Whether an origin's host is percent-encoded. No browser sends one in an `Origin`, and
  * `validateConfigEntry` refuses one, so the matchers refuse it too rather than read it
@@ -100,7 +110,9 @@ function hasPercentEncodedHost(origin: string): boolean {
 function foldOriginDots(text: string): string {
   // After the leading C0 controls and spaces the URL parser strips, so ` foo://a。b` is
   // still read as the opaque `foo:` host it is.
-  const scheme = /^[\u0000-\u0020]*([a-z][a-z\d+.-]*):/i.exec(text)?.[1];
+  const scheme = /^([a-z][a-z\d+.-]*):/i.exec(
+    stripLeadingC0AndSpace(text),
+  )?.[1];
 
   return scheme !== undefined && !isSpecialScheme(`${scheme.toLowerCase()}:`)
     ? text
