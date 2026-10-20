@@ -405,3 +405,12 @@
 - domain-utils: the pattern `*.` matches nothing, as `validateConfigEntry` already refused it; the matchers read it as the global `*`, past the `allowGlobalWildcard` gate.
 - domain-utils: an IPv6 literal with one bracket (`[::1`) is no address: `isIPv6` is `false` and `normalizeDomain` refuses it.
 - HTTP: `stripCrossOriginURLCredentials` with an unparseable initial URL strips credentials from every network-path spelling the URL parser reads as one (`\\host`, `/\host`, a leading space or tab), not only `//host`.
+- HTTP NodeAdapter: a `zstd` body cut short is a stream error, as a cut-short `gzip`, `br` or `deflate` body is; Node's and Bun's zstd decoders end cleanly on a partial frame, and the decoded part was delivered as a success. The frame boundaries are followed over the encoded bytes.
+- HTTP: an adapter's `errorCause` is read only for a transport failure or a stream error, as documented; on a `3xx` it became the cause of a cancel or timeout between hops.
+- HTTP: a cookie jar that throws while building a redirect target's `Cookie` header reports the target as `requestURL` and in `redirectHistory`, as the other failures before a hop goes out do.
+- HTTP: `maxResponseBytes` also holds a custom adapter's string body, counted as UTF-8.
+- HTTP CookieJar: a tab in a cookie name is refused (a value may still hold one); `Domain=..example.com` is ignored rather than read as `example.com`; a `SameSite=None` cookie without `Secure` is ignored, as browsers ignore it; a cookie replacing an expired one not yet purged takes its own place in the `Cookie` header.
+- HTTP multipart: a `File` named `''` is sent as `filename=""`, as browsers send it, rather than `filename="blob"` (where the runtime's `FormData` keeps the empty name).
+- HTTP XHRAdapter: a repeated `cookie` request header is joined with `; `, as the other adapters join it.
+- HTTP MockAdapter: a path-only `requestURL` loses its fragment before routing, and a `1xx` route answers with no body.
+- domain-utils: `matchesCORSCredentialsList` accepts a wildcard origin with a trailing dot (`https://*.example.com.`), as the other matchers do; a wildcard origin pattern with whitespace in its host (`https:// *`) matches nothing.

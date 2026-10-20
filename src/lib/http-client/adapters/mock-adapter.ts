@@ -13,6 +13,7 @@ import {
 } from '../internal/progress';
 import { materializeRequestHeaders } from '../internal/header-utils';
 import {
+  hasResponseBody,
   makeResponseTooLargeError,
   readMaxResponseBytes,
 } from '../internal/response-limit';
@@ -345,13 +346,17 @@ export class MockAdapter implements HTTPAdapter {
       path = url.pathname;
       queryString = url.search.slice(1);
     } catch {
-      const qIdx = requestURL.indexOf('?');
+      // Without its fragment, as `URL` drops it from `pathname` and `search`.
+      const hashIdx = requestURL.indexOf('#');
+      const withoutHash =
+        hashIdx >= 0 ? requestURL.slice(0, hashIdx) : requestURL;
+      const qIdx = withoutHash.indexOf('?');
 
       if (qIdx >= 0) {
-        path = requestURL.slice(0, qIdx);
-        queryString = requestURL.slice(qIdx + 1);
+        path = withoutHash.slice(0, qIdx);
+        queryString = withoutHash.slice(qIdx + 1);
       } else {
-        path = requestURL;
+        path = withoutHash;
         queryString = '';
       }
     }
@@ -1045,7 +1050,7 @@ function lowercaseHeaderNames(
 }
 
 function shouldOmitResponseBody(method: string, status: number): boolean {
-  return method.toUpperCase() === 'HEAD' || status === 204 || status === 304;
+  return !hasResponseBody(method, status);
 }
 
 function awaitAbortable<T>(

@@ -1230,3 +1230,25 @@ test('uses the original part size even when size changes after the sizing pass',
   expect(failure).toBeInstanceOf(Error);
   expect(capture.getBody().toString()).not.toContain('AAA');
 });
+
+test('round 129: a File named "" is sent as filename="", one with no name as blob', async () => {
+  // Built by hand: Bun's FormData hands back an empty-named File with no `name` at all,
+  // where Node's keeps `''`.
+  const emptyNamed = Object.assign(new Blob(['x']), { name: '' });
+  const unnamed = new Blob(['y']);
+  const fd = {
+    entries: () =>
+      [
+        ['empty', emptyNamed],
+        ['unnamed', unnamed],
+      ][Symbol.iterator](),
+  } as unknown as FormData;
+  const { req, getBody } = makeCapture();
+  const boundary = generateMultipartBoundary();
+
+  await serializeMultipartFormData(fd, req, boundary);
+  const body = getBody().toString();
+  expect(body).toContain('name="empty"; filename=""');
+  expect(body).toContain('name="unnamed"; filename="blob"');
+  expect(calculateMultipartFormDataSize(fd, boundary)).toBe(getBody().length);
+});

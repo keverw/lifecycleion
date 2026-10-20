@@ -145,7 +145,10 @@ function measureMultipartFormData(
         `Content-Disposition: form-data; name="${fieldName}"\r\n\r\n${normalizeLinefeeds(value)}\r\n`,
       );
     } else {
-      const filename = (value as File).name || 'blob';
+      // A `File` named `''` is sent as `filename=""`, as browsers send it (a server reads
+      // it as no file chosen); only a part with no name at all is `blob`.
+      const partName: unknown = (value as File).name;
+      const filename = typeof partName === 'string' ? partName : 'blob';
       const contentType =
         sanitizeContentType((value as File).type) || 'application/octet-stream';
 
@@ -360,7 +363,10 @@ export async function serializeMultipartFormData(
         `Content-Disposition: form-data; name="${fieldName}"\r\n\r\n${normalizeLinefeeds(value)}\r\n`,
       );
     } else {
-      const filename = (value as File).name || 'blob';
+      // A `File` named `''` is sent as `filename=""`, as browsers send it (a server reads
+      // it as no file chosen); only a part with no name at all is `blob`.
+      const partName: unknown = (value as File).name;
+      const filename = typeof partName === 'string' ? partName : 'blob';
       const contentType =
         sanitizeContentType((value as File).type) || 'application/octet-stream';
 

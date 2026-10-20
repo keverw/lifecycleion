@@ -143,7 +143,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   private didRawEnd = false;
   private isReading = false;
   private isDestroyed = false;
-  private didFailTrailingBytes = false;
+  private didFailDecoding = false;
   /** Raw bytes that arrived before the decoders were attached: the first chunk. */
   private rawBytes = 0;
   private readonly held: Array<{ event: string; args: unknown[] }> = [];
@@ -302,15 +302,25 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     // already fails on bytes after its stream unless they start with a zero byte, which it
     // reads as padding (some servers pad) - a count would refuse what Node and browsers
     // read.
+    //
+    // A cut-off zstd frame, followed the same way: Node's and Bun's zstd decoders end
+    // cleanly on one, handing over what they decoded, where gunzip, brotli and inflate
+    // fail. The frame boundaries are walked over the bytes each zstd stage is fed.
     const fedBytes = this.decoders.map(() => 0);
     fedBytes[0] = this.rawBytes;
+    const zstdFrames = this.decodeOrder.map((coding) =>
+      coding === 'zstd' ? new ZstdFrameWalker() : undefined,
+    );
+    zstdFrames[0]?.feed(first);
     this.res.on('data', (chunk: Buffer) => {
       fedBytes[0] = (fedBytes[0] ?? 0) + chunk.length;
+      zstdFrames[0]?.feed(chunk);
     });
     for (const [index, decoder] of this.decoders.entries()) {
       if (index + 1 < fedBytes.length) {
         decoder.on('data', (chunk: Buffer) => {
           fedBytes[index + 1] = (fedBytes[index + 1] ?? 0) + chunk.length;
+          zstdFrames[index + 1]?.feed(chunk);
         });
       }
 
@@ -323,14 +333,18 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
           .bytesWritten;
 
         if (typeof consumed === 'number' && consumed < (fedBytes[index] ?? 0)) {
-          this.failTrailingBytes();
+          this.failDecoding(trailingBytesError());
+        } else if (zstdFrames[index]?.isAtFrameEnd === false) {
+          this.failDecoding(
+            new Error('Response body ends before its compressed stream does'),
+          );
         }
       });
     }
 
     const last = this.decoders.at(-1) as Decoder;
     last.on('end', () => {
-      if (this.didFailTrailingBytes) {
+      if (this.didFailDecoding) {
         return;
       }
 
@@ -348,19 +362,17 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     }
   }
 
-  /** Bytes after a compressed stream: a stream error, the decoding and response let go. */
-  private failTrailingBytes(): void {
-    if (this.didFailTrailingBytes) {
+  /**
+   * A body its decoder ended on without failing - bytes after its compressed stream, a
+   * zstd frame cut short: a stream error, the decoding and response let go.
+   */
+  private failDecoding(error: Error): void {
+    if (this.didFailDecoding) {
       return;
     }
 
-    this.didFailTrailingBytes = true;
-    this.deliver(
-      'error',
-      markDecodeError(
-        new Error('Response body has bytes after its compressed stream'),
-      ),
-    );
+    this.didFailDecoding = true;
+    this.deliver('error', markDecodeError(error));
     this.destroyDecoders();
 
     try {
@@ -531,6 +543,139 @@ class SniffingInflate extends Transform {
   private hasLeftover(): boolean {
     return (this.inner?.bytesWritten ?? 0) < this.fedBytes;
   }
+}
+
+/**
+ * Follows zstd frame boundaries (RFC 8878 §3.1) over the bytes fed to a zstd decoder,
+ * without decoding them: the frame header's own length, then each block's header and
+ * size up to the last block, then the optional checksum. Skippable frames are stepped
+ * over. A malformed header is left to the decoder, which fails on it.
+ */
+class ZstdFrameWalker {
+  private skipBytes = 0;
+  private readonly fieldBytes: number[] = [];
+  private fieldLength = 4;
+  private isAwaitingMagic = true;
+  private hasFrame = false;
+  private hasChecksum = false;
+  private isMalformed = false;
+  /** What the next field, once `fieldLength` bytes of it are in, is read as. */
+  private onField: (field: number[]) => void;
+
+  constructor() {
+    this.onField = (field) => {
+      this.readMagic(field);
+    };
+  }
+
+  /** Whether the bytes so far end on a frame boundary, after at least one frame. */
+  public get isAtFrameEnd(): boolean {
+    return (
+      this.isMalformed ||
+      (this.hasFrame &&
+        this.isAwaitingMagic &&
+        this.skipBytes === 0 &&
+        this.fieldBytes.length === 0)
+    );
+  }
+
+  public feed(chunk: Uint8Array): void {
+    let offset = 0;
+
+    while (offset < chunk.length && !this.isMalformed) {
+      if (this.skipBytes > 0) {
+        const skipped = Math.min(this.skipBytes, chunk.length - offset);
+        this.skipBytes -= skipped;
+        offset += skipped;
+        continue;
+      }
+
+      this.fieldBytes.push(chunk[offset]);
+      offset++;
+
+      if (this.fieldBytes.length === this.fieldLength) {
+        this.onField(this.fieldBytes.splice(0));
+      }
+    }
+  }
+
+  private expect(length: number, onField: (field: number[]) => void): void {
+    this.fieldLength = length;
+    this.onField = onField;
+  }
+
+  private expectMagic(): void {
+    this.isAwaitingMagic = true;
+    this.expect(4, (field) => {
+      this.readMagic(field);
+    });
+  }
+
+  private readMagic(field: number[]): void {
+    const magic = readLittleEndian(field);
+    this.isAwaitingMagic = false;
+
+    if (magic === 0xfd2fb528) {
+      this.expect(1, ([descriptor = 0]) => {
+        this.readFrameHeader(descriptor);
+      });
+    } else if (magic >>> 4 === 0x184d2a5) {
+      this.expect(4, (size) => {
+        this.skipBytes = readLittleEndian(size);
+        this.hasFrame = true;
+        this.expectMagic();
+      });
+    } else {
+      this.isMalformed = true;
+    }
+  }
+
+  private readFrameHeader(descriptor: number): void {
+    const isSingleSegment = (descriptor & 0x20) !== 0;
+    const contentSizeLength = [isSingleSegment ? 1 : 0, 2, 4, 8][
+      descriptor >> 6
+    ];
+    const dictionaryIDLength = [0, 1, 2, 4][descriptor & 0x03];
+    this.hasChecksum = (descriptor & 0x04) !== 0;
+    this.skipBytes =
+      (isSingleSegment ? 0 : 1) + dictionaryIDLength + contentSizeLength;
+    this.expect(3, (field) => {
+      this.readBlockHeader(field);
+    });
+  }
+
+  private readBlockHeader(field: number[]): void {
+    const header = readLittleEndian(field);
+    const blockType = (header >> 1) & 0x03;
+
+    if (blockType === 3) {
+      this.isMalformed = true;
+      return;
+    }
+
+    // An RLE block carries one byte, repeated; the others carry their size.
+    this.skipBytes = blockType === 1 ? 1 : header >>> 3;
+
+    if ((header & 0x01) !== 0) {
+      this.hasFrame = true;
+      this.skipBytes += this.hasChecksum ? 4 : 0;
+      this.expectMagic();
+    } else {
+      this.expect(3, (next) => {
+        this.readBlockHeader(next);
+      });
+    }
+  }
+}
+
+function readLittleEndian(bytes: number[]): number {
+  let value = 0;
+
+  for (const [index, byte] of bytes.entries()) {
+    value += byte * 2 ** (8 * index);
+  }
+
+  return value;
 }
 
 function trailingBytesError(): Error {

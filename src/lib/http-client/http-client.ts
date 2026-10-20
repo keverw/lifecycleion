@@ -1462,23 +1462,31 @@ export class BaseHTTPClient {
             // A cookie jar that throws while building the target's `Cookie` header fails
             // the hop as the other between-hop failures do, naming the redirect it was
             // building: the outer catch reported the previous hop, with no redirect seen.
+            const pendingRedirectRequest: ResolvedRequest = {
+              headers: hopHeaders,
+              requestURL: redirectURL,
+              method: redirectMethod,
+              // Dropped when this hop rewrote the method or is a 303: a 307/308 replays a
+              // GET's body as it replays any other method's.
+              body: isBodyDropped ? undefined : sentBody.value,
+            };
             let redirectRequest: ResolvedRequest;
             try {
               redirectRequest = this._sanitizeRedirectRequest(
-                {
-                  headers: hopHeaders,
-                  requestURL: redirectURL,
-                  method: redirectMethod,
-                  // Dropped when this hop rewrote the method or is a 303: a 307/308
-                  // replays a GET's body as it replays any other method's.
-                  body: isBodyDropped ? undefined : sentBody.value,
-                },
+                pendingRedirectRequest,
                 {
                   fromURL: hopFromURL,
                   cookieJar: jar ?? undefined,
                 },
               );
             } catch (error) {
+              // The target, as the other failures before the hop went out report it - to
+              // the error observers too, so a host filter agrees with the response.
+              observerRequest = this._bestEffortAttemptRequestFromPending(
+                pendingRedirectRequest,
+                attemptLimits,
+                requestID,
+              );
               response = this._buildResponse<T>({
                 adapterResponse: null,
                 requestID,
@@ -1486,11 +1494,11 @@ export class BaseHTTPClient {
                 wasTimeout: false,
                 adapterType: this._adapter.getType(),
                 initialURL: initialRequestURL,
-                requestURL: hopFromURL,
-                redirectHistory,
+                requestURL: redirectURL,
+                redirectHistory: nextRedirectHistory,
                 undispatchedRedirect: {
                   url: detectedTargetURL,
-                  isRecorded: false,
+                  isRecorded: true,
                 },
                 isNetworkErrorOverride: false,
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
@@ -2793,11 +2801,9 @@ export class BaseHTTPClient {
         if (
           adapterResponse.isStreamError !== true &&
           adapterResponse.isStreamed !== true &&
-          // A plain `ArrayBuffer` too: outside the type, but `_buildResponse` reads one,
-          // so it is a body the limit must see.
-          (ArrayBuffer.isView(answeredBody) ||
-            answeredBody instanceof ArrayBuffer) &&
-          answeredBody.byteLength > maxResponseBytes
+          // A plain `ArrayBuffer` or a string too: outside the type, but `_buildResponse`
+          // delivers either, so they are bodies the limit must see.
+          isAnsweredBodyOverLimit(answeredBody, maxResponseBytes)
         ) {
           adapterResponse.body = null;
           adapterResponse.isStreamError = true;
@@ -3088,7 +3094,15 @@ export class BaseHTTPClient {
           });
         }
 
-        const responseCauseValue = adapterResponse.errorCause;
+        // Only for the failures it is documented for - a transport failure resolved rather
+        // than thrown, a stream error. On an answer that succeeded it is no failure's
+        // cause, and carried as one it became the cause of whatever ended the request
+        // next: a cancel or timeout between hops, after the `302` that carried it.
+        const responseCauseValue =
+          adapterResponse.isStreamError === true ||
+          adapterResponse.isTransportError === true
+            ? adapterResponse.errorCause
+            : undefined;
         const responseCause: Error | undefined = isErrorValue(
           responseCauseValue,
         )
@@ -4882,6 +4896,26 @@ function describeValue(value: unknown): string {
  * `RESPONSE_DECODE_ERROR_KEY`): the tag is on the cause, or a cause of it, that the
  * adapter reported.
  */
+/**
+ * Whether a body a custom adapter handed over is past `maxResponseBytes`: bytes as given,
+ * a string as its UTF-8 encoding - never fewer bytes than UTF-16 units, at most three per
+ * unit, so encoded only when its length alone cannot tell. Anything else has no size.
+ */
+function isAnsweredBodyOverLimit(body: unknown, maxBytes: number): boolean {
+  if (ArrayBuffer.isView(body) || body instanceof ArrayBuffer) {
+    return body.byteLength > maxBytes;
+  }
+
+  if (typeof body !== 'string' || body.length * 3 <= maxBytes) {
+    return false;
+  }
+
+  return (
+    body.length > maxBytes ||
+    new TextEncoder().encode(body).byteLength > maxBytes
+  );
+}
+
 function isBodyDecodeFailure(response: AdapterResponse): boolean {
   // A streamed body was already handed to the caller's stream, so it is no whole answer.
   if (

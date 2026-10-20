@@ -835,7 +835,7 @@ A `CookieJar` provides cookie storage with Public Suffix List domain matching, p
 
 A response cookie's lifetime is capped at 400 days, as browsers cap it (RFC 6265bis): a longer `Max-Age` or a later `Expires` is read as 400 days from now. `Expires` is read with RFC 6265's cookie-date algorithm, in UTC whatever zone is written, and a value that is not a cookie-date (`Expires=0`) is ignored, leaving a session cookie. A cookie whose name and value together pass 4096 bytes is ignored. A cookie a header cannot carry - a name or value with a character above U+00FF - is refused by `setCookie()` and `fromJSON()`. The jar does not limit how many cookies it holds; call `clearExpiredCookies()` on a long-lived jar. A replaced cookie keeps its place in the `Cookie` header, as browsers keep it; a jar restored with `fromJSON` orders cookies of equal path length by `createdAt` instead, so that place is not kept across a save.
 
-Cookie domains are canonicalized through IDNA to lowercase ASCII: for example, `Domain=münchen.de` matches the request host `xn--mnchen-3ya.de`. The same normalization applies to cookies stored through `setCookie()` or restored through `fromJSON()`, and to hosts passed to `clear()`. Invalid domain scopes are rejected. A trailing dot is dropped, so `example.com.` and `example.com` are the same host to the jar, as they are to the client's credential scope.
+Cookie domains are canonicalized through IDNA to lowercase ASCII: for example, `Domain=münchen.de` given as a JavaScript string matches the request host `xn--mnchen-3ya.de`. The same normalization applies to cookies stored through `setCookie()` or restored through `fromJSON()`, and to hosts passed to `clear()`. Off the wire it does not arise: the adapters read header bytes as latin1, so a UTF-8 `Domain=münchen.de` arrives as other characters and its cookie is ignored, as RFC 6265bis ignores a non-ASCII `Domain`; servers send the `xn--` form. A `Domain` with two leading dots (`..example.com`) names no host, and its cookie is ignored. A `SameSite=None` cookie without `Secure` is ignored, as browsers ignore it. Invalid domain scopes are rejected. A trailing dot is dropped, so `example.com.` and `example.com` are the same host to the jar, as they are to the client's credential scope.
 
 Fetch uses `Headers.getSetCookie()` to preserve individual response cookie lines.
 On legacy implementations without it, the fallback accepts a single unambiguous
@@ -865,6 +865,9 @@ When a `CookieJar` is attached to the client:
 over `https:` or `wss:`. Response parsing refuses Secure cookies from other schemes,
 and refuses insecure cookies that would replace or shadow an existing, unexpired Secure
 cookie of the same name with overlapping domain/path scope, including deletion attempts.
+Overlapping in either direction: RFC 6265bis refuses only a path inside the Secure
+cookie's, and this jar also refuses a wider one (`Path=/` beside a Secure `Path=/admin`),
+which would be sent alongside it.
 HTTPS responses may replace or downgrade their cookies. HTTP localhost is not treated
 as secure. Use an HTTPS origin for Secure-cookie mocks.
 
@@ -941,7 +944,7 @@ const jar = new CookieJar();
 // `createdAt` that is not a finite number - such a cookie would never be found expired),
 // or if the name or value cannot be sent as one `name=value` pair: a name that holds
 // `=`, `;`, whitespace or a control character, or a value holding `;` or a control
-// character. A name may be empty (a nameless cookie, sent as its value alone) when the
+// character other than a tab. A name may be empty (a nameless cookie, sent as its value alone) when the
 // value is not empty, holds no `=` and does not start with `__Secure-` / `__Host-`. Looser than RFC 6265's cookie-octet grammar on purpose: spaces,
 // commas, quotes and backslashes in a value are accepted, as browsers accept them,
 // because real servers send them. Only what would change the header's framing is refused.
@@ -1364,7 +1367,7 @@ interface NodeAdapterConfig {
 }
 ```
 
-TLS certificate errors resolve as status `495` (transport error, not retryable) rather than throwing, so they flow through the normal error path - those the runtime reports as a certificate failure. A server rejecting the client certificate may only close or reset the connection on some runtimes (Bun does for TLS 1.3), which is status `0` and retried as any transport failure is. That includes every revocation failure, such as `CERT_REVOKED`, `UNABLE_TO_GET_CRL`, `CRL_HAS_EXPIRED` and friends.
+TLS certificate errors resolve as status `495` (transport error, not retryable) rather than throwing, so they flow through the normal error path - those the runtime reports as a certificate failure. That includes every revocation failure, such as `CERT_REVOKED`, `UNABLE_TO_GET_CRL`, `CRL_HAS_EXPIRED` and friends. A server rejecting the client certificate may only close or reset the connection on some runtimes (Bun does for TLS 1.3), which is status `0` and retried as any transport failure is.
 
 **URL credentials and TLS identity are scoped to the caller-selected origin.**
 `AdapterRequest.initialURL` identifies that origin, including one a retry interceptor

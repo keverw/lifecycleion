@@ -175,8 +175,9 @@ export interface AdapterResponse {
    * Set when response-body delivery fails after headers arrive — buffered
    * download truncation, writable errors, upstream response-stream errors.
    * NodeAdapter, FetchAdapter and MockAdapter all report it, and the client
-   * synthesizes it for a per-attempt timeout that strikes mid-body. XHRAdapter
-   * cannot: `XMLHttpRequest` zeroes the status on error.
+   * synthesizes it for a per-attempt timeout that strikes mid-body. XHRAdapter reports
+   * it only for a body past `maxResponseBytes`: `XMLHttpRequest` zeroes the status on
+   * any other error.
    *
    * The client treats this as a terminal stream failure. The real HTTP status is
    * preserved (not zeroed) so observers can tell the server responded but body

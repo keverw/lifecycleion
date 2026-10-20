@@ -92,7 +92,12 @@ export class XHRAdapter implements HTTPAdapter {
         // and is silently dropped by the browser regardless; the browser manages
         // cookies on its own.
         for (const [key, value] of Object.entries(request.headers)) {
-          if (Array.isArray(value)) {
+          // Except `cookie`, joined with `; ` as the other adapters join it: where XHR
+          // runs outside a browser (React Native, a test shim) it is sent, and `, `
+          // read as one cookie.
+          if (Array.isArray(value) && key.toLowerCase() === 'cookie') {
+            xhr.setRequestHeader(key, value.join('; '));
+          } else if (Array.isArray(value)) {
             for (const v of value) {
               xhr.setRequestHeader(key, v);
             }

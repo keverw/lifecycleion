@@ -19,6 +19,7 @@ import {
   STREAM_ABORT_STATUS_KEY,
 } from './consts';
 import { CookieJar } from './cookie-jar';
+import { sleep } from '../sleep';
 import {
   matchesCORSCredentialsList,
   matchesDomainList,
@@ -6173,4 +6174,212 @@ test('round 128: FetchAdapter reads a lowercase head as bodiless; a caller refus
   } finally {
     server.close();
   }
+});
+
+const zstdCompressSync = (
+  zlib as unknown as { zstdCompressSync?: (input: Buffer) => Buffer }
+).zstdCompressSync;
+
+test.skipIf(zstdCompressSync === undefined)(
+  'round 129: a zstd body cut short is a stream error, as gzip, br and deflate are',
+  async () => {
+    const big = Buffer.from(
+      Array.from({ length: 50000 }, (_, i) => String(i)).join(','),
+    );
+    const whole = (zstdCompressSync as (input: Buffer) => Buffer)(big);
+    let body = whole;
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, {
+        'content-type': 'application/octet-stream',
+        'content-encoding': 'zstd',
+      });
+      res.end(body);
+    });
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      const client = new HTTPClient({ adapter: new NodeAdapter(), baseURL });
+      const complete = await client.get('/').send();
+      expect(complete.isFailed).toBe(false);
+      expect((complete.body as Uint8Array).byteLength).toBe(big.length);
+
+      for (const cut of [1, Math.floor(whole.length / 2)]) {
+        body = whole.subarray(0, whole.length - cut);
+        const truncated = await client.get('/').send();
+        expect(truncated.isStreamError).toBe(true);
+      }
+    } finally {
+      server.close();
+    }
+  },
+);
+
+test('round 129: a cancel between hops carries no cause from the 3xx it leaves', async () => {
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () =>
+        Promise.resolve<AdapterResponse>({
+          status: 302,
+          headers: { location: '/b' },
+          body: null,
+          errorCause: new Error('hop1 stale cause'),
+        }),
+    },
+    baseURL: 'http://api.test',
+    followRedirects: true,
+  });
+  client.addRequestInterceptor(() => ({ cancel: true }), {
+    phases: ['redirect'],
+  });
+  const builder = client.get('/a');
+  await builder.send();
+  expect(builder.error?.code).toBe('cancelled');
+  expect(builder.error?.cause).toBeUndefined();
+});
+
+test('round 129: a jar that throws for the redirect target reports the target as requestURL', async () => {
+  const throwingJar = new CookieJar();
+  const original = throwingJar.getCookieHeaderString.bind(throwingJar);
+  throwingJar.getCookieHeaderString = (url: string) => {
+    if (url.endsWith('/next')) {
+      throw new Error('jar failed');
+    }
+    return original(url);
+  };
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: (request) =>
+        Promise.resolve<AdapterResponse>(
+          request.requestURL.endsWith('/start')
+            ? { status: 302, headers: { location: '/next' }, body: null }
+            : { status: 200, headers: {}, body: null },
+        ),
+    },
+    baseURL: 'http://api.test',
+    followRedirects: true,
+    cookieJar: throwingJar,
+  });
+  const response = await client.get('/start').send();
+  expect(response.requestURL).toBe('http://api.test/next');
+  expect(response.redirectHistory).toEqual(['http://api.test/next']);
+  expect(response.detectedRedirectURL).toBe('http://api.test/next');
+});
+
+test('round 129: a string body from a custom adapter is held to maxResponseBytes', async () => {
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/octet-stream' },
+          body: 'x'.repeat(1000) as unknown as Uint8Array,
+        }),
+    },
+    baseURL: 'http://api.test',
+    maxResponseBytes: 10,
+  });
+  const builder = client.get('/x');
+  await builder.send();
+  expect(builder.error?.code).toBe('response_too_large');
+
+  // Counted as UTF-8: four characters, twelve bytes.
+  const multibyte = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'text/plain' },
+          body: '€€€€' as unknown as Uint8Array,
+        }),
+    },
+    baseURL: 'http://api.test',
+    maxResponseBytes: 10,
+  });
+  const euro = multibyte.get('/x');
+  await euro.send();
+  expect(euro.error?.code).toBe('response_too_large');
+});
+
+test('round 129: cookie names refuse a tab; values keep one', () => {
+  const jar = new CookieJar();
+  const base = { domain: 'example.com', path: '/', value: '1' };
+  expect(jar.setCookie({ ...base, name: 'a\tb' })).toBe(false);
+  jar.processResponseHeaders(
+    { 'set-cookie': ['c\td=1', 'e=x\ty'] },
+    'https://example.com/',
+  );
+  expect(jar.getCookieHeaderString('https://example.com/')).toBe('e=x\ty');
+});
+
+test('round 129: Domain=..example.com and SameSite=None without Secure are ignored', () => {
+  const jar = new CookieJar();
+  jar.processResponseHeaders(
+    {
+      'set-cookie': [
+        'dots=1; Domain=..example.com',
+        'lax=1; SameSite=None',
+        'ok=1; SameSite=None; Secure',
+      ],
+    },
+    'https://www.example.com/',
+  );
+  expect(jar.getCookieHeaderString('https://www.example.com/')).toBe('ok=1');
+});
+
+test('round 129: a cookie replacing an expired one takes its own place in the header', async () => {
+  const jar = new CookieJar();
+  // Stored already expired, and not yet purged; host-only, so `a=new` replaces it.
+  expect(
+    jar.setCookie({
+      name: 'a',
+      value: 'old',
+      domain: 'example.com',
+      hostOnly: true,
+      path: '/',
+      maxAge: 0,
+      createdAt: Date.now() - 10_000,
+    }),
+  ).toBe(true);
+  await sleep(2);
+  jar.processResponseHeaders({ 'set-cookie': 'b=1' }, 'https://example.com/');
+  await sleep(2);
+  jar.processResponseHeaders({ 'set-cookie': 'a=new' }, 'https://example.com/');
+  expect(jar.getCookieHeaderString('https://example.com/')).toBe('b=1; a=new');
+});
+
+test('round 129: MockAdapter drops a path-only URL fragment and a 1xx body', async () => {
+  const adapter = new MockAdapter();
+  const seen: unknown[] = [];
+  adapter.routes.get('/x', (request) => {
+    seen.push(request.query);
+    return { status: 200, body: 'ok' };
+  });
+  adapter.routes.get('/info', () => ({ status: 101, body: 'hi' }));
+  await adapter.send({
+    requestURL: '/x?a=1#frag',
+    method: 'GET',
+    headers: {},
+  });
+  expect(seen).toEqual([{ a: '1' }]);
+  const informational = await adapter.send({
+    requestURL: 'http://api.test/info',
+    method: 'GET',
+    headers: {},
+  });
+  expect(informational.body).toBeNull();
+});
+
+test('round 129: credentials-list trailing-dot wildcards and whitespace in origin patterns', () => {
+  expect(
+    matchesCORSCredentialsList(
+      'https://a.example.com',
+      ['https://*.example.com.'],
+      { allowWildcardSubdomains: true },
+    ),
+  ).toBe(true);
+  expect(matchesOriginList('https://evil.com', ['https:// *'])).toBe(false);
 });

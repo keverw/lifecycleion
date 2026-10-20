@@ -903,8 +903,9 @@ describe('HTTPClient — basic HTTP methods', () => {
 
     expect(builder.error?.code).toBe('request_setup_error');
     expect(response.initialURL).toBe('http://example.test/rewritten');
-    expect(response.requestURL).toBe('http://example.test/rewritten');
-    expect(observedURLs).toEqual(['http://example.test/rewritten']);
+    // The redirect target it failed preparing, as the docs have `requestURL`.
+    expect(response.requestURL).toBe('http://example.test/next');
+    expect(observedURLs).toEqual(['http://example.test/next']);
   });
 
   test('a throw between later hops reports the hop it happened on', async () => {
@@ -955,9 +956,13 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(hop).toBe(2);
     expect(builder.error?.code).toBe('request_setup_error');
     expect(response.initialURL).toBe('http://example.test/first');
-    expect(response.requestURL).toBe('http://example.test/next');
-    expect(response.redirectHistory).toEqual(['http://example.test/next']);
-    expect(observedURLs).toEqual(['http://example.test/next']);
+    // The redirect target it failed preparing, after the hop already followed.
+    expect(response.requestURL).toBe('http://example.test/third');
+    expect(response.redirectHistory).toEqual([
+      'http://example.test/next',
+      'http://example.test/third',
+    ]);
+    expect(observedURLs).toEqual(['http://example.test/third']);
   });
 
   test("a followed redirect waits for the hop's upload to settle first", async () => {

@@ -183,10 +183,13 @@ describe('writeRequestBodyChunked', () => {
   test('stops writing if req.destroyed becomes true mid-loop', async () => {
     const data = Buffer.alloc(REQUEST_BODY_CHUNK_SIZE * 3, 0x00);
     let writeCalls = 0;
+    // Destroyed between chunks, once the first was accepted: the loop's own exit, not a
+    // rejection of a chunk still in flight.
+    let isDestroyed = false;
 
     const req: RequestBodyWritable = {
       get destroyed() {
-        return writeCalls >= 1;
+        return isDestroyed;
       },
       setHeader() {},
       write(_data, callback) {
@@ -204,7 +207,9 @@ describe('writeRequestBodyChunked', () => {
 
     let caught: Error | undefined;
     try {
-      await writeRequestBodyChunked(data, req);
+      await writeRequestBodyChunked(data, req, () => {
+        isDestroyed = true;
+      });
     } catch (error) {
       caught = error as Error;
     }

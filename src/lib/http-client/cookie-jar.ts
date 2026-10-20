@@ -281,7 +281,8 @@ export class CookieJar {
    * Also returns false for a name or value that cannot be written into a `Cookie`
    * header as one cookie-pair (and `getCookiesFor` withholds a stored cookie that no
    * longer passes, so a mutation through `getAllCookies()` cannot reach the header): a name that holds `=`, `;`, whitespace or a
-   * control character, or a value holding `;` or a control character. A name may be
+   * control character, or a value holding `;` or a control character other than a tab.
+   * A name may be
    * empty - a nameless cookie, sent as its value alone - when the value is not empty,
    * holds no `=` and does not start with `__Secure-` / `__Host-`. The header is
    * built as `name=value` pairs joined by `; `, so a value of `x; other=evil` was sent
@@ -372,10 +373,17 @@ export class CookieJar {
     // A replacement keeps the creation time of the cookie it replaces (RFC 6265 §5.3
     // step 11.3), which orders the `Cookie` header; `createdAt` stays the new cookie's
     // own, the base of its `Max-Age`.
+    // Not an expired one still waiting to be purged: it was already gone (§5.3 step 11
+    // reads the store, from which an expired cookie has been evicted), so the new cookie
+    // takes its own place.
     const replaced = bucket.get(key);
+    const replacedSnapshot =
+      replaced === undefined ? null : this.snapshotForSend(replaced);
     this.creationTimes.set(
       stored,
-      replaced === undefined
+      replaced === undefined ||
+        replacedSnapshot === null ||
+        this.isExpired(replacedSnapshot, Date.now())
         ? createdAt
         : (this.creationTimes.get(replaced) ?? replaced.createdAt),
     );
@@ -980,6 +988,9 @@ export class CookieJar {
 
         switch (attrName) {
           case 'domain': {
+            // One leading dot dropped, as RFC 6265 §5.2.3 drops it; a second is kept, so
+            // `Domain=..example.com` names no host and its cookie is ignored (see
+            // `storeParsed`), as browsers ignore it, rather than becoming `example.com`.
             cookie.domain = attrValue.startsWith('.')
               ? attrValue.slice(1)
               : attrValue;
@@ -1146,6 +1157,11 @@ export class CookieJar {
       return;
     }
 
+    // RFC 6265bis §5.7: `SameSite=None` without `Secure` is ignored, as browsers ignore it.
+    if (parsed.sameSite === 'None' && parsed.secure !== true) {
+      return;
+    }
+
     let domain: string;
 
     // Set when `Domain=` names a public suffix that is also the request host. RFC 6265bis
@@ -1155,6 +1171,11 @@ export class CookieJar {
     let isPublicSuffixHostOnly = false;
 
     if (parsed.domain) {
+      // A dot the parser left: `Domain=..example.com`, which no host domain-matches.
+      if (toAsciiDots(parsed.domain).startsWith('.')) {
+        return;
+      }
+
       // RFC 6265 §5.2.3 / §5.1.3: ignore a leading dot and match domains
       // case-insensitively. URL.host is lowercased but Domain= is not.
       const normalizedDomain = this.normalizeStoredDomain(parsed.domain);
@@ -1311,7 +1332,11 @@ export class CookieJar {
    * Whether the jar already holds a Secure cookie named `name` whose scope meets a new
    * cookie stored for `domain` / `path` - RFC 6265bis §5.7 step 21: the stored cookie's
    * domain domain-matches the new cookie's domain *or vice versa*, and either path
-   * path-matches the other. Both directions, and without regard to `hostOnly`: a
+   * path-matches the other. The RFC asks only that the new path path-match the stored
+   * one; the reverse is refused too, on purpose and stricter than browsers: a `/`
+   * cookie planted beside a Secure `/admin` one is sent with it, and a server that reads
+   * the last of two same-named cookies reads the plant. Both directions, and without
+   * regard to `hostOnly`: a
    * host-only Secure cookie on `app.example.com` is shadowed by a `Domain=example.com`
    * cookie planted from `http://example.com`, which the send path would deliver beside
    * it, so the wider plant must be refused as much as the narrower one.
@@ -1520,7 +1545,7 @@ export class CookieJar {
     }
 
     return (
-      isHeaderSafeCookieText(name, '= ') && isHeaderSafeCookieText(value, '')
+      isHeaderSafeCookieText(name, '= \t') && isHeaderSafeCookieText(value, '')
     );
   }
 

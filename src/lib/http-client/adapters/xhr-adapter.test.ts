@@ -343,6 +343,23 @@ describe('XHRAdapter', () => {
     ]);
   });
 
+  test('round 129: joins a repeated cookie header with "; " as the other adapters do', async () => {
+    const adapter = new XHRAdapter();
+    const promise = adapter.send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: { cookie: ['a=1', 'b=2'] },
+    });
+
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+
+    await promise;
+
+    expect(lastXHR.requestHeaders['cookie']).toEqual(['a=1; b=2']);
+  });
+
   test('returns status and body on successful load', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({

@@ -786,7 +786,7 @@ describe('CookieJar', () => {
 
     test('parses SameSite=None', () => {
       jar.parseSetCookieHeader(
-        'auth=token; SameSite=None',
+        'auth=token; SameSite=None; Secure',
         'https://example.com',
       );
       expect(jar.getCookieFor('auth', 'https://example.com')?.sameSite).toBe(

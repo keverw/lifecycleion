@@ -493,8 +493,10 @@ export function matchesWildcardOrigin(
     const [patternProtocol, ...rest] = normalizedPattern.split('://');
     const domainPattern = rest.join('://');
 
-    // Reject non-domain characters in the domain pattern portion
-    if (INVALID_DOMAIN_CHARS.test(domainPattern)) {
+    // Reject non-domain characters in the domain pattern portion - whitespace too, which
+    // the domain matcher would trim: `https:// *` became the protocol wildcard
+    // `https://*` that `validateConfigEntry` refuses.
+    if (INVALID_DOMAIN_CHARS.test(domainPattern) || /\s/.test(domainPattern)) {
       return false;
     }
 
@@ -1250,7 +1252,12 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
     .normalize('NFC')
     .replace(/[．。｡]/g, '.');
 
-  function isValidCredentialWildcardHost(hostPattern: string): boolean {
+  function isValidCredentialWildcardHost(written: string): boolean {
+    // One trailing dot dropped, as the other matchers drop it: its empty last label
+    // refused `https://*.example.com.`, which `validateConfigEntry` and
+    // `matchesOriginList` both accept.
+    const hostPattern = written.endsWith('.') ? written.slice(0, -1) : written;
+
     if (isAllWildcards(hostPattern)) {
       return false;
     }
