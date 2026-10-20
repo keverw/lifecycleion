@@ -5873,3 +5873,40 @@ test('round 122: trailing bytes in the last chunk of an ended response are a str
     server.close();
   }
 });
+
+test('round 123: a large stacked deflate with trailing bytes fails; gzip zero padding is accepted', async () => {
+  const payload = Buffer.alloc(300_000, 'p');
+  const bodies: Record<string, [string, Buffer]> = {
+    stacked: [
+      'deflate, gzip',
+      zlib.gzipSync(
+        Buffer.concat([zlib.deflateSync(payload), Buffer.from('x')]),
+      ),
+    ],
+    padded: ['gzip', Buffer.concat([zlib.gzipSync('hello'), Buffer.alloc(16)])],
+  };
+  const server = http.createServer((req, res) => {
+    const [encoding, body] = bodies[(req.url ?? '/').slice(1)] ?? [
+      'identity',
+      Buffer.from('x'),
+    ];
+    res.writeHead(200, {
+      'content-type': 'text/plain',
+      'content-encoding': encoding,
+      'content-length': String(body.length),
+    });
+    res.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const client = new HTTPClient({ adapter: new NodeAdapter(), baseURL });
+    const stacked = await client.get('/stacked').send();
+    expect(stacked.isStreamError).toBe(true);
+    const padded = await client.get('/padded').send();
+    expect(padded.isStreamError).toBe(false);
+    expect(padded.body).toBe('hello');
+  } finally {
+    server.close();
+  }
+});

@@ -297,7 +297,9 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     // not by the order of events - decoding runs off the main thread, so the response's
     // own `'end'` routinely comes first even when its last chunk carried the junk: a
     // decoder that ends having consumed (`bytesWritten`) fewer bytes than it was fed
-    // stopped short of its input. `SniffingInflate` tells its own.
+    // stopped short of its input. `SniffingInflate` tells its own. Not for gzip: gunzip
+    // already fails on bytes after its stream, and deliberately accepts zero padding there,
+    // which some servers send - a count would refuse what Node and browsers read.
     const fedBytes = this.decoders.map(() => 0);
     fedBytes[0] = this.rawBytes;
     this.res.on('data', (chunk: Buffer) => {
@@ -308,6 +310,10 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
         decoder.on('data', (chunk: Buffer) => {
           fedBytes[index + 1] = (fedBytes[index + 1] ?? 0) + chunk.length;
         });
+      }
+
+      if (this.decodeOrder[index] === 'gzip') {
+        continue;
       }
 
       decoder.once('end', () => {
@@ -441,12 +447,8 @@ function createDecoder(
  */
 class SniffingInflate extends Transform {
   private inner: zlib.Inflate | zlib.InflateRaw | undefined;
-  /**
-   * The inner inflater ended its output before this stream was told the input had: zlib
-   * does that when a write leaves bytes after the deflate stream. Trailing bytes, so an
-   * error - and never waited on in `_flush`, whose `'end'` had already come and gone.
-   */
-  private didInnerEndEarly = false;
+  /** Bytes handed to the inner inflater, read against what it consumed. */
+  private fedBytes = 0;
 
   public override _transform(
     chunk: Buffer,
@@ -467,18 +469,16 @@ class SniffingInflate extends Transform {
       inner.on('error', (error: Error) => {
         this.destroy(error);
       });
-      inner.once('end', () => {
-        if (!this.writableEnded) {
-          this.didInnerEndEarly = true;
-        }
-      });
       this.inner = inner;
     }
 
-    if (this.didInnerEndEarly) {
+    // Input after the deflate stream has ended: trailing bytes.
+    if (this.inner.readableEnded) {
       callback(trailingBytesError());
       return;
     }
+
+    this.fedBytes += chunk.length;
 
     if (this.inner.write(chunk)) {
       callback();
@@ -500,15 +500,19 @@ class SniffingInflate extends Transform {
       return;
     }
 
-    if (this.didInnerEndEarly || this.inner.readableEnded) {
-      callback(trailingBytesError());
+    // Trailing bytes, told by count as the other decoders are: the inner inflater ends
+    // when its deflate stream does and drops the rest, and whether that happened before or
+    // after this flush is down to when it got to the last chunk.
+    if (this.inner.readableEnded) {
+      callback(this.hasLeftover() ? trailingBytesError() : undefined);
       return;
     }
 
-    this.inner.once('end', () => {
-      callback();
+    const inner = this.inner;
+    inner.once('end', () => {
+      callback(this.hasLeftover() ? trailingBytesError() : undefined);
     });
-    this.inner.end();
+    inner.end();
   }
 
   public override _destroy(
@@ -517,6 +521,11 @@ class SniffingInflate extends Transform {
   ): void {
     this.inner?.destroy();
     callback(error);
+  }
+
+  /** Whether the inner inflater stopped short of what it was given. */
+  private hasLeftover(): boolean {
+    return (this.inner?.bytesWritten ?? 0) < this.fedBytes;
   }
 }
 
