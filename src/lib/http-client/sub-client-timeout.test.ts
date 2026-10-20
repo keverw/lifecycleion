@@ -33,6 +33,7 @@ test.each(['own', 'inherited', 'non-enumerable'] as const)(
       includeRequestID: true,
       includeAttemptHeader: true,
       userAgent: 'child-agent',
+      maxResponseBytes: 2048,
     } satisfies SubClientConfig;
     const owner = {};
     const overrides = (
@@ -71,6 +72,7 @@ test.each(['own', 'inherited', 'non-enumerable'] as const)(
       'includeRequestID',
       'includeAttemptHeader',
       'userAgent',
+      'maxResponseBytes',
     ] as const) {
       expect(config[key]).toEqual(values[key]);
     }
@@ -125,6 +127,7 @@ test.each(['own', 'inherited', 'non-enumerable'] as const)(
       'includeRequestID',
       'includeAttemptHeader',
       'userAgent',
+      'maxResponseBytes',
     ]) {
       Object.defineProperty(owner, key, {
         enumerable: placement !== 'non-enumerable',
@@ -141,7 +144,7 @@ test.each(['own', 'inherited', 'non-enumerable'] as const)(
     const configOf = (client: unknown) =>
       (client as { _config: unknown })._config;
     expect(configOf(child)).toEqual(configOf(parent));
-    expect(Object.values(reads)).toEqual(Array.from({ length: 13 }, () => 1));
+    expect(Object.values(reads)).toEqual(Array.from({ length: 14 }, () => 1));
   },
 );
 

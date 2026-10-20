@@ -206,10 +206,10 @@ export interface AdapterResponse {
    * arrived while it was still being written. Advisory: it never makes a response
    * a failure, and it never rejects.
    *
-   * Absent for an ordinary REST endpoint, which reads and processes the whole
-   * upload before answering - by then the body is already out. This is for the
-   * uncommon shapes where the answer can come first: early-ack, unbuffered and
-   * duplex endpoints.
+   * Of no interest for an ordinary REST endpoint, which reads and processes the
+   * whole upload before answering - by then the body is already out, and the field
+   * resolves `undefined` at once. This is for the uncommon shapes where the answer
+   * can come first: early-ack, unbuffered and duplex endpoints.
    *
    * An endpoint with request buffering disabled answers while the upload is still
    * going, and what happens to the body afterwards was invisible to the caller.

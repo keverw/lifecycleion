@@ -204,8 +204,11 @@ export function normalizeOrigin(origin: string): string {
   }
 
   // A percent-encoded host (`https://ex%61mple.com`) is refused, as `validateConfigEntry`
-  // refuses it. See `hasPercentEncodedHost`.
-  if (hasPercentEncodedHost(normalizedOrigin)) {
+  // refuses it. See `hasPercentEncodedHost`. So is an empty userinfo, query or fragment.
+  if (
+    hasPercentEncodedHost(normalizedOrigin) ||
+    hasOriginExtras(normalizedOrigin)
+  ) {
     return '';
   }
 
@@ -429,7 +432,8 @@ export function matchesWildcardOrigin(
 
   if (
     hasDanglingPortInAuthority(normalizedOrigin) ||
-    hasPercentEncodedHost(normalizedOrigin)
+    hasPercentEncodedHost(normalizedOrigin) ||
+    hasOriginExtras(normalizedOrigin)
   ) {
     return false;
   }
@@ -493,10 +497,8 @@ export function matchesWildcardOrigin(
     const [patternProtocol, ...rest] = normalizedPattern.split('://');
     const domainPattern = rest.join('://');
 
-    // Reject non-domain characters in the domain pattern portion - whitespace too, which
-    // the domain matcher would trim: `https:// *` became the protocol wildcard
-    // `https://*` that `validateConfigEntry` refuses.
-    if (INVALID_DOMAIN_CHARS.test(domainPattern) || /\s/.test(domainPattern)) {
+    // Reject non-domain characters in the domain pattern portion
+    if (INVALID_DOMAIN_CHARS.test(domainPattern)) {
       return false;
     }
 
@@ -506,7 +508,9 @@ export function matchesWildcardOrigin(
     }
 
     // Fast reject: domain pattern must contain at least one wildcard and not be all-wildcards
-    if (!domainPattern.includes('*') || isAllWildcards(domainPattern)) {
+    // - read trimmed, as the domain matcher reads it: `https:// *` became the protocol
+    // wildcard `https://*`, which `validateConfigEntry` refuses as `https:// *`.
+    if (!domainPattern.includes('*') || isAllWildcards(domainPattern.trim())) {
       return false;
     }
 
@@ -1244,6 +1248,18 @@ function parseExactOriginForMatching(entry: string): {
       !isSpecialScheme(url.protocol.toLowerCase()) &&
       !url.hostname.startsWith('['),
   };
+}
+
+/**
+ * Whether an origin's text carries `@`, `?` or `#` after its scheme: userinfo, a query or
+ * a fragment - even an empty one, which the URL parser reports as `''` and so slipped
+ * past the field checks, where `validateConfigEntry` refuses the same text. No host
+ * holds any of the three.
+ */
+function hasOriginExtras(text: string): boolean {
+  const schemeEnd = text.indexOf('://');
+
+  return /[@?#]/.test(schemeEnd === -1 ? text : text.slice(schemeEnd + 3));
 }
 
 function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {

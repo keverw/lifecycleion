@@ -57,6 +57,12 @@ const TRANSPORT_ERROR_CODES = new Set([
   'ENETUNREACH',
   'ENETDOWN',
   'EADDRNOTAVAIL',
+  // A `socketPath` that is missing, not permitted or not a socket: the message names the
+  // path, and `sock/certificates/agent.sock` matched /certificate/ on it alone.
+  'ENOENT',
+  'EACCES',
+  'EINVAL',
+  'ENOTSOCK',
 ]);
 
 /**
@@ -120,9 +126,12 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
     return true;
   }
 
+  // `UNKNOWN_CA` too: the server's alert that it does not trust the client certificate's
+  // issuer (`ERR_SSL_TLSV1_ALERT_UNKNOWN_CA`), the mTLS refusal the other certificate
+  // alerts already are - it fails the same way every time.
   if (
     (code.startsWith('ERR_TLS_') || code.startsWith('ERR_SSL_')) &&
-    code.includes('CERT')
+    (code.includes('CERT') || code.includes('UNKNOWN_CA'))
   ) {
     return true;
   }
@@ -149,7 +158,7 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
   const message = readMember(error, 'message');
 
   return typeof message === 'string'
-    ? /certificate|self signed|unable to verify|altname|subtree violation|critical extension|path length constraint|issuer public key/i.test(
+    ? /certificate|self signed|unable to verify|altname|subtree violation|critical extension|path length constraint|issuer public key|alert unknown ca/i.test(
         message,
       )
     : false;

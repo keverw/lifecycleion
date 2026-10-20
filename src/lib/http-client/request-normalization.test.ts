@@ -6383,3 +6383,113 @@ test('round 129: credentials-list trailing-dot wildcards and whitespace in origi
   ).toBe(true);
   expect(matchesOriginList('https://evil.com', ['https:// *'])).toBe(false);
 });
+
+test('round 130: a status-0 answer carries its errorCause without isTransportError', async () => {
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () =>
+        Promise.resolve<AdapterResponse>({
+          status: 0,
+          headers: {},
+          body: null,
+          errorCause: new Error('connect ECONNREFUSED'),
+        }),
+    },
+    baseURL: 'http://api.test',
+  });
+  const builder = client.get('/x');
+  await builder.send();
+  expect(builder.error?.code).toBe('network_error');
+  expect(builder.error?.cause?.message).toBe('connect ECONNREFUSED');
+});
+
+test('round 130: origin matchers agree with validateConfigEntry on whitespace and empty extras', () => {
+  // Whitespace in a protocol wildcard's host: as the validator reads it.
+  expect(validateConfigEntry('https:// *.example.com', 'origin').valid).toBe(
+    true,
+  );
+  expect(
+    matchesOriginList('https://a.example.com', ['https:// *.example.com']),
+  ).toBe(true);
+  expect(validateConfigEntry('https:// *', 'origin').valid).toBe(false);
+  expect(matchesOriginList('https://evil.com', ['https:// *'])).toBe(false);
+
+  // An empty userinfo, query or fragment is still one.
+  for (const origin of [
+    'https://example.com?',
+    'https://example.com#',
+    'https://@example.com',
+    'https://:@example.com',
+  ]) {
+    expect(validateConfigEntry(origin, 'origin').valid).toBe(false);
+    expect(normalizeOrigin(origin)).toBe('');
+    expect(matchesOriginList(origin, ['https://example.com'])).toBe(false);
+    expect(matchesOriginList('https://example.com', [origin])).toBe(false);
+  }
+  expect(
+    matchesWildcardOrigin('https://a.example.com?', 'https://*.example.com'),
+  ).toBe(false);
+});
+
+test('round 130: MockAdapter never serializes a streamError route body', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({
+    status: 200,
+    body: new Map() as unknown as string,
+    streamError: true,
+  }));
+  const response = await adapter.send({
+    requestURL: 'http://api.test/x',
+    method: 'GET',
+    headers: {},
+  });
+  expect(response.status).toBe(200);
+  expect(response.isStreamError).toBe(true);
+  expect(response.body).toBeNull();
+});
+
+test('round 130: each callback is handed its own copy of the redirect hop', async () => {
+  let hits = 0;
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: (request) => {
+        if (request.requestURL.endsWith('/1')) {
+          return Promise.resolve<AdapterResponse>({
+            status: 302,
+            headers: { location: '/2' },
+            body: null,
+          });
+        }
+        return Promise.resolve<AdapterResponse>(
+          hits++ === 0
+            ? { status: 503, headers: {}, body: null }
+            : { status: 200, headers: {}, body: null },
+        );
+      },
+    },
+    baseURL: 'http://api.test',
+    followRedirects: true,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+  });
+  const seen: string[] = [];
+  client.addResponseObserver(
+    (_response, _request, phase) => {
+      if (phase.type === 'retry' && phase.redirect) {
+        seen.push(phase.redirect.to);
+      }
+    },
+    { phases: ['retry'] },
+  );
+  const response = await client
+    .get('/1')
+    .onAttemptStart((event) => {
+      if (event.redirect) {
+        event.redirect.to = 'https://MUTATED/';
+      }
+    })
+    .send();
+  expect(response.status).toBe(200);
+  expect(seen).toEqual(['http://api.test/2']);
+});

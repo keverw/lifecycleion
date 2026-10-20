@@ -1377,7 +1377,10 @@ nothing. On a hop to another origin, all network adapters
 withhold URL userinfo, and `NodeAdapter` also withholds `servername` and
 `mtls.cert` / `mtls.key`. The client strips cross-origin Location userinfo before
 recording the followed hop. Same-origin userinfo is preserved. Node uses it for Basic
-auth, while Fetch remains subject to the runtime's URL-credential restrictions.
+auth. `fetch` sends none of it: Node's and browsers' `fetch` refuse a URL with
+credentials, and Bun's drops them without a word, so a FetchAdapter request to
+`https://user:pass@host/` goes out unauthenticated there. Set `Authorization` yourself
+with FetchAdapter.
 
 TLS trust settings (`ca`, `mtls.ca`, `crl`, and `rejectUnauthorized`) apply on every
 connection. A target requiring the withheld client certificate can fail TLS or reject

@@ -562,11 +562,15 @@ export class MockAdapter implements HTTPAdapter {
     // What the server would have put on the wire. HEAD / 204 / 304 never expose
     // a body to consumers, even if the handler returned one. This keeps the mock
     // transport aligned with real HTTP.
+    // Not serialized at all under a simulated stream error, which loses it: a body the
+    // mock could not serialize (a `Map`) failed the route as an `adapter_error` instead.
     let intendedBody: ReturnType<typeof serializeResponseBody> | null;
     try {
-      intendedBody = shouldOmitResponseBody(method, mockResponse.status)
-        ? null
-        : serializeResponseBody(mockResponse);
+      intendedBody =
+        shouldOmitResponseBody(method, mockResponse.status) ||
+        simulatedStreamErrorCode !== undefined
+          ? null
+          : serializeResponseBody(mockResponse);
     } catch (error) {
       // A body the mock cannot serialize is the route's mistake, after it has run; not
       // retried, for the reason a bad delay is not.
@@ -585,8 +589,8 @@ export class MockAdapter implements HTTPAdapter {
       isResponseTooLarge ? 'response_too_large' : simulatedStreamErrorCode;
 
     // A simulated stream error loses the body, but it strikes after headers
-    // arrived, so the headers still stand — Content-Type included. Header
-    // inference below reads `intendedBody` for that reason.
+    // arrived, so the headers still stand — Content-Type included, inferred below from
+    // the route's body as it would have been sent.
     const responseBody = streamErrorCode !== undefined ? null : intendedBody;
 
     // --- 7. Build response headers ---
@@ -623,7 +627,9 @@ export class MockAdapter implements HTTPAdapter {
     // A HEAD response carries the content-type its GET would, body or no body.
     const hasRouteBody =
       intendedBody !== null ||
-      (routeMethod === 'HEAD' &&
+      ((routeMethod === 'HEAD' ||
+        (simulatedStreamErrorCode !== undefined &&
+          !shouldOmitResponseBody(method, mockResponse.status))) &&
         mockResponse.body !== undefined &&
         mockResponse.body !== null);
     if (!hasHeader(responseHeaders, 'content-type') && hasRouteBody) {

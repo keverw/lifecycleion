@@ -204,7 +204,8 @@ export function resolveAbsoluteURL(url: string, baseURL?: string): string {
  * The same URL with any `user:pass@` userinfo removed.
  *
  * Userinfo in a URL is `Authorization: Basic` by another name: `NodeAdapter` copies it
- * onto `options.auth` and `fetch` sends it for us. A redirect target is chosen by the
+ * onto `options.auth` (`fetch` sends none of it - Node's refuses such a URL, Bun's drops
+ * the credentials). A redirect target is chosen by the
  * remote server, so a `Location` carrying credentials must not be able to authenticate
  * this client to a host the caller never named - see `_sanitizeRedirectRequest`.
  *

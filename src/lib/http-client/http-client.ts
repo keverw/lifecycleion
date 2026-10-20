@@ -2023,7 +2023,7 @@ export class BaseHTTPClient {
     //
     // `Location: https://admin:secret@other.host/` is the remote server's choice, not the
     // caller's, and `user:pass@` in a URL *is* an `Authorization: Basic` header by another
-    // name - `NodeAdapter` copies it onto `options.auth` and `fetch` sends it for us. So a
+    // name - `NodeAdapter` copies it onto `options.auth`. So a
     // hop that has the caller's `Authorization` header stripped for crossing origins used
     // to get credentials back, from the very response that redirected it, and authenticate
     // to a host the caller never named. Fetch treats the same shape as fatal (a
@@ -2355,7 +2355,9 @@ export class BaseHTTPClient {
           ...(hopContext
             ? {
                 hopNumber: hopContext.hopNumber,
-                redirect: hopContext.redirect,
+                // A copy per callback, as `redirectHistory` is copied: one that wrote to
+                // it changed what every later callback of the hop was told.
+                redirect: { ...hopContext.redirect },
               }
             : {}),
         });
@@ -2386,7 +2388,10 @@ export class BaseHTTPClient {
           requestID,
           initialURL,
           ...(hopContext
-            ? { hopNumber: hopContext.hopNumber, redirect: hopContext.redirect }
+            ? {
+                hopNumber: hopContext.hopNumber,
+                redirect: { ...hopContext.redirect },
+              }
             : {}),
         });
       }
@@ -2485,7 +2490,9 @@ export class BaseHTTPClient {
           type: 'retry',
           attempt: attemptNumber,
           maxAttempts: maxAttemptNumber,
-          ...(hopContext?.redirect ? { redirect: hopContext.redirect } : {}),
+          ...(hopContext?.redirect
+            ? { redirect: { ...hopContext.redirect } }
+            : {}),
         };
         let retryIntercept: ResolvedRequest | InterceptorCancel;
         let failedRetryRequest: InterceptedRequest = baseRequest;
@@ -3095,12 +3102,15 @@ export class BaseHTTPClient {
         }
 
         // Only for the failures it is documented for - a transport failure resolved rather
-        // than thrown, a stream error. On an answer that succeeded it is no failure's
+        // than thrown (`status: 0` included), a stream error. On an answer that succeeded it is no failure's
         // cause, and carried as one it became the cause of whatever ended the request
         // next: a cancel or timeout between hops, after the `302` that carried it.
         const responseCauseValue =
           adapterResponse.isStreamError === true ||
-          adapterResponse.isTransportError === true
+          adapterResponse.isTransportError === true ||
+          // `status: 0`, which the client reads as a transport failure whether or not
+          // `isTransportError` says so.
+          adapterResponse.status === 0
             ? adapterResponse.errorCause
             : undefined;
         const responseCause: Error | undefined = isErrorValue(
@@ -4286,7 +4296,8 @@ export class BaseHTTPClient {
           type: 'retry',
           attempt: completedAttemptNumber,
           maxAttempts,
-          redirect,
+          // A copy, for the reason the attempt callbacks get one.
+          redirect: { ...redirect },
         }
       : {
           type: 'retry',
@@ -4892,11 +4903,6 @@ function describeValue(value: unknown): string {
 }
 
 /**
- * Whether a stream-error response failed only in decoding its body (see
- * `RESPONSE_DECODE_ERROR_KEY`): the tag is on the cause, or a cause of it, that the
- * adapter reported.
- */
-/**
  * Whether a body a custom adapter handed over is past `maxResponseBytes`: bytes as given,
  * a string as its UTF-8 encoding - never fewer bytes than UTF-16 units, at most three per
  * unit, so encoded only when its length alone cannot tell. Anything else has no size.
@@ -4916,6 +4922,11 @@ function isAnsweredBodyOverLimit(body: unknown, maxBytes: number): boolean {
   );
 }
 
+/**
+ * Whether a stream-error response failed only in decoding its body (see
+ * `RESPONSE_DECODE_ERROR_KEY`): the tag is on the cause, or a cause of it, that the
+ * adapter reported.
+ */
 function isBodyDecodeFailure(response: AdapterResponse): boolean {
   // A streamed body was already handed to the caller's stream, so it is no whole answer.
   if (
