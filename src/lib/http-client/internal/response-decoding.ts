@@ -16,6 +16,7 @@ import { EventEmitter } from 'node:events';
 import type * as http from 'node:http';
 import { Transform, type TransformCallback } from 'node:stream';
 import * as zlib from 'node:zlib';
+import { RESPONSE_DECODE_ERROR_KEY } from '../consts';
 import { hasResponseBody } from './response-limit';
 
 /** The encodings NodeAdapter asks for and decodes, as `fetch` asks for them. */
@@ -171,7 +172,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     // Refused before anything is built: delivered as the body's error, and the response
     // let go.
     if (refusal !== undefined) {
-      this.deliver('error', refusal);
+      this.deliver('error', markDecodeError(refusal));
       res.on('close', () => {
         this.deliver('close');
       });
@@ -276,7 +277,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       decoder.on('error', (error: Error) => {
         // Delivered - or held for a reader not yet attached - and the decoding and the
         // response's socket let go. Not `destroy`, which would drop the held error.
-        this.deliver('error', error);
+        this.deliver('error', markDecodeError(error));
         this.destroyDecoders();
 
         try {
@@ -356,7 +357,9 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     this.didFailTrailingBytes = true;
     this.deliver(
       'error',
-      new Error('Response body has bytes after its compressed stream'),
+      markDecodeError(
+        new Error('Response body has bytes after its compressed stream'),
+      ),
     );
     this.destroyDecoders();
 
@@ -532,4 +535,18 @@ class SniffingInflate extends Transform {
 
 function trailingBytesError(): Error {
   return new Error('Response body has bytes after its compressed stream');
+}
+
+/**
+ * `error` tagged as the body's decoding failure, not a transport one. The decoder's own
+ * error object, tagged in place: it is this module's, never a caller's.
+ */
+function markDecodeError(error: Error): Error {
+  try {
+    Object.defineProperty(error, RESPONSE_DECODE_ERROR_KEY, { value: true });
+  } catch {
+    // Not extensible: reported untagged, as a stream error the redirect rule keeps.
+  }
+
+  return error;
 }

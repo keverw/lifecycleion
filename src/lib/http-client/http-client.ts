@@ -67,6 +67,7 @@ import {
   STREAM_ABORT_STATUS_KEY,
   STREAM_FACTORY_ERROR_FLAG,
   ADAPTER_ERROR_CARRIER_KEY,
+  RESPONSE_DECODE_ERROR_KEY,
   XHR_BROWSER_TIMEOUT_FLAG,
   RETRYABLE_STATUS_CODES,
   IDEMPOTENT_METHODS,
@@ -1187,10 +1188,14 @@ export class BaseHTTPClient {
           // and overwrites the failed attempt's `wasTimeout`. The terminal path
           // below builds from this response, so the real 3xx status,
           // `wasRedirectDetected` and `detectedRedirectURL` are all still reported.
+          // Except a body that only failed to decode - a server that labels its small
+          // "Moved" page `gzip` and sends it plain: the transfer was whole, and a browser
+          // never decodes a body it is about to leave, so the redirect is followed.
           if (
             this._config.followRedirects &&
             adapterResponse &&
-            !adapterResponse.isStreamError &&
+            (!adapterResponse.isStreamError ||
+              isBodyDecodeFailure(adapterResponse)) &&
             !adapterResponse.isTransportError &&
             REDIRECT_STATUS_CODES.has(adapterResponse.status)
           ) {
@@ -4787,6 +4792,32 @@ function describeValue(value: unknown): string {
     : typeof value === 'string'
       ? `'${value}'`
       : typeof value;
+}
+
+/**
+ * Whether a stream-error response failed only in decoding its body (see
+ * `RESPONSE_DECODE_ERROR_KEY`): the tag is on the cause, or a cause of it, that the
+ * adapter reported.
+ */
+function isBodyDecodeFailure(response: AdapterResponse): boolean {
+  if (response.streamErrorCode !== 'stream_response_error') {
+    return false;
+  }
+
+  let cause: unknown = response.errorCause;
+  for (
+    let depth = 0;
+    depth < 4 && cause !== undefined && cause !== null;
+    depth++
+  ) {
+    if (readObjectMember(cause, RESPONSE_DECODE_ERROR_KEY) === true) {
+      return true;
+    }
+
+    cause = readObjectMember(cause, 'cause');
+  }
+
+  return false;
 }
 
 function isAbortError(err: unknown): err is Error {

@@ -5910,3 +5910,43 @@ test('round 123: a large stacked deflate with trailing bytes fails; gzip zero pa
     server.close();
   }
 });
+
+test('round 126: a redirect whose body only fails to decode is followed; a cut-off 3xx is not', async () => {
+  const server = http.createServer((req, res) => {
+    if (req.url === '/start') {
+      res.writeHead(302, {
+        location: '/end',
+        'content-encoding': 'gzip',
+        'content-type': 'text/html',
+      });
+      res.end('<a href="/end">Moved</a>');
+      return;
+    }
+    if (req.url === '/cut') {
+      res.writeHead(302, { location: '/end', 'content-length': '100' });
+      res.write('partial');
+      setTimeout(() => res.socket?.destroy(), 20);
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('arrived');
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      followRedirects: true,
+    });
+    const followed = await client.get('/start').send();
+    expect(followed.status).toBe(200);
+    expect(followed.body).toBe('arrived');
+
+    const cut = await client.get('/cut').send();
+    expect(cut.status).toBe(302);
+    expect(cut.isStreamError).toBe(true);
+  } finally {
+    server.close();
+  }
+});

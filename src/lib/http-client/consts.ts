@@ -193,6 +193,16 @@ export const STREAM_FACTORY_ERROR_FLAG = '_lifecycleion_stream_factory_error';
  * Marks an adapter's carrier for a failure that may be the caller's own error: the client
  * reports the carrier's `cause`. A symbol, so it never reaches a serialized error.
  */
+/**
+ * Marks a response body's decoding failure - a corrupt compressed stream, bytes after it,
+ * too many stacked codings - as opposed to a transport failure. The client follows a
+ * redirect whose body only failed to decode, as browsers do: they never decode a body
+ * they are about to leave.
+ */
+export const RESPONSE_DECODE_ERROR_KEY = Symbol.for(
+  'lifecycleion.http-client.response-decode-error',
+);
+
 export const ADAPTER_ERROR_CARRIER_KEY = Symbol.for(
   'lifecycleion.http-client.adapter-error-carrier',
 );
