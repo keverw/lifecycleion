@@ -1905,7 +1905,7 @@ await client
 
 Adapter evidence answers "did this reach the server?". The request method answers a different question, "does it matter if it arrives twice?" The client uses both.
 
-`POST` and `PATCH` are the methods RFC 9110 does not define as idempotent, so replaying one may apply the same change twice. By default `HTTPClient` will not retry them:
+`POST`, `PATCH` and any custom method (WebDAV's `LOCK`, say) are the methods RFC 9110 does not define as idempotent, so replaying one may apply the same change twice. By default `HTTPClient` will not retry them:
 
 - **After a real HTTP response**, never by default. A retryable status like `500` does not prove that the write failed: the server may already have applied it.
 - **After a transport failure**, only when the adapter reports `wasDefinitelyNotSent: true`, proving that no request bytes reached the server. An adapter that cannot tell reports nothing, which is treated as unsafe. The transport condition is part of the rule: on a real response delivery is already settled the other way, so nothing can unlock a replay there.

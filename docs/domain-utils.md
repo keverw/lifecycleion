@@ -347,7 +347,7 @@ Validates DNS length constraints for a hostname. Non-throwing. Assumes ASCII inp
 ```typescript
 checkDNSLength('example.com'); // true
 checkDNSLength('a'.repeat(64) + '.com'); // false (label > 63)
-checkDNSLength('x.'.repeat(127) + 'com'); // false (255 characters > 253)
+checkDNSLength('x.'.repeat(126) + 'com'); // false (127 labels, but 255 characters > 253)
 ```
 
 ### getDomain

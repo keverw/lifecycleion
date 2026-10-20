@@ -3143,11 +3143,13 @@ describe('domain-utils', () => {
     });
 
     it('rejects an origin whose hostname fails normalization (normalizeOrigin returns empty)', () => {
-      // An exact-origin list entry with an underscore in the hostname parses as a URL
-      // but fails TR46 normalization — normalizeOrigin returns '', so parseExactOriginForMatching returns null
+      // An exact-origin list entry with a `!` in the hostname parses as a URL but fails
+      // hostname normalization (an underscore no longer does: it is a valid label
+      // character) — normalizeOrigin returns '', so parseExactOriginForMatching returns null
+      expect(normalizeOrigin('https://foo!bar.example.com')).toBe('');
       expect(
         matchesOriginList('https://example.com', [
-          'https://foo_bar.example.com',
+          'https://foo!bar.example.com',
         ]),
       ).toBe(false);
     });
@@ -3184,14 +3186,23 @@ describe('domain-utils', () => {
     });
 
     it('rejects wildcard patterns with concrete labels that fail IDN normalization', () => {
-      // Underscore label fails TR46 — nd === '' branch inside isValidCredentialWildcardHost
+      // A `!` label fails normalization — the nd === '' branch inside
+      // isValidCredentialWildcardHost. (An underscore label is valid now, so it no longer
+      // reached that branch.) The same pattern with a valid label matches.
       expect(
         matchesCORSCredentialsList(
-          'https://app.example.com',
-          ['*.foo_bar.example.com'],
+          'https://app.foo-bar.example.com',
+          ['*.foo!bar.example.com'],
           { allowWildcardSubdomains: true },
         ),
       ).toBe(false);
+      expect(
+        matchesCORSCredentialsList(
+          'https://app.foo-bar.example.com',
+          ['*.foo-bar.example.com'],
+          { allowWildcardSubdomains: true },
+        ),
+      ).toBe(true);
     });
 
     it('rejects wildcard patterns with a concrete label over 63 chars', () => {
