@@ -409,7 +409,7 @@
 - HTTP: an adapter's `errorCause` is read only for a transport failure (`isTransportError` or `status: 0`) or a stream error, as documented; on a `3xx` it became the cause of a cancel or timeout between hops.
 - HTTP: a cookie jar that throws while building a redirect target's `Cookie` header reports the target as `requestURL` and in `redirectHistory`, as the other failures before a hop goes out do.
 - HTTP: `maxResponseBytes` also holds a custom adapter's string body, counted as UTF-8.
-- HTTP CookieJar: a tab in a cookie name is refused (a value may still hold one); `Domain=..example.com` is ignored rather than read as `example.com`; a `SameSite=None` cookie without `Secure` is ignored, as browsers ignore it; a cookie replacing an expired one not yet purged takes its own place in the `Cookie` header.
+- HTTP CookieJar: a tab in a cookie name is refused (a value may still hold one); `Domain=..example.com` is ignored rather than read as `example.com` (one leading dot, of any Unicode dot variant, is dropped as before); a `SameSite=None` cookie without `Secure` is ignored, as browsers ignore it; a cookie replacing an expired one not yet purged takes its own place in the `Cookie` header.
 - HTTP multipart: a `File` named `''` is sent as `filename=""`, as browsers send it, rather than `filename="blob"` (where the runtime's `FormData` keeps the empty name).
 - HTTP XHRAdapter: a repeated `cookie` request header is joined with `; `, as the other adapters join it.
 - HTTP MockAdapter: a path-only `requestURL` loses its fragment before routing, and a `1xx` route answers with no body.
@@ -417,4 +417,4 @@
 - HTTP NodeAdapter: a server refusing the client certificate's issuer (the TLS `unknown_ca` alert, `ERR_SSL_TLSV1_ALERT_UNKNOWN_CA` or `tlsv1 alert unknown ca`) is a `495` certificate failure, not retried, as the other client-certificate alerts are; it was a retried `network_error`. A missing or unusable `socketPath` (`ENOENT`, `EACCES`, `EINVAL`, `ENOTSOCK`) is a transport failure even when the path names `certificates`.
 - domain-utils: an origin with an empty userinfo, query or fragment (`https://@example.com`, `https://example.com?`, `https://example.com#`) is refused by `normalizeOrigin` and the origin matchers, as `validateConfigEntry` refuses it; the empty part was dropped and the origin matched.
 - HTTP MockAdapter: a `streamError` route's body is never serialized, as documented; one it could not serialize failed the route as an `adapter_error`.
-- HTTP: each `onAttemptStart` / `onAttemptEnd` event, retry-phase interceptor and observer is handed its own copy of the redirect hop, so one that writes to it does not change what the others are told.
+- HTTP: each `onAttemptStart` / `onAttemptEnd` event, and each request interceptor and response or error observer in a chain, is handed its own phase object and redirect hop, so one that writes to it does not change what the others are told.

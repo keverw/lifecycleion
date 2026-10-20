@@ -1,6 +1,9 @@
 import { matchesFilter } from './utils';
 import { adoptPromise } from '../internal/adopt-promise';
-import { CallbackRegistry } from './internal/callback-registry';
+import {
+  CallbackRegistry,
+  copyCallbackPhase,
+} from './internal/callback-registry';
 import type { RegisteredCallback } from './internal/callback-registry';
 import type {
   RequestInterceptorFilter,
@@ -84,7 +87,9 @@ async function runInterceptors(
     // Adopted, not awaited as it is: an interceptor is caller code, and one returning
     // a native promise with its own `constructor` and a no-op `then` would hang the
     // request. See `adoptPromise()`.
-    const { value: result } = await adoptPromise(fn(current, phase, context));
+    const { value: result } = await adoptPromise(
+      fn(current, copyCallbackPhase(phase), context),
+    );
 
     // null is shorthand for { cancel: true } with no reason
     if (result === null) {

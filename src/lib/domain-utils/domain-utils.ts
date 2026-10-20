@@ -508,9 +508,13 @@ export function matchesWildcardOrigin(
     }
 
     // Fast reject: domain pattern must contain at least one wildcard and not be all-wildcards
-    // - read trimmed, as the domain matcher reads it: `https:// *` became the protocol
-    // wildcard `https://*`, which `validateConfigEntry` refuses as `https:// *`.
-    if (!domainPattern.includes('*') || isAllWildcards(domainPattern.trim())) {
+    // - read without leading whitespace, as the domain matcher reads it: `https:// *`
+    // became the protocol wildcard `https://*`, which `validateConfigEntry` refuses. A
+    // trailing space is the validator's own trim, and `https://* ` still matches.
+    if (
+      !domainPattern.includes('*') ||
+      isAllWildcards(domainPattern.trimStart())
+    ) {
       return false;
     }
 

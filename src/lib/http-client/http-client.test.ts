@@ -858,10 +858,11 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect((await response.requestBodySettled)?.cause).toBe(uploadFailure);
   });
 
-  test('a throw between hops reports the interceptor-rewritten URL, as every other failure does', async () => {
-    // The `catch` around the whole of `send()` built its response from the request as it
-    // was before the initial-phase interceptors ran, so `initialURL` there named a URL
-    // that was never sent, where every other terminal path names the rewritten one.
+  test('a jar that throws between hops reports the interceptor-rewritten initial URL and the target', async () => {
+    // A throw between hops once reached the `catch` around the whole of `send()`, which
+    // built its response from the request as it was before the initial-phase interceptors
+    // ran, so `initialURL` named a URL that was never sent. The jar failure is now caught
+    // where the redirect is prepared, and reports the target it was preparing.
     const adapter: HTTPAdapter = {
       getType: () => 'node',
       send: (): Promise<AdapterResponse> =>
@@ -908,11 +909,11 @@ describe('HTTPClient — basic HTTP methods', () => {
     expect(observedURLs).toEqual(['http://example.test/next']);
   });
 
-  test('a throw between later hops reports the hop it happened on', async () => {
-    // The `catch` around the whole of `send()` built its response with the initial URL as
-    // `requestURL` and an empty redirect history, so a throw while preparing the second
-    // redirect - after one had already been followed - read as a failure of the first
-    // request.
+  test('a throw between later hops reports the redirect it was preparing, after the hop already followed', async () => {
+    // A throw while preparing the second redirect - after one had already been followed -
+    // once read as a failure of the first request: initial URL as `requestURL`, empty
+    // redirect history. It reports the second redirect's target, with the first hop kept
+    // in the history.
     let hop = 0;
 
     const adapter: HTTPAdapter = {

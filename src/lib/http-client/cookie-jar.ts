@@ -991,7 +991,9 @@ export class CookieJar {
             // One leading dot dropped, as RFC 6265 §5.2.3 drops it; a second is kept, so
             // `Domain=..example.com` names no host and its cookie is ignored (see
             // `storeParsed`), as browsers ignore it, rather than becoming `example.com`.
-            cookie.domain = attrValue.startsWith('.')
+            // Any dot variant counts as the one, as `toAsciiDots` folds it: `。example.com`
+            // is `.example.com`.
+            cookie.domain = /^[.．。｡]/.test(attrValue)
               ? attrValue.slice(1)
               : attrValue;
             break;

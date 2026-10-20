@@ -333,3 +333,19 @@ export class CallbackRegistry<
     return this.registrations;
   }
 }
+
+/**
+ * A phase object for one callback: its own copy, and its own copy of the redirect hop a
+ * retry phase nests. One shared object let an interceptor or observer that wrote to it -
+ * `phase.redirect.to = ...` - change what every later one in the chain was told.
+ */
+export function copyCallbackPhase<Phase extends object>(phase: Phase): Phase {
+  const copy = { ...phase };
+  const redirect: unknown = (copy as { redirect?: unknown }).redirect;
+
+  if (typeof redirect === 'object' && redirect !== null) {
+    (copy as { redirect?: unknown }).redirect = { ...redirect };
+  }
+
+  return copy;
+}

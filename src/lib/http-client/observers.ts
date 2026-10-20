@@ -3,7 +3,10 @@ import {
   reportCallbackError,
 } from '../safe-handle-callback';
 import { matchesFilter, scalarHeader } from './utils';
-import { CallbackRegistry } from './internal/callback-registry';
+import {
+  CallbackRegistry,
+  copyCallbackPhase,
+} from './internal/callback-registry';
 import type { RegisteredCallback } from './internal/callback-registry';
 import type {
   ResponseObserverFilter,
@@ -64,9 +67,7 @@ export class ResponseObserverManager extends CallbackRegistry<
             phase.type,
             'response',
           ),
-        response,
-        request,
-        phase,
+        () => [response, request, copyCallbackPhase(phase)],
       );
   }
 }
@@ -109,9 +110,7 @@ export class ErrorObserverManager extends CallbackRegistry<
             phase.type,
             'error',
           ),
-        error,
-        request,
-        phase,
+        () => [error, request, copyCallbackPhase(phase)],
       );
   }
 }
@@ -126,13 +125,14 @@ export type ErrorObserverChain = (
  * Run each observer whose filter matches, in registration order, waiting for each before
  * the next. `matches` is asked once per observer, so a filter target is read afresh for
  * every one; a filter that throws is reported and its observer skipped, and an observer
- * that throws is reported without stopping the rest.
+ * that throws is reported without stopping the rest. Each observer's arguments come from
+ * `argsFor`, so each is handed its own phase object.
  */
 async function runObservers<Filter, Args extends unknown[]>(
   label: 'ResponseObserver' | 'ErrorObserver',
   observers: ReadonlyArray<RegisteredCallback<unknown, Filter>>,
   matches: (filter: Filter | undefined) => boolean,
-  ...args: Args
+  argsFor: () => Args,
 ): Promise<void> {
   for (const { fn, filter } of observers) {
     let doesMatch: boolean;
@@ -146,7 +146,7 @@ async function runObservers<Filter, Args extends unknown[]>(
       continue;
     }
 
-    await safeHandleCallbackAndWait(label, fn, ...args);
+    await safeHandleCallbackAndWait(label, fn, ...argsFor());
   }
 }
 

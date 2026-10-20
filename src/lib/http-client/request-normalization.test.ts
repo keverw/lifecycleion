@@ -6493,3 +6493,69 @@ test('round 130: each callback is handed its own copy of the redirect hop', asyn
   expect(response.status).toBe(200);
   expect(seen).toEqual(['http://api.test/2']);
 });
+
+test('round 131: each observer and interceptor in a chain gets its own phase', async () => {
+  let hits = 0;
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: (request) =>
+        Promise.resolve<AdapterResponse>(
+          request.requestURL.endsWith('/a')
+            ? { status: 302, headers: { location: '/b' }, body: null }
+            : hits++ === 0
+              ? { status: 503, headers: {}, body: null }
+              : { status: 200, headers: {}, body: null },
+        ),
+    },
+    baseURL: 'http://api.test',
+    followRedirects: true,
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+  });
+  const seen: string[] = [];
+  const mutate = (phase: { type: string; redirect?: { to: string } }) => {
+    if (phase.type === 'retry' && phase.redirect) {
+      seen.push(phase.redirect.to);
+      phase.redirect.to = 'MUTATED';
+    }
+  };
+  client.addResponseObserver((_r, _q, phase) => mutate(phase), {
+    phases: ['retry'],
+  });
+  client.addResponseObserver((_r, _q, phase) => mutate(phase), {
+    phases: ['retry'],
+  });
+  client.addRequestInterceptor(
+    (request, phase) => {
+      mutate(phase);
+      return request;
+    },
+    { phases: ['retry'] },
+  );
+  client.addRequestInterceptor(
+    (request, phase) => {
+      mutate(phase);
+      return request;
+    },
+    { phases: ['retry'] },
+  );
+  const response = await client.get('/a').send();
+  expect(response.status).toBe(200);
+  expect(seen).toEqual(Array.from({ length: 4 }, () => 'http://api.test/b'));
+});
+
+test('round 131: a trailing space after a protocol wildcard still matches; one Unicode dot in Domain is one dot', () => {
+  expect(matchesWildcardOrigin('https://a.example.com', 'https://* ')).toBe(
+    true,
+  );
+  expect(matchesWildcardOrigin('https://a.example.com', 'https:// *')).toBe(
+    false,
+  );
+
+  const jar = new CookieJar();
+  jar.processResponseHeaders(
+    { 'set-cookie': 'a=1; Domain=。example.com' },
+    'https://www.example.com/',
+  );
+  expect(jar.getCookieHeaderString('https://www.example.com/')).toBe('a=1');
+});
