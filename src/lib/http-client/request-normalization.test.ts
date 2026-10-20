@@ -4775,3 +4775,50 @@ test('round 106: NodeAdapter drops a bodiless Content-Length, refuses Upgrade/CO
     server.close();
   }
 });
+
+test('round 107: an adapter answer without a body field is delivered; a dropped Content-Length is not reported as sent', async () => {
+  const bodiless: HTTPAdapter = {
+    getType: () => 'node',
+    send: () =>
+      Promise.resolve({
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      } as unknown as AdapterResponse),
+  };
+  const delivered = await new HTTPClient({
+    adapter: bodiless,
+    baseURL: 'http://a.test',
+  })
+    .get('/x')
+    .send();
+  expect(delivered.isFailed).toBe(false);
+  expect(delivered.body).toBeNull();
+
+  let serverSaw: string | undefined;
+  const server = http.createServer((req, res) => {
+    serverSaw = req.headers['content-length'];
+    req.resume();
+    req.on('end', () => res.end('ok'));
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const client = new HTTPClient({ adapter: new NodeAdapter(), baseURL });
+    let observerSaw: unknown = 'unset';
+    client.addResponseObserver((_response, request) => {
+      observerSaw = request.headers['content-length'];
+    });
+    await client.post('/x').headers({ 'content-length': '20' }).send();
+    expect(serverSaw).not.toBe('20');
+    expect(observerSaw).not.toBe('20');
+
+    const direct = await new NodeAdapter().send({
+      requestURL: `${baseURL}/x`,
+      method: 'POST',
+      headers: { 'Content-Length': '20' },
+    });
+    expect(direct.effectiveRequestHeaders?.['content-length']).not.toBe('20');
+  } finally {
+    server.close();
+  }
+});

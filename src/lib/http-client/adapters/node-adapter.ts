@@ -392,7 +392,9 @@ export class NodeAdapter implements HTTPAdapter {
     // Every member read once, here, where a getter that throws rejects this send. Read
     // later, from an emitter or `AbortSignal` callback, the same throw would be an
     // uncaught exception and the send would never settle. See `snapshotAdapterRequest`.
-    const request = snapshotAdapterRequest(adapterRequest);
+    const request = withoutBodilessContentLength(
+      snapshotAdapterRequest(adapterRequest),
+    );
 
     // This adapter frames every body itself with a `Content-Length`. A caller's
     // `Transfer-Encoding` went out beside it - both on one message, which RFC 9112 6.1
@@ -444,22 +446,9 @@ export class NodeAdapter implements HTTPAdapter {
     const isHTTPS = parsedURL.protocol === 'https:';
     const httpModule = isHTTPS ? https : http;
 
-    const materializedHeaders = materializeRequestHeaders(request.headers);
-
-    // A caller's `Content-Length` on a request with no body is taken off, as the bodied
-    // branches below replace it: sent with no body after it, the server waited for bytes
-    // that never came, and on a pooled keep-alive socket took them from the next request.
-    if (request.body === undefined || request.body === null) {
-      for (const name of Object.keys(materializedHeaders)) {
-        if (name.toLowerCase() === 'content-length') {
-          delete materializedHeaders[name];
-        }
-      }
-    }
-
     const options: http.RequestOptions = {
       method: request.method,
-      headers: materializedHeaders,
+      headers: materializeRequestHeaders(request.headers),
       // Timeout is managed by the client via abort signal — the adapter does
       // not impose its own timeout so the client retains full control.
     };
@@ -2153,7 +2142,7 @@ export class NodeAdapter implements HTTPAdapter {
           );
         } else if (request.body === undefined || request.body === null) {
           // No body — fire 100% upload immediately and end the request. (A caller's
-          // `Content-Length` was taken off the options above.)
+          // `Content-Length` was taken off the request; see `withoutBodilessContentLength`.)
           reportUploadProgress({ loaded: 0, total: 0, progress: 1 });
           req.end();
         } else {
@@ -2958,6 +2947,32 @@ function copyRequestHeaders(
     }
   }
   return copy;
+}
+
+/**
+ * The request without a caller's `Content-Length` when it has no body, as the bodied
+ * paths replace it: sent with no body after it, the server waited for bytes that never
+ * came, and on a pooled keep-alive socket took them from the next request. Taken off the
+ * request itself, so the effective headers reported to observers do not put it back.
+ */
+function withoutBodilessContentLength(request: AdapterRequest): AdapterRequest {
+  if (request.body !== undefined && request.body !== null) {
+    return request;
+  }
+
+  const names = Object.keys(request.headers);
+  if (!names.some((name) => name.toLowerCase() === 'content-length')) {
+    return request;
+  }
+
+  const headers: Record<string, string | string[]> = {};
+  for (const name of names) {
+    if (name.toLowerCase() !== 'content-length') {
+      defineEntry(headers, name, request.headers[name]);
+    }
+  }
+
+  return { ...request, headers };
 }
 
 /**

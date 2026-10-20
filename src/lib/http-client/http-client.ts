@@ -3871,10 +3871,15 @@ export class BaseHTTPClient {
     // `null` for one, while FetchAdapter and XHRAdapter hand over an empty array, which a
     // JSON `Content-Type` then reported as a parse error - a `200` with nothing in it (a
     // bodiless `204`-style answer) failing to parse. axios, got and ky read it as empty too.
+    // Nullish, not just `null`: a custom adapter that leaves `body` out answered with a
+    // `TypeError` here, failing a `200` it had delivered whole.
+    const answeredBody: Uint8Array | null | undefined = adapterResponse.body;
     const rawBody =
-      adapterResponse.body !== null && adapterResponse.body.byteLength === 0
+      answeredBody === null ||
+      answeredBody === undefined ||
+      answeredBody.byteLength === 0
         ? null
-        : adapterResponse.body;
+        : answeredBody;
     let body: unknown = rawBody;
     let isJSON = false;
     let isText = false;
@@ -4139,6 +4144,12 @@ export class BaseHTTPClient {
     } else if (contentType && headers['content-type'] === undefined) {
       // Preserve an explicit content-type for every other body; otherwise infer it.
       headers['content-type'] = contentType;
+    }
+
+    // No body, no `Content-Length`: every adapter drops a caller's then (browsers refuse to
+    // send one, `NodeAdapter` takes it off), so it is not reported to observers as sent.
+    if (observedBodies.body === undefined || observedBodies.body === null) {
+      delete headers['content-length'];
     }
 
     // When a jar is present it is authoritative for outbound cookies on every
