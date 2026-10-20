@@ -6544,7 +6544,7 @@ test('round 131: each observer and interceptor in a chain gets its own phase', a
   expect(seen).toEqual(Array.from({ length: 4 }, () => 'http://api.test/b'));
 });
 
-test('round 131: a trailing space after a protocol wildcard still matches; one Unicode dot in Domain is one dot', () => {
+test('round 131: a trailing space after a protocol wildcard still matches; a Unicode dot in a Set-Cookie Domain is non-ASCII', () => {
   expect(matchesWildcardOrigin('https://a.example.com', 'https://* ')).toBe(
     true,
   );
@@ -6557,5 +6557,113 @@ test('round 131: a trailing space after a protocol wildcard still matches; one U
     { 'set-cookie': 'a=1; Domain=。example.com' },
     'https://www.example.com/',
   );
-  expect(jar.getCookieHeaderString('https://www.example.com/')).toBe('a=1');
+  // Ignored whole, as RFC 6265bis ignores a non-ASCII Domain (round 132).
+  expect(jar.getAllCookies()).toEqual([]);
+});
+
+test('round 132: a coding chain refused as too long is a decode failure, so a 503 is retried', async () => {
+  let hits = 0;
+  const server = http.createServer((_req, res) => {
+    if (hits++ === 0) {
+      res.writeHead(503, {
+        'content-encoding': Array.from({ length: 6 }, () => 'gzip').join(','),
+      });
+      res.end('x');
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('ok');
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    });
+    const response = await client.get('/').send();
+    expect(hits).toBe(2);
+    expect(response.status).toBe(200);
+  } finally {
+    server.close();
+  }
+});
+
+test('round 132: a nameless cookie posing as a prefix is ignored whole', () => {
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader('flag', 'https://n.example/');
+  jar.parseSetCookieHeader('__Host-x; Max-Age=0', 'https://n.example/');
+  expect(jar.getCookieHeaderString('https://n.example/')).toBe('flag');
+});
+
+test('round 132: the last SameSite wins, an unrecognized one included', () => {
+  const sameSite = new CookieJar();
+  sameSite.parseSetCookieHeader(
+    'a=1; SameSite=None; SameSite=bogus',
+    'https://s.example/',
+  );
+  sameSite.parseSetCookieHeader(
+    'b=1; SameSite=Strict; SameSite=bogus',
+    'https://s.example/',
+  );
+  expect(sameSite.getAllCookies().map((c) => [c.name, c.sameSite])).toEqual([
+    ['a', undefined],
+    ['b', undefined],
+  ]);
+});
+
+test('round 132: each interceptor gets its own context', async () => {
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () =>
+        Promise.resolve<AdapterResponse>({
+          status: 200,
+          headers: {},
+          body: null,
+        }),
+    },
+    baseURL: 'http://api.test',
+  });
+  const seen: unknown[] = [];
+  client.addRequestInterceptor((request, _phase, context) => {
+    context.redirectHistory.push('https://evil.test/');
+    context.attemptNumber = 99;
+    return request;
+  });
+  client.addRequestInterceptor((request, _phase, context) => {
+    seen.push([context.redirectHistory.length, context.attemptNumber]);
+    return request;
+  });
+  await client.get('/x').send();
+  expect(seen).toEqual([[0, 1]]);
+});
+
+test('round 132: the credentials list and wildcard origins trim as the validator does', () => {
+  expect(
+    matchesCORSCredentialsList(
+      'https://a.example.com',
+      ['https:// *.example.com'],
+      { allowWildcardSubdomains: true },
+    ),
+  ).toBe(true);
+  expect(matchesWildcardOrigin('https://a.example.com', ' https://*')).toBe(
+    true,
+  );
+});
+
+test('round 132: whitespace inside a wildcard pattern is refused, as in an exact entry', () => {
+  for (const pattern of ['*.example .com', '*. example.com']) {
+    expect(validateConfigEntry(pattern, 'domain').valid).toBe(false);
+    expect(matchesDomainList('a.example.com', [pattern])).toBe(false);
+  }
+});
+
+test('round 132: a name is at most 253 characters', () => {
+  const label = 'a'.repeat(63);
+  const tooLong = [label, label, label, label].join('.'); // 255 characters
+  const longest = [label, label, label, 'a'.repeat(61)].join('.'); // 253
+  expect(normalizeDomain(tooLong)).toBe('');
+  expect(normalizeDomain(longest)).toBe(longest);
 });

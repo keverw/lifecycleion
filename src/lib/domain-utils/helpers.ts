@@ -28,7 +28,7 @@ export function hasPartialLabelWildcard(s: string): boolean {
 /**
  * Check DNS length constraints for hostnames (non-throwing):
  * - each label <= 63 octets
- * - total FQDN <= 255 octets
+ * - total name <= 253 characters, a trailing dot aside (255 octets on the wire)
  * - max 127 labels (theoretical DNS limit)
  * Assumes ASCII input (post-TR46 processing).
  */
@@ -61,7 +61,9 @@ export function checkDNSLength(host: string): boolean {
     total += lbl.length + 1; // account for dot
   }
 
-  return total > 0 ? total - 1 <= 255 : false;
+  // 253 characters: the 255-octet wire limit counts a length octet per label and the root,
+  // so 255 characters of text are 257 on the wire - tr46's `verifyDNSLength` refuses them.
+  return total > 0 ? total - 1 <= 253 : false;
 }
 
 // IPv6 regex pattern hoisted to module scope for performance
@@ -539,6 +541,12 @@ export function normalizeWildcardPattern(pattern: string): string {
   // Refuse non-domain characters (ports, paths, fragments, brackets, userinfo, backslashes)
   if (INVALID_DOMAIN_CHARS.test(trimmed)) {
     return ''; // sentinel for invalid pattern
+  }
+
+  // Whitespace inside the pattern too: each label was trimmed on its own, so `*.example
+  // .com` matched `a.example.com`, where the exact entry `example .com` is refused.
+  if (/\s/.test(trimmed)) {
+    return '';
   }
 
   if (trimmed.endsWith('.')) {

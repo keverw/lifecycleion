@@ -835,7 +835,7 @@ A `CookieJar` provides cookie storage with Public Suffix List domain matching, p
 
 A response cookie's lifetime is capped at 400 days, as browsers cap it (RFC 6265bis): a longer `Max-Age` or a later `Expires` is read as 400 days from now. `Expires` is read with RFC 6265's cookie-date algorithm, in UTC whatever zone is written, and a value that is not a cookie-date (`Expires=0`) is ignored, leaving a session cookie. A cookie whose name and value together pass 4096 bytes is ignored. A cookie a header cannot carry - a name or value with a character above U+00FF - is refused by `setCookie()` and `fromJSON()`. The jar does not limit how many cookies it holds; call `clearExpiredCookies()` on a long-lived jar. A replaced cookie keeps its place in the `Cookie` header, as browsers keep it; a jar restored with `fromJSON` orders cookies of equal path length by `createdAt` instead, so that place is not kept across a save.
 
-Cookie domains are canonicalized through IDNA to lowercase ASCII: for example, `Domain=münchen.de` given as a JavaScript string matches the request host `xn--mnchen-3ya.de`. The same normalization applies to cookies stored through `setCookie()` or restored through `fromJSON()`, and to hosts passed to `clear()`. Off the wire it does not arise: the adapters read header bytes as latin1, so a UTF-8 `Domain=münchen.de` arrives as other characters and its cookie is ignored, as RFC 6265bis ignores a non-ASCII `Domain`; servers send the `xn--` form. A `Domain` with two leading dots (`..example.com`) names no host, and its cookie is ignored. A `SameSite=None` cookie without `Secure` is ignored, as browsers ignore it. Invalid domain scopes are rejected. A trailing dot is dropped, so `example.com.` and `example.com` are the same host to the jar, as they are to the client's credential scope.
+Cookie domains are canonicalized through IDNA to lowercase ASCII: for example, `domain: 'münchen.de'` given to `setCookie()` or restored through `fromJSON()` matches the request host `xn--mnchen-3ya.de`, and so does a request to `https://münchen.de/`. The same normalization applies to hosts passed to `clear()`. A `Set-Cookie` header's `Domain` is ASCII or the cookie is ignored, as RFC 6265bis has it - whether the header came off the wire (where its bytes are read as latin1) or as a string passed to `processResponseHeaders()` / `parseSetCookieHeader()`; servers send the `xn--` form. The last `SameSite` attribute wins, an unrecognized value reading as the default. A `Domain` with two leading dots (`..example.com`) names no host, and its cookie is ignored. A `SameSite=None` cookie without `Secure` is ignored, as browsers ignore it. Invalid domain scopes are rejected. A trailing dot is dropped, so `example.com.` and `example.com` are the same host to the jar, as they are to the client's credential scope.
 
 Fetch uses `Headers.getSetCookie()` to preserve individual response cookie lines.
 On legacy implementations without it, the fallback accepts a single unambiguous
@@ -872,8 +872,9 @@ HTTPS responses may replace or downgrade their cookies. HTTP localhost is not tr
 as secure. Use an HTTPS origin for Secure-cookie mocks.
 
 Cookie-name prefixes are matched case-insensitively. `__Secure-` requires `Secure`, while
-`__Host-` also requires no `Domain` attribute and an effective path of `/`. An omitted
-`Path` is accepted for `__Host-` only when the request URL's default path is `/`.
+`__Host-` also requires no `Domain` attribute and an explicit `Path=/`, as RFC 6265bis
+and browsers require: an omitted `Path` is refused even where it would default to `/`.
+A nameless cookie whose value starts with either prefix is ignored, deletions included.
 Programmatic `setCookie()` and `fromJSON()` have no request scheme to check, but still
 validate prefixes: `__Host-` requires `secure: true`, `hostOnly: true`, and path `/`.
 They also validate domains, expiry, and header framing, so cookies are not stored unchecked.
@@ -978,7 +979,7 @@ const cookieHeader = jar.getCookieHeaderString('https://api.example.com/users');
 jar.clearExpiredCookies(); // Returns count removed
 jar.clear(); // Remove all cookies - returns count removed
 jar.clear('api.example.com', 'hostname'); // Remove cookies for exactly that hostname only - returns count removed
-jar.clear('example.com', 'domain'); // Remove example.com and all its subdomains (the entire apex bucket) - returns count removed
+jar.clear('example.com', 'domain'); // Remove example.com and all its subdomains (the entire apex bucket) - returns count removed. A site behind a nested private suffix (bucket.s3.amazonaws.com under amazonaws.com) is its own domain and stays
 jar.clear('github.io', 'domain'); // On a public suffix or bare name, every site beneath it
 // A host that is not a non-empty string, or a missing or unknown scope, throws: only clear() with no arguments clears everything.
 

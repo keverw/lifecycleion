@@ -119,7 +119,8 @@ const ok = matchesOriginList(
 - Rejects partial-label wildcards (e.g., `ex*.example.com`)
 - Rejects invalid characters in patterns: ports, paths, fragments, brackets, userinfo, backslashes
 - PSL/IP tail guard: disallows patterns like `*.com` or `**.co.uk`, and forbids wildcarding around IPs
-- Wildcard tails are guarded consistently: public suffixes and the recognized pseudo-TLDs (`localhost`, `local`, `test`, `internal` - this is the complete set) are rejected for patterns like `*.suffix`
+- Wildcard tails are guarded consistently: ICANN public suffixes and the recognized pseudo-TLDs (`localhost`, `local`, `test`, `internal` - this is the complete set) are rejected for patterns like `*.suffix`
+- Only the ICANN section of the Public Suffix List guards a tail. A private suffix - `github.io`, `vercel.app`, `s3.amazonaws.com` - is an ordinary domain here, so `*.github.io` is valid and matches every tenant's site, `matchesCORSCredentialsList` with `allowWildcardSubdomains` included. Name the tenant (`*.mine.github.io`) unless every tenant is meant
 - Unicode dot normalization (`．。｡` → `.`) to avoid bypasses
 - Step limits and label count caps to avoid pathological inputs
 - Credentials helpers: exact-only and wildcard-enabled variants
@@ -339,7 +340,7 @@ canonicalizeBracketedIPv6Content('::ffff:192.0.2.128'); // '::ffff:c000:280'
 Validates DNS length constraints for a hostname. Non-throwing. Assumes ASCII input (post-punycode processing).
 
 - Each label must be ≤ 63 octets
-- Total FQDN must be ≤ 255 octets
+- Total name must be ≤ 253 characters, a trailing dot aside (255 octets on the wire, counting each label's length octet and the root)
 - Maximum 127 labels (128+ is rejected)
 
 ```typescript

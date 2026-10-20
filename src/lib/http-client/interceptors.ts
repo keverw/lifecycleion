@@ -88,7 +88,12 @@ async function runInterceptors(
     // a native promise with its own `constructor` and a no-op `then` would hang the
     // request. See `adoptPromise()`.
     const { value: result } = await adoptPromise(
-      fn(current, copyCallbackPhase(phase), context),
+      // The context too, its `redirectHistory` with it: one shared per chain let an
+      // interceptor that pushed to it or rewrote a field change what the next was told.
+      fn(current, copyCallbackPhase(phase), {
+        ...context,
+        redirectHistory: [...context.redirectHistory],
+      }),
     );
 
     // null is shorthand for { cancel: true } with no reason

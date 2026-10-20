@@ -48,7 +48,17 @@ describe('CookieJar', () => {
     jar = new CookieJar();
   });
 
-  test.each(['münchen.de', 'xn--mnchen-3ya.de', '.MÜNCHEN.de'])(
+  test('ignores a Set-Cookie whose Domain is not ASCII (RFC 6265bis)', () => {
+    for (const domain of ['münchen.de', '.MÜNCHEN.de', 'm\u00fcnchen.de']) {
+      jar.parseSetCookieHeader(
+        `session=x; Domain=${domain}; Path=/`,
+        'https://www.xn--mnchen-3ya.de/',
+      );
+    }
+    expect(jar.getAllCookies()).toEqual([]);
+  });
+
+  test.each(['xn--mnchen-3ya.de', '.XN--MNCHEN-3YA.de'])(
     'canonicalizes IDN Domain=%s',
     (domain) => {
       jar.parseSetCookieHeader(
@@ -173,8 +183,16 @@ describe('CookieJar', () => {
         path: '/',
         createdAt: Date.now(),
       });
-      expect(jar.getCookieFor('sid', 'http://[::1]/')).toBeDefined();
+      jar.setCookie({
+        name: 'bare',
+        value: 'y',
+        domain: '::1',
+        path: '/',
+        createdAt: Date.now(),
+      });
       expect(jar.getCookieFor('sid', 'http://[::1]/')?.value).toBe('x');
+      expect(jar.getCookieFor('bare', 'http://[::1]/')?.value).toBe('y');
+      expect(jar.getCookieFor('bare', 'http://[0:0::1]/')?.value).toBe('y');
     });
 
     test('returns true for .test TLD', () => {
@@ -1327,6 +1345,13 @@ describe('CookieJar', () => {
       expect(
         jar.getCookieFor('session', 'https://api.mine.github.io')?.value,
       ).toBe('ok');
+      // A domain cookie, not a host-only one: another subdomain, and the domain itself.
+      expect(
+        jar.getCookieFor('session', 'https://www.mine.github.io')?.value,
+      ).toBe('ok');
+      expect(jar.getCookieFor('session', 'https://mine.github.io')?.value).toBe(
+        'ok',
+      );
       expect(
         jar.getCookieFor('session', 'https://other.github.io'),
       ).toBeUndefined();
@@ -2065,22 +2090,15 @@ describe('CookieJar', () => {
       );
       expect(jar.getAllCookies()).toHaveLength(0);
 
+      // An omitted Path is refused even where it would default to `/`, as RFC 6265bis
+      // and browsers require the attribute.
       jar.parseSetCookieHeader('__Host-id=4; Secure', 'https://example.com/');
-      expect(jar.getCookieFor('__Host-id', 'https://example.com/')?.value).toBe(
-        '4',
-      );
       jar.parseSetCookieHeader('__Host-id=4b; Secure', 'https://example.com');
-      expect(jar.getCookieFor('__Host-id', 'https://example.com/')?.value).toBe(
-        '4b',
-      );
-
       jar.parseSetCookieHeader(
         '__Host-id=refused; Secure',
         'https://example.com/app/page',
       );
-      expect(
-        jar.getCookieFor('__Host-id', 'https://example.com/app/page')?.value,
-      ).toBe('4b');
+      expect(jar.getAllCookies()).toHaveLength(0);
 
       jar.parseSetCookieHeader(
         '__Host-id=5; Secure; Path=/',

@@ -428,7 +428,9 @@ export function matchesWildcardOrigin(
 
   // Normalize Unicode dots before URL parsing for consistency
   const normalizedOrigin = foldOriginDots(originText);
-  const normalizedPattern = toAsciiDots(pattern);
+  // Trimmed, as `validateConfigEntry` and `matchesOriginList` read it: ` https://*`
+  // matched nothing here alone.
+  const normalizedPattern = toAsciiDots(pattern.trim());
 
   if (
     hasDanglingPortInAuthority(normalizedOrigin) ||
@@ -1276,7 +1278,10 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
     // One trailing dot dropped, as the other matchers drop it: its empty last label
     // refused `https://*.example.com.`, which `validateConfigEntry` and
     // `matchesOriginList` both accept.
-    const hostPattern = written.endsWith('.') ? written.slice(0, -1) : written;
+    // Leading and trailing whitespace dropped, as the other matchers drop it: `https://
+    // *.example.com` is valid to `validateConfigEntry` and matches in `matchesOriginList`.
+    const host = written.trim();
+    const hostPattern = host.endsWith('.') ? host.slice(0, -1) : host;
 
     if (isAllWildcards(hostPattern)) {
       return false;

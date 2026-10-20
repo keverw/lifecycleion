@@ -628,7 +628,8 @@ export interface HTTPResponse<T = unknown> {
   initialURL: string;
   /**
    * URL of the request that produced this response (last adapter attempt after redirects).
-   * Equals {@link HTTPResponse.initialURL} when no redirect occurred.
+   * Equals {@link HTTPResponse.initialURL} when no redirect occurred and no retry-phase
+   * interceptor rewrote the URL (a failover to a backup host, say).
    */
   requestURL: string;
   /** True when a redirect response was encountered at any point (followed or not). */

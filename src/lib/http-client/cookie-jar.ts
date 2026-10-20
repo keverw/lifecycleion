@@ -655,7 +655,9 @@ export class CookieJar {
    * - `clear(host, 'domain')` — removes all cookies for the entire domain family
    *   (apex + all subdomains). e.g. `clear('api.example.com', 'domain')` clears
    *   everything in the `example.com` apex bucket, and `clear('github.io', 'domain')`
-   *   every `*.github.io` site's cookies.
+   *   every `*.github.io` site's cookies. A site behind a nested private suffix is its
+   *   own domain and is not cleared with its parent: `clear('amazonaws.com', 'domain')`
+   *   leaves `bucket.s3.amazonaws.com`'s cookies.
    *
    * A `host` that is not a non-empty string, or a `scope` that is not one of the two,
    * throws: only a call with no arguments at all clears everything.
@@ -991,9 +993,7 @@ export class CookieJar {
             // One leading dot dropped, as RFC 6265 §5.2.3 drops it; a second is kept, so
             // `Domain=..example.com` names no host and its cookie is ignored (see
             // `storeParsed`), as browsers ignore it, rather than becoming `example.com`.
-            // Any dot variant counts as the one, as `toAsciiDots` folds it: `。example.com`
-            // is `.example.com`.
-            cookie.domain = /^[.．。｡]/.test(attrValue)
+            cookie.domain = attrValue.startsWith('.')
               ? attrValue.slice(1)
               : attrValue;
             break;
@@ -1041,6 +1041,10 @@ export class CookieJar {
               cookie.sameSite = 'Lax';
             } else if (lower === 'none') {
               cookie.sameSite = 'None';
+            } else {
+              // The last `SameSite` wins, an unrecognized one included: it is the
+              // default enforcement (RFC 6265bis §5.6.7), not the earlier value.
+              delete cookie.sameSite;
             }
             break;
           }
@@ -1173,8 +1177,14 @@ export class CookieJar {
     let isPublicSuffixHostOnly = false;
 
     if (parsed.domain) {
-      // A dot the parser left: `Domain=..example.com`, which no host domain-matches.
-      if (toAsciiDots(parsed.domain).startsWith('.')) {
+      // A dot the parser left: `Domain=..example.com`, which no host domain-matches. And
+      // a non-ASCII one, which RFC 6265bis §5.6.3 ignores: header bytes arrive read as
+      // latin1, so `Domain=m\xFCnchen.de` reads as `münchen.de` and IDNA made it the
+      // registrable `xn--mnchen-3ya.de`. A server sends the `xn--` form.
+      if (
+        parsed.domain.startsWith('.') ||
+        /[\u0080-\uffff]/.test(parsed.domain)
+      ) {
         return;
       }
 
@@ -1219,10 +1229,17 @@ export class CookieJar {
 
     const path = this.resolvedCookiePath(parsed, address.pathname);
 
-    // Prefix validation uses the effective path. An omitted Path attribute on a root
-    // request resolves to `/` and therefore satisfies `__Host-`; an omission whose
-    // RFC default path is deeper than `/` still does not.
-    if (!this.hasValidNamePrefix({ ...parsed, path })) {
+    // Prefix validation reads the `Path` attribute as sent: `__Host-` needs an explicit
+    // `Path=/`, as RFC 6265bis §5.7 and browsers require - an omitted one that would
+    // resolve to `/` from a root request does not count.
+    if (!this.hasValidNamePrefix(parsed)) {
+      return;
+    }
+
+    // A nameless cookie posing as a prefixed one - `__Host-x; Max-Age=0` - is ignored
+    // whole (RFC 6265bis §5.7), before the deletions below: it deleted the jar's
+    // nameless cookie, which `setCookie` would never have let it replace.
+    if (parsed.name === '' && /^__(secure|host)-/i.test(parsed.value)) {
       return;
     }
 

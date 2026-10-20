@@ -2927,6 +2927,9 @@ export class BaseHTTPClient {
         // defined `false`, so `true` claims nothing about delivery. On a real
         // response delivery is settled the other way: the server answered, so the
         // handler may have committed. Silence is treated as unsafe.
+        // Only an explicit `isTransportError`: a bare `status: 0` is reported as a network
+        // error, but the proof that unlocks a replay is not read off it - withholding a
+        // retry is the safe side of that doubt.
         const isTransportOutcome = adapterResponse.isTransportError === true;
 
         const isMethodReplayable =

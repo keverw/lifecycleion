@@ -412,7 +412,11 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       return;
     }
 
-    if (!this.isReading) {
+    // Held behind what is already held, too: the held events are flushed a microtask
+    // after the reader attaches, and a `close` arriving first (a `nextTick` after the
+    // refused response's `destroy()`) settled the reader before the tagged error that
+    // came before it - a coding chain refused as too long then read as a transport cut.
+    if (!this.isReading || this.held.length > 0) {
       this.held.push({ event, args });
 
       return;
