@@ -49,6 +49,7 @@ import {
 } from '../internal/response-limit';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
+  lowerCaseHeaderName,
   materializeRequestHeaders,
   presentHeaderValue,
 } from '../internal/header-utils';
@@ -516,7 +517,7 @@ export class NodeAdapter implements HTTPAdapter {
     // that serves ranges of a precompressed file answered with a slice of a gzip stream
     // that cannot be decoded. `br` only over https, as undici and browsers offer it.
     const headerNames = Object.keys(requestHeaders).map((name) =>
-      name.toLowerCase(),
+      lowerCaseHeaderName(name),
     );
     if (isDecompressing && !headerNames.includes('accept-encoding')) {
       requestHeaders['accept-encoding'] = headerNames.includes('range')
@@ -2778,8 +2779,8 @@ async function streamResponseBody(
  * Its lifetime is bounded: each delivered error schedules its removal a turn later (a
  * `setImmediate`, so a sibling error in the same turn is still absorbed), a `'close'`
  * listener removes it once the stream has finished tearing down, and a backstop timer
- * (1 s, extended by later errors up to 5 s) removes it from a writable that emits
- * neither - a hand-written {@link WritableLike} that throws from `write` or `end` is not
+ * (1 s, extended by later requests that settle on the same writable, up to 5 s) removes
+ * it from a writable that emits neither - a hand-written {@link WritableLike} that throws from `write` or `end` is not
  * obliged to emit anything afterwards. See the file head.
  *
  * Skipped entirely for a writable with no listener-removal method, because an
@@ -3386,8 +3387,20 @@ function normalizeCRLEntry(
 
   const split = splitCRLString(text);
 
-  // A single block stays the Buffer: it needed no splitting.
-  return Array.isArray(split) ? split : bytes;
+  // A single block stays the Buffer: it needed no splitting - without a leading UTF-8
+  // byte-order mark, which not every runtime's `tls` reads past.
+  if (Array.isArray(split)) {
+    return split;
+  }
+
+  const withoutBOM =
+    bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf
+      ? bytes.subarray(3)
+      : bytes;
+
+  // Copied when it starts partway into its memory (a `subarray`, a view at an offset):
+  // Bun's `tls` reads such a view from the start of the memory, and failed to parse it.
+  return withoutBOM.byteOffset === 0 ? withoutBOM : Buffer.from(withoutBOM);
 }
 
 /**
@@ -3403,7 +3416,10 @@ function crlValidationError(error: Error): Error {
   return error;
 }
 
-function splitCRLString(crl: string): string | string[] {
+function splitCRLString(withBOM: string): string | string[] {
+  // A leading byte-order mark is no content: a CRL file saved with one reads as `\uFEFF`
+  // as a string, or `ï»¿` once a Buffer is read as latin1, and Node's own `tls` takes it.
+  const crl = withBOM.replace(/^(?:\uFEFF|\u00EF\u00BB\u00BF)/, '');
   const blocks = crl.match(PEM_CRL_BLOCK) ?? [];
 
   // Returning only the complete blocks would DISCARD whatever did not match,

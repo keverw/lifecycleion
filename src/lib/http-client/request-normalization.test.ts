@@ -21,6 +21,7 @@ import {
   STREAM_ABORT_STATUS_KEY,
 } from './consts';
 import { CookieJar } from './cookie-jar';
+import { materializeRequestHeaders } from './internal/header-utils';
 import { sleep } from '../sleep';
 import {
   matchesCORSCredentialsList,
@@ -39,6 +40,7 @@ import {
 import { MockAdapter } from './adapters/mock-adapter';
 import type { MockRequest } from './adapters/mock-adapter';
 import { NodeAdapter } from './adapters/node-adapter';
+import { getRevocationFixtures } from './test-helpers/https-test-server';
 import { FetchAdapter } from './adapters/fetch-adapter';
 import type {
   AdapterRequest,
@@ -6996,4 +6998,103 @@ test('round 135: a late cancel keeps a redirect detected with no target to name'
   expect(response.isCancelled).toBe(true);
   expect(response.wasRedirectDetected).toBe(true);
   expect(builder.error?.wasRedirectDetected).toBe(true);
+});
+
+test('round 136: a word-final Σ is read as the URL parser reads it; "null" is never a domain match; hex suffix tails refused', () => {
+  expect(normalizeDomain('ΑΣ-b.com')).toBe(
+    new URL('https://ΑΣ-b.com').hostname,
+  );
+  // `ας-b.com` is another domain.
+  expect(
+    matchesCORSCredentialsList('https://xn---b-b9b2e.com', ['ΑΣ-b.com']),
+  ).toBe(false);
+  expect(
+    matchesOriginList(`https://${new URL('https://ΑΣ-b.com').hostname}`, [
+      'ΑΣ-b.com',
+    ]),
+  ).toBe(true);
+
+  expect(matchesDomainList('null', ['*'])).toBe(false);
+
+  for (const entry of ['corp.0x1f', 'corp.0x']) {
+    expect(() => new CookieJar({ publicSuffixes: { add: [entry] } })).toThrow(
+      TypeError,
+    );
+  }
+});
+
+test('round 136: a Kelvin-sign header name is not grouped with a real one on the way out', () => {
+  expect(materializeRequestHeaders({ 'x-key': 'a', 'X-Key': 'b' })).toEqual({
+    'x-key': 'a',
+    'X-Key': 'b',
+  });
+});
+
+test('round 136: a CRL with a leading byte-order mark, or in a view at an offset, is read', () => {
+  const crl = getRevocationFixtures().crlEmpty;
+  // Bun's `tls` read a view from the start of its memory.
+  expect(
+    () => new NodeAdapter({ crl: Buffer.from(`xxxx${crl}`).subarray(4) }),
+  ).not.toThrow();
+  expect(() => new NodeAdapter({ crl: `\uFEFF${crl}` })).not.toThrow();
+  expect(
+    () =>
+      new NodeAdapter({
+        crl: Buffer.concat([Buffer.from([0xef, 0xbb, 0xbf]), Buffer.from(crl)]),
+      }),
+  ).not.toThrow();
+});
+
+test('round 136: a cross-origin Location password never reaches redirect-phase observers or interceptors', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/a', () => ({
+    status: 302,
+    headers: { location: 'https://admin:secret@other.example/x' },
+  }));
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'https://api.test',
+    followRedirects: true,
+  });
+  const seen: string[] = [];
+  client.addResponseObserver(
+    (_response, _request, phase) => {
+      if (phase.type === 'redirect') {
+        seen.push(phase.to);
+      }
+    },
+    { phases: ['redirect'] },
+  );
+  client.addRequestInterceptor(
+    (request, phase, context) => {
+      if (phase.type === 'redirect') {
+        seen.push(phase.to, ...context.redirectHistory);
+      }
+      return request;
+    },
+    { phases: ['redirect'] },
+  );
+  await client.get('/a').send();
+  expect(seen.length).toBeGreaterThan(0);
+  expect(seen.every((url) => !url.includes('secret'))).toBe(true);
+});
+
+test('round 136: a thrown failure on a POST names the method as why it was not retried', async () => {
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () =>
+        Promise.reject(
+          Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' }),
+        ),
+    },
+    baseURL: 'http://api.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+  });
+  const ends: unknown[] = [];
+  await client
+    .post('/x')
+    .onAttemptEnd((event) => ends.push(event.retrySuppressedReason))
+    .send();
+  expect(ends).toEqual(['non_idempotent_method']);
 });

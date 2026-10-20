@@ -5337,7 +5337,7 @@ describe('NodeAdapter via HTTPClient', () => {
     }
   });
 
-  test('an early response with the body still uploading does not strand the socket', async () => {
+  test('an early response with the body still uploading reports the answer and lets the upload finish', async () => {
     const net = await import('node:net');
 
     // A complete answer mid-upload, with the connection kept alive: a proxy replying
@@ -5388,10 +5388,8 @@ describe('NodeAdapter via HTTPClient', () => {
       // `UPLOAD_STALL_GRACE_MS`.
       await new Promise((resolve) => setTimeout(resolve, 6_000));
 
-      // Either exit leaves the socket usable: the upload finished and the request was
-      // ended, or it made no further progress and was destroyed. What the request must
-      // never be is left open with a body it is no longer writing - which is what a
-      // server still reading here would see as neither.
+      // This server keeps reading, so the upload finishes; that a stalled one is torn
+      // down instead is the next test's, which stops reading and so can tell.
       expect(didCloseSocket || receivedBytes >= bodySize).toBe(true);
     } finally {
       server.close();
@@ -6548,6 +6546,27 @@ describe('NodeAdapter — crl option (enforcement)', () => {
     })
       .get('/api/test')
       .send();
+
+  test('round 136: mtls.ca adds to ca rather than replacing it', async () => {
+    // The server's CA only through `ca`, and an unrelated one through `mtls.ca`: replaced,
+    // `ca` would be gone and the server's certificate untrusted. The server asks for no
+    // client certificate, so the mTLS identity is never used.
+    const identity = { cert: fixtures.good.cert, key: fixtures.good.key };
+    const merged = await get(
+      {
+        ca: fixtures.caCert,
+        mtls: { ...identity, ca: fixtures.unrelatedCACert },
+      },
+      goodServer,
+    );
+    expect(merged.status).toBe(200);
+
+    const mtlsOnly = await get(
+      { mtls: { ...identity, ca: fixtures.unrelatedCACert } },
+      goodServer,
+    );
+    expect(mtlsOnly.status).toBe(495);
+  });
 
   test.skipIf(!doesRuntimeEnforceCRL)(
     'a revoked certificate is rejected once its CRL is supplied',

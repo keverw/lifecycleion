@@ -552,8 +552,10 @@ export function matchesDomainList(
 ): boolean {
   const normalizedDomain = normalizeDomain(domain);
 
-  // Early exit: invalid input cannot match any allowed domain
-  if (normalizedDomain === '') {
+  // Early exit: invalid input cannot match any allowed domain. Nor can `"null"`, the
+  // origin-only literal: as documented, it is never matched here - the global `*`
+  // matched it as it matches any single-label name.
+  if (normalizedDomain === '' || normalizedDomain === 'null') {
     return false;
   }
 

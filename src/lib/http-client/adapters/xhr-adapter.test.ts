@@ -1,7 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import vm from 'node:vm';
 import { XHRAdapter } from './xhr-adapter';
-import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
+import {
+  RESPONSE_STREAM_ABORT_FLAG,
+  STREAM_ABORT_STATUS_KEY,
+  XHR_BROWSER_TIMEOUT_FLAG,
+} from '../consts';
 
 // ---------------------------------------------------------------------------
 // Fake XMLHttpRequest
@@ -49,6 +53,7 @@ class FakeXHR {
   public readonly requestHeaders: Record<string, string[]> = {};
   public sentBody: XMLHttpRequestBodyInit | null = null;
   public abortCalled = false;
+  public readyState = 0;
   public getAllResponseHeadersResult = '';
 
   private handlers: Record<string, Array<(e: unknown) => void>> = {};
@@ -358,6 +363,30 @@ describe('XHRAdapter', () => {
     await promise;
 
     expect(lastXHR.requestHeaders['cookie']).toEqual(['a=1; b=2']);
+  });
+
+  test('round 136: an abort once the headers are in carries the real status', async () => {
+    const controller = new AbortController();
+    const adapter = new XHRAdapter();
+    const promise = adapter.send({
+      requestURL: 'https://api.test/slow',
+      method: 'GET',
+      headers: {},
+      signal: controller.signal,
+    });
+
+    lastXHR.readyState = 3; // LOADING: headers received, body arriving
+    lastXHR.status = 200;
+    lastXHR.getAllResponseHeadersResult = 'content-type: text/plain\r\n';
+    controller.abort();
+    lastXHR.simulateAbort();
+
+    const failure = (await promise.catch((error: unknown) => error)) as Record<
+      PropertyKey,
+      unknown
+    >;
+    expect(failure[RESPONSE_STREAM_ABORT_FLAG]).toBe(true);
+    expect(failure[STREAM_ABORT_STATUS_KEY]).toBe(200);
   });
 
   test('returns status and body on successful load', async () => {

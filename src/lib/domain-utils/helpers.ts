@@ -491,7 +491,11 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
   }
 
   // Apply NFC normalization for Unicode domains
-  const normalized = trimmed.normalize('NFC').toLowerCase();
+  // Not lowercased first: TR46 maps case itself, as the URL parser does. JavaScript's
+  // `toLowerCase` turns a word-final `Σ` into the final sigma `ς` (`ΑΣ-b.com`), which
+  // non-transitional IDNA encodes apart from `σ` - so an entry matched a different
+  // domain from the one a browser sends for it.
+  const normalized = trimmed.normalize('NFC');
 
   try {
     // Use TR46/IDNA processing for robust Unicode domain handling that mirrors browser behavior

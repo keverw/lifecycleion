@@ -1,6 +1,6 @@
 import { defineEntry } from '../../internal/define-entry';
 import {
-  defineHiddenTags,
+  markResponseStreamAbort,
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
 } from '../internal/adapter-error';
@@ -21,12 +21,7 @@ import {
   parseContentLength,
   readMaxResponseBytes,
 } from '../internal/response-limit';
-import {
-  REDIRECT_STATUS_CODES,
-  RESPONSE_STREAM_ABORT_FLAG,
-  STREAM_ABORT_HEADERS_KEY,
-  STREAM_ABORT_STATUS_KEY,
-} from '../consts';
+import { REDIRECT_STATUS_CODES } from '../consts';
 import type {
   HTTPAdapter,
   AdapterRequest,
@@ -536,51 +531,6 @@ function materializeFetchHeaders(
   }
 
   return materialized;
-}
-
-/**
- * Tag an abort thrown while reading the body with the response already received,
- * matching what NodeAdapter attaches to its response-stream aborts. The client
- * decides what the abort meant; this only makes the evidence survive the throw.
- *
- * `effectiveRequestHeaders` is omitted throughout this adapter: `fetch` exposes
- * no view of the final wire headers, and echoing the request's own back would
- * claim a proof it does not have.
- */
-function markResponseStreamAbort(
-  error: unknown,
-  status: number,
-  headers: Record<string, string | string[]>,
-): unknown {
-  // Per the Fetch Standard the rejection is the abort reason verbatim, so
-  // returning it untagged sends the client down its early cancellation path and
-  // drops the response headers, Set-Cookie included.
-  //
-  // Always a fresh object, never the reason itself: a signal hands the same
-  // reason to every consumer, so two requests sharing one controller would
-  // overwrite each other's status and headers (and a frozen reason would throw).
-  // `name` is copied because the client routes on it.
-  const original = asError(error);
-  const originalMessage =
-    original === undefined ? undefined : readObjectMember(original, 'message');
-  const originalName =
-    original === undefined ? undefined : readObjectMember(original, 'name');
-  const tagged = new Error(
-    typeof originalMessage === 'string' ? originalMessage : 'Request aborted',
-  );
-
-  tagged.name = typeof originalName === 'string' ? originalName : 'AbortError';
-
-  // Hidden, as NodeAdapter's tags are: the response headers carry its `Set-Cookie`, and a
-  // serialized error must not.
-  defineHiddenTags(tagged, {
-    [RESPONSE_STREAM_ABORT_FLAG]: true,
-    [STREAM_ABORT_STATUS_KEY]: status,
-    [STREAM_ABORT_HEADERS_KEY]: headers,
-    cause: error,
-  });
-
-  return tagged;
 }
 
 /** `headers` without any entry named `name`, in any case; the same object when it has none. */

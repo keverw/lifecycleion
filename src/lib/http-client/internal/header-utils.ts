@@ -9,6 +9,15 @@ import { isNullish } from '../../internal/is-nullish';
 import type { RequestHeadersInput } from '../types';
 
 /**
+ * A header name lowercased in ASCII only, as HTTP header names are compared: `toLowerCase`
+ * maps the Kelvin sign U+212A to `k`, turning `X-Key` - a name every transport refuses -
+ * into the valid `x-key`, and grouping it with a real `x-key`.
+ */
+export function lowerCaseHeaderName(name: string): string {
+  return name.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+}
+
+/**
  * A header value as every header normalizer reads it - the one rule they share, so a
  * header is present or absent alike on the wire and to observers. HTTPClient applies it
  * before any adapter sees a request; driven directly, NodeAdapter and MockAdapter apply
@@ -122,7 +131,7 @@ export function materializeRequestHeaders(
       continue;
     }
 
-    const lower = key.toLowerCase();
+    const lower = lowerCaseHeaderName(key);
     const separator = lower === 'cookie' ? '; ' : ', ';
     const joined = Array.isArray(present) ? present.join(separator) : present;
     const spelling = spellings.get(lower);

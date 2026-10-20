@@ -3337,12 +3337,20 @@ describe('domain-utils', () => {
     });
 
     it('enforces step limit to avoid exponential blowups', () => {
-      const deepDomain =
-        Array.from({ length: 28 }, () => 'a').join('.') + '.example.com';
-      const explosivePattern =
-        Array.from({ length: 20 }, () => '**').join('.') + '.zzz.example.com';
+      // The fixed tails must agree, or the match fails at the tail comparison before
+      // any recursion: `zzz.**.example.com` against `x.a.....example.com` recurses on
+      // every `**` (about 10,000 steps here) and stops at the limit.
+      const deepDomain = `x.${'a.'.repeat(26)}example.com`;
+      const explosivePattern = `x.${'**.'.repeat(12)}zzz.**.example.com`;
       // Should fail without hanging due to step limit guard
       expect(matchesWildcardDomain(deepDomain, explosivePattern)).toBe(false);
+      // The same pattern still matches a domain that holds `zzz`.
+      expect(
+        matchesWildcardDomain(
+          `x.${'a.'.repeat(12)}zzz.a.example.com`,
+          explosivePattern,
+        ),
+      ).toBe(true);
     });
 
     it('covers helper-level DNS and wildcard guard branches', () => {

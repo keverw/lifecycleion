@@ -1069,6 +1069,8 @@ export type AttemptRequest = Omit<
   | 'onUploadProgress'
   | 'onDownloadProgress'
   | 'streamResponse'
+  // Never on the snapshot: the credential scope is the adapter's, not an observer's.
+  | 'initialURL'
 > & {
   /**
    * Final request headers visible to response/error observers. These are

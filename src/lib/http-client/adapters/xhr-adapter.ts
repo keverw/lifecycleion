@@ -4,7 +4,10 @@ import {
   guardProgressCallback,
   knownBodyByteLength,
 } from '../internal/progress';
-import { nonRetryableAdapterErrorFrom } from '../internal/adapter-error';
+import {
+  markResponseStreamAbort,
+  nonRetryableAdapterErrorFrom,
+} from '../internal/adapter-error';
 import {
   makeResponseTooLargeError,
   readMaxResponseBytes,
@@ -62,6 +65,10 @@ export class XHRAdapter implements HTTPAdapter {
 
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
+      /** The answer an abort landed on, read before `abort()` resets it. */
+      let answeredBeforeAbort:
+        | { status: number; headers: Record<string, string | string[]> }
+        | undefined;
 
       // Refused the same way on every attempt - a method or header value `open` or
       // `setRequestHeader` will not take - so failed once as non-retryable, as the other
@@ -124,6 +131,17 @@ export class XHRAdapter implements HTTPAdapter {
 
         const signal = request.signal;
         const onAbort = (): void => {
+          // Read before `abort()`, which resets the status to `0`: a timeout that lands
+          // once the headers are in has a real answer behind it, and FetchAdapter
+          // carries it out on the abort so the client reports a terminal stream error
+          // with that status rather than a retryable plain timeout.
+          if (xhr.readyState >= 2 && xhr.readyState < 4 && xhr.status > 0) {
+            answeredBeforeAbort = {
+              status: xhr.status,
+              headers: parseXHRResponseHeaders(xhr.getAllResponseHeaders()),
+            };
+          }
+
           xhr.abort();
         };
 
@@ -424,7 +442,16 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        reject(new DOMException('Request aborted', 'AbortError'));
+        const abortError = new DOMException('Request aborted', 'AbortError');
+        reject(
+          answeredBeforeAbort === undefined
+            ? abortError
+            : markResponseStreamAbort(
+                abortError,
+                answeredBeforeAbort.status,
+                answeredBeforeAbort.headers,
+              ),
+        );
       });
 
       // Checked again here: a cancel from the 0% upload progress callback above aborts the

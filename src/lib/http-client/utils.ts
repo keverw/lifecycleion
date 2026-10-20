@@ -4,7 +4,10 @@ import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
 import { isPlainRecord } from './internal/plain-record';
 import { readUnknownMember } from '../internal/read-member';
-import { presentHeaderValue } from './internal/header-utils';
+import {
+  lowerCaseHeaderName,
+  presentHeaderValue,
+} from './internal/header-utils';
 import {
   matchesWildcardDomain,
   normalizeDomain,
@@ -19,6 +22,7 @@ import type {
   RequestHeadersInput,
 } from './types';
 
+export { lowerCaseHeaderName } from './internal/header-utils';
 /**
  * If `path` is an absolute HTTP(S) URL, returns its canonical `href` (normalized
  * scheme/host casing). Otherwise `null`. Protocol-relative `//host` is handled
@@ -396,7 +400,7 @@ export function normalizeHeaders(
   const result: Record<string, string> = {};
 
   for (const [key, value] of Object.entries(headers)) {
-    defineEntry(result, key.toLowerCase(), value);
+    defineEntry(result, lowerCaseHeaderName(key), value);
   }
 
   return result;
@@ -415,15 +419,6 @@ const STANDARD_HTTP_METHODS: ReadonlySet<string> = new Set(HTTP_METHODS);
  * names are case-sensitive (RFC 9110) and a server may route `purge` and `PURGE` apart.
  * ASCII only: `toUpperCase` would also turn `poſt` into `POST`.
  */
-/**
- * A header name lowercased in ASCII only, as HTTP header names are compared: `toLowerCase`
- * maps the Kelvin sign U+212A to `k`, turning `X-Key` - a name every transport refuses -
- * into the valid `x-key`.
- */
-export function lowerCaseHeaderName(name: string): string {
-  return name.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
-}
-
 export function normalizeHTTPMethod(method: string): HTTPMethod {
   const uppercased = method.replace(/[a-z]/g, (letter) => letter.toUpperCase());
   return STANDARD_HTTP_METHODS.has(uppercased) ? uppercased : method;
@@ -565,7 +560,7 @@ export function mergeObservedHeaders(
         continue;
       }
 
-      defineEntry(result, key.toLowerCase(), present);
+      defineEntry(result, lowerCaseHeaderName(key), present);
     }
   }
 
@@ -768,7 +763,7 @@ export function extractFetchHeaders(
   const result: Record<string, string | string[]> = {};
 
   for (const [key, value] of headers.entries()) {
-    const lower = key.toLowerCase();
+    const lower = lowerCaseHeaderName(key);
 
     if (lower !== 'set-cookie') {
       // A repeated `Location` arrives joined as `a, b`; its first value is kept, as Node's
@@ -856,7 +851,7 @@ export function normalizeAdapterResponseHeaders(
   const result: Record<string, string | string[]> = {};
 
   for (const [key, rawValue] of Object.entries(headers)) {
-    const lower = key.toLowerCase();
+    const lower = lowerCaseHeaderName(key);
     // As every header normalizer reads an unset value: a `null` or `undefined` value or
     // array item is no header, so an adapter's `undefined` is not reported as `''`. Other
     // values are left as they are, for the checks downstream to read.
