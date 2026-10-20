@@ -1251,6 +1251,11 @@ export class BaseHTTPClient {
 
             redirectURL = resolveAbsoluteURL(redirectURL, this._config.baseURL);
 
+            // The target as the server wrote it, userinfo included, for `detectedRedirectURL`
+            // on every exit that does not follow it - as `redirect_disabled` and
+            // `redirect_loop` report it, and as the docs promise. Nothing is sent to it.
+            const detectedTargetURL = redirectURL;
+
             // Stripped here, before the hop is recorded, rather than only on the request:
             // `hopInfo`, `redirectHistory` and every observer and error built from them
             // carry this string, so a `Location` password left on it long enough to reach
@@ -1312,7 +1317,10 @@ export class BaseHTTPClient {
                 requestURL: hopFromURL,
                 redirectHistory,
                 // The redirect this hop answered with, detected and never followed.
-                undispatchedRedirect: { url: redirectURL, isRecorded: false },
+                undispatchedRedirect: {
+                  url: detectedTargetURL,
+                  isRecorded: false,
+                },
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
               cancelReason = getSignalCancelReason(cancelSignal);
@@ -1370,7 +1378,10 @@ export class BaseHTTPClient {
                 requestURL: hopFromURL,
                 redirectHistory,
                 // The redirect this hop answered with, detected and never followed.
-                undispatchedRedirect: { url: redirectURL, isRecorded: false },
+                undispatchedRedirect: {
+                  url: detectedTargetURL,
+                  isRecorded: false,
+                },
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
               cancelReason = getSignalCancelReason(cancelSignal);
@@ -1501,7 +1512,10 @@ export class BaseHTTPClient {
                   redirectURL,
                 ),
                 redirectHistory: nextRedirectHistory,
-                undispatchedRedirect: { url: redirectURL, isRecorded: true },
+                undispatchedRedirect: {
+                  url: detectedTargetURL,
+                  isRecorded: true,
+                },
                 isNetworkErrorOverride: false,
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
@@ -1550,7 +1564,7 @@ export class BaseHTTPClient {
                 requestURL: cancelledRequestURL,
                 redirectHistory: [...redirectHistory, cancelledRequestURL],
                 undispatchedRedirect: {
-                  url: cancelledRequestURL,
+                  url: detectedTargetURL,
                   isRecorded: true,
                 },
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
@@ -1578,7 +1592,10 @@ export class BaseHTTPClient {
                 initialURL: initialRequestURL,
                 requestURL: redirectInterceptURL,
                 redirectHistory: nextRedirectHistory,
-                undispatchedRedirect: { url: redirectURL, isRecorded: true },
+                undispatchedRedirect: {
+                  url: detectedTargetURL,
+                  isRecorded: true,
+                },
                 isNetworkErrorOverride: false,
                 ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
@@ -1680,7 +1697,7 @@ export class BaseHTTPClient {
                   requestURL: redirectedRequestURL,
                   redirectHistory,
                   undispatchedRedirect: {
-                    url: redirectedRequestURL,
+                    url: detectedTargetURL,
                     isRecorded: true,
                   },
                   ...(uploadOutcome
@@ -3099,7 +3116,8 @@ export class BaseHTTPClient {
             sentRequest: reportedSentRequest,
             attemptCount: attemptNumber,
             wasCancelled: true,
-            wasTimeout: isTimedOut,
+            // A cancel is the outcome, as the docs say a timeout is "instead": not both.
+            wasTimeout: false,
             isRetriesExhausted: false,
             ...(signalReason !== undefined
               ? { cancelReason: signalReason }
@@ -3145,7 +3163,8 @@ export class BaseHTTPClient {
               ),
               attemptCount: attemptNumber,
               wasCancelled: true,
-              wasTimeout: isTimedOut,
+              // A cancel is the outcome, as the docs say a timeout is "instead": not both.
+              wasTimeout: false,
               isRetriesExhausted: false,
               ...(signalReason !== undefined
                 ? { cancelReason: signalReason }
@@ -3273,7 +3292,8 @@ export class BaseHTTPClient {
               sentRequest: reportedSentRequest,
               attemptCount: attemptNumber,
               wasCancelled: true,
-              wasTimeout: isTimedOut,
+              // A cancel is the outcome, as the docs say a timeout is "instead": not both.
+              wasTimeout: false,
               isRetriesExhausted: false,
               ...(signalReason !== undefined
                 ? { cancelReason: signalReason }
@@ -3418,7 +3438,14 @@ export class BaseHTTPClient {
               : isStreamFactoryError
                 ? 'stream_setup_error'
                 : 'interceptor_error',
-            adapterCause: normalizeError(error),
+            // A stream factory's failure arrives on a fresh carrier (see NodeAdapter's
+            // `markStreamFactoryError`), and the caller's own error is its `cause`: that
+            // is the one reported.
+            adapterCause: normalizeError(
+              isStreamFactoryError
+                ? (readObjectMember(error, 'cause') ?? error)
+                : error,
+            ),
           };
         }
 

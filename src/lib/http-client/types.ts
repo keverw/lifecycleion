@@ -572,12 +572,13 @@ export interface HTTPResponse<T = unknown> {
    * `isTransportError` is the explicit signal; bare `status: 0` is also
    * treated as a transport failure by the client.
    *
-   * Three failures can carry a nonzero status: a stream error and an
-   * `adapter_error` for an answered response the client could not read keep
-   * the real status, and an adapter-reported `isTransportError` keeps whatever
-   * status the adapter gave. Any of them can be `isFailed: true` with a 2xx or
-   * 3xx `status`. A timeout reports `status: 0`; only a body that timed out
-   * mid-stream keeps its status, as a stream error. An answer that arrived
+   * Four failures can carry a nonzero status: a stream error, a
+   * `stream_setup_error` and an `adapter_error` for an answered response the
+   * client could not read keep the real status, and an adapter-reported
+   * `isTransportError` keeps whatever status the adapter gave. Any of them can be
+   * `isFailed: true` with a 2xx or 3xx `status`. A timeout reports `status: 0`;
+   * only a body that timed out mid-stream, or whose stream factory was still
+   * setting up, keeps its status. An answer that arrived
    * after its attempt's timer fired is handled as any answer is: delivered if
    * it can be read, an `adapter_error` keeping its status if not.
    *

@@ -305,7 +305,7 @@ interface HTTPResponse<T = unknown> {
 }
 ```
 
-`isFailed` is `true` only for client-level failures, not for HTTP error statuses. A 404 or 500 HTTP response has `isFailed: false` (the server responded and returned a status code). Most failures report `status: 0`, but three can carry a nonzero one: a stream error (see [Stream Errors and Replay](#stream-errors-and-replay)) and an `adapter_error` for an answered response the client could not read (see [Error Codes](#error-codes)) keep the real status, and a transport failure an adapter reports with `isTransportError: true` keeps whatever status the adapter gave. Any of them can be `isFailed: true` with a `2xx` or `3xx` status, so check `isFailed` before trusting `status`. A timeout reports `status: 0`; only a body that timed out mid-stream keeps its status, as a stream error. An answer that arrives after its attempt's timer fired - from an adapter that does not stop on abort - is handled as any answer is: delivered if it can be read, an `adapter_error` keeping its status if not.
+`isFailed` is `true` only for client-level failures, not for HTTP error statuses. A 404 or 500 HTTP response has `isFailed: false` (the server responded and returned a status code). Most failures report `status: 0`, but four can carry a nonzero one: a stream error (see [Stream Errors and Replay](#stream-errors-and-replay)), a `stream_setup_error` (the factory was called for an answer whose headers had arrived), and an `adapter_error` for an answered response the client could not read (see [Error Codes](#error-codes)) keep the real status, and a transport failure an adapter reports with `isTransportError: true` keeps whatever status the adapter gave. Any of them can be `isFailed: true` with a `2xx` or `3xx` status, so check `isFailed` before trusting `status`. A timeout reports `status: 0`; only a body that timed out mid-stream, or one whose stream factory was still setting up, keeps its status. A cancel and a timeout are exclusive: a request cancelled after its timer fired is `isCancelled`, not `isTimeout`. An answer that arrives after its attempt's timer fired - from an adapter that does not stop on abort - is handled as any answer is: delivered if it can be read, an `adapter_error` keeping its status if not.
 
 #### Uploads That Outlive the Response
 
@@ -398,8 +398,8 @@ const response = await builder.send();
 
 if (response.isFailed) {
   // Client-level failure (timeout, cancelled, network error, redirect handling failure, etc.)
-  const err = builder.error; // HTTPClientError
-  console.log(err.code, err.message);
+  const err = builder.error; // HTTPClientError, set whenever isFailed is
+  console.log(err?.code, err?.message);
 } else if (response.status === 404) {
   console.log('Not found');
 } else if (response.status >= 200 && response.status < 300) {

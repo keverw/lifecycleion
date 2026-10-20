@@ -3992,7 +3992,8 @@ describe('NodeAdapter.send() — unit branches without server', () => {
             () => undefined,
             (error: unknown) => error,
           );
-        expect(error).toBe(failure);
+        // On a fresh carrier, with the factory's own error as its cause.
+        expect((error as Error).cause).toBe(failure);
       } finally {
         requestSpy.mockRestore();
       }

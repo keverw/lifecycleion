@@ -3632,24 +3632,11 @@ function markStreamFactoryError(
     [STREAM_ABORT_HEADERS_KEY]: answered.headers,
   };
 
-  // Tagged in place when possible, so the caller still sees the error its own
-  // `streamResponse` factory threw, with its identity and stack intact. Non-enumerable,
-  // so a logger that serializes the error - or its `cause` - does not write the request's
-  // headers, its credentials among them.
-  try {
-    defineHiddenTags(normalized, marks);
-
-    return normalized;
-  } catch {
-    // The factory threw something frozen or sealed, and in strict mode assigning to it
-    // raises `TypeError: object is not extensible`. Falling through with an untagged
-    // error is the damaging outcome: the client reads both flags to classify this as a
-    // non-retryable `stream_setup_error`, so without them the failure lands in the
-    // generic retry arm and the factory is invoked again. A fresh carrier keeps the
-    // classification and preserves the original on `cause`, the same way
-    // `markResponseStreamAbort` does in the fetch adapter.
-  }
-
+  // Always a fresh carrier, with the caller's error on `cause` (the client reports that
+  // cause). Tagging the caller's own error in place shared the tags between requests that
+  // threw the same object - a rethrown `await storageReady`, a module-level sentinel - so
+  // one request read another's headers, `Authorization` among them, and its status and
+  // `Set-Cookie`; and it left the request's headers attached to the caller's object.
   const carrier = new Error(
     readErrorMessage(normalized) ?? 'Stream factory failed',
     { cause: error },

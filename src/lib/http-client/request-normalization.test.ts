@@ -4822,3 +4822,89 @@ test('round 107: an adapter answer without a body field is delivered; a dropped 
     server.close();
   }
 });
+
+test('round 108: a shared factory error does not mix requests; cancel and timeout are exclusive; detectedRedirectURL as written', async () => {
+  const server = http.createServer((req, res) => {
+    const who = req.url === '/a' ? 'a' : 'b';
+    res.writeHead(200, {
+      'x-who': who,
+      'set-cookie': `${who}=1; Path=/`,
+    });
+    res.flushHeaders();
+    setTimeout(() => res.end('x'), 200);
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const jar = new CookieJar();
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      cookieJar: jar,
+    });
+    const shared = new Error('storage not ready');
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const factory = async (): Promise<never> => {
+      await gate;
+      throw shared;
+    };
+    const a = client.get('/a').streamResponse(factory);
+    const b = client.get('/b').streamResponse(factory);
+    const pending = Promise.all([a.send(), b.send()]);
+    setTimeout(release, 50);
+    const [responseA, responseB] = await pending;
+    expect(responseA.headers['x-who']).toBe('a');
+    expect(responseB.headers['x-who']).toBe('b');
+    expect(a.error?.cause).toBe(shared);
+    expect(Object.getOwnPropertyNames(shared)).not.toContain(
+      '_lifecycleion_stream_factory_error',
+    );
+    expect(jar.getCookieHeaderString(`${baseURL}/`)).toContain('a=1');
+    expect(jar.getCookieHeaderString(`${baseURL}/`)).toContain('b=1');
+  } finally {
+    server.close();
+  }
+
+  const slow: HTTPAdapter = {
+    getType: () => 'node',
+    send: () =>
+      new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('late')), 110);
+      }),
+  };
+  const raced = new HTTPClient({
+    adapter: slow,
+    baseURL: 'http://a.test',
+    timeout: 30,
+  }).get('/x');
+  setTimeout(() => raced.cancel(), 60);
+  const racedResponse = await raced.send();
+  expect(racedResponse.isCancelled).toBe(true);
+  expect(racedResponse.isTimeout).toBe(false);
+
+  const redirecting = new MockAdapter();
+  redirecting.routes.get('/start', () => ({
+    status: 302,
+    headers: { location: 'https://admin:secret@other.test/y' },
+  }));
+  const redirectClient = new HTTPClient({
+    adapter: redirecting,
+    baseURL: 'https://a.test',
+    followRedirects: true,
+  });
+  redirectClient.addRequestInterceptor(
+    () => {
+      throw new Error('no hop');
+    },
+    { phases: ['redirect'] },
+  );
+  const refused = redirectClient.get('/start');
+  await refused.send();
+  expect(refused.error?.code).toBe('interceptor_error');
+  expect(refused.error?.detectedRedirectURL).toBe(
+    'https://admin:secret@other.test/y',
+  );
+});
