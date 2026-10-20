@@ -7098,3 +7098,109 @@ test('round 136: a thrown failure on a POST names the method as why it was not r
     .send();
   expect(ends).toEqual(['non_idempotent_method']);
 });
+
+test('round 137: a combining mark that maps to a letter is read in the URL parser order', () => {
+  const host = 'x́ͅ.example.com';
+  const browserHost = new URL(`https://${host}`).hostname;
+  expect(normalizeDomain(host)).toBe(browserHost);
+  expect(matchesDomainList(browserHost, [host])).toBe(true);
+  expect(
+    matchesDomainList(new URL(`https://a.${host}`).hostname, [`*.${host}`]),
+  ).toBe(true);
+
+  // The cookie jar's domains too, and its Σ case.
+  const jar = new CookieJar();
+  jar.setCookie({ name: 'a', value: '1', domain: 'ΑΣ-b.com' });
+  expect(jar.getAllCookies()[0]?.domain).toBe(
+    new URL('https://ΑΣ-b.com').hostname,
+  );
+});
+
+test('round 137: MockAdapter groups request header names in ASCII case only', async () => {
+  const adapter = new MockAdapter();
+  const seen: unknown[] = [];
+  adapter.routes.get('/h', (request) => {
+    seen.push(request.headers['x-key']);
+    return { status: 200, body: 'ok' };
+  });
+  await adapter.send({
+    requestURL: 'http://api.test/h',
+    method: 'GET',
+    headers: { 'x-key': 'a', 'x-Key': 'b' },
+  });
+  expect(seen).toEqual(['a']);
+});
+
+test('round 137: a cookie domain whose trailing dot only IDNA mapping exposes is stored as the domain', () => {
+  const jar = new CookieJar();
+  jar.setCookie({ name: 'sid', value: 'a', domain: 'example.com' });
+  jar.setCookie({ name: 'sid', value: 'b', domain: 'example.com.­' });
+  expect(jar.getStoredDomains()).toEqual([{ domain: 'example.com', count: 1 }]);
+  expect(jar.getCookieHeaderString('https://example.com/')).toBe('sid=b');
+});
+
+test('round 137: NodeAdapter refuses an Expect header; a decode failure during stream setup keeps its cause', async () => {
+  let hits = 0;
+  const server = http.createServer((req, res) => {
+    hits++;
+    if (req.url === '/corrupt') {
+      res.writeHead(200, { 'content-encoding': 'gzip' });
+      res.write('not gzip at all');
+      return; // held open
+    }
+    res.end('ok');
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    });
+    const form = new FormData();
+    form.append('a', 'b');
+    const expecting = client
+      .put('/upload')
+      .headers({ expect: '100-continue' })
+      .formData(form);
+    await expecting.send();
+    expect(expecting.error?.code).toBe('adapter_error');
+    expect(expecting.attemptCount).toBe(1);
+    expect(hits).toBe(0);
+
+    const streamed = client.get('/corrupt').streamResponse(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      return new Writable({
+        write(_chunk, _encoding, done) {
+          done();
+        },
+      });
+    });
+    await streamed.send();
+    expect(streamed.error?.cause?.message).not.toBe(
+      'Response stream closed during setup',
+    );
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
+
+test('round 137: maxRedirects must be a whole number; a request path must be a string', () => {
+  expect(
+    () =>
+      new HTTPClient({
+        adapter: new MockAdapter(),
+        followRedirects: true,
+        maxRedirects: 1.5,
+      }),
+  ).toThrow();
+  const client = new HTTPClient({
+    adapter: new MockAdapter(),
+    baseURL: 'http://api.test',
+  });
+  for (const path of [new URL('http://api.test/x'), 123, undefined]) {
+    expect(() => client.get(path as unknown as string)).toThrow(TypeError);
+  }
+});

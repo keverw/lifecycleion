@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import vm from 'node:vm';
 import { XHRAdapter } from './xhr-adapter';
+import { HTTPClient } from '../http-client';
 import {
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_ABORT_STATUS_KEY,
@@ -387,6 +388,56 @@ describe('XHRAdapter', () => {
     >;
     expect(failure[RESPONSE_STREAM_ABORT_FLAG]).toBe(true);
     expect(failure[STREAM_ABORT_STATUS_KEY]).toBe(200);
+  });
+
+  test('round 137: an abort after a redirect the browser followed resolves the redirect', async () => {
+    const controller = new AbortController();
+    const adapter = new XHRAdapter();
+    const promise = adapter.send({
+      requestURL: 'https://api.test/redir',
+      method: 'GET',
+      headers: {},
+      signal: controller.signal,
+    });
+
+    lastXHR.readyState = 3;
+    lastXHR.status = 200;
+    lastXHR.responseURL = 'https://api.test/slow';
+    controller.abort();
+    lastXHR.simulateAbort();
+
+    const response = await promise;
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.detectedRedirectURL).toBe('https://api.test/slow');
+    expect(response.status).toBe(0);
+  });
+
+  test('round 137: HTTPClient refuses a GET with a body through XHRAdapter', async () => {
+    const client = new HTTPClient({
+      adapter: new XHRAdapter(),
+      baseURL: 'https://api.test',
+    });
+    const builder = client.get('/echo').json({ a: 1 });
+    await builder.send();
+    expect(builder.error?.code).toBe('request_setup_error');
+  });
+
+  test('round 137: a cancel after a browser-followed redirect still ends cancelled', async () => {
+    const client = new HTTPClient({
+      adapter: new XHRAdapter(),
+      baseURL: 'https://api.test',
+    });
+    const builder = client.get('/redir');
+    const sending = builder.send();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    lastXHR.readyState = 3;
+    lastXHR.status = 200;
+    lastXHR.responseURL = 'https://api.test/slow';
+    builder.cancel();
+    lastXHR.simulateAbort();
+    const response = await sending;
+    expect(response.isCancelled).toBe(true);
+    expect(builder.error?.code).toBe('cancelled');
   });
 
   test('returns status and body on successful load', async () => {

@@ -65,6 +65,8 @@ export class XHRAdapter implements HTTPAdapter {
 
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
+      /** A redirect the browser followed before an abort, read before `abort()` resets it. */
+      let followedRedirectBeforeAbort: string | undefined;
       /** The answer an abort landed on, read before `abort()` resets it. */
       let answeredBeforeAbort:
         | { status: number; headers: Record<string, string | string[]> }
@@ -135,7 +137,24 @@ export class XHRAdapter implements HTTPAdapter {
           // once the headers are in has a real answer behind it, and FetchAdapter
           // carries it out on the abort so the client reports a terminal stream error
           // with that status rather than a retryable plain timeout.
-          if (xhr.readyState >= 2 && xhr.readyState < 4 && xhr.status > 0) {
+          //
+          // Unless the browser had already followed a redirect: those headers are the
+          // final page's, which the original URL never answered with. The redirect is
+          // what was answered, so it is resolved as the load path resolves it, and the
+          // client sorts the abort (a cancel stays cancelled; a timeout ends at the
+          // refused redirect, as the docs have it for `followRedirects: false`).
+          const responseURL = xhr.responseURL;
+          if (
+            xhr.readyState >= 2 &&
+            responseURL &&
+            didBrowserFollowRedirect(responseURL, dispatchedURL)
+          ) {
+            followedRedirectBeforeAbort = responseURL;
+          } else if (
+            xhr.readyState >= 2 &&
+            xhr.readyState < 4 &&
+            xhr.status > 0
+          ) {
             answeredBeforeAbort = {
               status: xhr.status,
               headers: parseXHRResponseHeaders(xhr.getAllResponseHeaders()),
@@ -439,6 +458,11 @@ export class XHRAdapter implements HTTPAdapter {
       xhr.addEventListener('abort', () => {
         // Already resolved as `response_too_large`; this abort is the adapter's own.
         if (didExceedMaxResponseBytes) {
+          return;
+        }
+
+        if (followedRedirectBeforeAbort !== undefined) {
+          resolve(browserRedirectResponse(followedRedirectBeforeAbort));
           return;
         }
 

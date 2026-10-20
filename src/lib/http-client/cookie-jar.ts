@@ -939,7 +939,10 @@ export class CookieJar {
     // Keep IDNA safety checks and length limits without silently discarding their cookies.
     try {
       const ascii = toASCII(
-        this.unbracketHost(raw).normalize('NFC').toLowerCase(),
+        // Neither lowercased nor NFC-normalized first: TR46 maps case and then
+        // normalizes, as the URL parser does - `toLowerCase` made a word-final `Σ` the
+        // final sigma `ς`, another domain (see `normalizeHostText` in domain-utils).
+        this.unbracketHost(raw),
         {
           useSTD3ASCIIRules: false,
           checkHyphens: false,
@@ -949,6 +952,15 @@ export class CookieJar {
           verifyDNSLength: false,
         },
       );
+      // A trailing dot mapping exposed (`example.com.` and a soft hyphen): dropped as the
+      // one trailing dot if none was written, so the cookie is stored for `example.com`
+      // and not beside it under `example.com.`; refused as a second if one was.
+      if (ascii?.endsWith('.')) {
+        return raw === withoutLeadingDot && !ascii.endsWith('..')
+          ? this.normalizeStoredDomain(ascii.slice(0, -1))
+          : '';
+      }
+
       // IDNA alone permits URL delimiters in non-strict mode. Reject anything
       // that URL parsing would interpret as credentials, a port, a path, or an escape.
       return ascii &&
@@ -1354,7 +1366,8 @@ export class CookieJar {
    * RFC 6265bis §4.1.3 cookie name prefixes, matched case-insensitively as browsers do.
    *
    * `__Secure-` requires the `Secure` attribute. `__Host-` requires `Secure`, no
-   * `Domain` attribute (so the cookie is host-only) and `Path=/`. A cookie that claims
+   * non-empty `Domain` attribute (so the cookie is host-only; an empty `Domain=` reads
+   * as absent) and `Path=/`. A cookie that claims
    * a prefix without meeting its conditions is refused outright rather than stored with
    * the guarantees the prefix promises to a server reading it back. The secure-scheme
    * half of both prefixes is enforced by the `Secure` check in `storeParsed`; the

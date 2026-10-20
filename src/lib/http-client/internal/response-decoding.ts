@@ -34,6 +34,12 @@ const MAX_CONTENT_CODINGS = 5;
  * it. Only the members they use.
  */
 export interface ResponseBodySource {
+  /**
+   * The error held for a reader not yet attached - a decoding failure found before the
+   * stream factory had its sink - so a setup that ends on the raw response's close can
+   * report it rather than a generic one.
+   */
+  heldError?(): Error | undefined;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the emitter signature
   on(event: string, listener: (...args: any[]) => void): unknown;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the emitter signature
@@ -229,6 +235,13 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     res.once('data', (first: Buffer) => {
       this.attachDecoders(first);
     });
+  }
+
+  public heldError(): Error | undefined {
+    const held = this.held.find((entry) => entry.event === 'error');
+    const error: unknown = held?.args[0];
+
+    return error instanceof Error ? error : undefined;
   }
 
   public pause(): this {

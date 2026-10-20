@@ -247,7 +247,7 @@ describe('HTTPClient — basic HTTP methods', () => {
         maxRedirects: -1,
       }),
     ).toThrow(
-      /maxRedirects must be greater than or equal to 1 when followRedirects is true/i,
+      /maxRedirects must be an integer greater than or equal to 1 when followRedirects is true/i,
     );
 
     expect(() =>
@@ -256,7 +256,7 @@ describe('HTTPClient — basic HTTP methods', () => {
         maxRedirects: 0,
       }),
     ).toThrow(
-      /maxRedirects must be greater than or equal to 1 when followRedirects is true/i,
+      /maxRedirects must be an integer greater than or equal to 1 when followRedirects is true/i,
     );
   });
 

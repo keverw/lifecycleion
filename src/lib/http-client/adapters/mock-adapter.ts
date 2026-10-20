@@ -11,7 +11,10 @@ import {
   knownBodyByteLength,
   uploadCompleteEvent,
 } from '../internal/progress';
-import { materializeRequestHeaders } from '../internal/header-utils';
+import {
+  lowerCaseHeaderName,
+  materializeRequestHeaders,
+} from '../internal/header-utils';
 import {
   hasResponseBody,
   makeResponseTooLargeError,
@@ -1041,7 +1044,9 @@ function lowercaseHeaderNames(
 ): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(headers)) {
-    const lower = key.toLowerCase();
+    // ASCII only, as `materializeRequestHeaders` grouped them: `toLowerCase` folded a
+    // Kelvin-sign name into a real one.
+    const lower = lowerCaseHeaderName(key);
     // Own entries only: `constructor` and `__proto__` are headers here, not members.
     const existing = Object.hasOwn(result, lower) ? result[lower] : undefined;
     defineEntry(

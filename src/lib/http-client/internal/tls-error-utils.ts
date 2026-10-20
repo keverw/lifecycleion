@@ -47,6 +47,11 @@ const CRL_CODE_PATTERN = /(?:^|_)CRLS?(?:_|$)/;
 const TRANSPORT_ERROR_CODES = new Set([
   'ENOTFOUND',
   'EAI_AGAIN',
+  // The other getaddrinfo failures Node reports: a name that does not resolve, whatever
+  // the message says about the host (`certificates.internal.corp`).
+  'EAI_FAIL',
+  'EAI_NONAME',
+  'EAI_NODATA',
   'ECONNREFUSED',
   'ECONNRESET',
   'ECONNABORTED',

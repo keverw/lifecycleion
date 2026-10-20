@@ -352,6 +352,17 @@ export class BaseHTTPClient {
     if (methodProblem !== undefined) {
       throw new TypeError(`HTTPClient request method ${methodProblem}`);
     }
+
+    // A string, said here as every other request option says it: a `URL` object (which
+    // `fetch` takes), a number or `undefined` built a builder whose `send()` rejected with
+    // an engine error from deep inside URL building.
+    const pathValue: unknown = path;
+    if (typeof pathValue !== 'string') {
+      throw new TypeError(
+        `HTTPClient request path must be a string (got ${pathValue === null ? 'null' : pathValue instanceof URL ? 'a URL object; pass url.href' : typeof pathValue})`,
+      );
+    }
+
     return new HTTPRequestBuilder<T>(
       normalizeHTTPMethod(method),
       path,
@@ -4659,17 +4670,21 @@ export class BaseHTTPClient {
     ) {
       assertNoBrowserRestrictedHeaders(request.headers, adapterName);
     }
-    // `fetch` refuses a GET or HEAD with a body on every attempt, on every runtime.
-    // Refused here for the same reason as the methods below.
+    // `fetch` refuses a GET or HEAD with a body on every attempt, on every runtime, and
+    // XHR drops it - the XHR standard sends a GET or HEAD bodiless - so the request went
+    // out without it and answered as though it had been sent. Refused here for the same
+    // reason as the methods below.
     if (
-      adapterType === 'fetch' &&
+      (adapterType === 'fetch' || adapterType === 'xhr') &&
       request.body !== undefined &&
       request.body !== null &&
       (request.method.toUpperCase() === 'GET' ||
         request.method.toUpperCase() === 'HEAD')
     ) {
       throw methodRefusal(
-        `[FetchAdapter] Cannot send a ${request.method} request with a body: fetch refuses one. Use NodeAdapter, or send the body with POST.`,
+        adapterType === 'fetch'
+          ? `[FetchAdapter] Cannot send a ${request.method} request with a body: fetch refuses one. Use NodeAdapter, or send the body with POST.`
+          : `[XHRAdapter] Cannot send a ${request.method} request with a body: XMLHttpRequest drops it. Send the body with POST.`,
       );
     }
     // Refused here, as the method-override headers that tunnel them are: `fetch` refuses

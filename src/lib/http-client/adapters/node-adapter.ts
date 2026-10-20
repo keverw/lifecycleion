@@ -445,11 +445,20 @@ export class NodeAdapter implements HTTPAdapter {
     // standing in for the `101` the server sent.
     for (const name of Object.keys(request.headers)) {
       const lowerName = name.toLowerCase();
-      if (lowerName === 'transfer-encoding' || lowerName === 'upgrade') {
+      // Nor `Expect`: Node sends the headers at once for one, so the `Content-Length` the
+      // adapter sets afterwards threw - a string body as an `adapter_error`, a
+      // `FormData` one as a transport failure, retried and failing the same each time.
+      if (
+        lowerName === 'transfer-encoding' ||
+        lowerName === 'upgrade' ||
+        lowerName === 'expect'
+      ) {
         const refusal = new TypeError(
           lowerName === 'upgrade'
             ? 'NodeAdapter does not switch protocols; an Upgrade request header is not supported'
-            : 'NodeAdapter frames request bodies itself; a Transfer-Encoding request header is not supported',
+            : lowerName === 'expect'
+              ? 'NodeAdapter does not wait for 100 Continue; an Expect request header is not supported'
+              : 'NodeAdapter frames request bodies itself; a Transfer-Encoding request header is not supported',
         );
         markNonRetryableAdapterError(refusal);
         throw refusal;
@@ -1541,11 +1550,16 @@ export class NodeAdapter implements HTTPAdapter {
               // that answers differently on a later read cannot carry a non-sink past the
               // shape check below and into `streamResponseBody`.
               let isCancelReturn = false;
+              // A decoding failure found while the factory set up its sink is the body's
+              // own error, held for the reader that never attached; the raw response's
+              // close that follows reported it as a generic one, the cause dropped.
               const setupFailed = (error: Error): void => {
-                pendingStreamSetup?.failOnSocketError?.(error);
+                pendingStreamSetup?.failOnSocketError?.(
+                  body.heldError?.() ?? error,
+                );
               };
               const setupClosed = (): void => {
-                if (!res.complete) {
+                if (!res.complete || body.heldError?.() !== undefined) {
                   setupFailed(
                     makeResponseStreamError(
                       'Response stream closed during setup',

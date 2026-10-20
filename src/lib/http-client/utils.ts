@@ -670,10 +670,11 @@ export function assertSupportedAdapterRuntimeAndConfig(
   if (
     config.followRedirects === true &&
     config.maxRedirects !== undefined &&
-    (!Number.isFinite(config.maxRedirects) || config.maxRedirects < 1)
+    // A whole number, as every other count option is: `1.5` was accepted and acted as 1.
+    (!Number.isInteger(config.maxRedirects) || config.maxRedirects < 1)
   ) {
     throw new Error(
-      'HTTPClient maxRedirects must be greater than or equal to 1 when followRedirects is true. It must also be finite.',
+      'HTTPClient maxRedirects must be an integer greater than or equal to 1 when followRedirects is true.',
     );
   }
 

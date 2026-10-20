@@ -354,3 +354,11 @@ test('round 130: an unknown_ca alert is a certificate error; a socket path namin
   expect(isTLSCertificateError(tls12)).toBe(true);
   expect(isTLSCertificateError(socketPath)).toBe(false);
 });
+
+test('round 137: a getaddrinfo EAI_FAIL is a transport failure whatever the host name says', () => {
+  const dns = Object.assign(
+    new Error('getaddrinfo EAI_FAIL certificates.internal.corp'),
+    { code: 'EAI_FAIL' },
+  );
+  expect(isTLSCertificateError(dns)).toBe(false);
+});

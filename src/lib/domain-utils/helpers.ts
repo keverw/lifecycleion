@@ -491,11 +491,12 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
   }
 
   // Apply NFC normalization for Unicode domains
-  // Not lowercased first: TR46 maps case itself, as the URL parser does. JavaScript's
-  // `toLowerCase` turns a word-final `Σ` into the final sigma `ς` (`ΑΣ-b.com`), which
-  // non-transitional IDNA encodes apart from `σ` - so an entry matched a different
-  // domain from the one a browser sends for it.
-  const normalized = trimmed.normalize('NFC');
+  // Neither lowercased nor NFC-normalized first: TR46 maps, then normalizes, as the URL
+  // parser does. JavaScript's `toLowerCase` turns a word-final `Σ` into the final sigma
+  // `ς` (`ΑΣ-b.com`), and NFC before mapping reorders a combining mark that maps to a
+  // letter (U+0345 is `ι`) - either way an entry matched a different domain from the
+  // one a browser sends for it.
+  const normalized = trimmed;
 
   try {
     // Use TR46/IDNA processing for robust Unicode domain handling that mirrors browser behavior
@@ -560,10 +561,9 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
  * a trailing dot if present.
  */
 export function normalizeWildcardPattern(pattern: string): string {
-  let trimmed = pattern
-    .trim()
-    .normalize('NFC')
-    .replace(/[．。｡]/g, '.'); // normalize Unicode dot variants to ASCII
+  // Not NFC-normalized first: each label goes through TR46, which normalizes after
+  // mapping, as the URL parser does (see `normalizeHostText`).
+  let trimmed = pattern.trim().replace(/[．。｡]/g, '.'); // normalize Unicode dot variants to ASCII
 
   // Refuse non-domain characters (ports, paths, fragments, brackets, userinfo, backslashes)
   if (INVALID_DOMAIN_CHARS.test(trimmed)) {
