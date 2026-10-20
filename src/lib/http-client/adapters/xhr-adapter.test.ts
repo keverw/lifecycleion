@@ -538,6 +538,30 @@ describe('XHRAdapter', () => {
     expect(response.errorCause).toBeInstanceOf(Error);
   });
 
+  test('round 133: an empty upload completes as 0 of 0 bytes, not a stand-in 1', async () => {
+    const adapter = new XHRAdapter();
+    const events: unknown[] = [];
+    const promise = adapter.send({
+      requestURL: 'https://api.test/data',
+      method: 'POST',
+      headers: {},
+      body: '',
+      onUploadProgress: (event) => events.push(event),
+    });
+
+    lastXHR.upload.dispatch('load', {
+      loaded: 0,
+      total: 0,
+      lengthComputable: true,
+    });
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    await promise;
+
+    expect(events.at(-1)).toEqual({ loaded: 0, total: 0, progress: 1 });
+  });
+
   test('leaves both replay signals unset after an upload progressed', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({
@@ -774,9 +798,10 @@ describe('XHRAdapter', () => {
     await promise;
 
     expect(uploadEvents[0]).toEqual({ loaded: 0, total: 0, progress: 0 });
+    // The browser reported no bytes, so the body's own size: `payload` is 7.
     expect(uploadEvents[uploadEvents.length - 1]).toEqual({
-      loaded: 1,
-      total: 1,
+      loaded: 7,
+      total: 7,
       progress: 1,
     });
   });

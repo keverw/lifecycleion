@@ -8,7 +8,7 @@ export type AdapterType = 'fetch' | 'xhr' | 'node' | 'mock';
 /**
  * A request method. The standard ones are named for autocompletion, and are sent uppercase
  * whatever case they are given in; any other RFC 9110 method name - `PROPFIND`, `purge` -
- * is accepted too, and is case-sensitive to the client (its filters and retry rules).
+ * is accepted too, except `CONNECT`, which opens a tunnel and is refused, and is case-sensitive to the client (its filters and retry rules).
  * What goes on the wire depends on the transport: Node's `http` (and so `NodeAdapter`)
  * uppercases it, `fetch` sends it as given. So code switching over a request's method
  * should keep a default branch.
@@ -63,8 +63,9 @@ export interface AdapterRequest {
   /** Passed by the client so NodeAdapter can populate StreamResponseInfo. */
   requestID?: string;
   /**
-   * The resolved URL last selected by the caller, including retry interceptor origin changes,
-   * before any server redirect hop. Passed by the
+   * The resolved URL last selected by the caller, including a retry interceptor's change of
+   * host (a scheme or port change alone keeps the server-chosen host), before any server
+   * redirect hop. Passed by the
    * client so an adapter can tell a hop to another origin from the request the caller
    * addressed. Every network adapter withholds URL userinfo on such a hop, and
    * `NodeAdapter` also withholds its configured client certificate and SNI override
@@ -252,18 +253,13 @@ export interface AdapterResponse {
    * keeps reporting progress is never cut, however long it takes. `NodeAdapter`
    * reports progress as it writes and settles through its own stall watchdog; a
    * custom adapter that reports no progress gets the bound flat, and one that never
-   * settles the field turns every followed `307`/`308` and every retry into a
-   * timeout.
+   * settles the field turns every followed redirect and every retry into a timeout.
    */
   requestBodySettled?: Promise<Error | undefined>;
 }
 
 // --- Response streaming ---
 
-/**
- * Minimal write-capable stream interface. Structurally matches Node.js Writable
- * without importing from 'node:stream', keeping this file isomorphic.
- */
 /**
  * The subset of a Node `Writable` the adapter drives.
  *
@@ -429,7 +425,9 @@ export interface AttemptEndEvent {
   /**
    * Why no retry happened, when a retry was genuinely available to suppress — a
    * policy is configured, it has attempts left, and the status alone would have
-   * allowed one. Absent otherwise, since nothing was suppressed.
+   * allowed one. Absent otherwise, since nothing was suppressed - and absent when the
+   * attempt ends as an `adapter_error` (an answer whose body or `Set-Cookie` could not
+   * be processed), whose error code says why.
    *
    * - `adapter_veto` — the adapter reported `isRetryable: false`. Not produced by
    *   a real transport, which pairs that flag with the non-retryable `495`;
@@ -675,7 +673,7 @@ export interface HTTPResponse<T = unknown> {
    * for an `Error`. Only `NodeAdapter` reports it today: `FetchAdapter` cannot,
    * since `fetch()` exposes neither upload progress nor the moment the body finished,
    * and on an adapter that does not set it the client does not wait before a
-   * followed `307`/`308` hop or a retry.
+   * followed redirect hop or a retry.
    */
   requestBodySettled?: Promise<Error | undefined>;
 }
@@ -888,8 +886,9 @@ interface PhaseFilter {
    * dispatch. `MockAdapter` path-only requests without a client `baseURL`
    * are materialized as `http://localhost/...`, browser adapters resolve
    * against `window.location`, and non-mock adapters still require absolute
-   * URLs at validation time. The scheme check is skipped only when
-   * `requestURL` is absent.
+   * URLs at validation time. For an observer the scheme check is skipped when
+   * `requestURL` is absent; an interceptor handed a request with none (an earlier
+   * interceptor dropped it) matches no `schemes` filter.
    */
   schemes?: ('http' | 'https')[];
 }

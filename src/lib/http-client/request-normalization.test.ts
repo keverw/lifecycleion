@@ -29,7 +29,11 @@ import {
   normalizeOrigin,
   validateConfigEntry,
 } from '../domain-utils/domain-utils';
-import { isIPv6, normalizeDomain } from '../domain-utils/helpers';
+import {
+  checkDNSLength,
+  isIPv6,
+  normalizeDomain,
+} from '../domain-utils/helpers';
 import { MockAdapter } from './adapters/mock-adapter';
 import type { MockRequest } from './adapters/mock-adapter';
 import { NodeAdapter } from './adapters/node-adapter';
@@ -6666,4 +6670,29 @@ test('round 132: a name is at most 253 characters', () => {
   const longest = [label, label, label, 'a'.repeat(61)].join('.'); // 253
   expect(normalizeDomain(tooLong)).toBe('');
   expect(normalizeDomain(longest)).toBe(longest);
+});
+
+test('round 133: no wildcard over a tail a PSL wildcard rule makes every child of a suffix', () => {
+  for (const pattern of ['*.kawasaki.jp', '*.*.sch.uk', '*.sch.uk']) {
+    expect(validateConfigEntry(pattern, 'domain').valid).toBe(false);
+  }
+  expect(matchesWildcardDomain('city.kawasaki.jp', '*.kawasaki.jp')).toBe(
+    false,
+  );
+  expect(matchesWildcardDomain('county.sch.uk', '*.sch.uk')).toBe(false);
+  expect(
+    matchesCORSCredentialsList(
+      'https://city.kawasaki.jp',
+      ['https://*.kawasaki.jp'],
+      { allowWildcardSubdomains: true },
+    ),
+  ).toBe(false);
+  // An ordinary tail is unaffected.
+  expect(matchesWildcardDomain('a.example.com', '*.example.com')).toBe(true);
+});
+
+test('round 133: a trailing dot is not a label toward the 127-label cap', () => {
+  expect(checkDNSLength('x.'.repeat(127))).toBe(true);
+  expect(checkDNSLength(`${'x.'.repeat(126)}x`)).toBe(true);
+  expect(checkDNSLength(`${'x.'.repeat(127)}x`)).toBe(false);
 });

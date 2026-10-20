@@ -69,30 +69,6 @@ interface StoredCookieScope {
 }
 
 /**
- * Shareable, standalone cookie jar.
- *
- * Cookies are bucketed by apex domain (via tldts Public Suffix List) for efficient
- * URL lookup — only the relevant bucket is scanned instead of all stored cookies.
- *
- * Validation applied when storing from Set-Cookie headers:
- * - Rejects Domain= values that are recognized public suffixes. Both halves of the
- *   Public Suffix List count: ICANN (co.uk, com) and private (github.io, herokuapp.com,
- *   s3.amazonaws.com). Callers with internal or multi-tenant domains the public list
- *   does not carry can extend or trim the list per jar - see {@link CookieJarOptions}.
- * - Rejects Domain= values that are not a suffix of the request host
- * - Strips leading dots from Domain= per RFC 6265
- * - Rejects a `Secure` cookie set over a non-secure scheme, and a non-`Secure` cookie
- *   set over a non-secure scheme that would replace or evict a stored `Secure` cookie
- *   (RFC 6265bis "Leave Secure Cookies Alone")
- * - Enforces the `__Secure-` and `__Host-` name prefixes (RFC 6265bis)
- *
- * IPs are never treated as public suffixes. A bare single-label hostname - `localhost`,
- * `myapp` - is, so a cookie may not span one; per RFC 6265bis §5.5 a `Domain=` naming the
- * request host itself is still accepted, host-only, so a server on `http://localhost/`
- * setting `Domain=localhost` keeps working while `https://evil.localhost/` cannot claim
- * the shared name.
- */
-/**
  * Whether every character of `text` can be written into a `Cookie` header as part of
  * one cookie-pair: no control character other than a tab (a CR LF is a header injection,
  * a DEL is refused by the header parser on the other side; a tab is header-safe, and
@@ -246,6 +222,30 @@ export interface CookieJarOptions {
   publicSuffixes?: PublicSuffixOverrides;
 }
 
+/**
+ * Shareable, standalone cookie jar.
+ *
+ * Cookies are bucketed by apex domain (via tldts Public Suffix List) for efficient
+ * URL lookup — only the relevant bucket is scanned instead of all stored cookies.
+ *
+ * Validation applied when storing from Set-Cookie headers:
+ * - Rejects Domain= values that are recognized public suffixes. Both halves of the
+ *   Public Suffix List count: ICANN (co.uk, com) and private (github.io, herokuapp.com,
+ *   s3.amazonaws.com). Callers with internal or multi-tenant domains the public list
+ *   does not carry can extend or trim the list per jar - see {@link CookieJarOptions}.
+ * - Rejects Domain= values that are not a suffix of the request host
+ * - Strips leading dots from Domain= per RFC 6265
+ * - Rejects a `Secure` cookie set over a non-secure scheme, and a non-`Secure` cookie
+ *   set over a non-secure scheme that would replace or evict a stored `Secure` cookie
+ *   (RFC 6265bis "Leave Secure Cookies Alone")
+ * - Enforces the `__Secure-` and `__Host-` name prefixes (RFC 6265bis)
+ *
+ * IPs are never treated as public suffixes. A bare single-label hostname - `localhost`,
+ * `myapp` - is, so a cookie may not span one; per RFC 6265bis §5.5 a `Domain=` naming the
+ * request host itself is still accepted, host-only, so a server on `http://localhost/`
+ * setting `Domain=localhost` keeps working while `https://evil.localhost/` cannot claim
+ * the shared name.
+ */
 export class CookieJar {
   // Outer key: apex domain from the Public Suffix List (e.g. 'example.co.uk'), or the
   //            hostname itself for IPs and bare names like localhost
@@ -497,8 +497,8 @@ export class CookieJar {
 
   /**
    * Returns cookies applicable for the given URL (domain + path matching, unexpired).
-   * Cookies with the Secure attribute are omitted unless the URL uses the `https:` scheme
-   * (RFC 6265 §5.4).
+   * Cookies with the Secure attribute are omitted unless the URL uses a secure scheme,
+   * `https:` or `wss:` (RFC 6265 §5.4).
    *
    * Scans the URL and ancestor-domain buckets, including parents above nested
    * private suffixes, instead of scanning all cookies.

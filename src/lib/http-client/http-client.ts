@@ -1422,11 +1422,11 @@ export class BaseHTTPClient {
               break;
             }
 
-            // Cross-origin safety: strip ALL headers except CORS-safelisted ones
-            // when the redirect crosses origins (scheme + host + port). Matches
-            // Chromium/fetch behavior — Authorization, X-API-Key, etc. must not
-            // leak to a different host. Cookies and internal headers (request ID)
-            // are re-attached below as needed.
+            // Cross-origin safety: strip every header outside a fixed allow-list when the
+            // redirect crosses origins (scheme + host + port) - stricter than fetch, which
+            // forwards everything but `Authorization`; see `_sanitizeRedirectRequest`.
+            // Authorization, X-API-Key, etc. must not leak to a different host. Cookies
+            // and internal headers (request ID) are re-attached below as needed.
             const nextRedirectHistory = [...redirectHistory, redirectURL];
 
             // Whether the *server's* `Location` was already unusable, remembered before
@@ -2580,7 +2580,7 @@ export class BaseHTTPClient {
       // `unbuildable` while building them is what is under way.
       let knownBodies: ObservedAttemptBodies | 'unbuildable' | undefined;
       try {
-        // Only an origin change explicitly selects a new credential destination.
+        // Only a host change explicitly selects a new credential destination.
         // Editing a redirected URL's path, query or fragment must not authorize the
         // server-selected origin. Preserve this scope without changing observer URLs.
         // A change of scheme or port alone keeps the host the server chose - an "upgrade
@@ -4144,11 +4144,11 @@ export class BaseHTTPClient {
    * Build an HTTPClientError from a failed response.
    *
    * Error code priority:
-   * 1. Explicit codeOverride (redirect_disabled, redirect_loop, request_setup_error, adapter_error, stream_write_error, stream_response_error, stream_setup_error, response_too_large)
-   * 2. Response flags (isCancelled → cancelled, isTimeout → timeout),
-   *    except streamed-body failures preserve their specific stream_* code while
-   *    still surfacing `isTimeout: true`
-   * 3. Default fallback → network_error
+   * 1. isCancelled → cancelled, whatever the override
+   * 2. isTimeout → timeout, over every override but a stream code: a streamed-body
+   *    failure keeps its stream_* code while still surfacing `isTimeout: true`
+   * 3. Explicit codeOverride (redirect_disabled, redirect_loop, request_setup_error, adapter_error, stream_write_error, stream_response_error, stream_setup_error, response_too_large)
+   * 4. Default fallback → network_error
    *
    * Key distinction:
    * - `adapter_error`: Adapter threw an exception (DNS failure, connection refused, etc.)
@@ -5240,9 +5240,9 @@ function stableUploadError(value: unknown): Error {
 /** How a wait on the previous attempt's upload ended. */
 type UploadSettleWait = 'settled' | 'cancelled' | 'deadline';
 
-/** When a request's upload last reported progress, as epoch ms. One per request. */
+/** When a request's upload last showed activity - dispatched, or reported progress. One per request. */
 interface UploadActivity {
-  /** `performance.now()` of the last upload progress, so a wall-clock step cannot fake a stall or hide one. */
+  /** `performance.now()` of the last upload activity, so a wall-clock step cannot fake a stall or hide one. */
   at: number;
 }
 

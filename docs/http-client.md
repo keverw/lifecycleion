@@ -251,19 +251,19 @@ const response = await client
 
 ### Body Types
 
-| Method / value       | Content-Type set                       | Notes                                                                                                                                                                                                                              |
-| -------------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `.json(data)`        | `application/json` for an object/array | The same as `.body(data)`: an object or array is serialized via `JSON.stringify`. A string is sent as `text/plain` and a number or boolean is refused - see the note below for a JSON primitive. `null` or `undefined` is no body. |
-| `.text(str)`         | `text/plain`                           | UTF-8 encoded                                                                                                                                                                                                                      |
-| `.formData(fd)`      | _(none, set by adapter)_               | The library does not set this header. The adapter, or browser runtime, sets `multipart/form-data` with the boundary. Not visible in `request.headers` inside interceptors. Use `request.body instanceof FormData` to detect it.    |
-| `.body(data)`        | Inferred from value type (see below)   | Generic form. Accepts JSON objects/arrays (`application/json`), strings (`text/plain`), Uint8Array (`application/octet-stream`), FormData (see `.formData`), null, or undefined                                                    |
-| `undefined` / `null` | none                                   | No body sent                                                                                                                                                                                                                       |
+| Method / value       | Content-Type set                                      | Notes                                                                                                                                                                                                                                             |
+| -------------------- | ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `.json(data)`        | `application/json; charset=utf-8` for an object/array | The same as `.body(data)`: an object or array is serialized via `JSON.stringify`. A string is sent as `text/plain; charset=utf-8` and a number or boolean is refused - see the note below for a JSON primitive. `null` or `undefined` is no body. |
+| `.text(str)`         | `text/plain; charset=utf-8`                           | UTF-8 encoded                                                                                                                                                                                                                                     |
+| `.formData(fd)`      | _(none, set by adapter)_                              | The library does not set this header. The adapter, or browser runtime, sets `multipart/form-data` with the boundary. Not visible in `request.headers` inside interceptors. Use `request.body instanceof FormData` to detect it.                   |
+| `.body(data)`        | Inferred from value type (see below)                  | Generic form. Accepts JSON objects/arrays (`application/json; charset=utf-8`), strings (`text/plain; charset=utf-8`), Uint8Array (`application/octet-stream`), FormData (see `.formData`), null, or undefined                                     |
+| `undefined` / `null` | none                                                  | No body sent                                                                                                                                                                                                                                      |
 
 > **Note:** Passing `null` or `undefined` to any body method, including `.json()`, always results in no body and no `Content-Type`. This applies across all methods since serialization is type-based, not method-based. To send a JSON primitive - `null`, a string, a number - serialize it yourself and say what it is: `.body(JSON.stringify(value)).headers({ 'content-type': 'application/json' })`.
 
 **The body is held by reference, not copied.** Request interceptors are handed it unserialized, so it is serialized when each attempt is dispatched, as axios serializes after its interceptors. Changing the object, `Uint8Array` or `FormData` you passed before the request settles changes what is sent - including on a retry or a `307`/`308` replay. Pass a fresh value per request (or `structuredClone` it) if you reuse one.
 
-`NodeAdapter` writes a `FormData` body as `fetch` does (the WHATWG multipart encoding): field names and filenames as UTF-8, with `"`, CR and LF percent-encoded, and no `filename*=`, so a server reads the same names whichever adapter sent them. A file part whose `File` cannot be read (missing, a directory, no permission) fails the request as a non-retryable `adapter_error` with the read failure as its cause. A caller-set `Transfer-Encoding` header is refused by `NodeAdapter`, which frames every body with a `Content-Length` itself, and a caller's `Content-Length` on a request with no body is dropped. `NodeAdapter` does not switch protocols or open tunnels: an `Upgrade` header or a `CONNECT` request is refused, as is a body of any type other than a string, `Uint8Array` or `FormData` when the adapter is called directly.
+`NodeAdapter` writes a `FormData` body as `fetch` does (the WHATWG multipart encoding): field names and filenames as UTF-8, with `"`, CR and LF percent-encoded, and no `filename*=`, so a server reads the same names whichever adapter sent them. A file part whose `File` cannot be read (missing, a directory, no permission) fails the request as a non-retryable `adapter_error` whose `cause` is `Request body source could not be read`, with the read failure itself (`ENOENT`, `EISDIR`, ...) as that error's own `cause` - `error.cause.cause`. A caller-set `Transfer-Encoding` header is refused by `NodeAdapter`, which frames every body with a `Content-Length` itself, and a caller's `Content-Length` on a request with no body is dropped. `NodeAdapter` does not switch protocols or open tunnels: an `Upgrade` header or a `CONNECT` request is refused, as is a body of any type other than a string, `Uint8Array` or `FormData` when the adapter is called directly.
 
 ### Query Parameters
 
@@ -944,8 +944,8 @@ const jar = new CookieJar();
 // if the expiry cannot be read (an `expires` that is an Invalid Date, or a `maxAge` /
 // `createdAt` that is not a finite number - such a cookie would never be found expired),
 // or if the name or value cannot be sent as one `name=value` pair: a name that holds
-// `=`, `;`, whitespace or a control character, or a value holding `;` or a control
-// character other than a tab. A name may be empty (a nameless cookie, sent as its value alone) when the
+// `=`, `;`, a space, a tab or a control character (U+0000-U+001F, U+007F), or a value
+// holding `;` or such a control character other than a tab. A name may be empty (a nameless cookie, sent as its value alone) when the
 // value is not empty, holds no `=` and does not start with `__Secure-` / `__Host-`. Looser than RFC 6265's cookie-octet grammar on purpose: spaces,
 // commas, quotes and backslashes in a value are accepted, as browsers accept them,
 // because real servers send them. Only what would change the header's framing is refused.
@@ -1101,9 +1101,9 @@ if (client.cancel(someID) === 0) {
 ### Tracker-Wide Cancel
 
 ```typescript
-client.cancelAll(); // Cancel every tracked request (this client + all sub-clients)
+client.cancelAll(); // Cancel every request on the shared tracker: the whole client tree - parent, sub-clients and siblings - whichever client it is called on
 client.cancelOwn(); // Cancel only requests from this exact client instance (not sub-clients)
-client.cancelAllWithLabel('my-label'); // Cancel all requests with label (this client + sub-clients)
+client.cancelAllWithLabel('my-label'); // Cancel all requests with label across the whole client tree
 client.cancelOwnWithLabel('my-label'); // Cancel own requests with label (not sub-clients)
 
 // Each returns the number cancelled:
@@ -1192,7 +1192,7 @@ const { count, requests } = client.listRequests({
 // { requestID: string; clientID: string; label?: string; state: RequestState }
 ```
 
-`scope: 'all'` includes requests from sub-clients that share the same tracker. Any other `scope`, or a `label` that is not a non-empty string, throws.
+`scope: 'all'` covers every request on the shared tracker - the whole client tree, so on a sub-client it lists the parent's and siblings' requests too. Any other `scope`, or a `label` that is not a non-empty string, throws.
 
 ## Sub-Client Creation
 

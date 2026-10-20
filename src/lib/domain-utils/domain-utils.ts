@@ -378,9 +378,7 @@ export function matchesWildcardDomain(
     return false; // no wildcarding around IPs
   }
 
-  const ps = getPublicSuffix(tail);
-
-  if (INTERNAL_PSEUDO_TLDS.has(tail) || (ps && ps === tail)) {
+  if (isSuffixLikeTail(tail)) {
     return false; // no wildcarding around suffix-like tails
   }
 
@@ -728,11 +726,7 @@ export function validateConfigEntry(
     if (/^(?:\d+|0x[0-9a-f]*)$/i.test(fixedTailLabels.at(-1) ?? '')) {
       return true;
     }
-    const ps = getPublicSuffix(tail);
-    if (INTERNAL_PSEUDO_TLDS.has(tail) || (ps && ps === tail)) {
-      return true;
-    }
-    return false;
+    return isSuffixLikeTail(tail);
   }
 
   // Helper: domain-wildcard structural checks (no URL chars, full labels, etc.)
@@ -1257,6 +1251,27 @@ function parseExactOriginForMatching(entry: string): {
 }
 
 /**
+ * Whether a wildcard pattern's fixed tail is one no wildcard may sit over: a pseudo-TLD,
+ * a public suffix, or a tail under a Public Suffix List wildcard rule (`*.kawasaki.jp`,
+ * `*.sch.uk`), where every label directly beneath it is itself a public suffix - so
+ * `*.kawasaki.jp` matched the suffix `foo.kawasaki.jp` and the apex `city.kawasaki.jp`.
+ * Told by asking for the suffix of a made-up label under the tail.
+ */
+function isSuffixLikeTail(tail: string): boolean {
+  if (INTERNAL_PSEUDO_TLDS.has(tail)) {
+    return true;
+  }
+
+  const ps = getPublicSuffix(tail);
+  if (ps && ps === tail) {
+    return true;
+  }
+
+  const probe = `lifecycleion-tail-probe.${tail}`;
+  return getPublicSuffix(probe) === probe;
+}
+
+/**
  * Whether an origin's text carries `@`, `?` or `#` after its scheme: userinfo, a query or
  * a fragment - even an empty one, which the URL parser reports as `''` and so slipped
  * past the field checks, where `validateConfigEntry` refuses the same text. No host
@@ -1332,8 +1347,7 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
       return false;
     }
 
-    const ps = getPublicSuffix(tail);
-    return !INTERNAL_PSEUDO_TLDS.has(tail) && !(ps && ps === tail);
+    return !isSuffixLikeTail(tail);
   }
 
   if (!trimmed.includes('*')) {

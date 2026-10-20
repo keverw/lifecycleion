@@ -993,7 +993,6 @@ export function isBrowserEnvironment(): boolean {
 
 /**
  * Serializes the request body and returns the body + inferred content-type.
- * If `formData` is provided, it takes precedence over `body`.
  */
 export function serializeBody(body: unknown): {
   body: string | Uint8Array | FormData | null;

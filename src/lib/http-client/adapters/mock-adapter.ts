@@ -277,9 +277,7 @@ export class MockAdapter implements HTTPAdapter {
   }
 
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
-    // Guarded once, at the boundary, so every call site below is covered - including the
-    // ones handed to `streamResponseBody`, `writeRequestBodyChunked` and
-    // `serializeMultipartFormData`. Progress reporting is advisory and must not be able to
+    // Guarded once, at the boundary, so every call site below is covered. Progress reporting is advisory and must not be able to
     // change whether a request succeeded; a throwing callback used to propagate out and be
     // classified as a transport failure. See `guardProgressCallback`.
     const guardedUploadProgress = guardProgressCallback(

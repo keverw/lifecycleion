@@ -1,6 +1,9 @@
 import { defineEntry } from '../../internal/define-entry';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
-import { guardProgressCallback } from '../internal/progress';
+import {
+  guardProgressCallback,
+  knownBodyByteLength,
+} from '../internal/progress';
 import { nonRetryableAdapterErrorFrom } from '../internal/adapter-error';
 import {
   makeResponseTooLargeError,
@@ -39,9 +42,7 @@ export class XHRAdapter implements HTTPAdapter {
   }
 
   public send(request: AdapterRequest): Promise<AdapterResponse> {
-    // Guarded once, at the boundary, so every call site below is covered - including the
-    // ones handed to `streamResponseBody`, `writeRequestBodyChunked` and
-    // `serializeMultipartFormData`. Progress reporting is advisory and must not be able to
+    // Guarded once, at the boundary, so every call site below is covered. Progress reporting is advisory and must not be able to
     // change whether a request succeeded; a throwing callback used to propagate out and be
     // classified as a transport failure. See `guardProgressCallback`.
     const guardedUploadProgress = guardProgressCallback(
@@ -194,8 +195,12 @@ export class XHRAdapter implements HTTPAdapter {
         );
 
         if (!didFireUpload100) {
-          const finalLoaded = uploadedBytes > 0 ? uploadedBytes : 1;
-          const finalTotal = uploadTotalBytes > 0 ? uploadTotalBytes : 1;
+          // The body's own size where the browser reported none - `0` for an empty
+          // string, as FetchAdapter reports it - not a stand-in `1`.
+          const knownBytes = knownBodyByteLength(request.body) ?? 0;
+          const finalLoaded = uploadedBytes > 0 ? uploadedBytes : knownBytes;
+          const finalTotal =
+            uploadTotalBytes > 0 ? uploadTotalBytes : knownBytes;
           guardedUploadProgress?.({
             loaded: finalLoaded,
             total: finalTotal,

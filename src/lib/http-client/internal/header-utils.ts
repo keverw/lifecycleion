@@ -76,7 +76,8 @@ export function isBrowserRestrictedHeader(
 
 /**
  * Throws if any of the given headers are browser-restricted.
- * Used by Fetch and XHR adapters to fail fast during development.
+ * Used by `HTTPClient` in a browser runtime to fail fast during development; an adapter
+ * driven directly does not run it.
  */
 export function assertNoBrowserRestrictedHeaders(
   headers: RequestHeadersInput,

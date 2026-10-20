@@ -153,8 +153,8 @@ function isTLSCertificateErrorSelf(error: Error): boolean {
 
   // Reached with no code, or a code the checks above do not recognize — which is
   // why the fallback cannot be dropped for any error carrying one. OpenSSL has
-  // many more permanent verification failures (CERT_UNTRUSTED, HOSTNAME_MISMATCH,
-  // UNABLE_TO_GET_ISSUER_CERT, INVALID_CA, …) that match no code rule above.
+  // more permanent verification failures than the set names (UNABLE_TO_GET_ISSUER_CERT,
+  // CERT_CHAIN_TOO_LONG, …), and a runtime may report one with no code at all.
   const message = readMember(error, 'message');
 
   return typeof message === 'string'

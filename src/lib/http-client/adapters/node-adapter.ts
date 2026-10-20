@@ -350,7 +350,8 @@ export interface NodeAdapterConfig {
    * requires, as is each string or binary element of an array. Only PEM is
    * read: Node's `tls` does not read DER CRLs, so DER bytes - or a value with
    * no complete CRL block at all - are refused when the adapter is constructed.
-   * Binary data may be any `ArrayBuffer` view, and is passed on as a `Buffer`.
+   * Binary data may be any `ArrayBuffer` view: one CRL block is passed on as a `Buffer`,
+   * several are split into one latin1 string each.
    *
    * The split exists because Node reads only the FIRST CRL of a concatenated
    * string and silently ignores the rest, unlike `ca`, which reads every
@@ -2753,12 +2754,12 @@ async function streamResponseBody(
  * attached with `on`, not `once`, so it keeps absorbing for as long as it is there
  * instead of standing down after the first error and leaving a sibling's unhandled.
  *
- * Its lifetime is bounded by the stream's own delivery: the absorber removes itself
- * once the error arrives, and a `'close'` listener removes it once the stream has
- * finished tearing down. A `setImmediate` is the fallback, and only for a writable
- * that would not take a `'close'` listener - a hand-written {@link WritableLike} that
- * throws from `write` or `end` is not obliged to emit anything afterwards, so a
- * listener waiting for delivery could otherwise wait forever.
+ * Its lifetime is bounded: each delivered error schedules its removal a turn later (a
+ * `setImmediate`, so a sibling error in the same turn is still absorbed), a `'close'`
+ * listener removes it once the stream has finished tearing down, and a backstop timer
+ * (1 s, extended by later errors up to 5 s) removes it from a writable that emits
+ * neither - a hand-written {@link WritableLike} that throws from `write` or `end` is not
+ * obliged to emit anything afterwards. See the file head.
  *
  * Skipped entirely for a writable with no listener-removal method, because an
  * absorber attached to one could never be taken back: the `setImmediate` would drop
@@ -3868,8 +3869,9 @@ function describeFactoryReturn(value: unknown): string {
 }
 
 /**
- * Refuse a trust store with nothing in it - `''`, `[]`, an empty buffer, entries that
- * are all empty - as `crl` refuses an empty list: it would leave the connection on the
+ * Refuse a trust store with nothing in it - `''`, `[]`, an empty buffer, or a list with
+ * any empty entry (`['', pem]` reads as a mistake, not a store) - as `crl` refuses an
+ * empty list: it would leave the connection on the
  * runtime's public roots, the opposite of what a caller supplying its own CA meant.
  */
 function assertTrustAnchors(value: unknown, name: string): void {
