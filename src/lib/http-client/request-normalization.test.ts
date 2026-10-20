@@ -1,6 +1,7 @@
 import { expect, test } from 'bun:test';
 import vm from 'node:vm';
 import * as http from 'node:http';
+import * as zlib from 'node:zlib';
 import type { AddressInfo } from 'node:net';
 import { HTTPClient } from './http-client';
 import {
@@ -5010,4 +5011,83 @@ test('round 111: FetchAdapter refusals at dispatch are not retried; terminal upl
     .onUploadProgress((event) => uploads.push(event))
     .send();
   expect(uploads.at(-1)).toMatchObject({ loaded: 10, total: 10, progress: 1 });
+});
+
+test('NodeAdapter asks for and decodes gzip, deflate and br bodies, as fetch does', async () => {
+  const json = JSON.stringify({ ok: true, items: [1, 2, 3] });
+  const encoded: Record<string, Buffer> = {
+    gzip: zlib.gzipSync(json),
+    deflate: zlib.deflateSync(json),
+    'deflate-raw': zlib.deflateRawSync(json),
+    br: zlib.brotliCompressSync(json),
+  };
+  let lastAcceptEncoding: string | undefined;
+  const server = http.createServer((req, res) => {
+    lastAcceptEncoding = req.headers['accept-encoding'];
+    const kind = (req.url ?? '/').slice(1);
+    if (kind === 'corrupt') {
+      res.writeHead(200, {
+        'content-type': 'application/json',
+        'content-encoding': 'gzip',
+      });
+      res.end('not gzip at all');
+      return;
+    }
+    const body = encoded[kind] ?? Buffer.from(json);
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      'content-encoding': kind.startsWith('deflate') ? 'deflate' : kind,
+      'content-length': String(body.length),
+    });
+    res.end(req.method === 'HEAD' ? undefined : body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const node = new HTTPClient({ adapter: new NodeAdapter(), baseURL });
+    const fetchClient = new HTTPClient({
+      adapter: new FetchAdapter(),
+      baseURL,
+    });
+    for (const kind of Object.keys(encoded)) {
+      const viaNode = await node.get(`/${kind}`).send();
+      expect(viaNode.body).toEqual({ ok: true, items: [1, 2, 3] });
+      expect(viaNode.isJSON).toBe(true);
+      const viaFetch = await fetchClient.get(`/${kind}`).send();
+      expect(viaNode.body).toEqual(viaFetch.body);
+    }
+    expect(lastAcceptEncoding).toContain('gzip');
+
+    await node.get('/gzip').headers({ 'accept-encoding': 'identity' }).send();
+    expect(lastAcceptEncoding).toBe('identity');
+
+    const head = await node.head('/gzip').send();
+    expect(head.isFailed).toBe(false);
+    expect(head.body).toBeNull();
+
+    const corrupt = node.get('/corrupt');
+    const corruptResponse = await corrupt.send();
+    expect(corruptResponse.isStreamError).toBe(true);
+    expect(corruptResponse.status).toBe(200);
+
+    const chunks: Buffer[] = [];
+    const streamed = await node
+      .get('/br')
+      .streamResponse(
+        () =>
+          ({
+            write: (chunk: Buffer, callback?: () => void) => {
+              chunks.push(chunk);
+              callback?.();
+              return true;
+            },
+            end: (callback?: () => void) => callback?.(),
+          }) as never,
+      )
+      .send();
+    expect(streamed.isStreamed).toBe(true);
+    expect(Buffer.concat(chunks).toString()).toBe(json);
+  } finally {
+    server.close();
+  }
 });

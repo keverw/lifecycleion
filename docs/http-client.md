@@ -1242,6 +1242,8 @@ Browsers automatically strip forbidden headers (`cookie`, `user-agent`, `host`, 
 
 Uses Node.js native `http` / `https` modules. Supports Unix domain sockets, mTLS, and per-chunk streaming.
 
+Compressed responses are handled as `fetch` handles them: NodeAdapter sends `Accept-Encoding: gzip, deflate, br` unless the request sets its own (`identity` asks for none), and decodes a `gzip`, `deflate` or `br` body - buffered or streamed - before handing it over. Response headers are reported as received, `Content-Encoding` included. Download progress counts decoded bytes, with an unknown total, since `Content-Length` counts the encoded ones. A body that cannot be decoded fails as a stream error with the response's status.
+
 ```typescript
 import { NodeAdapter } from 'lifecycleion/http-client-node';
 import { HTTPClient } from 'lifecycleion/http-client';

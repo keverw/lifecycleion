@@ -36,6 +36,11 @@ import {
   serializeMultipartFormData,
 } from '../internal/multipart';
 import { writeRequestBodyChunked } from '../internal/request-body-writer';
+import {
+  ACCEPTED_CONTENT_ENCODINGS,
+  createResponseBodySource,
+  type ResponseBodySource,
+} from '../internal/response-decoding';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
   materializeRequestHeaders,
@@ -447,9 +452,22 @@ export class NodeAdapter implements HTTPAdapter {
     const isHTTPS = parsedURL.protocol === 'https:';
     const httpModule = isHTTPS ? https : http;
 
+    const requestHeaders = materializeRequestHeaders(request.headers);
+
+    // Asked for as `fetch` asks for it, and decoded as it decodes (see
+    // `createResponseBodySource`); a caller's own `Accept-Encoding` stands - `identity`
+    // to ask for none.
+    if (
+      !Object.keys(requestHeaders).some(
+        (name) => name.toLowerCase() === 'accept-encoding',
+      )
+    ) {
+      requestHeaders['accept-encoding'] = ACCEPTED_CONTENT_ENCODINGS;
+    }
+
     const options: http.RequestOptions = {
       method: request.method,
-      headers: materializeRequestHeaders(request.headers),
+      headers: requestHeaders,
       // Timeout is managed by the client via abort signal — the adapter does
       // not impose its own timeout so the client retains full control.
     };
@@ -1375,6 +1393,15 @@ export class NodeAdapter implements HTTPAdapter {
           const responseTask = (async () => {
             const status = res.statusCode ?? 0;
             const headers = normalizeResponseHeaders(res.headers);
+            // The body as `fetch` would hand it over: decoded when the server compressed
+            // it. Headers are reported as received, `Content-Encoding` included, as
+            // `fetch` reports them.
+            const { source: body, isDecoded } = createResponseBodySource(
+              res,
+              request.method,
+              status,
+              headers['content-encoding'],
+            );
 
             // --- Response streaming (NodeAdapter-only feature) ---
             //
@@ -1612,15 +1639,17 @@ export class NodeAdapter implements HTTPAdapter {
                 abortStream,
               };
 
-              const totalBytes =
-                parseInt(String(headers['content-length'] ?? '0'), 10) || 0;
+              // Unknown once decoded: `Content-Length` counts the encoded bytes.
+              const totalBytes = isDecoded
+                ? 0
+                : parseInt(String(headers['content-length'] ?? '0'), 10) || 0;
 
               // Pipe the response into the caller's writable. Extracted to a
               // module-level function to keep callback nesting within ESLint's
               // max-nested-callbacks limit. Returns true on success, or the
               // writable error when the local sink fails (disk full, etc.).
               const streamResult = await streamResponseBody(
-                res,
+                body,
                 sink,
                 totalBytes,
                 guardedDownloadProgress,
@@ -1675,10 +1704,12 @@ export class NodeAdapter implements HTTPAdapter {
             // completion event if the last chunk already reported 100%.
             let didFireDownload100 = false;
 
-            const totalBytes =
-              parseInt(String(headers['content-length'] ?? '0'), 10) || 0;
+            // Unknown once decoded: `Content-Length` counts the encoded bytes.
+            const totalBytes = isDecoded
+              ? 0
+              : parseInt(String(headers['content-length'] ?? '0'), 10) || 0;
 
-            res.on('data', (chunk: Buffer) => {
+            body.on('data', (chunk: Buffer) => {
               chunks.push(chunk);
               loadedBytes += chunk.length;
 
@@ -1701,7 +1732,7 @@ export class NodeAdapter implements HTTPAdapter {
               });
             });
 
-            res.on('end', () => {
+            body.on('end', () => {
               // Nothing for a response the request no longer has: a cancel or timeout that
               // landed after the last chunk already failed it, and Node still emits `'end'`.
               if (activeBufferedResponse === undefined) {
@@ -1724,15 +1755,13 @@ export class NodeAdapter implements HTTPAdapter {
 
               activeBufferedResponse = undefined;
 
-              const body =
-                chunks.length > 0
-                  ? new Uint8Array(Buffer.concat(chunks))
-                  : null;
-
               settleResponse({
                 status,
                 headers,
-                body,
+                body:
+                  chunks.length > 0
+                    ? new Uint8Array(Buffer.concat(chunks))
+                    : null,
               });
             });
 
@@ -1757,15 +1786,15 @@ export class NodeAdapter implements HTTPAdapter {
               });
             };
 
-            res.on('error', (err: Error) => {
+            body.on('error', (err: Error) => {
               settleBufferedStreamError('Response stream error', err);
             });
 
-            res.on('aborted', () => {
+            body.on('aborted', () => {
               settleBufferedStreamError('Response stream aborted');
             });
 
-            res.on('close', () => {
+            body.on('close', () => {
               settleBufferedStreamError(
                 'Response stream closed before completion',
               );
@@ -2278,7 +2307,7 @@ function isCrossOriginRedirectHop(
 // that error into isStreamError rather than throwing, so the real HTTP status
 // is preserved and the failure stays non-retryable once streaming has started.
 async function streamResponseBody(
-  res: http.IncomingMessage,
+  res: ResponseBodySource,
   writable: WritableLike,
   totalBytes: number,
   onProgress?: (e: AdapterProgressEvent) => void,
