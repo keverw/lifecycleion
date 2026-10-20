@@ -72,6 +72,19 @@ export interface AdapterRequest {
    * Absent when an adapter is driven directly.
    */
   initialURL?: string;
+  /**
+   * The most bytes of a buffered response body the adapter reads, counted on the body as
+   * it is handed over - decoded, where the adapter decodes. Past it the adapter stops
+   * reading, releases the response, and resolves a stream error with
+   * `streamErrorCode: 'response_too_large'`, keeping the real status and headers.
+   * `NodeAdapter` and `FetchAdapter` also refuse a `Content-Length` already over it
+   * before the body is read, where that length counts the bytes handed over.
+   *
+   * `undefined` or `Infinity` means no limit, as does any value that is not a positive
+   * number. A body piped to `streamResponse` is not held, so it is not limited. Set by
+   * `HTTPClient` from `maxResponseBytes`.
+   */
+  maxResponseBytes?: number;
 }
 
 export interface AdapterResponse {
@@ -179,7 +192,8 @@ export interface AdapterResponse {
    * more precise `HTTPClientError.code` while keeping `HTTPResponse`
    * transport-agnostic.
    */
-  streamErrorCode?: 'stream_write_error' | 'stream_response_error';
+  streamErrorCode?:
+    'stream_write_error' | 'stream_response_error' | 'response_too_large';
   /**
    * Underlying error for an absorbed adapter failure. Populated for transport
    * failures the adapter resolves instead of throwing, and for streamed-body
@@ -463,6 +477,16 @@ export interface HTTPClientConfig {
    * either inherits the parent client's timeout instead.
    */
   timeout?: number | null;
+  /**
+   * The most bytes of a buffered response body this client will hold. A body past it
+   * fails the request as `response_too_large`; one piped to `streamResponse` is not
+   * limited. Counted as handed over, so a compressed body is counted decoded.
+   *
+   * A positive integer, or `Infinity` for no limit. Null or undefined selects
+   * `DEFAULT_MAX_RESPONSE_BYTES` (64 MiB). In `createSubClient` overrides, either
+   * inherits the parent client's value instead.
+   */
+  maxResponseBytes?: number | null;
   cookieJar?: CookieJar | null;
   retryPolicy?: RetryPolicyOptions;
   /**
@@ -525,6 +549,11 @@ export interface HTTPRequestOptions {
   body?: unknown;
   /** Null or undefined inherits the client's configured `timeout`. */
   timeout?: number | null;
+  /**
+   * Per-request override for {@link HTTPClientConfig.maxResponseBytes}. Null or
+   * undefined inherits the client's configured value.
+   */
+  maxResponseBytes?: number | null;
   signal?: AbortSignal;
   retryPolicy?: RetryPolicyOptions | null;
   /**
@@ -662,7 +691,8 @@ export type ErrorCode =
   | 'interceptor_error'
   | 'stream_write_error'
   | 'stream_response_error'
-  | 'stream_setup_error';
+  | 'stream_setup_error'
+  | 'response_too_large';
 
 export interface HTTPClientError {
   code: ErrorCode;

@@ -1,7 +1,7 @@
 import { isNullish } from '../internal/is-nullish';
 import { readUnknownMember } from '../internal/read-member';
 import { generateID } from '../id-helpers';
-import { validateRequestTimeoutMS } from './consts';
+import { validateMaxResponseBytes, validateRequestTimeoutMS } from './consts';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import { defineEntry } from '../internal/define-entry';
 import {
@@ -61,6 +61,7 @@ export class HTTPRequestBuilder<T = unknown> {
   private _params?: Record<string, unknown>;
   private _body?: unknown;
   private _timeout?: number | null;
+  private _maxResponseBytes?: number | null;
   private _signal?: AbortSignal;
   private _retryPolicy?: RetryPolicyOptions | null;
   private _retryNonIdempotentMethods?: boolean;
@@ -175,6 +176,20 @@ export class HTTPRequestBuilder<T = unknown> {
     // value is resolved once.
     validateRequestTimeoutMS(ms);
     this._timeout = ms;
+    return this;
+  }
+
+  /**
+   * The most bytes of a buffered response body this request will hold, overriding the
+   * client's `maxResponseBytes`. A positive integer, `Infinity` for no limit, or `null`
+   * to inherit the client's value. A streamed response is not limited.
+   */
+  public maxResponseBytes(bytes: number | null): this {
+    this._assertNotSent('maxResponseBytes');
+    // Validated only, as `timeout()` is: nullish inherits the client's value at
+    // dispatch, where the value is resolved once.
+    validateMaxResponseBytes(bytes);
+    this._maxResponseBytes = bytes;
     return this;
   }
 
@@ -453,6 +468,7 @@ export class HTTPRequestBuilder<T = unknown> {
         params: this._params,
         body: this._body,
         timeout: this._timeout,
+        maxResponseBytes: this._maxResponseBytes,
         signal: this._signal,
         retryPolicy: this._retryPolicy,
         retryNonIdempotentMethods: this._retryNonIdempotentMethods,
@@ -541,6 +557,12 @@ export class HTTPRequestBuilder<T = unknown> {
     const timeout = opts.timeout;
     if (timeout !== undefined) {
       this.timeout(timeout);
+    }
+
+    // Request-level response size limit in bytes
+    const maxResponseBytes = opts.maxResponseBytes;
+    if (maxResponseBytes !== undefined) {
+      this.maxResponseBytes(maxResponseBytes);
     }
 
     // External abort signal — merged with the internal one so both can cancel

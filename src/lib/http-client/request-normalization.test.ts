@@ -1,7 +1,8 @@
-import { expect, test } from 'bun:test';
+import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import vm from 'node:vm';
 import * as http from 'node:http';
 import * as zlib from 'node:zlib';
+import { Writable } from 'node:stream';
 import type { AddressInfo } from 'node:net';
 import { HTTPClient } from './http-client';
 import {
@@ -11,6 +12,7 @@ import {
   parseContentType,
 } from './utils';
 import {
+  DEFAULT_MAX_RESPONSE_BYTES,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_ABORT_HEADERS_KEY,
   STREAM_ABORT_STATUS_KEY,
@@ -5296,4 +5298,283 @@ test('round 115: a long content-coding chain is refused; the adapter Accept-Enco
   } finally {
     server.close();
   }
+});
+
+describe('maxResponseBytes', () => {
+  // Hits per path, so a test can tell a refused response was not retried.
+  const hits = new Map<string, number>();
+  const server = http.createServer((req, res) => {
+    const path = req.url ?? '/';
+    hits.set(path, (hits.get(path) ?? 0) + 1);
+
+    if (path === '/small') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('x'.repeat(50));
+    } else if (path === '/big' || path === '/big-503') {
+      // Chunked, with no Content-Length: only counting the body can find it too large.
+      res.writeHead(path === '/big' ? 200 : 503, {
+        'content-type': 'text/plain',
+        'x-kept': 'yes',
+      });
+      for (let i = 0; i < 6; i++) {
+        res.write('x'.repeat(50));
+      }
+      res.end();
+    } else if (path === '/declared') {
+      // Headers only, with a length over the limit, then nothing: only a refusal made
+      // from the Content-Length answers before the attempt times out.
+      res.writeHead(200, { 'content-length': '5000' });
+      res.flushHeaders();
+    } else if (path === '/gzip') {
+      // A few dozen bytes on the wire, 5000 once decoded.
+      const encoded = zlib.gzipSync(Buffer.from('a'.repeat(5000)));
+      res.writeHead(200, {
+        'content-encoding': 'gzip',
+        'content-length': String(encoded.length),
+      });
+      res.end(encoded);
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
+  let baseURL = '';
+
+  beforeAll(async () => {
+    await new Promise<void>((resolve) =>
+      server.listen(0, '127.0.0.1', resolve),
+    );
+    baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  });
+
+  afterAll(() => {
+    server.closeAllConnections();
+    server.close();
+  });
+
+  const adapters = [
+    ['NodeAdapter', () => new NodeAdapter()],
+    ['FetchAdapter', () => new FetchAdapter()],
+  ] as const;
+
+  for (const [name, makeAdapter] of adapters) {
+    test(`${name}: a buffered body over the limit fails as response_too_large, keeping its status, and is not retried`, async () => {
+      hits.delete('/big-503');
+      const client = new HTTPClient({
+        adapter: makeAdapter(),
+        baseURL,
+        maxResponseBytes: 100,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+      });
+
+      const builder = client.get('/big-503');
+      const response = await builder.send();
+
+      expect(response.status).toBe(503);
+      expect(response.headers['x-kept']).toBe('yes');
+      expect(response.body).toBeNull();
+      expect(response.isStreamError).toBe(true);
+      expect(response.isFailed).toBe(true);
+      expect(builder.error?.code).toBe('response_too_large');
+      expect(builder.error?.message).toBe(
+        'Response body exceeded maxResponseBytes',
+      );
+      expect(builder.error?.cause?.message).toContain(
+        'Response body exceeds maxResponseBytes (100); raise maxResponseBytes',
+      );
+      expect(builder.error?.isRetriesExhausted).toBe(false);
+      expect(hits.get('/big-503')).toBe(1);
+    });
+
+    test(`${name}: a body within the limit is delivered`, async () => {
+      const client = new HTTPClient({
+        adapter: makeAdapter(),
+        baseURL,
+        maxResponseBytes: 100,
+      });
+
+      const response = await client.get<string>('/small').send();
+
+      expect(response.isFailed).toBe(false);
+      expect(response.body).toBe('x'.repeat(50));
+    });
+
+    test(`${name}: a Content-Length over the limit is refused before the body is read`, async () => {
+      const builder = new HTTPClient({
+        adapter: makeAdapter(),
+        baseURL,
+        maxResponseBytes: 100,
+        timeout: 5000,
+      }).get('/declared');
+      const startedAt = performance.now();
+      const response = await builder.send();
+
+      expect(builder.error?.code).toBe('response_too_large');
+      expect(response.status).toBe(200);
+      expect(response.isTimeout).toBe(false);
+      expect(performance.now() - startedAt).toBeLessThan(4000);
+    });
+
+    test(`${name}: Infinity disables the limit`, async () => {
+      const response = await new HTTPClient({
+        adapter: makeAdapter(),
+        baseURL,
+        maxResponseBytes: Infinity,
+      })
+        .get<string>('/big')
+        .send();
+
+      expect(response.isFailed).toBe(false);
+      expect(response.body).toHaveLength(300);
+    });
+  }
+
+  test('NodeAdapter counts a compressed body decoded', async () => {
+    const builder = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      maxResponseBytes: 1000,
+    }).get('/gzip');
+    const response = await builder.send();
+
+    expect(builder.error?.code).toBe('response_too_large');
+    expect(response.status).toBe(200);
+    expect(response.isStreamError).toBe(true);
+
+    // The same body within a limit that fits it decoded.
+    const decoded = await new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      maxResponseBytes: 5000,
+    })
+      .get<Uint8Array>('/gzip')
+      .send();
+    expect(decoded.isFailed).toBe(false);
+    expect(decoded.body).toHaveLength(5000);
+  });
+
+  test('NodeAdapter does not limit a streamed response', async () => {
+    const received: Buffer[] = [];
+    const response = await new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      maxResponseBytes: 100,
+    })
+      .get('/big')
+      .streamResponse(
+        () =>
+          new Writable({
+            write(chunk: Buffer, _encoding, callback) {
+              received.push(chunk);
+              callback();
+            },
+          }),
+      )
+      .send();
+
+    expect(response.isFailed).toBe(false);
+    expect(response.isStreamed).toBe(true);
+    expect(Buffer.concat(received).length).toBe(300);
+  });
+
+  test('a sub-client inherits the limit, and a sub-client or request overrides it', async () => {
+    const parent = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      maxResponseBytes: 100,
+    });
+
+    const inheriting = parent.createSubClient({ maxResponseBytes: null });
+    const inherited = inheriting.get('/big');
+    await inherited.send();
+    expect(inherited.error?.code).toBe('response_too_large');
+
+    const raised = await parent
+      .createSubClient({ maxResponseBytes: 1000 })
+      .get('/big')
+      .send();
+    expect(raised.isFailed).toBe(false);
+
+    const perRequest = await parent.get('/big').maxResponseBytes(1000).send();
+    expect(perRequest.isFailed).toBe(false);
+
+    const perRequestOption = await parent
+      .get('/big', { maxResponseBytes: Infinity })
+      .send();
+    expect(perRequestOption.isFailed).toBe(false);
+
+    // A null request value inherits the client's, which a sub-client took from its parent.
+    const nullOption = inheriting.get('/big', { maxResponseBytes: null });
+    await nullOption.send();
+    expect(nullOption.error?.code).toBe('response_too_large');
+
+    // A request can lower the limit too.
+    const lowered = new HTTPClient({ adapter: new NodeAdapter(), baseURL })
+      .get('/small')
+      .maxResponseBytes(10);
+    await lowered.send();
+    expect(lowered.error?.code).toBe('response_too_large');
+  });
+
+  test('the default limit is DEFAULT_MAX_RESPONSE_BYTES, reported on the attempt snapshot', async () => {
+    expect(DEFAULT_MAX_RESPONSE_BYTES).toBe(64 * 1024 * 1024);
+
+    const seen: Array<number | undefined> = [];
+    const client = new HTTPClient({ adapter: new NodeAdapter(), baseURL });
+    client.addResponseObserver((_response, request) => {
+      seen.push(request.maxResponseBytes);
+    });
+    await client.get('/small').send();
+    await client.get('/small').maxResponseBytes(500).send();
+
+    expect(seen).toEqual([DEFAULT_MAX_RESPONSE_BYTES, 500]);
+  });
+
+  test('MockAdapter fails a route body over the limit as response_too_large', async () => {
+    const adapter = new MockAdapter();
+    adapter.routes.get('/big', () => ({
+      status: 201,
+      headers: { 'x-kept': 'yes' },
+      body: 'x'.repeat(200),
+    }));
+    const client = new HTTPClient({ adapter, maxResponseBytes: 100 });
+
+    const builder = client.get('/big');
+    const response = await builder.send();
+
+    expect(builder.error?.code).toBe('response_too_large');
+    expect(response.status).toBe(201);
+    expect(response.headers['x-kept']).toBe('yes');
+    expect(response.isStreamError).toBe(true);
+    expect(response.body).toBeNull();
+
+    const within = await client.get('/big').maxResponseBytes(200).send();
+    expect(within.isFailed).toBe(false);
+    expect(within.body).toBe('x'.repeat(200));
+  });
+
+  test('an invalid limit is refused where it is given', () => {
+    const client = new HTTPClient({ adapter: new MockAdapter() });
+
+    for (const value of [0, -1, 1.5, NaN, -Infinity, '100', true]) {
+      expect(
+        () => new HTTPClient({ maxResponseBytes: value as never }),
+      ).toThrow(/^HTTPClient maxResponseBytes must be a positive integer/);
+      expect(() =>
+        client.createSubClient({ maxResponseBytes: value as never }),
+      ).toThrow(TypeError);
+      expect(() => client.get('/x').maxResponseBytes(value as never)).toThrow(
+        /^HTTP request maxResponseBytes must be a positive integer/,
+      );
+      expect(() =>
+        client.get('/x', { maxResponseBytes: value as never }),
+      ).toThrow(TypeError);
+    }
+
+    // `null` inherits, and is accepted everywhere a value is.
+    expect(() => client.get('/x').maxResponseBytes(null)).not.toThrow();
+    expect(() =>
+      client.createSubClient({ maxResponseBytes: null }),
+    ).not.toThrow();
+  });
 });

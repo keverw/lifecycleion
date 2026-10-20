@@ -15,6 +15,11 @@ import {
 } from '../internal/progress';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
+  makeResponseTooLargeError,
+  parseContentLength,
+  readMaxResponseBytes,
+} from '../internal/response-limit';
+import {
   REDIRECT_STATUS_CODES,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_ABORT_HEADERS_KEY,
@@ -57,6 +62,8 @@ export class FetchAdapter implements HTTPAdapter {
     );
 
     const { requestURL, method, body, signal } = request;
+    // The most a buffered body may hold, as `fetch` decodes it; `Infinity` for none.
+    const maxResponseBytes = readMaxResponseBytes(request);
     // A caller's `Content-Length` is left to `fetch`, which frames the body itself:
     // browsers refuse to send one, and Node's undici, given one that disagrees with the
     // body, waited for bytes that never came until the attempt timed out - on every retry.
@@ -191,10 +198,10 @@ export class FetchAdapter implements HTTPAdapter {
 
     const responseHeadersForBody = extractFetchHeaders(response.headers);
 
-    let rawBody: Uint8Array | null;
+    let rawBody: Uint8Array | null | typeof RESPONSE_TOO_LARGE;
 
     try {
-      rawBody = await readResponseBody(method, response);
+      rawBody = await readResponseBody(method, response, maxResponseBytes);
     } catch (error) {
       // Headers already arrived, so the status is real and the body transfer is
       // what failed. Resolve with isStreamError rather than throwing, which would
@@ -240,6 +247,30 @@ export class FetchAdapter implements HTTPAdapter {
       };
     }
 
+    // A body over the limit fails as a stream error with the real status, as a body that
+    // failed in transit does just above: the server answered, and what failed is taking
+    // delivery. No terminal progress, for the reason a failed read reports none.
+    if (rawBody === RESPONSE_TOO_LARGE) {
+      const detectedRedirectURL = resolveDetectedRedirectURL(
+        dispatchedURL,
+        response.status,
+        responseHeadersForBody,
+      );
+
+      return {
+        status: response.status,
+        wasRedirectDetected:
+          detectedRedirectURL !== undefined ||
+          REDIRECT_STATUS_CODES.has(response.status),
+        ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
+        headers: responseHeadersForBody,
+        body: null,
+        isStreamError: true,
+        streamErrorCode: 'response_too_large',
+        errorCause: makeResponseTooLargeError(maxResponseBytes, false),
+      };
+    }
+
     guardedDownloadProgress?.({
       loaded: rawBody?.length ?? 0,
       total: rawBody?.length ?? 0,
@@ -267,16 +298,111 @@ export class FetchAdapter implements HTTPAdapter {
   }
 }
 
+/** What {@link readResponseBody} answers for a body over `maxResponseBytes`. */
+const RESPONSE_TOO_LARGE = Symbol('response too large');
+
+/**
+ * The response body's bytes, `null` for a response that carries none, or
+ * {@link RESPONSE_TOO_LARGE} once the body passes `maxResponseBytes`.
+ *
+ * With a limit, the body is read chunk by chunk and counted as it arrives, so a body over
+ * it is cancelled - the rest neither downloaded nor held - rather than buffered whole by
+ * `arrayBuffer()` and refused afterwards. Without one, or without a readable `body` (a
+ * test double, an older runtime), it is read as it always was.
+ */
 async function readResponseBody(
   method: string,
   response: Response,
-): Promise<Uint8Array | null> {
+  maxResponseBytes: number,
+): Promise<Uint8Array | null | typeof RESPONSE_TOO_LARGE> {
   if (method === 'HEAD' || response.status === 204 || response.status === 304) {
     return null;
   }
 
-  const buffer = await response.arrayBuffer();
-  return new Uint8Array(buffer);
+  if (maxResponseBytes === Number.POSITIVE_INFINITY) {
+    const buffer = await response.arrayBuffer();
+    return new Uint8Array(buffer);
+  }
+
+  // Refused before reading when the body says up front it is over the limit - only where
+  // its `Content-Length` counts what `fetch` hands over, which is the decoded body: so
+  // not when a coding is applied, nor when one may be hidden. A browser exposes
+  // `Content-Encoding` on a cross-origin (`cors`) response only when the server lists it
+  // in `Access-Control-Expose-Headers`, so its absence there proves nothing.
+  const contentEncoding = response.headers.get('content-encoding');
+  const isIdentityEncoded =
+    contentEncoding === null
+      ? response.type !== 'cors'
+      : contentEncoding
+          .split(',')
+          .every((token) =>
+            ['', 'identity'].includes(token.trim().toLowerCase()),
+          );
+  const declaredLength = isIdentityEncoded
+    ? parseContentLength(response.headers.get('content-length'))
+    : undefined;
+
+  if (declaredLength !== undefined && declaredLength > maxResponseBytes) {
+    cancelBodyQuietly(response.body);
+    return RESPONSE_TOO_LARGE;
+  }
+
+  if (!response.body) {
+    const buffer = await response.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+    return bytes.length > maxResponseBytes ? RESPONSE_TOO_LARGE : bytes;
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let loadedBytes = 0;
+
+  while (true) {
+    const { done: isDone, value } = await reader.read();
+
+    if (isDone) {
+      break;
+    }
+
+    loadedBytes += value.byteLength;
+
+    // Counted before the chunk is kept, so a body over the limit is never held whole.
+    // Cancelled, not awaited: the cancel settles once the stream has let go, and the
+    // answer here does not depend on when that is.
+    if (loadedBytes > maxResponseBytes) {
+      reader.cancel().catch(() => {
+        // The body is being discarded; a stream that fails to cancel has nothing to add.
+      });
+      return RESPONSE_TOO_LARGE;
+    }
+
+    chunks.push(value);
+  }
+
+  const bytes = new Uint8Array(loadedBytes);
+  let offset = 0;
+
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return bytes;
+}
+
+/** Cancel a body that will not be read, ignoring a stream that refuses. */
+function cancelBodyQuietly(body: ReadableStream<Uint8Array> | null): void {
+  if (!body) {
+    return;
+  }
+
+  try {
+    body.cancel().catch(() => {
+      // The body is being discarded; a stream that fails to cancel has nothing to add.
+    });
+  } catch {
+    // A locked or already-cancelled stream: nothing left to release.
+  }
 }
 
 function isAbortError(error: unknown): boolean {

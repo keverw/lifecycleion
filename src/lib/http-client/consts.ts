@@ -120,6 +120,60 @@ export function resolveRequestTimeoutMS(
   return clampTimerDelayMS(requested);
 }
 
+/**
+ * The most bytes of a buffered response body a client holds unless configured otherwise:
+ * 64 MiB. A buffered body is held whole in memory before it is parsed, so without a bound
+ * one oversized or endless response - a misrouted download, a hostile server - could take
+ * the process with it. A body meant to be that large belongs in `streamResponse`.
+ */
+export const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Reject a response size limit that {@link resolveMaxResponseBytes} would refuse, without
+ * resolving it. Builders validate when the value is set but keep nullish as-is, so it
+ * still inherits the client value at dispatch, as {@link validateRequestTimeoutMS} does
+ * for the timeout.
+ *
+ * A positive integer, or `Infinity` for no limit. `0` is refused rather than read as
+ * "disabled" the way a zero timeout is: a limit of nothing would fail every response with
+ * a body, and a caller who wants no limit says so with `Infinity`. A fraction, `NaN` and a
+ * non-number are refused for the reason `NaN` is refused for a timeout - each is a mistake
+ * upstream, not a request for a default.
+ */
+export function validateMaxResponseBytes(
+  requested: unknown,
+  label = 'HTTP request maxResponseBytes',
+): asserts requested is number | null | undefined {
+  if (isNullish(requested) || requested === Number.POSITIVE_INFINITY) {
+    return;
+  }
+
+  if (
+    typeof requested !== 'number' ||
+    !Number.isInteger(requested) ||
+    requested <= 0
+  ) {
+    throw new TypeError(
+      `${label} must be a positive integer, or Infinity for no limit (got ${typeof requested === 'number' ? String(requested) : requested === null ? 'null' : typeof requested})`,
+    );
+  }
+}
+
+/**
+ * The response size limit a request will actually run under: null and undefined select
+ * `defaultBytes`, anything else is validated by {@link validateMaxResponseBytes} and kept
+ * as given. `Infinity` is kept too, and adapters read it as no limit.
+ */
+export function resolveMaxResponseBytes(
+  requested: unknown,
+  defaultBytes: number = DEFAULT_MAX_RESPONSE_BYTES,
+  label?: string,
+): number {
+  validateMaxResponseBytes(requested, label);
+
+  return isNullish(requested) ? defaultBytes : requested;
+}
+
 export const DEFAULT_REQUEST_ID_HEADER = 'x-local-client-request-id';
 
 export const DEFAULT_REQUEST_ATTEMPT_HEADER = 'x-local-client-request-attempt';

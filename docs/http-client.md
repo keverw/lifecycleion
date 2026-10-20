@@ -130,6 +130,8 @@ interface HTTPClientConfig {
   timeout?: number | null; // Default: 30,000 ms; <= 0 disables the per-attempt timeout.
   // NaN or a non-number throws; Infinity disables it like 0 does.
   // Same rules for the per-request override, whose default is this value.
+  maxResponseBytes?: number | null; // Default: 64 MiB (DEFAULT_MAX_RESPONSE_BYTES); the most bytes of a buffered response body the client holds.
+  // A positive integer, or Infinity for no limit. See Response Size Limit.
   cookieJar?: CookieJar | null; // Cookie management (null disables)
   retryPolicy?: RetryPolicyOptions; // Retry strategy (disabled by default)
   retryNonIdempotentMethods?: boolean; // Default: false - retry only the RFC 9110 idempotent methods (GET, HEAD, OPTIONS, TRACE, PUT, DELETE), not POST, PATCH or a custom one such as LOCK. See Non-Idempotent Methods
@@ -170,11 +172,12 @@ run. Invalid retry durations throw there, and later mutations to the supplied ob
 not change the policy. Each request starts with a fresh retry budget; `null` on the
 builder disables retries inherited from the client.
 
-**Invalid timeouts and retry policies throw synchronously.** A `timeout` that is `NaN` or
-not a number (a `TypeError`), or an invalid `retryPolicy`, throws from the call that
-supplies it: `new HTTPClient()`, `createSubClient()`,
-`client.get(path, { timeout, retryPolicy })` and the other method helpers, `.timeout()`, and
-`.retryPolicy()`. It never reaches `send()`, so it does not resolve as a
+**Invalid timeouts, size limits and retry policies throw synchronously.** A `timeout` that
+is `NaN` or not a number (a `TypeError`), a `maxResponseBytes` that is not a positive
+integer or `Infinity` (a `TypeError`), or an invalid `retryPolicy`, throws from the call
+that supplies it: `new HTTPClient()`, `createSubClient()`,
+`client.get(path, { timeout, maxResponseBytes, retryPolicy })` and the other method helpers,
+`.timeout()`, `.maxResponseBytes()`, and `.retryPolicy()`. It never reaches `send()`, so it does not resolve as a
 `request_setup_error` and no `'error'` observer sees it. A malformed setting is a
 programming mistake that no retry or response handling can repair, so it fails where it
 was written.
@@ -217,6 +220,7 @@ const builder = client
   .headers({ 'x-idempotency-key': 'abc123' }) // merged onto defaultHeaders
   .json({ name: 'Alice' }) // sets a JSON body; content-type is inferred during request materialization
   .timeout(5_000) // per-request timeout override
+  .maxResponseBytes(1024 * 1024) // per-request response size limit override (null inherits)
   .retryPolicy({ strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1000 }) // per-request retry override
   .retryNonIdempotentMethods(true) // POST is not retried by default; safe here because of the idempotency key
   .label('create-user') // non-empty grouping label for cancel/list filtering
@@ -386,6 +390,28 @@ The response `Content-Type` header determines how the body is parsed. Only its m
 
 `isText` mirrors `contentType === 'text'`. `isJSON` is `true` only when JSON parsing actually succeeded, and it stays `false` on a parse failure. `isParseError` is `true` when the server sent a JSON `Content-Type` but the body could not be parsed. In that case `contentType` is still `'json'`, `isJSON` is `false`, and `body` falls back to the raw string. An empty body is no body, whatever the `Content-Type` and the adapter: `body` is `null` and `isParseError` is `false`.
 
+### Response Size Limit
+
+A buffered response body is held whole in memory before it is parsed, so the client bounds it: `maxResponseBytes`, 64 MiB by default (`DEFAULT_MAX_RESPONSE_BYTES`). A body past the limit fails the request as `response_too_large`:
+
+```typescript
+const client = new HTTPClient({ maxResponseBytes: 10 * 1024 * 1024 }); // 10 MiB
+
+// Per request: raise it, lower it, or turn it off with Infinity.
+const builder = client.get('/export').maxResponseBytes(Infinity);
+const response = await builder.send();
+
+if (builder.error?.code === 'response_too_large') {
+  console.log(response.status); // the server's real status
+}
+```
+
+- **Where it is set.** `HTTPClientConfig.maxResponseBytes`, a sub-client's override (null or omitted inherits the parent's value), the `maxResponseBytes` request option, and `.maxResponseBytes()` on the builder (null or omitted inherits the client's value). It is a positive integer, or `Infinity` for no limit; anything else - `0`, a negative or fractional number, `NaN`, a non-number - throws a `TypeError` where it is given.
+- **What is counted.** The body as it is handed over: decoded, where the adapter decodes a compressed response (`NodeAdapter`, and `fetch` itself), so a small gzip body that inflates past the limit is refused. The network adapters stop reading once the count passes the limit, rather than buffering the whole body first, and release the connection. `NodeAdapter` and `FetchAdapter` refuse a `Content-Length` already over the limit before the body is read, where it counts the bytes handed over - not for a compressed response, whose length counts the encoded bytes. `XHRAdapter` stops on download progress, which a browser reports in bytes received, and checks the decoded body once more when it has loaded. `MockAdapter` applies it to the serialized route body.
+- **Buffered responses only.** A body piped to `streamResponse` goes to your writable and is never held by the client, so it is not limited. A body too large to buffer is what `streamResponse` is for.
+- **How it fails.** As a stream error: the response keeps its real status and headers, with `isStreamError: true`, `isFailed: true` and a `null` body. The error's `cause` states the limit. It is never retried - the server answered, so the outcome is the same as any other stream error (see [Stream Errors and Replay](#stream-errors-and-replay)) - and a `3xx` whose body is too large is not followed.
+- **Observers.** The attempt snapshot reports the limit the attempt ran under as `request.maxResponseBytes`.
+
 ## Error Handling
 
 `send()` always resolves for request outcomes handled by the client runtime. HTTP errors (4xx/5xx), timeouts, cancels, transport failures, redirect control-flow failures, and other client-managed failure states all produce a settled `HTTPResponse` with no exception. Check `response.isFailed` for client-level failures and `response.status` for HTTP errors.
@@ -444,6 +470,7 @@ interface HTTPClientError {
 | `stream_write_error`    | Writing chunks to the StreamResponseFactory writable failed                                                                                                                                                                                                |
 | `stream_response_error` | The upstream response stream errored after headers arrived                                                                                                                                                                                                 |
 | `stream_setup_error`    | The StreamResponseFactory threw an error during setup, returned something other than a writable, `null`, or a cancel object, or the attempt timed out while it was still setting up (`isTimeout: true`, not retried: the factory may have opened its sink) |
+| `response_too_large`    | A buffered response body passed `maxResponseBytes`. The real status and headers are kept, with `isStreamError: true`; not retried. See [Response Size Limit](#response-size-limit)                                                                         |
 
 When `adapter_error` comes from a response the client could not read, the server did answer, so the response keeps the status that answer carried (the same status `onAttemptEnd` reports) and its headers once they were normalized, with `isFailed: true`, `isNetworkError: false` and a `null` body, as a stream error keeps its real status. Treat `isFailed` and the error code as authoritative, not the status. The status is `0` when the response object's own fields could not be read, and the headers are empty when they were what failed. `wasRedirectDetected` and `detectedRedirectURL` are the adapter's own when its response object was read, as on a healthy response. When there was none to read them from - a cookie jar that threw on a body stream aborted after headers, or a response whose own fields could not be read - they are derived from the status and `Location`. When it was the configured cookie jar that threw while storing the response's `Set-Cookie`, the error's `message` is `Cookie jar failed to process response headers` and its `cause` is what the jar threw. A cancel takes precedence over a jar failure, and so does a per-attempt timeout that cut the body stream: the request ends as that cancel or timeout instead. A jar failure on an answer that arrived whole is this `adapter_error` even if the attempt's timer had fired.
 
@@ -625,6 +652,7 @@ interface AttemptRequest {
   body?: string | Uint8Array | FormData | null; // serialized adapter-facing body
   rawBody?: unknown; // structured pre-serialization body when available
   timeout?: number; // configured per-attempt timeout budget in ms
+  maxResponseBytes?: number; // configured buffered response size limit; Infinity for none
   attemptNumber?: number; // 1-based; undefined on pre-dispatch best-effort snapshots
   requestID?: string; // matches HTTPResponse.requestID / HTTPClientError.requestID
 }
@@ -1178,7 +1206,7 @@ const authClient = client.createSubClient({
 - `'replace'` (default): the sub-client's `defaultHeaders` replace the parent's entirely.
 - `'merge'`: the sub-client's `defaultHeaders` are layered on top of the parent's.
 
-Any `HTTPClientConfig` field can be overridden. An omitted or explicitly `undefined` field inherits the parent value. Of the options typed to accept `null`, a null `timeout` inherits, while `cookieJar: null` disables cookies for that sub-client even if the parent has one. A `null` given to an option whose type excludes it also inherits for `adapter`, `defaultHeaders` and `followRedirects`; for every other option it reaches the new client as given and is handled as `new HTTPClient()` handles it, so `retryPolicy: null` disables the parent's retries, a null boolean option reads as `false`, a null `userAgent` as unset, and a null `maxRedirects` throws.
+Any `HTTPClientConfig` field can be overridden. An omitted or explicitly `undefined` field inherits the parent value. Of the options typed to accept `null`, a null `timeout` or `maxResponseBytes` inherits, while `cookieJar: null` disables cookies for that sub-client even if the parent has one. A `null` given to an option whose type excludes it also inherits for `adapter`, `defaultHeaders` and `followRedirects`; for every other option it reaches the new client as given and is handled as `new HTTPClient()` handles it, so `retryPolicy: null` disables the parent's retries, a null boolean option reads as `false`, a null `userAgent` as unset, and a null `maxRedirects` throws.
 
 Sub-clients inherit the parent's interceptors and observers. The parent chain runs first, then the sub-client's own. This means shared concerns like auth headers or global logging happen before sub-client-specific logic. Adding interceptors or observers to a sub-client does not affect the parent.
 
@@ -1770,6 +1798,8 @@ Two things deliberately do **not** set the flag. A caller's own `AbortSignal` fi
 | `MockAdapter`  | Simulated       | Opt in per response with `streamError: true`, or name the code explicitly                                                                                 |
 | `XHRAdapter`   | Not reported    | `XMLHttpRequest` discards the status on a network error, leaving nothing to qualify                                                                       |
 
+Every adapter, `XHRAdapter` included, also reports `response_too_large` as a stream error for a buffered body past `maxResponseBytes` (see [Response Size Limit](#response-size-limit)): there the adapter itself stops the read, while the headers are still in hand.
+
 `FetchAdapter` is not limited to server runtimes here. Headers have already arrived when the body read starts, so the status is readable in a browser exactly as it is under Node or Bun, and a truncated body rejects the same way.
 
 A per-attempt timeout that fires _during_ the body read counts as a post-header failure too, and is reported with the real status rather than as a plain timeout. The adapter cannot tell that abort apart from a caller cancellation because both arrive on the same signal, so it carries the response metadata out with the error and the client decides: a cancellation stays `isCancelled`, a timeout becomes a terminal stream failure (`stream_response_error`, even when a slow sink rather than the server is what held the body up).
@@ -2027,6 +2057,7 @@ From `lifecycleion/http-client`:
 | Constant                                   | Value / Type                       | Description                          |
 | ------------------------------------------ | ---------------------------------- | ------------------------------------ |
 | `DEFAULT_TIMEOUT_MS`                       | `30_000`                           | Default request timeout              |
+| `DEFAULT_MAX_RESPONSE_BYTES`               | `67_108_864` (64 MiB)              | Default buffered response size limit |
 | `DEFAULT_REQUEST_ID_HEADER`                | `'x-local-client-request-id'`      | Header name for request IDs          |
 | `DEFAULT_REQUEST_ATTEMPT_HEADER`           | `'x-local-client-request-attempt'` | Header name for attempt number       |
 | `DEFAULT_USER_AGENT`                       | `'lifecycleion-http-client'`       | Default User-Agent string            |

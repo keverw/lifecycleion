@@ -1298,3 +1298,88 @@ test('XHRAdapter keeps the redirect target when a final progress callback aborts
   expect(response.wasRedirectDetected).toBe(true);
   expect(response.detectedRedirectURL).toBe('https://api.test/b');
 });
+
+describe('XHRAdapter - maxResponseBytes', () => {
+  test('a download passing the limit is aborted and fails as response_too_large with its status and headers', async () => {
+    const onDownloadProgress: number[] = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/big',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 100,
+      onDownloadProgress: (event) => {
+        onDownloadProgress.push(event.loaded);
+      },
+    });
+    const xhr = lastXHR;
+    xhr.status = 503;
+    xhr.getAllResponseHeadersResult = 'content-type: text/plain\r\n';
+    // As a real XHR does: reset to UNSENT and fire `abort` synchronously.
+    xhr.abort = () => {
+      xhr.abortCalled = true;
+      xhr.status = 0;
+      xhr.getAllResponseHeadersResult = '';
+      xhr.simulateAbort();
+    };
+
+    xhr.simulateDownloadProgress(60, 0);
+    xhr.simulateDownloadProgress(160, 0);
+    // A late event after the abort changes nothing.
+    xhr.simulateDownloadProgress(260, 0);
+
+    const response = await promise;
+
+    expect(xhr.abortCalled).toBe(true);
+    expect(response.status).toBe(503);
+    expect(response.headers['content-type']).toBe('text/plain');
+    expect(response.body).toBeNull();
+    expect(response.isStreamError).toBe(true);
+    expect(response.streamErrorCode).toBe('response_too_large');
+    expect(response.errorCause?.message).toBe(
+      'Response body exceeds maxResponseBytes (100); raise maxResponseBytes',
+    );
+    // Only the progress under the limit was reported.
+    expect(onDownloadProgress).toEqual([60]);
+  });
+
+  test('a loaded body over the limit fails as response_too_large', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/big',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 4,
+    });
+    lastXHR.status = 200;
+    lastXHR.response = textBody('hello world');
+    lastXHR.simulateLoad();
+
+    const response = await promise;
+
+    expect(response.status).toBe(200);
+    expect(response.body).toBeNull();
+    expect(response.isStreamError).toBe(true);
+    expect(response.streamErrorCode).toBe('response_too_large');
+  });
+
+  test('a body within the limit, or with Infinity, is delivered', async () => {
+    for (const maxResponseBytes of [11, Infinity]) {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/ok',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes,
+      });
+      lastXHR.status = 200;
+      lastXHR.simulateDownloadProgress(11, 11);
+      lastXHR.response = textBody('hello world');
+      lastXHR.simulateLoad();
+
+      const response = await promise;
+
+      expect(response.isStreamError).toBeUndefined();
+      expect(new TextDecoder().decode(response.body as Uint8Array)).toBe(
+        'hello world',
+      );
+    }
+  });
+});

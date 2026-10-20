@@ -15,6 +15,7 @@
 import { EventEmitter } from 'node:events';
 import type * as http from 'node:http';
 import * as zlib from 'node:zlib';
+import { hasResponseBody } from './response-limit';
 
 /** The encodings NodeAdapter asks for and decodes, as `fetch` asks for them. */
 export const ACCEPTED_CONTENT_ENCODINGS = 'gzip, deflate, br';
@@ -67,13 +68,7 @@ export function createResponseBodySource(
   contentEncoding: string | string[] | undefined,
 ): { source: ResponseBodySource; isDecoded: boolean; release: () => void } {
   const raw = { source: res, isDecoded: false, release: () => undefined };
-  const hasBody =
-    method.toUpperCase() !== 'HEAD' &&
-    status >= 200 &&
-    status !== 204 &&
-    status !== 304;
-
-  if (!hasBody || contentEncoding === undefined) {
+  if (!hasResponseBody(method, status) || contentEncoding === undefined) {
     return raw;
   }
 

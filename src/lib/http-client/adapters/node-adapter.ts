@@ -41,6 +41,12 @@ import {
   createResponseBodySource,
   type ResponseBodySource,
 } from '../internal/response-decoding';
+import {
+  hasResponseBody,
+  makeResponseTooLargeError,
+  parseContentLength,
+  readMaxResponseBytes,
+} from '../internal/response-limit';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
   materializeRequestHeaders,
@@ -446,6 +452,8 @@ export class NodeAdapter implements HTTPAdapter {
       request.onDownloadProgress,
       'onDownloadProgress',
     );
+    // The most a buffered body may hold, decoded; `Infinity` for none.
+    const maxResponseBytes = readMaxResponseBytes(request);
 
     const parsedURL = new URL(request.requestURL);
     const urlOptions = urlToHttpOptions(parsedURL);
@@ -1709,6 +1717,41 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             // --- Normal buffered response ---
+
+            // A body too large to hold fails as a stream error with the real status:
+            // the server answered, and what failed is taking delivery of what it sent.
+            // The response is torn down - its socket, and any decoder still inflating it -
+            // so the rest of the body is neither read nor decoded into nothing.
+            const refuseTooLargeBody = (): void => {
+              activeBufferedResponse = undefined;
+              tearDownAfterResponse();
+              settleResponse({
+                status,
+                headers,
+                body: null,
+                isStreamError: true,
+                streamErrorCode: 'response_too_large',
+                errorCause: makeResponseTooLargeError(maxResponseBytes, true),
+              });
+            };
+
+            // Refused before a byte is read when the body says up front that it is over
+            // the limit. Only an undecoded one: a compressed body's `Content-Length` counts
+            // the encoded bytes, and the limit counts what is handed over.
+            if (!isDecoded && hasResponseBody(request.method, status)) {
+              const declaredLength = parseContentLength(
+                headers['content-length'],
+              );
+
+              if (
+                declaredLength !== undefined &&
+                declaredLength > maxResponseBytes
+              ) {
+                refuseTooLargeBody();
+                return;
+              }
+            }
+
             activeBufferedResponse = {
               status,
               headers,
@@ -1733,8 +1776,17 @@ export class NodeAdapter implements HTTPAdapter {
                 return;
               }
 
-              chunks.push(chunk);
               loadedBytes += chunk.length;
+
+              // Counted before the chunk is kept, so a body over the limit is never held
+              // whole: what was gathered is dropped with it.
+              if (loadedBytes > maxResponseBytes) {
+                chunks.length = 0;
+                refuseTooLargeBody();
+                return;
+              }
+
+              chunks.push(chunk);
 
               // progress: -1 when Content-Length is absent (chunked transfer,
               // compressed response, etc.) — callers treat -1 as "length unknown".
@@ -3074,6 +3126,7 @@ function snapshotAdapterRequest(request: AdapterRequest): AdapterRequest {
     attemptNumber,
     requestID,
     initialURL,
+    maxResponseBytes,
   } = request;
 
   return {
@@ -3092,6 +3145,7 @@ function snapshotAdapterRequest(request: AdapterRequest): AdapterRequest {
     attemptNumber,
     requestID,
     initialURL,
+    maxResponseBytes,
   };
 }
 

@@ -310,6 +310,7 @@ describe('HTTPRequestBuilder', () => {
       params: { page: 1 },
       body: { first: true },
       timeout: 1000,
+      maxResponseBytes: 2048,
       signal: new AbortController().signal,
       retryPolicy: null,
       retryNonIdempotentMethods: false,

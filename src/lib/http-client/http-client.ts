@@ -52,6 +52,7 @@ import {
 } from './utils';
 import {
   resolveRequestTimeoutMS,
+  resolveMaxResponseBytes,
   DEFAULT_REQUEST_ID_HEADER,
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_USER_AGENT,
@@ -211,6 +212,7 @@ export class BaseHTTPClient {
     Pick<
       HTTPClientConfig,
       | 'timeout'
+      | 'maxResponseBytes'
       | 'includeRequestID'
       | 'includeAttemptHeader'
       | 'followRedirects'
@@ -218,7 +220,7 @@ export class BaseHTTPClient {
       | 'retryNonIdempotentMethods'
     >
   > &
-    HTTPClientConfig & { timeout: number };
+    HTTPClientConfig & { timeout: number; maxResponseBytes: number };
 
   protected _adapter: NonNullable<HTTPClientConfig['adapter']>;
   protected _tracker: RequestTracker;
@@ -268,6 +270,11 @@ export class BaseHTTPClient {
         snapshot.timeout,
         undefined,
         'HTTPClient timeout',
+      ),
+      maxResponseBytes: resolveMaxResponseBytes(
+        snapshot.maxResponseBytes,
+        undefined,
+        'HTTPClient maxResponseBytes',
       ),
       cookieJar: snapshot.cookieJar,
       retryPolicy: isNullish(configuredRetryPolicy)
@@ -480,7 +487,8 @@ export class BaseHTTPClient {
     overrides: SubClientConfig = {},
   ): HTTPClientConfig {
     // Undefined overrides inherit; explicit null retains each option's policy
-    // (notably cookieJar: null disables the jar, while a null timeout inherits).
+    // (notably cookieJar: null disables the jar, while a null timeout or
+    // maxResponseBytes inherits).
     // Capture every documented field through its original receiver, regardless of
     // enumerability or prototype placement. See `snapshotClientConfigFields`.
     const snapshot = {
@@ -492,6 +500,7 @@ export class BaseHTTPClient {
       defaultHeadersStrategy,
       defaultHeaders: overrideHeaders,
       timeout,
+      maxResponseBytes,
       adapter,
       cookieJar,
       maxRedirects,
@@ -525,6 +534,7 @@ export class BaseHTTPClient {
       ...this._config,
       ...definedOverrides,
       timeout: timeout ?? this._config.timeout,
+      maxResponseBytes: maxResponseBytes ?? this._config.maxResponseBytes,
       defaultHeaders,
       followRedirects: shouldFollowRedirects,
       adapter: adapter ?? this._adapter,
@@ -591,6 +601,15 @@ export class BaseHTTPClient {
       options.timeout,
       this._config.timeout,
     );
+    // Resolved once, as the timeout is, and handed to every attempt's adapter call: the
+    // client's value when the request names none. `Infinity` is passed on as no limit.
+    const maxResponseBytes = resolveMaxResponseBytes(
+      options.maxResponseBytes,
+      this._config.maxResponseBytes,
+    );
+    // The limits every observed attempt snapshot reports, built once for the snapshots
+    // taken before or between dispatches.
+    const attemptLimits: AttemptLimits = { timeout, maxResponseBytes };
 
     // When the request's upload last reported progress, across every hop and attempt.
     // Stamped by the upload-progress wrapper each attempt hands the adapter, and read by
@@ -673,7 +692,7 @@ export class BaseHTTPClient {
         error,
         this._bestEffortAttemptRequestFromPending(
           interceptedRequest,
-          timeout,
+          attemptLimits,
           requestID,
         ),
         {
@@ -915,7 +934,7 @@ export class BaseHTTPClient {
             normalizedError,
             this._bestEffortAttemptRequestFromPending(
               initialRequestCandidate,
-              timeout,
+              attemptLimits,
               requestID,
               // The URL the response and error name, so a host filter agrees with them.
               { fallbackURL: url },
@@ -965,7 +984,7 @@ export class BaseHTTPClient {
             error,
             this._bestEffortAttemptRequestFromPending(
               finalRequest,
-              timeout,
+              attemptLimits,
               requestID,
               // The URL the response names: `finalRequest` was handed to the
               // interceptors, which could have rewritten it before cancelling.
@@ -1035,6 +1054,7 @@ export class BaseHTTPClient {
             sentBody,
             credentialScope,
             timeout,
+            maxResponseBytes,
             cancelSignal,
             signalReleasers,
             uploadActivity,
@@ -1495,7 +1515,7 @@ export class BaseHTTPClient {
             } catch (error) {
               observerRequest = this._bestEffortAttemptRequestFromPending(
                 failedRedirectRequest,
-                timeout,
+                attemptLimits,
                 requestID,
                 { fallbackURL: redirectURL },
               );
@@ -1537,7 +1557,7 @@ export class BaseHTTPClient {
               const cancelledRequestURL = redirectTargetURL;
               observerRequest = this._bestEffortAttemptRequestFromPending(
                 redirectRequest,
-                timeout,
+                attemptLimits,
                 requestID,
                 // See the initial phase's cancel.
                 { reportedURL: redirectTargetURL },
@@ -1581,7 +1601,7 @@ export class BaseHTTPClient {
             if (!this._isSupportedRequestURL(redirectInterceptURL)) {
               observerRequest = this._bestEffortAttemptRequestFromPending(
                 redirectIntercept,
-                timeout,
+                attemptLimits,
                 requestID,
               );
               response = this._buildResponse<T>({
@@ -1684,7 +1704,7 @@ export class BaseHTTPClient {
 
                 observerRequest = this._bestEffortAttemptRequestFromPending(
                   sanitizedRedirectRequest,
-                  timeout,
+                  attemptLimits,
                   requestID,
                 );
 
@@ -1798,7 +1818,7 @@ export class BaseHTTPClient {
           // The current hop's request once there is one, matching the URLs above.
           this._bestEffortAttemptRequestFromPending(
             currentInterceptedRequest ?? finalRequest,
-            timeout,
+            attemptLimits,
             requestID,
           ),
           {
@@ -2073,6 +2093,8 @@ export class BaseHTTPClient {
     credentialScope: { url: string };
     /** Per-attempt timeout in ms. Each attempt gets its own independent timer — NOT a total deadline across all retries. */
     timeout: number;
+    /** The most bytes of a buffered response body each attempt's adapter reads; `Infinity` for no limit. */
+    maxResponseBytes: number;
     /** Cancellation signal from user cancel / cancelAll / external AbortSignal — NOT timeout. Also used to abort retry delays. */
     cancelSignal: AbortSignal;
     /** Where each attempt's signal composition registers its release; see `_composeSignals`. */
@@ -2142,6 +2164,7 @@ export class BaseHTTPClient {
       request: baseRequest,
       credentialScope,
       timeout,
+      maxResponseBytes,
       cancelSignal,
       signalReleasers,
       uploadActivity,
@@ -2354,7 +2377,7 @@ export class BaseHTTPClient {
             : {}),
           sentRequest: this._bestEffortAttemptRequestFromPending(
             pendingRequest,
-            timeout,
+            { timeout, maxResponseBytes },
             requestID,
             // The hop's own URL when the pending request's cannot be read, so the
             // response, the error and host-filtered observers name a real one.
@@ -2492,7 +2515,7 @@ export class BaseHTTPClient {
         sentRequest = this._buildAttemptRequest(
           attemptRequest,
           observedBodies,
-          { requestID, timeout, attemptNumber, cookieJar },
+          { requestID, timeout, maxResponseBytes, attemptNumber, cookieJar },
         );
       } catch (error) {
         // Serialization and cookie/header preparation precede adapter dispatch. The
@@ -2566,6 +2589,9 @@ export class BaseHTTPClient {
             // itself.
             attemptNumber,
             requestID: requestID,
+            // Every adapter stops reading a buffered body past it; a streamed one is
+            // not held, so it is not limited. See `AdapterRequest.maxResponseBytes`.
+            maxResponseBytes,
             // The origin the caller addressed, so an adapter can tell a redirect hop to
             // another host from the request it was configured for. See
             // `AdapterRequest.initialURL`.
@@ -3966,7 +3992,7 @@ export class BaseHTTPClient {
    * Build an HTTPClientError from a failed response.
    *
    * Error code priority:
-   * 1. Explicit codeOverride (redirect_disabled, redirect_loop, request_setup_error, adapter_error, stream_write_error, stream_response_error, stream_setup_error)
+   * 1. Explicit codeOverride (redirect_disabled, redirect_loop, request_setup_error, adapter_error, stream_write_error, stream_response_error, stream_setup_error, response_too_large)
    * 2. Response flags (isCancelled → cancelled, isTimeout → timeout),
    *    except streamed-body failures preserve their specific stream_* code while
    *    still surfacing `isTimeout: true`
@@ -3999,7 +4025,8 @@ export class BaseHTTPClient {
     const isSpecificStreamCodePreserved =
       code === 'stream_write_error' ||
       code === 'stream_response_error' ||
-      code === 'stream_setup_error';
+      code === 'stream_setup_error' ||
+      code === 'response_too_large';
 
     if (response.isCancelled) {
       code = 'cancelled';
@@ -4023,6 +4050,8 @@ export class BaseHTTPClient {
       message = 'Response download stream failed';
     } else if (code === 'stream_setup_error') {
       message = 'Stream response setup failed';
+    } else if (code === 'response_too_large') {
+      message = 'Response body exceeded maxResponseBytes';
     }
 
     return {
@@ -4153,11 +4182,13 @@ export class BaseHTTPClient {
     params: {
       requestID: string;
       timeout: number;
+      maxResponseBytes: number;
       attemptNumber?: number;
       cookieJar?: CookieJar | null;
     },
   ): AttemptRequest {
-    const { requestID, timeout, attemptNumber, cookieJar } = params;
+    const { requestID, timeout, maxResponseBytes, attemptNumber, cookieJar } =
+      params;
 
     // Build the finalized attempt snapshot before adapter-specific transport
     // materialization. Header names are already lowercase (see `ResolvedRequest`), and
@@ -4204,6 +4235,7 @@ export class BaseHTTPClient {
       body: observedBodies.body,
       rawBody: observedBodies.rawBody,
       timeout,
+      maxResponseBytes,
       attemptNumber,
       requestID,
     };
@@ -4216,7 +4248,7 @@ export class BaseHTTPClient {
    */
   private _bestEffortAttemptRequestFromPending(
     request: InterceptedRequest,
-    timeout: number,
+    limits: AttemptLimits,
     requestID: string,
     urls: {
       /** The URL the response falls back to when `requestURL` cannot be read. */
@@ -4314,7 +4346,8 @@ export class BaseHTTPClient {
       headers,
       body: clonedBodies.body,
       rawBody: clonedBodies.rawBody,
-      timeout,
+      timeout: limits.timeout,
+      maxResponseBytes: limits.maxResponseBytes,
       requestID,
     };
   }
@@ -4513,6 +4546,11 @@ export class HTTPClient extends BaseHTTPClient {
  */
 export type HTTPSubClient = Omit<HTTPClient, 'createSubClient'>;
 
+/** The per-request limits an observed attempt snapshot reports. */
+type AttemptLimits = Required<
+  Pick<AttemptRequest, 'timeout' | 'maxResponseBytes'>
+>;
+
 type ObservedAttemptBodies = Pick<AttemptRequest, 'body' | 'rawBody'> & {
   contentType: string | null;
 };
@@ -4635,6 +4673,7 @@ function snapshotClientConfigFields(config: SubClientConfig) {
     baseURL: config.baseURL,
     defaultHeaders: config.defaultHeaders,
     timeout: config.timeout,
+    maxResponseBytes: config.maxResponseBytes,
     cookieJar: config.cookieJar,
     retryPolicy: config.retryPolicy,
     retryNonIdempotentMethods: config.retryNonIdempotentMethods,

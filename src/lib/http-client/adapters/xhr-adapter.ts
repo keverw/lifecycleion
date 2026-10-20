@@ -2,6 +2,10 @@ import { defineEntry } from '../../internal/define-entry';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 import { guardProgressCallback } from '../internal/progress';
 import { nonRetryableAdapterErrorFrom } from '../internal/adapter-error';
+import {
+  makeResponseTooLargeError,
+  readMaxResponseBytes,
+} from '../internal/response-limit';
 import { isArrayBufferLike } from '../../internal/binary-view';
 import type {
   HTTPAdapter,
@@ -52,6 +56,8 @@ export class XHRAdapter implements HTTPAdapter {
       request.requestURL,
       request.initialURL,
     );
+    // The most a buffered body may hold; `Infinity` for none.
+    const maxResponseBytes = readMaxResponseBytes(request);
 
     return new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -204,7 +210,52 @@ export class XHRAdapter implements HTTPAdapter {
       let downloadedBytes = 0;
       let downloadTotalBytes = 0;
 
+      // Set when this adapter aborted the XHR itself over a body past `maxResponseBytes`,
+      // so the `abort` event that follows is not reported as a cancel.
+      let didExceedMaxResponseBytes = false;
+
+      /**
+       * Fail a body past `maxResponseBytes` as a stream error with the real status and
+       * headers, and stop the download. Both are read before `xhr.abort()`, which resets
+       * them. A browser-followed redirect is reported as the redirect, as on `load`: the
+       * client refuses those whatever the body.
+       */
+      const refuseTooLargeBody = (): void => {
+        didExceedMaxResponseBytes = true;
+        const responseURL = xhr.responseURL;
+
+        if (
+          responseURL &&
+          didBrowserFollowRedirect(responseURL, dispatchedURL)
+        ) {
+          resolve(browserRedirectResponse(responseURL));
+        } else {
+          resolve({
+            status: xhr.status,
+            headers: parseXHRResponseHeaders(xhr.getAllResponseHeaders()),
+            body: null,
+            isStreamError: true,
+            streamErrorCode: 'response_too_large',
+            errorCause: makeResponseTooLargeError(maxResponseBytes, false),
+          });
+        }
+
+        xhr.abort();
+      };
+
       xhr.addEventListener('progress', (event) => {
+        // Stopped as soon as the download passes the limit, rather than once the whole
+        // body has been buffered. `loaded` counts the bytes as they arrived - encoded,
+        // where the response was compressed - so `load` checks the decoded body too.
+        if (didExceedMaxResponseBytes) {
+          return;
+        }
+
+        if (event.loaded > maxResponseBytes) {
+          refuseTooLargeBody();
+          return;
+        }
+
         const progress = event.lengthComputable
           ? event.loaded / event.total
           : -1;
@@ -266,16 +317,7 @@ export class XHRAdapter implements HTTPAdapter {
             });
           }
 
-          resolve({
-            status: 0,
-            wasRedirectDetected: true,
-            // XHR exposes the post-redirect final URL via responseURL. Browser
-            // fetch opaque redirects do not, so this is intentionally
-            // adapter-specific and surfaced separately from requestURL.
-            detectedRedirectURL: responseURL,
-            headers: {},
-            body: null,
-          });
+          resolve(browserRedirectResponse(responseURL));
           return;
         }
 
@@ -286,6 +328,21 @@ export class XHRAdapter implements HTTPAdapter {
           xhr.getAllResponseHeaders(),
         );
         const body = readResponseBody(request.method, xhr);
+
+        // The body as handed over can be larger than the bytes progress counted - a
+        // compressed response is counted encoded there - and a browser need not report
+        // progress at all, so the whole body is checked once more here.
+        if (body !== null && body.length > maxResponseBytes) {
+          resolve({
+            status,
+            headers: responseHeaders,
+            body: null,
+            isStreamError: true,
+            streamErrorCode: 'response_too_large',
+            errorCause: makeResponseTooLargeError(maxResponseBytes, false),
+          });
+          return;
+        }
 
         // Fallback: upload.load didn't fire (no request body, or the browser
         // skipped the event). Ensure callers always see a 100% upload event,
@@ -352,6 +409,11 @@ export class XHRAdapter implements HTTPAdapter {
       });
 
       xhr.addEventListener('abort', () => {
+        // Already resolved as `response_too_large`; this abort is the adapter's own.
+        if (didExceedMaxResponseBytes) {
+          return;
+        }
+
         reject(new DOMException('Request aborted', 'AbortError'));
       });
 
@@ -371,6 +433,23 @@ export class XHRAdapter implements HTTPAdapter {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * The response for a redirect the browser followed on its own: `status: 0` with the
+ * final URL, which the client reports as `redirect_disabled`.
+ */
+function browserRedirectResponse(responseURL: string): AdapterResponse {
+  return {
+    status: 0,
+    wasRedirectDetected: true,
+    // XHR exposes the post-redirect final URL via responseURL. Browser
+    // fetch opaque redirects do not, so this is intentionally
+    // adapter-specific and surfaced separately from requestURL.
+    detectedRedirectURL: responseURL,
+    headers: {},
+    body: null,
+  };
+}
 
 /**
  * Returns the response body as a Uint8Array, or null for response types that

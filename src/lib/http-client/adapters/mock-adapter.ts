@@ -12,6 +12,10 @@ import {
   uploadCompleteEvent,
 } from '../internal/progress';
 import { materializeRequestHeaders } from '../internal/header-utils';
+import {
+  makeResponseTooLargeError,
+  readMaxResponseBytes,
+} from '../internal/response-limit';
 import qs from 'qs';
 import { sleep } from '../../sleep';
 import {
@@ -546,7 +550,7 @@ export class MockAdapter implements HTTPAdapter {
 
     // A simulated post-header body failure loses the body the same way a real
     // one does, so the handler's body is never serialized.
-    const streamErrorCode = resolveMockStreamErrorCode(
+    const simulatedStreamErrorCode = resolveMockStreamErrorCode(
       mockResponse.streamError,
     );
 
@@ -563,6 +567,17 @@ export class MockAdapter implements HTTPAdapter {
       // retried, for the reason a bad delay is not.
       throw nonRetryableAdapterErrorFrom(error);
     }
+
+    // A body past `maxResponseBytes` fails as the real adapters fail it: a stream error
+    // that keeps the status and headers, the body dropped. A simulated stream error
+    // already loses the body, so it stands as the route asked.
+    const maxResponseBytes = readMaxResponseBytes(request);
+    const isResponseTooLarge =
+      simulatedStreamErrorCode === undefined &&
+      intendedBody !== null &&
+      intendedBody.length > maxResponseBytes;
+    const streamErrorCode: AdapterResponse['streamErrorCode'] =
+      isResponseTooLarge ? 'response_too_large' : simulatedStreamErrorCode;
 
     // A simulated stream error loses the body, but it strikes after headers
     // arrived, so the headers still stand — Content-Type included. Header
@@ -655,9 +670,11 @@ export class MockAdapter implements HTTPAdapter {
         ? {
             isStreamError: true,
             streamErrorCode,
-            errorCause: new Error(
-              'Mock response stream error (MockResponse.streamError)',
-            ),
+            errorCause: isResponseTooLarge
+              ? makeResponseTooLargeError(maxResponseBytes, false)
+              : new Error(
+                  'Mock response stream error (MockResponse.streamError)',
+                ),
           }
         : {}),
     };
