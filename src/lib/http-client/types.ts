@@ -860,8 +860,9 @@ export type ErrorObserverPhase = Extract<
 //                   Because they run before, they can refresh auth tokens, rewrite URLs,
 //                   add headers, or abort entirely.
 //
-//   Observers     = "what DID happen", run after an attempt produces a result, cannot
-//                   modify anything. Because they run after, they are the right place for
+//   Observers     = "what DID happen", run after an attempt produces a result, with no
+//                   say in it. They are handed the response and error themselves, so
+//                   treat them as read-only: a change is what the caller gets back. Because they run after, they are the right place for
 //                   logging, metrics, cache writes, and analytics. A common pattern is
 //                   reading auth tokens or account metadata out of response bodies (or even
 //                   error bodies) and updating client state, without touching the response

@@ -476,8 +476,9 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
   // counting one that appears only once decoded, so `1.2.3.4%2e.` is the name `1.2.3.4..`
   // to it and not the address `1.2.3.4`.
   const hostAsWritten = trimmed;
+  const didHaveTrailingDot = trimmed.endsWith('.');
 
-  if (trimmed.endsWith('.')) {
+  if (didHaveTrailingDot) {
     trimmed = trimmed.slice(0, -1);
   }
 
@@ -518,6 +519,16 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
     }
     if (!/^[a-z0-9_.-]+$/.test(ascii)) {
       return '';
+    }
+    // A trailing dot mapping exposed: a character IDNA maps to nothing after a dot
+    // (`example.com.` + a soft hyphen) is `example.com.` once mapped. One trailing dot in
+    // all is the FQDN form and dropped; two is the `example.com..` the parser refuses.
+    if (ascii.endsWith('.')) {
+      if (didHaveTrailingDot || ascii.endsWith('..')) {
+        return '';
+      }
+
+      return normalizeHostText(ascii.slice(0, -1), isWholeHost);
     }
     // On the Unicode form of each label: an IDN label starting or ending with a hyphen
     // (`-ñ`) is `xn----rga` once encoded, which hides the hyphen from a check on `ascii`.

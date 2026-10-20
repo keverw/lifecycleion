@@ -162,6 +162,29 @@ export class PublicSuffixResolver {
   private readonly hasOverrides: boolean;
 
   constructor(overrides?: PublicSuffixOverrides) {
+    // Shape-checked, as every entry is: `publicSuffixes: ['corp.internal']` (the list
+    // given where `{ add }` belongs) or a misspelled `{ ad: [...] }` built a jar with no
+    // overrides at all, leaving the tenants the caller meant to isolate sharing cookies.
+    if (overrides !== undefined) {
+      if (
+        typeof overrides !== 'object' ||
+        overrides === null ||
+        Array.isArray(overrides)
+      ) {
+        throw new TypeError(
+          `publicSuffixes must be an object with 'add' and/or 'remove' lists (got ${Array.isArray(overrides) ? 'an array' : overrides === null ? 'null' : typeof overrides})`,
+        );
+      }
+
+      for (const key of Object.keys(overrides)) {
+        if (key !== 'add' && key !== 'remove') {
+          throw new TypeError(
+            `publicSuffixes has an unknown field '${key}'; only 'add' and 'remove' are read`,
+          );
+        }
+      }
+    }
+
     this.added = normalizeList(overrides?.add, 'add');
     this.removed = normalizeList(overrides?.remove, 'remove');
 

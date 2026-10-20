@@ -482,7 +482,28 @@ export class NodeAdapter implements HTTPAdapter {
     const isDecompressing = this._config.decompress !== false;
 
     const parsedURL = new URL(request.requestURL);
-    const urlOptions = urlToHttpOptions(parsedURL);
+
+    // Refused, not sent: any other scheme went out as plaintext HTTP - a `wss://` URL to
+    // port 80, its userinfo as Basic auth. `HTTPClient` checks this first; a caller
+    // driving the adapter directly did not.
+    if (parsedURL.protocol !== 'http:' && parsedURL.protocol !== 'https:') {
+      throw nonRetryableAdapterErrorFrom(
+        new TypeError(
+          `NodeAdapter sends http: and https: URLs only (got ${parsedURL.protocol})`,
+        ),
+      );
+    }
+
+    // `urlToHttpOptions` percent-decodes the userinfo, and a malformed escape
+    // (`a%E0:b@`) throws a `URIError` that reads the same on every attempt: tagged
+    // non-retryable, as the other setup throws are, rather than retried.
+    let urlOptions: ReturnType<typeof urlToHttpOptions>;
+    try {
+      urlOptions = urlToHttpOptions(parsedURL);
+    } catch (error) {
+      throw nonRetryableAdapterErrorFrom(error);
+    }
+
     const isHTTPS = parsedURL.protocol === 'https:';
     const httpModule = isHTTPS ? https : http;
 

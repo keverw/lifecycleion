@@ -28,7 +28,11 @@ export interface Cookie {
   name: string;
   value: string;
   domain?: string;
-  /** True when the cookie came from a Set-Cookie without Domain= and must not match subdomains. */
+  /**
+   * True when the cookie must not match subdomains: a Set-Cookie with no `Domain=`, an
+   * empty `Domain=` / `Domain=.`, or a `Domain=` naming a public suffix that is the
+   * request host itself (`Domain=localhost` from `http://localhost/`).
+   */
   hostOnly?: boolean;
   path?: string;
   expires?: Date;
@@ -323,6 +327,21 @@ export class CookieJar {
 
     if (!this.hasReadableExpiry(input)) {
       return false;
+    }
+
+    // A same-realm copy of a `Date` made in another realm (a `vm` context, an iframe),
+    // which `hasReadableExpiry` accepts by its time rather than by `instanceof`.
+    if (input.expires !== undefined && !(input.expires instanceof Date)) {
+      input.expires = new Date(Date.prototype.getTime.call(input.expires));
+    }
+
+    // Booleans or absent: the send path withholds a cookie whose `secure`, `hostOnly` or
+    // `httpOnly` is anything else, so storing one reported a cookie that never goes out.
+    for (const flag of ['secure', 'hostOnly', 'httpOnly'] as const) {
+      const value: unknown = input[flag];
+      if (value !== undefined && typeof value !== 'boolean') {
+        return false;
+      }
     }
 
     if (!this.hasWritableNameAndValue(input)) {
@@ -832,6 +851,14 @@ export class CookieJar {
 
       if ((cookie.maxAge as unknown) === null) {
         delete cookie.maxAge;
+      }
+
+      // A `null` flag reads as absent, as a `null` expiry does; any other non-boolean is
+      // refused by `setCookie`, and counted out of the total.
+      for (const flag of ['secure', 'hostOnly', 'httpOnly'] as const) {
+        if ((cookie[flag] as unknown) === null) {
+          delete cookie[flag];
+        }
       }
 
       if (rawExpires === undefined || rawExpires === null) {
@@ -1521,11 +1548,19 @@ export class CookieJar {
   private hasReadableExpiry(cookie: CookieInput): boolean {
     const { expires, maxAge, createdAt } = cookie;
 
-    if (
-      expires !== undefined &&
-      (!(expires instanceof Date) || Number.isNaN(expires.getTime()))
-    ) {
-      return false;
+    // A `Date` read by its time, not `instanceof`, so one from another realm counts.
+    if (expires !== undefined) {
+      let time: number;
+
+      try {
+        time = Date.prototype.getTime.call(expires);
+      } catch {
+        return false;
+      }
+
+      if (Number.isNaN(time)) {
+        return false;
+      }
     }
 
     if (maxAge !== undefined && !Number.isFinite(maxAge)) {

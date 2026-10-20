@@ -1949,7 +1949,11 @@ export class BaseHTTPClient {
                     response.redirectHistory.length > 0,
                 },
               }
-            : {}),
+            : // One detected with no target to name - an opaque redirect, a `3xx`
+              // with no `Location` - is kept too, flag alone.
+              response.wasRedirectDetected
+              ? { wasRedirectDetected: true }
+              : {}),
           ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
         });
         // Whatever the answer was - a success, or a failure such as a final 500 - the
@@ -3923,6 +3927,12 @@ export class BaseHTTPClient {
      * URL makes the followed entry and the new target the same string.
      */
     undispatchedRedirect?: { url: string; isRecorded: boolean };
+    /**
+     * A redirect the answer being replaced had detected with no target to name - a
+     * browser's opaque redirect, a `3xx` with no `Location` - kept when the response is
+     * rebuilt (see the late cancel in `send`).
+     */
+    wasRedirectDetected?: boolean;
   }): HTTPResponse<T> {
     const {
       adapterResponse,
@@ -3936,6 +3946,7 @@ export class BaseHTTPClient {
       requestBodySettled,
       answeredResponse,
       undispatchedRedirect,
+      wasRedirectDetected: isRedirectDetected,
     } = params;
     // Each response its own copy: the loop's history is the client's, and an observer
     // handed this response must not be able to rewrite the history of the request.
@@ -3953,7 +3964,9 @@ export class BaseHTTPClient {
           ? adapterRedirectFields(adapterResponse)
           : (answeredResponse ?? {});
     const wasRedirectDetected =
-      wasRedirectFollowed || (redirectFields.wasRedirectDetected ?? false);
+      wasRedirectFollowed ||
+      isRedirectDetected === true ||
+      (redirectFields.wasRedirectDetected ?? false);
     const detectedRedirectURL = redirectFields.detectedRedirectURL;
 
     // The caller's word first, on every branch below. The explicit parameter was

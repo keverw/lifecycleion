@@ -564,7 +564,7 @@ class SniffingInflate extends Transform {
  * over. A malformed header is left to the decoder, which fails on it.
  */
 class ZstdFrameWalker {
-  /** Zstandard frames (not skippable ones) whose last block has been read. */
+  /** Frames read whole: Zstandard frames and skippable ones alike, both valid (RFC 8878). */
   public frameCount = 0;
   private skipBytes = 0;
   private readonly fieldBytes: number[] = [];
@@ -637,6 +637,7 @@ class ZstdFrameWalker {
       this.expect(4, (size) => {
         this.skipBytes = readLittleEndian(size);
         this.hasFrame = true;
+        this.frameCount++;
         this.expectMagic();
       });
     } else {

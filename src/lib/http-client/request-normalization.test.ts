@@ -9,9 +9,11 @@ import {
   buildURL,
   extractFetchHeaders,
   matchesFilter,
+  mergeHeaders,
   parseContentType,
   stripCrossOriginURLCredentials,
 } from './utils';
+import { deepClone } from '../deep-clone';
 import {
   DEFAULT_MAX_RESPONSE_BYTES,
   RESPONSE_STREAM_ABORT_FLAG,
@@ -6829,4 +6831,169 @@ test('round 134: an observer rawBody keeps an own __proto__ key; builder.respons
   });
   await builder.send();
   expect(seen.at(-1)).toBe(200);
+});
+
+test('round 135: FetchAdapter keeps a __proto__ header beside a Content-Length and joins case-variant cookies', async () => {
+  // The raw list: a parsed header record cannot hold a `__proto__` key.
+  const received: string[][] = [];
+  const server = http.createServer((req, res) => {
+    received.push(req.rawHeaders.map((entry) => entry.toLowerCase()));
+    res.end('ok');
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/`;
+  try {
+    const headers: Record<string, string> = JSON.parse(
+      '{"__proto__":"x","Content-Length":"3"}',
+    );
+    await new FetchAdapter().send({
+      requestURL: url,
+      method: 'POST',
+      headers,
+      body: new TextEncoder().encode('abc'),
+    });
+    expect(received[0]).toContain('__proto__');
+
+    await new FetchAdapter().send({
+      requestURL: url,
+      method: 'GET',
+      headers: { Cookie: 'a=1', cookie: ['b=2', 'c=3'] },
+    });
+    expect(received[1]).toContain('a=1; b=2; c=3');
+  } finally {
+    server.close();
+  }
+});
+
+test('round 135: setCookie refuses a non-boolean flag; fromJSON reads a null one as absent', () => {
+  const jar = new CookieJar();
+  const base = { name: 'a', value: '1', domain: 'example.com' };
+  expect(jar.setCookie({ ...base, secure: 'true' as unknown as boolean })).toBe(
+    false,
+  );
+  expect(jar.setCookie({ ...base, hostOnly: null as unknown as boolean })).toBe(
+    false,
+  );
+  expect(
+    jar.fromJSON({
+      cookies: [
+        { ...base, secure: null as unknown as boolean, createdAt: Date.now() },
+      ],
+    }),
+  ).toBe(1);
+  expect(jar.getCookieHeaderString('https://example.com/')).toBe('a=1');
+});
+
+test('round 135: setCookie accepts a Date from another realm', () => {
+  const jar = new CookieJar();
+  const expires = vm.runInNewContext('new Date(Date.now() + 3600000)') as Date;
+  expect(
+    jar.setCookie({ name: 'a', value: '1', domain: 'example.com', expires }),
+  ).toBe(true);
+  expect(jar.getAllCookies()[0]?.expires).toBeInstanceOf(Date);
+  expect(jar.getCookieHeaderString('https://example.com/')).toBe('a=1');
+});
+
+test('round 135: a malformed publicSuffixes config throws', () => {
+  for (const publicSuffixes of [
+    ['corp.internal'],
+    'corp.internal',
+    { ad: ['corp.internal'] },
+    42,
+  ]) {
+    expect(
+      () =>
+        new CookieJar({ publicSuffixes } as unknown as ConstructorParameters<
+          typeof CookieJar
+        >[0]),
+    ).toThrow(TypeError);
+  }
+});
+
+test('round 135: a trailing dot IDNA mapping exposes is one trailing dot', () => {
+  expect(normalizeDomain('example.com.­')).toBe('example.com');
+  expect(normalizeDomain('example.com.­.')).toBe('');
+  expect(validateConfigEntry('com.­', 'domain').valid).toBe(false);
+  expect(matchesDomainList('example.com', ['example.com.­'])).toBe(true);
+});
+
+test('round 135: a same-scheme URL without slashes is read on its own for credentials', () => {
+  expect(
+    stripCrossOriginURLCredentials('https:u:p@b.com/x', 'https://a.com/'),
+  ).toBe('https://b.com/x');
+});
+
+test('round 135: header names are lowercased in ASCII only', () => {
+  const kelvin = 'X-Key';
+  expect(mergeHeaders({ [kelvin]: 'v' })).toEqual({ [`x-Key`]: 'v' });
+});
+
+test('round 135: deepClone copies a Buffer, a DataView and an ArrayBuffer', () => {
+  const buffer = Buffer.from('abc');
+  const copy = deepClone(buffer);
+  copy[0] = 0x7a;
+  expect(buffer.toString()).toBe('abc');
+
+  const view = new DataView(new ArrayBuffer(2));
+  view.setUint8(1, 9);
+  const viewCopy = deepClone({ view }).view;
+  expect(viewCopy).toBeInstanceOf(DataView);
+  expect(viewCopy.getUint8(1)).toBe(9);
+
+  const arrayBuffer = new ArrayBuffer(3);
+  expect(deepClone(arrayBuffer)).toBeInstanceOf(ArrayBuffer);
+  expect(deepClone(arrayBuffer)).not.toBe(arrayBuffer);
+});
+
+test('round 135: NodeAdapter refuses a non-http scheme and does not retry a malformed userinfo escape', async () => {
+  let hits = 0;
+  const server = http.createServer((_req, res) => {
+    hits++;
+    res.end('ok');
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const port = (server.address() as AddressInfo).port;
+  try {
+    let refusal: unknown;
+    try {
+      await new NodeAdapter().send({
+        requestURL: `wss://u:p@127.0.0.1:${port}/x`,
+        method: 'GET',
+        headers: {},
+      });
+    } catch (error) {
+      refusal = error;
+    }
+    expect(refusal).toBeInstanceOf(Error);
+    expect(hits).toBe(0);
+
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    });
+    const builder = client.get(`http://a%E0:b@127.0.0.1:${port}/`);
+    await builder.send();
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(builder.attemptCount).toBe(1);
+  } finally {
+    server.close();
+  }
+});
+
+test('round 135: a late cancel keeps a redirect detected with no target to name', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({ status: 302 }));
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+  });
+  const builder = client.get('/x');
+  builder.onAttemptEnd(() => {
+    builder.cancel();
+  });
+  const response = await builder.send();
+  expect(response.isCancelled).toBe(true);
+  expect(response.wasRedirectDetected).toBe(true);
+  expect(builder.error?.wasRedirectDetected).toBe(true);
 });

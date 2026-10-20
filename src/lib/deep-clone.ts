@@ -83,8 +83,27 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
       | Float64Array
       | BigInt64Array
       | BigUint64Array;
-    const cloned = typedArray.slice();
+    // The shared `%TypedArray%.prototype.slice`, not the array's own: `Buffer`
+    // overrides `slice` to return a view on the same memory, so a cloned `Buffer` was
+    // the original under another name.
+    const cloned = (
+      Object.getPrototypeOf(Uint8Array.prototype) as {
+        slice: (this: typeof typedArray) => typeof typedArray;
+      }
+    ).slice.call(typedArray);
     return cloned as T;
+  }
+
+  // A `DataView` over a copy of its bytes, and an `ArrayBuffer` copied: both fell through
+  // to the plain-object branch and came back as `{}`.
+  if (obj instanceof DataView) {
+    return new DataView(
+      obj.buffer.slice(obj.byteOffset, obj.byteOffset + obj.byteLength),
+    ) as T;
+  }
+
+  if (obj instanceof ArrayBuffer) {
+    return obj.slice(0) as T;
   }
 
   // Handle Array

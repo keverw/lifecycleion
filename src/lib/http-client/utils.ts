@@ -283,7 +283,14 @@ export function stripCrossOriginURLCredentials(
   }
 
   try {
-    const target = new URL(requestURL, initial);
+    // Read on its own first, as `fetch` reads it: `https:u:p@b.com/x` is a relative path
+    // under an `https:` base but an absolute URL to `b.com`, credentials and all.
+    let target: URL;
+    try {
+      target = new URL(requestURL);
+    } catch {
+      target = new URL(requestURL, initial);
+    }
 
     if (initial.origin === target.origin) {
       return requestURL;
@@ -408,6 +415,15 @@ const STANDARD_HTTP_METHODS: ReadonlySet<string> = new Set(HTTP_METHODS);
  * names are case-sensitive (RFC 9110) and a server may route `purge` and `PURGE` apart.
  * ASCII only: `toUpperCase` would also turn `poſt` into `POST`.
  */
+/**
+ * A header name lowercased in ASCII only, as HTTP header names are compared: `toLowerCase`
+ * maps the Kelvin sign U+212A to `k`, turning `X-Key` - a name every transport refuses -
+ * into the valid `x-key`.
+ */
+export function lowerCaseHeaderName(name: string): string {
+  return name.replace(/[A-Z]/g, (letter) => letter.toLowerCase());
+}
+
 export function normalizeHTTPMethod(method: string): HTTPMethod {
   const uppercased = method.replace(/[a-z]/g, (letter) => letter.toUpperCase());
   return STANDARD_HTTP_METHODS.has(uppercased) ? uppercased : method;
@@ -499,7 +515,7 @@ export function mergeHeaders(
     }
 
     for (const [key, value] of Object.entries(headers)) {
-      const name = key.toLowerCase();
+      const name = lowerCaseHeaderName(key);
       const normalized = normalizeMergedHeaderValue(value);
       if (normalized === undefined) {
         delete result[name];

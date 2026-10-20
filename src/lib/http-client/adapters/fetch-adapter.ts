@@ -1,3 +1,4 @@
+import { defineEntry } from '../../internal/define-entry';
 import {
   defineHiddenTags,
   markNonRetryableAdapterError,
@@ -515,13 +516,19 @@ function materializeFetchHeaders(
   const materialized = new Headers();
 
   for (const [key, value] of Object.entries(headers)) {
-    if (Array.isArray(value)) {
-      if (key.toLowerCase() === 'cookie') {
-        materialized.set(key, value.join('; '));
-      } else {
-        for (const item of value) {
-          materialized.append(key, item);
-        }
+    if (key.toLowerCase() === 'cookie') {
+      // Joined with `; ` onto any earlier spelling's (`Cookie` then `cookie`), as
+      // `materializeRequestHeaders` joins them: `set` replaced it, and `append` would
+      // join with `, `, which reads as one cookie.
+      const joined = Array.isArray(value) ? value.join('; ') : value;
+      const existing = materialized.get(key);
+      materialized.set(
+        key,
+        existing === null ? joined : `${existing}; ${joined}`,
+      );
+    } else if (Array.isArray(value)) {
+      for (const item of value) {
+        materialized.append(key, item);
       }
     } else {
       materialized.append(key, value);
@@ -589,7 +596,9 @@ function withoutHeader(
   const result: Record<string, string | string[]> = {};
   for (const key of names) {
     if (key.toLowerCase() !== name) {
-      result[key] = headers[key];
+      // Defined, as every other header record is: a `__proto__` header was dropped (or,
+      // as an array, became the record's prototype).
+      defineEntry(result, key, headers[key]);
     }
   }
 

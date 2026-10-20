@@ -373,7 +373,14 @@ per-attempt response deadline.
 
 The upload outcome is advisory: its resolved error does not itself change the received
 status, `isFailed`, `isNetworkError`, or retry eligibility. This preserves an early `413`
-and its explanation even if the server stops reading the body. Failures detected after
+and its explanation even if the server stops reading the body - as long as the answer
+reaches the client. A server that closes the connection with the body unread can reset
+it before the client has read its answer: nginx avoids this by reading and discarding the
+rest of the body for a while (`lingering_close`, on by default), but a server that does
+not linger can make the upload fail as a transport error (`status: 0`) on Node, where
+writing into the reset connection fails before the buffered answer is read. Bun reads the
+answer first. Such a failure is retried as any transport failure is, for an idempotent
+method. Failures detected after
 an early response are also reported on the global `'error'` channel. A timeout while the
 client waits to dispatch another hop is a separate request failure.
 
@@ -622,7 +629,7 @@ interface RequestInterceptorContext {
 
 ## Response Observers
 
-Observers run **after** an adapter attempt and cannot modify the response. They are the right place for logging, metrics, cache writes, and reading token state out of response bodies.
+Observers run **after** an adapter attempt and have no say in the outcome: what they return is ignored, and a throw is reported, not raised. They are handed the response, request and error themselves, not copies - a final observer's change to the response is what `send()` returns and the next observer sees - so treat them as read-only. They are the right place for logging, metrics, cache writes, and reading token state out of response bodies.
 
 ```typescript
 const removeObserver = client.addResponseObserver(

@@ -4,6 +4,7 @@ import { generateID } from '../id-helpers';
 import { validateMaxResponseBytes, validateRequestTimeoutMS } from './consts';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import { defineEntry } from '../internal/define-entry';
+import { lowerCaseHeaderName } from './utils';
 import {
   assertOptionalHeaderRecord,
   isPlainRecord,
@@ -122,7 +123,7 @@ export class HTTPRequestBuilder<T = unknown> {
     // prototype (an array value) or vanish (a string). Lowercased, as the request sends
     // them, so a later call replaces an earlier one whatever either's capitalization.
     for (const [key, value] of Object.entries(headers)) {
-      defineEntry(this._headers, key.toLowerCase(), value);
+      defineEntry(this._headers, lowerCaseHeaderName(key), value);
     }
     return this;
   }
