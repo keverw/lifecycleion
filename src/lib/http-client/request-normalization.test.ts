@@ -5657,3 +5657,72 @@ test("round 118: a custom adapter's stream code is held to the stream codes; att
   jar.parseSetCookieHeader(`sid=1; Path=${path}`, 'https://example.com/x/y');
   expect(jar.getAllCookies()[0]?.path).toBe(path);
 });
+
+test('round 119: polyfilled fetch bodies, custom adapter bodies over the limit, caller Accept-Encoding across origins', async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (() =>
+    Promise.resolve({
+      status: 200,
+      type: 'basic',
+      headers: new Headers({ 'content-type': 'application/json' }),
+      body: { pipe() {} },
+      arrayBuffer: () =>
+        Promise.resolve(new TextEncoder().encode('{"ok":true}').buffer),
+    })) as unknown as typeof fetch;
+  try {
+    const polyfilled = await new HTTPClient({
+      adapter: new FetchAdapter(),
+      baseURL: 'http://a.test',
+    })
+      .get('/x')
+      .send();
+    expect(polyfilled.body).toEqual({ ok: true });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const big = await new HTTPClient({
+    adapter: {
+      getType: () => 'node',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: {},
+          body: new Uint8Array(5000),
+        }),
+    },
+    baseURL: 'http://a.test',
+    maxResponseBytes: 1000,
+  })
+    .get('/x')
+    .send();
+  expect(big.isStreamError).toBe(true);
+  expect(big.body).toBeNull();
+
+  const seen: string[] = [];
+  const server = http.createServer((req, res) => {
+    seen.push(`${req.url} ${req.headers['accept-encoding']}`);
+    if (req.url === '/start') {
+      const port = (server.address() as AddressInfo).port;
+      res.writeHead(302, { location: `http://localhost:${port}/file` });
+      res.end();
+      return;
+    }
+    res.end('ok');
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  try {
+    const port = (server.address() as AddressInfo).port;
+    await new HTTPClient({
+      adapter: new NodeAdapter({ decompress: false }),
+      baseURL: `http://127.0.0.1:${port}`,
+      followRedirects: true,
+    })
+      .get('/start')
+      .headers({ 'accept-encoding': 'gzip' })
+      .send();
+    expect(seen).toEqual(['/start gzip', '/file gzip']);
+  } finally {
+    server.close();
+  }
+});

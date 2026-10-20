@@ -347,7 +347,14 @@ async function readResponseBody(
     return RESPONSE_TOO_LARGE;
   }
 
-  if (!response.body) {
+  // Read through a reader only where the body is a web stream. A polyfilled `fetch`
+  // (node-fetch, cross-fetch) hands over a Node `Readable`, which has no `getReader`, and
+  // a test double may hand over anything: they are read whole and checked after, as
+  // before the limit was read through a reader.
+  if (
+    !response.body ||
+    typeof (response.body as { getReader?: unknown }).getReader !== 'function'
+  ) {
     const buffer = await response.arrayBuffer();
     const bytes = new Uint8Array(buffer);
     return bytes.length > maxResponseBytes ? RESPONSE_TOO_LARGE : bytes;

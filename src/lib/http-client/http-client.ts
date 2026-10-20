@@ -111,6 +111,7 @@ import type { CookieJar } from './cookie-jar';
 // original value retained on cause for consumers of the normalized error.
 import { isErrorValue, toError as normalizeError } from '../to-error';
 import { readUnknownMember as readObjectMember } from '../internal/read-member';
+import { makeResponseTooLargeError } from './internal/response-limit';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import {
   adoptPromise,
@@ -1984,6 +1985,9 @@ export class BaseHTTPClient {
       // to a CDN without its `range` gets the whole body back.
       const safelisted = new Set([
         'accept',
+        // Not a credential, and with NodeAdapter's `decompress: false` the caller's own is
+        // what asks for the encoding to save as sent; the adapter's own is never carried.
+        'accept-encoding',
         'accept-language',
         'content-encoding',
         'content-language',
@@ -2718,6 +2722,25 @@ export class BaseHTTPClient {
         answeredRedirectFields = adapterResponse;
         adapterResponse.headers = normalizeAdapterResponseHeaders(headers);
         answeredHeaders = adapterResponse.headers;
+
+        // Held to `maxResponseBytes` here as well as in the adapter: the built-in ones stop
+        // reading at the limit, but a custom adapter may hand over a body of any size, and
+        // the limit is the client's promise, not only theirs.
+        const answeredBody: unknown = adapterResponse.body;
+        if (
+          adapterResponse.isStreamError !== true &&
+          adapterResponse.isStreamed !== true &&
+          ArrayBuffer.isView(answeredBody) &&
+          answeredBody.byteLength > maxResponseBytes
+        ) {
+          adapterResponse.body = null;
+          adapterResponse.isStreamError = true;
+          adapterResponse.streamErrorCode = 'response_too_large';
+          adapterResponse.errorCause = makeResponseTooLargeError(
+            maxResponseBytes,
+            false,
+          );
+        }
 
         // Copied through the same guard the throw path uses: the record only feeds
         // observers, so a malformed or unreadable one is treated as absent.
