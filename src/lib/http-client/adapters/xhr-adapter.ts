@@ -459,7 +459,11 @@ function readResponseBody(
   method: string,
   xhr: XMLHttpRequest,
 ): Uint8Array | null {
-  if (method === 'HEAD' || xhr.status === 204 || xhr.status === 304) {
+  if (
+    method.toUpperCase() === 'HEAD' ||
+    xhr.status === 204 ||
+    xhr.status === 304
+  ) {
     return null;
   }
 

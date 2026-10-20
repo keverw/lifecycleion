@@ -331,7 +331,11 @@ describe('CookieJar', () => {
       expect(
         jar.setCookie({ ...base, name: 'sid', value: 'x\r\nX-Injected: 1' }),
       ).toBe(false);
+      // A tab is header-safe, and RFC 6265bis keeps a cookie that carries one.
       expect(jar.setCookie({ ...base, name: 'sid', value: 'tab\there' })).toBe(
+        true,
+      );
+      expect(jar.setCookie({ ...base, name: 'sid', value: 'bell\u0007' })).toBe(
         false,
       );
       // A nameless cookie is fine; a nameless one with nothing in it, or with an `=` that
@@ -351,8 +355,8 @@ describe('CookieJar', () => {
         }),
       ).toBe(false);
 
-      // Only the nameless `x` above was stored.
-      expect(jar.getAllCookies()).toHaveLength(1);
+      // Only the tab-carrying `sid` and the nameless `x` above were stored.
+      expect(jar.getAllCookies()).toHaveLength(2);
 
       // What the header can carry: an empty value, and the characters RFC 6265 allows.
       expect(jar.setCookie({ ...base, name: 'empty', value: '' })).toBe(true);

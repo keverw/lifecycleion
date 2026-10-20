@@ -255,28 +255,30 @@ export function stripCrossOriginURLCredentials(
   } catch {
     // The initial origin cannot be trusted. An absolute URL can be handled by the
     // ordinary helper; a network-path reference needs a base merely to expose its
-    // authority to URL parsing.
-    if (requestURL.startsWith('//')) {
-      try {
-        const target = new URL(
-          requestURL,
-          'http://credential-sanitizer.invalid',
-        );
-
-        if (!target.username && !target.password) {
-          return requestURL;
-        }
-
-        target.username = '';
-        target.password = '';
-
-        return target.href.slice(target.protocol.length);
-      } catch {
-        return requestURL;
-      }
+    // authority to URL parsing - `//host` and every spelling the parser reads as one
+    // (`\\host`, `/\host`, a leading space or tab), which a `startsWith('//')` let
+    // through with their credentials.
+    try {
+      new URL(requestURL);
+      return stripURLCredentials(requestURL);
+    } catch {
+      // Not absolute: resolved against a placeholder below.
     }
 
-    return stripURLCredentials(requestURL);
+    try {
+      const target = new URL(requestURL, 'http://credential-sanitizer.invalid');
+
+      if (!target.username && !target.password) {
+        return requestURL;
+      }
+
+      target.username = '';
+      target.password = '';
+
+      return target.href.slice(target.protocol.length);
+    } catch {
+      return requestURL;
+    }
   }
 
   try {

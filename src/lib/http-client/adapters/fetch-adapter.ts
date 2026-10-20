@@ -15,6 +15,7 @@ import {
 } from '../internal/progress';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
+  hasResponseBody,
   makeResponseTooLargeError,
   parseContentLength,
   readMaxResponseBytes,
@@ -315,7 +316,7 @@ async function readResponseBody(
   response: Response,
   maxResponseBytes: number,
 ): Promise<Uint8Array | null | typeof RESPONSE_TOO_LARGE> {
-  if (method === 'HEAD' || response.status === 204 || response.status === 304) {
+  if (!hasResponseBody(method, response.status)) {
     return null;
   }
 

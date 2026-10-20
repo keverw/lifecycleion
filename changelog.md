@@ -396,3 +396,12 @@
 - RetryRunner: a non-`Error` thrown by a `forceTry()` option getter is wrapped with `toError()` on `originalError`.
 - RetryRunner: `run()` and `resume()` refuse a non-boolean `shouldWaitForCompletion` (including `null`) as `pre_operation_error` / `unexpected_error` wrapping a `TypeError`, as `forceTry()` does.
 - HTTP: when a caller's `AbortSignal` throws on its `aborted` read, `NodeAdapter` fails the request with the real socket or body-write error. A response-task failure after the request was answered is reported on the global `'error'` channel without settling `requestBodySettled`. Errors on `requestBodySettled` carry no own `then` property.
+- HTTP: `maxResponseBytes` also holds a custom adapter's plain `ArrayBuffer` body, which the client reads like a `Uint8Array`; it was let through whatever its size.
+- HTTP FetchAdapter and XHRAdapter: a lowercase `head` method, when the adapter is driven directly, is read as bodiless as `HEAD` is; FetchAdapter refused its `Content-Length` as `response_too_large`.
+- HTTP: an earlier hop's `errorCause` no longer becomes the cause of a later hop's error, and a `redirect_loop` carries no hop body's cause, as `redirect_disabled` does not.
+- HTTP: a `request_setup_error` for the caller's own request reports `attemptCount: 0` whether or not a request interceptor is registered; with one it was `null`.
+- HTTP: a cookie jar that throws while building a redirect target's `Cookie` header fails the request as `request_setup_error` with the redirect reported (`wasRedirectDetected`, `detectedRedirectURL`); it reported the previous hop with no redirect seen.
+- HTTP CookieJar: a `Set-Cookie` with a tab inside its value is stored, as RFC 6265bis has it; it was dropped.
+- domain-utils: the pattern `*.` matches nothing, as `validateConfigEntry` already refused it; the matchers read it as the global `*`, past the `allowGlobalWildcard` gate.
+- domain-utils: an IPv6 literal with one bracket (`[::1`) is no address: `isIPv6` is `false` and `normalizeDomain` refuses it.
+- HTTP: `stripCrossOriginURLCredentials` with an unparseable initial URL strips credentials from every network-path spelling the URL parser reads as one (`\\host`, `/\host`, a leading space or tab), not only `//host`.

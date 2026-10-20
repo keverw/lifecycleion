@@ -83,7 +83,13 @@ export function isIPv4(str: string): boolean {
 export function isIPv6(str: string): boolean {
   // Zone identifiers are intentionally rejected to keep behavior portable across
   // Node, Bun, and browser-facing URL handling.
-  const cleaned = str.replace(/^\[|\]$/g, '');
+  // Both brackets or neither: `[::1` is no address, and the URL parser refuses it.
+  const isBracketed = str.startsWith('[') && str.endsWith(']');
+  if (!isBracketed && (str.startsWith('[') || str.endsWith(']'))) {
+    return false;
+  }
+
+  const cleaned = isBracketed ? str.slice(1, -1) : str;
   if (cleaned.includes('%')) {
     return false;
   }
@@ -537,6 +543,13 @@ export function normalizeWildcardPattern(pattern: string): string {
 
   if (trimmed.endsWith('.')) {
     trimmed = trimmed.slice(0, -1);
+
+    // `*.` is a subdomain pattern with no domain - a `*.${base}` whose base was empty -
+    // not the global `*`, which it became, matching every host past the
+    // `allowGlobalWildcard` gate that only reads the pattern as written.
+    if (trimmed === '*') {
+      return '';
+    }
   }
 
   const labels = trimmed.split('.');

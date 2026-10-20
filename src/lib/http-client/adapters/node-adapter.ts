@@ -373,8 +373,9 @@ export interface NodeAdapterConfig {
 
   /**
    * Whether a compressed response is decoded before it is handed over, as `fetch`
-   * decodes it. Defaults to `true`: `Accept-Encoding: gzip, deflate, br` is sent unless
-   * the request sets its own, and a `gzip` / `deflate` / `br` / `zstd` body is decoded.
+   * decodes it. Defaults to `true`: `Accept-Encoding: gzip, deflate, br` is sent (`br`
+   * over https only; `identity` on a `Range` request) unless the request sets its own,
+   * and a `gzip` / `deflate` / `br` / `zstd` body is decoded.
    *
    * `false` hands over every body exactly as it arrived - to save a server's `.gz` as
    * sent, say - and sends no `Accept-Encoding` of its own (a request's own still goes

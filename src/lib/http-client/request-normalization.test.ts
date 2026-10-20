@@ -10,6 +10,7 @@ import {
   extractFetchHeaders,
   matchesFilter,
   parseContentType,
+  stripCrossOriginURLCredentials,
 } from './utils';
 import {
   DEFAULT_MAX_RESPONSE_BYTES,
@@ -27,7 +28,7 @@ import {
   normalizeOrigin,
   validateConfigEntry,
 } from '../domain-utils/domain-utils';
-import { normalizeDomain } from '../domain-utils/helpers';
+import { isIPv6, normalizeDomain } from '../domain-utils/helpers';
 import { MockAdapter } from './adapters/mock-adapter';
 import type { MockRequest } from './adapters/mock-adapter';
 import { NodeAdapter } from './adapters/node-adapter';
@@ -5058,7 +5059,12 @@ test('NodeAdapter asks for and decodes gzip, deflate and br bodies, as fetch doe
       const viaFetch = await fetchClient.get(`/${kind}`).send();
       expect(viaNode.body).toEqual(viaFetch.body);
     }
-    expect(lastAcceptEncoding).toContain('gzip');
+    // NodeAdapter's own, read after a NodeAdapter request: the loop's last went through
+    // fetch. No `br` over plain http, and `identity` for a `Range`.
+    await node.get('/gzip').send();
+    expect(lastAcceptEncoding).toBe('gzip, deflate');
+    await node.get('/gzip').headers({ range: 'bytes=0-' }).send();
+    expect(lastAcceptEncoding).toBe('identity');
 
     await node.get('/gzip').headers({ 'accept-encoding': 'identity' }).send();
     expect(lastAcceptEncoding).toBe('identity');
@@ -6012,6 +6018,158 @@ test('round 127: a followed decode-failed redirect leaves no error behind; a 503
     const busy = await retrying.get('/busy').send();
     expect(busy.status).toBe(200);
     expect(busy.body).toBe('arrived');
+  } finally {
+    server.close();
+  }
+});
+
+test('round 128: a plain ArrayBuffer body is held to maxResponseBytes', async () => {
+  // A plain ArrayBuffer body from a custom adapter is held to maxResponseBytes.
+  const bufferClient = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode(
+            JSON.stringify({ pad: 'x'.repeat(90) }),
+          ).buffer as unknown as Uint8Array,
+        }),
+    },
+    baseURL: 'http://api.test',
+    maxResponseBytes: 10,
+  });
+  const tooLarge = bufferClient.get('/x');
+  await tooLarge.send();
+  expect(tooLarge.error?.code).toBe('response_too_large');
+});
+
+test("round 128: an earlier hop's cause is not the next hop's", async () => {
+  // An earlier hop's cause is not the next hop's.
+  let hop = 0;
+  const causeClient = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () =>
+        Promise.resolve<AdapterResponse>(
+          hop++ === 0
+            ? {
+                status: 302,
+                headers: { location: '/b' },
+                body: null,
+                errorCause: new Error('hop1 stale cause'),
+              }
+            : { status: 0, isTransportError: true, headers: {}, body: null },
+        ),
+    },
+    baseURL: 'http://api.test',
+    followRedirects: true,
+  });
+  const stale = causeClient.get('/a');
+  await stale.send();
+  expect(stale.error?.code).toBe('network_error');
+  expect(stale.error?.cause).toBeUndefined();
+});
+
+test('round 128: a jar that throws for the redirect target still names the redirect', async () => {
+  // A jar that throws for the redirect target still names the redirect.
+  const throwingJar = new CookieJar();
+  const original = throwingJar.getCookieHeaderString.bind(throwingJar);
+  throwingJar.getCookieHeaderString = (url: string) => {
+    if (url.endsWith('/next')) {
+      throw new Error('jar failed');
+    }
+    return original(url);
+  };
+  const jarClient = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: (request) =>
+        Promise.resolve<AdapterResponse>(
+          request.requestURL.endsWith('/start')
+            ? { status: 302, headers: { location: '/next' }, body: null }
+            : { status: 200, headers: {}, body: null },
+        ),
+    },
+    baseURL: 'http://api.test',
+    followRedirects: true,
+    cookieJar: throwingJar,
+  });
+  const jarFailure = jarClient.get('/start');
+  const jarResponse = await jarFailure.send();
+  expect(jarFailure.error?.code).toBe('request_setup_error');
+  expect(jarResponse.wasRedirectDetected).toBe(true);
+  expect(jarResponse.detectedRedirectURL).toBe('http://api.test/next');
+});
+
+test('round 128: a tab inside a cookie value is kept', () => {
+  // A tab inside a cookie value is kept.
+  const jar = new CookieJar();
+  jar.processResponseHeaders(
+    { 'set-cookie': ['a=x\ty', 'b=x y'] },
+    'https://example.com/',
+  );
+  expect(jar.getCookieHeaderString('https://example.com/')).toContain('a=x\ty');
+});
+
+test('round 128: `*.` is no global wildcard', () => {
+  // `*.` is no global wildcard.
+  expect(matchesWildcardDomain('evil.com', '*.')).toBe(false);
+  expect(matchesDomainList('evil.com', ['*.'])).toBe(false);
+  expect(matchesOriginList('https://evil.com', ['*.'])).toBe(false);
+});
+
+test('round 128: credentials go from every network-path spelling when the initial URL is relative', () => {
+  // Credentials go from every network-path spelling when the initial URL is relative.
+  for (const target of [
+    '\\\\user:pw@evil.com/x',
+    '/\\user:pw@evil.com/x',
+    ' //user:pw@evil.com/x',
+    '\t//user:pw@evil.com/x',
+  ]) {
+    expect(stripCrossOriginURLCredentials(target, '/start')).not.toContain(
+      'pw',
+    );
+  }
+});
+
+test('round 128: one bracket is no IPv6 literal', () => {
+  // One bracket is no IPv6 literal.
+  expect(isIPv6('[::1')).toBe(false);
+  expect(normalizeDomain('[::1')).toBe('');
+  expect(matchesDomainList('::1', ['[::1'])).toBe(false);
+});
+
+test('round 128: FetchAdapter reads a lowercase head as bodiless; a caller refusal counts 0 attempts with an interceptor', async () => {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200, {
+      'content-type': 'text/plain',
+      'content-length': '1000',
+    });
+    res.end(req.method === 'HEAD' ? undefined : 'x'.repeat(1000));
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/x`;
+  try {
+    const response = await new FetchAdapter().send({
+      requestURL: url,
+      method: 'head',
+      headers: {},
+      maxResponseBytes: 10,
+    });
+    expect(response.isStreamError).toBeFalsy();
+    expect(response.body).toBeNull();
+
+    const client = new HTTPClient({
+      adapter: new FetchAdapter(),
+      baseURL: url,
+    });
+    client.addRequestInterceptor((request) => request);
+    const refused = client.get('/x', { body: 'hello' });
+    await refused.send();
+    expect(refused.error?.code).toBe('request_setup_error');
+    expect(refused.attemptCount).toBe(0);
   } finally {
     server.close();
   }

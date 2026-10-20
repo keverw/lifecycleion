@@ -928,6 +928,12 @@ export class BaseHTTPClient {
                 normalizeError(error),
               );
 
+          // And counted as it is there: `0`, a setup error before any attempt, not the
+          // `null` of a request the interceptors ended.
+          if (!isCancelled && isCallersOwnRefusal) {
+            callbacks.setAttemptCount(0);
+          }
+
           callbacks.setError(normalizedError);
           trackedCallbacks.setState(isCancelled ? 'cancelled' : 'failed');
           callbacks.setResponse(response);
@@ -1103,18 +1109,12 @@ export class BaseHTTPClient {
           isRetriesExhausted = attemptResult.isRetriesExhausted;
           completedAttemptCount = attemptResult.attemptCount;
 
-          // If adapter threw, capture the error code and cause
-          if (attemptResult.errorCode) {
-            errorCode = attemptResult.errorCode;
-          }
-
-          if (attemptResult.adapterCause) {
-            adapterCause = attemptResult.adapterCause;
-          }
-
-          if (attemptResult.errorMessage !== undefined) {
-            errorMessage = attemptResult.errorMessage;
-          }
+          // This hop's error code and cause, replacing the last hop's: a followed hop that
+          // carried a cause (a custom adapter's `errorCause` on its `302`) handed it to the
+          // next hop's failure, which had none of its own.
+          errorCode = attemptResult.errorCode;
+          adapterCause = attemptResult.adapterCause;
+          errorMessage = attemptResult.errorMessage;
 
           if (attemptResult.cancelReason !== undefined) {
             cancelReason = attemptResult.cancelReason;
@@ -1265,6 +1265,9 @@ export class BaseHTTPClient {
                 isNetworkErrorOverride: false,
               });
               errorCode = 'redirect_loop';
+              // As for `redirect_disabled`: the limit is the outcome, not this hop's body.
+              adapterCause = undefined;
+              errorMessage = undefined;
               break;
             }
 
@@ -1456,20 +1459,47 @@ export class BaseHTTPClient {
             } =
               attemptResult.redirectRequestHeaders ??
               attemptResult.sentRequest.headers;
-            const redirectRequest = this._sanitizeRedirectRequest(
-              {
-                headers: hopHeaders,
-                requestURL: redirectURL,
-                method: redirectMethod,
-                // Dropped when this hop rewrote the method or is a 303: a 307/308 replays
-                // a GET's body as it replays any other method's.
-                body: isBodyDropped ? undefined : sentBody.value,
-              },
-              {
-                fromURL: hopFromURL,
-                cookieJar: jar ?? undefined,
-              },
-            );
+            // A cookie jar that throws while building the target's `Cookie` header fails
+            // the hop as the other between-hop failures do, naming the redirect it was
+            // building: the outer catch reported the previous hop, with no redirect seen.
+            let redirectRequest: ResolvedRequest;
+            try {
+              redirectRequest = this._sanitizeRedirectRequest(
+                {
+                  headers: hopHeaders,
+                  requestURL: redirectURL,
+                  method: redirectMethod,
+                  // Dropped when this hop rewrote the method or is a 303: a 307/308
+                  // replays a GET's body as it replays any other method's.
+                  body: isBodyDropped ? undefined : sentBody.value,
+                },
+                {
+                  fromURL: hopFromURL,
+                  cookieJar: jar ?? undefined,
+                },
+              );
+            } catch (error) {
+              response = this._buildResponse<T>({
+                adapterResponse: null,
+                requestID,
+                wasCancelled: false,
+                wasTimeout: false,
+                adapterType: this._adapter.getType(),
+                initialURL: initialRequestURL,
+                requestURL: hopFromURL,
+                redirectHistory,
+                undispatchedRedirect: {
+                  url: detectedTargetURL,
+                  isRecorded: false,
+                },
+                isNetworkErrorOverride: false,
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
+              });
+              errorCode = 'request_setup_error';
+              adapterCause = normalizeError(error);
+
+              break;
+            }
             const redirectTargetURL = redirectRequest.requestURL;
 
             // Run redirect-phase request interceptors so they can update headers
@@ -1638,25 +1668,55 @@ export class BaseHTTPClient {
               break;
             }
 
-            const sanitizedRedirectRequest = this._sanitizeRedirectRequest(
-              redirectIntercept,
-              {
-                // fromURL is the redirect target URL (what the interceptor received).
-                // This sanitize only strips headers if the interceptor rewrote the
-                // URL to a third host — in that case from=redirectTarget, to=thirdHost
-                // is cross-origin and the strip fires correctly.
+            // As for the target before the interceptors ran, above.
+            let sanitizedRedirectRequest: ResolvedRequest;
+            try {
+              sanitizedRedirectRequest = this._sanitizeRedirectRequest(
+                redirectIntercept,
+                {
+                  // fromURL is the redirect target URL (what the interceptor received).
+                  // This sanitize only strips headers if the interceptor rewrote the
+                  // URL to a third host — in that case from=redirectTarget, to=thirdHost
+                  // is cross-origin and the strip fires correctly.
 
-                // If the interceptor kept the URL (normal case), from and to are the
-                // same origin and nothing is stripped, preserving any headers the
-                // interceptor added (e.g. Authorization for the redirect target).
-                //
-                // The target as it was before the interceptors ran, not re-read from the
-                // request they were handed: one that rewrote that object in place would
-                // otherwise compare its new host with itself and keep the credentials.
-                fromURL: redirectTargetURL,
-                cookieJar: jar ?? undefined,
-              },
-            );
+                  // If the interceptor kept the URL (normal case), from and to are the
+                  // same origin and nothing is stripped, preserving any headers the
+                  // interceptor added (e.g. Authorization for the redirect target).
+                  //
+                  // The target as it was before the interceptors ran, not re-read from the
+                  // request they were handed: one that rewrote that object in place would
+                  // otherwise compare its new host with itself and keep the credentials.
+                  fromURL: redirectTargetURL,
+                  cookieJar: jar ?? undefined,
+                },
+              );
+            } catch (error) {
+              observerRequest = this._bestEffortAttemptRequestFromPending(
+                redirectIntercept,
+                attemptLimits,
+                requestID,
+              );
+              response = this._buildResponse<T>({
+                adapterResponse: null,
+                requestID,
+                wasCancelled: false,
+                wasTimeout: false,
+                adapterType: this._adapter.getType(),
+                initialURL: initialRequestURL,
+                requestURL: redirectInterceptURL,
+                redirectHistory: nextRedirectHistory,
+                undispatchedRedirect: {
+                  url: detectedTargetURL,
+                  isRecorded: true,
+                },
+                isNetworkErrorOverride: false,
+                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
+              });
+              errorCode = 'request_setup_error';
+              adapterCause = normalizeError(error);
+
+              break;
+            }
 
             const redirectedRequestURL = sanitizedRedirectRequest.requestURL;
 
@@ -2733,7 +2793,10 @@ export class BaseHTTPClient {
         if (
           adapterResponse.isStreamError !== true &&
           adapterResponse.isStreamed !== true &&
-          ArrayBuffer.isView(answeredBody) &&
+          // A plain `ArrayBuffer` too: outside the type, but `_buildResponse` reads one,
+          // so it is a body the limit must see.
+          (ArrayBuffer.isView(answeredBody) ||
+            answeredBody instanceof ArrayBuffer) &&
           answeredBody.byteLength > maxResponseBytes
         ) {
           adapterResponse.body = null;

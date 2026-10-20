@@ -730,8 +730,8 @@ export interface HTTPClientError {
    * True when the last attempt failed in a way the retry policy retries, and the
    * policy declined because all of its attempts were spent - the request would
    * have been tried again with budget left. False when the last failure is one no
-   * retry follows whatever the budget (an adapter veto, a stream error, a
-   * non-idempotent method, a non-retryable status). The last attempt may still
+   * retry follows whatever the budget (an adapter veto, a stream error other than a
+   * body that only failed to decode, a non-idempotent method, a non-retryable status). The last attempt may still
    * have received a response: a retryable status whose body then could not be
    * read ends as an `adapter_error` with its status.
    */

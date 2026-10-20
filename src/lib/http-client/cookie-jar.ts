@@ -94,9 +94,10 @@ interface StoredCookieScope {
  */
 /**
  * Whether every character of `text` can be written into a `Cookie` header as part of
- * one cookie-pair: no control character (a CR LF is a header injection, a DEL or tab is
- * refused by the header parser on the other side), no `;` (the pair delimiter), and
- * none of `extra`.
+ * one cookie-pair: no control character other than a tab (a CR LF is a header injection,
+ * a DEL is refused by the header parser on the other side; a tab is header-safe, and
+ * RFC 6265bis keeps a cookie that carries one), no `;` (the pair delimiter), and none
+ * of `extra`.
  *
  * Deliberately looser than RFC 6265's cookie-octet grammar, which also forbids space,
  * comma, double quote and backslash in a value. Servers send all four - a JSON blob, a
@@ -112,7 +113,7 @@ function isHeaderSafeCookieText(text: string, extra: string): boolean {
     // Above U+00FF is refused too: no header can carry it, so a stored cookie holding
     // one failed every request to its host, and took the host's other cookies with it.
     if (
-      code <= 0x1f ||
+      (code <= 0x1f && code !== 0x09) ||
       code === 0x7f ||
       code > 0xff ||
       char === ';' ||
