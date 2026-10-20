@@ -32,83 +32,110 @@ export interface ResponseBodySource {
   resume(): unknown;
 }
 
-type Decoder =
-  zlib.Gunzip | zlib.Inflate | zlib.InflateRaw | zlib.BrotliDecompress;
+type ContentCoding = 'gzip' | 'deflate' | 'br' | 'zstd';
+
+type Decoder = NodeJS.ReadWriteStream & {
+  destroy(error?: Error): unknown;
+  pause(): unknown;
+  resume(): unknown;
+};
+
+/** zstd where the runtime decodes it (Node 22.15+ / 23.8+, Bun): not asked for, decoded. */
+const createZstdDecompress = (
+  zlib as unknown as { createZstdDecompress?: () => Decoder }
+).createZstdDecompress;
 
 /**
  * The body source for `res`: the response itself, or - when it carries a body encoded with
- * one of {@link ACCEPTED_CONTENT_ENCODINGS} - a decoded view of it. A `HEAD` answer, a
- * `204` / `304` and an informational status have no body to decode, and a stacked encoding
- * (`gzip, br`) or an unknown one is handed over as it came.
+ * codings this adapter decodes - a decoded view of it, with `release` to let go of the
+ * decoding on a teardown. A `HEAD` answer, a `204` / `304` and an informational status
+ * have no body to decode, and an unknown coding hands the body over as it came. A stacked
+ * coding (`gzip, br`, or a repeated `Content-Encoding` Node joined) is decoded in reverse
+ * order, as `fetch` decodes it; `identity` is skipped.
  */
 export function createResponseBodySource(
   res: http.IncomingMessage,
   method: string,
   status: number,
   contentEncoding: string | string[] | undefined,
-): { source: ResponseBodySource; isDecoded: boolean } {
-  const encoding = (
-    Array.isArray(contentEncoding)
-      ? contentEncoding.join(', ')
-      : contentEncoding
-  )
-    ?.trim()
-    .toLowerCase();
-
+): { source: ResponseBodySource; isDecoded: boolean; release: () => void } {
+  const raw = { source: res, isDecoded: false, release: () => undefined };
   const hasBody =
     method.toUpperCase() !== 'HEAD' &&
     status >= 200 &&
     status !== 204 &&
     status !== 304;
 
-  if (
-    !hasBody ||
-    (encoding !== 'gzip' &&
-      encoding !== 'x-gzip' &&
-      encoding !== 'deflate' &&
-      encoding !== 'br')
-  ) {
-    return { source: res, isDecoded: false };
+  if (!hasBody || contentEncoding === undefined) {
+    return raw;
   }
 
+  const codings = (
+    Array.isArray(contentEncoding) ? contentEncoding.join(',') : contentEncoding
+  )
+    .split(',')
+    .map((token) => token.trim().toLowerCase())
+    .filter((token) => token !== '' && token !== 'identity')
+    .map((token) => (token === 'x-gzip' ? 'gzip' : token));
+
+  if (
+    codings.length === 0 ||
+    !codings.every(
+      (coding): coding is ContentCoding =>
+        coding === 'gzip' ||
+        coding === 'deflate' ||
+        coding === 'br' ||
+        (coding === 'zstd' && createZstdDecompress !== undefined),
+    )
+  ) {
+    return raw;
+  }
+
+  const decoded = new DecodedResponseBody(res, [...codings].reverse());
+
   return {
-    source: new DecodedResponseBody(res, encoding),
+    source: decoded,
     isDecoded: true,
+    release: () => {
+      decoded.destroy();
+    },
   };
 }
 
 /**
  * A decoded view of a response body.
  *
- * - `data` / `end` come from the decoder, and only start flowing once a `data` listener is
- *   added, as a paused `IncomingMessage` waits for its reader: a streamed response whose
- *   factory is still opening its sink loses nothing.
+ * - The decoders are made on the first byte: an empty body is no stream to decode, and a
+ *   strict decoder reads one as truncated. `deflate` is meant to be zlib-wrapped, but some
+ *   servers send it raw; the first byte tells them apart, as undici tells them apart.
+ * - Decoded strictly: a body that ends before its compressed stream does - a gzip body cut
+ *   before its trailer, which a CDN can serve whole from a truncated cache entry - is a
+ *   stream error, not a success that silently lost the rest. `Z_SYNC_FLUSH` only makes
+ *   what is decoded arrive promptly.
+ * - `data` / `end` come from the last decoder, and only start flowing once a `data`
+ *   listener is added, as a paused `IncomingMessage` waits for its reader.
  * - `aborted` comes from the response. `close` does too when the response closed short;
- *   when all of it arrived, `close` waits for the decoder to finish, so a body still being
- *   decoded is not read as cut off.
- * - `error` is the response's or the decoder's - a corrupt body fails as a stream error,
- *   and tears the response down so its socket is not held. Forwarded only while someone is
- *   listening: an `error` emitted with no listener would be an uncaught exception.
- * - Until a reader attaches (its `data` listener), `end`, `close`, `error` and `aborted`
- *   are held, and delivered in order once it has - as a paused `IncomingMessage` holds
- *   them. A streamed response's factory may still be opening its sink when an empty
- *   `deflate` body ends or a corrupt one fails; emitted then, they reached no one and the
- *   request hung until its timeout.
- *
- * Decoded with a sync flush, as undici decodes: a body cut short after its last full block
- * keeps what was decoded instead of failing outright.
+ *   when all of it arrived, `close` waits for the decoding to finish.
+ * - `error` is the response's or a decoder's - a corrupt body fails as a stream error, and
+ *   tears the response down so its socket is not held.
+ * - Until a reader attaches, `end`, `close`, `error` and `aborted` are held and delivered in
+ *   order once it has: a streamed response's factory may still be opening its sink.
+ * - `destroy` stops everything: a request cancelled or timed out after a small compressed
+ *   body had arrived whole went on inflating it - a few kilobytes into gigabytes - with
+ *   nobody reading.
  */
 class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
-  private decoder: Decoder | undefined;
+  private decoders: Decoder[] = [];
   private isForwardingData = false;
-  private didDecoderEnd = false;
+  private didDecodeEnd = false;
   private didRawEnd = false;
   private isReading = false;
+  private isDestroyed = false;
   private readonly held: Array<{ event: string; args: unknown[] }> = [];
 
   constructor(
     private readonly res: http.IncomingMessage,
-    private readonly encoding: 'gzip' | 'x-gzip' | 'deflate' | 'br',
+    private readonly decodeOrder: ContentCoding[],
   ) {
     super();
 
@@ -121,49 +148,33 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     res.on('end', () => {
       this.didRawEnd = true;
 
-      // An empty `deflate` body never sent the byte that picks its decoder.
-      if (this.decoder === undefined) {
-        this.didDecoderEnd = true;
+      // An empty body: nothing to decode.
+      if (this.decoders.length === 0) {
+        this.didDecodeEnd = true;
         this.deliver('end');
       }
     });
     res.on('close', () => {
-      if (this.didRawEnd || this.didDecoderEnd) {
-        if (this.didDecoderEnd || this.decoder === undefined) {
+      if (this.didRawEnd || this.didDecodeEnd) {
+        const last = this.decoders.at(-1);
+
+        if (this.didDecodeEnd || last === undefined) {
           this.deliver('close');
         } else {
-          this.decoder.once('close', () => this.deliver('close'));
+          last.once('close', () => this.deliver('close'));
         }
 
         return;
       }
 
-      // Closed short: the decoder will get no more, and is let go.
-      this.decoder?.destroy();
+      // Closed short: the decoders will get no more, and are let go.
+      this.destroyDecoders();
       this.deliver('close');
     });
 
-    if (encoding === 'deflate') {
-      // `deflate` is meant to be zlib-wrapped, but some servers send it raw. Told apart by
-      // the first byte, as undici tells them apart: a zlib stream's low nibble is 8.
-      res.once('data', (first: Buffer) => {
-        this.attachDecoder(
-          (first[0] ?? 0) % 16 === 8
-            ? zlib.createInflate(zlibFlushOptions())
-            : zlib.createInflateRaw(zlibFlushOptions()),
-          first,
-        );
-      });
-    } else {
-      this.attachDecoder(
-        encoding === 'br'
-          ? zlib.createBrotliDecompress({
-              flush: zlib.constants.BROTLI_OPERATION_FLUSH,
-              finishFlush: zlib.constants.BROTLI_OPERATION_FLUSH,
-            })
-          : zlib.createGunzip(zlibFlushOptions()),
-      );
-    }
+    res.once('data', (first: Buffer) => {
+      this.attachDecoders(first);
+    });
 
     this.on('newListener', (event: string) => {
       if (event === 'data' && !this.isReading) {
@@ -181,39 +192,75 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   }
 
   public pause(): this {
-    this.decoder?.pause();
+    this.decoders.at(-1)?.pause();
 
     return this;
   }
 
   public resume(): this {
-    this.decoder?.resume();
+    this.decoders.at(-1)?.resume();
 
     return this;
   }
 
-  private attachDecoder(decoder: Decoder, first?: Buffer): void {
-    this.decoder = decoder;
+  /** Stop decoding and delivering: the request no longer wants this body. */
+  public destroy(): void {
+    if (this.isDestroyed) {
+      return;
+    }
 
-    decoder.on('error', (error: Error) => {
-      this.deliver('error', error);
+    this.isDestroyed = true;
+    this.held.length = 0;
+    this.destroyDecoders();
 
-      try {
-        this.res.destroy();
-      } catch {
-        // Already gone; the error above is what is reported.
-      }
-    });
-    decoder.on('end', () => {
-      this.didDecoderEnd = true;
+    try {
+      this.res.destroy();
+    } catch {
+      // Already gone.
+    }
+  }
+
+  private attachDecoders(first: Buffer): void {
+    if (this.isDestroyed) {
+      return;
+    }
+
+    this.decoders = this.decodeOrder.map((coding, index) =>
+      createDecoder(
+        coding,
+        // Sniffed only for the outermost coding, the one whose first byte this is.
+        index === 0 ? first[0] : undefined,
+      ),
+    );
+
+    for (const decoder of this.decoders) {
+      decoder.on('error', (error: Error) => {
+        // Delivered - or held for a reader not yet attached - and the decoding and the
+        // response's socket let go. Not `destroy`, which would drop the held error.
+        this.deliver('error', error);
+        this.destroyDecoders();
+
+        try {
+          this.res.destroy();
+        } catch {
+          // Already gone; the error above is what is reported.
+        }
+      });
+    }
+
+    for (let index = 1; index < this.decoders.length; index++) {
+      this.decoders[index - 1].pipe(this.decoders[index]);
+    }
+
+    const last = this.decoders.at(-1) as Decoder;
+    last.on('end', () => {
+      this.didDecodeEnd = true;
       this.deliver('end');
     });
 
-    if (first !== undefined) {
-      decoder.write(first);
-    }
-
-    this.res.pipe(decoder);
+    const head = this.decoders[0];
+    head.write(first);
+    this.res.pipe(head);
 
     if (this.isForwardingData) {
       this.isForwardingData = false;
@@ -227,13 +274,30 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     }
 
     this.isForwardingData = true;
-    this.decoder?.on('data', (chunk: Buffer) => {
-      this.emit('data', chunk);
+    this.decoders.at(-1)?.on('data', (chunk: Buffer) => {
+      if (!this.isDestroyed) {
+        this.emit('data', chunk);
+      }
     });
   }
 
-  /** Emitted now while a reader is attached, held for it until then. */
+  private destroyDecoders(): void {
+    for (const decoder of this.decoders) {
+      try {
+        this.res.unpipe(decoder);
+        decoder.destroy();
+      } catch {
+        // Nothing left to release.
+      }
+    }
+  }
+
+  /** Emitted now while a reader is attached, held for it until then; nothing once destroyed. */
   private deliver(event: string, ...args: unknown[]): void {
+    if (this.isDestroyed) {
+      return;
+    }
+
     if (!this.isReading) {
       this.held.push({ event, args });
 
@@ -250,9 +314,23 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   }
 }
 
-function zlibFlushOptions(): zlib.ZlibOptions {
-  return {
-    flush: zlib.constants.Z_SYNC_FLUSH,
-    finishFlush: zlib.constants.Z_SYNC_FLUSH,
-  };
+function createDecoder(
+  coding: ContentCoding,
+  firstByte: number | undefined,
+): Decoder {
+  switch (coding) {
+    case 'gzip':
+      return zlib.createGunzip({ flush: zlib.constants.Z_SYNC_FLUSH });
+    case 'deflate':
+      // A zlib stream's first byte has a low nibble of 8; anything else is raw deflate.
+      return firstByte === undefined || firstByte % 16 === 8
+        ? zlib.createInflate({ flush: zlib.constants.Z_SYNC_FLUSH })
+        : zlib.createInflateRaw({ flush: zlib.constants.Z_SYNC_FLUSH });
+    case 'br':
+      return zlib.createBrotliDecompress({
+        flush: zlib.constants.BROTLI_OPERATION_FLUSH,
+      });
+    case 'zstd':
+      return (createZstdDecompress as () => Decoder)();
+  }
 }

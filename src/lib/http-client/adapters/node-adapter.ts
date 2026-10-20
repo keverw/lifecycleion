@@ -825,6 +825,12 @@ export class NodeAdapter implements HTTPAdapter {
         let didResponseClose = false;
         /** The response, once it has arrived; see `reportWriteErrorAfterResponse`. */
         let receivedResponse: http.IncomingMessage | undefined;
+        /**
+         * Lets go of a decoded response body - its decoders and the response under it - when
+         * the request no longer wants it: a cancel, a timeout, a teardown. Without it, a small
+         * compressed body that had arrived whole went on inflating after the request settled.
+         */
+        let releaseResponseBody: (() => void) | undefined;
 
         /**
          * Whether a body writer is still running.
@@ -862,6 +868,7 @@ export class NodeAdapter implements HTTPAdapter {
         let didTearDownAfterResponse = false;
         const tearDownAfterResponse = (): void => {
           didTearDownAfterResponse = true;
+          releaseResponseBody?.();
           destroyRequestQuietly(req);
         };
 
@@ -1402,12 +1409,17 @@ export class NodeAdapter implements HTTPAdapter {
             // The body as `fetch` would hand it over: decoded when the server compressed
             // it. Headers are reported as received, `Content-Encoding` included, as
             // `fetch` reports them.
-            const { source: body, isDecoded } = createResponseBodySource(
+            const {
+              source: body,
+              isDecoded,
+              release,
+            } = createResponseBodySource(
               res,
               request.method,
               status,
               headers['content-encoding'],
             );
+            releaseResponseBody = release;
 
             // --- Response streaming (NodeAdapter-only feature) ---
             //
@@ -1716,6 +1728,11 @@ export class NodeAdapter implements HTTPAdapter {
               : parseInt(String(headers['content-length'] ?? '0'), 10) || 0;
 
             body.on('data', (chunk: Buffer) => {
+              // Nothing kept, or reported, for a response the request no longer has.
+              if (activeBufferedResponse === undefined) {
+                return;
+              }
+
               chunks.push(chunk);
               loadedBytes += chunk.length;
 
@@ -1995,6 +2012,8 @@ export class NodeAdapter implements HTTPAdapter {
             // Settlement removes the relay listener during this same abort dispatch.
             // Notify a pending factory first, while its cleanup still has ownership.
             pendingStreamSetup?.abort();
+            // Nothing more is decoded for a request that was cancelled or timed out.
+            releaseResponseBody?.();
             if (activeResponseStream) {
               const { status, headers, writable, abortStream } =
                 activeResponseStream;

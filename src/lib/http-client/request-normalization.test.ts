@@ -5150,3 +5150,62 @@ test('round 112: decoded bodies hold their end/error for a streamed reader; a Ra
     server.close();
   }
 });
+
+test('round 113: decoding stops on a timeout, a truncated body is a stream error, stacked codings decode', async () => {
+  const bomb = zlib.gzipSync(Buffer.alloc(200 * 1024 * 1024), { level: 1 });
+  const full = zlib.gzipSync(Buffer.alloc(100000, 'a'));
+  const truncated = full.subarray(0, full.length - 4);
+  const stacked = zlib.brotliCompressSync(zlib.gzipSync('{"stacked":true}'));
+  const server = http.createServer((req, res) => {
+    const send = (encoding: string, body: Buffer, type = 'text/plain') => {
+      res.writeHead(200, {
+        'content-type': type,
+        'content-encoding': encoding,
+        'content-length': String(body.length),
+      });
+      res.end(body);
+    };
+    if (req.url === '/bomb') {
+      send('gzip', bomb);
+    } else if (req.url === '/truncated') {
+      send('gzip', truncated);
+    } else if (req.url === '/stacked') {
+      send('gzip, br', stacked, 'application/json');
+    } else {
+      send('gzip', Buffer.alloc(0));
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const client = new HTTPClient({ adapter: new NodeAdapter(), baseURL });
+
+    let eventsAfterSettle = 0;
+    let isSettled = false;
+    const timedOut = await client
+      .get('/bomb')
+      .timeout(30)
+      .onDownloadProgress(() => {
+        if (isSettled) {
+          eventsAfterSettle++;
+        }
+      })
+      .send();
+    isSettled = true;
+    expect(timedOut.isTimeout).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(eventsAfterSettle).toBe(0);
+
+    const cut = await client.get('/truncated').send();
+    expect(cut.isStreamError).toBe(true);
+
+    const both = await client.get('/stacked').send();
+    expect(both.body).toEqual({ stacked: true });
+
+    const empty = await client.get('/empty').send();
+    expect(empty.isFailed).toBe(false);
+    expect(empty.body).toBeNull();
+  } finally {
+    server.close();
+  }
+}, 30_000);
