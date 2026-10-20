@@ -1188,14 +1188,12 @@ export class BaseHTTPClient {
           // and overwrites the failed attempt's `wasTimeout`. The terminal path
           // below builds from this response, so the real 3xx status,
           // `wasRedirectDetected` and `detectedRedirectURL` are all still reported.
-          // Except a body that only failed to decode - a server that labels its small
-          // "Moved" page `gzip` and sends it plain: the transfer was whole, and a browser
-          // never decodes a body it is about to leave, so the redirect is followed.
+          // A body that only failed to decode never gets here as one: the attempt reads it
+          // as a bodiless 3xx (see `_dispatchRequestAttempts`).
           if (
             this._config.followRedirects &&
             adapterResponse &&
-            (!adapterResponse.isStreamError ||
-              isBodyDecodeFailure(adapterResponse)) &&
+            !adapterResponse.isStreamError &&
             !adapterResponse.isTransportError &&
             REDIRECT_STATUS_CODES.has(adapterResponse.status)
           ) {
@@ -2747,6 +2745,24 @@ export class BaseHTTPClient {
           );
         }
 
+        // A redirect about to be followed whose body only failed to decode - a server that
+        // labels its small "Moved" page `gzip` and sends it plain - is the redirect it says
+        // it is: the transfer was whole, and a browser never decodes a body it is about to
+        // leave. Read as a bodiless 3xx from here on, so nothing of the failure reaches the
+        // observers, the hop's error code, or a later hop's.
+        if (
+          this._config.followRedirects &&
+          adapterResponse.isTransportError !== true &&
+          REDIRECT_STATUS_CODES.has(adapterResponse.status) &&
+          scalarHeader(adapterResponse.headers, 'location') &&
+          isBodyDecodeFailure(adapterResponse)
+        ) {
+          adapterResponse.body = null;
+          delete adapterResponse.isStreamError;
+          delete adapterResponse.streamErrorCode;
+          delete adapterResponse.errorCause;
+        }
+
         // Copied through the same guard the throw path uses: the record only feeds
         // observers, so a malformed or unreadable one is treated as absent.
         const observedEffectiveHeaders = snapshotHeaderRecord(
@@ -2851,7 +2867,8 @@ export class BaseHTTPClient {
           !cancelSignal.aborted
             ? adapterResponse.isRetryable === false
               ? ('adapter_veto' as const)
-              : adapterResponse.isStreamError
+              : adapterResponse.isStreamError &&
+                  !isBodyDecodeFailure(adapterResponse)
                 ? ('stream_error' as const)
                 : !isMethodReplayable
                   ? ('non_idempotent_method' as const)
@@ -2859,11 +2876,14 @@ export class BaseHTTPClient {
             : undefined;
 
         // Check if should retry based on status code.
-        // Stream failures are terminal even when status is retryable (e.g. 0).
+        // Stream failures are terminal even when status is retryable (e.g. 0). Except a
+        // body that only failed to decode: the server's answer arrived whole, and its
+        // status asks for a retry as it would with a readable body.
         if (
           policy &&
           adapterResponse.isRetryable !== false &&
-          !adapterResponse.isStreamError &&
+          (!adapterResponse.isStreamError ||
+            isBodyDecodeFailure(adapterResponse)) &&
           isMethodReplayable &&
           RETRYABLE_STATUS_CODES.has(adapterResponse.status) &&
           !cancelSignal.aborted
@@ -4800,7 +4820,12 @@ function describeValue(value: unknown): string {
  * adapter reported.
  */
 function isBodyDecodeFailure(response: AdapterResponse): boolean {
-  if (response.streamErrorCode !== 'stream_response_error') {
+  // A streamed body was already handed to the caller's stream, so it is no whole answer.
+  if (
+    response.isStreamError !== true ||
+    response.isStreamed === true ||
+    response.streamErrorCode !== 'stream_response_error'
+  ) {
     return false;
   }
 

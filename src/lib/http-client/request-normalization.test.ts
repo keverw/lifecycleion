@@ -5950,3 +5950,69 @@ test('round 126: a redirect whose body only fails to decode is followed; a cut-o
     server.close();
   }
 });
+
+test('round 127: a followed decode-failed redirect leaves no error behind; a 503 that only fails to decode is retried', async () => {
+  let unavailableCount = 0;
+  const server = http.createServer((req, res) => {
+    if (req.url === '/start' || req.url === '/to-ok') {
+      res.writeHead(302, {
+        location: req.url === '/start' ? '/refused' : '/ok',
+        'content-encoding': 'gzip',
+      });
+      res.end('Moved');
+      return;
+    }
+    if (req.url === '/refused') {
+      res.socket?.destroy();
+      return;
+    }
+    if (req.url === '/busy' && unavailableCount++ === 0) {
+      res.writeHead(503, { 'content-encoding': 'gzip' });
+      res.end('Busy');
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'text/plain' });
+    res.end('arrived');
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      followRedirects: true,
+    });
+
+    // The next hop's own failure is reported, not the redirect's decoding.
+    const refused = client.get('/start');
+    await refused.send();
+    expect(refused.error?.code).toBe('network_error');
+
+    // Redirect-phase observers see a plain 3xx.
+    const seen: { status: number; isFailed: boolean; body: unknown }[] = [];
+    client.addResponseObserver(
+      (response) => {
+        seen.push({
+          status: response.status,
+          isFailed: response.isFailed,
+          body: response.body,
+        });
+      },
+      { phases: ['redirect'] },
+    );
+    const ok = await client.get('/to-ok').send();
+    expect(ok.body).toBe('arrived');
+    expect(seen).toEqual([{ status: 302, isFailed: false, body: null }]);
+
+    const retrying = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    });
+    const busy = await retrying.get('/busy').send();
+    expect(busy.status).toBe(200);
+    expect(busy.body).toBe('arrived');
+  } finally {
+    server.close();
+  }
+});
