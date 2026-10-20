@@ -372,6 +372,17 @@ export interface NodeAdapterConfig {
   crl?: string | ArrayBufferView | Array<string | ArrayBufferView>;
 
   /**
+   * Whether a compressed response is decoded before it is handed over, as `fetch`
+   * decodes it. Defaults to `true`: `Accept-Encoding: gzip, deflate, br` is sent unless
+   * the request sets its own, and a `gzip` / `deflate` / `br` / `zstd` body is decoded.
+   *
+   * `false` hands over every body exactly as it arrived - to save a server's `.gz` as
+   * sent, say - and sends no `Accept-Encoding` of its own (a request's own still goes
+   * out). `maxResponseBytes` then counts the bytes as received.
+   */
+  decompress?: boolean;
+
+  /**
    * Set to false to accept self-signed certificates in dev/test environments.
    * Defaults to true (Node.js default — rejects invalid certs).
    */
@@ -393,6 +404,17 @@ export class NodeAdapter implements HTTPAdapter {
     }
     assertTrustAnchors(config.ca, 'ca');
     assertTrustAnchors(config.mtls?.ca, 'mtls.ca');
+
+    const candidateDecompress: unknown = config.decompress;
+    if (
+      candidateDecompress !== undefined &&
+      typeof candidateDecompress !== 'boolean'
+    ) {
+      throw new TypeError(
+        `NodeAdapter decompress must be a boolean (got ${candidateDecompress === null ? 'null' : typeof candidateDecompress})`,
+      );
+    }
+
     this._config = config;
   }
 
@@ -454,6 +476,8 @@ export class NodeAdapter implements HTTPAdapter {
     );
     // The most a buffered body may hold, decoded; `Infinity` for none.
     const maxResponseBytes = readMaxResponseBytes(request);
+    // Read once per request, as the rest of the config is: see `decompress`.
+    const isDecompressing = this._config.decompress !== false;
 
     const parsedURL = new URL(request.requestURL);
     const urlOptions = urlToHttpOptions(parsedURL);
@@ -471,7 +495,7 @@ export class NodeAdapter implements HTTPAdapter {
     const headerNames = Object.keys(requestHeaders).map((name) =>
       name.toLowerCase(),
     );
-    if (!headerNames.includes('accept-encoding')) {
+    if (isDecompressing && !headerNames.includes('accept-encoding')) {
       requestHeaders['accept-encoding'] = headerNames.includes('range')
         ? 'identity'
         : isHTTPS
@@ -1425,7 +1449,8 @@ export class NodeAdapter implements HTTPAdapter {
               res,
               request.method,
               status,
-              headers['content-encoding'],
+              // With `decompress: false`, no coding is decoded: the body as it arrived.
+              isDecompressing ? headers['content-encoding'] : undefined,
             );
             releaseResponseBody = release;
 

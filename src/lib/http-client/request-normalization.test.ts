@@ -5578,3 +5578,35 @@ describe('maxResponseBytes', () => {
     ).not.toThrow();
   });
 });
+
+test('NodeAdapter decompress: false hands the body over as it arrived and asks for no encoding', async () => {
+  const gz = zlib.gzipSync('{"raw":true}');
+  let acceptEncoding: string | undefined;
+  const server = http.createServer((req, res) => {
+    acceptEncoding = req.headers['accept-encoding'];
+    res.writeHead(200, {
+      'content-type': 'application/octet-stream',
+      'content-encoding': 'gzip',
+      'content-length': String(gz.length),
+    });
+    res.end(gz);
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const raw = await new HTTPClient({
+      adapter: new NodeAdapter({ decompress: false }),
+      baseURL,
+    })
+      .get('/x')
+      .send();
+    expect(acceptEncoding).toBeUndefined();
+    expect(Buffer.from(raw.body as Uint8Array).equals(gz)).toBe(true);
+
+    expect(
+      () => new NodeAdapter({ decompress: 'no' as unknown as boolean }),
+    ).toThrow(TypeError);
+  } finally {
+    server.close();
+  }
+});
