@@ -1,13 +1,18 @@
 import {
   defineHiddenTags,
   markNonRetryableAdapterError,
+  nonRetryableAdapterErrorFrom,
 } from '../internal/adapter-error';
 import {
   extractFetchHeaders,
   resolveDetectedRedirectURL,
   stripCrossOriginURLCredentials,
 } from '../utils';
-import { guardProgressCallback } from '../internal/progress';
+import {
+  guardProgressCallback,
+  knownBodyByteLength,
+  uploadCompleteEvent,
+} from '../internal/progress';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
   REDIRECT_STATUS_CODES,
@@ -26,7 +31,10 @@ import type {
 // original value retained on cause for consumers of the normalized error.
 import { isErrorValue, toError as normalizeError } from '../../to-error';
 // Guard error members for the same reason adapter marker reads are guarded.
-import { readMember as readObjectMember } from '../../internal/read-member';
+import {
+  readMember as readObjectMember,
+  readUnknownMember,
+} from '../../internal/read-member';
 
 export class FetchAdapter implements HTTPAdapter {
   public getType(): AdapterType {
@@ -48,7 +56,11 @@ export class FetchAdapter implements HTTPAdapter {
       'onDownloadProgress',
     );
 
-    const { requestURL, method, headers, body, signal } = request;
+    const { requestURL, method, body, signal } = request;
+    // A caller's `Content-Length` is left to `fetch`, which frames the body itself:
+    // browsers refuse to send one, and Node's undici, given one that disagrees with the
+    // body, waited for bytes that never came until the attempt timed out - on every retry.
+    const headers = withoutHeader(request.headers, 'content-length');
     const dispatchedURL = stripCrossOriginURLCredentials(
       requestURL,
       request.initialURL,
@@ -84,9 +96,8 @@ export class FetchAdapter implements HTTPAdapter {
           redirect: 'manual',
         }).method;
       } catch (error) {
-        const refusal = normalizeError(error);
-        markNonRetryableAdapterError(refusal);
-        throw refusal;
+        // On a carrier: the throw may be the caller's own, from a header value.
+        throw nonRetryableAdapterErrorFrom(error);
       }
 
       // A runtime that rewrites the method - Bun's fetch reads one it does not know as
@@ -120,6 +131,15 @@ export class FetchAdapter implements HTTPAdapter {
       }
 
       const normalizedError = normalizeError(error);
+
+      // A request Node's undici refuses at dispatch rather than at `new Request` - a
+      // `keep-alive`, `expect` or `upgrade` header, a fetch-blocked port - is refused the
+      // same way on every attempt, so it fails once as the non-retryable `adapter_error`
+      // it is, as the `new Request` refusals above do, rather than as a network error
+      // retried to no end with nothing sent.
+      if (isFetchDispatchRefusal(normalizedError)) {
+        throw nonRetryableAdapterErrorFrom(normalizedError);
+      }
 
       // TLS certificate failures → 495, matching NodeAdapter. A rejected
       // certificate fails identically every time, and `status: 0` is retryable.
@@ -155,7 +175,7 @@ export class FetchAdapter implements HTTPAdapter {
       // Even though the client will classify this as redirect_disabled, the
       // browser completed the fetch operation. Emit terminal progress so the
       // browser adapters match the server/mock adapters' completion semantics.
-      guardedUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
+      guardedUploadProgress?.(uploadCompleteEvent(knownBodyByteLength(body)));
       guardedDownloadProgress?.({ loaded: 0, total: 0, progress: 1 });
 
       return {
@@ -167,7 +187,7 @@ export class FetchAdapter implements HTTPAdapter {
     }
 
     // Fire 100% upload + download progress (fetch has no real per-chunk progress)
-    guardedUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
+    guardedUploadProgress?.(uploadCompleteEvent(knownBodyByteLength(body)));
 
     const responseHeadersForBody = extractFetchHeaders(response.headers);
 
@@ -358,4 +378,42 @@ function markResponseStreamAbort(
   });
 
   return tagged;
+}
+
+/** `headers` without any entry named `name`, in any case; the same object when it has none. */
+function withoutHeader(
+  headers: Record<string, string | string[]>,
+  name: string,
+): Record<string, string | string[]> {
+  const names = Object.keys(headers);
+  if (!names.some((key) => key.toLowerCase() === name)) {
+    return headers;
+  }
+
+  const result: Record<string, string | string[]> = {};
+  for (const key of names) {
+    if (key.toLowerCase() !== name) {
+      result[key] = headers[key];
+    }
+  }
+
+  return result;
+}
+
+/**
+ * Whether `fetch` failed because the runtime refused to dispatch the request at all:
+ * undici's invalid-argument and not-supported refusals (a `keep-alive`, `expect`,
+ * `transfer-encoding` or `upgrade` header), and the Fetch standard's blocked ports. Read
+ * off the `cause` Node hangs them on, guardedly; a browser's opaque `TypeError` is none.
+ */
+function isFetchDispatchRefusal(error: Error): boolean {
+  const cause = readUnknownMember(error, 'cause');
+  const code = readUnknownMember(cause, 'code');
+  const message = readUnknownMember(cause, 'message');
+
+  return (
+    code === 'UND_ERR_INVALID_ARG' ||
+    code === 'UND_ERR_NOT_SUPPORTED' ||
+    (typeof message === 'string' && message.toLowerCase() === 'bad port')
+  );
 }

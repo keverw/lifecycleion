@@ -48,3 +48,41 @@ export function guardProgressCallback(
     safeHandleCallback(label, callback, event);
   };
 }
+
+/**
+ * The byte size of a request body as the browser adapters can know it without reading it:
+ * `0` for no body, the encoded length of a string, a binary body's `byteLength`, a `Blob`'s
+ * `size`, and `undefined` when it cannot be known up front (a `FormData`, a stream). Their
+ * terminal upload event reports it, so `loaded` / `total` mean bytes, as on NodeAdapter,
+ * rather than a stand-in `1`.
+ */
+export function knownBodyByteLength(body: unknown): number | undefined {
+  if (body === undefined || body === null) {
+    return 0;
+  }
+
+  if (typeof body === 'string') {
+    return new TextEncoder().encode(body).byteLength;
+  }
+
+  if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
+    return body.byteLength;
+  }
+
+  if (typeof Blob !== 'undefined' && body instanceof Blob) {
+    return body.size;
+  }
+
+  return undefined;
+}
+
+/** The terminal upload event for a body of `byteLength` bytes, or of unknown size. */
+export function uploadCompleteEvent(byteLength: number | undefined): {
+  loaded: number;
+  total: number;
+  progress: 1;
+} {
+  const bytes = byteLength ?? 0;
+
+  return { loaded: bytes, total: bytes, progress: 1 };
+}

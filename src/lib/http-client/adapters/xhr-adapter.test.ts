@@ -939,7 +939,12 @@ describe('XHRAdapter', () => {
 
     await promise;
 
-    expect(downloadEvents[0]).toEqual({ loaded: 100, total: 0, progress: -1 });
+    // An unknown length reports what has arrived as the total, as NodeAdapter does.
+    expect(downloadEvents[0]).toEqual({
+      loaded: 100,
+      total: 100,
+      progress: -1,
+    });
   });
 
   test('preserves 4xx/5xx status codes', async () => {

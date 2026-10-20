@@ -307,7 +307,8 @@ describe('FetchAdapter', () => {
     expect(response.detectedRedirectURL).toBeUndefined();
     expect(uploadEvents).toEqual([
       { loaded: 0, total: 0, progress: 0 },
-      { loaded: 1, total: 1, progress: 1 },
+      // No body: zero bytes, as NodeAdapter reports it.
+      { loaded: 0, total: 0, progress: 1 },
     ]);
     expect(downloadEvents).toEqual([{ loaded: 0, total: 0, progress: 1 }]);
   });
@@ -536,7 +537,8 @@ describe('FetchAdapter', () => {
 
     expect(uploadEvents).toEqual([
       { loaded: 0, total: 0, progress: 0 },
-      { loaded: 1, total: 1, progress: 1 },
+      // No body: zero bytes, as NodeAdapter reports it.
+      { loaded: 0, total: 0, progress: 1 },
     ]);
 
     expect(downloadEvents).toEqual([{ loaded: 5, total: 5, progress: 1 }]);

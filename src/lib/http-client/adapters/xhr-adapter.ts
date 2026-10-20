@@ -1,8 +1,7 @@
 import { defineEntry } from '../../internal/define-entry';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 import { guardProgressCallback } from '../internal/progress';
-import { markNonRetryableAdapterError } from '../internal/adapter-error';
-import { toError as normalizeError } from '../../to-error';
+import { nonRetryableAdapterErrorFrom } from '../internal/adapter-error';
 import { isArrayBufferLike } from '../../internal/binary-view';
 import type {
   HTTPAdapter,
@@ -61,9 +60,8 @@ export class XHRAdapter implements HTTPAdapter {
       // `setRequestHeader` will not take - so failed once as non-retryable, as the other
       // adapters fail a request their transport refuses to build.
       const refuse = (error: unknown): void => {
-        const refusal = normalizeError(error);
-        markNonRetryableAdapterError(refusal);
-        reject(refusal);
+        // On a carrier: the throw may be the caller's own, from a method or header value.
+        reject(nonRetryableAdapterErrorFrom(error));
       };
 
       try {
@@ -218,9 +216,10 @@ export class XHRAdapter implements HTTPAdapter {
         downloadedBytes = Math.max(downloadedBytes, event.loaded);
         downloadTotalBytes = Math.max(downloadTotalBytes, event.total);
 
+        // An unknown length reports what has arrived as the total, as NodeAdapter does.
         guardedDownloadProgress?.({
           loaded: event.loaded,
-          total: event.total || 0,
+          total: event.lengthComputable ? event.total : event.loaded,
           progress,
         });
       });

@@ -6,7 +6,11 @@ import { defineEntry } from '../../internal/define-entry';
 import { observeRejection } from '../../internal/promise-reactions';
 import Router from 'find-my-way';
 import type { HTTPMethod as RouterHTTPMethod } from 'find-my-way';
-import { guardProgressCallback } from '../internal/progress';
+import {
+  guardProgressCallback,
+  knownBodyByteLength,
+  uploadCompleteEvent,
+} from '../internal/progress';
 import { materializeRequestHeaders } from '../internal/header-utils';
 import qs from 'qs';
 import { sleep } from '../../sleep';
@@ -620,7 +624,9 @@ export class MockAdapter implements HTTPAdapter {
     // After the headers are built and checked, as a real adapter has the headers before
     // any body progress: a route mistake found there does not follow a completed download.
     // Signal upload complete, then report download size based on serialised body.
-    guardedUploadProgress?.({ loaded: 1, total: 1, progress: 1 });
+    guardedUploadProgress?.(
+      uploadCompleteEvent(knownBodyByteLength(request.body)),
+    );
 
     // A simulated stream error reports no terminal download progress: real
     // adapters fail the body read before that point, so `progress: 1` here would

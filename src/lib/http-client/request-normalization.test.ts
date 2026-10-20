@@ -4953,3 +4953,61 @@ test('round 110: underscore suffix overrides; a sub-second mock maxAge keeps the
     expect.stringContaining('Max-Age=1'),
   ]);
 });
+
+test('round 111: FetchAdapter refusals at dispatch are not retried; terminal upload events count bytes; browser adapters never flag the caller error', async () => {
+  const mine = new Error('header value failed');
+  const hostile = {
+    toString() {
+      throw mine;
+    },
+  };
+  const refused = await new FetchAdapter()
+    .send({
+      requestURL: 'http://127.0.0.1:1/x',
+      method: 'GET',
+      headers: { 'x-a': hostile as unknown as string },
+    })
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+  expect((refused as Error).cause).toBe(mine);
+  expect(Object.getOwnPropertyNames(mine)).not.toContain(
+    '_lifecycleion_non_retryable_http_adapter_error',
+  );
+
+  const undiciRefusal = Object.assign(new TypeError('fetch failed'), {
+    cause: Object.assign(new Error('invalid keep-alive header'), {
+      code: 'UND_ERR_INVALID_ARG',
+    }),
+  });
+  const originalFetch = globalThis.fetch;
+  let fetches = 0;
+  globalThis.fetch = (() => {
+    fetches++;
+    return Promise.reject(undiciRefusal);
+  }) as unknown as typeof fetch;
+  try {
+    const builder = new HTTPClient({
+      adapter: new FetchAdapter(),
+      baseURL: 'http://127.0.0.1:1',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    }).get('/x');
+    await builder.send();
+    expect(fetches).toBe(1);
+    expect(builder.error?.code).toBe('adapter_error');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const uploads: Array<{ loaded: number; total: number; progress: number }> =
+    [];
+  const adapter = new MockAdapter();
+  adapter.routes.post('/u', () => ({ status: 200 }));
+  await new HTTPClient({ adapter, baseURL: 'http://api.test' })
+    .post('/u')
+    .text('0123456789')
+    .onUploadProgress((event) => uploads.push(event))
+    .send();
+  expect(uploads.at(-1)).toMatchObject({ loaded: 10, total: 10, progress: 1 });
+});
