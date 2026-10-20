@@ -5610,3 +5610,24 @@ test('NodeAdapter decompress: false hands the body over as it arrived and asks f
     server.close();
   }
 });
+
+test('round 117: redirect_disabled carries no cause from the hop body', async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(302, { location: '/small' });
+    res.end('x'.repeat(500));
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const builder = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      maxResponseBytes: 100,
+    }).get('/start');
+    await builder.send();
+    expect(builder.error?.code).toBe('redirect_disabled');
+    expect(builder.error?.cause).toBeUndefined();
+  } finally {
+    server.close();
+  }
+});

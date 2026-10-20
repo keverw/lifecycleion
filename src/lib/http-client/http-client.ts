@@ -1171,6 +1171,11 @@ export class BaseHTTPClient {
               isNetworkErrorOverride: false,
             });
             errorCode = 'redirect_disabled';
+            // The redirect is the outcome, so nothing the hop's body did is its cause: a 3xx
+            // whose body was cut short or too large reported `redirect_disabled` with that
+            // stream error as its `cause`.
+            adapterCause = undefined;
+            errorMessage = undefined;
             break;
           }
 
