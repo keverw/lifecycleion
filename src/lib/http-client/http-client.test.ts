@@ -6214,7 +6214,10 @@ describe('HTTPClient — builder state', () => {
 
     await builder.send();
 
-    expect(builder.elapsedMS).toBeGreaterThanOrEqual(50);
+    // A few ms of slack: `elapsedMS` is whole `Date.now()` milliseconds, the delay is
+    // measured on the monotonic clock, and a timer may fire a millisecond early - a 50 ms
+    // wait has shown up as 49 ms elapsed. Without the wait it would be about 0.
+    expect(builder.elapsedMS).toBeGreaterThanOrEqual(45);
   });
 
   test('cancel during retry delay resolves immediately', async () => {
