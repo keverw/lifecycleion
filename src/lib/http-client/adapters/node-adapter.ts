@@ -1756,7 +1756,13 @@ export class NodeAdapter implements HTTPAdapter {
                 body: null,
                 isStreamError: true,
                 streamErrorCode: 'response_too_large',
-                errorCause: makeResponseTooLargeError(maxResponseBytes, true),
+                // `streamResponse` is only offered where it would help: a factory is
+                // called for a `200` alone, so any other status is buffered whatever the
+                // request asked for.
+                errorCause: makeResponseTooLargeError(
+                  maxResponseBytes,
+                  status === 200,
+                ),
               });
             };
 
