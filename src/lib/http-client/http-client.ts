@@ -4229,9 +4229,10 @@ export class BaseHTTPClient {
   ): AttemptRequest {
     // Best-effort snapshot for observers when a request fails before any adapter
     // attempt is dispatched (interceptor throw, pre-send cancel, setup error, etc.).
-    // Jar cookies and internal headers (x-local-client-request-id,
-    // x-local-client-request-attempt) are not added here - they are applied at dispatch
-    // time, and no attempt went out. A request that already carries them (a redirect
+    // Jar cookies and the attempt header (x-local-client-request-attempt) are not added
+    // here - they are applied at dispatch time, and no attempt went out. The request ID
+    // header and the default user-agent are already on it: they are set before the
+    // interceptors run. A request that already carries them (a redirect
     // hop's, built from the previous hop's sent headers, or a retry interceptor's input)
     // keeps them, as it would have sent them. Unsupported body types are caught
     // and swallowed here; the real error is reported via request_setup_error instead.

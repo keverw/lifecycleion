@@ -103,18 +103,6 @@ export function assertNoBrowserRestrictedHeaders(
 }
 
 /**
- * Returns true if the content-type indicates a JSON body.
- */
-export function isJSONContentType(contentType: string | undefined): boolean {
-  if (!contentType) {
-    return false;
-  }
-
-  const lower = contentType.toLowerCase();
-  return lower.includes('application/json') || lower.includes('+json');
-}
-
-/**
  * Join repeated request header values into the single field each transport sends:
  * `; ` for `Cookie` (the RFC 6265 cookie-pair delimiter), `, ` for everything else.
  * Shared by NodeAdapter and MockAdapter, so it stays free of Node-only imports.

@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test';
 import {
   assertNoBrowserRestrictedHeaders,
   isBrowserRestrictedHeader,
-  isJSONContentType,
   materializeRequestHeaders,
 } from './header-utils';
 
@@ -113,33 +112,6 @@ describe('assertNoBrowserRestrictedHeaders', () => {
     expect(() =>
       assertNoBrowserRestrictedHeaders({}, 'FetchAdapter'),
     ).not.toThrow();
-  });
-});
-
-describe('isJSONContentType', () => {
-  test('returns true for application/json', () => {
-    expect(isJSONContentType('application/json')).toBe(true);
-  });
-
-  test('returns true for application/json with charset', () => {
-    expect(isJSONContentType('application/json; charset=utf-8')).toBe(true);
-  });
-
-  test('returns true for +json vendor types', () => {
-    expect(isJSONContentType('application/vnd.api+json')).toBe(true);
-  });
-
-  test('returns false for non-JSON types', () => {
-    expect(isJSONContentType('text/plain')).toBe(false);
-    expect(isJSONContentType('application/xml')).toBe(false);
-  });
-
-  test('returns false for undefined', () => {
-    expect(isJSONContentType(undefined)).toBe(false);
-  });
-
-  test('is case-insensitive', () => {
-    expect(isJSONContentType('Application/JSON')).toBe(true);
   });
 });
 

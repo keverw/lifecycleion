@@ -834,7 +834,15 @@ function serializeMockCookieOptions(
     parts,
     'Max-Age',
     typeof maxAge === 'number' && !Number.isNaN(maxAge)
-      ? Math.max(-1, Math.min(Math.trunc(maxAge), MAX_COOKIE_AGE_SECONDS))
+      ? Math.max(
+          -1,
+          // Up for a positive fraction, so `0.5` is the short-lived cookie it asks for
+          // rather than `Max-Age=0`, which deletes it; toward zero otherwise.
+          Math.min(
+            maxAge > 0 ? Math.ceil(maxAge) : Math.trunc(maxAge),
+            MAX_COOKIE_AGE_SECONDS,
+          ),
+        )
       : maxAge,
   );
   appendCookieAttribute(parts, 'Domain', cookie.domain);

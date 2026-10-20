@@ -1683,7 +1683,7 @@ describe('CookieJar', () => {
       [{ add: ['https://corp.internal'] }, 'scheme'],
       [{ add: ['corp internal'] }, 'whitespace'],
       [{ add: ['corp/internal'] }, 'path separator'],
-      [{ add: ['-corp.internal'] }, 'leading hyphen'],
+      [{ add: ['corp!.internal'] }, 'punctuation'],
       [{ add: [42 as unknown as string] }, 'non-string'],
       [{ add: ['corp.internal'], remove: ['corp.internal'] }, 'contradiction'],
     ])('throws on a %o config (%s)', (publicSuffixes) => {

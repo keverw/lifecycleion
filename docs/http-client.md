@@ -683,7 +683,7 @@ type ErrorObserver = (
 
 The `request` argument is the same `AttemptRequest` snapshot described above, including the configured `timeout` for that attempt.
 
-When a request fails before any adapter attempt is dispatched (for example request setup errors, pre-dispatch interceptor failures, or pre-send cancellation), the snapshot is best-effort: it omits internally added request headers and cookie-jar-applied cookies because no real outbound attempt occurred.
+When a request fails before any adapter attempt is dispatched (for example request setup errors, pre-dispatch interceptor failures, or pre-send cancellation), the snapshot is best-effort: it carries the headers set before interceptors run - the request ID header (with `includeRequestID`) and the default `user-agent` - but not the per-attempt attempt header or cookie-jar cookies, which are applied at dispatch, because no real outbound attempt occurred.
 
 ### Filter Options
 

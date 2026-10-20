@@ -4932,3 +4932,24 @@ test("round 109: an adapter never flags the caller's own error in place", async 
     '_lifecycleion_non_retryable_http_adapter_error',
   );
 });
+
+test('round 110: underscore suffix overrides; a sub-second mock maxAge keeps the cookie', async () => {
+  const jar = new CookieJar({ publicSuffixes: { add: ['svc.my_net'] } });
+  jar.parseSetCookieHeader('t=1; Domain=svc.my_net', 'http://a.svc.my_net/');
+  expect(jar.getCookieHeaderString('http://b.svc.my_net/')).toBe('');
+
+  const adapter = new MockAdapter();
+  adapter.routes.get('/c', () => ({
+    status: 200,
+    cookies: { s: { value: 'v', maxAge: 0.5 } },
+  }));
+  const response = await new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+  })
+    .get('/c')
+    .send();
+  expect(response.headers['set-cookie']).toEqual([
+    expect.stringContaining('Max-Age=1'),
+  ]);
+});
