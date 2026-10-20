@@ -5726,3 +5726,64 @@ test('round 119: polyfilled fetch bodies, custom adapter bodies over the limit, 
     server.close();
   }
 });
+
+test('round 120: polyfilled fetch bodies are read incrementally and released; an inner raw deflate decodes', async () => {
+  const { Readable } = await import('node:stream');
+  let produced = 0;
+  let isDestroyed = false;
+  const endless = new Readable({
+    read() {
+      produced += 1024;
+      this.push(Buffer.alloc(1024));
+    },
+  });
+  endless.on('close', () => {
+    isDestroyed = true;
+  });
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (() =>
+    Promise.resolve({
+      status: 200,
+      type: 'basic',
+      headers: new Headers({ 'content-type': 'text/plain' }),
+      body: endless,
+      arrayBuffer: () => Promise.reject(new Error('not read whole')),
+    })) as unknown as typeof fetch;
+  try {
+    const capped = await new HTTPClient({
+      adapter: new FetchAdapter(),
+      baseURL: 'http://a.test',
+      maxResponseBytes: 10_000,
+    })
+      .get('/x')
+      .send();
+    expect(capped.isStreamError).toBe(true);
+    expect(produced).toBeLessThan(100_000);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(isDestroyed).toBe(true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const body = zlib.gzipSync(zlib.deflateRawSync('inner'));
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, {
+      'content-type': 'text/plain',
+      'content-encoding': 'deflate, gzip',
+    });
+    res.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  try {
+    const port = (server.address() as AddressInfo).port;
+    const decoded = await new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL: `http://127.0.0.1:${port}`,
+    })
+      .get('/x')
+      .send();
+    expect(decoded.body).toBe('inner');
+  } finally {
+    server.close();
+  }
+});

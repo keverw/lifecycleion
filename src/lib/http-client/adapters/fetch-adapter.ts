@@ -351,16 +351,29 @@ async function readResponseBody(
   // (node-fetch, cross-fetch) hands over a Node `Readable`, which has no `getReader`, and
   // a test double may hand over anything: they are read whole and checked after, as
   // before the limit was read through a reader.
-  if (
-    !response.body ||
-    typeof (response.body as { getReader?: unknown }).getReader !== 'function'
-  ) {
+  const body: unknown = response.body;
+
+  if (!body || typeof readUnknownMember(body, 'getReader') !== 'function') {
+    // A Node `Readable` is async-iterable: read it a chunk at a time as well, so a body
+    // over the limit is neither read whole first nor left holding its socket.
+    if (
+      body &&
+      typeof (body as { [Symbol.asyncIterator]?: unknown })[
+        Symbol.asyncIterator
+      ] === 'function'
+    ) {
+      return await readIterableBody(
+        body as AsyncIterable<Uint8Array | string>,
+        maxResponseBytes,
+      );
+    }
+
     const buffer = await response.arrayBuffer();
     const bytes = new Uint8Array(buffer);
     return bytes.length > maxResponseBytes ? RESPONSE_TOO_LARGE : bytes;
   }
 
-  const reader = response.body.getReader();
+  const reader = (body as ReadableStream<Uint8Array>).getReader();
   const chunks: Uint8Array[] = [];
   let loadedBytes = 0;
 
@@ -397,16 +410,67 @@ async function readResponseBody(
   return bytes;
 }
 
-/** Cancel a body that will not be read, ignoring a stream that refuses. */
-function cancelBodyQuietly(body: ReadableStream<Uint8Array> | null): void {
+/**
+ * A polyfilled `fetch`'s async-iterable body (a Node `Readable`) read a chunk at a time,
+ * counted as it comes and released the moment it passes the limit.
+ */
+async function readIterableBody(
+  body: AsyncIterable<Uint8Array | string>,
+  maxResponseBytes: number,
+): Promise<Uint8Array | typeof RESPONSE_TOO_LARGE> {
+  const chunks: Uint8Array[] = [];
+  let loadedBytes = 0;
+
+  for await (const value of body) {
+    const chunk =
+      typeof value === 'string' ? new TextEncoder().encode(value) : value;
+    loadedBytes += chunk.byteLength;
+
+    if (loadedBytes > maxResponseBytes) {
+      cancelBodyQuietly(body);
+      return RESPONSE_TOO_LARGE;
+    }
+
+    chunks.push(chunk);
+  }
+
+  const bytes = new Uint8Array(loadedBytes);
+  let offset = 0;
+
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  return bytes;
+}
+
+/**
+ * Let go of a body that will not be read, ignoring one that refuses: a web stream is
+ * cancelled, and a polyfilled `fetch`'s Node `Readable` - which has no `cancel` - is
+ * destroyed, so its socket is not held with the body unread.
+ */
+function cancelBodyQuietly(body: unknown): void {
   if (!body) {
     return;
   }
 
   try {
-    body.cancel().catch(() => {
-      // The body is being discarded; a stream that fails to cancel has nothing to add.
-    });
+    const cancel = readUnknownMember(body, 'cancel');
+    if (typeof cancel === 'function') {
+      const cancelled: unknown = cancel.call(body);
+      if (cancelled instanceof Promise) {
+        cancelled.catch(() => {
+          // The body is being discarded; a stream that fails to cancel has nothing to add.
+        });
+      }
+      return;
+    }
+
+    const destroy = readUnknownMember(body, 'destroy');
+    if (typeof destroy === 'function') {
+      destroy.call(body);
+    }
   } catch {
     // A locked or already-cancelled stream: nothing left to release.
   }

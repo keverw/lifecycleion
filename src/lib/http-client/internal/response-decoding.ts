@@ -14,6 +14,7 @@
 
 import { EventEmitter } from 'node:events';
 import type * as http from 'node:http';
+import { Transform, type TransformCallback } from 'node:stream';
 import * as zlib from 'node:zlib';
 import { hasResponseBody } from './response-limit';
 
@@ -351,7 +352,12 @@ function createDecoder(
       return zlib.createGunzip({ flush: zlib.constants.Z_SYNC_FLUSH });
     case 'deflate':
       // A zlib stream's first byte has a low nibble of 8; anything else is raw deflate.
-      return firstByte === undefined || firstByte % 16 === 8
+      // An inner coding's first byte is not known yet: told apart on its own first chunk.
+      if (firstByte === undefined) {
+        return new SniffingInflate();
+      }
+
+      return firstByte % 16 === 8
         ? zlib.createInflate({ flush: zlib.constants.Z_SYNC_FLUSH })
         : zlib.createInflateRaw({ flush: zlib.constants.Z_SYNC_FLUSH });
     case 'br':
@@ -360,5 +366,72 @@ function createDecoder(
       });
     case 'zstd':
       return (createZstdDecompress as () => Decoder)();
+  }
+}
+
+/**
+ * A `deflate` decoder that tells zlib-wrapped from raw deflate by the first byte it is
+ * given, as undici's inflate stage does - for a `deflate` stacked inside another coding,
+ * whose bytes only exist once the outer one is decoded. Backpressure is passed through:
+ * the inner inflater is paused while this stream's reader is, so a stacked bomb is no
+ * more eager than a plain one.
+ */
+class SniffingInflate extends Transform {
+  private inner: zlib.Inflate | zlib.InflateRaw | undefined;
+
+  public override _transform(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: TransformCallback,
+  ): void {
+    if (this.inner === undefined) {
+      const inner =
+        (chunk[0] ?? 0) % 16 === 8
+          ? zlib.createInflate({ flush: zlib.constants.Z_SYNC_FLUSH })
+          : zlib.createInflateRaw({ flush: zlib.constants.Z_SYNC_FLUSH });
+
+      inner.on('data', (decoded: Buffer) => {
+        if (!this.push(decoded)) {
+          inner.pause();
+        }
+      });
+      inner.on('error', (error: Error) => {
+        this.destroy(error);
+      });
+      this.inner = inner;
+    }
+
+    if (this.inner.write(chunk)) {
+      callback();
+    } else {
+      this.inner.once('drain', () => {
+        callback();
+      });
+    }
+  }
+
+  public override _read(size: number): void {
+    this.inner?.resume();
+    super._read(size);
+  }
+
+  public override _flush(callback: TransformCallback): void {
+    if (this.inner === undefined) {
+      callback();
+      return;
+    }
+
+    this.inner.once('end', () => {
+      callback();
+    });
+    this.inner.end();
+  }
+
+  public override _destroy(
+    error: Error | null,
+    callback: (error?: Error | null) => void,
+  ): void {
+    this.inner?.destroy();
+    callback(error);
   }
 }
