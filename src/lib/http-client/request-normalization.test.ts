@@ -5834,3 +5834,42 @@ test('round 121: bytes after a compressed stream are a stream error for every co
     server.close();
   }
 });
+
+test('round 122: trailing bytes in the last chunk of an ended response are a stream error too', async () => {
+  const junk = Buffer.alloc(1000, 'j');
+  const bodies: Record<string, [string, Buffer]> = {
+    br: ['br', Buffer.concat([zlib.brotliCompressSync('hello'), junk])],
+    deflate: ['deflate', Buffer.concat([zlib.deflateSync('hello'), junk])],
+    raw: ['deflate', Buffer.concat([zlib.deflateRawSync('hello'), junk])],
+    stacked: [
+      'br, gzip',
+      zlib.gzipSync(Buffer.concat([zlib.brotliCompressSync('hello'), junk])),
+    ],
+    clean: ['br', zlib.brotliCompressSync('hello')],
+  };
+  const server = http.createServer((req, res) => {
+    const [encoding, body] = bodies[(req.url ?? '/').slice(1)] ?? [
+      'identity',
+      Buffer.from('x'),
+    ];
+    res.writeHead(200, {
+      'content-type': 'text/plain',
+      'content-encoding': encoding,
+      'content-length': String(body.length),
+    });
+    res.end(body);
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const client = new HTTPClient({ adapter: new NodeAdapter(), baseURL });
+    for (const kind of ['br', 'deflate', 'raw', 'stacked']) {
+      const response = await client.get(`/${kind}`).send();
+      expect(response.isStreamError).toBe(true);
+    }
+    const clean = await client.get('/clean').send();
+    expect(clean.body).toBe('hello');
+  } finally {
+    server.close();
+  }
+});

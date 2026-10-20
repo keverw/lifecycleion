@@ -143,6 +143,8 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   private isReading = false;
   private isDestroyed = false;
   private didFailTrailingBytes = false;
+  /** Raw bytes that arrived before the decoders were attached: the first chunk. */
+  private rawBytes = 0;
   private readonly held: Array<{ event: string; args: unknown[] }> = [];
 
   constructor(
@@ -216,6 +218,13 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       this.deliver('close');
     });
 
+    // Every raw byte, the first chunk's included: read against what the first decoder
+    // consumed, to tell trailing bytes (see `attachDecoders`).
+    res.on('data', (chunk: Buffer) => {
+      if (this.decoders.length === 0) {
+        this.rawBytes += chunk.length;
+      }
+    });
     res.once('data', (first: Buffer) => {
       this.attachDecoders(first);
     });
@@ -282,22 +291,31 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       this.decoders[index - 1].pipe(this.decoders[index]);
     }
 
-    // Trailing bytes: a decoder whose compressed stream ended while what feeds it had not
-    // - the response for the first, the decoder before it for the rest. zlib and brotli
-    // end their output early then and drop the rest, so `br` or `deflate` followed by
-    // junk was delivered as a success, its response left open; it is a stream error, as
-    // gunzip makes it one for gzip. A decoder that ends otherwise only ends once its
-    // source has, since nothing calls its `end` sooner.
-    const isSourceEnded = this.decoders.map(() => false);
+    // Trailing bytes: zlib and brotli end their output when their compressed stream ends
+    // and drop whatever input is left, so `br` or `deflate` followed by junk was delivered
+    // as a success; it is a stream error, as gunzip makes it one for gzip. Told by count,
+    // not by the order of events - decoding runs off the main thread, so the response's
+    // own `'end'` routinely comes first even when its last chunk carried the junk: a
+    // decoder that ends having consumed (`bytesWritten`) fewer bytes than it was fed
+    // stopped short of its input. `SniffingInflate` tells its own.
+    const fedBytes = this.decoders.map(() => 0);
+    fedBytes[0] = this.rawBytes;
+    this.res.on('data', (chunk: Buffer) => {
+      fedBytes[0] = (fedBytes[0] ?? 0) + chunk.length;
+    });
     for (const [index, decoder] of this.decoders.entries()) {
-      decoder.once('end', () => {
-        if (index === 0 ? !this.didRawEnd : !isSourceEnded[index]) {
-          this.failTrailingBytes();
-          return;
-        }
+      if (index + 1 < fedBytes.length) {
+        decoder.on('data', (chunk: Buffer) => {
+          fedBytes[index + 1] = (fedBytes[index + 1] ?? 0) + chunk.length;
+        });
+      }
 
-        if (index + 1 < isSourceEnded.length) {
-          isSourceEnded[index + 1] = true;
+      decoder.once('end', () => {
+        const consumed: unknown = (decoder as { bytesWritten?: unknown })
+          .bytesWritten;
+
+        if (typeof consumed === 'number' && consumed < (fedBytes[index] ?? 0)) {
+          this.failTrailingBytes();
         }
       });
     }
