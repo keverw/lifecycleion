@@ -1,4 +1,35 @@
-import { NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG } from '../consts';
+import {
+  ADAPTER_ERROR_CARRIER_KEY,
+  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
+} from '../consts';
+import { readUnknownMember as readObjectMember } from '../../internal/read-member';
+
+/**
+ * A non-retryable adapter error for a failure that may be the caller's own error - one a
+ * route, a body's `toJSON` or a header value's `toString` threw. A fresh carrier, with
+ * that error on `cause` (which the client reports), rather than the flag defined on the
+ * caller's object: there it stayed for good, so the same object thrown later by an
+ * adapter's `send()` was read as non-retryable, and it showed up in `serializeError`.
+ */
+export function nonRetryableAdapterErrorFrom(error: unknown): Error {
+  const message = readObjectMember(error, 'message');
+  const carrier = new Error(
+    typeof message === 'string' && message.length > 0
+      ? message
+      : 'Adapter failure',
+    { cause: error },
+  );
+  const name = readObjectMember(error, 'name');
+
+  if (typeof name === 'string') {
+    carrier.name = name;
+  }
+
+  Object.defineProperty(carrier, ADAPTER_ERROR_CARRIER_KEY, { value: true });
+  markNonRetryableAdapterError(carrier);
+
+  return carrier;
+}
 
 /**
  * Tag a terminal adapter configuration failure so `HTTPClient` reports it as a

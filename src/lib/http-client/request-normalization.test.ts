@@ -4908,3 +4908,27 @@ test('round 108: a shared factory error does not mix requests; cancel and timeou
     'https://admin:secret@other.test/y',
   );
 });
+
+test("round 109: an adapter never flags the caller's own error in place", async () => {
+  const shared = new Error('cannot serialize');
+  const adapter = new MockAdapter();
+  adapter.routes.get('/x', () => ({
+    status: 200,
+    body: {
+      x: {
+        toJSON() {
+          throw shared;
+        },
+      },
+    },
+  }));
+  const builder = new HTTPClient({ adapter, baseURL: 'http://a.test' }).get(
+    '/x',
+  );
+  await builder.send();
+  expect(builder.error?.code).toBe('adapter_error');
+  expect(builder.error?.cause).toBe(shared);
+  expect(Object.getOwnPropertyNames(shared)).not.toContain(
+    '_lifecycleion_non_retryable_http_adapter_error',
+  );
+});

@@ -1,4 +1,7 @@
-import { markNonRetryableAdapterError } from '../internal/adapter-error';
+import {
+  markNonRetryableAdapterError,
+  nonRetryableAdapterErrorFrom,
+} from '../internal/adapter-error';
 import { defineEntry } from '../../internal/define-entry';
 import { observeRejection } from '../../internal/promise-reactions';
 import Router from 'find-my-way';
@@ -554,8 +557,7 @@ export class MockAdapter implements HTTPAdapter {
     } catch (error) {
       // A body the mock cannot serialize is the route's mistake, after it has run; not
       // retried, for the reason a bad delay is not.
-      markNonRetryableAdapterError(error);
-      throw error;
+      throw nonRetryableAdapterErrorFrom(error);
     }
 
     // A simulated stream error loses the body, but it strikes after headers
@@ -1133,8 +1135,7 @@ function asRouteMistake<R>(step: () => R): R {
   try {
     return step();
   } catch (error) {
-    markNonRetryableAdapterError(error);
-    throw error;
+    throw nonRetryableAdapterErrorFrom(error);
   }
 }
 

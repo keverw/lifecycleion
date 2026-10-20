@@ -136,6 +136,14 @@ export const NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG =
 export const STREAM_FACTORY_ERROR_FLAG = '_lifecycleion_stream_factory_error';
 
 /**
+ * Marks an adapter's carrier for a failure that may be the caller's own error: the client
+ * reports the carrier's `cause`. A symbol, so it never reaches a serialized error.
+ */
+export const ADAPTER_ERROR_CARRIER_KEY = Symbol.for(
+  'lifecycleion.http-client.adapter-error-carrier',
+);
+
+/**
  * Attached to the AbortError thrown when a StreamResponseFactory returns null
  * or `{ cancel: true, reason? }`. The value is the reason string if provided,
  * or `true` if the factory cancelled without a reason. Lets HTTPClient surface

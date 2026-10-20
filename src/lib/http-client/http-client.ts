@@ -65,6 +65,7 @@ import {
   STREAM_ABORT_HEADERS_KEY,
   STREAM_ABORT_STATUS_KEY,
   STREAM_FACTORY_ERROR_FLAG,
+  ADAPTER_ERROR_CARRIER_KEY,
   XHR_BROWSER_TIMEOUT_FLAG,
   RETRYABLE_STATUS_CODES,
   IDEMPOTENT_METHODS,
@@ -3441,8 +3442,11 @@ export class BaseHTTPClient {
             // A stream factory's failure arrives on a fresh carrier (see NodeAdapter's
             // `markStreamFactoryError`), and the caller's own error is its `cause`: that
             // is the one reported.
+            // An adapter's carrier for what may be the caller's own error (see
+            // `nonRetryableAdapterErrorFrom`) reports that error too.
             adapterCause: normalizeError(
-              isStreamFactoryError
+              isStreamFactoryError ||
+                readObjectMember(error, ADAPTER_ERROR_CARRIER_KEY) === true
                 ? (readObjectMember(error, 'cause') ?? error)
                 : error,
             ),

@@ -7875,7 +7875,8 @@ test.each(['aborted', 'addEventListener', 'setHeader'] as const)(
       } catch (error) {
         caught = error;
       }
-      expect(caught).toBe(failure);
+      // On a carrier, with the caller's own error as its cause.
+      expect((caught as Error).cause).toBe(failure);
       expect(request.destroyed).toBe(true);
       expect(destroys).toBe(1);
     } finally {

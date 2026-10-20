@@ -1,6 +1,7 @@
 import {
   defineHiddenTags,
   markNonRetryableAdapterError,
+  nonRetryableAdapterErrorFrom,
 } from '../internal/adapter-error';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { observeRejection } from '../../internal/promise-reactions';
@@ -2150,14 +2151,23 @@ export class NodeAdapter implements HTTPAdapter {
           // object, another realm's `FormData` - went out as no body at all, and the request
           // succeeded without it. `HTTPClient` serializes bodies first; this is the adapter
           // called directly.
-          throw new TypeError(
+          const refusal = new TypeError(
             'NodeAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
           );
+          markNonRetryableAdapterError(refusal);
+          throw refusal;
         }
       } catch (error) {
-        const refusal = normalizeError(error);
-        markNonRetryableAdapterError(refusal);
-        throw refusal;
+        // This adapter's own refusal goes out as it is; anything else may be the caller's
+        // (a header value's `toString`, a hostile signal) and goes out on a carrier.
+        if (
+          readObjectMember(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG) ===
+          true
+        ) {
+          throw error;
+        }
+
+        throw nonRetryableAdapterErrorFrom(error);
       }
     });
     return await operation.catch((error: unknown) => {
