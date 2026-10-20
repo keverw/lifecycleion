@@ -68,10 +68,6 @@ export function checkDNSLength(host: string): boolean {
   return total > 0 ? total - 1 <= 253 : false;
 }
 
-// IPv6 regex pattern hoisted to module scope for performance
-const IPV6_BASE_REGEX =
-  /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:)|::([fF]{4}(:0{1,4}){0,1}:){0,1}((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])|([0-9a-fA-F]{1,4}:){1,4}:((25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9])\.){3,3}(25[0-5]|(2[0-4]|1{0,1}[0-9]){0,1}[0-9]))$/;
-
 /**
  * Check if a string is an IPv4 address
  */
@@ -98,7 +94,21 @@ export function isIPv6(str: string): boolean {
     return false;
   }
 
-  return IPV6_BASE_REGEX.test(cleaned);
+  // Asked of the URL parser, as the hosts it compares come from it: a hand-written
+  // pattern missed valid embedded-IPv4 forms (`1:2:3:4:5:6:1.2.3.4`,
+  // `1:2:3:4:5::1.2.3.4`), and `normalizeOrigin` then dropped such a host's brackets,
+  // leaving its port indistinguishable from the address. Only hex digits, colons and
+  // dots first, so nothing past the brackets can make the probe URL parse.
+  if (!/^[0-9a-f:.]+$/i.test(cleaned) || !cleaned.includes(':')) {
+    return false;
+  }
+
+  try {
+    new URL(`http://[${cleaned}]/`);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

@@ -975,11 +975,11 @@ export class CookieJar {
       } else if (attrName === 'httponly') {
         cookie.httpOnly = true;
       } else {
-        if (eqIdx === -1) {
-          continue;
-        }
-
-        const attrValue = trimSpacesAndTabs(part.slice(eqIdx + 1));
+        // A bare attribute (`; Path`) has an empty value, as RFC 6265bis §5.6 reads it -
+        // the same as `; Path=`. Skipped, it left an earlier `Path=/` in force, which let
+        // `__Host-id=1; Secure; Path=/; Path` past the prefix rule.
+        const attrValue =
+          eqIdx === -1 ? '' : trimSpacesAndTabs(part.slice(eqIdx + 1));
 
         // An attribute value over 1024 octets is ignored, as RFC 6265bis ignores it.
         // Counted in characters: the header arrives read as latin1, one character per

@@ -1671,13 +1671,19 @@ describe('CookieJar', () => {
     test('canonicalizes a trailing root dot for domain and host-only cookies', () => {
       const domainCookie = new CookieJar();
 
+      // A real domain cookie: `localhost` is a public suffix, so `Domain=localhost` is
+      // stored host-only and never reached this path.
       domainCookie.parseSetCookieHeader(
-        'session=domain; Domain=localhost; Path=/',
-        'http://localhost./',
+        'session=domain; Domain=example.com; Path=/',
+        'https://www.example.com./',
       );
 
+      expect(domainCookie.getAllCookies()[0]?.hostOnly).toBe(false);
       expect(
-        domainCookie.getCookieFor('session', 'http://localhost/')?.value,
+        domainCookie.getCookieFor('session', 'https://www.example.com/')?.value,
+      ).toBe('domain');
+      expect(
+        domainCookie.getCookieFor('session', 'https://api.example.com/')?.value,
       ).toBe('domain');
 
       const hostOnlyCookie = new CookieJar();

@@ -333,7 +333,15 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
           .bytesWritten;
 
         if (typeof consumed === 'number' && consumed < (fedBytes[index] ?? 0)) {
-          this.failDecoding(trailingBytesError());
+          // A second zstd frame is no junk: valid zstd (RFC 8878 allows several), which
+          // Node's decoder leaves unread when it arrives in the same write as the first.
+          this.failDecoding(
+            (zstdFrames[index]?.frameCount ?? 0) > 1
+              ? new Error(
+                  "Response body holds more than one zstd frame, and this runtime's zstd decoder reads only the first",
+                )
+              : trailingBytesError(),
+          );
         } else if (zstdFrames[index]?.isAtFrameEnd === false) {
           this.failDecoding(
             new Error('Response body ends before its compressed stream does'),
@@ -556,6 +564,8 @@ class SniffingInflate extends Transform {
  * over. A malformed header is left to the decoder, which fails on it.
  */
 class ZstdFrameWalker {
+  /** Zstandard frames (not skippable ones) whose last block has been read. */
+  public frameCount = 0;
   private skipBytes = 0;
   private readonly fieldBytes: number[] = [];
   private fieldLength = 4;
@@ -662,6 +672,7 @@ class ZstdFrameWalker {
 
     if ((header & 0x01) !== 0) {
       this.hasFrame = true;
+      this.frameCount++;
       this.skipBytes += this.hasChecksum ? 4 : 0;
       this.expectMagic();
     } else {

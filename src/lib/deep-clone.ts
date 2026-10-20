@@ -9,6 +9,8 @@
  * are detected and handled to prevent infinite recursion.
  */
 
+import { defineEntry } from './internal/define-entry';
+
 /**
  * Deep clone an object or value
  *
@@ -103,7 +105,13 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
 
   for (const key in obj) {
     if (Object.prototype.hasOwnProperty.call(obj, key)) {
-      cloned[key] = cloneInternal((obj as Record<string, unknown>)[key], seen);
+      // Defined, not assigned: an own `__proto__` key (`JSON.parse` makes one) would
+      // otherwise reparent the clone instead of being copied.
+      defineEntry(
+        cloned,
+        key,
+        cloneInternal((obj as Record<string, unknown>)[key], seen),
+      );
     }
   }
 

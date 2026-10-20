@@ -342,12 +342,12 @@ Validates DNS length constraints for a hostname. Non-throwing. Assumes ASCII inp
 
 - Each label must be ≤ 63 octets
 - Total name must be ≤ 253 characters, a trailing dot aside (255 octets on the wire, counting each label's length octet and the root)
-- Maximum 127 labels (128+ is rejected); a trailing dot's empty label does not count
+- Maximum 127 labels (128+ is rejected); a trailing dot's empty label does not count. Within 253 characters a name has at most 127 labels anyway, so the length limit is the one that decides
 
 ```typescript
 checkDNSLength('example.com'); // true
 checkDNSLength('a'.repeat(64) + '.com'); // false (label > 63)
-checkDNSLength('x.'.repeat(127) + 'com'); // false (128 labels > 127 limit)
+checkDNSLength('x.'.repeat(127) + 'com'); // false (255 characters > 253)
 ```
 
 ### getDomain

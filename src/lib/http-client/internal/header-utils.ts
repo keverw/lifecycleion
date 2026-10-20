@@ -112,22 +112,27 @@ export function materializeRequestHeaders(
   headers: Record<string, string | string[]>,
 ): Record<string, string> {
   const result: Record<string, string> = {};
+  // Names that differ only in case are one header, joined under the first spelling, as
+  // `fetch`'s `Headers` joins them: Node's `http` lowercases names and kept only the last.
+  const spellings = new Map<string, string>();
 
   for (const [key, value] of Object.entries(headers)) {
     const present = presentHeaderValue(value);
     if (present === undefined) {
       continue;
     }
-    if (!Array.isArray(present)) {
-      defineEntry(result, key, present);
-      continue;
-    }
 
-    defineEntry(
-      result,
-      key,
-      key.toLowerCase() === 'cookie' ? present.join('; ') : present.join(', '),
-    );
+    const lower = key.toLowerCase();
+    const separator = lower === 'cookie' ? '; ' : ', ';
+    const joined = Array.isArray(present) ? present.join(separator) : present;
+    const spelling = spellings.get(lower);
+
+    if (spelling === undefined) {
+      spellings.set(lower, key);
+      defineEntry(result, key, joined);
+    } else {
+      defineEntry(result, spelling, `${result[spelling]}${separator}${joined}`);
+    }
   }
 
   return result;

@@ -6694,5 +6694,139 @@ test('round 133: no wildcard over a tail a PSL wildcard rule makes every child o
 test('round 133: a trailing dot is not a label toward the 127-label cap', () => {
   expect(checkDNSLength('x.'.repeat(127))).toBe(true);
   expect(checkDNSLength(`${'x.'.repeat(126)}x`)).toBe(true);
+  // 128 labels, refused - by the 253-character limit, which no 128-label name meets.
   expect(checkDNSLength(`${'x.'.repeat(127)}x`)).toBe(false);
+});
+
+test('round 134: every IPv6 form the URL parser reads is an IPv6 literal, brackets kept', () => {
+  for (const address of ['1:2:3:4:5:6:1.2.3.4', '1:2:3:4:5::1.2.3.4']) {
+    expect(isIPv6(address)).toBe(true);
+  }
+  expect(isIPv6('::1.2.3.04')).toBe(false);
+  expect(normalizeOrigin('http://[1:2:3:4:5:6:1.2.3.4]:8080')).toBe(
+    'http://[1:2:3:4:5:6:102:304]:8080',
+  );
+  expect(
+    matchesOriginList('http://[1:2:3:4:5:6:102:304]', [
+      'http://[1:2:3:4:5:6:1.2.3.4]',
+    ]),
+  ).toBe(true);
+});
+
+test('round 134: a bare cookie attribute reads as one with an empty value', () => {
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader(
+    '__Host-id=1; Secure; Path=/; Path',
+    'https://example.com/app/page',
+  );
+  expect(jar.getAllCookies()).toEqual([]);
+
+  jar.parseSetCookieHeader('a=1; Path=/; Path', 'https://example.com/app/page');
+  expect(jar.getAllCookies()[0]?.path).toBe('/app');
+
+  const sameSite = new CookieJar();
+  sameSite.parseSetCookieHeader(
+    'a=1; SameSite=None; SameSite',
+    'https://example.com/',
+  );
+  expect(sameSite.getAllCookies().map((c) => c.sameSite)).toEqual([undefined]);
+
+  const domain = new CookieJar();
+  domain.parseSetCookieHeader(
+    'a=1; Domain=example.com; Domain',
+    'https://www.example.com/',
+  );
+  expect(domain.getAllCookies()[0]?.hostOnly).toBe(true);
+});
+
+test('round 134: a publicSuffixes entry ending in a number is refused', () => {
+  for (const entry of ['10.0.0.1', 'corp.123']) {
+    expect(() => new CookieJar({ publicSuffixes: { add: [entry] } })).toThrow(
+      TypeError,
+    );
+  }
+  expect(
+    () => new CookieJar({ publicSuffixes: { add: ['corp.internal'] } }),
+  ).not.toThrow();
+});
+
+test('round 134: MockAdapter echoes req.params; NodeAdapter joins case-variant header names', async () => {
+  const mock = new MockAdapter();
+  mock.routes.get('/u/:id', (request) => ({
+    status: 200,
+    body: request.params,
+  }));
+  const echoed = await mock.send({
+    requestURL: 'http://api.test/u/7',
+    method: 'GET',
+    headers: {},
+  });
+  expect(echoed.status).toBe(200);
+
+  let received: string | string[] | undefined;
+  const server = http.createServer((req, res) => {
+    received = req.headers['x-a'];
+    res.end('ok');
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  try {
+    await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${(server.address() as AddressInfo).port}/`,
+      method: 'GET',
+      headers: { 'X-A': '1', 'x-a': '2' },
+    });
+    expect(received).toBe('1, 2');
+  } finally {
+    server.close();
+  }
+});
+
+test('round 134: a redirect hop cancelled before it went out is detected, not followed', async () => {
+  const adapter = new MockAdapter();
+  const hits: string[] = [];
+  adapter.routes.get('/g', () => {
+    hits.push('/g');
+    return { status: 302, headers: { location: '/h' } };
+  });
+  adapter.routes.get('/h', () => {
+    hits.push('/h');
+    return { status: 200, body: 'ok' };
+  });
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+  });
+  const builder = client.get('/g');
+  builder.onAttemptStart((event) => {
+    if (event.attemptNumber === 2) {
+      builder.cancel();
+    }
+  });
+  const response = await builder.send();
+  expect(hits).toEqual(['/g']);
+  expect(response.isCancelled).toBe(true);
+  expect(response.wasRedirectFollowed).toBe(false);
+  expect(response.detectedRedirectURL).toBe('http://api.test/h');
+});
+
+test('round 134: an observer rawBody keeps an own __proto__ key; builder.response is set for final observers', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.post('/x', () => ({ status: 200, body: 'ok' }));
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  let rawBody: unknown;
+  client.addResponseObserver((_response, request) => {
+    rawBody = request.rawBody;
+  });
+  await client.post('/x').json(JSON.parse('{"a":1,"__proto__":[1,2]}')).send();
+  expect(Object.hasOwn(rawBody as object, '__proto__')).toBe(true);
+  expect(Object.getPrototypeOf(rawBody)).toBe(Object.prototype);
+
+  const seen: unknown[] = [];
+  const builder = client.post('/x');
+  client.addResponseObserver(() => {
+    seen.push(builder.response?.status);
+  });
+  await builder.send();
+  expect(seen.at(-1)).toBe(200);
 });

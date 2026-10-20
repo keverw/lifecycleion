@@ -377,7 +377,9 @@ export class MockAdapter implements HTTPAdapter {
     // fixed list; a method it does not know finds no route, as an unregistered path does.
     const routeMethod = method.toUpperCase();
     const match = this.router.find(routeMethod as RouterHTTPMethod, path);
-    const params = (match?.params ?? {}) as Record<string, string>;
+    // Copied into a plain object: the router's own is a null-prototype `NullObject`,
+    // which a route echoing `req.params` as its body had refused as an unsupported type.
+    const params = { ...(match?.params ?? {}) } as Record<string, string>;
 
     const mockRequest: MockRequest = {
       method: routeMethod,

@@ -108,6 +108,15 @@ function normalizeSuffix(entry: unknown, listName: string): string {
     }
   }
 
+  // A last label of digits only: an IP address, which the jar answers before it consults
+  // any suffix rule, or a name the URL parser reads as one (`corp.123`), which no
+  // request host can be. Either way the entry could never take effect.
+  if (/^\d+$/.test(normalized.split('.').at(-1) ?? '')) {
+    throw new TypeError(
+      `publicSuffixes.${listName} entry '${entry}' ends in a number, so no request host can match it (an IP address is never a public suffix)`,
+    );
+  }
+
   return normalized;
 }
 

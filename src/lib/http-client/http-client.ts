@@ -690,6 +690,7 @@ export class BaseHTTPClient {
       );
       callbacks.setError(error);
       callbacks.setState('cancelled');
+      callbacks.setResponse(response);
       await this._runErrorObservers(
         error,
         this._bestEffortAttemptRequestFromPending(
@@ -701,7 +702,6 @@ export class BaseHTTPClient {
           type: 'final',
         },
       );
-      callbacks.setResponse(response);
       return response;
     }
 
@@ -987,6 +987,7 @@ export class BaseHTTPClient {
           );
           callbacks.setError(error);
           trackedCallbacks.setState('cancelled');
+          callbacks.setResponse(cancelledResponse);
 
           await this._runErrorObservers(
             error,
@@ -1003,7 +1004,6 @@ export class BaseHTTPClient {
             },
           );
 
-          callbacks.setResponse(cancelledResponse);
           return cancelledResponse;
         }
 
@@ -1050,6 +1050,9 @@ export class BaseHTTPClient {
         // initial request → 4,5 on first redirect hop → 6 on second hop).
         let lastAttemptNumber = 0;
         let currentHopInfo: RedirectHopInfo | undefined;
+        // The last followed redirect's target as the server wrote it, for a hop that then
+        // ends before it is dispatched: it is reported detected, not followed.
+        let lastDetectedTargetURL: string | undefined;
 
         while (true) {
           // Send request through the adapter with retry support. Each hop gets
@@ -1288,6 +1291,7 @@ export class BaseHTTPClient {
             // on every exit that does not follow it - as `redirect_disabled` and
             // `redirect_loop` report it, and as the docs promise. Nothing is sent to it.
             const detectedTargetURL = redirectURL;
+            lastDetectedTargetURL = detectedTargetURL;
 
             // Stripped here, before the hop is recorded, rather than only on the request:
             // `hopInfo`, `redirectHistory` and every observer and error built from them
@@ -1820,6 +1824,19 @@ export class BaseHTTPClient {
             initialURL: initialRequestURL,
             requestURL: attemptResult.sentRequest.requestURL,
             redirectHistory,
+            // A redirect hop whose first attempt never went out - cancelled from
+            // `onAttemptStart`, a body that failed on replay - was detected, not
+            // followed, as a cancel between hops reports it.
+            ...(currentHopInfo !== undefined &&
+            attemptResult.isHopUndispatched === true &&
+            lastDetectedTargetURL !== undefined
+              ? {
+                  undispatchedRedirect: {
+                    url: lastDetectedTargetURL,
+                    isRecorded: true,
+                  },
+                }
+              : {}),
             // From the attempt result when it threw - the shape that leaves
             // `adapterResponse` null - and otherwise straight off the response,
             // which the branches above reach with `adapterResponse: null` and so
@@ -1951,6 +1968,9 @@ export class BaseHTTPClient {
       // retryable HTTP failures may have been retried before we get here; interceptor
       // throw/cancel never retries and reaches this block immediately.
       const finalResponse = response;
+      // Set before the final observers run, with the state and error: an observer reading
+      // the builder saw a settled state and a `null` response.
+      callbacks.setResponse(finalResponse);
 
       if (response.isFailed) {
         const error = this._makeError(
@@ -1985,7 +2005,6 @@ export class BaseHTTPClient {
         });
       }
 
-      callbacks.setResponse(finalResponse);
       return finalResponse;
     } catch (error) {
       // Only a setup failure gets here - every outcome of the request itself is answered
@@ -2201,6 +2220,12 @@ export class BaseHTTPClient {
   }): Promise<{
     adapterResponse: AdapterResponse | null;
     sentRequest: AttemptRequest;
+    /**
+     * Set when the hop's first attempt ended before it was dispatched - cancelled from
+     * `onAttemptStart`, a body that failed to serialize: a redirect hop that never went
+     * out, which is no followed redirect.
+     */
+    isHopUndispatched?: boolean;
     /** Headers for following a redirect, excluding adapter-generated origin headers. */
     redirectRequestHeaders?: Record<string, string | string[]>;
     attemptCount: number;
@@ -2473,6 +2498,9 @@ export class BaseHTTPClient {
           wasCancelled: false,
           wasTimeout: false,
           isRetriesExhausted: false,
+          ...(attemptNumber === startAttempt
+            ? { isHopUndispatched: true }
+            : {}),
           ...outcome,
         };
       };
