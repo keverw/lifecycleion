@@ -5209,3 +5209,48 @@ test('round 113: decoding stops on a timeout, a truncated body is a stream error
     server.close();
   }
 }, 30_000);
+
+test('round 114: host-only and domain cookies are two cookies; header order, trimming, attribute size, nameless cookies', () => {
+  const jar = new CookieJar();
+  jar.parseSetCookieHeader(
+    'sid=real; Secure; HttpOnly; Path=/',
+    'https://bank.example/',
+  );
+  jar.parseSetCookieHeader(
+    'sid=x; Domain=bank.example; Secure; Path=/; Max-Age=0',
+    'https://evil.bank.example/',
+  );
+  expect(jar.getCookieHeaderString('https://bank.example/')).toBe('sid=real');
+  jar.parseSetCookieHeader(
+    'sid=attacker; Domain=bank.example; Secure; Path=/',
+    'https://evil.bank.example/',
+  );
+  expect(jar.getCookieHeaderString('https://bank.example/')).toContain(
+    'sid=real',
+  );
+
+  const ordered = new CookieJar();
+  ordered.parseSetCookieHeader('a=1', 'https://o.example/');
+  ordered.parseSetCookieHeader('b=1', 'https://o.example/');
+  ordered.parseSetCookieHeader('a=2', 'https://o.example/');
+  expect(ordered.getCookieHeaderString('https://o.example/')).toBe('a=2; b=1');
+
+  const text = new CookieJar();
+  text.parseSetCookieHeader('greet=voilÃ ', 'https://t.example/');
+  expect(text.getCookieHeaderString('https://t.example/')).toBe('greet=voilÃ ');
+  text.parseSetCookieHeader('bad=x\u000b', 'https://t.example/');
+  expect(text.getCookieHeaderString('https://t.example/')).not.toContain(
+    'bad=',
+  );
+  text.parseSetCookieHeader(
+    `long=1; Path=/${'x'.repeat(5000)}`,
+    'https://t.example/',
+  );
+  expect(text.getCookieHeaderString('https://t.example/')).toContain('long=1');
+
+  const nameless = new CookieJar();
+  nameless.parseSetCookieHeader('flag', 'https://n.example/');
+  expect(nameless.getCookieHeaderString('https://n.example/')).toBe('flag');
+  nameless.parseSetCookieHeader('__Host-x', 'https://n.example/');
+  expect(nameless.getCookieHeaderString('https://n.example/')).toBe('flag');
+});

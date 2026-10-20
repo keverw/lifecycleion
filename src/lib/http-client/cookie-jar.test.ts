@@ -334,7 +334,11 @@ describe('CookieJar', () => {
       expect(jar.setCookie({ ...base, name: 'sid', value: 'tab\there' })).toBe(
         false,
       );
-      expect(jar.setCookie({ ...base, name: '', value: 'x' })).toBe(false);
+      // A nameless cookie is fine; a nameless one with nothing in it, or with an `=` that
+      // would read back as a name, is not.
+      expect(jar.setCookie({ ...base, name: '', value: 'x' })).toBe(true);
+      expect(jar.setCookie({ ...base, name: '', value: '' })).toBe(false);
+      expect(jar.setCookie({ ...base, name: '', value: 'a=b' })).toBe(false);
       expect(jar.setCookie({ ...base, name: 'a=b', value: 'x' })).toBe(false);
       expect(jar.setCookie({ ...base, name: 'a;b', value: 'x' })).toBe(false);
       expect(jar.setCookie({ ...base, name: 'a b', value: 'x' })).toBe(false);
@@ -347,7 +351,8 @@ describe('CookieJar', () => {
         }),
       ).toBe(false);
 
-      expect(jar.getAllCookies()).toHaveLength(0);
+      // Only the nameless `x` above was stored.
+      expect(jar.getAllCookies()).toHaveLength(1);
 
       // What the header can carry: an empty value, and the characters RFC 6265 allows.
       expect(jar.setCookie({ ...base, name: 'empty', value: '' })).toBe(true);

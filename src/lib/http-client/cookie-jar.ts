@@ -262,6 +262,8 @@ export class CookieJar {
   // off it, because the object itself is handed out by `getAllCookies()` and is writable
   // from there; dropped with the cookie when the bucket entry goes.
   private storedScopes: WeakMap<Cookie, StoredCookieScope> = new WeakMap();
+  /** When each stored cookie's identity was first stored; orders the `Cookie` header. */
+  private creationTimes: WeakMap<Cookie, number> = new WeakMap();
 
   constructor(options?: CookieJarOptions) {
     this.publicSuffixes = new PublicSuffixResolver(options?.publicSuffixes);
@@ -358,7 +360,23 @@ export class CookieJar {
       path,
     };
 
-    bucket.set(this.cookieKey(stored.name, normalizedDomain, path), stored);
+    const key = this.cookieKey(
+      stored.name,
+      normalizedDomain,
+      path,
+      input.hostOnly === true,
+    );
+    // A replacement keeps the creation time of the cookie it replaces (RFC 6265 §5.3
+    // step 11.3), which orders the `Cookie` header; `createdAt` stays the new cookie's
+    // own, the base of its `Max-Age`.
+    const replaced = bucket.get(key);
+    this.creationTimes.set(
+      stored,
+      replaced === undefined
+        ? createdAt
+        : (this.creationTimes.get(replaced) ?? replaced.createdAt),
+    );
+    bucket.set(key, stored);
 
     const scope: StoredCookieScope = {
       name: stored.name,
@@ -502,7 +520,7 @@ export class CookieJar {
     }
 
     const now = Date.now();
-    const result: Cookie[] = [];
+    const result: Array<{ cookie: Cookie; creationTime: number }> = [];
     // A parent domain can live above a nested private suffix. Include its
     // bucket while retaining the ordinary domain/host-only checks below.
     const candidateBuckets = new Set<string>();
@@ -557,21 +575,25 @@ export class CookieJar {
           continue;
         }
 
-        result.push(cookie);
+        result.push({
+          cookie,
+          creationTime: this.creationTimes.get(stored) ?? cookie.createdAt,
+        });
       }
     }
 
     result.sort((a, b) => {
-      const pathLengthDelta = (b.path ?? '/').length - (a.path ?? '/').length;
+      const pathLengthDelta =
+        (b.cookie.path ?? '/').length - (a.cookie.path ?? '/').length;
 
       if (pathLengthDelta !== 0) {
         return pathLengthDelta;
       }
 
-      return a.createdAt - b.createdAt;
+      return a.creationTime - b.creationTime;
     });
 
-    return result;
+    return result.map((entry) => entry.cookie);
   }
 
   /**
@@ -582,8 +604,9 @@ export class CookieJar {
    * written onto them.
    */
   public getCookieHeaderString(url: string): string {
+    // A nameless cookie goes out as its value alone, as browsers send it.
     return this.getCookiesFor(url)
-      .map((c) => `${c.name}=${c.value}`)
+      .map((c) => (c.name === '' ? c.value : `${c.name}=${c.value}`))
       .join('; ');
   }
 
@@ -830,13 +853,22 @@ export class CookieJar {
   // --- Private helpers ---
 
   /**
-   * A cookie's identity (RFC 6265 §5.3: name, domain and path) as one unambiguous key.
-   * Encoded as a JSON array rather than joined: a name may contain `@` and `/` and a path
-   * `@`, so `a@x.example.com/` with path `/` and `a` on `x.example.com` with path
-   * `/@...` must not become the same key, or one site's cookie could replace another's.
+   * A cookie's identity (RFC 6265bis: name, domain, host-only flag and path) as one
+   * unambiguous key. Encoded as a JSON array rather than joined: a name may contain `@`
+   * and `/` and a path `@`, so `a@x.example.com/` with path `/` and `a` on
+   * `x.example.com` with path `/@...` must not become the same key, or one site's cookie
+   * could replace another's. The host-only flag is part of it, as browsers keep it: a
+   * `Domain=example.com` cookie from `evil.example.com` and `example.com`'s own host-only
+   * one of the same name are two cookies - one shared, not the other replacing or
+   * deleting the parent's session.
    */
-  private cookieKey(name: string, domain: string, path: string): string {
-    return JSON.stringify([name, domain, path]);
+  private cookieKey(
+    name: string,
+    domain: string,
+    path: string,
+    isHostOnly: boolean,
+  ): string {
+    return JSON.stringify([name, domain, path, isHostOnly]);
   }
 
   /** Canonical form for stored cookie domains: no leading dot, ASCII/IDNA DNS names;
@@ -887,18 +919,28 @@ export class CookieJar {
   }
 
   private parseCookieString(header: string): ParsedCookie | null {
-    const parts = header.split(';').map((p) => p.trim());
-    const nameValuePart = parts[0];
-    const eqIndex = nameValuePart.indexOf('=');
-
-    if (eqIndex === -1) {
+    // A control character other than a tab anywhere ignores the whole line (RFC 6265bis).
+    // eslint-disable-next-line no-control-regex -- control characters are what is refused
+    if (/[\u0000-\u0008\u000a-\u001f\u007f]/.test(header)) {
       return null;
     }
 
-    const name = nameValuePart.slice(0, eqIndex).trim();
-    const value = nameValuePart.slice(eqIndex + 1).trim();
+    // Trimmed of spaces and tabs only, as RFC 6265bis trims. `trim()` also took U+00A0 -
+    // the last byte of a UTF-8 `à` or `Р` once Node and Bun read the header as latin1 -
+    // and sent the value back cut in the middle of a character.
+    const parts = header.split(';').map(trimSpacesAndTabs);
+    const nameValuePart = parts[0] ?? '';
+    const eqIndex = nameValuePart.indexOf('=');
 
-    if (!name) {
+    // No `=` is a nameless cookie, its whole text the value (RFC 6265bis), as browsers
+    // store it and send it back as `Cookie: foo`.
+    const name =
+      eqIndex === -1 ? '' : trimSpacesAndTabs(nameValuePart.slice(0, eqIndex));
+    const value = trimSpacesAndTabs(
+      eqIndex === -1 ? nameValuePart : nameValuePart.slice(eqIndex + 1),
+    );
+
+    if (name === '' && value === '') {
       return null;
     }
 
@@ -907,9 +949,9 @@ export class CookieJar {
     for (let i = 1; i < parts.length; i++) {
       const part = parts[i];
       const eqIdx = part.indexOf('=');
-      const attrName = (eqIdx === -1 ? part : part.slice(0, eqIdx))
-        .trim()
-        .toLowerCase();
+      const attrName = trimSpacesAndTabs(
+        eqIdx === -1 ? part : part.slice(0, eqIdx),
+      ).toLowerCase();
 
       // Flag attributes are matched by name; RFC 6265bis ignores any value.
       if (attrName === 'secure') {
@@ -921,7 +963,12 @@ export class CookieJar {
           continue;
         }
 
-        const attrValue = part.slice(eqIdx + 1).trim();
+        const attrValue = trimSpacesAndTabs(part.slice(eqIdx + 1));
+
+        // An attribute value over 1024 octets is ignored, as RFC 6265bis ignores it.
+        if (new TextEncoder().encode(attrValue).byteLength > 1024) {
+          continue;
+        }
 
         switch (attrName) {
           case 'domain': {
@@ -993,10 +1040,13 @@ export class CookieJar {
     name: string,
     domain: string,
     path: string,
+    isHostOnly: boolean,
   ): void {
     domain = this.normalizeStoredDomain(domain);
     const apex = this.apexFor(domain);
-    this.buckets.get(apex)?.delete(this.cookieKey(name, domain, path));
+    this.buckets
+      .get(apex)
+      ?.delete(this.cookieKey(name, domain, path, isHostOnly));
     this.pruneEmptyBucket(apex);
   }
 
@@ -1158,9 +1208,15 @@ export class CookieJar {
       return;
     }
 
+    // Align with `if (parsed.domain)` above: empty `Domain=` / `Domain=.` parses to
+    // `''` and must be host-only like a missing Domain attribute. A `Domain=` naming a
+    // public suffix that is the request host is host-only too, per RFC 6265bis §5.5:
+    // the cookie is kept, but only for the host that set it.
+    const isHostOnly = !parsed.domain || isPublicSuffixHostOnly;
+
     // Max-Age=0 or negative → delete the cookie
     if (parsed.maxAge !== undefined && parsed.maxAge <= 0) {
-      this.deleteCookieByIdentity(parsed.name, domain, path);
+      this.deleteCookieByIdentity(parsed.name, domain, path, isHostOnly);
       return;
     }
 
@@ -1172,7 +1228,7 @@ export class CookieJar {
       parsed.expires.getTime() <= Date.now() &&
       parsed.maxAge === undefined
     ) {
-      this.deleteCookieByIdentity(parsed.name, domain, path);
+      this.deleteCookieByIdentity(parsed.name, domain, path, isHostOnly);
       return;
     }
 
@@ -1180,11 +1236,7 @@ export class CookieJar {
       name: parsed.name,
       value: parsed.value,
       domain,
-      // Align with `if (parsed.domain)` above: empty `Domain=` / `Domain=.` parses to
-      // `''` and must be host-only like a missing Domain attribute. A `Domain=` naming a
-      // public suffix that is the request host is host-only too, per RFC 6265bis §5.5:
-      // the cookie is kept, but only for the host that set it.
-      hostOnly: !parsed.domain || isPublicSuffixHostOnly,
+      hostOnly: isHostOnly,
       path,
       createdAt: Date.now(),
     };
@@ -1446,11 +1498,21 @@ export class CookieJar {
       return false;
     }
 
-    // A name is also non-empty and holds no `=` (its own delimiter) and no space.
+    // A name holds no `=` (its own delimiter) and no space. It may be empty - a nameless
+    // cookie, sent as its value alone (RFC 6265bis) - when the value is not: and then the
+    // value holds no `=`, or it would be read back as a name, and does not pose as a
+    // `__Secure-` / `__Host-` cookie, which RFC 6265bis refuses.
+    if (name === '') {
+      return (
+        value !== '' &&
+        !value.includes('=') &&
+        !/^__(secure|host)-/i.test(value) &&
+        isHeaderSafeCookieText(value, '')
+      );
+    }
+
     return (
-      name !== '' &&
-      isHeaderSafeCookieText(name, '= ') &&
-      isHeaderSafeCookieText(value, '')
+      isHeaderSafeCookieText(name, '= ') && isHeaderSafeCookieText(value, '')
     );
   }
 
@@ -1663,4 +1725,20 @@ function describeArgument(value: unknown): string {
     : typeof value === 'string'
       ? `'${value}'`
       : typeof value;
+}
+
+/** `text` without leading and trailing spaces and tabs, the only whitespace RFC 6265bis trims. */
+function trimSpacesAndTabs(text: string): string {
+  let start = 0;
+  let end = text.length;
+
+  while (start < end && (text[start] === ' ' || text[start] === '\t')) {
+    start++;
+  }
+
+  while (end > start && (text[end - 1] === ' ' || text[end - 1] === '\t')) {
+    end--;
+  }
+
+  return text.slice(start, end);
 }

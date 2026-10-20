@@ -464,7 +464,11 @@ describe('MockAdapter via HTTPClient', () => {
 
   test('null response cookie expires it in the jar', async () => {
     const jar = new CookieJar();
-    jar.setCookie(makeCookie({ name: 'session', value: 'old' }));
+    // Host-only, as the server set it: the deletion below is host-only too, and a
+    // host-only cookie and a `Domain` one of the same name are two cookies.
+    jar.setCookie(
+      makeCookie({ name: 'session', value: 'old', hostOnly: true }),
+    );
 
     const clientWithJar = new HTTPClient({
       adapter,
