@@ -20,6 +20,13 @@ import * as zlib from 'node:zlib';
 export const ACCEPTED_CONTENT_ENCODINGS = 'gzip, deflate, br';
 
 /**
+ * The most codings a response may stack, as undici bounds it. Each is a decoder built on
+ * the first byte, and a header of a few thousand `br,` - well under Node's header limit -
+ * cost tens of megabytes per response before its one-byte body failed to decode.
+ */
+const MAX_CONTENT_CODINGS = 5;
+
+/**
  * What the response paths read a body from: the raw `IncomingMessage`, or a decoded view of
  * it. Only the members they use.
  */
@@ -91,7 +98,15 @@ export function createResponseBodySource(
     return raw;
   }
 
-  const decoded = new DecodedResponseBody(res, [...codings].reverse());
+  const decoded = new DecodedResponseBody(
+    res,
+    [...codings].reverse(),
+    codings.length > MAX_CONTENT_CODINGS
+      ? new Error(
+          `Response stacks ${String(codings.length)} content codings; at most ${String(MAX_CONTENT_CODINGS)} are decoded`,
+        )
+      : undefined,
+  );
 
   return {
     source: decoded,
@@ -136,8 +151,40 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   constructor(
     private readonly res: http.IncomingMessage,
     private readonly decodeOrder: ContentCoding[],
+    refusal?: Error,
   ) {
     super();
+
+    this.on('newListener', (event: string) => {
+      if (event === 'data' && !this.isReading) {
+        this.isReading = true;
+        this.startForwardingData();
+        // After the reader's other listeners: they are attached in the same turn as its
+        // `data` one, and the held events are for them.
+        queueMicrotask(() => {
+          for (const { event: held, args } of this.held.splice(0)) {
+            this.deliver(held, ...args);
+          }
+        });
+      }
+    });
+
+    // Refused before anything is built: delivered as the body's error, and the response
+    // let go.
+    if (refusal !== undefined) {
+      this.deliver('error', refusal);
+      res.on('close', () => {
+        this.deliver('close');
+      });
+
+      try {
+        res.destroy();
+      } catch {
+        // Already gone; the error above is what is reported.
+      }
+
+      return;
+    }
 
     res.on('error', (error: Error) => {
       this.deliver('error', error);
@@ -174,20 +221,6 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
 
     res.once('data', (first: Buffer) => {
       this.attachDecoders(first);
-    });
-
-    this.on('newListener', (event: string) => {
-      if (event === 'data' && !this.isReading) {
-        this.isReading = true;
-        this.startForwardingData();
-        // After the reader's other listeners: they are attached in the same turn as its
-        // `data` one, and the held events are for them.
-        queueMicrotask(() => {
-          for (const { event: held, args } of this.held.splice(0)) {
-            this.deliver(held, ...args);
-          }
-        });
-      }
     });
   }
 

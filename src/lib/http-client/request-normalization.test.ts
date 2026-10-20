@@ -5254,3 +5254,46 @@ test('round 114: host-only and domain cookies are two cookies; header order, tri
   nameless.parseSetCookieHeader('__Host-x', 'https://n.example/');
   expect(nameless.getCookieHeaderString('https://n.example/')).toBe('flag');
 });
+
+test('round 115: a long content-coding chain is refused; the adapter Accept-Encoding is not carried to a redirect hop', async () => {
+  let hopAcceptEncoding: string | undefined;
+  const server = http.createServer((req, res) => {
+    if (req.url === '/chain') {
+      res.writeHead(200, {
+        'content-encoding': Array.from({ length: 50 }, () => 'br').join(','),
+      });
+      res.end('x');
+      return;
+    }
+    if (req.url === '/start') {
+      res.writeHead(302, { location: '/file' });
+      res.end();
+      return;
+    }
+    hopAcceptEncoding = req.headers['accept-encoding'];
+    res.end('ok');
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      followRedirects: true,
+    });
+    const chained = await client.get('/chain').send();
+    expect(chained.isStreamError).toBe(true);
+
+    client.addRequestInterceptor(
+      (request) => ({
+        ...request,
+        headers: { ...request.headers, range: 'bytes=10-' },
+      }),
+      { phases: ['redirect'] },
+    );
+    await client.get('/start').send();
+    expect(hopAcceptEncoding).toBe('identity');
+  } finally {
+    server.close();
+  }
+});

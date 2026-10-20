@@ -279,8 +279,10 @@ export class CookieJar {
    *
    * Also returns false for a name or value that cannot be written into a `Cookie`
    * header as one cookie-pair (and `getCookiesFor` withholds a stored cookie that no
-   * longer passes, so a mutation through `getAllCookies()` cannot reach the header): a name that is empty or holds `=`, `;`, whitespace or a
-   * control character, or a value holding `;` or a control character. The header is
+   * longer passes, so a mutation through `getAllCookies()` cannot reach the header): a name that holds `=`, `;`, whitespace or a
+   * control character, or a value holding `;` or a control character. A name may be
+   * empty - a nameless cookie, sent as its value alone - when the value is not empty,
+   * holds no `=` and does not start with `__Secure-` / `__Host-`. The header is
    * built as `name=value` pairs joined by `; `, so a value of `x; other=evil` was sent
    * as two cookies, and a CR LF was a header injection. The Set-Cookie parser cannot
    * produce these - it splits on `;` first - so this closes the programmatic path and
@@ -732,6 +734,9 @@ export class CookieJar {
    * Serializes detached cookie snapshots using their stored scope. Caller edits to
    * live cookie objects cannot widen that scope after a save and restore. Cookies
    * whose mutable fields cannot be safely read are omitted, as on the send path.
+   *
+   * A replaced cookie's place in the `Cookie` header - its first creation time - is not
+   * saved: after a restore, cookies of equal path length are ordered by `createdAt`.
    */
   public toJSON(): CookieJarJSON {
     const cookies: Cookie[] = [];

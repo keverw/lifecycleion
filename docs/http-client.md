@@ -804,7 +804,7 @@ await client
 
 A `CookieJar` provides cookie storage with Public Suffix List domain matching, path matching, secure-flag enforcement, and expiry handling.
 
-A response cookie's lifetime is capped at 400 days, as browsers cap it (RFC 6265bis): a longer `Max-Age` or a later `Expires` is read as 400 days from now. `Expires` is read with RFC 6265's cookie-date algorithm, in UTC whatever zone is written, and a value that is not a cookie-date (`Expires=0`) is ignored, leaving a session cookie. A cookie whose name and value together pass 4096 bytes is ignored. A cookie a header cannot carry - a name or value with a character above U+00FF - is refused by `setCookie()` and `fromJSON()`. The jar does not limit how many cookies it holds; call `clearExpiredCookies()` on a long-lived jar.
+A response cookie's lifetime is capped at 400 days, as browsers cap it (RFC 6265bis): a longer `Max-Age` or a later `Expires` is read as 400 days from now. `Expires` is read with RFC 6265's cookie-date algorithm, in UTC whatever zone is written, and a value that is not a cookie-date (`Expires=0`) is ignored, leaving a session cookie. A cookie whose name and value together pass 4096 bytes is ignored. A cookie a header cannot carry - a name or value with a character above U+00FF - is refused by `setCookie()` and `fromJSON()`. The jar does not limit how many cookies it holds; call `clearExpiredCookies()` on a long-lived jar. A replaced cookie keeps its place in the `Cookie` header, as browsers keep it; a jar restored with `fromJSON` orders cookies of equal path length by `createdAt` instead, so that place is not kept across a save.
 
 Cookie domains are canonicalized through IDNA to lowercase ASCII: for example, `Domain=münchen.de` matches the request host `xn--mnchen-3ya.de`. The same normalization applies to cookies stored through `setCookie()` or restored through `fromJSON()`, and to hosts passed to `clear()`. Invalid domain scopes are rejected. A trailing dot is dropped, so `example.com.` and `example.com` are the same host to the jar, as they are to the client's credential scope.
 
@@ -910,9 +910,10 @@ const jar = new CookieJar();
 // Returns false if domain is missing or syntactically invalid (empty string, spaces, etc.),
 // if the expiry cannot be read (an `expires` that is an Invalid Date, or a `maxAge` /
 // `createdAt` that is not a finite number - such a cookie would never be found expired),
-// or if the name or value cannot be sent as one `name=value` pair: a name that is empty
-// or holds `=`, `;`, whitespace or a control character, or a value holding `;` or a
-// control character. Looser than RFC 6265's cookie-octet grammar on purpose: spaces,
+// or if the name or value cannot be sent as one `name=value` pair: a name that holds
+// `=`, `;`, whitespace or a control character, or a value holding `;` or a control
+// character. A name may be empty (a nameless cookie, sent as its value alone) when the
+// value is not empty, holds no `=` and does not start with `__Secure-` / `__Host-`. Looser than RFC 6265's cookie-octet grammar on purpose: spaces,
 // commas, quotes and backslashes in a value are accepted, as browsers accept them,
 // because real servers send them. Only what would change the header's framing is refused.
 const ok = jar.setCookie({
@@ -1242,7 +1243,7 @@ Browsers automatically strip forbidden headers (`cookie`, `user-agent`, `host`, 
 
 Uses Node.js native `http` / `https` modules. Supports Unix domain sockets, mTLS, and per-chunk streaming.
 
-Compressed responses are handled as `fetch` handles them: NodeAdapter sends `Accept-Encoding: gzip, deflate, br` (`br` over https only, as browsers offer it; `identity` on a `Range` request, as the Fetch standard has it) unless the request sets its own (`identity` asks for none), and decodes a `gzip`, `deflate` or `br` body - buffered or streamed, stacked codings (`gzip, br`) in reverse order, and `zstd` where the runtime has it - before handing it over. Decoding is strict: a body that ends before its compressed stream does (a gzip body cut before its trailer) is a stream error, and a cancel or timeout stops the decoding at once. Response headers are reported as received, `Content-Encoding` included. Download progress counts decoded bytes, with an unknown total, since `Content-Length` counts the encoded ones. A body that cannot be decoded fails as a stream error with the response's status.
+Compressed responses are handled as `fetch` handles them: NodeAdapter sends `Accept-Encoding: gzip, deflate, br` (`br` over https only, as browsers offer it; `identity` on a `Range` request, as the Fetch standard has it) unless the request sets its own (`identity` asks for none), and decodes a `gzip`, `deflate` or `br` body - buffered or streamed, stacked codings (`gzip, br`) in reverse order, and `zstd` where the runtime has it - before handing it over. Decoding is strict: a body that ends before its compressed stream does (a gzip body cut before its trailer), or carries bytes after it, is a stream error - as in Node's own `fetch`, though Bun's `fetch` ignores trailing bytes - and a cancel or timeout stops the decoding at once. At most five stacked codings are decoded; more is a stream error. Response headers are reported as received, `Content-Encoding` included. Download progress counts decoded bytes, with an unknown total, since `Content-Length` counts the encoded ones. A body that cannot be decoded fails as a stream error with the response's status.
 
 ```typescript
 import { NodeAdapter } from 'lifecycleion/http-client-node';

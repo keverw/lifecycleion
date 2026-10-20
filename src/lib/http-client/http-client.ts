@@ -2962,7 +2962,9 @@ export class BaseHTTPClient {
         // will regenerate them for that hop; explicit caller headers still carry
         // through same-origin redirects and caller-directed failover retries.
         const redirectRequestHeaders = { ...observedSentRequest.headers };
-        for (const key of ['host', 'authorization']) {
+        // `accept-encoding` with them: NodeAdapter adds its own, and carried forward as a
+        // caller's it stood in the way of the `identity` a later hop's `Range` asks for.
+        for (const key of ['host', 'authorization', 'accept-encoding']) {
           if (Object.hasOwn(sentRequest.headers, key)) {
             redirectRequestHeaders[key] = sentRequest.headers[key];
           } else {
