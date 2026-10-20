@@ -89,6 +89,11 @@ export function createResponseBodySource(
  * - `error` is the response's or the decoder's - a corrupt body fails as a stream error,
  *   and tears the response down so its socket is not held. Forwarded only while someone is
  *   listening: an `error` emitted with no listener would be an uncaught exception.
+ * - Until a reader attaches (its `data` listener), `end`, `close`, `error` and `aborted`
+ *   are held, and delivered in order once it has - as a paused `IncomingMessage` holds
+ *   them. A streamed response's factory may still be opening its sink when an empty
+ *   `deflate` body ends or a corrupt one fails; emitted then, they reached no one and the
+ *   request hung until its timeout.
  *
  * Decoded with a sync flush, as undici decodes: a body cut short after its last full block
  * keeps what was decoded instead of failing outright.
@@ -98,6 +103,8 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   private isForwardingData = false;
   private didDecoderEnd = false;
   private didRawEnd = false;
+  private isReading = false;
+  private readonly held: Array<{ event: string; args: unknown[] }> = [];
 
   constructor(
     private readonly res: http.IncomingMessage,
@@ -106,10 +113,10 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     super();
 
     res.on('error', (error: Error) => {
-      this.forwardError(error);
+      this.deliver('error', error);
     });
     res.on('aborted', () => {
-      this.emit('aborted');
+      this.deliver('aborted');
     });
     res.on('end', () => {
       this.didRawEnd = true;
@@ -117,15 +124,15 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       // An empty `deflate` body never sent the byte that picks its decoder.
       if (this.decoder === undefined) {
         this.didDecoderEnd = true;
-        this.emit('end');
+        this.deliver('end');
       }
     });
     res.on('close', () => {
       if (this.didRawEnd || this.didDecoderEnd) {
         if (this.didDecoderEnd || this.decoder === undefined) {
-          this.emit('close');
+          this.deliver('close');
         } else {
-          this.decoder.once('close', () => this.emit('close'));
+          this.decoder.once('close', () => this.deliver('close'));
         }
 
         return;
@@ -133,7 +140,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
 
       // Closed short: the decoder will get no more, and is let go.
       this.decoder?.destroy();
-      this.emit('close');
+      this.deliver('close');
     });
 
     if (encoding === 'deflate') {
@@ -159,8 +166,16 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     }
 
     this.on('newListener', (event: string) => {
-      if (event === 'data') {
+      if (event === 'data' && !this.isReading) {
+        this.isReading = true;
         this.startForwardingData();
+        // After the reader's other listeners: they are attached in the same turn as its
+        // `data` one, and the held events are for them.
+        queueMicrotask(() => {
+          for (const { event: held, args } of this.held.splice(0)) {
+            this.deliver(held, ...args);
+          }
+        });
       }
     });
   }
@@ -181,7 +196,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     this.decoder = decoder;
 
     decoder.on('error', (error: Error) => {
-      this.forwardError(error);
+      this.deliver('error', error);
 
       try {
         this.res.destroy();
@@ -191,7 +206,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     });
     decoder.on('end', () => {
       this.didDecoderEnd = true;
-      this.emit('end');
+      this.deliver('end');
     });
 
     if (first !== undefined) {
@@ -217,10 +232,21 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     });
   }
 
-  private forwardError(error: Error): void {
-    if (this.listenerCount('error') > 0) {
-      this.emit('error', error);
+  /** Emitted now while a reader is attached, held for it until then. */
+  private deliver(event: string, ...args: unknown[]): void {
+    if (!this.isReading) {
+      this.held.push({ event, args });
+
+      return;
     }
+
+    // An `error` with no listener would be an uncaught exception: dropped instead, once
+    // the reader has let go.
+    if (event === 'error' && this.listenerCount('error') === 0) {
+      return;
+    }
+
+    this.emit(event, ...args);
   }
 }
 

@@ -456,13 +456,19 @@ export class NodeAdapter implements HTTPAdapter {
 
     // Asked for as `fetch` asks for it, and decoded as it decodes (see
     // `createResponseBodySource`); a caller's own `Accept-Encoding` stands - `identity`
-    // to ask for none.
-    if (
-      !Object.keys(requestHeaders).some(
-        (name) => name.toLowerCase() === 'accept-encoding',
-      )
-    ) {
-      requestHeaders['accept-encoding'] = ACCEPTED_CONTENT_ENCODINGS;
+    // to ask for none. A `Range` request asks for `identity`, as the Fetch standard has it
+    // (undici and browsers send it): the range is of the bytes as stored, and a server
+    // that serves ranges of a precompressed file answered with a slice of a gzip stream
+    // that cannot be decoded. `br` only over https, as undici and browsers offer it.
+    const headerNames = Object.keys(requestHeaders).map((name) =>
+      name.toLowerCase(),
+    );
+    if (!headerNames.includes('accept-encoding')) {
+      requestHeaders['accept-encoding'] = headerNames.includes('range')
+        ? 'identity'
+        : isHTTPS
+          ? ACCEPTED_CONTENT_ENCODINGS
+          : 'gzip, deflate';
     }
 
     const options: http.RequestOptions = {

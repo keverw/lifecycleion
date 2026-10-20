@@ -5091,3 +5091,62 @@ test('NodeAdapter asks for and decodes gzip, deflate and br bodies, as fetch doe
     server.close();
   }
 });
+
+test('round 112: decoded bodies hold their end/error for a streamed reader; a Range request asks for identity', async () => {
+  let lastAcceptEncoding: string | undefined;
+  const server = http.createServer((req, res) => {
+    lastAcceptEncoding = req.headers['accept-encoding'];
+    if (req.url === '/empty-deflate') {
+      res.writeHead(200, {
+        'content-encoding': 'deflate',
+        'content-length': '0',
+      });
+      res.end();
+      return;
+    }
+    if (req.url === '/corrupt') {
+      res.writeHead(200, { 'content-encoding': 'gzip' });
+      res.end('not gzip at all');
+      return;
+    }
+    res.end('ok');
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const sink = (): never =>
+    ({
+      write: (_chunk: unknown, callback?: () => void) => {
+        callback?.();
+        return true;
+      },
+      end: (callback?: () => void) => callback?.(),
+    }) as never;
+  try {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      timeout: 2000,
+    });
+    const empty = await client
+      .get('/empty-deflate')
+      .streamResponse(sink)
+      .send();
+    expect(empty.isTimeout).toBe(false);
+    expect(empty.isStreamed).toBe(true);
+
+    const corrupt = await client
+      .get('/corrupt')
+      .streamResponse(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        return sink();
+      })
+      .send();
+    expect(corrupt.isTimeout).toBe(false);
+    expect(corrupt.isStreamError).toBe(true);
+
+    await client.get('/x').headers({ range: 'bytes=10-' }).send();
+    expect(lastAcceptEncoding).toBe('identity');
+  } finally {
+    server.close();
+  }
+});
