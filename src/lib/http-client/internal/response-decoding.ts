@@ -298,8 +298,9 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     // own `'end'` routinely comes first even when its last chunk carried the junk: a
     // decoder that ends having consumed (`bytesWritten`) fewer bytes than it was fed
     // stopped short of its input. `SniffingInflate` tells its own. Not for gzip: gunzip
-    // already fails on bytes after its stream, and deliberately accepts zero padding there,
-    // which some servers send - a count would refuse what Node and browsers read.
+    // already fails on bytes after its stream unless they start with a zero byte, which it
+    // reads as padding (some servers pad) - a count would refuse what Node and browsers
+    // read.
     const fedBytes = this.decoders.map(() => 0);
     fedBytes[0] = this.rawBytes;
     this.res.on('data', (chunk: Buffer) => {
