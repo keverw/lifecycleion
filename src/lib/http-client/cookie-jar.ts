@@ -971,7 +971,9 @@ export class CookieJar {
         const attrValue = trimSpacesAndTabs(part.slice(eqIdx + 1));
 
         // An attribute value over 1024 octets is ignored, as RFC 6265bis ignores it.
-        if (new TextEncoder().encode(attrValue).byteLength > 1024) {
+        // Counted in characters: the header arrives read as latin1, one character per
+        // octet on the wire, and encoding it as UTF-8 counted each byte above 0x7F twice.
+        if (attrValue.length > 1024) {
           continue;
         }
 

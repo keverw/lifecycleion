@@ -5631,3 +5631,29 @@ test('round 117: redirect_disabled carries no cause from the hop body', async ()
     server.close();
   }
 });
+
+test("round 118: a custom adapter's stream code is held to the stream codes; attribute size counts wire octets", async () => {
+  for (const code of ['cancelled', 'bogus', 42]) {
+    const builder = new HTTPClient({
+      adapter: {
+        getType: () => 'node',
+        send: () =>
+          Promise.resolve({
+            status: 200,
+            headers: {},
+            body: null,
+            isStreamError: true,
+            streamErrorCode: code,
+          } as unknown as AdapterResponse),
+      },
+      baseURL: 'http://a.test',
+    }).get('/x');
+    await builder.send();
+    expect(builder.error?.code).toBe('stream_write_error');
+  }
+
+  const jar = new CookieJar();
+  const path = `/${'Ð¶'.repeat(300)}`;
+  jar.parseSetCookieHeader(`sid=1; Path=${path}`, 'https://example.com/x/y');
+  expect(jar.getAllCookies()[0]?.path).toBe(path);
+});

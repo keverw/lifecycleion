@@ -2984,8 +2984,17 @@ export class BaseHTTPClient {
           ? responseCauseValue
           : undefined;
 
+        // Only a stream code an adapter may report: anything else from a custom adapter -
+        // another code's name (`cancelled`), a typo, a non-string - became
+        // `HTTPClientError.code` as it was, and a caller branching on it misread the
+        // failure. Read as the default instead.
+        const answeredStreamCode: unknown = adapterResponse.streamErrorCode;
         const streamErrorCode = adapterResponse.isStreamError
-          ? (adapterResponse.streamErrorCode ?? 'stream_write_error')
+          ? answeredStreamCode === 'stream_response_error' ||
+            answeredStreamCode === 'response_too_large' ||
+            answeredStreamCode === 'stream_write_error'
+            ? answeredStreamCode
+            : 'stream_write_error'
           : undefined;
 
         // Observers retain the wire snapshot, but Node-generated Host and URL
