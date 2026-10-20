@@ -4697,3 +4697,81 @@ test('underscore host labels are accepted as the URL standard allows; an empty b
   expect(response.isParseError).toBe(false);
   expect(response.isFailed).toBe(false);
 });
+
+test('round 106: NodeAdapter drops a bodiless Content-Length, refuses Upgrade/CONNECT and unsendable bodies, sends no progress after a cancel', async () => {
+  const seen: string[] = [];
+  const server = http.createServer((req, res) => {
+    seen.push(
+      `${req.method} ${req.url} cl=${req.headers['content-length'] ?? '-'}`,
+    );
+    if (req.url === '/chunked') {
+      res.writeHead(200, { 'content-type': 'text/plain' });
+      res.end('hello');
+      return;
+    }
+    req.resume();
+    req.on('end', () => res.end('ok'));
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const adapter = new NodeAdapter();
+  try {
+    const first = await adapter.send({
+      requestURL: `${baseURL}/first`,
+      method: 'POST',
+      headers: { 'content-length': '20' },
+    });
+    expect(first.status).toBe(200);
+    const second = await adapter.send({
+      requestURL: `${baseURL}/second`,
+      method: 'GET',
+      headers: {},
+    });
+    expect(second.status).toBe(200);
+    expect(seen).toContain('GET /second cl=-');
+
+    for (const request of [
+      {
+        method: 'GET',
+        headers: { upgrade: 'websocket', connection: 'Upgrade' },
+      },
+      { method: 'CONNECT', headers: {} },
+      { method: 'POST', headers: {}, body: new ArrayBuffer(10) },
+    ]) {
+      const refused = await adapter
+        .send({
+          requestURL: `${baseURL}/x`,
+          ...(request as Partial<AdapterRequest>),
+        } as AdapterRequest)
+        .then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+      expect(refused).toBeInstanceOf(TypeError);
+    }
+
+    const events: number[] = [];
+    const controller = new AbortController();
+    let settledAt = -1;
+    const pending = adapter
+      .send({
+        requestURL: `${baseURL}/chunked`,
+        method: 'GET',
+        headers: {},
+        signal: controller.signal,
+        onDownloadProgress: (event) => {
+          events.push(event.progress);
+          controller.abort();
+        },
+      })
+      .catch(() => {
+        settledAt = events.length;
+      });
+    await pending;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(settledAt).toBeGreaterThanOrEqual(0);
+    expect(events.length).toBe(settledAt);
+  } finally {
+    server.close();
+  }
+});

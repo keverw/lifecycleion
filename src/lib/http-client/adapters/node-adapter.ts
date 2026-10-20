@@ -399,14 +399,30 @@ export class NodeAdapter implements HTTPAdapter {
     // forbids a sender to do: strict servers answer 400, and a lenient proxy chain can
     // read the two framings differently (request smuggling). Refused, as undici refuses
     // it, and not retried: every attempt carries the same header.
+    //
+    // Nor a protocol switch: an `Upgrade` header or a `CONNECT` request is answered with a
+    // socket handed over through `'upgrade'` / `'connect'`, not a response, and this
+    // adapter reads responses - such a request never settled, or settled as a timeout
+    // standing in for the `101` the server sent.
     for (const name of Object.keys(request.headers)) {
-      if (name.toLowerCase() === 'transfer-encoding') {
+      const lowerName = name.toLowerCase();
+      if (lowerName === 'transfer-encoding' || lowerName === 'upgrade') {
         const refusal = new TypeError(
-          'NodeAdapter frames request bodies itself; a Transfer-Encoding request header is not supported',
+          lowerName === 'upgrade'
+            ? 'NodeAdapter does not switch protocols; an Upgrade request header is not supported'
+            : 'NodeAdapter frames request bodies itself; a Transfer-Encoding request header is not supported',
         );
         markNonRetryableAdapterError(refusal);
         throw refusal;
       }
+    }
+
+    if (String(request.method).toUpperCase() === 'CONNECT') {
+      const refusal = new TypeError(
+        'NodeAdapter does not open tunnels; a CONNECT request is not supported',
+      );
+      markNonRetryableAdapterError(refusal);
+      throw refusal;
     }
 
     // Guarded once, at the boundary, so every call site below is covered - including the
@@ -428,9 +444,22 @@ export class NodeAdapter implements HTTPAdapter {
     const isHTTPS = parsedURL.protocol === 'https:';
     const httpModule = isHTTPS ? https : http;
 
+    const materializedHeaders = materializeRequestHeaders(request.headers);
+
+    // A caller's `Content-Length` on a request with no body is taken off, as the bodied
+    // branches below replace it: sent with no body after it, the server waited for bytes
+    // that never came, and on a pooled keep-alive socket took them from the next request.
+    if (request.body === undefined || request.body === null) {
+      for (const name of Object.keys(materializedHeaders)) {
+        if (name.toLowerCase() === 'content-length') {
+          delete materializedHeaders[name];
+        }
+      }
+    }
+
     const options: http.RequestOptions = {
       method: request.method,
-      headers: materializeRequestHeaders(request.headers),
+      headers: materializedHeaders,
       // Timeout is managed by the client via abort signal — the adapter does
       // not impose its own timeout so the client retains full control.
     };
@@ -1683,6 +1712,12 @@ export class NodeAdapter implements HTTPAdapter {
             });
 
             res.on('end', () => {
+              // Nothing for a response the request no longer has: a cancel or timeout that
+              // landed after the last chunk already failed it, and Node still emits `'end'`.
+              if (activeBufferedResponse === undefined) {
+                return;
+              }
+
               // Final 100% download event — skipped when the last `data` chunk
               // already reported it (Content-Length known, body filled exactly).
               // Sent while the response is still the active one, as the `data` handler's
@@ -1770,6 +1805,27 @@ export class NodeAdapter implements HTTPAdapter {
             tearDownAfterResponse();
           });
         }));
+
+        // A socket handed over instead of a response - a `101` the server sent unasked, a
+        // tunnel - is not one this adapter can read. Unhandled, Node destroyed it and
+        // emitted neither `'response'` nor `'error'`, so the request never settled.
+        const onSocketHandover = (
+          _response: unknown,
+          socket: { destroy?: () => void } | undefined,
+        ): void => {
+          try {
+            socket?.destroy?.();
+          } catch {
+            // The failure below is what the caller needs to see.
+          }
+          const refusal = new TypeError(
+            'NodeAdapter received a protocol switch it cannot read',
+          );
+          markNonRetryableAdapterError(refusal);
+          failRequest(refusal);
+        };
+        req.on('upgrade', onSocketHandover);
+        req.on('connect', onSocketHandover);
 
         // Network / transport errors (DNS failure, connection refused, cert errors)
         req.on('error', (error) => {
@@ -2095,10 +2151,19 @@ export class NodeAdapter implements HTTPAdapter {
           runBodyWrite(() =>
             writeRequestBodyChunked(bytes, req, reportUploadProgress),
           );
-        } else {
-          // No body — fire 100% upload immediately and end the request
+        } else if (request.body === undefined || request.body === null) {
+          // No body — fire 100% upload immediately and end the request. (A caller's
+          // `Content-Length` was taken off the options above.)
           reportUploadProgress({ loaded: 0, total: 0, progress: 1 });
           req.end();
+        } else {
+          // Refused rather than dropped: anything else - an `ArrayBuffer`, a `Blob`, a plain
+          // object, another realm's `FormData` - went out as no body at all, and the request
+          // succeeded without it. `HTTPClient` serializes bodies first; this is the adapter
+          // called directly.
+          throw new TypeError(
+            'NodeAdapter sends a string, Uint8Array or FormData body; serialize other bodies first',
+          );
         }
       } catch (error) {
         const refusal = normalizeError(error);
@@ -3315,7 +3380,7 @@ const sharedWritableListeners = new WeakMap<
 interface SharedWritableListenerEntry {
   readonly listeners: Set<(argument: never) => void>;
   /**
-   * Until when, as epoch ms, an `'error'` arriving with no request registered is still
+   * Until when, as `performance.now()`, an `'error'` arriving with no request registered is still
    * reported. Restarted each time the last request deregisters; see `dispatch`.
    */
   reportUnclaimedUntil: number;
