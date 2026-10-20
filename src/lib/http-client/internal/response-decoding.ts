@@ -142,6 +142,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   private didRawEnd = false;
   private isReading = false;
   private isDestroyed = false;
+  private didFailTrailingBytes = false;
   private readonly held: Array<{ event: string; args: unknown[] }> = [];
 
   constructor(
@@ -281,8 +282,32 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       this.decoders[index - 1].pipe(this.decoders[index]);
     }
 
+    // Trailing bytes: a decoder whose compressed stream ended while what feeds it had not
+    // - the response for the first, the decoder before it for the rest. zlib and brotli
+    // end their output early then and drop the rest, so `br` or `deflate` followed by
+    // junk was delivered as a success, its response left open; it is a stream error, as
+    // gunzip makes it one for gzip. A decoder that ends otherwise only ends once its
+    // source has, since nothing calls its `end` sooner.
+    const isSourceEnded = this.decoders.map(() => false);
+    for (const [index, decoder] of this.decoders.entries()) {
+      decoder.once('end', () => {
+        if (index === 0 ? !this.didRawEnd : !isSourceEnded[index]) {
+          this.failTrailingBytes();
+          return;
+        }
+
+        if (index + 1 < isSourceEnded.length) {
+          isSourceEnded[index + 1] = true;
+        }
+      });
+    }
+
     const last = this.decoders.at(-1) as Decoder;
     last.on('end', () => {
+      if (this.didFailTrailingBytes) {
+        return;
+      }
+
       this.didDecodeEnd = true;
       this.deliver('end');
     });
@@ -294,6 +319,26 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     if (this.isForwardingData) {
       this.isForwardingData = false;
       this.startForwardingData();
+    }
+  }
+
+  /** Bytes after a compressed stream: a stream error, the decoding and response let go. */
+  private failTrailingBytes(): void {
+    if (this.didFailTrailingBytes) {
+      return;
+    }
+
+    this.didFailTrailingBytes = true;
+    this.deliver(
+      'error',
+      new Error('Response body has bytes after its compressed stream'),
+    );
+    this.destroyDecoders();
+
+    try {
+      this.res.destroy();
+    } catch {
+      // Already gone; the error above is what is reported.
     }
   }
 
@@ -378,6 +423,12 @@ function createDecoder(
  */
 class SniffingInflate extends Transform {
   private inner: zlib.Inflate | zlib.InflateRaw | undefined;
+  /**
+   * The inner inflater ended its output before this stream was told the input had: zlib
+   * does that when a write leaves bytes after the deflate stream. Trailing bytes, so an
+   * error - and never waited on in `_flush`, whose `'end'` had already come and gone.
+   */
+  private didInnerEndEarly = false;
 
   public override _transform(
     chunk: Buffer,
@@ -398,7 +449,17 @@ class SniffingInflate extends Transform {
       inner.on('error', (error: Error) => {
         this.destroy(error);
       });
+      inner.once('end', () => {
+        if (!this.writableEnded) {
+          this.didInnerEndEarly = true;
+        }
+      });
       this.inner = inner;
+    }
+
+    if (this.didInnerEndEarly) {
+      callback(trailingBytesError());
+      return;
     }
 
     if (this.inner.write(chunk)) {
@@ -421,6 +482,11 @@ class SniffingInflate extends Transform {
       return;
     }
 
+    if (this.didInnerEndEarly || this.inner.readableEnded) {
+      callback(trailingBytesError());
+      return;
+    }
+
     this.inner.once('end', () => {
       callback();
     });
@@ -434,4 +500,8 @@ class SniffingInflate extends Transform {
     this.inner?.destroy();
     callback(error);
   }
+}
+
+function trailingBytesError(): Error {
+  return new Error('Response body has bytes after its compressed stream');
 }

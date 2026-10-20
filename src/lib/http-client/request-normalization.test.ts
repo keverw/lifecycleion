@@ -5787,3 +5787,50 @@ test('round 120: polyfilled fetch bodies are read incrementally and released; an
     server.close();
   }
 });
+
+test('round 121: bytes after a compressed stream are a stream error for every coding, and a stacked deflate does not hang', async () => {
+  const junk = Buffer.alloc(1000, 'j');
+  const bodies: Record<string, [string, Buffer]> = {
+    br: ['br', Buffer.concat([zlib.brotliCompressSync('hello'), junk])],
+    deflate: ['deflate', Buffer.concat([zlib.deflateSync('hello'), junk])],
+    raw: ['deflate', Buffer.concat([zlib.deflateRawSync('hello'), junk])],
+    stacked: [
+      'deflate, gzip',
+      zlib.gzipSync(
+        Buffer.concat([zlib.deflateSync('hello'), Buffer.from('\n')]),
+      ),
+    ],
+  };
+  const server = http.createServer((req, res) => {
+    const [encoding, body] = bodies[(req.url ?? '/').slice(1)] ?? [
+      'identity',
+      Buffer.from('x'),
+    ];
+    res.writeHead(200, {
+      'content-type': 'text/plain',
+      'content-encoding': encoding,
+    });
+    res.write(body);
+    if (req.url === '/stacked') {
+      res.end();
+    }
+    // The others never end: only a stream error settles them quickly.
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      timeout: 2000,
+    });
+    for (const kind of Object.keys(bodies)) {
+      const response = await client.get(`/${kind}`).send();
+      expect(response.isTimeout).toBe(false);
+      expect(response.isStreamError).toBe(true);
+    }
+  } finally {
+    server.closeAllConnections();
+    server.close();
+  }
+});
