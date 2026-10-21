@@ -71,8 +71,8 @@ const createZstdDecompress = (
 /**
  * The body source for `res`: the response itself, or - when it carries a body encoded with
  * codings this adapter decodes - a decoded view of it, with `release` to let go of the
- * decoding on a teardown. A `HEAD` answer, a `204` / `304` and an informational status
- * have no body to decode, and an unknown coding hands the body over as it came. A stacked
+ * decoding on a teardown. A `HEAD` answer, a `204` / `205` / `304` and an informational
+ * status have no body to decode (see `hasResponseBody`), and an unknown coding hands the body over as it came. A stacked
  * coding (`gzip, br`, or a repeated `Content-Encoding` Node joined) is decoded in reverse
  * order, as `fetch` decodes it; `identity` is skipped.
  */

@@ -467,6 +467,26 @@ describe('XHRAdapter', () => {
     expect(uploads.at(-1)).toBe(1);
   });
 
+  test('PR review round 11: a body refused mid-download still ends with the final upload event', async () => {
+    const uploads: number[] = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/big',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 10,
+      onUploadProgress: (event) => {
+        uploads.push(event.progress);
+      },
+    });
+
+    lastXHR.status = 200;
+    lastXHR.simulateDownloadProgress(100, 100);
+    const response = await promise;
+
+    expect(response.streamErrorCode).toBe('response_too_large');
+    expect(uploads.at(-1)).toBe(1);
+  });
+
   test('round 136: an abort once the headers are in carries the real status', async () => {
     const controller = new AbortController();
     const adapter = new XHRAdapter();

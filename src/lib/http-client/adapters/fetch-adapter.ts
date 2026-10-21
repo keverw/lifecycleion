@@ -434,9 +434,10 @@ async function readIterableBody(
   const chunks: Uint8Array[] = [];
   let loadedBytes = 0;
 
+  const encoder = new TextEncoder();
+
   for await (const value of body) {
-    const chunk =
-      typeof value === 'string' ? new TextEncoder().encode(value) : value;
+    const chunk = typeof value === 'string' ? encoder.encode(value) : value;
     loadedBytes += chunk.byteLength;
 
     if (loadedBytes > maxResponseBytes) {

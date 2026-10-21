@@ -65,6 +65,11 @@ const DATA_VIEW_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
   'byteLength',
 )?.get;
 
+const DATA_VIEW_BUFFER = Object.getOwnPropertyDescriptor(
+  DataView.prototype,
+  'buffer',
+)?.get;
+
 const ARRAY_BUFFER_BYTE_LENGTH = Object.getOwnPropertyDescriptor(
   ArrayBuffer.prototype,
   'byteLength',
@@ -250,5 +255,26 @@ export function readBinaryByteLength(value: object): number | null {
     }
   }
 
+  // A `DataView` over a detached buffer, or one a resizable buffer shrank out from under:
+  // its `byteLength` getter throws where a typed array's reads `0`, so it is told by its
+  // `buffer` getter, which does not, and measures `0` as such a typed array does.
+  if (isDataViewBrand(value)) {
+    return 0;
+  }
+
   return null;
+}
+
+/** Whether `value` is a `DataView`, told by an intrinsic getter that never throws for one. */
+function isDataViewBrand(value: object): boolean {
+  if (DATA_VIEW_BUFFER === undefined) {
+    return false;
+  }
+
+  try {
+    DATA_VIEW_BUFFER.call(value);
+    return true;
+  } catch {
+    return false;
+  }
 }

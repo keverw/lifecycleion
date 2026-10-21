@@ -28,6 +28,7 @@ import {
   materializeRequestHeaders,
 } from './internal/header-utils';
 import { knownBodyByteLength } from './internal/progress';
+import { readBinaryByteLength } from '../internal/binary-view';
 import { utf8ByteLength } from './internal/utf8-length';
 import { createResponseBodySource } from './internal/response-decoding';
 import { sleep } from '../sleep';
@@ -8049,4 +8050,35 @@ test('PR review round 8: an unmeasurable body presenting as bytes from any realm
   const empty = await custom('', 'application/json').get('/x').send();
   expect(empty.body).toBeNull();
   expect(empty.isParseError).toBe(false);
+});
+
+test('PR review round 11: a redirect whose page is past maxResponseBytes is followed, not failed', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get('/start', () => ({
+    status: 302,
+    headers: { location: '/end', 'content-type': 'text/html' },
+    body: 'x'.repeat(4096),
+  }));
+  adapter.routes.get('/end', () => ({ status: 200, body: 'ok' }));
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    followRedirects: true,
+    maxResponseBytes: 1024,
+  });
+
+  const response = await client.get('/start').send();
+  expect(response.isFailed).toBe(false);
+  expect(response.status).toBe(200);
+  expect(response.body).toBe('ok');
+});
+
+test('PR review round 11: a DataView over a detached buffer measures 0, as a typed array over one does', () => {
+  const buffer = new ArrayBuffer(8);
+  const view = new DataView(buffer);
+  const bytes = new Uint8Array(buffer);
+  structuredClone(buffer, { transfer: [buffer] });
+
+  expect(readBinaryByteLength(view)).toBe(0);
+  expect(readBinaryByteLength(bytes)).toBe(0);
 });

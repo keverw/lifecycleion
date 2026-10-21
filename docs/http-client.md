@@ -399,7 +399,7 @@ The response `Content-Type` header determines how the body is parsed. Only its m
 
 ### Response Size Limit
 
-A buffered response body is held whole in memory before it is parsed, so the client bounds it: `maxResponseBytes`, 64 MiB by default (`DEFAULT_MAX_RESPONSE_BYTES`). A body past the limit fails the request as `response_too_large`:
+A buffered response body is held whole in memory before it is parsed, so the client bounds it: `maxResponseBytes`, 64 MiB by default (`DEFAULT_MAX_RESPONSE_BYTES`). A body past the limit fails the request as `response_too_large` - except on a redirect the client is about to follow, whose body is never read, so a "Moved" page past the limit does not stop the redirect:
 
 ```typescript
 const client = new HTTPClient({ maxResponseBytes: 10 * 1024 * 1024 }); // 10 MiB

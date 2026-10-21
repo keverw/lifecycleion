@@ -2871,16 +2871,18 @@ export class BaseHTTPClient {
         }
 
         // A redirect about to be followed whose body only failed to decode - a server that
-        // labels its small "Moved" page `gzip` and sends it plain - is the redirect it says
-        // it is: the transfer was whole, and a browser never decodes a body it is about to
-        // leave. Read as a bodiless 3xx from here on, so nothing of the failure reaches the
-        // observers, the hop's error code, or a later hop's.
+        // labels its small "Moved" page `gzip` and sends it plain - or was past
+        // `maxResponseBytes` - a "Moved" page larger than the limit - is the redirect it
+        // says it is: a browser never reads a body it is about to leave, so neither can
+        // fail it. Read as a bodiless 3xx from here on, so nothing of the failure reaches
+        // the observers, the hop's error code, or a later hop's.
         if (
           this._config.followRedirects &&
           adapterResponse.isTransportError !== true &&
           REDIRECT_STATUS_CODES.has(adapterResponse.status) &&
           scalarHeader(adapterResponse.headers, 'location') &&
-          isBodyDecodeFailure(adapterResponse)
+          (isBodyDecodeFailure(adapterResponse) ||
+            adapterResponse.streamErrorCode === 'response_too_large')
         ) {
           adapterResponse.body = null;
           delete adapterResponse.isStreamError;

@@ -291,8 +291,23 @@ export class XHRAdapter implements HTTPAdapter {
        * them. A browser-followed redirect is reported as the redirect, as on `load`: the
        * client refuses those whatever the body.
        */
+      // Fallback: upload.load didn't fire (no request body, or the browser skipped the
+      // event). Callers always see a 100% upload event, unless upload.progress already
+      // reported it - on every way the request ends with an answer, a refused one too.
+      const finishUploadProgress = (): void => {
+        if (!didUploadComplete && !didFireUpload100) {
+          didFireUpload100 = true;
+          guardedUploadProgress?.({
+            loaded: uploadedBytes,
+            total: uploadTotalBytes,
+            progress: 1,
+          });
+        }
+      };
+
       const refuseTooLargeBody = (): void => {
         didExceedMaxResponseBytes = true;
+        finishUploadProgress();
         const responseURL = xhr.responseURL;
 
         if (
@@ -400,16 +415,8 @@ export class XHRAdapter implements HTTPAdapter {
         );
         const body = readResponseBody(method, xhr);
 
-        // Fallback: upload.load didn't fire (no request body, or the browser
-        // skipped the event). Ensure callers always see a 100% upload event,
-        // unless upload.progress already reported it - a body refused below too.
-        if (!didUploadComplete && !didFireUpload100) {
-          guardedUploadProgress?.({
-            loaded: uploadedBytes,
-            total: uploadTotalBytes,
-            progress: 1,
-          });
-        }
+        // Before the refusal below, so a refused body sees it too.
+        finishUploadProgress();
 
         // The body as handed over can be larger than the bytes progress counted - a
         // compressed response is counted encoded there - and a browser need not report
@@ -569,7 +576,7 @@ function browserRedirectResponse(responseURL: string): AdapterResponse {
 
 /**
  * Returns the response body as a Uint8Array, or null for response types that
- * carry no body (HEAD, 204 No Content, 304 Not Modified).
+ * carry no body (HEAD, 204, 205, 304 and 1xx - see `hasResponseBody`).
  */
 function readResponseBody(
   method: string,

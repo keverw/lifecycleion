@@ -564,7 +564,7 @@ export class MockAdapter implements HTTPAdapter {
       mockResponse.streamError,
     );
 
-    // What the server would have put on the wire. HEAD / 204 / 304 never expose
+    // What the server would have put on the wire. HEAD / 204 / 205 / 304 never expose
     // a body to consumers, even if the handler returned one. This keeps the mock
     // transport aligned with real HTTP.
     // Not serialized at all under a simulated stream error, which loses it: a body the

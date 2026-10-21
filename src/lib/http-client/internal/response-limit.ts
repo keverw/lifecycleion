@@ -78,7 +78,7 @@ export function parseContentLength(
     .split(',')
     .map((token) => token.trim());
 
-  if (tokens.length === 0 || !tokens.every((token) => /^\d+$/.test(token))) {
+  if (!tokens.every((token) => /^\d+$/.test(token))) {
     return undefined;
   }
 
