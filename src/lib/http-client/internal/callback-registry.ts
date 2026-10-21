@@ -1,6 +1,6 @@
 import { isNullish } from '../../internal/is-nullish';
 import { isRealmRootPrototype } from './plain-record';
-import { normalizeFilterMethods, normalizeHostPatterns } from '../utils';
+import { normalizeFilterMethods, readHostPattern } from '../utils';
 import { validateConfigEntry } from '../../domain-utils/domain-utils';
 import { isIPAddress, normalizeDomain } from '../../domain-utils/helpers';
 
@@ -300,9 +300,9 @@ export class CallbackRegistry<
     // `matchesFilter` reads are kept.
     const methods = normalizeFilterMethods(source.methods, this.label);
     const lists = copyFilterLists(source, this.label, this.kind);
-    // Normalized once here, as the copy `matchesFilter` reads them from never changes.
+    // Read once here, as the copy `matchesFilter` reads them from never changes.
     if (lists.hosts) {
-      lists.normalizedHosts = normalizeHostPatterns(lists.hosts as string[]);
+      lists.hostPatterns = (lists.hosts as string[]).map(readHostPattern);
     }
     const entry: RegisteredCallback<Fn, Filter> = {
       fn,

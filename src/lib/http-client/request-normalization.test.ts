@@ -9,7 +9,7 @@ import {
   buildURL,
   extractFetchHeaders,
   matchesFilter,
-  normalizeHostPatterns,
+  readHostPattern,
   mergeHeaders,
   parseContentType,
   stripCrossOriginURLCredentials,
@@ -7704,14 +7704,14 @@ test('a registered host filter reads each pattern once and answers as the unregi
     '-edge.example.com',
   ];
   for (const pattern of patterns) {
-    const normalizedHosts = normalizeHostPatterns([pattern]);
+    const hostPatterns = [readHostPattern(pattern)];
     for (const host of hosts) {
       const context = { requestURL: `https://${host}/` };
       expect([
         pattern,
         host,
         matchesFilter(
-          { hosts: [pattern], normalizedHosts },
+          { hosts: [pattern], hostPatterns },
           context,
           'final',
           'response',
@@ -7722,5 +7722,70 @@ test('a registered host filter reads each pattern once and answers as the unregi
         matchesFilter({ hosts: [pattern] }, context, 'final', 'response'),
       ]);
     }
+  }
+});
+
+test('a host filter registered on a client matches what the unregistered matcher matches, and refuses what it never matches', async () => {
+  const filters: string[][] = [
+    ['*.example.com'],
+    ['**.example.com'],
+    ['*.*.example.com'],
+    ['*.com'],
+    ['*.*'],
+    ['*.2.3.4'],
+    ['api.example.com'],
+    ['BÜCHER.example'],
+    ['*.bücher.example'],
+    ['*'],
+    ['*.'],
+    // Several patterns sharing one checked host: an IP, an exact name and wildcards.
+    ['127.0.0.1', '*.example.com'],
+    ['*.example.com', '127.0.0.1', 'xn--bcher-kva.example'],
+    ['**.example.com', 'BÜCHER.example', '*.bücher.example'],
+  ];
+  const hosts = [
+    'api.example.com',
+    'a.b.example.com',
+    'example.com',
+    '127.0.0.1',
+    'xn--bcher-kva.example',
+    'api.xn--bcher-kva.example',
+    '-edge.example.com',
+  ];
+  const adapter = new MockAdapter();
+  adapter.routes.get('/', () => ({ status: 200 }));
+
+  for (const filter of filters) {
+    const expected = hosts.filter((host) =>
+      matchesFilter(
+        { hosts: filter },
+        { requestURL: `https://${host}/` },
+        'final',
+        'response',
+      ),
+    );
+    const client = new HTTPClient({ adapter });
+    const seen: string[] = [];
+    const register = (): void => {
+      client.addResponseObserver(
+        (_response, request) => {
+          seen.push(new URL(request.requestURL).hostname);
+        },
+        { hosts: filter },
+      );
+    };
+
+    // Refused at registration only when it would never match anything.
+    if (expected.length === 0 && filter.length === 1) {
+      expect(register).toThrow(TypeError);
+      continue;
+    }
+
+    register();
+    for (const host of hosts) {
+      await client.get(`https://${host}/`).send();
+    }
+
+    expect([filter, seen]).toEqual([filter, expected]);
   }
 });

@@ -15,7 +15,7 @@ import {
   normalizeWildcardPattern,
   compileWildcardPattern,
   matchesCompiledWildcard,
-  isSuffixLikeTail,
+  isUnmatchableWildcardTail,
   INTERNAL_PSEUDO_TLDS,
   INVALID_DOMAIN_CHARS,
   MAX_LABELS,
@@ -640,30 +640,11 @@ export function validateConfigEntry(
   }
 
   // Helper: PSL tail guard and IP-tail rejection for wildcard patterns
-  function wildcardTailIsInvalid(pattern: string): boolean {
-    const normalized = normalizeWildcardPattern(pattern);
-
-    const labels = normalized.split('.');
-
-    // Extract the fixed tail after the last wildcard
-    const { fixedTail: fixedTailLabels } =
-      extractFixedTailAfterLastWildcard(labels);
-    if (fixedTailLabels.length === 0) {
-      return true; // require a concrete tail
-    }
-
-    const tail = fixedTailLabels.join('.');
-    if (isIPAddress(tail)) {
-      return true; // no wildcarding around IPs
-    }
-
-    // Nor around a numeric last label (`*.2.3.4`): the URL parser reads any host ending
-    // in one as IPv4, so a host under it is an address or no URL's host at all, and the
-    // pattern can never match.
-    if (/^(?:\d+|0x[0-9a-f]*)$/i.test(fixedTailLabels.at(-1) ?? '')) {
-      return true;
-    }
-    return isSuffixLikeTail(tail);
+  function wildcardTailIsInvalid(normalized: string): boolean {
+    // The matcher's own tail rule, so the two cannot disagree.
+    return isUnmatchableWildcardTail(
+      extractFixedTailAfterLastWildcard(normalized.split('.')).fixedTail,
+    );
   }
 
   // Helper: domain-wildcard structural checks (no URL chars, full labels, etc.)
@@ -1245,19 +1226,14 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
     }
 
     const normalized = normalizeWildcardPattern(hostPattern);
-    const { fixedTail } = extractFixedTailAfterLastWildcard(
-      (normalized || hostPattern).split('.'),
+    if (!normalized) {
+      return false;
+    }
+
+    // The matcher's own tail rule, so the two cannot disagree.
+    return !isUnmatchableWildcardTail(
+      extractFixedTailAfterLastWildcard(normalized.split('.')).fixedTail,
     );
-    if (!normalized || fixedTail.length === 0) {
-      return false;
-    }
-
-    const tail = fixedTail.join('.');
-    if (isIPAddress(tail)) {
-      return false;
-    }
-
-    return !isSuffixLikeTail(tail);
   }
 
   if (!trimmed.includes('*')) {

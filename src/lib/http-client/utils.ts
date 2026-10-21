@@ -11,6 +11,7 @@ import {
 import { normalizeDomain } from '../domain-utils/domain-utils';
 import {
   compileWildcardPattern,
+  isIPAddress,
   matchesCompiledWildcard,
   type CompiledWildcardPattern,
 } from '../domain-utils/helpers';
@@ -1073,7 +1074,7 @@ export function extractHostname(url: string): string {
 }
 
 /**
- * Wildcard hostname matching backed by {@link matchesWildcardDomain}.
+ * Wildcard hostname matching by `matchesWildcardDomain`'s rules.
  *
  * - `*` — global wildcard, matches any valid hostname including apex domains
  * - `*.example.com` — matches exactly one subdomain label (`api.example.com`) but not deeper levels or the apex
@@ -1083,72 +1084,87 @@ export function extractHostname(url: string): string {
  * - Pseudo-TLD suffix wildcards are rejected just like PSL tails (`*.localhost`, `*.local`, etc.)
  */
 export function matchesHostPattern(hostname: string, pattern: string): boolean {
-  return matchesHost(hostname, pattern, undefined, () =>
-    normalizeDomain(hostname),
+  return matchesReadHostPattern(
+    new CheckedHost(hostname),
+    readHostPattern(pattern),
   );
 }
 
-/**
- * One `hosts` pattern read once: an exact name normalized, or a wildcard compiled (`null`
- * for one that matches no host).
- */
-export type NormalizedHostPattern = string | CompiledWildcardPattern | null;
+/** One `hosts` pattern read once, by {@link readHostPattern}. */
+export type HostPattern =
+  /**
+   * `*` alone (or `*.`, `*` written as a fully qualified name): any host a request URL
+   * can carry, as documented - including one the domain matcher cannot read
+   * (`-edge.example.com`), which every other pattern skips.
+   */
+  | { readonly kind: 'any' }
+  /** An exact name, normalized. */
+  | { readonly kind: 'exact'; readonly name: string }
+  | { readonly kind: 'wildcard'; readonly compiled: CompiledWildcardPattern }
+  /** A pattern that matches no host: `*.com`, `*.*`, a name the normalizer cannot read. */
+  | { readonly kind: 'never' };
+
+const ANY_HOST: HostPattern = { kind: 'any' };
+const NO_HOST: HostPattern = { kind: 'never' };
 
 /**
- * A `hosts` list's patterns read once, index for index: done when a filter is registered,
- * rather than on every request it is checked for - normalizing parses with the URL parser
- * and runs IDNA, and a wildcard's checks look its tail up in the Public Suffix List.
+ * A `hosts` pattern read once - done when a filter is registered, rather than on every
+ * request it is checked for: normalizing parses with the URL parser and runs IDNA, and a
+ * wildcard's checks look its tail up in the Public Suffix List.
  */
-export function normalizeHostPatterns(
-  hosts: readonly string[],
-): NormalizedHostPattern[] {
-  return hosts.map((pattern) =>
-    pattern.includes('*')
-      ? (compileWildcardPattern(pattern) ?? null)
-      : normalizeDomain(pattern),
-  );
-}
-
-/**
- * The one place a host is routed to the wildcard or exact matcher. A registered filter's
- * pattern was read when it was added (`undefined` reads it here), and the hostname comes
- * lazily, so a filter check normalizes it once, for every pattern that needs it.
- */
-function matchesHost(
-  hostname: string,
-  pattern: string,
-  normalizedPattern: NormalizedHostPattern | undefined,
-  normalizedHostname: () => string,
-): boolean {
-  // `*` alone matches any host a request URL can carry, as documented - including one the
-  // domain matcher cannot read (`-edge.example.com`), which every other pattern skips.
-  // `*.` is `*` written as a fully qualified name, as registration reads it.
+export function readHostPattern(pattern: string): HostPattern {
   if (pattern.trim().replace(/\.$/, '') === '*') {
-    return hostname !== '';
+    return ANY_HOST;
   }
 
   if (pattern.includes('*')) {
-    // Compiled here only for a filter not registered through a client.
-    const compiled =
-      normalizedPattern === undefined
-        ? (compileWildcardPattern(pattern) ?? null)
-        : normalizedPattern;
-
-    return (
-      typeof compiled === 'object' &&
-      compiled !== null &&
-      matchesCompiledWildcard(normalizedHostname(), compiled)
-    );
+    const compiled = compileWildcardPattern(pattern);
+    return compiled === undefined ? NO_HOST : { kind: 'wildcard', compiled };
   }
 
-  const host = normalizedHostname();
-  return (
-    host !== '' &&
-    host ===
-      (typeof normalizedPattern === 'string'
-        ? normalizedPattern
-        : normalizeDomain(pattern))
-  );
+  const name = normalizeDomain(pattern);
+  return name === '' ? NO_HOST : { kind: 'exact', name };
+}
+
+/**
+ * A request's hostname as one filter check reads it: normalized, and told whether it is
+ * an IP address, each at most once and only if a pattern asks.
+ */
+class CheckedHost {
+  private normalizedName: string | undefined;
+  private isIPName: boolean | undefined;
+
+  constructor(public readonly hostname: string) {}
+
+  public get normalized(): string {
+    this.normalizedName ??= normalizeDomain(this.hostname);
+    return this.normalizedName;
+  }
+
+  public get isIP(): boolean {
+    this.isIPName ??= isIPAddress(this.normalized);
+    return this.isIPName;
+  }
+}
+
+/** The one place a host is matched against a read pattern, exact or wildcard. */
+function matchesReadHostPattern(
+  host: CheckedHost,
+  pattern: HostPattern,
+): boolean {
+  switch (pattern.kind) {
+    case 'any':
+      return host.hostname !== '';
+    case 'never':
+      return false;
+    case 'exact':
+      return host.normalized === pattern.name;
+    case 'wildcard':
+      return (
+        host.normalized !== '' &&
+        matchesCompiledWildcard(host.normalized, pattern.compiled, host.isIP)
+      );
+  }
 }
 
 /**
@@ -1246,8 +1262,8 @@ export function matchesFilter(
     methods?: string[];
     bodyContainsKeys?: string[];
     hosts?: string[];
-    /** `hosts` normalized by {@link normalizeHostPatterns}, when it was registered. */
-    normalizedHosts?: readonly NormalizedHostPattern[];
+    /** `hosts` read by {@link readHostPattern}, index for index, when it was registered. */
+    hostPatterns?: readonly HostPattern[];
     schemes?: ('http' | 'https')[];
     phases?: RequestPhaseName[];
     contentTypes?: ContentType[];
@@ -1349,23 +1365,15 @@ export function matchesFilter(
   // request whose URL could not be read (`''`) matches no host or scheme rather than
   // skipping the filter, so a host-scoped observer does not hear about other hosts.
   if (filter.hosts && context.requestURL !== undefined) {
-    const hostname = extractHostname(context.requestURL);
-    const { hosts, normalizedHosts } = filter;
-    // Once per check, and only if an exact pattern needs it.
-    let normalizedHostname: string | undefined;
-    const hostOnce = (): string => {
-      normalizedHostname ??= normalizeDomain(hostname);
-      return normalizedHostname;
-    };
+    const host = new CheckedHost(extractHostname(context.requestURL));
+    const { hosts, hostPatterns } = filter;
 
     if (
       !hosts.some((pattern: string, index: number) =>
-        matchesHost(
-          hostname,
-          pattern,
-          // Absent only for a filter not registered through a client.
-          normalizedHosts?.[index],
-          hostOnce,
+        matchesReadHostPattern(
+          host,
+          // Read here only for a filter not registered through a client.
+          hostPatterns?.[index] ?? readHostPattern(pattern),
         ),
       )
     ) {

@@ -245,7 +245,9 @@ export function canonicalizeBracketedIPv6Content(content: string): string {
  * @param patternLabels - Array of pattern labels (e.g., ["*", "api", "example", "com"])
  * @returns Object with fixedTailStart index and fixedTail labels array
  */
-export function extractFixedTailAfterLastWildcard(patternLabels: string[]): {
+export function extractFixedTailAfterLastWildcard(
+  patternLabels: readonly string[],
+): {
   fixedTailStart: number;
   fixedTail: string[];
 } {
@@ -269,8 +271,8 @@ export function extractFixedTailAfterLastWildcard(patternLabels: string[]): {
  * Internal recursive helper for wildcard label matching
  */
 function matchesWildcardLabelsInternal(
-  domainLabels: string[],
-  patternLabels: string[],
+  domainLabels: readonly string[],
+  patternLabels: readonly string[],
   domainIndex: number,
   patternIndex: number,
   counter: { count: number },
@@ -360,8 +362,8 @@ function matchesWildcardLabelsInternal(
  * Match domain labels against wildcard pattern labels
  */
 export function matchesWildcardLabels(
-  domainLabels: string[],
-  patternLabels: string[],
+  domainLabels: readonly string[],
+  patternLabels: readonly string[],
 ): boolean {
   const counter = { count: 0 };
   return matchesWildcardLabelsInternal(
@@ -397,10 +399,26 @@ export function matchesMultiLabelPattern(
     return false;
   }
 
-  // Extract the fixed tail after the last wildcard
   const { fixedTailStart, fixedTail } =
     extractFixedTailAfterLastWildcard(patternLabels);
 
+  return matchesSplitPattern(
+    domainLabels,
+    patternLabels.slice(0, fixedTailStart),
+    fixedTail,
+  );
+}
+
+/**
+ * The label match behind {@link matchesMultiLabelPattern}, for a pattern already split
+ * and checked: the labels up to and including its last wildcard, and the fixed tail
+ * after it.
+ */
+function matchesSplitPattern(
+  domainLabels: readonly string[],
+  leftPatternLabels: readonly string[],
+  fixedTail: readonly string[],
+): boolean {
   // Domain must be at least as long as the fixed tail
   if (domainLabels.length < fixedTail.length) {
     return false;
@@ -421,7 +439,6 @@ export function matchesMultiLabelPattern(
     0,
     domainLabels.length - fixedTail.length,
   );
-  const leftPatternLabels = patternLabels.slice(0, fixedTailStart);
 
   if (leftPatternLabels.length === 0) {
     // No left pattern, so only the fixed tail is required
@@ -672,7 +689,7 @@ export function normalizeWildcardPattern(pattern: string): string {
  * `*.kawasaki.jp` matched the suffix `foo.kawasaki.jp` and the apex `city.kawasaki.jp`.
  * Told by asking for the suffix of a made-up label under the tail.
  */
-export function isSuffixLikeTail(tail: string): boolean {
+function isSuffixLikeTail(tail: string): boolean {
   if (INTERNAL_PSEUDO_TLDS.has(tail)) {
     return true;
   }
@@ -687,20 +704,52 @@ export function isSuffixLikeTail(tail: string): boolean {
 }
 
 /**
- * A wildcard pattern read once - normalized, its checks that do not depend on the host
- * done - for {@link matchesCompiledWildcard} to match any number of hosts against. The
- * pattern half of `matchesWildcardDomain`, which is the two together.
+ * Whether a wildcard pattern's fixed tail - the labels after its last wildcard - leaves it
+ * matching no host: there is none, it is an IP address, it ends in a numeric label (the
+ * URL parser reads any host ending in one as IPv4, so a host under it is an address or no
+ * URL's host at all), or it is suffix-like (a public suffix or pseudo-TLD: `*.com`,
+ * `**.co.uk`, `*.local`). The one tail rule the matcher and the validators share.
  */
-export interface CompiledWildcardPattern {
-  readonly pattern: string;
-  /** For a `**.` pattern, the normalized name it sits on, which it never matches. */
-  readonly apex: string | undefined;
+export function isUnmatchableWildcardTail(
+  fixedTail: readonly string[],
+): boolean {
+  if (fixedTail.length === 0) {
+    return true; // require a concrete tail
+  }
+
+  const tail = fixedTail.join('.');
+
+  return (
+    isIPAddress(tail) ||
+    /^(?:\d+|0x[0-9a-f]*)$/i.test(fixedTail.at(-1) ?? '') ||
+    isSuffixLikeTail(tail)
+  );
 }
 
 /**
+ * A wildcard pattern read once - normalized, split, and checked as far as it can be
+ * without a host - for {@link matchesCompiledWildcard} to match any number of hosts
+ * against. The pattern half of `matchesWildcardDomain`, which is the two together.
+ */
+export type CompiledWildcardPattern =
+  /** `*` alone, which matches every host the normalizer reads, IPs included. */
+  | { readonly kind: 'global' }
+  | {
+      readonly kind: 'labels';
+      /** The labels up to and including the last wildcard. */
+      readonly leftLabels: readonly string[];
+      /** The labels after it, matched exactly. */
+      readonly fixedTail: readonly string[];
+      /** For a `**.` pattern, the normalized name it sits on, which it never matches. */
+      readonly apex: string | undefined;
+    };
+
+const GLOBAL_WILDCARD: CompiledWildcardPattern = { kind: 'global' };
+
+/**
  * `pattern` compiled for {@link matchesCompiledWildcard}, or `undefined` for one that
- * matches no host: not a wildcard, all wildcards (`*.*`), or with no concrete tail, or a
- * tail that is an IP address, a public suffix or a pseudo-TLD (`*.com`, `**.co.uk`).
+ * matches no host: not a wildcard, all wildcards (`*.*`), too many labels, or with a tail
+ * {@link isUnmatchableWildcardTail} refuses.
  */
 export function compileWildcardPattern(
   pattern: string,
@@ -713,30 +762,27 @@ export function compileWildcardPattern(
 
   // Allow single "*" as global wildcard - matches both domains and IP addresses
   if (normalizedPattern === '*') {
-    return { pattern: '*', apex: undefined };
+    return GLOBAL_WILDCARD;
   }
 
-  // Reject other all-wildcards patterns (e.g., "*.*", "**.*")
-  if (isAllWildcards(normalizedPattern)) {
+  // Reject other all-wildcards patterns (e.g., "*.*", "**.*"), and pathological label
+  // counts, which the label match refuses for any host.
+  const labels = normalizedPattern.split('.');
+  if (isAllWildcards(normalizedPattern) || labels.length > MAX_LABELS) {
     return undefined;
   }
 
-  // PSL/IP tail guard: ensure the fixed tail is neither a PSL, a pseudo-TLD, nor an IP.
-  // This prevents patterns like "*.com" or "**.co.uk" from matching
-  const { fixedTail } = extractFixedTailAfterLastWildcard(
-    normalizedPattern.split('.'),
-  );
-  if (fixedTail.length === 0) {
-    return undefined; // require a concrete tail
-  }
-
-  const tail = fixedTail.join('.');
-  if (isIPAddress(tail) || isSuffixLikeTail(tail)) {
-    return undefined; // no wildcarding around IPs or suffix-like tails
+  // PSL/IP tail guard: this prevents patterns like "*.com" or "**.co.uk" from matching.
+  const { fixedTailStart, fixedTail } =
+    extractFixedTailAfterLastWildcard(labels);
+  if (isUnmatchableWildcardTail(fixedTail)) {
+    return undefined;
   }
 
   return {
-    pattern: normalizedPattern,
+    kind: 'labels',
+    leftLabels: labels.slice(0, fixedTailStart),
+    fixedTail,
     // "**." requires at least one label before the remainder, so a domain that
     // exactly equals the remainder can never match (e.g., "**.example.com" ≠ "example.com").
     apex: normalizedPattern.startsWith('**.')
@@ -745,21 +791,26 @@ export function compileWildcardPattern(
   };
 }
 
-/** Whether a host, already normalized by `normalizeDomain`, matches a compiled pattern. */
+/**
+ * Whether a host, already normalized by `normalizeDomain`, matches a compiled pattern.
+ * `isIP` is whether that host is an IP address, when the caller already knows it - one
+ * host checked against several patterns is asked once.
+ */
 export function matchesCompiledWildcard(
   normalizedDomain: string,
   compiled: CompiledWildcardPattern,
+  isIP?: boolean,
 ): boolean {
   if (normalizedDomain === '') {
     return false; // invalid domain cannot match
   }
 
-  if (compiled.pattern === '*') {
+  if (compiled.kind === 'global') {
     return true;
   }
 
   // Do not wildcard-match IP addresses with non-global patterns; only exact IP matches are supported elsewhere
-  if (isIPAddress(normalizedDomain)) {
+  if (isIP ?? isIPAddress(normalizedDomain)) {
     return false;
   }
 
@@ -767,5 +818,14 @@ export function matchesCompiledWildcard(
     return false;
   }
 
-  return matchesMultiLabelPattern(normalizedDomain, compiled.pattern);
+  const domainLabels = normalizedDomain.split('.');
+  if (domainLabels.length > MAX_LABELS) {
+    return false;
+  }
+
+  return matchesSplitPattern(
+    domainLabels,
+    compiled.leftLabels,
+    compiled.fixedTail,
+  );
 }
