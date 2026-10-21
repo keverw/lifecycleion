@@ -592,9 +592,11 @@ export function matchesDomainList(
     }
 
     const normalizedAllowed = normalizedExactEntry(allowed, isCached);
+    // The cheap comparison first: at most one entry can be equal, and only that one
+    // needs the IP and public-suffix checks.
     if (
-      isAllowedExactHostname(normalizedAllowed) &&
-      normalizedDomain === normalizedAllowed
+      normalizedDomain === normalizedAllowed &&
+      isAllowedExactHostname(normalizedAllowed)
     ) {
       return true;
     }

@@ -4,7 +4,9 @@ import { checkDNSLength, toAsciiDots } from '../domain-utils/helpers';
 import { describeValue } from '../internal/describe-value';
 import { PublicSuffixResolver } from './public-suffix';
 import type { PublicSuffixOverrides } from './public-suffix';
-import { normalizeAdapterResponseHeaders } from './utils';
+import { isPlainRecord } from './internal/plain-record';
+import { lowerCaseHeaderName } from './internal/header-utils';
+import { isNullish } from '../internal/is-nullish';
 
 // Matches bare hostnames like 'localhost', 'myapp', 'my-app' that tldts
 // won't assign a registered domain to but are still valid cookie domains.
@@ -488,31 +490,43 @@ export class CookieJar {
   }
 
   /**
-   * Processes all Set-Cookie headers from a response headers object.
+   * Processes all Set-Cookie headers from a response headers object: a plain object of
+   * header names to values, its `set-cookie` lines read under any capitalization, in the
+   * order they appear (as `HTTPClient` merges them). Only those lines are read; other
+   * headers are not this method's to check.
    *
-   * Uses the same normalization as `HTTPClient` ({@link normalizeAdapterResponseHeaders}):
-   * lowercase keys and merged `set-cookie` lines, so mixed-case adapter output
-   * matches `FetchAdapter` / normalized responses.
+   * @throws {TypeError} When `headers` is not a plain object - a `Headers` or `Map`
+   *         keeps its entries where this cannot read them, and every cookie in it was
+   *         silently dropped - or a `set-cookie` line is not a string.
    */
   public processResponseHeaders(
     headers: Record<string, string | string[]>,
     url: string,
   ): void {
-    const normalized = normalizeAdapterResponseHeaders(headers);
-    const raw = normalized['set-cookie'];
-
-    if (raw === undefined || raw === '') {
-      return;
+    if (!isPlainRecord(headers)) {
+      throw new TypeError(
+        `CookieJar processResponseHeaders headers must be a plain object of header names to values (got ${describeValue(headers)})`,
+      );
     }
 
-    const lines: string[] = Array.isArray(raw) ? raw : [raw];
+    for (const [name, raw] of Object.entries(headers)) {
+      if (lowerCaseHeaderName(name) !== 'set-cookie' || isNullish(raw)) {
+        continue;
+      }
 
-    if (lines.length === 0) {
-      return;
-    }
+      for (const line of Array.isArray(raw) ? (raw as unknown[]) : [raw]) {
+        if (isNullish(line) || line === '') {
+          continue;
+        }
 
-    for (const line of lines) {
-      this.parseSetCookieHeader(line, url);
+        if (typeof line !== 'string') {
+          throw new TypeError(
+            `CookieJar processResponseHeaders set-cookie line is not a string (got ${describeValue(line)})`,
+          );
+        }
+
+        this.parseSetCookieHeader(line, url);
+      }
     }
   }
 

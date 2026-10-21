@@ -11,6 +11,7 @@ import {
 import {
   markResponseStreamAbort,
   nonRetryableAdapterErrorFrom,
+  readAdapterMethod,
 } from '../internal/adapter-error';
 import {
   makeResponseTooLargeError,
@@ -68,11 +69,10 @@ export class XHRAdapter implements HTTPAdapter {
       dispatchedURL,
       maxResponseBytes,
     } = fields;
+    const method = readAdapterMethod(givenMethod);
 
     return await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      // As `open` reads it: anything is converted to a string there.
-      let method = '';
       /** A redirect the browser followed before an abort, read before `abort()` resets it. */
       let followedRedirectBeforeAbort: string | undefined;
       /** The answer an abort landed on, read before `abort()` resets it. */
@@ -91,7 +91,6 @@ export class XHRAdapter implements HTTPAdapter {
       try {
         // responseType 'arraybuffer' gives us a raw ArrayBuffer on load,
         // consistent with how FetchAdapter and NodeAdapter deliver body bytes.
-        method = String(givenMethod);
         xhr.open(method, dispatchedURL);
         xhr.responseType = 'arraybuffer';
 
@@ -252,15 +251,14 @@ export class XHRAdapter implements HTTPAdapter {
         }
 
         didFireUpload100 = true;
-        const knownBytes =
-          uploadedBytes > 0 && uploadTotalBytes > 0
-            ? 0
-            : (knownBodyByteLength(requestBody) ?? 0);
-        guardedUploadProgress?.({
-          loaded: uploadedBytes > 0 ? uploadedBytes : knownBytes,
-          total: uploadTotalBytes > 0 ? uploadTotalBytes : knownBytes,
-          progress: 1,
-        });
+        // One number for both: the upload is done, so what was sent is its size. A
+        // browser that counted bytes without a total, or a total without bytes, for a
+        // body whose size cannot be known (a `FormData`), reported `loaded` and
+        // `total` apart.
+        const bytes =
+          Math.max(uploadedBytes, uploadTotalBytes) ||
+          (knownBodyByteLength(requestBody) ?? 0);
+        guardedUploadProgress?.({ loaded: bytes, total: bytes, progress: 1 });
       };
 
       xhr.upload.addEventListener('load', (event) => {
@@ -290,12 +288,6 @@ export class XHRAdapter implements HTTPAdapter {
       // so the `abort` event that follows is not reported as a cancel.
       let didExceedMaxResponseBytes = false;
 
-      /**
-       * Fail a body past `maxResponseBytes` as a stream error with the real status and
-       * headers, and stop the download. Both are read before `xhr.abort()`, which resets
-       * them. A browser-followed redirect is reported as the redirect, as on `load`: the
-       * client refuses those whatever the body.
-       */
       // Fallback: upload.load didn't fire (no request body, or the browser skipped the
       // event). Callers always see a 100% upload event, unless upload.progress already
       // reported it - on every way the request ends with an answer, a refused one too.
@@ -305,6 +297,12 @@ export class XHRAdapter implements HTTPAdapter {
         }
       };
 
+      /**
+       * Fail a body past `maxResponseBytes` as a stream error with the real status and
+       * headers, and stop the download. Both are read before `xhr.abort()`, which resets
+       * them. A browser-followed redirect is reported as the redirect, as on `load`: the
+       * client refuses those whatever the body.
+       */
       const refuseTooLargeBody = (): void => {
         didExceedMaxResponseBytes = true;
         // Read before the upload callback below: one that cancels makes `xhr.abort()`

@@ -163,6 +163,10 @@ export interface AdapterResponse {
    *
    * Adapters may use any header casing, `HTTPClient` normalizes keys to
    * lowercase before redirect handling, cookies, and the public `HTTPResponse`.
+   *
+   * A plain object: a `Headers` or `Map` (a wrapped `fetch` response's own) is
+   * refused as a non-retryable `adapter_error`, as is a value that is not a
+   * string or finite number - a `set-cookie` line must be a string.
    */
   headers: Record<string, string | string[]>;
   /** Raw response bytes. Higher layers decode/parse based on content-type. */

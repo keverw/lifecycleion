@@ -1,6 +1,7 @@
 import {
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
+  readAdapterMethod,
 } from '../internal/adapter-error';
 import { defineEntry } from '../../internal/define-entry';
 import { readBinaryByteLength } from '../../internal/binary-view';
@@ -282,28 +283,23 @@ export class MockAdapter implements HTTPAdapter {
   }
 
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
-    // Guarded once, at the boundary, so every call site below is covered. Progress reporting is advisory and must not be able to
-    // change whether a request succeeded; a throwing callback used to propagate out and be
-    // classified as a transport failure. See `guardProgressCallback`.
-    const guardedUploadProgress = guardProgressCallback(
-      request.onUploadProgress,
-      'onUploadProgress',
-    );
-    const guardedDownloadProgress = guardProgressCallback(
-      request.onDownloadProgress,
-      'onDownloadProgress',
-    );
-
-    const { requestURL, method: givenMethod, headers, body } = request;
-    // Converted once, as a real transport reads it: a non-string method threw at the
-    // first `toUpperCase`.
-    let method: string;
+    // Every field read once, here, on a carrier: a getter that throws is the caller's,
+    // refused as a non-retryable `adapter_error` rather than retried as a network failure.
+    let fields: ReturnType<typeof readRequestFields>;
     try {
-      method =
-        typeof givenMethod === 'string' ? givenMethod : String(givenMethod);
+      fields = readRequestFields(request);
     } catch (error) {
       throw nonRetryableAdapterErrorFrom(error);
     }
+    const {
+      guardedUploadProgress,
+      guardedDownloadProgress,
+      requestURL,
+      headers,
+      body,
+      signal,
+    } = fields;
+    const method = readAdapterMethod(fields.givenMethod);
     // Read before the route runs, so a limit refused as unusable refuses the request
     // without running it.
     const maxResponseBytes = readMaxResponseBytes(request);
@@ -334,7 +330,7 @@ export class MockAdapter implements HTTPAdapter {
 
     // --- 1. Pre-flight abort check ---
     // Throw immediately if the signal was already cancelled before we even start.
-    if (request.signal?.aborted) {
+    if (signal?.aborted) {
       throwAbortError();
     }
 
@@ -344,7 +340,7 @@ export class MockAdapter implements HTTPAdapter {
 
     // Again, as the real adapters do: a cancel from that callback ends the request before
     // the route handler runs, as it would before a real request was sent.
-    if (request.signal?.aborted) {
+    if (signal?.aborted) {
       throwAbortError();
     }
 
@@ -431,9 +427,8 @@ export class MockAdapter implements HTTPAdapter {
       try {
         // Match real network semantics more closely: once the caller aborts,
         // stop waiting on an async mock handler and reject immediately.
-        mockResponse = (
-          await awaitAbortable(handler(mockRequest), request.signal)
-        ).value;
+        mockResponse = (await awaitAbortable(handler(mockRequest), signal))
+          .value;
       } catch (handlerError) {
         if (isInternalAbortError(handlerError)) {
           throwAbortError();
@@ -449,7 +444,7 @@ export class MockAdapter implements HTTPAdapter {
                   mockRequest,
                   handlerError,
                 ]),
-                request.signal,
+                signal,
               )
             ).value;
           } catch (error) {
@@ -520,8 +515,8 @@ export class MockAdapter implements HTTPAdapter {
     if (delay > 0) {
       // Use abort-aware sleep when a signal is present so cancellation throws
       // immediately rather than waiting for the full delay to elapse.
-      if (request.signal) {
-        await sleepAbortable(delay, request.signal);
+      if (signal) {
+        await sleepAbortable(delay, signal);
       } else {
         await sleep(delay);
       }
@@ -529,7 +524,7 @@ export class MockAdapter implements HTTPAdapter {
 
     // --- 6. Post-delay abort check ---
     // Catches cancellation when there was no delay (or delay was 0).
-    if (request.signal?.aborted) {
+    if (signal?.aborted) {
       throwAbortError();
     }
 
@@ -670,9 +665,7 @@ export class MockAdapter implements HTTPAdapter {
     // After the headers are built and checked, as a real adapter has the headers before
     // any body progress: a route mistake found there does not follow a completed download.
     // Signal upload complete, then report download size based on serialised body.
-    guardedUploadProgress?.(
-      uploadCompleteEvent(knownBodyByteLength(request.body)),
-    );
+    guardedUploadProgress?.(uploadCompleteEvent(knownBodyByteLength(body)));
 
     // A simulated stream error reports no terminal download progress: real
     // adapters fail the body read before that point, so `progress: 1` here would
@@ -686,7 +679,7 @@ export class MockAdapter implements HTTPAdapter {
     }
 
     const detectedRedirectURL = resolveDetectedRedirectURL(
-      request.requestURL,
+      requestURL,
       mockResponse.status,
       normalizedResponseHeaders,
     );
@@ -713,6 +706,29 @@ export class MockAdapter implements HTTPAdapter {
 }
 
 // --- Helpers ---
+
+/**
+ * The request's fields, each read once, before the route runs. Progress callbacks are
+ * guarded here, so every call site is covered: progress reporting is advisory and must
+ * not be able to change whether a request succeeded (see `guardProgressCallback`).
+ */
+function readRequestFields(request: AdapterRequest) {
+  return {
+    guardedUploadProgress: guardProgressCallback(
+      request.onUploadProgress,
+      'onUploadProgress',
+    ),
+    guardedDownloadProgress: guardProgressCallback(
+      request.onDownloadProgress,
+      'onDownloadProgress',
+    ),
+    requestURL: request.requestURL,
+    givenMethod: request.method as unknown,
+    headers: request.headers,
+    body: request.body,
+    signal: request.signal,
+  };
+}
 
 /**
  * Normalizes `MockResponse.streamError` to a `streamErrorCode`, or `undefined`

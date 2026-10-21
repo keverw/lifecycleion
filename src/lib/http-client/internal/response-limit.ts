@@ -3,8 +3,10 @@
  * {@link AdapterRequest.maxResponseBytes}.
  */
 
-import { readUnknownMember } from '../../internal/read-member';
-import { markNonRetryableAdapterError } from './adapter-error';
+import {
+  markNonRetryableAdapterError,
+  nonRetryableAdapterErrorFrom,
+} from './adapter-error';
 import { describeValue } from '../../internal/describe-value';
 import type { AdapterRequest } from '../types';
 import {
@@ -24,7 +26,14 @@ import { utf8ByteLength } from './utf8-length';
  * environment variable, `0`, `NaN`) silently read as no limit at all.
  */
 export function readMaxResponseBytes(request: AdapterRequest): number {
-  const value = readUnknownMember(request, 'maxResponseBytes');
+  // Not `readUnknownMember`, which reads a throw as absent: a getter that throws turned
+  // the limit off. Refused, as an unusable value is.
+  let value: unknown;
+  try {
+    value = (request as { maxResponseBytes?: unknown }).maxResponseBytes;
+  } catch (error) {
+    throw nonRetryableAdapterErrorFrom(error);
+  }
 
   if (value === undefined || value === null) {
     return Number.POSITIVE_INFINITY;

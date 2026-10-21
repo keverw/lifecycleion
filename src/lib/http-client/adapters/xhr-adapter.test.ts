@@ -544,6 +544,74 @@ describe('XHRAdapter', () => {
     expect(uploads.at(-1)).toEqual({ loaded: 5, progress: 1 });
   });
 
+  test('PR review round 15: the final upload event never reports more bytes than its total', async () => {
+    const uploads: Array<{ loaded: number; total: number; progress: number }> =
+      [];
+    const body = new FormData();
+    body.append('field', 'value');
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/form',
+      method: 'POST',
+      headers: {},
+      body,
+      onUploadProgress: (event) => {
+        uploads.push({
+          loaded: event.loaded,
+          total: event.total,
+          progress: event.progress,
+        });
+      },
+    });
+
+    // Bytes reported, but no total, and no `upload.load` after them.
+    lastXHR.simulateUploadProgress(500, 0);
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    await promise;
+
+    expect(uploads.at(-1)).toEqual({ loaded: 500, total: 500, progress: 1 });
+  });
+
+  test('PR review round 15: the final upload event reports a total the browser gave without bytes as sent', async () => {
+    const uploads: Array<{ loaded: number; total: number }> = [];
+    const body = new FormData();
+    body.append('field', 'value');
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/form',
+      method: 'POST',
+      headers: {},
+      body,
+      onUploadProgress: (event) => {
+        uploads.push({ loaded: event.loaded, total: event.total });
+      },
+    });
+
+    lastXHR.simulateUploadProgress(0, 1200);
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    await promise;
+
+    expect(uploads.at(-1)).toEqual({ loaded: 1200, total: 1200 });
+  });
+
+  test('PR review round 15: a missing method is refused rather than sent as "undefined"', async () => {
+    const outcome = await new XHRAdapter()
+      .send({
+        requestURL: 'https://api.test/x',
+        method: undefined as unknown as 'GET',
+        headers: {},
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Error,
+      );
+
+    expect(outcome).toBeInstanceOf(TypeError);
+    expect(outcome?.message).toContain('method is required');
+  });
+
   test('round 136: an abort once the headers are in carries the real status', async () => {
     const controller = new AbortController();
     const adapter = new XHRAdapter();

@@ -18,6 +18,7 @@ import {
 import { deepClone } from '../deep-clone';
 import {
   DEFAULT_MAX_RESPONSE_BYTES,
+  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_ABORT_HEADERS_KEY,
   STREAM_ABORT_STATUS_KEY,
@@ -8208,4 +8209,212 @@ test('PR review round 14: a domain list longer than the pattern cache still matc
   expect(matchesDomainList('api.tenant599.example.com', list)).toBe(true);
   expect(matchesDomainList('exact.example.org', list)).toBe(true);
   expect(matchesDomainList('nope.example.net', list)).toBe(false);
+});
+
+test('PR review round 15: an adapter answering with a Headers object, or an object header value, fails as adapter_error', async () => {
+  for (const headers of [
+    new Headers({ 'content-type': 'application/json' }),
+    new Map([['content-type', 'application/json']]),
+    { 'content-type': { type: 'json' } },
+    { 'x-trace': [Symbol('t')] },
+  ]) {
+    let sends = 0;
+    const client = new HTTPClient({
+      baseURL: 'http://api.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+      adapter: {
+        getType: () => 'mock',
+        send: () => {
+          sends++;
+          return Promise.resolve({
+            status: 200,
+            headers: headers as unknown as Record<string, string>,
+            body: new TextEncoder().encode('{"a":1}'),
+          });
+        },
+      },
+    });
+    const builder = client.get('/x');
+    const response = await builder.send();
+
+    expect(response.isFailed).toBe(true);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(String(builder.error?.cause)).toContain('header');
+    expect(sends).toBe(1);
+  }
+
+  // A number is its text, as before.
+  const numeric = await new HTTPClient({
+    baseURL: 'http://api.test',
+    adapter: {
+      getType: () => 'mock',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'content-length': 2 } as unknown as Record<string, string>,
+          body: null,
+        }),
+    },
+  })
+    .get('/x')
+    .send();
+  expect(numeric.headers['content-length']).toBe('2');
+});
+
+test('PR review round 15: adapters refuse a missing method, and a throwing field getter, as non-retryable', async () => {
+  const originalFetch = globalThis.fetch;
+  let fetched = 0;
+  (globalThis as { fetch: unknown }).fetch = () => {
+    fetched++;
+    return Promise.resolve(new Response('ok', { status: 200 }));
+  };
+  const mock = new MockAdapter();
+  let ran = 0;
+  mock.routes.get('/x', () => {
+    ran++;
+    return { status: 200 };
+  });
+  const throwing = (field: string) =>
+    Object.defineProperty(
+      { requestURL: 'http://api.test/x', method: 'GET', headers: {} },
+      field,
+      {
+        get() {
+          throw new Error(`${field} getter failed`);
+        },
+        enumerable: true,
+      },
+    ) as AdapterRequest;
+
+  try {
+    for (const adapter of [new FetchAdapter(), mock]) {
+      const requests = [
+        {
+          requestURL: 'http://api.test/x',
+          method: undefined as unknown as 'GET',
+          headers: {},
+        } as AdapterRequest,
+        throwing('signal'),
+        throwing('onUploadProgress'),
+        throwing('maxResponseBytes'),
+      ];
+      for (const request of requests) {
+        const outcome = await adapter.send(request).then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+        expect(outcome).toBeDefined();
+        expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      }
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  expect(fetched).toBe(0);
+  expect(ran).toBe(0);
+});
+
+test('PR review round 15: NodeAdapter refuses a bad method, and a throwing field getter, as non-retryable', async () => {
+  const throwing = (field: string) =>
+    Object.defineProperty(
+      { requestURL: 'http://127.0.0.1:1/x', method: 'GET', headers: {} },
+      field,
+      {
+        get() {
+          throw new Error(`${field} getter failed`);
+        },
+        enumerable: true,
+      },
+    ) as AdapterRequest;
+  const requests = [
+    {
+      requestURL: 'http://127.0.0.1:1/x',
+      method: {
+        toString() {
+          throw new Error('no method');
+        },
+      } as unknown as 'GET',
+      headers: {},
+    },
+    {
+      requestURL: 'http://127.0.0.1:1/x',
+      method: undefined as unknown as 'GET',
+      headers: {},
+    },
+    throwing('signal'),
+    throwing('maxResponseBytes'),
+  ];
+
+  for (const request of requests) {
+    const outcome = await new NodeAdapter().send(request).then(
+      () => undefined,
+      (error: unknown) => error as Record<PropertyKey, unknown>,
+    );
+
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+  }
+});
+
+test('PR review round 15: CookieJar.processResponseHeaders reads only set-cookie, and refuses a Headers', () => {
+  const jar = new CookieJar();
+  jar.processResponseHeaders(
+    {
+      'Set-Cookie': 'a=1; Path=/',
+      'x-meta': { not: 'text' },
+    } as unknown as Record<string, string>,
+    'https://example.com/',
+  );
+  expect(jar.getCookieHeaderString('https://example.com/')).toBe('a=1');
+
+  expect(() =>
+    jar.processResponseHeaders(
+      new Headers({ 'set-cookie': 'b=2' }) as unknown as Record<string, string>,
+      'https://example.com/',
+    ),
+  ).toThrow('CookieJar processResponseHeaders headers must be a plain object');
+});
+
+test('PR review round 15: a stream abort tagged with a Headers is left untagged, and a boolean header value is refused', async () => {
+  for (const headers of [
+    new Headers({ 'set-cookie': 'sid=1' }),
+    { 'x-flag': true },
+  ]) {
+    const client = new HTTPClient({
+      baseURL: 'http://api.test',
+      adapter: {
+        getType: () => 'mock',
+        send: () => {
+          const error = new Error('stream broke');
+          Object.defineProperty(error, RESPONSE_STREAM_ABORT_FLAG, {
+            value: true,
+          });
+          Object.defineProperty(error, STREAM_ABORT_STATUS_KEY, { value: 200 });
+          Object.defineProperty(error, STREAM_ABORT_HEADERS_KEY, {
+            value: headers,
+          });
+          return Promise.reject(error);
+        },
+      },
+    });
+    const response = await client.get('/x').send();
+
+    // Untagged: no answer is claimed from headers that could not be read.
+    expect(response.status).toBe(0);
+  }
+
+  const builder = new HTTPClient({
+    baseURL: 'http://api.test',
+    adapter: {
+      getType: () => 'mock',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'x-flag': true } as unknown as Record<string, string>,
+          body: null,
+        }),
+    },
+  }).get('/x');
+  await builder.send();
+  expect(builder.error?.code).toBe('adapter_error');
 });

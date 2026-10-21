@@ -36,6 +36,35 @@ export function nonRetryableAdapterErrorFrom(error: unknown): Error {
 }
 
 /**
+ * An adapter request's method as the transport takes it: converted to a string once, as
+ * `fetch`, `open` and Node's request line convert it, so a non-string one does not throw
+ * at the first `toUpperCase` after the request may already have gone out. Refused as a
+ * non-retryable `adapter_error` when it is absent - `String` made that the verb
+ * `undefined`, which `fetch` accepts as a token and sent - or when its `toString` throws:
+ * every attempt carries the same method.
+ */
+export function readAdapterMethod(method: unknown): string {
+  if (typeof method === 'string') {
+    return method;
+  }
+
+  if (method === undefined || method === null) {
+    const refusal = new TypeError(
+      `Adapter request method is required (got ${String(method)})`,
+    );
+    markNonRetryableAdapterError(refusal);
+    throw refusal;
+  }
+
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-base-to-string -- a caller's value, converted as the transport converts it
+    return String(method);
+  } catch (error) {
+    throw nonRetryableAdapterErrorFrom(error);
+  }
+}
+
+/**
  * Tag a terminal adapter configuration failure so `HTTPClient` reports it as a
  * non-retryable `adapter_error` rather than retrying it as a network error.
  */

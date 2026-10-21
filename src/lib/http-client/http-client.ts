@@ -44,6 +44,7 @@ import {
   describeInvalidHTTPMethod,
   isPlainJSONBodyObject,
   normalizeAdapterResponseHeaders,
+  isAdapterHeaderValue,
   parseContentType,
   resolveAbsoluteURL,
   resolveAbsoluteURLForRuntime,
@@ -5078,13 +5079,9 @@ function getEffectiveRequestHeadersFromError(
   );
 }
 
-/** A header value an adapter may report: a string, a finite number, or unset. */
+/** A header value an adapter may report: see `isAdapterHeaderValue`, or unset. */
 function isHeaderScalar(value: unknown): boolean {
-  return (
-    isNullish(value) ||
-    typeof value === 'string' ||
-    (typeof value === 'number' && Number.isFinite(value))
-  );
+  return isNullish(value) || isAdapterHeaderValue(value);
 }
 
 /**
@@ -5097,7 +5094,9 @@ function isHeaderScalar(value: unknown): boolean {
 function snapshotHeaderRecord(
   value: unknown,
 ): Record<string, string | string[]> | undefined {
-  if (typeof value !== 'object' || value === null) {
+  // A plain record only: a `Headers` or `Map` keeps its entries off its own properties,
+  // and read as one it was every header - `Set-Cookie` too - silently gone.
+  if (!isPlainRecord(value)) {
     return undefined;
   }
 

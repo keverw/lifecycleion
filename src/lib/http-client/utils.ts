@@ -3,6 +3,7 @@ import qs from 'qs';
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
 import { isPlainRecord } from './internal/plain-record';
+import { describeValue } from '../internal/describe-value';
 import { readUnknownMember } from '../internal/read-member';
 import {
   lowerCaseHeaderName,
@@ -846,7 +847,8 @@ const SINGLE_VALUE_RESPONSE_HEADERS: ReadonlySet<string> = new Set([
 /**
  * Lowercases all keys on adapter/response header objects. `HTTPClient` runs
  * this on each adapter response before {@link CookieJar.processResponseHeaders}.
- * The jar also normalizes so the same shapes work when feeding headers directly.
+ * Refuses, with a `TypeError`, a record that is not a plain object and a value
+ * that is not a string or finite number.
  *
  * - Non–`set-cookie` values: an array (a mock or custom adapter's repeated
  *   header) is read as Node's `res.headers` reads a repeated header - the first
@@ -861,60 +863,85 @@ const SINGLE_VALUE_RESPONSE_HEADERS: ReadonlySet<string> = new Set([
 export function normalizeAdapterResponseHeaders(
   headers: Record<string, string | string[]>,
 ): Record<string, string | string[]> {
+  // A `Headers` or `Map` keeps its entries off its own properties: read as one, every
+  // header - the content type, `Set-Cookie` - was silently dropped. Refused, as the
+  // request side refuses one.
+  if (!isPlainRecord(headers)) {
+    throw new TypeError(
+      `HTTPClient adapter answered with headers that are not a plain object of header names to values (got ${describeValue(headers)})`,
+    );
+  }
+
   const result: Record<string, string | string[]> = {};
 
   for (const [key, rawValue] of Object.entries(headers)) {
     const lower = lowerCaseHeaderName(key);
     // As every header normalizer reads an unset value: a `null` or `undefined` value or
-    // array item is no header, so an adapter's `undefined` is not reported as `''`. Other
-    // values are left as they are, for the checks downstream to read.
+    // array item is no header, so an adapter's `undefined` is not reported as `''`.
     if (isNullish(rawValue)) {
       continue;
     }
-    const value = Array.isArray(rawValue)
-      ? rawValue.filter((item) => !isNullish(item))
-      : rawValue;
+    const value: unknown[] = Array.isArray(rawValue)
+      ? (rawValue as unknown[]).filter((item) => !isNullish(item))
+      : [rawValue];
 
-    if (Array.isArray(value) && value.length === 0) {
+    if (value.length === 0) {
       continue;
     }
 
+    // The adapter's malformed answer, said as one: an object value was read as
+    // `'[object Object]'` - a `content-type` of one read the body as binary - and a
+    // `set-cookie` line that is not a string, left for the cookie jar to trip over, as
+    // the jar failing. A finite number, as a mock's `content-length: 2`, is its text.
+    if (
+      value.some((item) =>
+        lower === 'set-cookie'
+          ? typeof item !== 'string'
+          : !isAdapterHeaderValue(item),
+      )
+    ) {
+      throw new TypeError(
+        `HTTPClient adapter answered with a ${lower} header value that is not ${lower === 'set-cookie' ? 'a string' : 'a string or finite number'}`,
+      );
+    }
+    const lines = value.map((item) => String(item));
+
     if (lower === 'set-cookie') {
-      const chunk = Array.isArray(value) ? value : [value];
-      // The adapter's malformed answer, said as one: left for the cookie jar to trip
-      // over, it was reported as the jar failing.
-      if (chunk.some((line) => typeof line !== 'string')) {
-        throw new TypeError(
-          'HTTPClient adapter answered with a set-cookie header line that is not a string',
-        );
-      }
       const existing = result[lower];
 
       if (existing === undefined) {
-        result[lower] = chunk;
+        result[lower] = lines;
       } else {
         const existingLines = Array.isArray(existing) ? existing : [existing];
-        result[lower] = [...existingLines, ...chunk];
+        result[lower] = [...existingLines, ...lines];
       }
     } else {
       // As Node's `res.headers` reads a repeated header - an array, or keys that
       // differ only by case: the first value of one that can hold only one
       // (`location`, `content-type`), and the rest joined.
-      const values = Array.isArray(value) ? value : [value];
       const existing = Object.hasOwn(result, lower) ? result[lower] : undefined;
       const all =
-        existing === undefined ? values : [existing as string, ...values];
+        existing === undefined ? lines : [existing as string, ...lines];
       defineEntry(
         result,
         lower,
-        SINGLE_VALUE_RESPONSE_HEADERS.has(lower)
-          ? String(all[0] ?? '')
-          : all.join(', '),
+        SINGLE_VALUE_RESPONSE_HEADERS.has(lower) ? all[0] : all.join(', '),
       );
     }
   }
 
   return result;
+}
+
+/**
+ * A header value an adapter may answer with: a string, or a finite number - Node's
+ * `getHeaders()` answers `content-length` as one - which is its text.
+ */
+export function isAdapterHeaderValue(value: unknown): value is string | number {
+  return (
+    typeof value === 'string' ||
+    (typeof value === 'number' && Number.isFinite(value))
+  );
 }
 
 /**

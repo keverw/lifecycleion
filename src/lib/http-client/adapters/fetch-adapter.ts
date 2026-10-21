@@ -3,10 +3,12 @@ import {
   lowerCaseHeaderName,
 } from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
+import { concatChunks } from '../internal/concat-chunks';
 import {
   markResponseStreamAbort,
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
+  readAdapterMethod,
 } from '../internal/adapter-error';
 import {
   extractFetchHeaders,
@@ -48,38 +50,25 @@ export class FetchAdapter implements HTTPAdapter {
   }
 
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
-    // Guarded once, at the boundary, so every call site below is covered. Progress reporting is advisory and must not be able to
-    // change whether a request succeeded; a throwing callback used to propagate out and be
-    // classified as a transport failure. See `guardProgressCallback`.
-    const guardedUploadProgress = guardProgressCallback(
-      request.onUploadProgress,
-      'onUploadProgress',
-    );
-    const guardedDownloadProgress = guardProgressCallback(
-      request.onDownloadProgress,
-      'onDownloadProgress',
-    );
-
-    const { requestURL, method: givenMethod, body, signal } = request;
-    // Converted once, as `fetch` reads it: a non-string method threw at the first
-    // `toUpperCase`, after the request may already have gone out.
-    let method: string;
+    // Every field read once, here, on a carrier: a getter that throws is the caller's,
+    // refused as a non-retryable `adapter_error` rather than retried as a network failure.
+    let fields: ReturnType<typeof readRequestFields>;
     try {
-      method =
-        typeof givenMethod === 'string' ? givenMethod : String(givenMethod);
+      fields = readRequestFields(request);
     } catch (error) {
       throw nonRetryableAdapterErrorFrom(error);
     }
+    const {
+      guardedUploadProgress,
+      guardedDownloadProgress,
+      body,
+      signal,
+      headers,
+      dispatchedURL,
+    } = fields;
+    const method = readAdapterMethod(fields.givenMethod);
     // The most a buffered body may hold, as `fetch` decodes it; `Infinity` for none.
     const maxResponseBytes = readMaxResponseBytes(request);
-    // A caller's `Content-Length` is left to `fetch`, which frames the body itself:
-    // browsers refuse to send one, and Node's undici, given one that disagrees with the
-    // body, waited for bytes that never came until the attempt timed out - on every retry.
-    const headers = withoutHeader(request.headers, 'content-length');
-    const dispatchedURL = stripCrossOriginURLCredentials(
-      requestURL,
-      request.initialURL,
-    );
 
     // Fire 0% upload progress
     guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
@@ -416,20 +405,35 @@ async function readResponseBody(
   return concatChunks(chunks, loadedBytes);
 }
 
-/** `chunks` joined into one array of `byteLength` bytes. */
-function concatChunks(
-  chunks: readonly Uint8Array[],
-  byteLength: number,
-): Uint8Array {
-  const bytes = new Uint8Array(byteLength);
-  let offset = 0;
+/**
+ * The request's fields, each read once, before anything is sent. Progress callbacks are
+ * guarded here, so every call site is covered: progress reporting is advisory and must
+ * not be able to change whether a request succeeded (see `guardProgressCallback`).
+ */
+function readRequestFields(request: AdapterRequest) {
+  const requestURL = request.requestURL;
 
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-
-  return bytes;
+  return {
+    guardedUploadProgress: guardProgressCallback(
+      request.onUploadProgress,
+      'onUploadProgress',
+    ),
+    guardedDownloadProgress: guardProgressCallback(
+      request.onDownloadProgress,
+      'onDownloadProgress',
+    ),
+    givenMethod: request.method as unknown,
+    body: request.body,
+    signal: request.signal,
+    // A caller's `Content-Length` is left to `fetch`, which frames the body itself:
+    // browsers refuse to send one, and Node's undici, given one that disagrees with the
+    // body, waited for bytes that never came until the attempt timed out - on every retry.
+    headers: withoutHeader(request.headers, 'content-length'),
+    dispatchedURL: stripCrossOriginURLCredentials(
+      requestURL,
+      request.initialURL,
+    ),
+  };
 }
 
 /**

@@ -2,7 +2,9 @@ import {
   defineHiddenTags,
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
+  readAdapterMethod,
 } from '../internal/adapter-error';
+import { concatChunks } from '../internal/concat-chunks';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { observeRejection } from '../../internal/promise-reactions';
 import * as http from 'node:http';
@@ -429,9 +431,17 @@ export class NodeAdapter implements HTTPAdapter {
     // Every member read once, here, where a getter that throws rejects this send. Read
     // later, from an emitter or `AbortSignal` callback, the same throw would be an
     // uncaught exception and the send would never settle. See `snapshotAdapterRequest`.
-    const request = withoutBodilessContentLength(
-      snapshotAdapterRequest(adapterRequest),
-    );
+    // On a carrier, as the other adapters read theirs: a getter that throws is the
+    // caller's, refused as a non-retryable `adapter_error` rather than retried as a
+    // network failure. The method is converted after, by the rule every adapter shares.
+    let snapshot: AdapterRequest;
+    try {
+      snapshot = snapshotAdapterRequest(adapterRequest);
+    } catch (error) {
+      throw nonRetryableAdapterErrorFrom(error);
+    }
+    snapshot.method = readAdapterMethod(snapshot.method);
+    const request = withoutBodilessContentLength(snapshot);
 
     // This adapter frames every body itself with a `Content-Length`. A caller's
     // `Transfer-Encoding` went out beside it - both on one message, which RFC 9112 6.1
@@ -460,7 +470,7 @@ export class NodeAdapter implements HTTPAdapter {
       }
     }
 
-    if (String(request.method).toUpperCase() === 'CONNECT') {
+    if (request.method.toUpperCase() === 'CONNECT') {
       const refusal = new TypeError(
         'NodeAdapter does not open tunnels; a CONNECT request is not supported',
       );
@@ -1915,10 +1925,10 @@ export class NodeAdapter implements HTTPAdapter {
               settleResponse({
                 status,
                 headers,
+                // Copied once, into a fresh array: `Buffer.concat` and a copy of its
+                // result held the body twice over.
                 body:
-                  chunks.length > 0
-                    ? new Uint8Array(Buffer.concat(chunks))
-                    : null,
+                  chunks.length > 0 ? concatChunks(chunks, loadedBytes) : null,
               });
             });
 
@@ -3242,9 +3252,8 @@ function snapshotAdapterRequest(request: AdapterRequest): AdapterRequest {
 
   return {
     requestURL,
-    // Converted once, as the request line takes it: a non-string method passed the
-    // CONNECT check through `String` and threw at the body checks.
-    method: typeof method === 'string' ? method : String(method),
+    // As given: converted once by the caller (see `send`), as the request line takes it.
+    method,
     headers: copyRequestHeaders(headers),
     body,
     signal,
