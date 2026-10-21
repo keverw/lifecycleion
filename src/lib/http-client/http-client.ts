@@ -14,6 +14,7 @@ import { RetryPolicy } from '../retry-utils';
 import { FetchAdapter } from './adapters/fetch-adapter';
 import {
   assertNoBrowserRestrictedHeaders,
+  lowerCaseHeaderName,
   presentHeaderValue,
 } from './internal/header-utils';
 import {
@@ -41,7 +42,6 @@ import {
   normalizeHTTPMethod,
   describeInvalidHTTPMethod,
   isPlainJSONBodyObject,
-  lowerCaseHeaderName,
   normalizeAdapterResponseHeaders,
   parseContentType,
   resolveAbsoluteURL,

@@ -954,7 +954,10 @@ export class CookieJar {
       );
       // A trailing dot mapping exposed (`example.com.` and a soft hyphen): dropped as the
       // one trailing dot if none was written, so the cookie is stored for `example.com`
-      // and not beside it under `example.com.`; refused as a second if one was.
+      // and not beside it under `example.com.`; refused as a second if one was. A leading
+      // one exposed the same way (a soft hyphen, then `.example.com`) is refused on
+      // purpose, below, as domain-utils refuses it: an empty first label is no host, and
+      // only a dot actually written is the leading dot RFC 6265 ignores.
       if (ascii?.endsWith('.')) {
         return raw === withoutLeadingDot && !ascii.endsWith('..')
           ? this.normalizeStoredDomain(ascii.slice(0, -1))

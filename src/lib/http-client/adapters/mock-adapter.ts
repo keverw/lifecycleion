@@ -1012,9 +1012,8 @@ function hasHeader(
   headers: Record<string, string | string[]>,
   name: string,
 ): boolean {
-  return Object.keys(headers).some(
-    (k) => lowerCaseHeaderName(k) === lowerCaseHeaderName(name),
-  );
+  const lowerName = lowerCaseHeaderName(name);
+  return Object.keys(headers).some((k) => lowerCaseHeaderName(k) === lowerName);
 }
 
 class InternalMockAbortError extends Error {

@@ -222,13 +222,11 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
         const last = this.decoders.at(-1);
 
         // Or the last decoder already closed - destroyed by a decoding failure after the
-        // raw body ended - whose `'close'` a listener added now would never see.
-        if (
-          this.didDecodeEnd ||
-          last === undefined ||
-          last.closed === true ||
-          last.destroyed === true
-        ) {
+        // raw body ended - whose `'close'` a listener added now would never see. `closed`
+        // only, not `destroyed`: `destroy(error)` sets that at once and emits the error
+        // and `'close'` a tick later, so delivering `close` on it settled the reader
+        // before the tagged decoding error, as a plain closed stream.
+        if (this.didDecodeEnd || last === undefined || last.closed === true) {
           this.deliver('close');
         } else {
           last.once('close', () => this.deliver('close'));
@@ -256,6 +254,18 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
 
   public onFailure(listener: (error: Error) => void): () => void {
     this.failureListeners.add(listener);
+
+    // A failure already held - the coding chain refused in the constructor, before any
+    // subscriber - is told too, a microtask on, so a setup waiting on it need not hang
+    // on the raw response's `close` to hear of it.
+    const held = this.heldError();
+    if (held !== undefined) {
+      queueMicrotask(() => {
+        if (this.failureListeners.has(listener)) {
+          this.notifyFailure(listener, held);
+        }
+      });
+    }
 
     return () => {
       this.failureListeners.delete(listener);
@@ -452,6 +462,18 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     }
   }
 
+  /**
+   * One failure listener, guarded: it runs inside a decoder's `'error'` emit, where a
+   * throw would unwind through zlib as an uncaught exception.
+   */
+  private notifyFailure(listener: (error: Error) => void, error: Error): void {
+    try {
+      listener(error);
+    } catch {
+      // The listener's own failure; the decoding failure is still delivered below.
+    }
+  }
+
   /** Emitted now while a reader is attached, held for it until then; nothing once destroyed. */
   private deliver(event: string, ...args: unknown[]): void {
     if (this.isDestroyed) {
@@ -461,7 +483,13 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     const failure: unknown = args[0];
     if (event === 'error' && failure instanceof Error) {
       for (const listener of [...this.failureListeners]) {
-        listener(failure);
+        this.notifyFailure(listener, failure);
+      }
+
+      // A listener may have torn the body down (a stream setup that failed releases it):
+      // nothing is held once destroyed, or `heldError()` answered a stale error.
+      if (this.isDestroyed) {
+        return;
       }
     }
 

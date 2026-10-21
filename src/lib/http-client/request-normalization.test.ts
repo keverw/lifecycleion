@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
 import vm from 'node:vm';
 import * as http from 'node:http';
 import * as zlib from 'node:zlib';
-import { Writable } from 'node:stream';
+import { PassThrough, Writable } from 'node:stream';
 import type { AddressInfo } from 'node:net';
 import { HTTPClient } from './http-client';
 import {
@@ -26,6 +26,7 @@ import {
   materializeRequestHeaders,
 } from './internal/header-utils';
 import { knownBodyByteLength } from './internal/progress';
+import { createResponseBodySource } from './internal/response-decoding';
 import { sleep } from '../sleep';
 import {
   matchesCORSCredentialsList,
@@ -7293,4 +7294,49 @@ test('round 140: a hostile body is of unknown size, not a throw; header names ar
 
   // The Kelvin-sign name is no `x-key`, so a real one is kept apart from it.
   expect(isBrowserRestrictedHeader('\u212Aeep-Alive', 'x')).toBe(false);
+});
+
+function stubResponse(): http.IncomingMessage {
+  const res = new PassThrough() as unknown as http.IncomingMessage;
+  Object.defineProperty(res, 'complete', { value: false, writable: true });
+  return res;
+}
+
+test('round 140 review: a throwing failure listener stays contained; a body torn down by one holds nothing', async () => {
+  const res = stubResponse();
+  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  let didTearDown = false;
+  source.onFailure?.(() => {
+    throw new Error('listener failed');
+  });
+  source.onFailure?.(() => {
+    didTearDown = true;
+    (source as unknown as { destroy(): void }).destroy();
+  });
+  const uncaught: unknown[] = [];
+  const onUncaught = (error: unknown) => uncaught.push(error);
+  process.on('uncaughtException', onUncaught);
+  try {
+    (res as unknown as PassThrough).end(Buffer.from('not gzip at all'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  } finally {
+    process.off('uncaughtException', onUncaught);
+  }
+  expect(uncaught).toEqual([]);
+  expect(didTearDown).toBe(true);
+  expect(source.heldError?.()).toBeUndefined();
+});
+
+test('round 140 review: onFailure replays a failure held before it subscribed', async () => {
+  const res = stubResponse();
+  const { source } = createResponseBodySource(
+    res,
+    'GET',
+    200,
+    Array.from({ length: 6 }, () => 'gzip').join(','),
+  );
+  const told: Error[] = [];
+  source.onFailure?.((error) => told.push(error));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(told).toHaveLength(1);
 });
