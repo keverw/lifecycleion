@@ -230,10 +230,11 @@ function isBinaryTag(tag: unknown, isViewIncluded: boolean): boolean {
  * nothing. A subclass that under-reports would otherwise be handed the slow path it just
  * claimed not to need - which is the one case a size check exists to catch.
  *
- * `null` - a foreign-realm view neither getter recognizes, a detached buffer, a host
+ * `null` - a value no getter recognizes (a `Proxy`, which has no internal slots), a host
  * without one of the intrinsics - means "no usable measurement", and every caller reads
  * that as "assume it does not fit", the way every other bound here fails closed on a
- * measurement it could not take.
+ * measurement it could not take. A detached buffer, or a view over one, measures `0`:
+ * the getters read it as empty, which is what it holds.
  */
 export function readBinaryByteLength(value: object): number | null {
   for (const getter of [

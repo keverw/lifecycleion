@@ -114,12 +114,11 @@ import type { CookieJar } from './cookie-jar';
 // original value retained on cause for consumers of the normalized error.
 import { isErrorValue, toError as normalizeError } from '../to-error';
 import { readUnknownMember as readObjectMember } from '../internal/read-member';
-import { makeResponseTooLargeError } from './internal/response-limit';
 import {
-  presentsAsBinary,
-  readBinaryByteLength,
-} from '../internal/binary-view';
-import { utf8ByteLength } from './internal/utf8-length';
+  isAnsweredBodyOverLimit,
+  makeResponseTooLargeError,
+} from './internal/response-limit';
+import { readBinaryByteLength } from '../internal/binary-view';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import {
   adoptPromise,
@@ -4988,33 +4987,6 @@ function describeRequestPath(value: unknown): string {
   }
 
   return typeof value;
-}
-
-/**
- * Whether a body a custom adapter handed over is past `maxResponseBytes`: bytes as their
- * internal slot measures them - a view or buffer of any kind, from any realm, not the
- * size the value reports - and a string as its UTF-8 length, counted only when its
- * UTF-16 length alone cannot tell (never fewer bytes than units, at most three per
- * unit). Under a finite limit, a value that presents as bytes by its prototype chain
- * but that no intrinsic getter can measure (a `Proxy` over bytes) is taken as over it,
- * failing closed as `readBinaryByteLength` asks. Anything else has no size, and is not
- * held to the limit. The limit is a backstop against an oversized answer, not against
- * an adapter disguising its own bytes - a `Proxy` whose prototype trap lies is the
- * adapter's own doing, and a `Proxy` cannot be told apart from what it claims to be.
- */
-function isAnsweredBodyOverLimit(body: unknown, maxBytes: number): boolean {
-  if (typeof body === 'object' && body !== null) {
-    const byteLength = readBinaryByteLength(body);
-    return byteLength === null
-      ? Number.isFinite(maxBytes) && presentsAsBinary(body)
-      : byteLength > maxBytes;
-  }
-
-  if (typeof body !== 'string' || body.length * 3 <= maxBytes) {
-    return false;
-  }
-
-  return body.length > maxBytes || utf8ByteLength(body) > maxBytes;
 }
 
 /**

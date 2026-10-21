@@ -15,6 +15,7 @@ import {
 import {
   makeResponseTooLargeError,
   readMaxResponseBytes,
+  hasResponseBody,
 } from '../internal/response-limit';
 import { isArrayBufferLike } from '../../internal/binary-view';
 import type {
@@ -399,6 +400,17 @@ export class XHRAdapter implements HTTPAdapter {
         );
         const body = readResponseBody(method, xhr);
 
+        // Fallback: upload.load didn't fire (no request body, or the browser
+        // skipped the event). Ensure callers always see a 100% upload event,
+        // unless upload.progress already reported it - a body refused below too.
+        if (!didUploadComplete && !didFireUpload100) {
+          guardedUploadProgress?.({
+            loaded: uploadedBytes,
+            total: uploadTotalBytes,
+            progress: 1,
+          });
+        }
+
         // The body as handed over can be larger than the bytes progress counted - a
         // compressed response is counted encoded there - and a browser need not report
         // progress at all, so the whole body is checked once more here.
@@ -412,17 +424,6 @@ export class XHRAdapter implements HTTPAdapter {
             errorCause: makeResponseTooLargeError(maxResponseBytes, false),
           });
           return;
-        }
-
-        // Fallback: upload.load didn't fire (no request body, or the browser
-        // skipped the event). Ensure callers always see a 100% upload event,
-        // unless upload.progress already reported it.
-        if (!didUploadComplete && !didFireUpload100) {
-          guardedUploadProgress?.({
-            loaded: uploadedBytes,
-            total: uploadTotalBytes,
-            progress: 1,
-          });
         }
 
         // Final 100% download progress — skip if a progress event already
@@ -574,11 +575,8 @@ function readResponseBody(
   method: string,
   xhr: XMLHttpRequest,
 ): Uint8Array | null {
-  if (
-    method.toUpperCase() === 'HEAD' ||
-    xhr.status === 204 ||
-    xhr.status === 304
-  ) {
+  // The shared rule, so a `205` or `1xx` is bodiless here as in the other adapters.
+  if (!hasResponseBody(method, xhr.status)) {
     return null;
   }
 

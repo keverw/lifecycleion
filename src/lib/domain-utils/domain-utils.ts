@@ -474,8 +474,8 @@ export function matchesWildcardOrigin(
 /**
  * Wildcard patterns compiled for {@link matchesDomainList}, which is called on every
  * request with the same list: compiling runs IDNA on each label and looks the tail up in
- * the Public Suffix List. Cleared whole when full, so a list of ever-new patterns does not
- * grow it without bound.
+ * the Public Suffix List. Bounded, least recently used out first, so a list of ever-new
+ * patterns does not grow it without bound.
  */
 const compiledWildcardPatterns = new Map<
   string,
@@ -486,13 +486,21 @@ const MAX_COMPILED_WILDCARD_PATTERNS = 512;
 function compiledWildcardPattern(
   pattern: string,
 ): ReturnType<typeof compileWildcardPattern> {
+  // Least recently used out first: a hit moves to the end, the oldest goes when full, so
+  // a list longer than the cache still keeps its most used entries.
   if (compiledWildcardPatterns.has(pattern)) {
-    return compiledWildcardPatterns.get(pattern);
+    const cached = compiledWildcardPatterns.get(pattern);
+    compiledWildcardPatterns.delete(pattern);
+    compiledWildcardPatterns.set(pattern, cached);
+    return cached;
   }
 
   const compiled = compileWildcardPattern(pattern);
   if (compiledWildcardPatterns.size >= MAX_COMPILED_WILDCARD_PATTERNS) {
-    compiledWildcardPatterns.clear();
+    const oldest = compiledWildcardPatterns.keys().next();
+    if (oldest.done !== true) {
+      compiledWildcardPatterns.delete(oldest.value);
+    }
   }
   compiledWildcardPatterns.set(pattern, compiled);
 
@@ -537,14 +545,18 @@ export function matchesDomainList(
     );
   }
 
+  // Asked once, for every wildcard entry, and only if one is reached.
+  let isIP: boolean | undefined;
+
   for (const allowed of cleaned) {
     // Against the domain normalized once above, as `matchesWildcardDomain` would read it,
     // rather than normalized again for every wildcard entry.
     if (allowed.includes('*')) {
       const compiled = compiledWildcardPattern(allowed);
+      isIP ??= isIPAddress(normalizedDomain);
       if (
         compiled !== undefined &&
-        matchesCompiledWildcard(normalizedDomain, compiled)
+        matchesCompiledWildcard(normalizedDomain, compiled, isIP)
       ) {
         return true;
       }

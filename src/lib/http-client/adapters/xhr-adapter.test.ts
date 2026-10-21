@@ -429,6 +429,44 @@ describe('XHRAdapter', () => {
     }
   });
 
+  test('PR review round 10: a 205 is bodiless, as in the other adapters', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/reset',
+      method: 'POST',
+      headers: {},
+      maxResponseBytes: 1,
+    });
+
+    lastXHR.status = 205;
+    lastXHR.response = textBody('stray');
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.body).toBeNull();
+    expect(response.streamErrorCode).toBeUndefined();
+  });
+
+  test('PR review round 10: the final upload event is sent before an oversized answer is refused', async () => {
+    const uploads: number[] = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/big',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 1,
+      onUploadProgress: (event) => {
+        uploads.push(event.progress);
+      },
+    });
+
+    lastXHR.status = 200;
+    lastXHR.response = textBody('too large');
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.streamErrorCode).toBe('response_too_large');
+    expect(uploads.at(-1)).toBe(1);
+  });
+
   test('round 136: an abort once the headers are in carries the real status', async () => {
     const controller = new AbortController();
     const adapter = new XHRAdapter();

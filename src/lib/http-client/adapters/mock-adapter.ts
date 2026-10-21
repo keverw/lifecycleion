@@ -18,6 +18,7 @@ import {
 } from '../internal/header-utils';
 import {
   hasResponseBody,
+  isAnsweredBodyOverLimit,
   makeResponseTooLargeError,
   readMaxResponseBytes,
 } from '../internal/response-limit';
@@ -584,19 +585,15 @@ export class MockAdapter implements HTTPAdapter {
     // A body past `maxResponseBytes` fails as the real adapters fail it: a stream error
     // that keeps the status and headers, the body dropped. A simulated stream error
     // already loses the body, so it stands as the route asked.
-    // Measured by its internal slot, not a `length` the route's body reports; under a
-    // finite limit, one no intrinsic getter can measure (a `Proxy` over bytes) is taken
-    // as over it, failing closed as `readBinaryByteLength` asks.
+    // By the client's own rule (see `isAnsweredBodyOverLimit`), so the mock and the
+    // client cannot disagree on which bodies the limit refuses.
     const maxResponseBytes = readMaxResponseBytes(request);
-    const measuredByteLength =
-      intendedBody === null ? 0 : readBinaryByteLength(intendedBody);
-    const intendedByteLength = measuredByteLength ?? 0;
+    const intendedByteLength =
+      intendedBody === null ? 0 : (readBinaryByteLength(intendedBody) ?? 0);
     const isResponseTooLarge =
       simulatedStreamErrorCode === undefined &&
       intendedBody !== null &&
-      (measuredByteLength === null
-        ? Number.isFinite(maxResponseBytes)
-        : measuredByteLength > maxResponseBytes);
+      isAnsweredBodyOverLimit(intendedBody, maxResponseBytes);
     const streamErrorCode: AdapterResponse['streamErrorCode'] =
       isResponseTooLarge ? 'response_too_large' : simulatedStreamErrorCode;
 
