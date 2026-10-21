@@ -1080,7 +1080,12 @@ export function extractHostname(url: string): string {
  * - PSL tail guard active: `*.com`, `**.co.uk`, etc. never match
  * - Pseudo-TLD suffix wildcards are rejected just like PSL tails (`*.localhost`, `*.local`, etc.)
  */
-export function matchesHostPattern(hostname: string, pattern: string): boolean {
+export function matchesHostPattern(
+  hostname: string,
+  pattern: string,
+  /** The hostname already normalized, when a caller matches it against several patterns. */
+  normalizedHostname?: string,
+): boolean {
   // `*` alone matches any host a request URL can carry, as documented - including one the
   // domain matcher cannot read (`-edge.example.com`), which every other pattern skips.
   // `*.` is `*` written as a fully qualified name, as registration reads it.
@@ -1092,9 +1097,31 @@ export function matchesHostPattern(hostname: string, pattern: string): boolean {
     return matchesWildcardDomain(hostname, pattern);
   }
 
-  const normalizedHostname = normalizeDomain(hostname);
-  const normalizedPattern = normalizeDomain(pattern);
-  return normalizedHostname !== '' && normalizedHostname === normalizedPattern;
+  const host = normalizedHostname ?? normalizeDomain(hostname);
+  return host !== '' && host === normalizedHostPattern(pattern);
+}
+
+/**
+ * Exact host patterns normalized once, not on every request: `normalizeDomain` parses with
+ * the URL parser and runs IDNA, and a host-filtered callback is matched per request,
+ * retry and hop. Patterns are configuration, so few; the cache is bounded all the same.
+ */
+const normalizedHostPatterns = new Map<string, string>();
+
+function normalizedHostPattern(pattern: string): string {
+  const cached = normalizedHostPatterns.get(pattern);
+  if (cached !== undefined) {
+    return cached;
+  }
+
+  if (normalizedHostPatterns.size >= 1024) {
+    normalizedHostPatterns.clear();
+  }
+
+  const normalized = normalizeDomain(pattern);
+  normalizedHostPatterns.set(pattern, normalized);
+
+  return normalized;
 }
 
 /**
@@ -1294,11 +1321,17 @@ export function matchesFilter(
   // skipping the filter, so a host-scoped observer does not hear about other hosts.
   if (filter.hosts && context.requestURL !== undefined) {
     const hostname = extractHostname(context.requestURL);
+    // Once per call, not once per pattern.
+    let normalizedHostname: string | undefined;
 
     if (
-      !filter.hosts.some((pattern: string) =>
-        matchesHostPattern(hostname, pattern),
-      )
+      !filter.hosts.some((pattern: string) => {
+        if (!pattern.includes('*') && normalizedHostname === undefined) {
+          normalizedHostname = normalizeDomain(hostname);
+        }
+
+        return matchesHostPattern(hostname, pattern, normalizedHostname);
+      })
     ) {
       return false;
     }

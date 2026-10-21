@@ -275,28 +275,9 @@ export function normalizeOrigin(origin: string): string {
     let port = '';
     const defaultPort = SPECIAL_SCHEME_DEFAULT_PORTS[protocolLower] ?? '';
 
+    // An empty `url.port` is the scheme's default (the parser drops it), so it stays off.
     if (url.port) {
-      // Remove default ports for known protocols
       port = url.port === defaultPort ? '' : `:${url.port}`;
-    } else {
-      // Fallback: some URL implementations with exotic hosts might not populate url.port
-      // even if an explicit port exists in the original string. Detect and normalize manually.
-      // Handle potential userinfo (user:pass@) prefix for future compatibility
-
-      // Try IPv6 bracketed format first
-      let portMatch = authority.match(/^(?:[^@]*@)?\[[^\]]+\]:(\d+)$/);
-
-      if (portMatch) {
-        const explicit = canonicalPortText(portMatch[1]);
-        port = explicit === defaultPort ? '' : `:${explicit}`;
-      } else {
-        // Fallback for non-IPv6 authorities: detect :port after host
-        portMatch = authority.match(/^(?:[^@]*@)?([^:]+):(\d+)$/);
-        if (portMatch) {
-          const explicit = canonicalPortText(portMatch[2]);
-          port = explicit === defaultPort ? '' : `:${explicit}`;
-        }
-      }
     }
 
     // Explicitly use lowercase protocol for consistency
@@ -1681,14 +1662,6 @@ export function isApexDomain(domain: string): boolean {
 
   // Domain is apex if it matches the parsed domain and has no subdomain
   return parsedDomain === normalizedDomain && !subdomain;
-}
-
-/**
- * A port as the URL parser writes it - leading zeros dropped (`080` is `80`) - so the
- * fallback below compares it with the default port as `url.port` would have.
- */
-function canonicalPortText(digits: string): string {
-  return String(Number(digits));
 }
 
 /**

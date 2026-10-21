@@ -69,14 +69,15 @@ function describeUnmatchableHostPattern(entry: string): string | undefined {
     // A guard for any name the URL parser reads differently from the matcher, which would
     // be compared as written and so never equal a request's hostname. The matcher reads IP
     // literals as the parser does - `2130706433` is `127.0.0.1` to both - so those match.
+    const normalizedEntry = normalizeDomain(entry);
     if (
       parsed !== undefined &&
-      normalizeDomain(entry) !== '' &&
-      normalizeDomain(parsed) !== normalizeDomain(entry)
+      normalizedEntry !== '' &&
+      normalizeDomain(parsed) !== normalizedEntry
     ) {
       return `is read by the URL parser as ${JSON.stringify(parsed)}, which is what a request's hostname will be; give that form`;
     }
-    return normalizeDomain(entry) === '' || parsed === undefined
+    return normalizedEntry === '' || parsed === undefined
       ? "is not a hostname the matcher can read (it reads host names: letters, digits, '_' and inner hyphens), so it can never match"
       : undefined;
   }

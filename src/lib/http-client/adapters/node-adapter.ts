@@ -1733,7 +1733,7 @@ export class NodeAdapter implements HTTPAdapter {
               // Unknown once decoded: `Content-Length` counts the encoded bytes.
               const totalBytes = isDecoded
                 ? 0
-                : parseInt(String(headers['content-length'] ?? '0'), 10) || 0;
+                : (parseContentLength(headers['content-length']) ?? 0);
 
               // Pipe the response into the caller's writable. Extracted to a
               // module-level function to keep callback nesting within ESLint's
@@ -1839,7 +1839,7 @@ export class NodeAdapter implements HTTPAdapter {
             // Unknown once decoded: `Content-Length` counts the encoded bytes.
             const totalBytes = isDecoded
               ? 0
-              : parseInt(String(headers['content-length'] ?? '0'), 10) || 0;
+              : (parseContentLength(headers['content-length']) ?? 0);
 
             body.on('data', (chunk: Buffer) => {
               // Nothing kept, or reported, for a response the request no longer has.

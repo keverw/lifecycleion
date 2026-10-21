@@ -7478,3 +7478,18 @@ test('round 140 review 7: an oversized wildcard pattern or bracketed host is ref
   ).toBe(false);
   expect(normalizeDomain(`[${'1:'.repeat(5000)}1]`)).toBe('');
 });
+
+test('round 140 review 8: a pause asked before the first byte holds the decoded body', async () => {
+  const res = stubResponse();
+  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const chunks: Buffer[] = [];
+  source.pause();
+  source.on('data', (chunk: Buffer) => chunks.push(chunk));
+  (res as unknown as PassThrough).end(zlib.gzipSync('hello world'));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(chunks).toEqual([]);
+
+  source.resume();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(Buffer.concat(chunks).toString()).toBe('hello world');
+});

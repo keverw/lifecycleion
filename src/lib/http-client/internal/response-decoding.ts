@@ -158,6 +158,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   private isDestroyed = false;
   private didFailDecoding = false;
   private didLastDecoderClose = false;
+  private isPaused = false;
   /** Raw bytes that arrived before the decoders were attached: the first chunk. */
   private rawBytes = 0;
   private readonly held: Array<{ event: string; args: unknown[] }> = [];
@@ -291,12 +292,16 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   }
 
   public pause(): this {
+    // Remembered too, for a pause asked before the first byte, when no decoder exists
+    // yet: applied once they are attached, as a raw `IncomingMessage` would honour it.
+    this.isPaused = true;
     this.decoders.at(-1)?.pause();
 
     return this;
   }
 
   public resume(): this {
+    this.isPaused = false;
     this.decoders.at(-1)?.resume();
 
     return this;
@@ -432,6 +437,10 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     if (this.isForwardingData) {
       this.isForwardingData = false;
       this.startForwardingData();
+    }
+
+    if (this.isPaused) {
+      this.decoders.at(-1)?.pause();
     }
   }
 
