@@ -433,14 +433,13 @@ export class NodeAdapter implements HTTPAdapter {
     // The fields every adapter reads, by the rules they share (see
     // `readAdapterRequestFields`), and this adapter's own on a carrier as those are.
     const fields = readAdapterRequestFields(adapterRequest);
-    let snapshot: AdapterRequest;
+    let request: AdapterRequest;
     try {
-      snapshot = snapshotAdapterRequest(adapterRequest, fields);
+      request = snapshotAdapterRequest(adapterRequest, fields);
     } catch (error) {
       throw nonRetryableAdapterErrorFrom(error);
     }
-    dropBodilessContentLength(snapshot);
-    const request = snapshot;
+    dropBodilessContentLength(request);
 
     // This adapter frames every body itself with a `Content-Length`. A caller's
     // `Transfer-Encoding` went out beside it - both on one message, which RFC 9112 6.1
@@ -3176,7 +3175,8 @@ function dropBodilessContentLength(request: AdapterRequest): void {
  * Every member of an {@link AdapterRequest} read once, into a plain object this adapter
  * owns: the members every adapter reads, from `fields` (see `readAdapterRequestFields`,
  * where any new rule for them belongs, so it reaches every adapter), and the three only
- * this one reads - `streamResponse`, `attemptNumber`, `requestID`.
+ * this one reads - `streamResponse`, `attemptNumber`, `requestID`. The progress callbacks
+ * are left off: `send` reads their guarded forms from `fields`, the one place they live.
  *
  * `send()` is public, and the request it is handed may be any object: its members can be
  * getters. Most of them are consulted again long after `send()` has returned - the URL
@@ -3202,8 +3202,6 @@ function snapshotAdapterRequest(
     headers: fields.headers,
     body: fields.body,
     signal: fields.signal,
-    onUploadProgress: fields.guardedUploadProgress,
-    onDownloadProgress: fields.guardedDownloadProgress,
     streamResponse:
       typeof streamResponse === 'function'
         ? (info, context) =>

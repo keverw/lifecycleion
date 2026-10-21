@@ -8548,3 +8548,110 @@ test("PR review round 17: a header value's toString throwing an AbortError fails
     globalThis.fetch = originalFetch;
   }
 });
+
+test("PR review round 18: an adapter's flagged non-retryable AbortError is its failure, not a cancel or a retried timeout", async () => {
+  for (const timeout of [undefined, 20]) {
+    let sends = 0;
+    const builder = new HTTPClient({
+      baseURL: 'http://api.test',
+      ...(timeout === undefined ? {} : { timeout }),
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+      adapter: {
+        getType: () => 'mock',
+        send: async () => {
+          sends++;
+          if (timeout !== undefined) {
+            await sleep(timeout * 3);
+          }
+          const error = new DOMException('unrelated signal', 'AbortError');
+          Object.defineProperty(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG, {
+            value: true,
+          });
+          throw error;
+        },
+      },
+    }).get('/x');
+    const response = await builder.send();
+
+    expect(response.isCancelled).toBe(false);
+    expect(builder.error?.code).toBe('adapter_error');
+    expect(sends).toBe(1);
+  }
+});
+
+test('PR review round 18: CookieJar refuses publicSuffixes given as a Map', () => {
+  expect(
+    () =>
+      new CookieJar({
+        publicSuffixes: new Map([['add', ['corp.internal']]]) as unknown as {
+          add: string[];
+        },
+      }),
+  ).toThrow('publicSuffixes must be a plain object');
+});
+
+test('PR review round 18: a flagged AbortError while the caller did cancel is still the cancel', async () => {
+  const builder = new HTTPClient({
+    baseURL: 'http://api.test',
+    adapter: {
+      getType: () => 'mock',
+      send: (request: AdapterRequest) =>
+        new Promise((_resolve, reject) => {
+          request.signal?.addEventListener('abort', () => {
+            const error = new DOMException('cancelled', 'AbortError');
+            Object.defineProperty(
+              error,
+              NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
+              {
+                value: true,
+              },
+            );
+            reject(error);
+          });
+        }),
+    },
+  }).get('/x');
+  const pending = builder.send();
+  await sleep(5);
+  builder.cancel();
+  const response = await pending;
+
+  expect(response.isCancelled).toBe(true);
+});
+
+test('PR review round 18: FetchAdapter and MockAdapter refuse a signal whose aborted getter throws as non-retryable', async () => {
+  const signal = {
+    get aborted(): boolean {
+      throw new Error('aborted getter failed');
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  } as unknown as AbortSignal;
+  const mock = new MockAdapter();
+  mock.routes.get('/x', () => ({ status: 200 }));
+
+  for (const adapter of [new FetchAdapter(), mock]) {
+    const outcome = await adapter
+      .send({
+        requestURL: 'http://api.test/x',
+        method: 'GET',
+        headers: {},
+        signal,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+  }
+});
+
+test('PR review round 18: publicSuffixes given as a list names the array', () => {
+  expect(
+    () =>
+      new CookieJar({
+        publicSuffixes: ['corp.internal'] as unknown as { add: string[] },
+      }),
+  ).toThrow('(got an array)');
+});

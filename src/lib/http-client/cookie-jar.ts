@@ -4,7 +4,7 @@ import { checkDNSLength, toAsciiDots } from '../domain-utils/helpers';
 import { describeValue } from '../internal/describe-value';
 import { PublicSuffixResolver } from './public-suffix';
 import type { PublicSuffixOverrides } from './public-suffix';
-import { isPlainRecord } from './internal/plain-record';
+import { assertHeaderRecord } from './internal/plain-record';
 import { lowerCaseHeaderName } from './internal/header-utils';
 import { isNullish } from '../internal/is-nullish';
 
@@ -497,11 +497,7 @@ export class CookieJar {
     headers: Record<string, string | string[]>,
     url: string,
   ): void {
-    if (!isPlainRecord(headers)) {
-      throw new TypeError(
-        `CookieJar processResponseHeaders headers must be a plain object of header names to values (got ${describeValue(headers)})`,
-      );
-    }
+    assertHeaderRecord(headers, 'CookieJar processResponseHeaders headers');
 
     // Every line checked before any is stored, so a refused call leaves the jar as it
     // found it rather than holding the cookies that came before the bad line.

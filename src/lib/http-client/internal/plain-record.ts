@@ -40,7 +40,17 @@ export function assertOptionalHeaderRecord(
   value: unknown,
   label: string,
 ): void {
-  if (!isNullish(value) && !isPlainRecord(value)) {
+  if (!isNullish(value)) {
+    assertHeaderRecord(value, label);
+  }
+}
+
+/** Throw a `TypeError` naming `label` unless `value` is a plain record. */
+export function assertHeaderRecord(
+  value: unknown,
+  label: string,
+): asserts value is Record<string, unknown> {
+  if (!isPlainRecord(value)) {
     throw new TypeError(
       `${label} must be a plain object of header names to values, not a Headers, Map or array (got ${describeValue(value)})`,
     );

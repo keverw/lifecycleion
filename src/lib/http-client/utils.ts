@@ -2,8 +2,7 @@ import { HTTP_METHODS } from './consts';
 import qs from 'qs';
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
-import { isPlainRecord } from './internal/plain-record';
-import { describeValue } from '../internal/describe-value';
+import { assertHeaderRecord, isPlainRecord } from './internal/plain-record';
 import { readUnknownMember } from '../internal/read-member';
 import {
   lowerCaseHeaderName,
@@ -866,11 +865,7 @@ export function normalizeAdapterResponseHeaders(
   // A `Headers` or `Map` keeps its entries off its own properties: read as one, every
   // header - the content type, `Set-Cookie` - was silently dropped. Refused, as the
   // request side refuses one.
-  if (!isPlainRecord(headers)) {
-    throw new TypeError(
-      `HTTPClient adapter answered with headers that are not a plain object of header names to values (got ${describeValue(headers)})`,
-    );
-  }
+  assertHeaderRecord(headers, 'HTTPClient adapter response headers');
 
   const result: Record<string, string | string[]> = {};
 

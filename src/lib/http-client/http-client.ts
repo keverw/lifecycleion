@@ -3519,7 +3519,19 @@ export class BaseHTTPClient {
           !cancelSignal.aborted &&
           !isTimedOut;
 
-        if (isAbortError(error) && !isFactoryOwnAbort) {
+        // An adapter's flagged non-retryable failure is its own, whatever its name: a
+        // caller's `throwIfAborted()` error it flagged is not a timeout, nor a cancel the
+        // caller did not make. One the caller did make stays a cancel.
+        const isFlaggedAdapterFailure = hasAdapterMarker(
+          error,
+          NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
+        );
+
+        if (
+          isAbortError(error) &&
+          !isFactoryOwnAbort &&
+          (!isFlaggedAdapterFailure || cancelSignal.aborted)
+        ) {
           // User/parent cancellation — never retry (even if a timeout fired in the same window).
           if (cancelSignal.aborted) {
             emitAttemptEnd({
@@ -3604,18 +3616,14 @@ export class BaseHTTPClient {
         // response's non-retryable adapter_error below, so it is not sent again.
         const isNonRetryableClientCallbackFailure =
           isNonRetryableClientCallbackError(error);
-        const isFlaggedNonRetryableAdapterError =
-          readObjectMember(error, NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG) ===
-          true;
         const didTimeoutThisAttempt =
           isTimedOut &&
+          !isFlaggedAdapterFailure &&
           (isAbortError(error) ||
-            (!didAdapterResolve &&
-              !isNonRetryableClientCallbackFailure &&
-              !isFlaggedNonRetryableAdapterError));
+            (!didAdapterResolve && !isNonRetryableClientCallbackFailure));
         const isNonRetryableAdapterFailure =
           (didAdapterResolve && !didTimeoutThisAttempt) ||
-          isFlaggedNonRetryableAdapterError;
+          isFlaggedAdapterFailure;
 
         if (
           isNonRetryableClientCallbackFailure ||

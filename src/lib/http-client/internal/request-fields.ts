@@ -44,7 +44,7 @@ export function readAdapterRequestFields(request: AdapterRequest) {
       initialURL: request.initialURL,
       headers: copyRequestHeaders(request.headers),
       body: request.body,
-      signal: request.signal,
+      signal: readSignal(request.signal),
     };
   } catch (error) {
     throw nonRetryableAdapterErrorFrom(error);
@@ -56,6 +56,19 @@ export function readAdapterRequestFields(request: AdapterRequest) {
     // The most a buffered body may hold; `Infinity` for none.
     maxResponseBytes: readMaxResponseBytes(request),
   };
+}
+
+/**
+ * The request's signal, its `aborted` read once here, inside the carrier: one whose
+ * getter throws is refused with the other fields rather than escaping raw - and retried
+ * as a network failure - from the first check an adapter makes of it.
+ */
+function readSignal(signal: AbortSignal | undefined): AbortSignal | undefined {
+  if (signal !== undefined && signal !== null) {
+    void signal.aborted;
+  }
+
+  return signal;
 }
 
 export type AdapterRequestFields = ReturnType<typeof readAdapterRequestFields>;

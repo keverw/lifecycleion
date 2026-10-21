@@ -1,3 +1,5 @@
+import { isPlainRecord } from './internal/plain-record';
+import { describeValue } from '../internal/describe-value';
 import { parse } from 'tldts';
 
 /**
@@ -168,13 +170,12 @@ export class PublicSuffixResolver {
     // given where `{ add }` belongs) or a misspelled `{ ad: [...] }` built a jar with no
     // overrides at all, leaving the tenants the caller meant to isolate sharing cookies.
     if (overrides !== undefined) {
-      if (
-        typeof overrides !== 'object' ||
-        overrides === null ||
-        Array.isArray(overrides)
-      ) {
+      // A plain object: a `Map` keeps its entries off its own properties, so it passed
+      // the key check below with no keys and built a jar with no overrides.
+      const candidate: unknown = overrides;
+      if (!isPlainRecord(candidate)) {
         throw new TypeError(
-          `publicSuffixes must be an object with 'add' and/or 'remove' lists (got ${Array.isArray(overrides) ? 'an array' : overrides === null ? 'null' : typeof overrides})`,
+          `publicSuffixes must be a plain object with 'add' and/or 'remove' lists (got ${Array.isArray(candidate) ? 'an array' : describeValue(candidate)})`,
         );
       }
 

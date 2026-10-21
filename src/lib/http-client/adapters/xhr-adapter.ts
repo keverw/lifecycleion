@@ -1,3 +1,5 @@
+import { readUnknownMember as readObjectMember } from '../../internal/read-member';
+import { toError } from '../../to-error';
 import {
   joinCookieHeader,
   lowerCaseHeaderName,
@@ -134,9 +136,20 @@ export class XHRAdapter implements HTTPAdapter {
       // Check for pre-aborted signal before calling xhr.send — if we called
       // send first and then aborted, the abort event fires asynchronously and
       // we'd resolve the promise rather than reject it with an AbortError.
+      //
+      // The signal is the caller's: one whose `aborted` or `addEventListener` throws is
+      // refused as non-retryable, as every other field they hand over is, rather than
+      // rejecting with the raw error and being retried as a network failure.
+      /** Takes the abort listener off the signal; set once it is on. */
+      let removeAbortListener = (): void => {};
       if (signal) {
-        if (signal.aborted) {
-          reject(new DOMException('Request aborted', 'AbortError'));
+        try {
+          if (signal.aborted) {
+            reject(new DOMException('Request aborted', 'AbortError'));
+            return;
+          }
+        } catch (error) {
+          refuse(error);
           return;
         }
 
@@ -172,20 +185,26 @@ export class XHRAdapter implements HTTPAdapter {
           xhr.abort();
         };
 
-        signal.addEventListener(
-          'abort',
-          onAbort,
-          // once: true — the XHR is already done after the first abort, no
-          // need to keep the listener alive and risk a second call.
-          { once: true },
-        );
+        try {
+          signal.addEventListener(
+            'abort',
+            onAbort,
+            // once: true — the XHR is already done after the first abort, no
+            // need to keep the listener alive and risk a second call.
+            { once: true },
+          );
+        } catch (error) {
+          refuse(error);
+          return;
+        }
 
         // And removed when the request ends any other way. `once` only fires on
         // abort, so on a long-lived shared signal - one controller over a whole
         // page session - every completed request left its listener behind, one
         // per request, until the signal finally aborted or was collected.
-        // `loadend` fires after load, error, timeout and abort alike.
-        xhr.addEventListener('loadend', () => {
+        // `loadend` fires after load, error, timeout and abort alike - and a send
+        // that throws, which fires none of them, removes it itself.
+        removeAbortListener = () => {
           // Guarded: a signal of the caller's own that throws on removal would throw out
           // of this listener, as an uncaught exception.
           try {
@@ -193,7 +212,8 @@ export class XHRAdapter implements HTTPAdapter {
           } catch {
             // The listener stays; `once` still bounds it to one call.
           }
-        });
+        };
+        xhr.addEventListener('loadend', removeAbortListener);
       }
 
       // --- Upload progress ---
@@ -212,10 +232,7 @@ export class XHRAdapter implements HTTPAdapter {
       let uploadTotalBytes = 0;
 
       xhr.upload.addEventListener('progress', (event) => {
-        // A length is known only where it is one: a polyfill's `lengthComputable` with a
-        // total of `0` made the progress `NaN` or `Infinity`.
-        const isLengthKnown = event.lengthComputable && event.total > 0;
-        const progress = isLengthKnown ? event.loaded / event.total : -1;
+        const { progress, total } = readProgressEvent(event);
 
         if (progress === 1) {
           didFireUpload100 = true;
@@ -224,13 +241,7 @@ export class XHRAdapter implements HTTPAdapter {
         uploadedBytes = Math.max(uploadedBytes, event.loaded);
         uploadTotalBytes = Math.max(uploadTotalBytes, event.total);
 
-        // An unknown length reports what has been sent as the total, as the download
-        // listener and NodeAdapter report it.
-        guardedUploadProgress?.({
-          loaded: event.loaded,
-          total: isLengthKnown ? event.total : event.loaded,
-          progress,
-        });
+        guardedUploadProgress?.({ loaded: event.loaded, total, progress });
       });
 
       // 100% upload fires as soon as all bytes are sent, always before xhr.load
@@ -343,10 +354,7 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        // A length is known only where it is one: a polyfill's `lengthComputable` with a
-        // total of `0` made the progress `NaN` or `Infinity`.
-        const isLengthKnown = event.lengthComputable && event.total > 0;
-        const progress = isLengthKnown ? event.loaded / event.total : -1;
+        const { progress, total } = readProgressEvent(event);
 
         if (progress === 1) {
           didFireDownload100 = true;
@@ -355,10 +363,9 @@ export class XHRAdapter implements HTTPAdapter {
         downloadedBytes = Math.max(downloadedBytes, event.loaded);
         downloadTotalBytes = Math.max(downloadTotalBytes, event.total);
 
-        // An unknown length reports what has arrived as the total, as NodeAdapter does.
         guardedDownloadProgress?.({
           loaded: event.loaded,
-          total: isLengthKnown ? event.total : event.loaded,
+          total,
           progress,
         });
       });
@@ -511,12 +518,37 @@ export class XHRAdapter implements HTTPAdapter {
       // Checked again here: a cancel from the 0% upload progress callback above aborts the
       // signal while the XHR is opened but not sent, where `xhr.abort()` does nothing and
       // fires no event - so the request would go out regardless, its one-shot listener spent.
-      if (signal?.aborted) {
-        reject(new DOMException('Request aborted', 'AbortError'));
+      //
+      // And the send itself, guarded. Never sent, the request fires no `loadend` to take
+      // the abort listener off the signal, so that is done here. The body, or an
+      // `InvalidStateError`, fails the same way on every attempt, so it is refused as
+      // non-retryable; any other throw (a shim's network failure) is left to the
+      // client's retry rules, as an asynchronous `error` event would be.
+      let preparedBody: ReturnType<typeof prepareBody>;
+      try {
+        if (signal?.aborted) {
+          removeAbortListener();
+          reject(new DOMException('Request aborted', 'AbortError'));
+          return;
+        }
+
+        preparedBody = prepareBody(requestBody);
+      } catch (error) {
+        removeAbortListener();
+        refuse(error);
         return;
       }
 
-      xhr.send(prepareBody(requestBody));
+      try {
+        xhr.send(preparedBody);
+      } catch (error) {
+        removeAbortListener();
+        if (readObjectMember(error, 'name') === 'InvalidStateError') {
+          refuse(error);
+        } else {
+          reject(toError(error));
+        }
+      }
     });
   }
 }
@@ -524,6 +556,24 @@ export class XHRAdapter implements HTTPAdapter {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * An XHR progress event's `progress` and `total`, for upload and download alike. A length
+ * is known only where it is one: a shim's `lengthComputable` with a total of `0` made the
+ * progress `NaN` or `Infinity`. An unknown length has progress `-1`, and the bytes so far
+ * stand for the total, as NodeAdapter reports them.
+ */
+function readProgressEvent(event: {
+  loaded: number;
+  total: number;
+  lengthComputable: boolean;
+}): { progress: number; total: number } {
+  const isLengthKnown = event.lengthComputable && event.total > 0;
+
+  return isLengthKnown
+    ? { progress: event.loaded / event.total, total: event.total }
+    : { progress: -1, total: event.loaded };
+}
 
 /**
  * The response for a redirect the browser followed on its own: `status: 0` with the

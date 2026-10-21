@@ -756,6 +756,103 @@ describe('XHRAdapter', () => {
     await promise;
   });
 
+  test('PR review round 18: a signal whose aborted or addEventListener throws is refused as non-retryable', async () => {
+    const signals = [
+      {
+        get aborted(): boolean {
+          throw new Error('aborted getter failed');
+        },
+        addEventListener() {},
+        removeEventListener() {},
+      },
+      {
+        aborted: false,
+        addEventListener() {
+          throw new Error('addEventListener failed');
+        },
+        removeEventListener() {},
+      },
+    ];
+
+    for (const signal of signals) {
+      const outcome = await new XHRAdapter()
+        .send({
+          requestURL: 'https://api.test/x',
+          method: 'GET',
+          headers: {},
+          signal: signal as unknown as AbortSignal,
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    }
+  });
+
+  test('PR review round 18: a send the XHR refuses is non-retryable and takes its abort listener off the signal', async () => {
+    let added = 0;
+    let removed = 0;
+    const signal = {
+      aborted: false,
+      addEventListener() {
+        added++;
+      },
+      removeEventListener() {
+        removed++;
+      },
+    };
+    // eslint-disable-next-line @typescript-eslint/unbound-method -- put back as it was, below
+    const originalSend = FakeXHR.prototype.send;
+    FakeXHR.prototype.send = () => {
+      throw new DOMException('refused', 'InvalidStateError');
+    };
+
+    try {
+      const outcome = await new XHRAdapter()
+        .send({
+          requestURL: 'https://api.test/x',
+          method: 'POST',
+          headers: {},
+          body: 'hello',
+          signal: signal as unknown as AbortSignal,
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      expect(added).toBe(1);
+      expect(removed).toBe(1);
+
+      // Any other throw is left to the client's retry rules, the listener still removed.
+      FakeXHR.prototype.send = () => {
+        throw new DOMException('offline', 'NetworkError');
+      };
+      const transient = await new XHRAdapter()
+        .send({
+          requestURL: 'https://api.test/x',
+          method: 'GET',
+          headers: {},
+          signal: signal as unknown as AbortSignal,
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(transient?.name).toBe('NetworkError');
+      expect(
+        transient?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG],
+      ).toBeUndefined();
+      expect(removed).toBe(2);
+    } finally {
+      FakeXHR.prototype.send = originalSend;
+    }
+  });
+
   test('PR review round 15: a missing method is refused rather than sent as "undefined"', async () => {
     const outcome = await new XHRAdapter()
       .send({
