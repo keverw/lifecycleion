@@ -682,7 +682,9 @@ export function validateConfigEntry(
         continue;
       }
 
-      if (lbl.length > 63) {
+      // Counted composed, as `normalizeWildcardPattern` counts it: a label typed
+      // decomposed is the same label.
+      if (lbl.normalize('NFC').length > 63) {
         return false;
       }
 
@@ -1314,7 +1316,9 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
         continue;
       }
 
-      if (lbl.length > 63) {
+      // Counted composed, as `normalizeWildcardPattern` counts it: a label typed
+      // decomposed is the same label.
+      if (lbl.normalize('NFC').length > 63) {
         return false;
       }
 

@@ -443,23 +443,17 @@ export class NodeAdapter implements HTTPAdapter {
     // socket handed over through `'upgrade'` / `'connect'`, not a response, and this
     // adapter reads responses - such a request never settled, or settled as a timeout
     // standing in for the `101` the server sent.
+    //
+    // Nor `Expect` on a request with a body: Node sends the headers at once for one, so
+    // the `Content-Length` the adapter sets afterwards threw - a string body as an
+    // `adapter_error`, a `FormData` one as a transport failure, retried and failing the
+    // same each time. A bodiless request sets no header after, and still goes out.
+    const hasBody = request.body !== undefined && request.body !== null;
     for (const name of Object.keys(request.headers)) {
-      const lowerName = name.toLowerCase();
-      // Nor `Expect`: Node sends the headers at once for one, so the `Content-Length` the
-      // adapter sets afterwards threw - a string body as an `adapter_error`, a
-      // `FormData` one as a transport failure, retried and failing the same each time.
-      if (
-        lowerName === 'transfer-encoding' ||
-        lowerName === 'upgrade' ||
-        lowerName === 'expect'
-      ) {
-        const refusal = new TypeError(
-          lowerName === 'upgrade'
-            ? 'NodeAdapter does not switch protocols; an Upgrade request header is not supported'
-            : lowerName === 'expect'
-              ? 'NodeAdapter does not wait for 100 Continue; an Expect request header is not supported'
-              : 'NodeAdapter frames request bodies itself; a Transfer-Encoding request header is not supported',
-        );
+      const lowerName = lowerCaseHeaderName(name);
+      const refusalMessage = REFUSED_REQUEST_HEADERS.get(lowerName);
+      if (refusalMessage !== undefined && (hasBody || lowerName !== 'expect')) {
+        const refusal = new TypeError(refusalMessage);
         markNonRetryableAdapterError(refusal);
         throw refusal;
       }
@@ -3361,6 +3355,22 @@ function assertCRLParses(
  * PEM goes through the same splitting and validation as a string; a Buffer
  * holding DER is refused, since Node's `tls` reads PEM CRLs only.
  */
+/** Request headers `NodeAdapter` refuses before dispatch, by name, with why. */
+const REFUSED_REQUEST_HEADERS: ReadonlyMap<string, string> = new Map([
+  [
+    'transfer-encoding',
+    'NodeAdapter frames request bodies itself; a Transfer-Encoding request header is not supported',
+  ],
+  [
+    'upgrade',
+    'NodeAdapter does not switch protocols; an Upgrade request header is not supported',
+  ],
+  [
+    'expect',
+    'NodeAdapter does not wait for 100 Continue; an Expect request header on a request with a body is not supported',
+  ],
+]);
+
 function normalizeCRLEntry(
   entry: string | ArrayBufferView,
 ): string | Buffer | string[] {

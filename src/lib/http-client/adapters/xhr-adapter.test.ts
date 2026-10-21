@@ -412,14 +412,40 @@ describe('XHRAdapter', () => {
     expect(response.status).toBe(0);
   });
 
-  test('round 137: HTTPClient refuses a GET with a body through XHRAdapter', async () => {
+  test('round 137: HTTPClient refuses a GET with a body through XHRAdapter in a browser', async () => {
+    const browserGlobals = globalThis as {
+      window?: unknown;
+      document?: unknown;
+    };
+    browserGlobals.window = globalThis;
+    browserGlobals.document = {};
+    try {
+      const client = new HTTPClient({
+        adapter: new XHRAdapter(),
+        baseURL: 'https://api.test',
+      });
+      const builder = client.get('/echo').json({ a: 1 });
+      await builder.send();
+      expect(builder.error?.code).toBe('request_setup_error');
+    } finally {
+      delete browserGlobals.window;
+      delete browserGlobals.document;
+    }
+  });
+
+  test('round 138: outside a browser an XHR GET with a body is sent', async () => {
     const client = new HTTPClient({
       adapter: new XHRAdapter(),
       baseURL: 'https://api.test',
     });
-    const builder = client.get('/echo').json({ a: 1 });
-    await builder.send();
-    expect(builder.error?.code).toBe('request_setup_error');
+    const sending = client.get('/echo').json({ a: 1 }).send();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    const response = await sending;
+    expect(response.status).toBe(200);
+    expect(lastXHR.sentBody).not.toBeNull();
   });
 
   test('round 137: a cancel after a browser-followed redirect still ends cancelled', async () => {

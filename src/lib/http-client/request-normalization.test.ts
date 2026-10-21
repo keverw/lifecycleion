@@ -7204,3 +7204,43 @@ test('round 137: maxRedirects must be a whole number; a request path must be a s
     expect(() => client.get(path as unknown as string)).toThrow(TypeError);
   }
 });
+
+test('round 138: a decomposed Unicode label is measured composed; a bodiless Expect request goes out; a hostile path value is described', async () => {
+  const label = 'é'.repeat(35); // 70 code units, 35 once composed
+  expect(normalizeDomain(`${label}.example.com`)).not.toBe('');
+  expect(validateConfigEntry(`*.${label}.example.com`, 'domain').valid).toBe(
+    true,
+  );
+
+  let expectHeader: string | undefined;
+  const server = http.createServer((req, res) => {
+    expectHeader = req.headers.expect;
+    res.end('ok');
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  try {
+    const response = await new NodeAdapter().send({
+      requestURL: `http://127.0.0.1:${(server.address() as AddressInfo).port}/`,
+      method: 'GET',
+      headers: { expect: '100-continue' },
+    });
+    expect(response.status).toBe(200);
+    expect(expectHeader).toBe('100-continue');
+  } finally {
+    server.close();
+  }
+
+  const client = new HTTPClient({
+    adapter: new MockAdapter(),
+    baseURL: 'http://api.test',
+  });
+  const hostile = new Proxy(
+    {},
+    {
+      getPrototypeOf() {
+        throw new Error('boom');
+      },
+    },
+  );
+  expect(() => client.get(hostile as unknown as string)).toThrow(TypeError);
+});

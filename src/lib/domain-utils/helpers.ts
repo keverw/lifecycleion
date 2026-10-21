@@ -604,8 +604,9 @@ export function normalizeWildcardPattern(pattern: string): string {
       continue;
     }
 
-    // Pre-punycode check for obviously invalid labels
-    if (lbl.length > 63) {
+    // Pre-punycode check for obviously invalid labels - counted composed, as a label typed
+    // decomposed (macOS can) is the same label: its exact entry is accepted.
+    if (lbl.normalize('NFC').length > 63) {
       return ''; // sentinel for invalid pattern
     }
 

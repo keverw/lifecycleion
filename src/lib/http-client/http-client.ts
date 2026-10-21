@@ -359,7 +359,7 @@ export class BaseHTTPClient {
     const pathValue: unknown = path;
     if (typeof pathValue !== 'string') {
       throw new TypeError(
-        `HTTPClient request path must be a string (got ${pathValue === null ? 'null' : pathValue instanceof URL ? 'a URL object; pass url.href' : typeof pathValue})`,
+        `HTTPClient request path must be a string (got ${describeRequestPath(pathValue)})`,
       );
     }
 
@@ -4674,8 +4674,11 @@ export class BaseHTTPClient {
     // XHR drops it - the XHR standard sends a GET or HEAD bodiless - so the request went
     // out without it and answered as though it had been sent. Refused here for the same
     // reason as the methods below.
+    // XHR in a browser only, as the TRACE refusal below: a non-browser XHR (React Native,
+    // a shim) may send the body.
     if (
-      (adapterType === 'fetch' || adapterType === 'xhr') &&
+      (adapterType === 'fetch' ||
+        (adapterType === 'xhr' && this._isBrowserRuntime)) &&
       request.body !== undefined &&
       request.body !== null &&
       (request.method.toUpperCase() === 'GET' ||
@@ -4966,6 +4969,23 @@ function describeValue(value: unknown): string {
  * a string as its UTF-8 encoding - never fewer bytes than UTF-16 units, at most three per
  * unit, so encoded only when its length alone cannot tell. Anything else has no size.
  */
+/** A non-string request path, for the refusal: `instanceof` guarded, as the value is the caller's. */
+function describeRequestPath(value: unknown): string {
+  if (value === null) {
+    return 'null';
+  }
+
+  try {
+    if (value instanceof URL) {
+      return 'a URL object; pass url.href';
+    }
+  } catch {
+    // A hostile prototype chain: described by its type alone.
+  }
+
+  return typeof value;
+}
+
 function isAnsweredBodyOverLimit(body: unknown, maxBytes: number): boolean {
   if (ArrayBuffer.isView(body) || body instanceof ArrayBuffer) {
     return body.byteLength > maxBytes;
