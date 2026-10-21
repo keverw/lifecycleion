@@ -461,6 +461,21 @@ export function normalizeDomainName(label: string): string {
   return normalizeHostText(label, false);
 }
 
+/** Whether any `.`-separated label of `host` is longer than `max` - one pass, no split. */
+function hasLabelLongerThan(host: string, max: number): boolean {
+  let run = 0;
+
+  for (let index = 0; index < host.length; index++) {
+    run = host.charCodeAt(index) === 0x2e ? 0 : run + 1;
+
+    if (run > max) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function normalizeHostText(domain: string, isWholeHost: boolean): string {
   let trimmed = domain.trim();
 
@@ -497,14 +512,12 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
   // one a browser sends for it.
   const normalized = trimmed;
 
-  // The same guard a wildcard pattern's labels get, so an exact entry and its wildcard
-  // agree on a label too long to be worth normalizing.
   // A cheap guard before TR46: a label past 1024 characters is refused unnormalized. The
   // real 63-character limit is held on the ASCII result - a raw count was wrong both
   // ways round, as a label typed decomposed (NFD) is longer than it normalizes to and
   // TR46 drops characters such as a soft hyphen. Once, here, for every caller: exact
   // entries and each wildcard label alike pass through, so they cannot disagree.
-  if (/[^.]{1025}/.test(normalized)) {
+  if (hasLabelLongerThan(normalized, 1024)) {
     return '';
   }
 

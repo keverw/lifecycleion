@@ -7384,3 +7384,27 @@ test('round 140 review 3: a decoding failure after the raw end reaches the reade
   expect(events[0]).toBe('error');
   expect(events).toContain('close');
 });
+
+test('round 140 review 4: a decoding failure held behind a raw error is replayed; a resubscribed listener is told afresh', async () => {
+  const res = stubResponse();
+  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  (res as unknown as PassThrough).write(Buffer.from('not gzip at all'));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  // Held, in that order, with no reader: a raw error ahead of the decoding failure.
+  const held = (
+    source as unknown as { held: { event: string; args: unknown[] }[] }
+  ).held;
+  held.unshift({ event: 'error', args: [new Error('socket reset')] });
+
+  const told: Error[] = [];
+  const listener = (error: Error) => told.push(error);
+  const unsubscribe = source.onFailure?.(listener);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(told).toHaveLength(1);
+  expect(told[0]?.message).not.toBe('socket reset');
+
+  unsubscribe?.();
+  source.onFailure?.(listener);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(told).toHaveLength(2);
+});

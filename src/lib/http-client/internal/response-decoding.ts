@@ -225,17 +225,15 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       if (this.didRawEnd || this.didDecodeEnd) {
         const last = this.decoders.at(-1);
 
-        // Or the last decoder already closed - destroyed by a decoding failure after the
-        // raw body ended - whose `'close'` a listener added now would never see. `closed`
-        // only, not `destroyed`: `destroy(error)` sets that at once and emits the error
-        // and `'close'` a tick later, so delivering `close` on it settled the reader
-        // before the tagged decoding error, as a plain closed stream.
-        // `closed` too, where a runtime sets it, beside the flag.
+        // Or the last decoder has already emitted `'close'` - destroyed by a decoding
+        // failure after the raw body ended - which a listener added now would never see.
+        // Told by our own listener's flag, not by `closed` or `destroyed`: `destroy(error)`
+        // sets both at once and emits the error and `'close'` a tick later, so either read
+        // delivered `close` before the tagged decoding error, as a plain closed stream.
         if (
           this.didDecodeEnd ||
           last === undefined ||
-          this.didLastDecoderClose ||
-          last.closed === true
+          this.didLastDecoderClose
         ) {
           this.deliver('close');
         } else {
@@ -269,8 +267,10 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     // before any subscriber - is told too, a microtask on, so a setup waiting on it need
     // not hang on the raw response's `close` to hear of it. A decoding failure only, as
     // the live path tells; and not if a newer one reached the listener meanwhile.
-    const held = this.heldError();
-    if (held !== undefined && isDecodeFailure(held)) {
+    // Searched for, not the first held error: a raw response error held ahead of it
+    // hid a decoding failure held after.
+    const held = this.heldDecodeFailure();
+    if (held !== undefined) {
       queueMicrotask(() => {
         if (
           !this.isDestroyed &&
@@ -284,6 +284,8 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
 
     return () => {
       this.failureListeners.delete(listener);
+      // So the same function subscribed again is told afresh.
+      this.notifiedListeners.delete(listener);
     };
   }
 
@@ -483,6 +485,21 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     }
   }
 
+  /** The first decoding failure held for a reader not yet attached, if any. */
+  private heldDecodeFailure(): Error | undefined {
+    for (const { event, args } of this.held) {
+      const error: unknown = args[0];
+      if (
+        event === 'error' &&
+        error instanceof Error &&
+        isDecodeFailure(error)
+      ) {
+        return error;
+      }
+    }
+
+    return undefined;
+  }
   /**
    * One failure listener, guarded: it runs inside a decoder's `'error'` emit, where a
    * throw would unwind through zlib as an uncaught exception.
@@ -494,8 +511,8 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       listener(error);
     } catch (error_) {
       // Reported, not swallowed: a listener that failed partway may have left its own
-      // work undone, and nothing else would say so. The decoding failure is still
-      // delivered below.
+      // work undone, and nothing else would say so. The failure itself still reaches the
+      // body's reader as its `'error'`, held or emitted as usual.
       reportCallbackError('response body failure listener', error_);
     }
   }
