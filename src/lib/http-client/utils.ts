@@ -1081,20 +1081,32 @@ export function extractHostname(url: string): string {
  * - Pseudo-TLD suffix wildcards are rejected just like PSL tails (`*.localhost`, `*.local`, etc.)
  */
 export function matchesHostPattern(hostname: string, pattern: string): boolean {
-  return matchesHost(hostname, pattern, normalizeDomain(pattern), () =>
+  return matchesHost(hostname, pattern, undefined, () =>
     normalizeDomain(hostname),
   );
 }
 
 /**
- * The one place a host is routed to the wildcard or exact matcher. The pattern comes
- * normalized (`''` for a wildcard, which does not read it); the hostname lazily, so a
- * filter check normalizes it once and only if an exact pattern needs it.
+ * A `hosts` list's exact patterns normalized, index for index (`''` for a wildcard, which
+ * is never compared): done once when a filter is registered, rather than on every request
+ * it is checked for - `normalizeDomain` parses with the URL parser and runs IDNA.
+ */
+export function normalizeHostPatterns(hosts: readonly string[]): string[] {
+  return hosts.map((pattern) =>
+    pattern.includes('*') ? '' : normalizeDomain(pattern),
+  );
+}
+
+/**
+ * The one place a host is routed to the wildcard or exact matcher. Normalized forms are
+ * read only for an exact pattern: a registered filter's pattern was normalized when it
+ * was added (`undefined` normalizes it here), and the hostname comes lazily, so a filter
+ * check normalizes it once.
  */
 function matchesHost(
   hostname: string,
   pattern: string,
-  normalizedPattern: string,
+  normalizedPattern: string | undefined,
   normalizedHostname: () => string,
 ): boolean {
   // `*` alone matches any host a request URL can carry, as documented - including one the
@@ -1109,37 +1121,9 @@ function matchesHost(
   }
 
   const host = normalizedHostname();
-  return host !== '' && host === normalizedPattern;
-}
-
-/**
- * A filter's exact host patterns, normalized once per `hosts` list rather than on every
- * request: `normalizeDomain` parses with the URL parser and runs IDNA. Keyed weakly by the
- * list, so it goes with its callback, and checked against a copy of what was normalized,
- * so a list changed in place is normalized again rather than read stale.
- */
-const normalizedHostPatterns = new WeakMap<
-  readonly string[],
-  { source: readonly string[]; normalized: readonly string[] }
->();
-
-function normalizedHostPatternsOf(hosts: readonly string[]): readonly string[] {
-  const cached = normalizedHostPatterns.get(hosts);
-
-  if (
-    cached !== undefined &&
-    cached.source.length === hosts.length &&
-    cached.source.every((pattern, index) => pattern === hosts[index])
-  ) {
-    return cached.normalized;
-  }
-
-  const normalized = hosts.map((pattern) =>
-    pattern.includes('*') ? '' : normalizeDomain(pattern),
+  return (
+    host !== '' && host === (normalizedPattern ?? normalizeDomain(pattern))
   );
-  normalizedHostPatterns.set(hosts, { source: [...hosts], normalized });
-
-  return normalized;
 }
 
 /**
@@ -1237,6 +1221,8 @@ export function matchesFilter(
     methods?: string[];
     bodyContainsKeys?: string[];
     hosts?: string[];
+    /** `hosts` normalized by {@link normalizeHostPatterns}, when it was registered. */
+    normalizedHosts?: readonly string[];
     schemes?: ('http' | 'https')[];
     phases?: RequestPhaseName[];
     contentTypes?: ContentType[];
@@ -1339,8 +1325,7 @@ export function matchesFilter(
   // skipping the filter, so a host-scoped observer does not hear about other hosts.
   if (filter.hosts && context.requestURL !== undefined) {
     const hostname = extractHostname(context.requestURL);
-    const hosts = filter.hosts;
-    const normalizedPatterns = normalizedHostPatternsOf(hosts);
+    const { hosts, normalizedHosts } = filter;
     // Once per check, and only if an exact pattern needs it.
     let normalizedHostname: string | undefined;
     const hostOnce = (): string => {
@@ -1353,7 +1338,8 @@ export function matchesFilter(
         matchesHost(
           hostname,
           pattern,
-          normalizedPatterns[index] ?? '',
+          // Absent only for a filter not registered through a client.
+          normalizedHosts?.[index],
           hostOnce,
         ),
       )

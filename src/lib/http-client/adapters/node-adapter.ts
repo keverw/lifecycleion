@@ -1730,10 +1730,7 @@ export class NodeAdapter implements HTTPAdapter {
                 abortStream,
               };
 
-              // Unknown once decoded: `Content-Length` counts the encoded bytes.
-              const totalBytes = isDecoded
-                ? 0
-                : (parseContentLength(headers['content-length']) ?? 0);
+              const totalBytes = declaredBodyLength(headers, isDecoded) ?? 0;
 
               // Pipe the response into the caller's writable. Extracted to a
               // module-level function to keep callback nesting within ESLint's
@@ -1807,12 +1804,8 @@ export class NodeAdapter implements HTTPAdapter {
             };
 
             // Refused before a byte is read when the body says up front that it is over
-            // the limit, and the progress total below - read once, for both. Unknown once
-            // decoded: a compressed body's `Content-Length` counts the encoded bytes, and
-            // the limit and progress count what is handed over.
-            const declaredLength = isDecoded
-              ? undefined
-              : parseContentLength(headers['content-length']);
+            // the limit, and the progress total below - read once, for both.
+            const declaredLength = declaredBodyLength(headers, isDecoded);
 
             if (
               hasResponseBody(request.method, status) &&
@@ -3492,6 +3485,18 @@ function splitCRLString(withBOM: string): string | string[] {
   }
 
   return blocks.length > 1 ? blocks : crl;
+}
+
+/**
+ * The body length the response declares, as the size limit and download progress read
+ * it. Unknown once decoded: a compressed body's `Content-Length` counts the encoded bytes,
+ * and the limit and progress count what is handed over.
+ */
+function declaredBodyLength(
+  headers: Record<string, string | string[]>,
+  isDecoded: boolean,
+): number | undefined {
+  return isDecoded ? undefined : parseContentLength(headers['content-length']);
 }
 
 function normalizeResponseHeaders(

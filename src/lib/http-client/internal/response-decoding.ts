@@ -160,8 +160,9 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   private didLastDecoderClose = false;
   private isPaused = false;
   /**
-   * Terminal events held while paused - an empty body's `'end'` and the `'close'` after
-   * it, as a raw `IncomingMessage` holds them - and anything after them, in order.
+   * An empty body's `'end'` held while paused, as a raw `IncomingMessage` holds it, and
+   * everything after it, in order. A `'close'` with no `'end'` before it - a body cut
+   * short - is not held: a raw response emits that one paused or not.
    */
   private readonly heldWhilePaused: Array<{ event: string; args: unknown[] }> =
     [];
@@ -331,6 +332,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
 
     this.isDestroyed = true;
     this.held.length = 0;
+    this.heldWhilePaused.length = 0;
     this.destroyDecoders();
 
     try {
@@ -504,12 +506,17 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     }
   }
 
-  /** The first error held for a reader not yet attached that `matches`, if any. */
+  /**
+   * The first held error that `matches`, if any: held for a reader not yet attached, or
+   * behind a paused `'end'` - in that order, the order they arrived in.
+   */
   private findHeldError(matches: (error: Error) => boolean): Error | undefined {
-    for (const { event, args } of this.held) {
-      const error: unknown = args[0];
-      if (event === 'error' && error instanceof Error && matches(error)) {
-        return error;
+    for (const queue of [this.held, this.heldWhilePaused]) {
+      for (const { event, args } of queue) {
+        const error: unknown = args[0];
+        if (event === 'error' && error instanceof Error && matches(error)) {
+          return error;
+        }
       }
     }
 
@@ -567,23 +574,23 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       }
     }
 
-    // While paused, an `'end'` or `'close'` waits for `resume()`, and so does whatever
-    // follows it, so an `'error'` cannot overtake the `'end'` of a body that completed.
-    if (
-      (this.isPaused && (event === 'end' || event === 'close')) ||
-      this.heldWhilePaused.length > 0
-    ) {
-      this.heldWhilePaused.push({ event, args });
-
-      return;
-    }
-
     // Held behind what is already held, too: the held events are flushed a microtask
     // after the reader attaches, and a `close` arriving first (a `nextTick` after the
     // refused response's `destroy()`) settled the reader before the tagged error that
     // came before it - a coding chain refused as too long then read as a transport cut.
     if (!this.isReading || this.held.length > 0) {
       this.held.push({ event, args });
+
+      return;
+    }
+
+    // While paused, an `'end'` waits for `resume()`, and so does whatever follows it, so
+    // an `'error'` cannot overtake the `'end'` of a body that completed. Read after the
+    // reader's hold, so the paused hold only ever has what came after everything there -
+    // and is re-read as each released event is delivered, so a body paused again before
+    // the release holds them again.
+    if ((this.isPaused && event === 'end') || this.heldWhilePaused.length > 0) {
+      this.heldWhilePaused.push({ event, args });
 
       return;
     }

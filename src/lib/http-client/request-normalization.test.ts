@@ -7573,3 +7573,86 @@ test('round 140 review 9: the length guard reads Unicode dots as dots on every p
     validateConfigEntry(pattern.replace('\u3002', '.'), 'domain').valid,
   ).toBe(true);
 });
+
+test('round 140 review 10: a paused body cut short delivers its close without a resume', async () => {
+  const res = stubResponse();
+  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const events: string[] = [];
+  source.pause();
+  source.on('data', () => undefined);
+  source.on('close', () => events.push('close'));
+  (res as unknown as PassThrough).destroy();
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(events).toEqual(['close']);
+});
+
+test('round 140 review 10: an error held behind a paused end is read by heldError, and let go on destroy', async () => {
+  const res = stubResponse();
+  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  source.pause();
+  source.on('data', () => undefined);
+  source.on('error', () => undefined);
+  (res as unknown as PassThrough).end();
+  await new Promise((resolve) => setImmediate(resolve));
+  const reset = new Error('socket reset');
+  (res as unknown as PassThrough).emit('error', reset);
+  expect(source.heldError?.()).toBe(reset);
+  (source as unknown as { destroy(): void }).destroy();
+  expect(source.heldError?.()).toBeUndefined();
+});
+
+test('round 140 review 10: a registered host filter matches by its normalized pattern', async () => {
+  const seen: string[] = [];
+  const adapter = new MockAdapter();
+  adapter.routes.get('/', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter });
+  client.addResponseObserver(
+    (_response, request) => {
+      seen.push(request.requestURL);
+    },
+    { hosts: ['BÜCHER.example', '*.example.com'] },
+  );
+  await client.get('https://xn--bcher-kva.example/').send();
+  await client.get('https://api.example.com/').send();
+  await client.get('https://other.example/').send();
+  expect(seen).toEqual([
+    'https://xn--bcher-kva.example/',
+    'https://api.example.com/',
+  ]);
+});
+
+test('round 140 review 10: an error held before a reader attaches is not overtaken by a paused end', async () => {
+  const res = stubResponse();
+  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const events: string[] = [];
+  (res as unknown as PassThrough).emit('error', new Error('socket reset'));
+  source.pause();
+  (res as unknown as PassThrough).end();
+  await new Promise((resolve) => setImmediate(resolve));
+  source.on('data', () => undefined);
+  source.on('end', () => events.push('end'));
+  source.on('error', () => events.push('error'));
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(events).toEqual(['error']);
+  source.resume();
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(events).toEqual(['error', 'end']);
+});
+
+test('round 140 review 10: a body paused again before the release holds its end again', async () => {
+  const res = stubResponse();
+  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const events: string[] = [];
+  source.pause();
+  source.on('data', () => undefined);
+  source.on('end', () => events.push('end'));
+  (res as unknown as PassThrough).end();
+  await new Promise((resolve) => setImmediate(resolve));
+  source.resume();
+  source.pause();
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(events).toEqual([]);
+  source.resume();
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(events).toEqual(['end']);
+});
