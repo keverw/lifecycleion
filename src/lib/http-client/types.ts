@@ -46,7 +46,11 @@ export interface HTTPAdapter {
 export interface AdapterRequest {
   requestURL: string;
   method: HTTPMethod;
-  /** Lowercase-keyed outbound headers for this attempt. Some adapters materialize string[] values at send time. */
+  /**
+   * Lowercase-keyed outbound headers for this attempt. Some adapters materialize string[]
+   * values at send time. A plain object: an adapter driven directly refuses a `Headers` or
+   * `Map` with a non-retryable `TypeError`, and drops an unset (`null`/`undefined`) value.
+   */
   headers: Record<string, string | string[]>;
   body?: string | Uint8Array | FormData | null;
   signal?: AbortSignal;

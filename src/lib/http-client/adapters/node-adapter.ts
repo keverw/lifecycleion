@@ -5,6 +5,7 @@ import {
   readAdapterMethod,
 } from '../internal/adapter-error';
 import { concatChunks } from '../internal/concat-chunks';
+import { copyRequestHeaders } from '../internal/request-fields';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { observeRejection } from '../../internal/promise-reactions';
 import * as http from 'node:http';
@@ -53,7 +54,6 @@ import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
   lowerCaseHeaderName,
   materializeRequestHeaders,
-  presentHeaderValue,
 } from '../internal/header-utils';
 import { mergeObservedHeaders, resolveDetectedRedirectURL } from '../utils';
 import { defineEntry } from '../../internal/define-entry';
@@ -3167,23 +3167,6 @@ function discardUnstreamedWritable(writable: WritableLike): void {
 /** Registered and at once deregistered, so only the permanent fan-out stays behind. */
 function ignoreWritableError(): void {
   // Intentionally empty.
-}
-
-/** A request's headers with each value read once and converted, names kept as given. */
-function copyRequestHeaders(
-  headers: Record<string, unknown> | undefined,
-): Record<string, string | string[]> {
-  const copy: Record<string, string | string[]> = {};
-  if (!headers) {
-    return copy;
-  }
-  for (const [name, value] of Object.entries(headers)) {
-    const present = presentHeaderValue(value);
-    if (present !== undefined) {
-      defineEntry(copy, name, present);
-    }
-  }
-  return copy;
 }
 
 /**

@@ -4,6 +4,7 @@ import {
 } from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
 import { concatChunks } from '../internal/concat-chunks';
+import { readAdapterRequestFields } from '../internal/request-fields';
 import {
   markResponseStreamAbort,
   markNonRetryableAdapterError,
@@ -15,11 +16,7 @@ import {
   resolveDetectedRedirectURL,
   stripCrossOriginURLCredentials,
 } from '../utils';
-import {
-  guardProgressCallback,
-  knownBodyByteLength,
-  uploadCompleteEvent,
-} from '../internal/progress';
+import { knownBodyByteLength, uploadCompleteEvent } from '../internal/progress';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
   hasResponseBody,
@@ -50,25 +47,20 @@ export class FetchAdapter implements HTTPAdapter {
   }
 
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
-    // Every field read once, here, on a carrier: a getter that throws is the caller's,
-    // refused as a non-retryable `adapter_error` rather than retried as a network failure.
-    let fields: ReturnType<typeof readRequestFields>;
-    try {
-      fields = readRequestFields(request);
-    } catch (error) {
-      throw nonRetryableAdapterErrorFrom(error);
-    }
-    const {
-      guardedUploadProgress,
-      guardedDownloadProgress,
-      body,
-      signal,
-      headers,
-      dispatchedURL,
-    } = fields;
+    const fields = readAdapterRequestFields(request);
+    const { guardedUploadProgress, guardedDownloadProgress, body, signal } =
+      fields;
+    const dispatchedURL = stripCrossOriginURLCredentials(
+      fields.requestURL,
+      fields.initialURL,
+    );
     const method = readAdapterMethod(fields.givenMethod);
     // The most a buffered body may hold, as `fetch` decodes it; `Infinity` for none.
     const maxResponseBytes = readMaxResponseBytes(request);
+    // A caller's `Content-Length` is left to `fetch`, which frames the body itself:
+    // browsers refuse to send one, and Node's undici, given one that disagrees with the
+    // body, waited for bytes that never came until the attempt timed out - on every retry.
+    const headers = withoutHeader(fields.headers, 'content-length');
 
     // Fire 0% upload progress
     guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
@@ -403,37 +395,6 @@ async function readResponseBody(
   }
 
   return concatChunks(chunks, loadedBytes);
-}
-
-/**
- * The request's fields, each read once, before anything is sent. Progress callbacks are
- * guarded here, so every call site is covered: progress reporting is advisory and must
- * not be able to change whether a request succeeded (see `guardProgressCallback`).
- */
-function readRequestFields(request: AdapterRequest) {
-  const requestURL = request.requestURL;
-
-  return {
-    guardedUploadProgress: guardProgressCallback(
-      request.onUploadProgress,
-      'onUploadProgress',
-    ),
-    guardedDownloadProgress: guardProgressCallback(
-      request.onDownloadProgress,
-      'onDownloadProgress',
-    ),
-    givenMethod: request.method as unknown,
-    body: request.body,
-    signal: request.signal,
-    // A caller's `Content-Length` is left to `fetch`, which frames the body itself:
-    // browsers refuse to send one, and Node's undici, given one that disagrees with the
-    // body, waited for bytes that never came until the attempt timed out - on every retry.
-    headers: withoutHeader(request.headers, 'content-length'),
-    dispatchedURL: stripCrossOriginURLCredentials(
-      requestURL,
-      request.initialURL,
-    ),
-  };
 }
 
 /**

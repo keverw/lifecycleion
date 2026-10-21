@@ -4,15 +4,13 @@ import {
 } from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
-import {
-  guardProgressCallback,
-  knownBodyByteLength,
-} from '../internal/progress';
+import { knownBodyByteLength } from '../internal/progress';
 import {
   markResponseStreamAbort,
   nonRetryableAdapterErrorFrom,
   readAdapterMethod,
 } from '../internal/adapter-error';
+import { readAdapterRequestFields } from '../internal/request-fields';
 import {
   makeResponseTooLargeError,
   readMaxResponseBytes,
@@ -27,8 +25,8 @@ import type {
 } from '../types';
 import {
   resolveAbsoluteURLForRuntime,
-  stripCrossOriginURLCredentials,
   stripURLCredentials,
+  stripCrossOriginURLCredentials,
 } from '../utils';
 
 /**
@@ -54,22 +52,23 @@ export class XHRAdapter implements HTTPAdapter {
   // `send` - refused as non-retryable, as a method or header value `open` will not take
   // is: the same request fails the same way on every attempt.
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
-    let fields: ReturnType<typeof readRequestFields>;
-    try {
-      fields = readRequestFields(request);
-    } catch (error) {
-      throw nonRetryableAdapterErrorFrom(error);
-    }
     const {
       givenMethod,
-      requestBody,
+      body: requestBody,
+      headers,
       signal,
       guardedUploadProgress,
       guardedDownloadProgress,
-      dispatchedURL,
-      maxResponseBytes,
-    } = fields;
+      requestURL,
+      initialURL,
+    } = readAdapterRequestFields(request);
+    const dispatchedURL = stripCrossOriginURLCredentials(
+      requestURL,
+      initialURL,
+    );
     const method = readAdapterMethod(givenMethod);
+    // The most a buffered body may hold; `Infinity` for none.
+    const maxResponseBytes = readMaxResponseBytes(request);
 
     return await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -113,7 +112,7 @@ export class XHRAdapter implements HTTPAdapter {
         // Except `cookie`, set once as NodeAdapter sends it - every spelling and item
         // joined with `; `: where XHR runs outside a browser (React Native, a test shim)
         // it is sent, and `, ` read as one cookie.
-        const headerEntries = Object.entries(request.headers);
+        const headerEntries = Object.entries(headers);
         for (const [key, value] of headerEntries) {
           if (lowerCaseHeaderName(key) === 'cookie') {
             continue;
@@ -251,10 +250,11 @@ export class XHRAdapter implements HTTPAdapter {
         }
 
         didFireUpload100 = true;
-        // One number for both: the upload is done, so what was sent is its size. A
-        // browser that counted bytes without a total, or a total without bytes, for a
-        // body whose size cannot be known (a `FormData`), reported `loaded` and
-        // `total` apart.
+        // One number for both, as every terminal event reports it. The browser's last
+        // `upload.progress` is throttled, so it may fall short of a body that was sent
+        // whole, and a body whose size cannot be known (a `FormData`) reported only one
+        // of the two - `total: 0`, or `loaded: 0`. An upload a server answered partway
+        // through cannot be told from a finished one here, as FetchAdapter cannot.
         const bytes =
           Math.max(uploadedBytes, uploadTotalBytes) ||
           (knownBodyByteLength(requestBody) ?? 0);
@@ -392,9 +392,12 @@ export class XHRAdapter implements HTTPAdapter {
           finishUploadProgress();
 
           if (!didFireDownload100) {
+            // One number for both, as on every other path: the bytes counted where the
+            // length was unknown, the length where the last throttled event fell short.
+            const bytes = Math.max(downloadedBytes, downloadTotalBytes);
             guardedDownloadProgress?.({
-              loaded: downloadedBytes,
-              total: downloadTotalBytes,
+              loaded: bytes,
+              total: bytes,
               progress: 1,
             });
           }
@@ -521,37 +524,6 @@ export class XHRAdapter implements HTTPAdapter {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/**
- * The request's fields, each read once, before the XHR is built: its event listeners read
- * them again otherwise, where a getter that throws - or a method `open` took as a number -
- * is an uncaught exception and a request that never settles.
- */
-function readRequestFields(request: AdapterRequest) {
-  return {
-    givenMethod: request.method,
-    requestBody: request.body,
-    signal: request.signal,
-    // Guarded once, at the boundary, so every call site is covered. Progress reporting
-    // is advisory and must not be able to change whether a request succeeded; a throwing
-    // callback used to propagate out and be classified as a transport failure. See
-    // `guardProgressCallback`.
-    guardedUploadProgress: guardProgressCallback(
-      request.onUploadProgress,
-      'onUploadProgress',
-    ),
-    guardedDownloadProgress: guardProgressCallback(
-      request.onDownloadProgress,
-      'onDownloadProgress',
-    ),
-    dispatchedURL: stripCrossOriginURLCredentials(
-      request.requestURL,
-      request.initialURL,
-    ),
-    // The most a buffered body may hold; `Infinity` for none.
-    maxResponseBytes: readMaxResponseBytes(request),
-  };
-}
 
 /**
  * The response for a redirect the browser followed on its own: `status: 0` with the

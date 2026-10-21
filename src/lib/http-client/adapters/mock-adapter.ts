@@ -3,16 +3,13 @@ import {
   nonRetryableAdapterErrorFrom,
   readAdapterMethod,
 } from '../internal/adapter-error';
+import { readAdapterRequestFields } from '../internal/request-fields';
 import { defineEntry } from '../../internal/define-entry';
 import { readBinaryByteLength } from '../../internal/binary-view';
 import { observeRejection } from '../../internal/promise-reactions';
 import Router from 'find-my-way';
 import type { HTTPMethod as RouterHTTPMethod } from 'find-my-way';
-import {
-  guardProgressCallback,
-  knownBodyByteLength,
-  uploadCompleteEvent,
-} from '../internal/progress';
+import { knownBodyByteLength, uploadCompleteEvent } from '../internal/progress';
 import {
   lowerCaseHeaderName,
   materializeRequestHeaders,
@@ -283,14 +280,7 @@ export class MockAdapter implements HTTPAdapter {
   }
 
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
-    // Every field read once, here, on a carrier: a getter that throws is the caller's,
-    // refused as a non-retryable `adapter_error` rather than retried as a network failure.
-    let fields: ReturnType<typeof readRequestFields>;
-    try {
-      fields = readRequestFields(request);
-    } catch (error) {
-      throw nonRetryableAdapterErrorFrom(error);
-    }
+    const fields = readAdapterRequestFields(request);
     const {
       guardedUploadProgress,
       guardedDownloadProgress,
@@ -706,29 +696,6 @@ export class MockAdapter implements HTTPAdapter {
 }
 
 // --- Helpers ---
-
-/**
- * The request's fields, each read once, before the route runs. Progress callbacks are
- * guarded here, so every call site is covered: progress reporting is advisory and must
- * not be able to change whether a request succeeded (see `guardProgressCallback`).
- */
-function readRequestFields(request: AdapterRequest) {
-  return {
-    guardedUploadProgress: guardProgressCallback(
-      request.onUploadProgress,
-      'onUploadProgress',
-    ),
-    guardedDownloadProgress: guardProgressCallback(
-      request.onDownloadProgress,
-      'onDownloadProgress',
-    ),
-    requestURL: request.requestURL,
-    givenMethod: request.method as unknown,
-    headers: request.headers,
-    body: request.body,
-    signal: request.signal,
-  };
-}
 
 /**
  * Normalizes `MockResponse.streamError` to a `streamErrorCode`, or `undefined`

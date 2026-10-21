@@ -8418,3 +8418,60 @@ test('PR review round 15: a stream abort tagged with a Headers is left untagged,
   await builder.send();
   expect(builder.error?.code).toBe('adapter_error');
 });
+
+test('PR review round 16: every adapter driven directly refuses a Headers for its request headers', async () => {
+  const headers = new Headers({
+    authorization: 'Bearer x',
+  }) as unknown as Record<string, string>;
+  const mock = new MockAdapter();
+  mock.routes.get('/x', () => ({ status: 200 }));
+  const originalFetch = globalThis.fetch;
+  let fetched = 0;
+  (globalThis as { fetch: unknown }).fetch = () => {
+    fetched++;
+    return Promise.resolve(new Response('ok', { status: 200 }));
+  };
+
+  try {
+    for (const adapter of [new FetchAdapter(), mock, new NodeAdapter()]) {
+      const outcome = await adapter
+        .send({ requestURL: 'http://127.0.0.1:1/x', method: 'GET', headers })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(String(outcome?.message)).toContain('must be a plain object');
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  expect(fetched).toBe(0);
+});
+
+test('PR review round 16: FetchAdapter does not send an unset header value as "null"', async () => {
+  const originalFetch = globalThis.fetch;
+  let sent: Headers | undefined;
+  (globalThis as { fetch: unknown }).fetch = (
+    _url: unknown,
+    init?: RequestInit,
+  ) => {
+    sent = new Headers(init?.headers);
+    return Promise.resolve(new Response('ok', { status: 200 }));
+  };
+
+  try {
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/x',
+      method: 'GET',
+      headers: { 'x-kept': 'yes', 'x-unset': null as unknown as string },
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  expect(sent?.get('x-kept')).toBe('yes');
+  expect(sent?.has('x-unset')).toBe(false);
+});

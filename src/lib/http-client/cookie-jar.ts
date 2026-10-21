@@ -114,12 +114,6 @@ function isHeaderSafeCookieText(text: string, extra: string): boolean {
 const MAX_AGE_PATTERN = /^-?\d+$/;
 
 /**
- * The longest `Max-Age` stored, in seconds: the largest value whose expiry in
- * milliseconds is still a safe integer.
- */
-const MAX_COOKIE_MAX_AGE_SECONDS = Math.floor(Number.MAX_SAFE_INTEGER / 1000);
-
-/**
  * The longest lifetime a `Set-Cookie` is given, in seconds: 400 days, RFC 6265bis §5.5's
  * cap on both `Max-Age` and `Expires`, as browsers apply it.
  */
@@ -1087,13 +1081,11 @@ export class CookieJar {
           case 'max-age': {
             // RFC 6265 §5.2.2 — an optional `-` then digits, and nothing else; otherwise
             // the attribute is ignored. `parseInt` read a prefix, so `Max-Age=60abc` was
-            // a minute and `Max-Age=1e9` was one second. Capped so `createdAt + maxAge *
-            // 1000` stays a finite number of milliseconds; a longer lifetime is
-            // indistinguishable from it.
+            // a minute and `Max-Age=1e9` was one second. Capped at RFC 6265bis's 400 days,
+            // as browsers cap it.
             if (MAX_AGE_PATTERN.test(attrValue)) {
               cookie.maxAge = Math.min(
                 parseInt(attrValue, 10),
-                MAX_COOKIE_MAX_AGE_SECONDS,
                 MAX_COOKIE_LIFETIME_SECONDS,
               );
             }

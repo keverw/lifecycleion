@@ -596,6 +596,108 @@ describe('XHRAdapter', () => {
     expect(uploads.at(-1)).toEqual({ loaded: 1200, total: 1200 });
   });
 
+  test('PR review round 16: an upload whose last throttled progress event fell short ends at its total', async () => {
+    const uploads: Array<{ loaded: number; total: number; progress: number }> =
+      [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/upload',
+      method: 'POST',
+      headers: {},
+      body: new Uint8Array(10_000),
+      onUploadProgress: (event) => {
+        uploads.push({
+          loaded: event.loaded,
+          total: event.total,
+          progress: event.progress,
+        });
+      },
+    });
+
+    // Sent whole, but the last event the browser let through said 9,000, and
+    // `upload.load` never fired.
+    lastXHR.simulateUploadProgress(9000, 10_000);
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    await promise;
+
+    expect(uploads.at(-1)).toEqual({
+      loaded: 10_000,
+      total: 10_000,
+      progress: 1,
+    });
+  });
+
+  test('PR review round 16: a browser-followed redirect of unknown length reports the bytes read as its total', async () => {
+    const downloads: Array<{ loaded: number; total: number }> = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/start',
+      method: 'GET',
+      headers: {},
+      onDownloadProgress: (event) => {
+        downloads.push({ loaded: event.loaded, total: event.total });
+      },
+    });
+
+    lastXHR.simulateDownloadProgress(5000, 0);
+    lastXHR.status = 200;
+    lastXHR.responseURL = 'https://api.test/elsewhere';
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    await promise;
+
+    expect(downloads.at(-1)).toEqual({ loaded: 5000, total: 5000 });
+
+    // A known length the last throttled event fell short of: the length, for both.
+    const known: Array<{ loaded: number; total: number }> = [];
+    const second = new XHRAdapter().send({
+      requestURL: 'https://api.test/start',
+      method: 'GET',
+      headers: {},
+      onDownloadProgress: (event) => {
+        known.push({ loaded: event.loaded, total: event.total });
+      },
+    });
+    lastXHR.simulateDownloadProgress(4000, 5000);
+    lastXHR.status = 200;
+    lastXHR.responseURL = 'https://api.test/elsewhere';
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    await second;
+
+    expect(known.at(-1)).toEqual({ loaded: 5000, total: 5000 });
+  });
+
+  test('PR review round 16: an unset header value is not sent as "null", and a Headers is refused', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/x',
+      method: 'GET',
+      headers: {
+        'x-kept': 'yes',
+        'x-unset': null as unknown as string,
+      },
+    });
+    expect(lastXHR.requestHeaders).toEqual({ 'x-kept': ['yes'] });
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    await promise;
+
+    const refused = await new XHRAdapter()
+      .send({
+        requestURL: 'https://api.test/x',
+        method: 'GET',
+        headers: new Headers({
+          authorization: 'Bearer x',
+        }) as unknown as Record<string, string>,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Error,
+      );
+    expect(refused?.message).toContain('must be a plain object');
+  });
+
   test('PR review round 15: a missing method is refused rather than sent as "undefined"', async () => {
     const outcome = await new XHRAdapter()
       .send({
