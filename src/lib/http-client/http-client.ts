@@ -115,6 +115,7 @@ import type { CookieJar } from './cookie-jar';
 import { isErrorValue, toError as normalizeError } from '../to-error';
 import { readUnknownMember as readObjectMember } from '../internal/read-member';
 import {
+  hasResponseBody,
   isAnsweredBodyOverLimit,
   makeResponseTooLargeError,
 } from './internal/response-limit';
@@ -2857,6 +2858,9 @@ export class BaseHTTPClient {
         if (
           adapterResponse.isStreamError !== true &&
           adapterResponse.isStreamed !== true &&
+          // A bodiless answer (a `HEAD`, a `204`) is not held to it, as no adapter
+          // holds one: a custom adapter's stray body there is not the answer's.
+          hasResponseBody(sentRequest.method, adapterResponse.status) &&
           // A plain `ArrayBuffer` or a string too: outside the type, but `_buildResponse`
           // delivers either, so they are bodies the limit must see.
           isAnsweredBodyOverLimit(answeredBody, maxResponseBytes)

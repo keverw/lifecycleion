@@ -8082,3 +8082,33 @@ test('PR review round 11: a DataView over a detached buffer measures 0, as a typ
   expect(readBinaryByteLength(view)).toBe(0);
   expect(readBinaryByteLength(bytes)).toBe(0);
 });
+
+test('PR review round 12: a bodiless answer is not held to maxResponseBytes by the client', async () => {
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/octet-stream' },
+          body: new Uint8Array(1000),
+        }),
+    },
+    baseURL: 'http://api.test',
+    maxResponseBytes: 10,
+  });
+
+  const response = await client.head('/x').send();
+  expect(response.isFailed).toBe(false);
+});
+
+test('PR review round 12: a cookie domain whose leading dot only mapping exposes is refused', () => {
+  const jar = new CookieJar();
+  expect(
+    jar.setCookie({
+      name: 's',
+      value: '1',
+      domain: '\u00AD.example.com.\u00AD',
+    }),
+  ).toBe(false);
+});

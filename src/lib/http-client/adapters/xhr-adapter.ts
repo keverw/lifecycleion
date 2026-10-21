@@ -294,12 +294,17 @@ export class XHRAdapter implements HTTPAdapter {
       // Fallback: upload.load didn't fire (no request body, or the browser skipped the
       // event). Callers always see a 100% upload event, unless upload.progress already
       // reported it - on every way the request ends with an answer, a refused one too.
+      // The body's own size where the browser reported none, as `upload.load` reports it.
       const finishUploadProgress = (): void => {
         if (!didUploadComplete && !didFireUpload100) {
           didFireUpload100 = true;
+          const knownBytes =
+            uploadedBytes > 0 && uploadTotalBytes > 0
+              ? 0
+              : (knownBodyByteLength(requestBody) ?? 0);
           guardedUploadProgress?.({
-            loaded: uploadedBytes,
-            total: uploadTotalBytes,
+            loaded: uploadedBytes > 0 ? uploadedBytes : knownBytes,
+            total: uploadTotalBytes > 0 ? uploadTotalBytes : knownBytes,
             progress: 1,
           });
         }
@@ -307,8 +312,12 @@ export class XHRAdapter implements HTTPAdapter {
 
       const refuseTooLargeBody = (): void => {
         didExceedMaxResponseBytes = true;
-        finishUploadProgress();
+        // Read before the upload callback below: one that cancels makes `xhr.abort()`
+        // reset this XHR, wiping its URL, status and headers.
         const responseURL = xhr.responseURL;
+        const status = xhr.status;
+        const headers = parseXHRResponseHeaders(xhr.getAllResponseHeaders());
+        finishUploadProgress();
 
         if (
           responseURL &&
@@ -317,8 +326,8 @@ export class XHRAdapter implements HTTPAdapter {
           resolve(browserRedirectResponse(responseURL));
         } else {
           resolve({
-            status: xhr.status,
-            headers: parseXHRResponseHeaders(xhr.getAllResponseHeaders()),
+            status,
+            headers,
             body: null,
             isStreamError: true,
             streamErrorCode: 'response_too_large',

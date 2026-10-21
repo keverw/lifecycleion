@@ -487,6 +487,42 @@ describe('XHRAdapter', () => {
     expect(uploads.at(-1)).toBe(1);
   });
 
+  test('PR review round 12: a mid-download refusal keeps the answer an upload callback cancels over', async () => {
+    const controller = new AbortController();
+    const uploads: Array<{ loaded: number; progress: number }> = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/big',
+      method: 'POST',
+      headers: {},
+      body: 'hello',
+      signal: controller.signal,
+      maxResponseBytes: 10,
+      onUploadProgress: (event) => {
+        uploads.push({ loaded: event.loaded, progress: event.progress });
+        if (event.progress === 1) {
+          controller.abort();
+        }
+      },
+    });
+    // `abort()` resets an XHR, as a browser's does.
+    lastXHR.abort = function (this: FakeXHR) {
+      this.abortCalled = true;
+      this.status = 0;
+      this.getAllResponseHeadersResult = '';
+    };
+
+    lastXHR.status = 200;
+    lastXHR.getAllResponseHeadersResult = 'x-kept: yes\r\n';
+    lastXHR.simulateDownloadProgress(100, 100);
+    const response = await promise;
+
+    expect(response.streamErrorCode).toBe('response_too_large');
+    expect(response.status).toBe(200);
+    expect(response.headers['x-kept']).toBe('yes');
+    // The body's own size, the browser having reported none.
+    expect(uploads.at(-1)).toEqual({ loaded: 5, progress: 1 });
+  });
+
   test('round 136: an abort once the headers are in carries the real status', async () => {
     const controller = new AbortController();
     const adapter = new XHRAdapter();

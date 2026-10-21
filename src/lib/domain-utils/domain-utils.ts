@@ -488,13 +488,10 @@ function compiledWildcardPattern(
 ): ReturnType<typeof compileWildcardPattern> {
   // Least recently used out first: a hit moves to the end, the oldest goes when full, so
   // a list longer than the cache still keeps its most used entries.
-  // Reordered only once the cache is full, when eviction order starts to matter.
   if (compiledWildcardPatterns.has(pattern)) {
     const cached = compiledWildcardPatterns.get(pattern);
-    if (compiledWildcardPatterns.size >= MAX_COMPILED_WILDCARD_PATTERNS) {
-      compiledWildcardPatterns.delete(pattern);
-      compiledWildcardPatterns.set(pattern, cached);
-    }
+    compiledWildcardPatterns.delete(pattern);
+    compiledWildcardPatterns.set(pattern, cached);
     return cached;
   }
 

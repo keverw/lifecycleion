@@ -960,8 +960,12 @@ export class CookieJar {
       // one exposed the same way (a soft hyphen, then `.example.com`) is refused on
       // purpose, below, as domain-utils refuses it: an empty first label is no host, and
       // only a dot actually written is the leading dot RFC 6265 ignores.
+      // Not when mapping exposed a leading dot too: the call below would strip it as a
+      // written one.
       if (ascii?.endsWith('.')) {
-        return raw === withoutLeadingDot && !ascii.endsWith('..')
+        return raw === withoutLeadingDot &&
+          !ascii.endsWith('..') &&
+          !ascii.startsWith('.')
           ? this.normalizeStoredDomain(ascii.slice(0, -1))
           : '';
       }
