@@ -7466,3 +7466,15 @@ test('round 140 review 6: a long run of dots is refused in linear time', () => {
   expect(normalizeDomain(`${'a'.repeat(1000)}.`.repeat(5000))).toBe('');
   expect(performance.now() - started).toBeLessThan(200);
 });
+
+test('round 140 review 7: an oversized wildcard pattern or bracketed host is refused', () => {
+  const huge = `*.${Array.from({ length: 5000 }, () => 'a'.repeat(1000)).join('.')}`;
+  expect(validateConfigEntry(huge, 'domain').valid).toBe(false);
+  expect(matchesDomainList('x.example.com', [huge])).toBe(false);
+  expect(
+    matchesCORSCredentialsList('https://x.example.com', [`https://${huge}`], {
+      allowWildcardSubdomains: true,
+    }),
+  ).toBe(false);
+  expect(normalizeDomain(`[${'1:'.repeat(5000)}1]`)).toBe('');
+});

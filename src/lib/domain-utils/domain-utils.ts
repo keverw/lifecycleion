@@ -1,6 +1,7 @@
 import { getDomain, getSubdomain, getPublicSuffix } from 'tldts';
 import {
   isAllWildcards,
+  isHostTooLongToNormalize,
   hasPartialLabelWildcard,
   checkDNSLength,
   normalizeDomain,
@@ -674,6 +675,10 @@ export function validateConfigEntry(
 
   // Helper: validate non-wildcard labels (punycode + DNS limits)
   function validateConcreteLabels(pattern: string): boolean {
+    if (isHostTooLongToNormalize(pattern)) {
+      return false;
+    }
+
     const labels = pattern.split('.');
     const concrete: string[] = [];
 
@@ -1288,6 +1293,10 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
     // Leading and trailing whitespace dropped, as the other matchers drop it: `https://
     // *.example.com` is valid to `validateConfigEntry` and matches in `matchesOriginList`.
     const host = written.trim();
+
+    if (isHostTooLongToNormalize(host)) {
+      return false;
+    }
     const hostPattern = host.endsWith('.') ? host.slice(0, -1) : host;
 
     if (isAllWildcards(hostPattern)) {

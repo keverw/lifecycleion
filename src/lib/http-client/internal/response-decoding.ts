@@ -58,9 +58,6 @@ export interface ResponseBodySource {
 type ContentCoding = 'gzip' | 'deflate' | 'br' | 'zstd';
 
 type Decoder = NodeJS.ReadWriteStream & {
-  /** Set once the stream has emitted `'close'` (or been destroyed), as every zlib and `Transform` stream reports. */
-  readonly closed?: boolean;
-  readonly destroyed?: boolean;
   destroy(error?: Error): unknown;
   pause(): unknown;
   resume(): unknown;

@@ -461,6 +461,19 @@ export function normalizeDomainName(label: string): string {
   return normalizeHostText(label, false);
 }
 
+/**
+ * A cheap guard before any parsing - IP canonicalization, TR46 - on a host or a pattern:
+ * one past 8,192 characters, or with a label past 1,024, is refused unparsed. Both far
+ * exceed anything that could normalize within DNS's 253 characters and 63 per label; the
+ * real limits are held on the ASCII result, since a raw count is wrong both ways round (a
+ * label typed decomposed is longer than it normalizes to, and TR46 drops characters such
+ * as a soft hyphen). Shared by exact entries and every wildcard path, before they split a
+ * pattern into labels, so none can disagree on it.
+ */
+export function isHostTooLongToNormalize(text: string): boolean {
+  return text.length > 8192 || hasLabelLongerThan(text, 1024);
+}
+
 /** Whether any `.`-separated label of `host` is longer than `max` - one pass, no split. */
 function hasLabelLongerThan(host: string, max: number): boolean {
   let run = 0;
@@ -485,7 +498,7 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
   // Allow a single trailing dot for FQDNs, but reject repeated trailing dots - by
   // `endsWith`, not `/\.\.+$/`, which backtracks quadratically over a long run of dots
   // that does not end the string (40,000 dots then `x`: most of a second).
-  if (trimmed.endsWith('..')) {
+  if (trimmed.endsWith('..') || isHostTooLongToNormalize(trimmed)) {
     return '';
   }
 
@@ -513,18 +526,6 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
   // letter (U+0345 is `ι`) - either way an entry matched a different domain from the
   // one a browser sends for it.
   const normalized = trimmed;
-
-  // A cheap guard before TR46: a label past 1024 characters is refused unnormalized. The
-  // real 63-character limit is held on the ASCII result - a raw count was wrong both
-  // ways round, as a label typed decomposed (NFD) is longer than it normalizes to and
-  // TR46 drops characters such as a soft hyphen. Once, here, for every caller: exact
-  // entries and each wildcard label alike pass through, so they cannot disagree.
-  // And the whole host: a multi-megabyte name of 1,000-character labels went through
-  // TR46 before its length was refused. 8,192 is far past any host that could normalize
-  // to the 253 characters DNS allows.
-  if (normalized.length > 8192 || hasLabelLongerThan(normalized, 1024)) {
-    return '';
-  }
 
   try {
     // Use TR46/IDNA processing for robust Unicode domain handling that mirrors browser behavior
@@ -592,6 +593,12 @@ export function normalizeWildcardPattern(pattern: string): string {
   // Not NFC-normalized first: each label goes through TR46, which normalizes after
   // mapping, as the URL parser does (see `normalizeHostText`).
   let trimmed = pattern.trim().replace(/[．。｡]/g, '.'); // normalize Unicode dot variants to ASCII
+
+  // The whole pattern, before it is split into labels that each pass the per-label
+  // guard alone (see `isHostTooLongToNormalize`).
+  if (isHostTooLongToNormalize(trimmed)) {
+    return '';
+  }
 
   // Refuse non-domain characters (ports, paths, fragments, brackets, userinfo, backslashes)
   if (INVALID_DOMAIN_CHARS.test(trimmed)) {
