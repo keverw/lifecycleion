@@ -60,7 +60,16 @@ export class FetchAdapter implements HTTPAdapter {
       'onDownloadProgress',
     );
 
-    const { requestURL, method, body, signal } = request;
+    const { requestURL, method: givenMethod, body, signal } = request;
+    // Converted once, as `fetch` reads it: a non-string method threw at the first
+    // `toUpperCase`, after the request may already have gone out.
+    let method: string;
+    try {
+      method =
+        typeof givenMethod === 'string' ? givenMethod : String(givenMethod);
+    } catch (error) {
+      throw nonRetryableAdapterErrorFrom(error);
+    }
     // The most a buffered body may hold, as `fetch` decodes it; `Infinity` for none.
     const maxResponseBytes = readMaxResponseBytes(request);
     // A caller's `Content-Length` is left to `fetch`, which frames the body itself:

@@ -491,18 +491,24 @@ const normalizedExactEntries = new Map<string, string>();
 
 function compiledWildcardPattern(
   pattern: string,
+  isCached: boolean,
 ): ReturnType<typeof compileWildcardPattern> {
-  return cachedEntry(compiledWildcardPatterns, pattern, compileWildcardPattern);
+  return isCached
+    ? cachedEntry(compiledWildcardPatterns, pattern, compileWildcardPattern)
+    : compileWildcardPattern(pattern);
 }
 
-function normalizedExactEntry(entry: string): string {
-  return cachedEntry(normalizedExactEntries, entry, normalizeDomain);
+function normalizedExactEntry(entry: string, isCached: boolean): string {
+  return isCached
+    ? cachedEntry(normalizedExactEntries, entry, normalizeDomain)
+    : normalizeDomain(entry);
 }
 
 /**
  * `compute(key)`, kept in `cache`. Least recently used out first: a hit moves to the end,
- * the oldest goes when full, so a list longer than the cache still keeps its most used
- * entries.
+ * the oldest goes when full. A list longer than the cache is not cached at all: scanned
+ * in order, each entry would evict the one the next scan needs first, missing every time
+ * at more cost than computing them.
  */
 function cachedEntry<T>(
   cache: Map<string, T>,
@@ -567,12 +573,14 @@ export function matchesDomainList(
 
   // Asked once, for every wildcard entry, and only if one is reached.
   let isIP: boolean | undefined;
+  // A list that fits the cache is cached; see `cachedEntry`.
+  const isCached = cleaned.length <= MAX_COMPILED_WILDCARD_PATTERNS;
 
   for (const allowed of cleaned) {
     // Against the domain normalized once above, as `matchesWildcardDomain` would read it,
     // rather than normalized again for every wildcard entry.
     if (allowed.includes('*')) {
-      const compiled = compiledWildcardPattern(allowed);
+      const compiled = compiledWildcardPattern(allowed, isCached);
       isIP ??= isIPAddress(normalizedDomain);
       if (
         compiled !== undefined &&
@@ -583,7 +591,7 @@ export function matchesDomainList(
       continue;
     }
 
-    const normalizedAllowed = normalizedExactEntry(allowed);
+    const normalizedAllowed = normalizedExactEntry(allowed, isCached);
     if (
       isAllowedExactHostname(normalizedAllowed) &&
       normalizedDomain === normalizedAllowed

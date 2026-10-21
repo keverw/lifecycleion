@@ -294,7 +294,19 @@ export class MockAdapter implements HTTPAdapter {
       'onDownloadProgress',
     );
 
-    const { requestURL, method, headers, body } = request;
+    const { requestURL, method: givenMethod, headers, body } = request;
+    // Converted once, as a real transport reads it: a non-string method threw at the
+    // first `toUpperCase`.
+    let method: string;
+    try {
+      method =
+        typeof givenMethod === 'string' ? givenMethod : String(givenMethod);
+    } catch (error) {
+      throw nonRetryableAdapterErrorFrom(error);
+    }
+    // Read before the route runs, so a limit refused as unusable refuses the request
+    // without running it.
+    const maxResponseBytes = readMaxResponseBytes(request);
     // Names lowercased, as a Node server receives them, so a request driven straight at
     // the adapter with `Content-Type` is read like one the client sent.
     const materializedHeaders = lowercaseHeaderNames(
@@ -572,7 +584,7 @@ export class MockAdapter implements HTTPAdapter {
     let intendedBody: ReturnType<typeof serializeResponseBody> | null;
     try {
       intendedBody =
-        shouldOmitResponseBody(method, mockResponse.status) ||
+        !hasResponseBody(method, mockResponse.status) ||
         simulatedStreamErrorCode !== undefined
           ? null
           : serializeResponseBody(mockResponse);
@@ -587,7 +599,6 @@ export class MockAdapter implements HTTPAdapter {
     // already loses the body, so it stands as the route asked.
     // By the client's own rule (see `isAnsweredBodyOverLimit`), so the mock and the
     // client cannot disagree on which bodies the limit refuses.
-    const maxResponseBytes = readMaxResponseBytes(request);
     const intendedByteLength =
       intendedBody === null ? 0 : (readBinaryByteLength(intendedBody) ?? 0);
     const isResponseTooLarge =
@@ -638,7 +649,7 @@ export class MockAdapter implements HTTPAdapter {
       intendedBody !== null ||
       ((routeMethod === 'HEAD' ||
         (simulatedStreamErrorCode !== undefined &&
-          !shouldOmitResponseBody(method, mockResponse.status))) &&
+          hasResponseBody(method, mockResponse.status))) &&
         mockResponse.body !== undefined &&
         mockResponse.body !== null);
     if (!hasHeader(responseHeaders, 'content-type') && hasRouteBody) {
@@ -1063,10 +1074,6 @@ function lowercaseHeaderNames(
     );
   }
   return result;
-}
-
-function shouldOmitResponseBody(method: string, status: number): boolean {
-  return !hasResponseBody(method, status);
 }
 
 function awaitAbortable<T>(

@@ -4,6 +4,8 @@
  */
 
 import { readUnknownMember } from '../../internal/read-member';
+import { markNonRetryableAdapterError } from './adapter-error';
+import { describeValue } from '../../internal/describe-value';
 import type { AdapterRequest } from '../types';
 import {
   presentsAsBinary,
@@ -12,20 +14,35 @@ import {
 import { utf8ByteLength } from './utf8-length';
 
 /**
- * The limit an adapter enforces for `request`: `maxResponseBytes` when it is a positive
- * number, `Infinity` otherwise.
+ * The limit an adapter enforces for `request`: `maxResponseBytes`, or `Infinity` when it
+ * is absent (`undefined` or `null`).
  *
  * Read once, guarded: an adapter can be driven directly, with a request object that is
- * the caller's own. `HTTPClient` validates the value before it gets here, so anything
- * that is not a usable limit came from such a caller, and is read as no limit - as an
- * absent one is - rather than failing a request the adapter could otherwise answer.
+ * the caller's own. `HTTPClient` validates the value before it gets here; a caller
+ * driving an adapter directly gets the same rule - a positive integer, or `Infinity` -
+ * as a non-retryable `TypeError`, rather than an unusable limit (`'1048576'` from an
+ * environment variable, `0`, `NaN`) silently read as no limit at all.
  */
 export function readMaxResponseBytes(request: AdapterRequest): number {
   const value = readUnknownMember(request, 'maxResponseBytes');
 
-  return typeof value === 'number' && value > 0
-    ? value
-    : Number.POSITIVE_INFINITY;
+  if (value === undefined || value === null) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  if (
+    typeof value === 'number' &&
+    value > 0 &&
+    (Number.isInteger(value) || value === Number.POSITIVE_INFINITY)
+  ) {
+    return value;
+  }
+
+  const refusal = new TypeError(
+    `Adapter request maxResponseBytes must be a positive integer or Infinity (got ${typeof value === 'number' ? String(value) : describeValue(value)})`,
+  );
+  markNonRetryableAdapterError(refusal);
+  throw refusal;
 }
 
 /**

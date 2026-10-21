@@ -242,6 +242,27 @@ export class XHRAdapter implements HTTPAdapter {
       // it as a fallback for environments that skip upload.load entirely.
       let didUploadComplete = false;
 
+      // The one final upload event, however the upload ends: the bytes the browser
+      // reported, or the body's own size where it reported none - `0` for an empty
+      // string, as FetchAdapter reports it - not a stand-in `1`. Measured once, and only
+      // when the browser reported nothing.
+      const emitFinalUpload = (): void => {
+        if (didFireUpload100) {
+          return;
+        }
+
+        didFireUpload100 = true;
+        const knownBytes =
+          uploadedBytes > 0 && uploadTotalBytes > 0
+            ? 0
+            : (knownBodyByteLength(requestBody) ?? 0);
+        guardedUploadProgress?.({
+          loaded: uploadedBytes > 0 ? uploadedBytes : knownBytes,
+          total: uploadTotalBytes > 0 ? uploadTotalBytes : knownBytes,
+          progress: 1,
+        });
+      };
+
       xhr.upload.addEventListener('load', (event) => {
         didUploadComplete = true;
 
@@ -251,23 +272,7 @@ export class XHRAdapter implements HTTPAdapter {
           event.total || event.loaded,
         );
 
-        if (!didFireUpload100) {
-          // The body's own size where the browser reported none - `0` for an empty
-          // string, as FetchAdapter reports it - not a stand-in `1`.
-          // Measured once, and only when the browser reported nothing.
-          const knownBytes =
-            uploadedBytes > 0 && uploadTotalBytes > 0
-              ? 0
-              : (knownBodyByteLength(requestBody) ?? 0);
-          const finalLoaded = uploadedBytes > 0 ? uploadedBytes : knownBytes;
-          const finalTotal =
-            uploadTotalBytes > 0 ? uploadTotalBytes : knownBytes;
-          guardedUploadProgress?.({
-            loaded: finalLoaded,
-            total: finalTotal,
-            progress: 1,
-          });
-        }
+        emitFinalUpload();
       });
 
       // --- Download progress ---
@@ -294,19 +299,9 @@ export class XHRAdapter implements HTTPAdapter {
       // Fallback: upload.load didn't fire (no request body, or the browser skipped the
       // event). Callers always see a 100% upload event, unless upload.progress already
       // reported it - on every way the request ends with an answer, a refused one too.
-      // The body's own size where the browser reported none, as `upload.load` reports it.
       const finishUploadProgress = (): void => {
-        if (!didUploadComplete && !didFireUpload100) {
-          didFireUpload100 = true;
-          const knownBytes =
-            uploadedBytes > 0 && uploadTotalBytes > 0
-              ? 0
-              : (knownBodyByteLength(requestBody) ?? 0);
-          guardedUploadProgress?.({
-            loaded: uploadedBytes > 0 ? uploadedBytes : knownBytes,
-            total: uploadTotalBytes > 0 ? uploadTotalBytes : knownBytes,
-            progress: 1,
-          });
+        if (!didUploadComplete) {
+          emitFinalUpload();
         }
       };
 

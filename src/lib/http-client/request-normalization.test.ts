@@ -8132,3 +8132,80 @@ test("PR review round 13: a bodiless answer's stray body is dropped, not deliver
   expect(response.isFailed).toBe(false);
   expect(response.body).toBeNull();
 });
+
+test('PR review round 14: FetchAdapter and MockAdapter read a non-string method as the string it is', async () => {
+  const method = { toString: () => 'POST' } as unknown as 'POST';
+  let sentMethod: string | undefined;
+  const originalFetch = globalThis.fetch;
+  (globalThis as { fetch: unknown }).fetch = (
+    _url: unknown,
+    init?: RequestInit,
+  ) => {
+    sentMethod = init?.method;
+    return Promise.resolve(new Response('ok', { status: 200 }));
+  };
+  try {
+    const fetched = await new FetchAdapter().send({
+      requestURL: 'https://local.test/x',
+      method,
+      headers: {},
+    });
+    expect(fetched.status).toBe(200);
+    expect(sentMethod).toBe('POST');
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const adapter = new MockAdapter();
+  adapter.routes.post('/x', () => ({ status: 201 }));
+  const mocked = await adapter.send({
+    requestURL: 'http://api.test/x',
+    method,
+    headers: {},
+  });
+  expect(mocked.status).toBe(201);
+});
+
+test('PR review round 14: an adapter driven directly refuses an unusable maxResponseBytes', async () => {
+  const adapter = new MockAdapter();
+  let ran = 0;
+  adapter.routes.get('/x', () => {
+    ran++;
+    return { status: 200 };
+  });
+  for (const maxResponseBytes of ['1048576', 0, Number.NaN, 1.5]) {
+    const outcome = await adapter
+      .send({
+        requestURL: 'http://api.test/x',
+        method: 'GET',
+        headers: {},
+        maxResponseBytes: maxResponseBytes as number,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Error,
+      );
+    expect(outcome).toBeInstanceOf(TypeError);
+  }
+  expect(ran).toBe(0);
+
+  const unlimited = await adapter.send({
+    requestURL: 'http://api.test/x',
+    method: 'GET',
+    headers: {},
+    maxResponseBytes: Infinity,
+  });
+  expect(unlimited.status).toBe(200);
+});
+
+test('PR review round 14: a domain list longer than the pattern cache still matches', () => {
+  const list = Array.from(
+    { length: 600 },
+    (_, i) => `*.tenant${i}.example.com`,
+  );
+  list.push('exact.example.org');
+
+  expect(matchesDomainList('api.tenant599.example.com', list)).toBe(true);
+  expect(matchesDomainList('exact.example.org', list)).toBe(true);
+  expect(matchesDomainList('nope.example.net', list)).toBe(false);
+});
