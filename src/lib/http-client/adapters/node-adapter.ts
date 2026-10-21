@@ -1807,20 +1807,20 @@ export class NodeAdapter implements HTTPAdapter {
             };
 
             // Refused before a byte is read when the body says up front that it is over
-            // the limit. Only an undecoded one: a compressed body's `Content-Length` counts
-            // the encoded bytes, and the limit counts what is handed over.
-            if (!isDecoded && hasResponseBody(request.method, status)) {
-              const declaredLength = parseContentLength(
-                headers['content-length'],
-              );
+            // the limit, and the progress total below - read once, for both. Unknown once
+            // decoded: a compressed body's `Content-Length` counts the encoded bytes, and
+            // the limit and progress count what is handed over.
+            const declaredLength = isDecoded
+              ? undefined
+              : parseContentLength(headers['content-length']);
 
-              if (
-                declaredLength !== undefined &&
-                declaredLength > maxResponseBytes
-              ) {
-                refuseTooLargeBody();
-                return;
-              }
+            if (
+              hasResponseBody(request.method, status) &&
+              declaredLength !== undefined &&
+              declaredLength > maxResponseBytes
+            ) {
+              refuseTooLargeBody();
+              return;
             }
 
             activeBufferedResponse = {
@@ -1836,10 +1836,7 @@ export class NodeAdapter implements HTTPAdapter {
             // completion event if the last chunk already reported 100%.
             let didFireDownload100 = false;
 
-            // Unknown once decoded: `Content-Length` counts the encoded bytes.
-            const totalBytes = isDecoded
-              ? 0
-              : (parseContentLength(headers['content-length']) ?? 0);
+            const totalBytes = declaredLength ?? 0;
 
             body.on('data', (chunk: Buffer) => {
               // Nothing kept, or reported, for a response the request no longer has.

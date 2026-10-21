@@ -159,6 +159,12 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   private didFailDecoding = false;
   private didLastDecoderClose = false;
   private isPaused = false;
+  /**
+   * Terminal events held while paused - an empty body's `'end'` and the `'close'` after
+   * it, as a raw `IncomingMessage` holds them - and anything after them, in order.
+   */
+  private readonly heldWhilePaused: Array<{ event: string; args: unknown[] }> =
+    [];
   /** Raw bytes that arrived before the decoders were attached: the first chunk. */
   private rawBytes = 0;
   private readonly held: Array<{ event: string; args: unknown[] }> = [];
@@ -303,6 +309,16 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   public resume(): this {
     this.isPaused = false;
     this.decoders.at(-1)?.resume();
+
+    // Released a tick on, as a raw `IncomingMessage` emits its `'end'` after `resume()`
+    // returns: a reader that resumes and then attaches its `'end'` listener still hears it.
+    if (this.heldWhilePaused.length > 0) {
+      queueMicrotask(() => {
+        for (const { event, args } of this.heldWhilePaused.splice(0)) {
+          this.deliver(event, ...args);
+        }
+      });
+    }
 
     return this;
   }
@@ -549,6 +565,17 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       if (this.isDestroyed) {
         return;
       }
+    }
+
+    // While paused, an `'end'` or `'close'` waits for `resume()`, and so does whatever
+    // follows it, so an `'error'` cannot overtake the `'end'` of a body that completed.
+    if (
+      (this.isPaused && (event === 'end' || event === 'close')) ||
+      this.heldWhilePaused.length > 0
+    ) {
+      this.heldWhilePaused.push({ event, args });
+
+      return;
     }
 
     // Held behind what is already held, too: the held events are flushed a microtask

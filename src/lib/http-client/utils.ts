@@ -1080,11 +1080,22 @@ export function extractHostname(url: string): string {
  * - PSL tail guard active: `*.com`, `**.co.uk`, etc. never match
  * - Pseudo-TLD suffix wildcards are rejected just like PSL tails (`*.localhost`, `*.local`, etc.)
  */
-export function matchesHostPattern(
+export function matchesHostPattern(hostname: string, pattern: string): boolean {
+  return matchesHost(hostname, pattern, normalizeDomain(pattern), () =>
+    normalizeDomain(hostname),
+  );
+}
+
+/**
+ * The one place a host is routed to the wildcard or exact matcher. The pattern comes
+ * normalized (`''` for a wildcard, which does not read it); the hostname lazily, so a
+ * filter check normalizes it once and only if an exact pattern needs it.
+ */
+function matchesHost(
   hostname: string,
   pattern: string,
-  /** The hostname already normalized, when a caller matches it against several patterns. */
-  normalizedHostname?: string,
+  normalizedPattern: string,
+  normalizedHostname: () => string,
 ): boolean {
   // `*` alone matches any host a request URL can carry, as documented - including one the
   // domain matcher cannot read (`-edge.example.com`), which every other pattern skips.
@@ -1097,29 +1108,36 @@ export function matchesHostPattern(
     return matchesWildcardDomain(hostname, pattern);
   }
 
-  const host = normalizedHostname ?? normalizeDomain(hostname);
-  return host !== '' && host === normalizedHostPattern(pattern);
+  const host = normalizedHostname();
+  return host !== '' && host === normalizedPattern;
 }
 
 /**
- * Exact host patterns normalized once, not on every request: `normalizeDomain` parses with
- * the URL parser and runs IDNA, and a host-filtered callback is matched per request,
- * retry and hop. Patterns are configuration, so few; the cache is bounded all the same.
+ * A filter's exact host patterns, normalized once per `hosts` list rather than on every
+ * request: `normalizeDomain` parses with the URL parser and runs IDNA. Keyed weakly by the
+ * list, so it goes with its callback, and checked against a copy of what was normalized,
+ * so a list changed in place is normalized again rather than read stale.
  */
-const normalizedHostPatterns = new Map<string, string>();
+const normalizedHostPatterns = new WeakMap<
+  readonly string[],
+  { source: readonly string[]; normalized: readonly string[] }
+>();
 
-function normalizedHostPattern(pattern: string): string {
-  const cached = normalizedHostPatterns.get(pattern);
-  if (cached !== undefined) {
-    return cached;
+function normalizedHostPatternsOf(hosts: readonly string[]): readonly string[] {
+  const cached = normalizedHostPatterns.get(hosts);
+
+  if (
+    cached !== undefined &&
+    cached.source.length === hosts.length &&
+    cached.source.every((pattern, index) => pattern === hosts[index])
+  ) {
+    return cached.normalized;
   }
 
-  if (normalizedHostPatterns.size >= 1024) {
-    normalizedHostPatterns.clear();
-  }
-
-  const normalized = normalizeDomain(pattern);
-  normalizedHostPatterns.set(pattern, normalized);
+  const normalized = hosts.map((pattern) =>
+    pattern.includes('*') ? '' : normalizeDomain(pattern),
+  );
+  normalizedHostPatterns.set(hosts, { source: [...hosts], normalized });
 
   return normalized;
 }
@@ -1321,17 +1339,24 @@ export function matchesFilter(
   // skipping the filter, so a host-scoped observer does not hear about other hosts.
   if (filter.hosts && context.requestURL !== undefined) {
     const hostname = extractHostname(context.requestURL);
-    // Once per call, not once per pattern.
+    const hosts = filter.hosts;
+    const normalizedPatterns = normalizedHostPatternsOf(hosts);
+    // Once per check, and only if an exact pattern needs it.
     let normalizedHostname: string | undefined;
+    const hostOnce = (): string => {
+      normalizedHostname ??= normalizeDomain(hostname);
+      return normalizedHostname;
+    };
 
     if (
-      !filter.hosts.some((pattern: string) => {
-        if (!pattern.includes('*') && normalizedHostname === undefined) {
-          normalizedHostname = normalizeDomain(hostname);
-        }
-
-        return matchesHostPattern(hostname, pattern, normalizedHostname);
-      })
+      !hosts.some((pattern: string, index: number) =>
+        matchesHost(
+          hostname,
+          pattern,
+          normalizedPatterns[index] ?? '',
+          hostOnce,
+        ),
+      )
     ) {
       return false;
     }

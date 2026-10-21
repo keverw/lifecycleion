@@ -7486,10 +7486,90 @@ test('round 140 review 8: a pause asked before the first byte holds the decoded 
   source.pause();
   source.on('data', (chunk: Buffer) => chunks.push(chunk));
   (res as unknown as PassThrough).end(zlib.gzipSync('hello world'));
-  await new Promise((resolve) => setTimeout(resolve, 50));
+
+  // Wait until the decoder has really produced the body - held in its buffer, paused -
+  // rather than for a fixed time a slow machine could outrun; read afresh each pass.
+  const lastDecoderBuffered = () =>
+    (
+      source as unknown as { decoders: { readableLength: number }[] }
+    ).decoders.at(-1)?.readableLength ?? 0;
+  const deadline = Date.now() + 5_000;
+  while (lastDecoderBuffered() === 0) {
+    expect(Date.now()).toBeLessThan(deadline);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
   expect(chunks).toEqual([]);
 
+  const ended = new Promise((resolve) => source.on('end', resolve));
   source.resume();
-  await new Promise((resolve) => setTimeout(resolve, 50));
+  await ended;
   expect(Buffer.concat(chunks).toString()).toBe('hello world');
+});
+
+test('round 140 review 9: an empty body paused before it ends holds its end until resumed', async () => {
+  const res = stubResponse();
+  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const events: string[] = [];
+  source.pause();
+  source.on('data', () => events.push('data'));
+  source.on('close', () => events.push('close'));
+  (res as unknown as PassThrough).end();
+  await new Promise((resolve) => setImmediate(resolve));
+  (res as unknown as PassThrough).destroy();
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(events).toEqual([]);
+
+  // `'end'` is attached after `resume()` in the same tick, and still heard.
+  source.resume();
+  source.on('end', () => events.push('end'));
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(events).toEqual(['end', 'close']);
+});
+
+test('round 140 review 9: an error after a held end does not overtake it', async () => {
+  const res = stubResponse();
+  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const events: string[] = [];
+  source.pause();
+  source.on('data', () => undefined);
+  source.on('end', () => events.push('end'));
+  source.on('error', () => events.push('error'));
+  (res as unknown as PassThrough).end();
+  await new Promise((resolve) => setImmediate(resolve));
+  (res as unknown as PassThrough).emit('error', new Error('socket reset'));
+  source.resume();
+  await new Promise((resolve) => setImmediate(resolve));
+  expect(events).toEqual(['end', 'error']);
+});
+
+test('round 140 review 9: a hosts list changed in place is matched as it now reads', () => {
+  const filter = { hosts: ['a.com'] };
+  expect(
+    matchesFilter(
+      filter,
+      { requestURL: 'https://a.com/' },
+      'final',
+      'response',
+    ),
+  ).toBe(true);
+  filter.hosts[0] = 'b.com';
+  expect(
+    matchesFilter(
+      filter,
+      { requestURL: 'https://b.com/' },
+      'final',
+      'response',
+    ),
+  ).toBe(true);
+});
+
+test('round 140 review 9: the length guard reads Unicode dots as dots on every path', () => {
+  // Two 601-character labels that normalize to `a` (soft hyphens map to nothing), joined
+  // by an ideographic full stop: one 1,203-character run if that dot is not read as one.
+  const label = `a${'\u00AD'.repeat(600)}`;
+  const pattern = `*.${label}\u3002${label}.example.com`;
+  expect(validateConfigEntry(pattern, 'domain').valid).toBe(true);
+  expect(
+    validateConfigEntry(pattern.replace('\u3002', '.'), 'domain').valid,
+  ).toBe(true);
 });
