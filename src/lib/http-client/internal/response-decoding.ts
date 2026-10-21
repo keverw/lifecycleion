@@ -164,9 +164,8 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   /** Raw bytes that arrived before the decoders were attached: the first chunk. */
   private rawBytes = 0;
   private readonly held: Array<{ event: string; args: unknown[] }> = [];
-  private readonly failureListeners = new Set<(error: Error) => void>();
-  /** Listeners already told of a failure, so a queued replay does not tell them twice. */
-  private readonly notifiedListeners = new WeakSet<(error: Error) => void>();
+  /** One record per `onFailure` call: active until unsubscribed, told at most once. */
+  private readonly failureSubscriptions = new Set<FailureSubscription>();
 
   constructor(
     private readonly res: http.IncomingMessage,
@@ -261,31 +260,28 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   }
 
   public onFailure(listener: (error: Error) => void): () => void {
-    this.failureListeners.add(listener);
+    const subscription: FailureSubscription = { listener, told: false };
+    this.failureSubscriptions.add(subscription);
 
     // A decoding failure already held - the coding chain refused in the constructor,
     // before any subscriber - is told too, a microtask on, so a setup waiting on it need
     // not hang on the raw response's `close` to hear of it. A decoding failure only, as
-    // the live path tells; and not if a newer one reached the listener meanwhile.
-    // Searched for, not the first held error: a raw response error held ahead of it
-    // hid a decoding failure held after.
+    // the live path tells; and not if one reached this subscription meanwhile.
     const held = this.findHeldError(isDecodeFailure);
     if (held !== undefined) {
       queueMicrotask(() => {
         if (
           !this.isDestroyed &&
-          this.failureListeners.has(listener) &&
-          !this.notifiedListeners.has(listener)
+          this.failureSubscriptions.has(subscription) &&
+          !subscription.told
         ) {
-          this.notifyFailure(listener, held);
+          this.notifyFailure(subscription, held);
         }
       });
     }
 
     return () => {
-      this.failureListeners.delete(listener);
-      // So the same function subscribed again is told afresh.
-      this.notifiedListeners.delete(listener);
+      this.failureSubscriptions.delete(subscription);
     };
   }
 
@@ -502,11 +498,11 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
    * One failure listener, guarded: it runs inside a decoder's `'error'` emit, where a
    * throw would unwind through zlib as an uncaught exception.
    */
-  private notifyFailure(listener: (error: Error) => void, error: Error): void {
-    this.notifiedListeners.add(listener);
+  private notifyFailure(subscription: FailureSubscription, error: Error): void {
+    subscription.told = true;
 
     try {
-      listener(error);
+      subscription.listener(error);
     } catch (error_) {
       // Reported, not swallowed: a listener that failed partway may have left its own
       // work undone, and nothing else would say so. The failure itself still reaches the
@@ -530,10 +526,15 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       isDecodeFailure(failure)
     ) {
       // Once per subscription, as the replay is: a second decoder's error queued in the
-      // same tick (a stacked `gzip, br`) does not tell a listener again.
-      for (const listener of [...this.failureListeners]) {
-        if (!this.notifiedListeners.has(listener)) {
-          this.notifyFailure(listener, failure);
+      // same tick (a stacked `gzip, br`) does not tell a listener again. Re-checked per
+      // listener, as an earlier one may unsubscribe another or tear the body down.
+      for (const subscription of [...this.failureSubscriptions]) {
+        if (this.isDestroyed) {
+          break;
+        }
+
+        if (this.failureSubscriptions.has(subscription) && !subscription.told) {
+          this.notifyFailure(subscription, failure);
         }
       }
 
@@ -816,6 +817,12 @@ function readLittleEndian(bytes: number[]): number {
   }
 
   return value;
+}
+
+/** One `onFailure` subscription. */
+interface FailureSubscription {
+  readonly listener: (error: Error) => void;
+  told: boolean;
 }
 
 /** Whether `error` is a decoding failure this module tagged (see `markDecodeError`). */

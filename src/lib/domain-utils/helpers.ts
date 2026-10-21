@@ -482,8 +482,10 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
   // Normalize Unicode dots BEFORE checking IP for consistent behavior
   trimmed = toAsciiDots(trimmed);
 
-  // Allow a single trailing dot for FQDNs, but reject repeated trailing dots
-  if (/\.\.+$/.test(trimmed)) {
+  // Allow a single trailing dot for FQDNs, but reject repeated trailing dots - by
+  // `endsWith`, not `/\.\.+$/`, which backtracks quadratically over a long run of dots
+  // that does not end the string (40,000 dots then `x`: most of a second).
+  if (trimmed.endsWith('..')) {
     return '';
   }
 
@@ -517,7 +519,10 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
   // ways round, as a label typed decomposed (NFD) is longer than it normalizes to and
   // TR46 drops characters such as a soft hyphen. Once, here, for every caller: exact
   // entries and each wildcard label alike pass through, so they cannot disagree.
-  if (hasLabelLongerThan(normalized, 1024)) {
+  // And the whole host: a multi-megabyte name of 1,000-character labels went through
+  // TR46 before its length was refused. 8,192 is far past any host that could normalize
+  // to the 253 characters DNS allows.
+  if (normalized.length > 8192 || hasLabelLongerThan(normalized, 1024)) {
     return '';
   }
 

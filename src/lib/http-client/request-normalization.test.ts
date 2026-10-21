@@ -6918,10 +6918,10 @@ test('round 135: a malformed publicSuffixes config throws', () => {
 });
 
 test('round 135: a trailing dot IDNA mapping exposes is one trailing dot', () => {
-  expect(normalizeDomain('example.com.­')).toBe('example.com');
-  expect(normalizeDomain('example.com.­.')).toBe('');
-  expect(validateConfigEntry('com.­', 'domain').valid).toBe(false);
-  expect(matchesDomainList('example.com', ['example.com.­'])).toBe(true);
+  expect(normalizeDomain('example.com.\u00AD')).toBe('example.com');
+  expect(normalizeDomain('example.com.\u00AD.')).toBe('');
+  expect(validateConfigEntry('com.\u00AD', 'domain').valid).toBe(false);
+  expect(matchesDomainList('example.com', ['example.com.\u00AD'])).toBe(true);
 });
 
 test('round 135: a same-scheme URL without slashes is read on its own for credentials', () => {
@@ -7139,7 +7139,7 @@ test('round 137: MockAdapter groups request header names in ASCII case only', as
 test('round 137: a cookie domain whose trailing dot only IDNA mapping exposes is stored as the domain', () => {
   const jar = new CookieJar();
   jar.setCookie({ name: 'sid', value: 'a', domain: 'example.com' });
-  jar.setCookie({ name: 'sid', value: 'b', domain: 'example.com.­' });
+  jar.setCookie({ name: 'sid', value: 'b', domain: 'example.com.\u00AD' });
   expect(jar.getStoredDomains()).toEqual([{ domain: 'example.com', count: 1 }]);
   expect(jar.getCookieHeaderString('https://example.com/')).toBe('sid=b');
 });
@@ -7342,7 +7342,7 @@ test('round 140 review: onFailure replays a failure held before it subscribed', 
 });
 
 test('round 140 review 2: exact and wildcard entries agree on an over-long label; onFailure hears decoding failures only', async () => {
-  const label = `a${'­'.repeat(1100)}b`;
+  const label = `a${'\u00AD'.repeat(1100)}b`;
   expect(normalizeDomain(`${label}.example.com`)).toBe('');
   expect(validateConfigEntry(`*.${label}.example.com`, 'domain').valid).toBe(
     false,
@@ -7406,4 +7406,63 @@ test('round 140 review 4: a held decoding failure is told once per subscription,
   source.onFailure?.(listener);
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(told).toHaveLength(2);
+});
+
+test('round 140 review 6: a throwing failure listener is reported on the live and replay paths; subscriptions are separate records', async () => {
+  const reports: unknown[] = [];
+  const onReport = (event: Event) => {
+    reports.push((event as ErrorEvent).error);
+    event.preventDefault();
+  };
+  globalThis.addEventListener('error', onReport);
+  try {
+    // Live: a corrupt body found failing after subscribing.
+    const live = stubResponse();
+    const liveBody = createResponseBodySource(live, 'GET', 200, 'gzip').source;
+    liveBody.onFailure?.(() => {
+      throw new Error('live listener failed');
+    });
+    liveBody.on('error', () => undefined);
+    (live as unknown as PassThrough).end(Buffer.from('not gzip at all'));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    // Replay: a refused chain held before subscribing.
+    const replay = stubResponse();
+    const replayBody = createResponseBodySource(
+      replay,
+      'GET',
+      200,
+      Array.from({ length: 6 }, () => 'gzip').join(','),
+    ).source;
+    replayBody.onFailure?.(() => {
+      throw new Error('replay listener failed');
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  } finally {
+    globalThis.removeEventListener('error', onReport);
+  }
+  expect(reports).toHaveLength(2);
+
+  // The same function subscribed twice: unsubscribing one leaves the other told.
+  const res = stubResponse();
+  const body = createResponseBodySource(
+    res,
+    'GET',
+    200,
+    Array.from({ length: 6 }, () => 'gzip').join(','),
+  ).source;
+  const told: Error[] = [];
+  const listener = (error: Error) => told.push(error);
+  const first = body.onFailure?.(listener);
+  body.onFailure?.(listener);
+  first?.();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(told).toHaveLength(1);
+});
+
+test('round 140 review 6: a long run of dots is refused in linear time', () => {
+  const started = performance.now();
+  expect(normalizeDomain(`${'.'.repeat(40_000)}x`)).toBe('');
+  expect(normalizeDomain(`${'a'.repeat(1000)}.`.repeat(5000))).toBe('');
+  expect(performance.now() - started).toBeLessThan(200);
 });

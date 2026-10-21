@@ -479,6 +479,8 @@ describe('XHRAdapter', () => {
     lastXHR.simulateLoad();
     const response = await promise;
     expect(response.headers['x-key']).toBe('a');
+    // Kept under its own name, not folded in or dropped.
+    expect(response.headers['x-\u212Aey']).toBe('b');
   });
 
   test('returns status and body on successful load', async () => {
