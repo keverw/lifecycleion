@@ -1548,6 +1548,7 @@ export class NodeAdapter implements HTTPAdapter {
               // A decoding failure found while the factory set up its sink is the body's
               // own error, held for the reader that never attached; the raw response's
               // close that follows reported it as a generic one, the cause dropped.
+              let stopWatchingDecodeFailure: (() => void) | undefined;
               const setupFailed = (error: Error): void => {
                 pendingStreamSetup?.failOnSocketError?.(
                   body.heldError?.() ?? error,
@@ -1597,6 +1598,11 @@ export class NodeAdapter implements HTTPAdapter {
                 res.once('error', setupFailed);
                 res.once('aborted', setupClosed);
                 res.once('close', setupClosed);
+                // And the decoded body's own failure: a corrupt body that finished
+                // arriving fails in decoding after the raw response's last event, so
+                // setup heard of it from nothing and an async factory waited until the
+                // timeout - or for ever with none.
+                stopWatchingDecodeFailure = body.onFailure?.(setupFailed);
                 const returned = request.streamResponse(
                   {
                     status: 200,
@@ -1668,6 +1674,7 @@ export class NodeAdapter implements HTTPAdapter {
                 res.removeListener('error', setupFailed);
                 res.removeListener('aborted', setupClosed);
                 res.removeListener('close', setupClosed);
+                stopWatchingDecodeFailure?.();
               }
 
               // The request may have been cancelled, timed out or lost its socket while

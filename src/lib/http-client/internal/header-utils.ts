@@ -52,7 +52,7 @@ export function isBrowserRestrictedHeader(
   key: string,
   value: string | undefined,
 ): boolean {
-  const lowerKey = key.toLowerCase();
+  const lowerKey = lowerCaseHeaderName(key);
 
   // Straight denylist: browsers block these header names outright.
   if (BROWSER_RESTRICTED_HEADERS.has(lowerKey)) {

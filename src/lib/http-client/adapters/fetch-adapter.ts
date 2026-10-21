@@ -1,3 +1,4 @@
+import { lowerCaseHeaderName } from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
 import {
   markResponseStreamAbort,
@@ -511,7 +512,7 @@ function materializeFetchHeaders(
   const materialized = new Headers();
 
   for (const [key, value] of Object.entries(headers)) {
-    if (key.toLowerCase() === 'cookie') {
+    if (lowerCaseHeaderName(key) === 'cookie') {
       // Joined with `; ` onto any earlier spelling's (`Cookie` then `cookie`), as
       // `materializeRequestHeaders` joins them: `set` replaced it, and `append` would
       // join with `, `, which reads as one cookie.
@@ -539,13 +540,13 @@ function withoutHeader(
   name: string,
 ): Record<string, string | string[]> {
   const names = Object.keys(headers);
-  if (!names.some((key) => key.toLowerCase() === name)) {
+  if (!names.some((key) => lowerCaseHeaderName(key) === name)) {
     return headers;
   }
 
   const result: Record<string, string | string[]> = {};
   for (const key of names) {
-    if (key.toLowerCase() !== name) {
+    if (lowerCaseHeaderName(key) !== name) {
       // Defined, as every other header record is: a `__proto__` header was dropped (or,
       // as an array, became the record's prototype).
       defineEntry(result, key, headers[key]);

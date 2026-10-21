@@ -21,7 +21,11 @@ import {
   STREAM_ABORT_STATUS_KEY,
 } from './consts';
 import { CookieJar } from './cookie-jar';
-import { materializeRequestHeaders } from './internal/header-utils';
+import {
+  isBrowserRestrictedHeader,
+  materializeRequestHeaders,
+} from './internal/header-utils';
+import { knownBodyByteLength } from './internal/progress';
 import { sleep } from '../sleep';
 import {
   matchesCORSCredentialsList,
@@ -7242,4 +7246,51 @@ test('round 138: a decomposed Unicode label is measured composed; an Expect head
     },
   );
   expect(() => client.get(hostile as unknown as string)).toThrow(TypeError);
+});
+
+test('round 140: a decode failure after the raw body ended reaches a pending stream setup', async () => {
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, { 'content-encoding': 'gzip' });
+    res.end('not gzip at all, and the body ends here');
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    // No timeout: before, an async factory waited for ever.
+    const client = new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL,
+      timeout: 0,
+    });
+    const started = Date.now();
+    const builder = client.get('/').streamResponse(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
+      return new Writable({
+        write(_chunk, _encoding, done) {
+          done();
+        },
+      });
+    });
+    await builder.send();
+    expect(builder.error?.code).toBe('stream_response_error');
+    // Settled when decoding failed, not once the factory was done.
+    expect(Date.now() - started).toBeLessThan(1_500);
+  } finally {
+    server.close();
+  }
+}, 10_000);
+
+test('round 140: a hostile body is of unknown size, not a throw; header names are matched in ASCII case on the way out', () => {
+  const hostile = new Proxy(
+    {},
+    {
+      getPrototypeOf() {
+        throw new Error('boom');
+      },
+    },
+  );
+  expect(knownBodyByteLength(hostile)).toBeUndefined();
+
+  // The Kelvin-sign name is no `x-key`, so a real one is kept apart from it.
+  expect(isBrowserRestrictedHeader('\u212Aeep-Alive', 'x')).toBe(false);
 });

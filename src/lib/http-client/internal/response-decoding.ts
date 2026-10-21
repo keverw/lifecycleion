@@ -40,6 +40,12 @@ export interface ResponseBodySource {
    * report it rather than a generic one.
    */
   heldError?(): Error | undefined;
+  /**
+   * Told of a decoding failure the moment it is found, whether or not a reader has
+   * attached - for a setup waiting on its stream factory, which no raw-response event
+   * reports once the raw body has already ended. Returns the unsubscribe.
+   */
+  onFailure?(listener: (error: Error) => void): () => void;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the emitter signature
   on(event: string, listener: (...args: any[]) => void): unknown;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- the emitter signature
@@ -51,6 +57,9 @@ export interface ResponseBodySource {
 type ContentCoding = 'gzip' | 'deflate' | 'br' | 'zstd';
 
 type Decoder = NodeJS.ReadWriteStream & {
+  /** Set once the stream has emitted `'close'` (or been destroyed), as every zlib and `Transform` stream reports. */
+  readonly closed?: boolean;
+  readonly destroyed?: boolean;
   destroy(error?: Error): unknown;
   pause(): unknown;
   resume(): unknown;
@@ -153,6 +162,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   /** Raw bytes that arrived before the decoders were attached: the first chunk. */
   private rawBytes = 0;
   private readonly held: Array<{ event: string; args: unknown[] }> = [];
+  private readonly failureListeners = new Set<(error: Error) => void>();
 
   constructor(
     private readonly res: http.IncomingMessage,
@@ -211,7 +221,14 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       if (this.didRawEnd || this.didDecodeEnd) {
         const last = this.decoders.at(-1);
 
-        if (this.didDecodeEnd || last === undefined) {
+        // Or the last decoder already closed - destroyed by a decoding failure after the
+        // raw body ended - whose `'close'` a listener added now would never see.
+        if (
+          this.didDecodeEnd ||
+          last === undefined ||
+          last.closed === true ||
+          last.destroyed === true
+        ) {
           this.deliver('close');
         } else {
           last.once('close', () => this.deliver('close'));
@@ -235,6 +252,14 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     res.once('data', (first: Buffer) => {
       this.attachDecoders(first);
     });
+  }
+
+  public onFailure(listener: (error: Error) => void): () => void {
+    this.failureListeners.add(listener);
+
+    return () => {
+      this.failureListeners.delete(listener);
+    };
   }
 
   public heldError(): Error | undefined {
@@ -431,6 +456,13 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   private deliver(event: string, ...args: unknown[]): void {
     if (this.isDestroyed) {
       return;
+    }
+
+    const failure: unknown = args[0];
+    if (event === 'error' && failure instanceof Error) {
+      for (const listener of [...this.failureListeners]) {
+        listener(failure);
+      }
     }
 
     // Held behind what is already held, too: the held events are flushed a microtask

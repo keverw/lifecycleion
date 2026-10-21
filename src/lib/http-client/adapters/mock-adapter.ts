@@ -1013,7 +1013,7 @@ function hasHeader(
   name: string,
 ): boolean {
   return Object.keys(headers).some(
-    (k) => k.toLowerCase() === name.toLowerCase(),
+    (k) => lowerCaseHeaderName(k) === lowerCaseHeaderName(name),
   );
 }
 

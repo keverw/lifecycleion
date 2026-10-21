@@ -65,12 +65,19 @@ export function knownBodyByteLength(body: unknown): number | undefined {
     return new TextEncoder().encode(body).byteLength;
   }
 
-  if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
-    return body.byteLength;
-  }
+  // Guarded: the body is the caller's, and a Proxy whose `getPrototypeOf` throws made
+  // these `instanceof` checks throw from inside an XHR event listener - an uncaught
+  // exception on the global channel rather than a size that cannot be known.
+  try {
+    if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
+      return body.byteLength;
+    }
 
-  if (typeof Blob !== 'undefined' && body instanceof Blob) {
-    return body.size;
+    if (typeof Blob !== 'undefined' && body instanceof Blob) {
+      return body.size;
+    }
+  } catch {
+    // Unknowable, as for a body of another kind.
   }
 
   return undefined;

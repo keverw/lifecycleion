@@ -41,6 +41,7 @@ import {
   normalizeHTTPMethod,
   describeInvalidHTTPMethod,
   isPlainJSONBodyObject,
+  lowerCaseHeaderName,
   normalizeAdapterResponseHeaders,
   parseContentType,
   resolveAbsoluteURL,
@@ -2107,7 +2108,7 @@ export class BaseHTTPClient {
       ]);
 
       for (const [key, value] of Object.entries(request.headers)) {
-        const lower = key.toLowerCase();
+        const lower = lowerCaseHeaderName(key);
 
         if (safelisted.has(lower)) {
           safeHeaders[lower] = value;
@@ -2137,7 +2138,7 @@ export class BaseHTTPClient {
             'content-encoding',
             'content-language',
             'content-location',
-          ].includes(key.toLowerCase())
+          ].includes(lowerCaseHeaderName(key))
         ) {
           delete headers[key];
         }
@@ -4508,7 +4509,7 @@ export class BaseHTTPClient {
         // As `mergeHeaders` reads a record: an unset value removes the header, whatever
         // the capitalization of the entry that set it, as the request itself would.
         const value = normalizeMergedHeaderValue(sourceHeaders[name]);
-        const lowerName = name.toLowerCase();
+        const lowerName = lowerCaseHeaderName(name);
         if (value === undefined) {
           delete headers[lowerName];
         } else {

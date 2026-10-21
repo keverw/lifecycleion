@@ -556,11 +556,6 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
 }
 
 /**
- * Normalize a wildcard domain pattern by preserving wildcard labels
- * and punycode only non-wildcard labels. Also trims and removes
- * a trailing dot if present.
- */
-/**
  * A cheap guard before TR46 runs on a label: only a label far past any that could
  * normalize to 63 characters is refused here. The real limit is checked on the ASCII
  * result - a raw count was wrong both ways round, since a label typed decomposed (NFD)
@@ -571,6 +566,11 @@ export function isLabelTooLongToNormalize(label: string): boolean {
   return label.length > 1024;
 }
 
+/**
+ * Normalize a wildcard domain pattern by preserving wildcard labels
+ * and punycode only non-wildcard labels. Also trims and removes
+ * a trailing dot if present.
+ */
 export function normalizeWildcardPattern(pattern: string): string {
   // Not NFC-normalized first: each label goes through TR46, which normalizes after
   // mapping, as the URL parser does (see `normalizeHostText`).
