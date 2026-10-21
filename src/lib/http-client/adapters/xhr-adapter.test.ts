@@ -1,12 +1,14 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import vm from 'node:vm';
 import { XHRAdapter } from './xhr-adapter';
-import { HTTPClient } from '../http-client';
+import type { AdapterRequest } from '../types';
 import {
+  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_ABORT_STATUS_KEY,
   XHR_BROWSER_TIMEOUT_FLAG,
 } from '../consts';
+import { HTTPClient } from '../http-client';
 
 // ---------------------------------------------------------------------------
 // Fake XMLHttpRequest
@@ -101,6 +103,12 @@ class FakeXHR {
   public simulateLoad() {
     for (const h of this.handlers['load'] ?? []) {
       h(new Event('load'));
+    }
+  }
+
+  public simulateLoadEnd() {
+    for (const h of this.handlers['loadend'] ?? []) {
+      h(new Event('loadend'));
     }
   }
 
@@ -481,6 +489,93 @@ describe('XHRAdapter', () => {
     expect(response.headers['x-key']).toBe('a');
     // Kept under its own name, not folded in or dropped.
     expect(response.headers['x-\u212Aey']).toBe('b');
+  });
+
+  test('audit: request fields are read once, so a listener never reads one again', async () => {
+    let methodReads = 0;
+    const request = {
+      requestURL: 'https://api.test/data',
+      headers: {},
+      get method() {
+        methodReads++;
+        if (methodReads > 1) {
+          throw new Error('method read again');
+        }
+        return 'GET';
+      },
+    } as unknown as AdapterRequest;
+    const promise = new XHRAdapter().send(request);
+
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    expect(() => lastXHR.simulateLoad()).not.toThrow();
+
+    expect((await promise).status).toBe(200);
+    expect(methodReads).toBe(1);
+  });
+
+  test('audit: a method open takes as a number is read as the string it sent', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 1 as unknown as 'GET',
+      headers: {},
+    });
+
+    expect(lastXHR.openArgs?.method).toBe('1');
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    expect(() => lastXHR.simulateLoad()).not.toThrow();
+    expect((await promise).status).toBe(200);
+  });
+
+  test('audit: a request field that throws when read rejects rather than throwing', async () => {
+    const request = {
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+      get onUploadProgress() {
+        throw new Error('getter failed');
+      },
+    } as unknown as AdapterRequest;
+    let thrown: unknown;
+    let promise: Promise<unknown> = Promise.resolve();
+    try {
+      promise = new XHRAdapter().send(request);
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect(thrown).toBeUndefined();
+    const outcome = await promise.then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    expect((outcome as Error).message).toBe('getter failed');
+    expect(
+      (outcome as Record<string, unknown>)[
+        NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG
+      ],
+    ).toBe(true);
+  });
+
+  test('audit: a signal that throws on removal does not throw out of loadend', async () => {
+    const controller = new AbortController();
+    const signal = controller.signal;
+    signal.removeEventListener = () => {
+      throw new Error('removal refused');
+    };
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+      signal,
+    });
+
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    expect(() => lastXHR.simulateLoadEnd()).not.toThrow();
+    expect((await promise).status).toBe(200);
   });
 
   test('returns status and body on successful load', async () => {

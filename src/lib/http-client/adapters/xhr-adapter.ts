@@ -45,27 +45,30 @@ export class XHRAdapter implements HTTPAdapter {
     return 'xhr';
   }
 
-  public send(request: AdapterRequest): Promise<AdapterResponse> {
-    // Guarded once, at the boundary, so every call site below is covered. Progress reporting is advisory and must not be able to
-    // change whether a request succeeded; a throwing callback used to propagate out and be
-    // classified as a transport failure. See `guardProgressCallback`.
-    const guardedUploadProgress = guardProgressCallback(
-      request.onUploadProgress,
-      'onUploadProgress',
-    );
-    const guardedDownloadProgress = guardProgressCallback(
-      request.onDownloadProgress,
-      'onDownloadProgress',
-    );
-    const dispatchedURL = stripCrossOriginURLCredentials(
-      request.requestURL,
-      request.initialURL,
-    );
-    // The most a buffered body may hold; `Infinity` for none.
-    const maxResponseBytes = readMaxResponseBytes(request);
+  // Async, so a request field that throws when read rejects rather than throwing out of
+  // `send` - refused as non-retryable, as a method or header value `open` will not take
+  // is: the same request fails the same way on every attempt.
+  public async send(request: AdapterRequest): Promise<AdapterResponse> {
+    let fields: ReturnType<typeof readRequestFields>;
+    try {
+      fields = readRequestFields(request);
+    } catch (error) {
+      throw nonRetryableAdapterErrorFrom(error);
+    }
+    const {
+      givenMethod,
+      requestBody,
+      signal,
+      guardedUploadProgress,
+      guardedDownloadProgress,
+      dispatchedURL,
+      maxResponseBytes,
+    } = fields;
 
-    return new Promise((resolve, reject) => {
+    return await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
+      // As `open` reads it: anything is converted to a string there.
+      let method = '';
       /** A redirect the browser followed before an abort, read before `abort()` resets it. */
       let followedRedirectBeforeAbort: string | undefined;
       /** The answer an abort landed on, read before `abort()` resets it. */
@@ -84,7 +87,8 @@ export class XHRAdapter implements HTTPAdapter {
       try {
         // responseType 'arraybuffer' gives us a raw ArrayBuffer on load,
         // consistent with how FetchAdapter and NodeAdapter deliver body bytes.
-        xhr.open(request.method, dispatchedURL);
+        method = String(givenMethod);
+        xhr.open(method, dispatchedURL);
         xhr.responseType = 'arraybuffer';
 
         // Timeout is managed by the client via the abort signal — the client's
@@ -126,13 +130,12 @@ export class XHRAdapter implements HTTPAdapter {
       // Check for pre-aborted signal before calling xhr.send — if we called
       // send first and then aborted, the abort event fires asynchronously and
       // we'd resolve the promise rather than reject it with an AbortError.
-      if (request.signal) {
-        if (request.signal.aborted) {
+      if (signal) {
+        if (signal.aborted) {
           reject(new DOMException('Request aborted', 'AbortError'));
           return;
         }
 
-        const signal = request.signal;
         const onAbort = (): void => {
           // Read before `abort()`, which resets the status to `0`: a timeout that lands
           // once the headers are in has a real answer behind it, and FetchAdapter
@@ -179,7 +182,13 @@ export class XHRAdapter implements HTTPAdapter {
         // per request, until the signal finally aborted or was collected.
         // `loadend` fires after load, error, timeout and abort alike.
         xhr.addEventListener('loadend', () => {
-          signal.removeEventListener('abort', onAbort);
+          // Guarded: a signal of the caller's own that throws on removal would throw out
+          // of this listener, as an uncaught exception.
+          try {
+            signal.removeEventListener('abort', onAbort);
+          } catch {
+            // The listener stays; `once` still bounds it to one call.
+          }
         });
       }
 
@@ -235,7 +244,7 @@ export class XHRAdapter implements HTTPAdapter {
         if (!didFireUpload100) {
           // The body's own size where the browser reported none - `0` for an empty
           // string, as FetchAdapter reports it - not a stand-in `1`.
-          const knownBytes = knownBodyByteLength(request.body) ?? 0;
+          const knownBytes = knownBodyByteLength(requestBody) ?? 0;
           const finalLoaded = uploadedBytes > 0 ? uploadedBytes : knownBytes;
           const finalTotal =
             uploadTotalBytes > 0 ? uploadTotalBytes : knownBytes;
@@ -375,7 +384,7 @@ export class XHRAdapter implements HTTPAdapter {
         const responseHeaders = parseXHRResponseHeaders(
           xhr.getAllResponseHeaders(),
         );
-        const body = readResponseBody(request.method, xhr);
+        const body = readResponseBody(method, xhr);
 
         // The body as handed over can be larger than the bytes progress counted - a
         // compressed response is counted encoded there - and a browser need not report
@@ -482,12 +491,12 @@ export class XHRAdapter implements HTTPAdapter {
       // Checked again here: a cancel from the 0% upload progress callback above aborts the
       // signal while the XHR is opened but not sent, where `xhr.abort()` does nothing and
       // fires no event - so the request would go out regardless, its one-shot listener spent.
-      if (request.signal?.aborted) {
+      if (signal?.aborted) {
         reject(new DOMException('Request aborted', 'AbortError'));
         return;
       }
 
-      xhr.send(prepareBody(request.body));
+      xhr.send(prepareBody(requestBody));
     });
   }
 }
@@ -495,6 +504,37 @@ export class XHRAdapter implements HTTPAdapter {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * The request's fields, each read once, before the XHR is built: its event listeners read
+ * them again otherwise, where a getter that throws - or a method `open` took as a number -
+ * is an uncaught exception and a request that never settles.
+ */
+function readRequestFields(request: AdapterRequest) {
+  return {
+    givenMethod: request.method,
+    requestBody: request.body,
+    signal: request.signal,
+    // Guarded once, at the boundary, so every call site is covered. Progress reporting
+    // is advisory and must not be able to change whether a request succeeded; a throwing
+    // callback used to propagate out and be classified as a transport failure. See
+    // `guardProgressCallback`.
+    guardedUploadProgress: guardProgressCallback(
+      request.onUploadProgress,
+      'onUploadProgress',
+    ),
+    guardedDownloadProgress: guardProgressCallback(
+      request.onDownloadProgress,
+      'onDownloadProgress',
+    ),
+    dispatchedURL: stripCrossOriginURLCredentials(
+      request.requestURL,
+      request.initialURL,
+    ),
+    // The most a buffered body may hold; `Infinity` for none.
+    maxResponseBytes: readMaxResponseBytes(request),
+  };
+}
 
 /**
  * The response for a redirect the browser followed on its own: `status: 0` with the

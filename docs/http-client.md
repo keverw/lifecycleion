@@ -1741,12 +1741,12 @@ One `'error'` listener is shared per writable rather than per request, so ten co
 downloads into one sink attach one listener between them, not ten. It comes off at the
 first of these:
 
-| Signal                             | What happens                                                                                                                                                                                                                           |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| The `'error'` arrives              | Absorbed, and reported through the host error reporter unless the request already handed it to you as `errorCause`. Released one turn later, so a sibling request's late error is still covered                                        |
-| `'close'`                          | The stream has finished tearing down and nothing further is coming, so it is released immediately                                                                                                                                      |
-| ~1 second with neither             | The per-request window. Every request that settles while the listener is already attached restarts it, so each gets a window of its own rather than the remainder of the first one's, clamped by whatever is left of the ceiling below |
-| ~5 seconds since it first attached | The absolute ceiling on one listener, which no amount of restarting extends                                                                                                                                                            |
+| Signal                             | What happens                                                                                                                                                                                                                                                                                     |
+| ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| The `'error'` arrives              | Absorbed, and reported through the host error reporter unless the request already handed it to you as `errorCause`. Released one turn later, so a sibling request's late error is still covered                                                                                                  |
+| `'close'`                          | The stream has finished tearing down and nothing further is coming, so it is released immediately                                                                                                                                                                                                |
+| ~1 second with neither             | The per-request window. Every request that settles while the listener is already attached restarts it, so each gets a window of its own rather than the remainder of the first one's. With less than a whole window left before the ceiling below, the request attaches a fresh listener instead |
+| ~5 seconds since it first attached | The absolute ceiling on one listener, which no amount of restarting extends                                                                                                                                                                                                                      |
 
 That last row is the one to hold on to: **the absorber does not live forever, and it is not
 per process.** Without the ceiling, a caller streaming continuously into `process.stdout` or
@@ -1765,6 +1765,13 @@ factory is still awaiting, the adapter destroys the writable the factory eventua
 returns, with this listener attached first. An error that writable emits anyway, such as a
 `createWriteStream()` into a missing directory failing to open, is reported through the
 host error reporter, because the request it belonged to has already answered.
+
+It also covers a writable a synchronous factory returns already failed (destroyed with an
+error): that error is emitted before the request can listen, so the absorber holds it,
+and the request settles as a `stream_write_error` with that error as its cause. An `async`
+factory's writable is not the adapter's until its promise resolves, so one it fails before
+returning (`destroy(error)` before the first `await`) can emit that error first, with no
+listener anywhere: attach your own `'error'` listener before failing a stream you return.
 
 That destroy is one of three: the adapter also destroys the writable when the request is
 cancelled or times out mid-stream, and when the stream fails mid-body. A sink handed to

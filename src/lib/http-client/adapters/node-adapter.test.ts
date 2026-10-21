@@ -3879,6 +3879,149 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     expect(reports).toEqual([]);
   });
 
+  test('a request settling near the absorber lifetime cap still gets a full window', async () => {
+    // Renewing an absorber close to its lifetime cap gave the request only what was left
+    // of it - a few milliseconds - so a late error inside the window it relied on found
+    // no listener. Too little left is now out of lifetime: a fresh absorber is attached.
+    const sink = new EventEmitter() as EventEmitter & {
+      write: () => boolean;
+      end: () => never;
+      destroy: () => void;
+    };
+    sink.write = () => true;
+    sink.end = () => {
+      throw new Error('sync end boom');
+    };
+    sink.destroy = () => undefined;
+
+    const runOnce = async (): Promise<void> => {
+      const req = new MockClientRequest();
+      const res = new MockIncomingMessage(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': '1',
+      });
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        (_options, callback) => {
+          const cb = callback as
+            ((res: http.IncomingMessage) => void) | undefined;
+          queueMicrotask(() => {
+            cb?.(res as unknown as http.IncomingMessage);
+            queueMicrotask(() => {
+              res.emit('data', Buffer.from('a'));
+              res.emit('end');
+            });
+          });
+          return req as unknown as http.ClientRequest;
+        },
+      );
+
+      try {
+        const response = await new NodeAdapter().send({
+          requestURL: 'http://example.test/data',
+          method: 'GET',
+          headers: {},
+          streamResponse: () => sink,
+        });
+
+        expect(response.streamErrorCode).toBe('stream_write_error');
+      } finally {
+        requestSpy.mockRestore();
+      }
+    };
+
+    await runOnce();
+
+    // 10 ms of the absorber's 5 s lifetime left when the second request settles.
+    const realNow = performance.now();
+    const nowSpy = spyOn(performance, 'now').mockImplementation(
+      () => realNow + 4990,
+    );
+
+    try {
+      await runOnce();
+    } finally {
+      nowSpy.mockRestore();
+    }
+
+    const reports: ErrorEvent[] = [];
+    const onError = (event: Event): void => {
+      reports.push(event as ErrorEvent);
+      event.preventDefault();
+    };
+    globalThis.addEventListener('error', onError);
+
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      // An `EventEmitter` throws an `'error'` nobody listens for.
+      expect(() =>
+        sink.emit('error', new Error('late close failure')),
+      ).not.toThrow();
+      await new Promise<void>((done) => {
+        setImmediate(done);
+      });
+    } finally {
+      globalThis.removeEventListener('error', onError);
+    }
+
+    expect(reports.map((event) => (event.error as Error).message)).toEqual([
+      'late close failure',
+    ]);
+  });
+
+  test('a sink the factory returns already failing settles with its error, not an uncaught one', async () => {
+    // A stream destroyed with an error emits it on a `nextTick`, which ran ahead of the
+    // handoff a synchronous factory's return waits for - before any listener was on it.
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '1',
+    });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        setImmediate(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          setImmediate(() => {
+            res.emit('data', Buffer.from('a'));
+            res.emit('end');
+          });
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+    const uncaught: unknown[] = [];
+    const onUncaught = (error: unknown): void => {
+      uncaught.push(error);
+    };
+    process.on('uncaughtException', onUncaught);
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        streamResponse: () => {
+          const sink = new Writable({
+            write: (_chunk, _encoding, done) => done(),
+          });
+          sink.destroy(new Error('sink failed at open'));
+          return sink;
+        },
+      });
+      await new Promise<void>((done) => {
+        setImmediate(done);
+      });
+
+      expect(uncaught).toEqual([]);
+      expect(response.streamErrorCode).toBe('stream_write_error');
+      expect(response.errorCause?.message).toBe('sink failed at open');
+    } finally {
+      process.off('uncaughtException', onUncaught);
+      requestSpy.mockRestore();
+    }
+  });
+
   test('a refused removal keeps the absorber tracked instead of stacking another', async () => {
     // The removal method is caller code and can refuse. When it does, the absorber is
     // still attached, so its bookkeeping is kept rather than dropped - dropping it would

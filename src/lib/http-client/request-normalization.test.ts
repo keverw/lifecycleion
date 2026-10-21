@@ -7656,3 +7656,20 @@ test('round 140 review 10: a body paused again before the release holds its end 
   await new Promise((resolve) => setImmediate(resolve));
   expect(events).toEqual(['end']);
 });
+
+test('round 140 review 11: a paused gzip body cut short mid-body delivers its close without a resume', async () => {
+  const res = stubResponse();
+  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const events: string[] = [];
+  source.on('data', () => undefined);
+  source.on('aborted', () => events.push('aborted'));
+  source.on('close', () => events.push('close'));
+  const whole = zlib.gzipSync(Buffer.alloc(64 * 1024, 'a'));
+  (res as unknown as PassThrough).write(whole.subarray(0, whole.length >> 1));
+  await new Promise((resolve) => setImmediate(resolve));
+  source.pause();
+  (res as unknown as PassThrough).emit('aborted');
+  (res as unknown as PassThrough).destroy();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(events).toEqual(['aborted', 'close']);
+});

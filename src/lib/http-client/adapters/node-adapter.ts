@@ -1624,6 +1624,14 @@ export class NodeAdapter implements HTTPAdapter {
                   writable = (await pending).value as
                     WritableLike | null | StreamResponseCancel;
                 } else {
+                  // A sink the factory already failed - destroyed with an error - emits
+                  // it on a `nextTick`, which runs ahead of the handoff below and of any
+                  // listener of this request's. The late-error absorber covers it
+                  // meanwhile, on whichever exit follows, and reports it unless the
+                  // request settles with it (see `streamResponseBody`'s `errored` read).
+                  // Anything not a writable is skipped there.
+                  absorbPendingWritableError(returned as WritableLike);
+
                   // Preserve the one-turn sync-factory handoff without adopting its
                   // writable again or adding extra microtasks before stream listeners.
                   await Promise.resolve(undefined);
@@ -2745,6 +2753,20 @@ async function streamResponseBody(
       settle({ code: 'stream_response_error', cause: streamError });
     };
 
+    // A sink that failed before a byte was handed to it - one its factory destroyed with
+    // an error - settles with that error at once, the response never resumed: written to,
+    // it fails only with a destroyed-stream error that hides the real one. Claimed, so the
+    // absorber that covered its early `'error'` does not report it again.
+    const erroredAtStart: unknown = readObjectMember(writable, 'errored');
+    if (erroredAtStart !== null && erroredAtStart !== undefined) {
+      claimWritableError(erroredAtStart);
+      settle({
+        code: 'stream_write_error',
+        cause: normalizeError(erroredAtStart),
+      });
+      return;
+    }
+
     // Through `attachWritableListener`, which for a writable that defines neither `off`
     // nor `removeListener` registers with one permanent listener per event instead of
     // adding another of its own. `off` and `removeListener` are both optional on
@@ -2973,8 +2995,11 @@ function absorbPendingWritableError(writable: WritableLike): void {
 
     // Out of lifetime, so this is the last word rather than another window: see
     // `MAX_PENDING_WRITABLE_ERROR_LIFETIME_MS` for why an unconditional restart is a
-    // deadline that never arrives.
-    if (remainingLifetime <= 0) {
+    // deadline that never arrives. Too little left for a whole window counts as out:
+    // renewed with the remainder, a request settling near the cap was covered for a few
+    // milliseconds, and a late error inside the window it relied on went uncaught. Out,
+    // it attaches a fresh absorber with a whole window of its own.
+    if (remainingLifetime < PENDING_WRITABLE_ERROR_WINDOW_MS) {
       detach();
 
       // Not simply `false`: `detach` returns early when the writable refuses to give
@@ -2988,10 +3013,7 @@ function absorbPendingWritableError(writable: WritableLike): void {
       // Scheduled before the old one is cleared, never after. A `setTimeout` that
       // refuses would otherwise leave this absorber with the bound it already had
       // cleared and no replacement - unbounded, by way of the code that bounds it.
-      const next = setTimeout(
-        detach,
-        Math.min(PENDING_WRITABLE_ERROR_WINDOW_MS, remainingLifetime),
-      );
+      const next = setTimeout(detach, PENDING_WRITABLE_ERROR_WINDOW_MS);
 
       next.unref?.();
 
