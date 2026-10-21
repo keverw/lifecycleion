@@ -7358,3 +7358,29 @@ test('round 140 review 2: exact and wildcard entries agree on an over-long label
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(told).toEqual([]);
 });
+
+test('round 140 review 3: a raw error held before onFailure subscribes is not replayed to it', async () => {
+  const res = stubResponse();
+  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  // No reader: the raw error is held.
+  (res as unknown as PassThrough).emit('error', new Error('socket reset'));
+  const told: Error[] = [];
+  source.onFailure?.((error) => told.push(error));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(told).toEqual([]);
+});
+
+test('round 140 review 3: a decoding failure after the raw end reaches the reader before close', async () => {
+  const res = stubResponse();
+  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const events: string[] = [];
+  source.on('error', () => events.push('error'));
+  source.on('close', () => events.push('close'));
+  source.on('data', () => undefined);
+  (res as unknown as PassThrough).end(Buffer.from('not gzip at all'));
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  (res as unknown as PassThrough).destroy();
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  expect(events[0]).toBe('error');
+  expect(events).toContain('close');
+});

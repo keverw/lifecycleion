@@ -499,7 +499,12 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
 
   // The same guard a wildcard pattern's labels get, so an exact entry and its wildcard
   // agree on a label too long to be worth normalizing.
-  if (normalized.split('.').some((label) => isLabelTooLongToNormalize(label))) {
+  // A cheap guard before TR46: a label past 1024 characters is refused unnormalized. The
+  // real 63-character limit is held on the ASCII result - a raw count was wrong both
+  // ways round, as a label typed decomposed (NFD) is longer than it normalizes to and
+  // TR46 drops characters such as a soft hyphen. Once, here, for every caller: exact
+  // entries and each wildcard label alike pass through, so they cannot disagree.
+  if (/[^.]{1025}/.test(normalized)) {
     return '';
   }
 
@@ -561,17 +566,6 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
 }
 
 /**
- * A cheap guard before TR46 runs on a label: only a label far past any that could
- * normalize to 63 characters is refused here. The real limit is checked on the ASCII
- * result - a raw count was wrong both ways round, since a label typed decomposed (NFD)
- * is longer than it normalizes to, and TR46 drops characters such as a soft hyphen
- * altogether, so an exact entry was accepted where its wildcard was refused.
- */
-export function isLabelTooLongToNormalize(label: string): boolean {
-  return label.length > 1024;
-}
-
-/**
  * Normalize a wildcard domain pattern by preserving wildcard labels
  * and punycode only non-wildcard labels. Also trims and removes
  * a trailing dot if present.
@@ -618,10 +612,6 @@ export function normalizeWildcardPattern(pattern: string): string {
     if (lbl === '*' || lbl === '**') {
       normalizedLabels.push(lbl);
       continue;
-    }
-
-    if (isLabelTooLongToNormalize(lbl)) {
-      return ''; // sentinel for invalid pattern
     }
 
     const nd = normalizeDomainName(lbl);

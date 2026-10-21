@@ -1,7 +1,6 @@
 import { getDomain, getSubdomain, getPublicSuffix } from 'tldts';
 import {
   isAllWildcards,
-  isLabelTooLongToNormalize,
   hasPartialLabelWildcard,
   checkDNSLength,
   normalizeDomain,
@@ -683,10 +682,6 @@ export function validateConfigEntry(
         continue;
       }
 
-      if (isLabelTooLongToNormalize(lbl)) {
-        return false;
-      }
-
       const nd = normalizeDomainName(lbl);
 
       if (nd === '') {
@@ -1313,10 +1308,6 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
     for (const lbl of labels) {
       if (lbl === '*' || lbl === '**') {
         continue;
-      }
-
-      if (isLabelTooLongToNormalize(lbl)) {
-        return false;
       }
 
       const nd = normalizeDomainName(lbl);

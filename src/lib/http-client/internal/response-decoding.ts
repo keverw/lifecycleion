@@ -17,6 +17,7 @@ import type * as http from 'node:http';
 import { Transform, type TransformCallback } from 'node:stream';
 import * as zlib from 'node:zlib';
 import { RESPONSE_DECODE_ERROR_KEY } from '../consts';
+import { reportCallbackError } from '../../safe-handle-callback';
 import { hasResponseBody } from './response-limit';
 
 /** The encodings NodeAdapter asks for and decodes, as `fetch` asks for them. */
@@ -164,6 +165,8 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   private rawBytes = 0;
   private readonly held: Array<{ event: string; args: unknown[] }> = [];
   private readonly failureListeners = new Set<(error: Error) => void>();
+  /** Listeners already told of a failure, so a queued replay does not tell them twice. */
+  private readonly notifiedListeners = new WeakSet<(error: Error) => void>();
 
   constructor(
     private readonly res: http.IncomingMessage,
@@ -227,10 +230,12 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
         // only, not `destroyed`: `destroy(error)` sets that at once and emits the error
         // and `'close'` a tick later, so delivering `close` on it settled the reader
         // before the tagged decoding error, as a plain closed stream.
+        // `closed` too, where a runtime sets it, beside the flag.
         if (
           this.didDecodeEnd ||
           last === undefined ||
-          this.didLastDecoderClose
+          this.didLastDecoderClose ||
+          last.closed === true
         ) {
           this.deliver('close');
         } else {
@@ -260,13 +265,18 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   public onFailure(listener: (error: Error) => void): () => void {
     this.failureListeners.add(listener);
 
-    // A failure already held - the coding chain refused in the constructor, before any
-    // subscriber - is told too, a microtask on, so a setup waiting on it need not hang
-    // on the raw response's `close` to hear of it.
+    // A decoding failure already held - the coding chain refused in the constructor,
+    // before any subscriber - is told too, a microtask on, so a setup waiting on it need
+    // not hang on the raw response's `close` to hear of it. A decoding failure only, as
+    // the live path tells; and not if a newer one reached the listener meanwhile.
     const held = this.heldError();
-    if (held !== undefined) {
+    if (held !== undefined && isDecodeFailure(held)) {
       queueMicrotask(() => {
-        if (!this.isDestroyed && this.failureListeners.has(listener)) {
+        if (
+          !this.isDestroyed &&
+          this.failureListeners.has(listener) &&
+          !this.notifiedListeners.has(listener)
+        ) {
           this.notifyFailure(listener, held);
         }
       });
@@ -478,10 +488,15 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
    * throw would unwind through zlib as an uncaught exception.
    */
   private notifyFailure(listener: (error: Error) => void, error: Error): void {
+    this.notifiedListeners.add(listener);
+
     try {
       listener(error);
-    } catch {
-      // The listener's own failure; the decoding failure is still delivered below.
+    } catch (error_) {
+      // Reported, not swallowed: a listener that failed partway may have left its own
+      // work undone, and nothing else would say so. The decoding failure is still
+      // delivered below.
+      reportCallbackError('response body failure listener', error_);
     }
   }
 
@@ -497,9 +512,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     if (
       event === 'error' &&
       failure instanceof Error &&
-      (failure as unknown as Record<PropertyKey, unknown>)[
-        RESPONSE_DECODE_ERROR_KEY
-      ] === true
+      isDecodeFailure(failure)
     ) {
       for (const listener of [...this.failureListeners]) {
         this.notifyFailure(listener, failure);
@@ -784,6 +797,15 @@ function readLittleEndian(bytes: number[]): number {
   }
 
   return value;
+}
+
+/** Whether `error` is a decoding failure this module tagged (see `markDecodeError`). */
+function isDecodeFailure(error: Error): boolean {
+  return (
+    (error as unknown as Record<PropertyKey, unknown>)[
+      RESPONSE_DECODE_ERROR_KEY
+    ] === true
+  );
 }
 
 function trailingBytesError(): Error {
