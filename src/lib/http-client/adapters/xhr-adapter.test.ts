@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
 import vm from 'node:vm';
 import { XHRAdapter } from './xhr-adapter';
 import type { AdapterRequest } from '../types';
+import { materializeRequestHeaders } from '../internal/header-utils';
 import {
   NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   RESPONSE_STREAM_ABORT_FLAG,
@@ -400,6 +401,32 @@ describe('XHRAdapter', () => {
     lastXHR.response = textBody('ok');
     lastXHR.simulateLoad();
     await promise;
+  });
+
+  test('PR review round 5: the Cookie header is the one NodeAdapter sends', async () => {
+    for (const headers of [
+      { Cookie: [], cookie: 'b=2' },
+      { cookie: ['a=1', ''] },
+      { Cookie: '', cookie: 'b=2' },
+      { Cookie: 'a=1', cookie: ['b=2', 'c=3'], accept: ['x', 'y'] },
+    ] as Array<Record<string, string | string[]>>) {
+      const expected = Object.entries(materializeRequestHeaders(headers)).find(
+        ([name]) => name.toLowerCase() === 'cookie',
+      )?.[1];
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/data',
+        method: 'GET',
+        headers,
+      });
+
+      expect(lastXHR.requestHeaders['cookie'] as string[] | undefined).toEqual(
+        expected === undefined ? undefined : [expected],
+      );
+      lastXHR.status = 200;
+      lastXHR.response = textBody('ok');
+      lastXHR.simulateLoad();
+      await promise;
+    }
   });
 
   test('round 136: an abort once the headers are in carries the real status', async () => {

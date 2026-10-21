@@ -113,6 +113,34 @@ export function assertNoBrowserRestrictedHeaders(
 }
 
 /**
+ * Every spelling of `Cookie` among `entries` as the one field NodeAdapter and MockAdapter
+ * send - {@link materializeRequestHeaders}' rule, for the adapters that build their own:
+ * each value read as {@link presentHeaderValue} reads it (an unset one, or an array with
+ * no items, left out), items and spellings joined with `; `, under the first set
+ * spelling's name. `undefined` when none is set.
+ */
+export function joinCookieHeader(
+  entries: ReadonlyArray<readonly [string, unknown]>,
+): { name: string; value: string } | undefined {
+  let name: string | undefined;
+  const parts: string[] = [];
+
+  for (const [key, value] of entries) {
+    if (lowerCaseHeaderName(key) !== 'cookie') {
+      continue;
+    }
+    const present = presentHeaderValue(value);
+    if (present === undefined) {
+      continue;
+    }
+    name ??= key;
+    parts.push(Array.isArray(present) ? present.join('; ') : present);
+  }
+
+  return name === undefined ? undefined : { name, value: parts.join('; ') };
+}
+
+/**
  * Join repeated request header values into the single field each transport sends:
  * `; ` for `Cookie` (the RFC 6265 cookie-pair delimiter), `, ` for everything else.
  * Shared by NodeAdapter and MockAdapter, so it stays free of Node-only imports.

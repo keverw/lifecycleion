@@ -1,4 +1,7 @@
-import { lowerCaseHeaderName } from '../internal/header-utils';
+import {
+  joinCookieHeader,
+  lowerCaseHeaderName,
+} from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 import {
@@ -107,21 +110,13 @@ export class XHRAdapter implements HTTPAdapter {
         // and is silently dropped by the browser regardless; the browser manages
         // cookies on its own.
         //
-        // Except `cookie`, joined with `; ` as the other adapters join it - its values
-        // and every spelling of its name, set once under the first: where XHR runs
-        // outside a browser (React Native, a test shim) it is sent, and `, ` read as one
-        // cookie.
-        let cookieName: string | undefined;
-        const cookieParts: string[] = [];
-        for (const [key, value] of Object.entries(request.headers)) {
+        // Except `cookie`, set once as NodeAdapter sends it - every spelling and item
+        // joined with `; `: where XHR runs outside a browser (React Native, a test shim)
+        // it is sent, and `, ` read as one cookie.
+        const headerEntries = Object.entries(request.headers);
+        for (const [key, value] of headerEntries) {
           if (lowerCaseHeaderName(key) === 'cookie') {
-            cookieName ??= key;
-            // Empty parts left out, as NodeAdapter leaves them.
-            for (const part of Array.isArray(value) ? value : [value]) {
-              if (part !== '') {
-                cookieParts.push(part);
-              }
-            }
+            continue;
           } else if (Array.isArray(value)) {
             for (const v of value) {
               xhr.setRequestHeader(key, v);
@@ -130,8 +125,9 @@ export class XHRAdapter implements HTTPAdapter {
             xhr.setRequestHeader(key, value);
           }
         }
-        if (cookieName !== undefined && cookieParts.length > 0) {
-          xhr.setRequestHeader(cookieName, cookieParts.join('; '));
+        const cookie = joinCookieHeader(headerEntries);
+        if (cookie !== undefined) {
+          xhr.setRequestHeader(cookie.name, cookie.value);
         }
       } catch (error) {
         refuse(error);

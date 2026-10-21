@@ -1,4 +1,7 @@
-import { lowerCaseHeaderName } from '../internal/header-utils';
+import {
+  joinCookieHeader,
+  lowerCaseHeaderName,
+} from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
 import {
   markResponseStreamAbort,
@@ -530,21 +533,8 @@ function materializeFetchHeaders(
 
   for (const [key, value] of entries) {
     if (lowerCaseHeaderName(key) === 'cookie') {
-      // Joined with `; ` onto any earlier spelling's (`Cookie` then `cookie`), as
-      // `materializeRequestHeaders` joins them: `set` replaced it, and `append` would
-      // join with `, `, which reads as one cookie.
-      // Empty parts left out, as NodeAdapter leaves them: `Cookie: []` sent no `; `.
-      const joined = (Array.isArray(value) ? value : [value])
-        .filter((part) => part !== '')
-        .join('; ');
-      if (joined === '') {
-        continue;
-      }
-      const existing = materialized.get(key);
-      materialized.set(
-        key,
-        existing === null ? joined : `${existing}; ${joined}`,
-      );
+      // Joined below, every spelling at once.
+      continue;
     } else if (Array.isArray(value)) {
       for (const item of value) {
         materialized.append(key, item);
@@ -552,6 +542,12 @@ function materializeFetchHeaders(
     } else {
       materialized.append(key, value);
     }
+  }
+
+  // As NodeAdapter sends it: `append` would join with `, `, which reads as one cookie.
+  const cookie = joinCookieHeader(entries);
+  if (cookie !== undefined) {
+    materialized.set(cookie.name, cookie.value);
   }
 
   return materialized;

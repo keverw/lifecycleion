@@ -4981,7 +4981,8 @@ function describeRequestPath(value: unknown): string {
  * internal slot measures them - a view or buffer of any kind, from any realm, not the
  * size the value reports - and a string as its UTF-8 length, counted only when its
  * UTF-16 length alone cannot tell (never fewer bytes than units, at most three per
- * unit). Anything else has no size.
+ * unit). Anything else - a value no intrinsic getter measures is not binary - has no
+ * size here.
  */
 function isAnsweredBodyOverLimit(body: unknown, maxBytes: number): boolean {
   if (typeof body === 'object' && body !== null) {

@@ -1170,19 +1170,22 @@ class CheckedHost {
 }
 
 /**
- * The last hostname checked, kept for the next check: every host-scoped interceptor and
- * observer of a request checks the same one, in turn, and its normalization - the URL
- * parser and IDNA - is the same answer each time. One entry, so it holds nothing past the
- * next request.
+ * The last request URL checked and its host, kept for the next check: every host-scoped
+ * interceptor and observer of a request checks the same URL, in turn, and parsing it and
+ * normalizing its host - the URL parser and IDNA - is the same answer each time. One
+ * entry, so it holds nothing past the next request.
  */
-let lastCheckedHost: CheckedHost | undefined;
+let lastChecked: { url: string; host: CheckedHost } | undefined;
 
-function checkedHostFor(hostname: string): CheckedHost {
-  if (lastCheckedHost?.hostname !== hostname) {
-    lastCheckedHost = new CheckedHost(hostname);
+function checkedHostFor(requestURL: string): CheckedHost {
+  if (lastChecked?.url !== requestURL) {
+    lastChecked = {
+      url: requestURL,
+      host: new CheckedHost(extractHostname(requestURL)),
+    };
   }
 
-  return lastCheckedHost;
+  return lastChecked.host;
 }
 
 /** The one place a host is matched against a read pattern, exact or wildcard. */
@@ -1403,7 +1406,7 @@ export function matchesFilter(
   // request whose URL could not be read (`''`) matches no host or scheme rather than
   // skipping the filter, so a host-scoped observer does not hear about other hosts.
   if (filter.hosts && context.requestURL !== undefined) {
-    const host = checkedHostFor(extractHostname(context.requestURL));
+    const host = checkedHostFor(context.requestURL);
     const { hosts, hostPatterns } = filter;
 
     if (

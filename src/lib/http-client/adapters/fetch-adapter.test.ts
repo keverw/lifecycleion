@@ -7,6 +7,7 @@ import {
   test,
 } from 'bun:test';
 import { FetchAdapter } from './fetch-adapter';
+import { materializeRequestHeaders } from '../internal/header-utils';
 import { serializeError } from '../../serialize-error';
 import { HTTPClient } from '../http-client';
 import { startTestServer, type TestServer } from '../test-helpers/test-server';
@@ -162,6 +163,38 @@ describe('FetchAdapter', () => {
     });
 
     expect(cookie).toBe('b=2');
+  });
+
+  test('PR review round 5: the Cookie header is the one NodeAdapter sends', async () => {
+    for (const headers of [
+      { Cookie: [], cookie: 'b=2' },
+      { cookie: ['a=1', ''] },
+      { Cookie: '', cookie: 'b=2' },
+      { Cookie: 'a=1', cookie: ['b=2', 'c=3'], accept: ['x', 'y'] },
+    ] as Array<Record<string, string | string[]>>) {
+      const expected = Object.entries(materializeRequestHeaders(headers)).find(
+        ([name]) => name.toLowerCase() === 'cookie',
+      )?.[1];
+      let sent = null as string | null;
+      (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {
+        sent =
+          init?.headers instanceof Headers
+            ? init.headers.get('cookie')
+            : ((Object.entries(init?.headers ?? {}).find(
+                ([name]) => name.toLowerCase() === 'cookie',
+              )?.[1] as string | undefined) ?? null);
+        return Promise.resolve(new Response('ok', { status: 200 }));
+      };
+
+      await new FetchAdapter().send({
+        requestURL: 'https://local.test/users',
+        method: 'GET',
+        headers,
+      });
+
+      // `Headers` trims each value, as fetch sends every header.
+      expect([headers, sent]).toEqual([headers, expected?.trim() ?? null]);
+    }
   });
 
   test('withholds URL userinfo on a cross-origin hop', async () => {
