@@ -818,8 +818,9 @@ export class NodeAdapter implements HTTPAdapter {
           | undefined;
         /**
          * A `streamResponse` factory that is still setting up its sink, or `undefined`
-         * outside that await. Set when the factory is called and cleared the moment it
-         * returns or throws; from there `streamResponseBody`'s handlers have the response.
+         * outside that await. Set a microtask before the factory is called (it is not
+         * called if the request ends in that microtask) and cleared the moment it returns
+         * or throws; from there `streamResponseBody`'s handlers have the response.
          */
         let pendingStreamSetup:
           | {
@@ -1603,6 +1604,19 @@ export class NodeAdapter implements HTTPAdapter {
                 // setup heard of it from nothing and an async factory waited until the
                 // timeout - or for ever with none.
                 stopWatchingDecodeFailure = body.onFailure?.(setupFailed);
+                // Called from a microtask, not from the response event's own turn: a sink
+                // the factory fails before handing it over - `destroy(error)`, sync or
+                // before an async factory's first `await` - emits that error on a
+                // `nextTick`, and Node and Bun run those only once the microtasks queued
+                // ahead of them are done. From here, the continuation that attaches this
+                // request's listener is one of them; from the event's own turn the error
+                // went first, to no listener at all - an uncaught exception.
+                await Promise.resolve(undefined);
+                // Cancelled, timed out, or the response failed meanwhile: the factory is
+                // not asked for a sink nothing will write to.
+                if (streamAbort.signal.aborted) {
+                  return;
+                }
                 const returned = request.streamResponse(
                   {
                     status: 200,
@@ -1624,17 +1638,8 @@ export class NodeAdapter implements HTTPAdapter {
                   writable = (await pending).value as
                     WritableLike | null | StreamResponseCancel;
                 } else {
-                  // A sink the factory already failed - destroyed with an error - emits
-                  // it on a `nextTick`, which runs ahead of the handoff below and of any
-                  // listener of this request's. The late-error absorber covers it
-                  // meanwhile, on whichever exit follows, and reports it unless the
-                  // request settles with it (see `streamResponseBody`'s `errored` read).
-                  // Anything not a writable is skipped there.
-                  absorbPendingWritableError(returned as WritableLike);
-
-                  // Preserve the one-turn sync-factory handoff without adopting its
-                  // writable again or adding extra microtasks before stream listeners.
-                  await Promise.resolve(undefined);
+                  // Not adopted again, and no turn added: the one before the call above
+                  // is a sync factory's handoff, so its listeners attach in that turn.
                   writable = returned as
                     WritableLike | null | StreamResponseCancel;
                 }

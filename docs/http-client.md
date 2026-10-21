@@ -1766,12 +1766,13 @@ returns, with this listener attached first. An error that writable emits anyway,
 `createWriteStream()` into a missing directory failing to open, is reported through the
 host error reporter, because the request it belonged to has already answered.
 
-It also covers a writable a synchronous factory returns already failed (destroyed with an
-error): that error is emitted before the request can listen, so the absorber holds it,
-and the request settles as a `stream_write_error` with that error as its cause. An `async`
-factory's writable is not the adapter's until its promise resolves, so one it fails before
-returning (`destroy(error)` before the first `await`) can emit that error first, with no
-listener anywhere: attach your own `'error'` listener before failing a stream you return.
+A writable the factory returns already failed (destroyed with an error, by a sync factory
+or an `async` one) settles the request as a `stream_write_error` with that error as its
+cause. The factory is called from a microtask, so the adapter's listener is on the
+writable before that error is emitted - as long as the factory returns it without waiting
+on I/O or a timer after failing it. A stream emits that error a tick after `destroy()`,
+and while an `async` factory waits on real I/O the stream is not the adapter's yet: give a
+stream you fail before such an `await` an `'error'` listener of your own.
 
 That destroy is one of three: the adapter also destroys the writable when the request is
 cancelled or times out mid-stream, and when the stream fails mid-body. A sink handed to

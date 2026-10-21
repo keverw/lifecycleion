@@ -3968,59 +3968,76 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     ]);
   });
 
-  test('a sink the factory returns already failing settles with its error, not an uncaught one', async () => {
-    // A stream destroyed with an error emits it on a `nextTick`, which ran ahead of the
-    // handoff a synchronous factory's return waits for - before any listener was on it.
-    const req = new MockClientRequest();
-    const res = new MockIncomingMessage(200, {
-      'content-type': 'application/octet-stream',
-      'content-length': '1',
+  const failedSink = (): Writable => {
+    const sink = new Writable({
+      write: (_chunk, _encoding, done) => done(),
     });
-    const requestSpy = spyOn(http, 'request').mockImplementation(
-      (_options, callback) => {
-        const cb = callback as
-          ((res: http.IncomingMessage) => void) | undefined;
-        setImmediate(() => {
-          cb?.(res as unknown as http.IncomingMessage);
-          setImmediate(() => {
-            res.emit('data', Buffer.from('a'));
-            res.emit('end');
-          });
-        });
-        return req as unknown as http.ClientRequest;
+    sink.destroy(new Error('sink failed at open'));
+    return sink;
+  };
+
+  test.each([
+    ['a synchronous', failedSink],
+    // Failed before its first `await`, so before the adapter could have it.
+    ['an async (failed at once)', async () => Promise.resolve(failedSink())],
+    [
+      'an async (failed before a microtask await)',
+      async () => {
+        const sink = failedSink();
+        await Promise.resolve();
+        return sink;
       },
-    );
-    const uncaught: unknown[] = [];
-    const onUncaught = (error: unknown): void => {
-      uncaught.push(error);
-    };
-    process.on('uncaughtException', onUncaught);
-
-    try {
-      const response = await new NodeAdapter().send({
-        requestURL: 'http://example.test/data',
-        method: 'GET',
-        headers: {},
-        streamResponse: () => {
-          const sink = new Writable({
-            write: (_chunk, _encoding, done) => done(),
+    ],
+  ] as const)(
+    'a sink %s factory returns already failing settles with its error, not an uncaught one',
+    async (_label, makeSink) => {
+      // A stream destroyed with an error emits it on a `nextTick`, which ran ahead of the
+      // adapter's listener when the factory was called from the response event's own turn.
+      const req = new MockClientRequest();
+      const res = new MockIncomingMessage(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': '1',
+      });
+      const requestSpy = spyOn(http, 'request').mockImplementation(
+        (_options, callback) => {
+          const cb = callback as
+            ((res: http.IncomingMessage) => void) | undefined;
+          setImmediate(() => {
+            cb?.(res as unknown as http.IncomingMessage);
+            setImmediate(() => {
+              res.emit('data', Buffer.from('a'));
+              res.emit('end');
+            });
           });
-          sink.destroy(new Error('sink failed at open'));
-          return sink;
+          return req as unknown as http.ClientRequest;
         },
-      });
-      await new Promise<void>((done) => {
-        setImmediate(done);
-      });
+      );
+      const uncaught: unknown[] = [];
+      const onUncaught = (error: unknown): void => {
+        uncaught.push(error);
+      };
+      process.on('uncaughtException', onUncaught);
 
-      expect(uncaught).toEqual([]);
-      expect(response.streamErrorCode).toBe('stream_write_error');
-      expect(response.errorCause?.message).toBe('sink failed at open');
-    } finally {
-      process.off('uncaughtException', onUncaught);
-      requestSpy.mockRestore();
-    }
-  });
+      try {
+        const response = await new NodeAdapter().send({
+          requestURL: 'http://example.test/data',
+          method: 'GET',
+          headers: {},
+          streamResponse: makeSink,
+        });
+        await new Promise<void>((done) => {
+          setImmediate(done);
+        });
+
+        expect(uncaught).toEqual([]);
+        expect(response.streamErrorCode).toBe('stream_write_error');
+        expect(response.errorCause?.message).toBe('sink failed at open');
+      } finally {
+        process.off('uncaughtException', onUncaught);
+        requestSpy.mockRestore();
+      }
+    },
+  );
 
   test('a refused removal keeps the absorber tracked instead of stacking another', async () => {
     // The removal method is caller code and can refuse. When it does, the absorber is
