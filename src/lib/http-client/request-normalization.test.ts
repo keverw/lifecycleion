@@ -7385,24 +7385,23 @@ test('round 140 review 3: a decoding failure after the raw end reaches the reade
   expect(events).toContain('close');
 });
 
-test('round 140 review 4: a decoding failure held behind a raw error is replayed; a resubscribed listener is told afresh', async () => {
+test('round 140 review 4: a held decoding failure is told once per subscription, and setup reads the same one', async () => {
+  // A refused coding chain: the one failure held when NodeAdapter subscribes.
   const res = stubResponse();
-  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
-  (res as unknown as PassThrough).write(Buffer.from('not gzip at all'));
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  // Held, in that order, with no reader: a raw error ahead of the decoding failure.
-  const held = (
-    source as unknown as { held: { event: string; args: unknown[] }[] }
-  ).held;
-  held.unshift({ event: 'error', args: [new Error('socket reset')] });
-
+  const { source } = createResponseBodySource(
+    res,
+    'GET',
+    200,
+    Array.from({ length: 6 }, () => 'gzip').join(','),
+  );
   const told: Error[] = [];
   const listener = (error: Error) => told.push(error);
   const unsubscribe = source.onFailure?.(listener);
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(told).toHaveLength(1);
-  expect(told[0]?.message).not.toBe('socket reset');
+  expect(source.heldError?.()).toBe(told[0]);
 
+  // A new subscription of the same function is told again; the old one is not.
   unsubscribe?.();
   source.onFailure?.(listener);
   await new Promise((resolve) => setTimeout(resolve, 0));

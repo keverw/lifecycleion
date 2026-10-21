@@ -269,7 +269,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     // the live path tells; and not if a newer one reached the listener meanwhile.
     // Searched for, not the first held error: a raw response error held ahead of it
     // hid a decoding failure held after.
-    const held = this.heldDecodeFailure();
+    const held = this.findHeldError(isDecodeFailure);
     if (held !== undefined) {
       queueMicrotask(() => {
         if (
@@ -290,10 +290,11 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   }
 
   public heldError(): Error | undefined {
-    const held = this.held.find((entry) => entry.event === 'error');
-    const error: unknown = held?.args[0];
-
-    return error instanceof Error ? error : undefined;
+    // A decoding failure first, wherever it is held - the cause the replay tells and a
+    // stream setup reports - then any other held error.
+    return (
+      this.findHeldError(isDecodeFailure) ?? this.findHeldError(() => true)
+    );
   }
 
   public pause(): this {
@@ -485,21 +486,18 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     }
   }
 
-  /** The first decoding failure held for a reader not yet attached, if any. */
-  private heldDecodeFailure(): Error | undefined {
+  /** The first error held for a reader not yet attached that `matches`, if any. */
+  private findHeldError(matches: (error: Error) => boolean): Error | undefined {
     for (const { event, args } of this.held) {
       const error: unknown = args[0];
-      if (
-        event === 'error' &&
-        error instanceof Error &&
-        isDecodeFailure(error)
-      ) {
+      if (event === 'error' && error instanceof Error && matches(error)) {
         return error;
       }
     }
 
     return undefined;
   }
+
   /**
    * One failure listener, guarded: it runs inside a decoder's `'error'` emit, where a
    * throw would unwind through zlib as an uncaught exception.
@@ -531,8 +529,12 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       failure instanceof Error &&
       isDecodeFailure(failure)
     ) {
+      // Once per subscription, as the replay is: a second decoder's error queued in the
+      // same tick (a stacked `gzip, br`) does not tell a listener again.
       for (const listener of [...this.failureListeners]) {
-        this.notifyFailure(listener, failure);
+        if (!this.notifiedListeners.has(listener)) {
+          this.notifyFailure(listener, failure);
+        }
       }
 
       // A listener may have torn the body down (a stream setup that failed releases it):
