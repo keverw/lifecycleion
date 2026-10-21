@@ -148,6 +148,22 @@ describe('FetchAdapter', () => {
     expect(sent).toEqual(['a=1; b=2', 'a=1; b=2']);
   });
 
+  test('PR review round 4: an empty Cookie part is left out', async () => {
+    let cookie = null as string | null;
+    (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {
+      cookie = new Headers(init?.headers).get('cookie');
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers: { Cookie: [], cookie: 'b=2' },
+    });
+
+    expect(cookie).toBe('b=2');
+  });
+
   test('withholds URL userinfo on a cross-origin hop', async () => {
     let capturedURL = '';
 

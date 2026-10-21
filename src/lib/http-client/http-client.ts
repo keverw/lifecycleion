@@ -116,7 +116,7 @@ import { isErrorValue, toError as normalizeError } from '../to-error';
 import { readUnknownMember as readObjectMember } from '../internal/read-member';
 import { makeResponseTooLargeError } from './internal/response-limit';
 import { readBinaryByteLength } from '../internal/binary-view';
-import { utf8ByteLength } from './internal/progress';
+import { utf8ByteLength } from './internal/utf8-length';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import {
   adoptPromise,

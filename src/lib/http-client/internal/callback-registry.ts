@@ -6,7 +6,11 @@ import {
   readHostPattern,
 } from '../utils';
 import { validateConfigEntry } from '../../domain-utils/domain-utils';
-import { isIPAddress, normalizeDomain } from '../../domain-utils/helpers';
+import {
+  isIPAddress,
+  normalizeDomain,
+  toAsciiDots,
+} from '../../domain-utils/helpers';
 
 /**
  * Every list a filter can carry besides `methods`: the type each entry must have and, for
@@ -85,9 +89,12 @@ function describeUnmatchableHostPattern(entry: string): string | undefined {
       ? "is not a hostname the matcher can read (it reads host names: letters, digits, '_' and inner hyphens), so it can never match"
       : undefined;
   }
-  // `*.` is `*` written as a fully qualified name, which the matcher reads the same way.
   if (isGlobalHostPattern(entry)) {
     return undefined;
+  }
+  // Said plainly: the template that writes it (`*.${domain}`) lost its domain.
+  if (toAsciiDots(entry) === '*.') {
+    return "is a wildcard with an empty label after it, so it can never match; give '*' to match every host";
   }
   const result = validateConfigEntry(entry, 'domain', {
     allowGlobalWildcard: true,

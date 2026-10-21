@@ -116,7 +116,12 @@ export class XHRAdapter implements HTTPAdapter {
         for (const [key, value] of Object.entries(request.headers)) {
           if (lowerCaseHeaderName(key) === 'cookie') {
             cookieName ??= key;
-            cookieParts.push(Array.isArray(value) ? value.join('; ') : value);
+            // Empty parts left out, as NodeAdapter leaves them.
+            for (const part of Array.isArray(value) ? value : [value]) {
+              if (part !== '') {
+                cookieParts.push(part);
+              }
+            }
           } else if (Array.isArray(value)) {
             for (const v of value) {
               xhr.setRequestHeader(key, v);
@@ -125,7 +130,7 @@ export class XHRAdapter implements HTTPAdapter {
             xhr.setRequestHeader(key, value);
           }
         }
-        if (cookieName !== undefined) {
+        if (cookieName !== undefined && cookieParts.length > 0) {
           xhr.setRequestHeader(cookieName, cookieParts.join('; '));
         }
       } catch (error) {

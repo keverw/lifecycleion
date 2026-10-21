@@ -195,10 +195,19 @@ function hasBufferTagInChain(value: object): boolean {
 
 /**
  * A buffer copied whole into a new one of its kind - resizable or growable as it is.
- * A `SharedArrayBuffer`'s copy is a new one, its memory not shared with the original.
+ * A `SharedArrayBuffer`'s copy is a new one, its memory not shared with the original. A
+ * subclass is copied by `slice`, through its own constructor (see {@link isSubclass}).
  */
 function copyBuffer(buffer: object, kind: BufferKind): object {
   const Kind = bufferConstructor(kind);
+  if (isSubclass(buffer, Kind, kind)) {
+    return Reflect.apply(
+      Reflect.get(Kind.prototype, 'slice') as (begin: number) => object,
+      buffer,
+      [0],
+    );
+  }
+
   const read = (key: string): unknown =>
     Reflect.get(Kind.prototype, key, buffer);
   const byteLength = read('byteLength') as number;
@@ -207,17 +216,12 @@ function copyBuffer(buffer: object, kind: BufferKind): object {
     read(kind === 'ArrayBuffer' ? 'resizable' : 'growable') === true &&
     typeof maxByteLength === 'number';
 
-  return keepSubclass(
+  return copyBytes(
     buffer,
-    copyBytes(
-      buffer,
-      Kind,
-      0,
-      byteLength,
-      isResizable ? maxByteLength : undefined,
-    ),
     Kind,
-    kind,
+    0,
+    byteLength,
+    isResizable ? maxByteLength : undefined,
   );
 }
 
@@ -247,10 +251,12 @@ function copyBytes(
 }
 
 /**
- * A typed array or `DataView` over a copy of the bytes it covers, of its own type - a
- * `Buffer` stays a `Buffer`. The copy is a fixed-length buffer of the view's buffer's
- * kind, even under a view of a resizable one. Read through the intrinsic getters, which
- * answer for a view from any realm.
+ * A typed array or `DataView` over a copy of the bytes it covers, of its own type. The
+ * copy is a fixed-length buffer of the view's buffer's kind, even under a view of a
+ * resizable one. Read through the intrinsic getters, which answer for a view from any
+ * realm. A typed array subclass - a `Buffer`, a caller's class - is copied by the shared
+ * `slice`, through its own constructor (see {@link isSubclass}); a `DataView` subclass
+ * comes back a `DataView`.
  */
 function cloneView(view: ArrayBufferView): object {
   const name = typedArrayName(view);
@@ -270,6 +276,14 @@ function cloneView(view: ArrayBufferView): object {
     );
   }
 
+  if (name !== undefined && isSubclass(view, View, name)) {
+    return Reflect.apply(
+      Reflect.get(TYPED_ARRAY_PROTOTYPE, 'slice') as () => object,
+      view,
+      [],
+    );
+  }
+
   const copy = copyBytes(
     buffer,
     bufferConstructor(arrayBufferKindOf(buffer) ?? 'ArrayBuffer'),
@@ -277,15 +291,10 @@ function cloneView(view: ArrayBufferView): object {
     read('byteLength') as number,
   );
 
-  return keepSubclass(
-    view,
-    new View(
-      copy,
-      0,
-      read(name === undefined ? 'byteLength' : 'length') as number,
-    ),
-    View,
-    name ?? 'DataView',
+  return new View(
+    copy,
+    0,
+    read(name === undefined ? 'byteLength' : 'length') as number,
   );
 }
 
@@ -315,31 +324,25 @@ function typedArrayName(view: ArrayBufferView): string | undefined {
 }
 
 /**
- * `copy`, given the original's prototype when that is a subclass's (a `Buffer`, a class
- * of the caller's), without running the subclass's constructor. The base type's own
- * prototype - this realm's, or another realm's `Uint8Array.prototype` - leaves the copy
- * as this realm's own, as a plain object from another realm is cloned. Told by the
- * prototype's own constructor and its name, not by `instanceof`, which a `Buffer` fails
- * where the globals are another realm's (a jsdom test environment).
+ * Whether `original` is a subclass's instance rather than a built-in type's own - this
+ * realm's, or another realm's `Uint8Array.prototype`. A subclass is copied through its
+ * own constructor, by the shared `slice` and its species, so its instance fields - a
+ * private field its methods read - are set up as they are for any instance of it. Told
+ * by the prototype's own constructor and its name, not by `instanceof`, which a `Buffer`
+ * fails where the globals are another realm's (a jsdom test environment).
  */
-function keepSubclass<C extends object>(
+function isSubclass(
   original: object,
-  copy: C,
   Base: { readonly prototype: object },
   baseName: string,
-): C {
+): boolean {
   const prototype = Object.getPrototypeOf(original) as object | null;
-  if (
-    prototype === null ||
-    prototype === Base.prototype ||
-    isBasePrototype(prototype, baseName)
-  ) {
-    return copy;
-  }
 
-  Object.setPrototypeOf(copy, prototype);
-
-  return copy;
+  return (
+    prototype !== null &&
+    prototype !== Base.prototype &&
+    !isBasePrototype(prototype, baseName)
+  );
 }
 
 /** Whether `prototype` is some realm's own prototype of the built-in type `name`. */

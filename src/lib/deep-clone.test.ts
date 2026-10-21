@@ -345,40 +345,28 @@ describe('deepClone', () => {
       expect(new Uint8Array(shared)[0]).toBe(1);
     });
 
-    test('subclasses are kept without running their constructors', () => {
-      let constructed = 0;
-      class TaggedBuffer extends ArrayBuffer {
-        constructor(length: number) {
-          super(length);
-          constructed++;
+    test('subclasses are copied through their own constructor, their fields set up', () => {
+      class TaggedBuffer extends ArrayBuffer {}
+      class Packet extends Uint8Array {
+        readonly #kind = 1;
+        public get kind(): number {
+          return this.#kind;
         }
       }
-      class TaggedBytes extends Uint8Array {
-        constructor(values: number[]) {
-          super(values);
-          constructed++;
-        }
-      }
-      const ViewBase = DataView as unknown as new (
-        buffer: ArrayBufferLike,
-      ) => DataView;
-      class TaggedView extends ViewBase {}
       const original = {
         buffer: new TaggedBuffer(2),
-        bytes: new TaggedBytes([1, 2]),
-        view: new TaggedView(new ArrayBuffer(2)),
+        packet: new Packet([1, 2]),
         node: Buffer.from('hi'),
       };
-      constructed = 0;
       const cloned = deepClone(original);
 
       expect(cloned.buffer).toBeInstanceOf(TaggedBuffer);
-      expect(cloned.bytes).toBeInstanceOf(TaggedBytes);
-      expect([...cloned.bytes]).toEqual([1, 2]);
-      expect(cloned.view).toBeInstanceOf(TaggedView);
+      expect(cloned.packet).toBeInstanceOf(Packet);
+      expect(cloned.packet.kind).toBe(1);
+      expect([...cloned.packet]).toEqual([1, 2]);
       expect(Buffer.isBuffer(cloned.node)).toBe(true);
       expect(cloned.node.toString()).toBe('hi');
-      expect(constructed).toBe(0);
+      expect(cloned.packet).not.toBe(original.packet);
     });
 
     test('a resizable buffer stays resizable', () => {

@@ -12,7 +12,6 @@ import { normalizeDomain } from '../domain-utils/domain-utils';
 import {
   compileWildcardPattern,
   isIPAddress,
-  toAsciiDots,
   matchesCompiledWildcard,
   type CompiledWildcardPattern,
 } from '../domain-utils/helpers';
@@ -113,9 +112,18 @@ function topLevelKeyOf(key: string): string {
 export function buildURL(
   baseURL: string | undefined,
   path: string,
-  params?: Record<string, unknown>,
+  givenParams?: Record<string, unknown>,
 ): string {
   let url: string;
+  // Each top-level value read once: the override check below and the serialized query
+  // read the same values, where a getter answering differently gave them different ones.
+  let params: Record<string, unknown> | undefined;
+  if (givenParams) {
+    params = {};
+    for (const [key, value] of Object.entries(givenParams)) {
+      defineEntry(params, key, value);
+    }
+  }
 
   const absoluteHref = tryAbsoluteWebHref(path);
 
@@ -1094,9 +1102,8 @@ export function matchesHostPattern(hostname: string, pattern: string): boolean {
 /** One `hosts` pattern read once, by {@link readHostPattern}. */
 export type HostPattern =
   /**
-   * `*` alone (or `*.`, `*` written as a fully qualified name): any host a request URL
-   * can carry, as documented - including one the domain matcher cannot read
-   * (`-edge.example.com`), which every other pattern skips.
+   * `*` alone: any host a request URL can carry, as documented - including one the
+   * domain matcher cannot read (`-edge.example.com`), which every other pattern skips.
    */
   | { readonly kind: 'any' }
   /** An exact name, normalized. */
@@ -1109,12 +1116,13 @@ const ANY_HOST: HostPattern = { kind: 'any' };
 const NO_HOST: HostPattern = { kind: 'never' };
 
 /**
- * Whether a `hosts` pattern is `*` alone: trimmed, and with one trailing dot dropped -
- * `*.` is `*` written as a fully qualified name, and so is `*．` or `*。`, with the
- * Unicode dots the domain matcher reads as `.`.
+ * Whether a `hosts` pattern is `*` alone, trimmed. Not `*.`: that is an empty label after
+ * the wildcard - what `*.${domain}` gives with the domain unset - and read as `*` it sent
+ * a host-scoped interceptor's token to every host. It matches nothing, as in the domain
+ * matchers, and is refused when the filter is added.
  */
 export function isGlobalHostPattern(pattern: string): boolean {
-  return toAsciiDots(pattern.trim()).replace(/\.$/, '') === '*';
+  return pattern.trim() === '*';
 }
 
 /**

@@ -27,7 +27,8 @@ import {
   isBrowserRestrictedHeader,
   materializeRequestHeaders,
 } from './internal/header-utils';
-import { knownBodyByteLength, utf8ByteLength } from './internal/progress';
+import { knownBodyByteLength } from './internal/progress';
+import { utf8ByteLength } from './internal/utf8-length';
 import { createResponseBodySource } from './internal/response-decoding';
 import { sleep } from '../sleep';
 import {
@@ -2149,10 +2150,15 @@ test('a hosts entry the matcher can never match is refused; whole-label wildcard
     'api.*.example.com',
     'api.**.example.com',
     'backend',
-    '*.',
     'redis',
   ]) {
     client.addErrorObserver(() => {}, { hosts: [pattern] })();
+  }
+  // An empty label after the wildcard - `*.${domain}` with the domain unset.
+  for (const pattern of ['*.', '*\uFF0E', ' *\u3002 ']) {
+    expect(() =>
+      client.addErrorObserver(() => {}, { hosts: [pattern] }),
+    ).toThrow(/empty label/);
   }
 });
 
@@ -3343,25 +3349,13 @@ test("hosts: ['*'] matches any host a URL can carry", async () => {
     { hosts: ['*'] },
   );
 
-  client.addResponseObserver(
-    (_response, request) => {
-      seen.push(`fqdn ${new URL(request.requestURL).hostname}`);
-    },
-    { hosts: ['*.'] },
-  );
-
   for (const host of ['my_service', '-edge.example.com', 'api.example.com']) {
     await client.get(`http://${host}/x`).send();
   }
 
-  expect(seen).toEqual([
-    'my_service',
-    'fqdn my_service',
-    '-edge.example.com',
-    'fqdn -edge.example.com',
-    'api.example.com',
-    'fqdn api.example.com',
-  ]);
+  expect(seen).toEqual(['my_service', '-edge.example.com', 'api.example.com']);
+  // `*.` matches nothing, unregistered as in the domain matchers.
+  expect(matchesHostPattern('api.example.com', '*.')).toBe(false);
 });
 
 test('MockAdapter refuses a cookie maxAge that is not a number', async () => {
@@ -7823,24 +7817,17 @@ test('PR review round 2: binary bodies from a custom adapter are measured by the
   }
 });
 
-test('PR review round 2: `*` written with a Unicode dot matches every host, as `*.` does', async () => {
-  for (const pattern of ['*\uFF0E', '*\u3002', ' *\uFF61 ']) {
-    expect(readHostPattern(pattern).kind).toBe('any');
-    expect(matchesHostPattern('api.example.com', pattern)).toBe(true);
+test('PR review round 4: `*.`, however its dot is written, matches nothing and is refused', () => {
+  for (const pattern of ['*.', '*\uFF0E', '*\u3002']) {
+    expect(readHostPattern(pattern).kind).toBe('never');
+    expect(matchesHostPattern('evil.attacker.net', pattern)).toBe(false);
+    expect(() =>
+      new HTTPClient({ adapter: new MockAdapter() }).addRequestInterceptor(
+        (request) => request,
+        { hosts: [pattern] },
+      ),
+    ).toThrow(TypeError);
   }
-
-  const adapter = new MockAdapter();
-  adapter.routes.get('/', () => ({ status: 200 }));
-  const client = new HTTPClient({ adapter });
-  const seen: string[] = [];
-  client.addResponseObserver(
-    (_response, request) => {
-      seen.push(request.requestURL);
-    },
-    { hosts: ['*\uFF0E'] },
-  );
-  await client.get('https://api.example.com/').send();
-  expect(seen).toEqual(['https://api.example.com/']);
 });
 
 test('PR review round 2: .params(undefined) clears the params, as before', async () => {
@@ -7904,4 +7891,19 @@ test('PR review round 3: MockAdapter holds a route body to maxResponseBytes by i
   });
 
   expect(response.streamErrorCode).toBe('response_too_large');
+});
+
+test('PR review round 4: a params value is read once, so the override check and the query agree', () => {
+  let reads = 0;
+  const params = {
+    get page(): string | undefined {
+      reads++;
+      return reads === 1 ? '3' : undefined;
+    },
+  };
+
+  expect(buildURL(undefined, 'http://api.test/x?page=1', params)).toBe(
+    'http://api.test/x?page=3',
+  );
+  expect(reads).toBe(1);
 });

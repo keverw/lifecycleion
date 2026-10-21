@@ -69,6 +69,6 @@ cloned !== obj; // true (distinct object)
 - Circular references are detected via an internal `WeakMap` and handled gracefully - no infinite recursion.
 - Symbol keys are **not** cloned (they are not enumerable by `for...in`).
 - A view copies only the bytes it covers, so a small view of a large buffer does not copy the buffer behind it. Unlike `structuredClone`, two views of one buffer, or a view and its buffer, do not share memory in the clone, and a `SharedArrayBuffer`'s copy does not share memory with the original.
-- A subclass (a `Buffer`, a class extending `Uint8Array` or `ArrayBuffer`) keeps its prototype; its constructor is not run. Buffers and views from another realm (a `vm` context, an iframe) are cloned as this realm's.
+- A typed array or buffer subclass (a `Buffer`, a class extending `Uint8Array` or `ArrayBuffer`) is copied through its own constructor, so its fields are set up; a `DataView` subclass comes back a `DataView`. Buffers and views from another realm (a `vm` context, an iframe) are cloned as this realm's.
 - A view's copy is a fixed-length buffer of its own bytes, even under a view of a resizable buffer; a resizable buffer cloned itself stays resizable.
 - A detached `ArrayBuffer` throws a `TypeError`.

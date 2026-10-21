@@ -388,6 +388,20 @@ describe('XHRAdapter', () => {
     await promise;
   });
 
+  test('PR review round 4: an empty Cookie part is left out', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: { Cookie: [], cookie: 'b=2' },
+    });
+
+    expect(lastXHR.requestHeaders['cookie']).toEqual(['b=2']);
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    await promise;
+  });
+
   test('round 136: an abort once the headers are in carries the real status', async () => {
     const controller = new AbortController();
     const adapter = new XHRAdapter();

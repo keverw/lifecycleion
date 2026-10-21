@@ -533,7 +533,13 @@ function materializeFetchHeaders(
       // Joined with `; ` onto any earlier spelling's (`Cookie` then `cookie`), as
       // `materializeRequestHeaders` joins them: `set` replaced it, and `append` would
       // join with `, `, which reads as one cookie.
-      const joined = Array.isArray(value) ? value.join('; ') : value;
+      // Empty parts left out, as NodeAdapter leaves them: `Cookie: []` sent no `; `.
+      const joined = (Array.isArray(value) ? value : [value])
+        .filter((part) => part !== '')
+        .join('; ');
+      if (joined === '') {
+        continue;
+      }
       const existing = materialized.get(key);
       materialized.set(
         key,
