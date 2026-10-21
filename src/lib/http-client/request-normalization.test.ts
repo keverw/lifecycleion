@@ -7689,6 +7689,7 @@ test('a registered host filter reads each pattern once and answers as the unregi
     '*.bücher.example',
     '*',
     '*.',
+    '*\uFF0E',
   ];
   const hosts = [
     'api.example.com',

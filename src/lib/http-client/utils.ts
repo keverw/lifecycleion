@@ -1119,7 +1119,14 @@ export function readHostPattern(pattern: string): HostPattern {
 
   if (pattern.includes('*')) {
     const compiled = compileWildcardPattern(pattern);
-    return compiled === undefined ? NO_HOST : { kind: 'wildcard', compiled };
+    if (compiled === undefined) {
+      return NO_HOST;
+    }
+
+    // `*` written another way - `*．`, with a fullwidth dot - means what `*.` means.
+    return compiled.kind === 'global'
+      ? ANY_HOST
+      : { kind: 'wildcard', compiled };
   }
 
   const name = normalizeDomain(pattern);

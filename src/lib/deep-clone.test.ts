@@ -1,5 +1,6 @@
 import vm from 'node:vm';
-import { describe, expect, test } from 'bun:test';
+import { describe, expect, spyOn, test } from 'bun:test';
+import * as binaryView from './internal/binary-view';
 import { deepClone } from './deep-clone';
 
 describe('deepClone', () => {
@@ -427,6 +428,23 @@ describe('deepClone', () => {
         dictionary: { b: 2 },
         point: { x: 3 },
       });
+    });
+
+    test("another realm's plain objects are passed over without the throwing slot check", () => {
+      const foreign = vm.runInNewContext(
+        '({ a: { b: 1 }, raw: new ArrayBuffer(2) })',
+      ) as { a: { b: number }; raw: ArrayBuffer };
+      const spy = spyOn(binaryView, 'arrayBufferKindOf');
+
+      try {
+        const cloned = deepClone(foreign);
+        expect(cloned.a).toEqual({ b: 1 });
+        expect(cloned.raw).toBeInstanceOf(ArrayBuffer);
+        // Asked of the buffer alone, not of the plain objects around it.
+        expect(spy).toHaveBeenCalledTimes(1);
+      } finally {
+        spy.mockRestore();
+      }
     });
 
     test('a strict Proxy from another realm clones without its traps being tripped', () => {

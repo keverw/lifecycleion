@@ -508,8 +508,17 @@ function materializeFetchHeaders(
   headers: Record<string, string | string[]>,
 ): HeadersInit {
   const entries = Object.entries(headers);
+  // A `Headers` whenever a value repeats - as an array, or as a `Cookie` given under two
+  // spellings - so a cookie is joined with `; ` however the other headers happen to be
+  // given; the runtime's own join would be `, `, which reads as one cookie.
+  const cookieSpellings = entries.filter(
+    ([key]) => lowerCaseHeaderName(key) === 'cookie',
+  ).length;
 
-  if (!entries.some(([, value]) => Array.isArray(value))) {
+  if (
+    cookieSpellings < 2 &&
+    !entries.some(([, value]) => Array.isArray(value))
+  ) {
     const record: Record<string, string> = {};
     for (const [key, value] of entries) {
       defineEntry(record, key, value as string);

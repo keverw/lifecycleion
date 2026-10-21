@@ -121,6 +121,33 @@ describe('FetchAdapter', () => {
     expect(capturedInit?.headers).toEqual({ authorization: 'Bearer checked' });
   });
 
+  test('a Cookie given under two spellings is joined with "; " whether or not another header is an array', async () => {
+    // Read off the adapter's own `Headers`: handed a record, the runtime would join the
+    // two spellings itself - with `, ` in Node and browsers (Bun happens to use `; `).
+    const sent: string[] = [];
+    (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {
+      sent.push(
+        init?.headers instanceof Headers
+          ? (init.headers.get('cookie') ?? '')
+          : 'not joined by the adapter',
+      );
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers: { Cookie: 'a=1', cookie: 'b=2' },
+    });
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers: { Cookie: 'a=1', cookie: 'b=2', accept: ['x', 'y'] },
+    });
+
+    expect(sent).toEqual(['a=1; b=2', 'a=1; b=2']);
+  });
+
   test('withholds URL userinfo on a cross-origin hop', async () => {
     let capturedURL = '';
 

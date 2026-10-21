@@ -147,9 +147,11 @@ const SHARED_ARRAY_BUFFER = globalConstructor('SharedArrayBuffer');
  * intrinsic getters - which throw for anything else without running a `Proxy`'s traps or
  * a getter of the value's. Asked only of what may be one: an object whose prototype
  * chain holds this realm's `ArrayBuffer` or `SharedArrayBuffer` (an object that merely
- * inherits from one is not one, and is cloned as a plain object), or an object from
- * another realm (a `vm` context, an iframe). So this realm's plain objects and class
- * instances, and null-prototype dictionaries, never pay for the check.
+ * inherits from one is not one, and is cloned as a plain object), or one from another
+ * realm (a `vm` context, an iframe) whose chain holds that realm's. So this realm's plain
+ * objects and class instances, another realm's plain objects, and null-prototype
+ * dictionaries never pay for the check. A buffer whose prototype was taken away is not
+ * told, as a `Date` or `Map` whose prototype was taken away is not.
  */
 function bufferKindOf(value: object): BufferKind | undefined {
   if (
@@ -159,11 +161,36 @@ function bufferKindOf(value: object): BufferKind | undefined {
     return arrayBufferKindOf(value);
   }
 
-  if (value instanceof Object || Object.getPrototypeOf(value) === null) {
+  if (value instanceof Object || !hasBufferTagInChain(value)) {
     return undefined;
   }
 
   return arrayBufferKindOf(value);
+}
+
+/**
+ * Whether a prototype in `value`'s chain carries a buffer's own `Symbol.toStringTag` -
+ * another realm's `ArrayBuffer.prototype` or `SharedArrayBuffer.prototype`, which define
+ * it as a plain value. Read off the prototypes, not the value, so a `Proxy`'s `get` trap
+ * is not run, and a non-buffer from another realm - its plain objects - is passed over
+ * without the throwing slot check.
+ */
+function hasBufferTagInChain(value: object): boolean {
+  for (
+    let prototype = Object.getPrototypeOf(value) as object | null;
+    prototype !== null;
+    prototype = Object.getPrototypeOf(prototype) as object | null
+  ) {
+    const tag: unknown = Object.getOwnPropertyDescriptor(
+      prototype,
+      Symbol.toStringTag,
+    )?.value;
+    if (tag === 'ArrayBuffer' || tag === 'SharedArrayBuffer') {
+      return true;
+    }
+  }
+
+  return false;
 }
 
 /**
