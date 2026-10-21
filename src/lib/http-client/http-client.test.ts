@@ -9380,7 +9380,7 @@ test('a retryable answer whose body cannot be decoded ends its attempt once', as
       return Promise.resolve({
         status: 503,
         headers: { 'content-type': 'text/plain' },
-        body: 'busy' as unknown as Uint8Array,
+        body: { notBytes: true } as unknown as Uint8Array,
       });
     },
   };
@@ -9441,7 +9441,7 @@ describe('an answered response whose body cannot be decoded', () => {
         return Promise.resolve({
           status,
           headers: { 'content-type': 'text/plain', ...extraHeaders },
-          body: 'busy' as unknown as Uint8Array,
+          body: { notBytes: true } as unknown as Uint8Array,
           ...redirectFields,
         });
       },
@@ -9554,7 +9554,7 @@ describe('a redirect whose undecodable body is discarded', () => {
         Promise.resolve({
           status: 302,
           headers: { 'content-type': 'text/html', location: '/next' },
-          body: 'moved' as unknown as Uint8Array,
+          body: { notBytes: true } as unknown as Uint8Array,
         }),
     };
     const request = new HTTPClient({ adapter, followRedirects: false }).get(
@@ -9578,7 +9578,7 @@ describe('a redirect whose undecodable body is discarded', () => {
             : {
                 status: 302,
                 headers: { location: '/b', 'content-type': 'text/plain' },
-                body: 'x' as unknown as Uint8Array,
+                body: { notBytes: true } as unknown as Uint8Array,
               },
         );
       },
@@ -9692,7 +9692,7 @@ describe('redirect fields agree whether the answer is read, undecodable or refus
               headers: { 'content-type': 'text/plain', ...headers },
               body:
                 mode === 'undecodable'
-                  ? ('bad' as unknown as Uint8Array)
+                  ? ({ notBytes: true } as unknown as Uint8Array)
                   : new TextEncoder().encode('ok'),
               ...fields,
             }),
@@ -9737,7 +9737,7 @@ test('a followed 3xx whose body cannot be decoded keeps an earlier hop upload ou
           : {
               status: 302,
               headers: { location: '/c', 'content-type': 'text/plain' },
-              body: 'x' as unknown as Uint8Array,
+              body: { notBytes: true } as unknown as Uint8Array,
             },
       );
     },

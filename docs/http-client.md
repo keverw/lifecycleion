@@ -884,6 +884,10 @@ Cookie-name prefixes are matched case-insensitively. `__Secure-` requires `Secur
 `__Host-` also requires no non-empty `Domain` attribute (an empty `Domain=` reads as absent, host-only) and an explicit `Path=/`, as RFC 6265bis
 and browsers require: an omitted `Path` is refused even where it would default to `/`.
 A nameless cookie whose value starts with either prefix is ignored, deletions included.
+A cookie set with `setCookie()` is a domain cookie unless `hostOnly: true` is given. A
+server's `Set-Cookie` without `Domain=` for the same name is a separate, host-only cookie,
+as Chrome and Firefox keep the two apart, so both are sent. Seed a cookie the server will
+refresh with `hostOnly: true` to have its `Set-Cookie` replace it.
 Programmatic `setCookie()` and `fromJSON()` have no request scheme to check, but still
 validate prefixes: `__Host-` requires `secure: true`, `hostOnly: true`, and path `/`.
 They also validate domains, expiry, and header framing, so cookies are not stored unchecked.

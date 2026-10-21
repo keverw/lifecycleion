@@ -7948,3 +7948,75 @@ test('PR review round 6: a body no getter can measure fails closed; one reportin
     .send();
   expect(delivered.body).not.toBeNull();
 });
+
+test('PR review round 7: a non-binary body is not held to the limit; an unmeasurable binary one only under a finite limit', async () => {
+  const custom = (
+    body: unknown,
+    maxResponseBytes: number,
+    contentType = 'application/octet-stream',
+  ) =>
+    new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: () =>
+          Promise.resolve({
+            status: 200,
+            headers: { 'content-type': contentType },
+            body: body as Uint8Array,
+          }),
+      },
+      baseURL: 'http://api.test',
+      maxResponseBytes,
+    });
+
+  const parsed = custom({ parsed: true }, 10).get('/x');
+  await parsed.send();
+  expect(parsed.error).toBeNull();
+
+  const proxied = new Proxy(new Uint8Array(1000), {});
+  const unlimited = custom(proxied, Infinity).get('/x');
+  await unlimited.send();
+  expect(unlimited.error?.code).not.toBe('response_too_large');
+
+  const adapter = new MockAdapter();
+  adapter.routes.get('/p', () => ({ status: 200, body: proxied }));
+  const mocked = await adapter.send({
+    requestURL: 'http://api.test/p',
+    method: 'GET',
+    headers: {},
+    maxResponseBytes: Infinity,
+  });
+  expect(mocked.streamErrorCode).toBeUndefined();
+});
+
+test("PR review round 7: a custom adapter's string body with a JSON type is parsed as text", async () => {
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+          body: '{"a":1}' as unknown as Uint8Array,
+        }),
+    },
+    baseURL: 'http://api.test',
+  });
+
+  const response = await client.get('/x').send();
+  expect(response.isFailed).toBe(false);
+  expect(response.body).toEqual({ a: 1 });
+});
+
+test("PR review round 7: a cookie seeded hostOnly is replaced by the server's host-only Set-Cookie", () => {
+  const jar = new CookieJar();
+  jar.setCookie({
+    name: 's',
+    value: '1',
+    domain: 'example.com',
+    hostOnly: true,
+  });
+  jar.parseSetCookieHeader('s=2', 'https://example.com/');
+
+  expect(jar.getCookieHeaderString('https://example.com/')).toBe('s=2');
+});

@@ -4157,7 +4157,12 @@ export class BaseHTTPClient {
     let decodedTextBody: string | null = null;
 
     if ((contentType === 'json' || contentType === 'text') && rawBody) {
-      decodedTextBody = new TextDecoder().decode(rawBody);
+      // A custom adapter's string body is already text: decoding it as bytes threw.
+      const answered: unknown = rawBody;
+      decodedTextBody =
+        typeof answered === 'string'
+          ? answered
+          : new TextDecoder().decode(rawBody);
     }
 
     if (contentType === 'json' && decodedTextBody !== null) {
@@ -4984,14 +4989,17 @@ function describeRequestPath(value: unknown): string {
  * internal slot measures them - a view or buffer of any kind, from any realm, not the
  * size the value reports - and a string as its UTF-8 length, counted only when its
  * UTF-16 length alone cannot tell (never fewer bytes than units, at most three per
- * unit). An object no intrinsic getter can measure - a `Proxy` over bytes - is taken
- * as over it, failing closed as `readBinaryByteLength` asks: delivered, it failed later
- * as a generic error anyway. Anything else has no size.
+ * unit). Under a finite limit, a value that looks binary - a typed array or buffer by
+ * its prototype - but that no intrinsic getter can measure (a `Proxy` over bytes) is
+ * taken as over it, failing closed as `readBinaryByteLength` asks. Anything else has no
+ * size, and is not held to the limit.
  */
 function isAnsweredBodyOverLimit(body: unknown, maxBytes: number): boolean {
   if (typeof body === 'object' && body !== null) {
     const byteLength = readBinaryByteLength(body);
-    return byteLength === null || byteLength > maxBytes;
+    return byteLength === null
+      ? Number.isFinite(maxBytes) && looksBinary(body)
+      : byteLength > maxBytes;
   }
 
   if (typeof body !== 'string' || body.length * 3 <= maxBytes) {
@@ -4999,6 +5007,23 @@ function isAnsweredBodyOverLimit(body: unknown, maxBytes: number): boolean {
   }
 
   return body.length > maxBytes || utf8ByteLength(body) > maxBytes;
+}
+
+/**
+ * Whether `value` presents as bytes by its prototype - a typed array or buffer, or a
+ * `Proxy` over one - which the size check cannot measure. Guarded: a hostile prototype
+ * chain answers no.
+ */
+function looksBinary(value: object): boolean {
+  try {
+    return (
+      value instanceof Object.getPrototypeOf(Uint8Array) ||
+      value instanceof ArrayBuffer ||
+      value instanceof DataView
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
