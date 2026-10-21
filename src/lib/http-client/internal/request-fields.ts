@@ -1,30 +1,37 @@
 import type { AdapterRequest } from '../types';
 import { guardProgressCallback } from './progress';
-import { nonRetryableAdapterErrorFrom } from './adapter-error';
+import {
+  nonRetryableAdapterErrorFrom,
+  readAdapterMethod,
+} from './adapter-error';
+import { readMaxResponseBytes } from './response-limit';
 import { presentHeaderValue } from './header-utils';
-import { isPlainRecord } from './plain-record';
+import { assertOptionalHeaderRecord } from './plain-record';
 import { defineEntry } from '../../internal/define-entry';
 import { isNullish } from '../../internal/is-nullish';
-import { describeValue } from '../../internal/describe-value';
 
 /**
- * The request fields the Fetch, XHR and Mock adapters read, each read once, before
- * anything is sent. Their event listeners and route handling read them again otherwise,
- * where a getter that throws is an uncaught exception and a request that never settles.
+ * The request fields every adapter reads, each read once, before anything is sent. Their
+ * event listeners and route handling read them again otherwise, where a getter that
+ * throws is an uncaught exception and a request that never settles.
  *
  * Read on a carrier: a getter that throws is the caller's, refused as a non-retryable
- * `adapter_error` rather than retried as a network failure. The method is left as given,
- * for `readAdapterMethod`, and the limit for `readMaxResponseBytes`, which refuse their
- * own way.
+ * `adapter_error` rather than retried as a network failure. Then the method and the limit
+ * are read by their own rules (`readAdapterMethod`, `readMaxResponseBytes`), which refuse
+ * their own way.
  *
  * - The progress callbacks are guarded here, so every call site is covered: progress
  *   reporting is advisory and must not be able to change whether a request succeeded
  *   (see `guardProgressCallback`).
- * - The headers are copied by {@link copyRequestHeaders}.
+ * - The headers are copied by {@link copyRequestHeaders}: the copy is the adapter's own.
  */
 export function readAdapterRequestFields(request: AdapterRequest) {
+  // As given, read with the rest; only its conversion below is handed back.
+  let givenMethod: unknown;
+  let fields;
   try {
-    return {
+    givenMethod = request.method;
+    fields = {
       guardedUploadProgress: guardProgressCallback(
         request.onUploadProgress,
         'onUploadProgress',
@@ -35,7 +42,6 @@ export function readAdapterRequestFields(request: AdapterRequest) {
       ),
       requestURL: request.requestURL,
       initialURL: request.initialURL,
-      givenMethod: request.method as unknown,
       headers: copyRequestHeaders(request.headers),
       body: request.body,
       signal: request.signal,
@@ -43,7 +49,16 @@ export function readAdapterRequestFields(request: AdapterRequest) {
   } catch (error) {
     throw nonRetryableAdapterErrorFrom(error);
   }
+
+  return {
+    ...fields,
+    method: readAdapterMethod(givenMethod),
+    // The most a buffered body may hold; `Infinity` for none.
+    maxResponseBytes: readMaxResponseBytes(request),
+  };
 }
+
+export type AdapterRequestFields = ReturnType<typeof readAdapterRequestFields>;
 
 /**
  * A request's headers as every adapter sends them: each value read once and converted
@@ -59,15 +74,10 @@ export function copyRequestHeaders(
   headers: unknown,
 ): Record<string, string | string[]> {
   const copy: Record<string, string | string[]> = {};
+  assertOptionalHeaderRecord(headers, 'Adapter request headers');
 
   if (isNullish(headers)) {
     return copy;
-  }
-
-  if (!isPlainRecord(headers)) {
-    throw new TypeError(
-      `Adapter request headers must be a plain object of header names to values (got ${describeValue(headers)})`,
-    );
   }
 
   for (const [name, value] of Object.entries(headers)) {

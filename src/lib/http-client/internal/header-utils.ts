@@ -20,9 +20,10 @@ export function lowerCaseHeaderName(name: string): string {
 /**
  * A header value as every header normalizer reads it - the one rule they share, so a
  * header is present or absent alike on the wire and to observers. HTTPClient applies it
- * before any adapter sees a request; driven directly, NodeAdapter and MockAdapter apply
- * it too, while FetchAdapter and XHRAdapter pass the values they are given on as is. A
- * `null` or `undefined` value, or array item, means no header (an array left with no
+ * before any adapter sees a request, and every adapter driven directly applies it too,
+ * through `copyRequestHeaders`.
+ *
+ * A `null` or `undefined` value, or array item, means no header (an array left with no
  * item is unset too); anything else is converted with `String`. `undefined` when the
  * header is unset.
  */
@@ -46,6 +47,21 @@ export function presentHeaderValue(
     }
   }
   return items.length === 0 ? undefined : items;
+}
+
+/**
+ * Remove every entry named `name` (lowercase), in any case, from `headers` - a record the
+ * caller owns, such as an adapter's copy of its request headers.
+ */
+export function deleteHeader(
+  headers: Record<string, string | string[]>,
+  name: string,
+): void {
+  for (const key of Object.keys(headers)) {
+    if (lowerCaseHeaderName(key) === name) {
+      delete headers[key];
+    }
+  }
 }
 
 export function isBrowserRestrictedHeader(

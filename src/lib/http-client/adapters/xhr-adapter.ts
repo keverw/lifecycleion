@@ -8,12 +8,10 @@ import { knownBodyByteLength } from '../internal/progress';
 import {
   markResponseStreamAbort,
   nonRetryableAdapterErrorFrom,
-  readAdapterMethod,
 } from '../internal/adapter-error';
 import { readAdapterRequestFields } from '../internal/request-fields';
 import {
   makeResponseTooLargeError,
-  readMaxResponseBytes,
   hasResponseBody,
 } from '../internal/response-limit';
 import { isArrayBufferLike } from '../../internal/binary-view';
@@ -53,7 +51,8 @@ export class XHRAdapter implements HTTPAdapter {
   // is: the same request fails the same way on every attempt.
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
     const {
-      givenMethod,
+      method,
+      maxResponseBytes,
       body: requestBody,
       headers,
       signal,
@@ -66,9 +65,6 @@ export class XHRAdapter implements HTTPAdapter {
       requestURL,
       initialURL,
     );
-    const method = readAdapterMethod(givenMethod);
-    // The most a buffered body may hold; `Infinity` for none.
-    const maxResponseBytes = readMaxResponseBytes(request);
 
     return await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
@@ -216,9 +212,10 @@ export class XHRAdapter implements HTTPAdapter {
       let uploadTotalBytes = 0;
 
       xhr.upload.addEventListener('progress', (event) => {
-        const progress = event.lengthComputable
-          ? event.loaded / event.total
-          : -1;
+        // A length is known only where it is one: a polyfill's `lengthComputable` with a
+        // total of `0` made the progress `NaN` or `Infinity`.
+        const isLengthKnown = event.lengthComputable && event.total > 0;
+        const progress = isLengthKnown ? event.loaded / event.total : -1;
 
         if (progress === 1) {
           didFireUpload100 = true;
@@ -227,9 +224,11 @@ export class XHRAdapter implements HTTPAdapter {
         uploadedBytes = Math.max(uploadedBytes, event.loaded);
         uploadTotalBytes = Math.max(uploadTotalBytes, event.total);
 
+        // An unknown length reports what has been sent as the total, as the download
+        // listener and NodeAdapter report it.
         guardedUploadProgress?.({
           loaded: event.loaded,
-          total: event.total || 0,
+          total: isLengthKnown ? event.total : event.loaded,
           progress,
         });
       });
@@ -344,9 +343,10 @@ export class XHRAdapter implements HTTPAdapter {
           return;
         }
 
-        const progress = event.lengthComputable
-          ? event.loaded / event.total
-          : -1;
+        // A length is known only where it is one: a polyfill's `lengthComputable` with a
+        // total of `0` made the progress `NaN` or `Infinity`.
+        const isLengthKnown = event.lengthComputable && event.total > 0;
+        const progress = isLengthKnown ? event.loaded / event.total : -1;
 
         if (progress === 1) {
           didFireDownload100 = true;
@@ -358,7 +358,7 @@ export class XHRAdapter implements HTTPAdapter {
         // An unknown length reports what has arrived as the total, as NodeAdapter does.
         guardedDownloadProgress?.({
           loaded: event.loaded,
-          total: event.lengthComputable ? event.total : event.loaded,
+          total: isLengthKnown ? event.total : event.loaded,
           progress,
         });
       });

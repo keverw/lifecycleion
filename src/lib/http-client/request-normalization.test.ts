@@ -8442,6 +8442,7 @@ test('PR review round 16: every adapter driven directly refuses a Headers for it
         );
 
       expect(String(outcome?.message)).toContain('must be a plain object');
+      expect(String(outcome?.message)).toContain('(got object)');
       expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
     }
   } finally {
@@ -8474,4 +8475,76 @@ test('PR review round 16: FetchAdapter does not send an unset header value as "n
 
   expect(sent?.get('x-kept')).toBe('yes');
   expect(sent?.has('x-unset')).toBe(false);
+});
+
+test("PR review round 17: a caller's own AbortError under a non-retryable carrier is an adapter_error, not a cancel", async () => {
+  const adapter = new MockAdapter();
+  let ran = 0;
+  adapter.routes.get('/x', () => {
+    ran++;
+    return {
+      status: 200,
+      body: {
+        toJSON() {
+          throw new DOMException('unrelated signal', 'AbortError');
+        },
+      },
+    };
+  });
+  const builder = new HTTPClient({
+    adapter,
+    baseURL: 'http://api.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 0 },
+  }).get('/x');
+  const response = await builder.send();
+
+  expect(response.isCancelled).toBe(false);
+  expect(builder.error?.code).toBe('adapter_error');
+  expect(ran).toBe(1);
+});
+
+test('PR review round 17: CookieJar.processResponseHeaders stores nothing when a line is refused', () => {
+  const jar = new CookieJar();
+  expect(() =>
+    jar.processResponseHeaders(
+      { 'set-cookie': ['a=1; Path=/', 42] } as unknown as Record<
+        string,
+        string[]
+      >,
+      'https://example.com/',
+    ),
+  ).toThrow('set-cookie line is not a string');
+  expect(jar.getAllCookies()).toHaveLength(0);
+});
+
+test("PR review round 17: a header value's toString throwing an AbortError fails every adapter as non-retryable, not as a cancel", async () => {
+  const originalFetch = globalThis.fetch;
+  (globalThis as { fetch: unknown }).fetch = () =>
+    Promise.resolve(new Response('ok', { status: 200 }));
+  const mock = new MockAdapter();
+  mock.routes.get('/x', () => ({ status: 200 }));
+  const headers = {
+    'x-token': {
+      toString() {
+        throw new DOMException('unrelated signal', 'AbortError');
+      },
+    },
+  } as unknown as Record<string, string>;
+
+  try {
+    for (const adapter of [new FetchAdapter(), mock, new NodeAdapter()]) {
+      const outcome = await adapter
+        .send({ requestURL: 'http://127.0.0.1:1/x', method: 'GET', headers })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome?.name).not.toBe('AbortError');
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      expect((outcome?.cause as Error | undefined)?.name).toBe('AbortError');
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

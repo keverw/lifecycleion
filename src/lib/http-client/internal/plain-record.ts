@@ -1,4 +1,5 @@
 import { isNullish } from '../../internal/is-nullish';
+import { describeValue } from '../../internal/describe-value';
 
 /**
  * Whether `value` is a record whose own properties are its entries: an object, not an
@@ -41,7 +42,7 @@ export function assertOptionalHeaderRecord(
 ): void {
   if (!isNullish(value) && !isPlainRecord(value)) {
     throw new TypeError(
-      `${label} must be a plain object of header names to values (not a Headers, Map or array)`,
+      `${label} must be a plain object of header names to values, not a Headers, Map or array (got ${describeValue(value)})`,
     );
   }
 }

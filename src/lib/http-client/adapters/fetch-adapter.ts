@@ -1,4 +1,5 @@
 import {
+  deleteHeader,
   joinCookieHeader,
   lowerCaseHeaderName,
 } from '../internal/header-utils';
@@ -9,7 +10,6 @@ import {
   markResponseStreamAbort,
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
-  readAdapterMethod,
 } from '../internal/adapter-error';
 import {
   extractFetchHeaders,
@@ -22,7 +22,6 @@ import {
   hasResponseBody,
   makeResponseTooLargeError,
   parseContentLength,
-  readMaxResponseBytes,
 } from '../internal/response-limit';
 import { REDIRECT_STATUS_CODES } from '../consts';
 import type {
@@ -47,20 +46,27 @@ export class FetchAdapter implements HTTPAdapter {
   }
 
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
-    const fields = readAdapterRequestFields(request);
-    const { guardedUploadProgress, guardedDownloadProgress, body, signal } =
-      fields;
+    // `maxResponseBytes` is the most a buffered body may hold, as `fetch` decodes it.
+    const {
+      guardedUploadProgress,
+      guardedDownloadProgress,
+      body,
+      signal,
+      headers,
+      method,
+      maxResponseBytes,
+      requestURL,
+      initialURL,
+    } = readAdapterRequestFields(request);
     const dispatchedURL = stripCrossOriginURLCredentials(
-      fields.requestURL,
-      fields.initialURL,
+      requestURL,
+      initialURL,
     );
-    const method = readAdapterMethod(fields.givenMethod);
-    // The most a buffered body may hold, as `fetch` decodes it; `Infinity` for none.
-    const maxResponseBytes = readMaxResponseBytes(request);
     // A caller's `Content-Length` is left to `fetch`, which frames the body itself:
     // browsers refuse to send one, and Node's undici, given one that disagrees with the
     // body, waited for bytes that never came until the attempt timed out - on every retry.
-    const headers = withoutHeader(fields.headers, 'content-length');
+    // Taken off the adapter's own copy, in place.
+    deleteHeader(headers, 'content-length');
 
     // Fire 0% upload progress
     guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
@@ -525,28 +531,6 @@ function materializeFetchHeaders(
   }
 
   return materialized;
-}
-
-/** `headers` without any entry named `name`, in any case; the same object when it has none. */
-function withoutHeader(
-  headers: Record<string, string | string[]>,
-  name: string,
-): Record<string, string | string[]> {
-  const names = Object.keys(headers);
-  if (!names.some((key) => lowerCaseHeaderName(key) === name)) {
-    return headers;
-  }
-
-  const result: Record<string, string | string[]> = {};
-  for (const key of names) {
-    if (lowerCaseHeaderName(key) !== name) {
-      // Defined, as every other header record is: a `__proto__` header was dropped (or,
-      // as an array, became the record's prototype).
-      defineEntry(result, key, headers[key]);
-    }
-  }
-
-  return result;
 }
 
 /**

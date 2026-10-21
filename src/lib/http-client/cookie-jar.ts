@@ -503,6 +503,9 @@ export class CookieJar {
       );
     }
 
+    // Every line checked before any is stored, so a refused call leaves the jar as it
+    // found it rather than holding the cookies that came before the bad line.
+    const lines: string[] = [];
     for (const [name, raw] of Object.entries(headers)) {
       if (lowerCaseHeaderName(name) !== 'set-cookie' || isNullish(raw)) {
         continue;
@@ -519,8 +522,12 @@ export class CookieJar {
           );
         }
 
-        this.parseSetCookieHeader(line, url);
+        lines.push(line);
       }
+    }
+
+    for (const line of lines) {
+      this.parseSetCookieHeader(line, url);
     }
   }
 

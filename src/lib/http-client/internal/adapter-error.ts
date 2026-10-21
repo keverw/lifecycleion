@@ -25,7 +25,11 @@ export function nonRetryableAdapterErrorFrom(error: unknown): Error {
   );
   const name = readObjectMember(error, 'name');
 
-  if (typeof name === 'string') {
+  // Not an `AbortError`: the client reads that name as a cancel or a timeout before it
+  // reads the flag, so a caller's own one - a `throwIfAborted()` on an unrelated signal,
+  // from a header value's `toString` - was reported as a cancel, or retried as a
+  // timeout. The caller's error stays on `cause`.
+  if (typeof name === 'string' && name !== 'AbortError') {
     carrier.name = name;
   }
 

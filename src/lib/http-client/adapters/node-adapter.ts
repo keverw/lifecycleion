@@ -2,14 +2,13 @@ import {
   defineHiddenTags,
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
-  readAdapterMethod,
 } from '../internal/adapter-error';
 import { concatChunks } from '../internal/concat-chunks';
-import { copyRequestHeaders } from '../internal/request-fields';
+import { readAdapterRequestFields } from '../internal/request-fields';
+import type { AdapterRequestFields } from '../internal/request-fields';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { observeRejection } from '../../internal/promise-reactions';
 import * as http from 'node:http';
-import { guardProgressCallback } from '../internal/progress';
 import * as https from 'node:https';
 import * as tls from 'node:tls';
 import { urlToHttpOptions } from 'node:url';
@@ -48,10 +47,10 @@ import {
   hasResponseBody,
   makeResponseTooLargeError,
   parseContentLength,
-  readMaxResponseBytes,
 } from '../internal/response-limit';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
+  deleteHeader,
   lowerCaseHeaderName,
   materializeRequestHeaders,
 } from '../internal/header-utils';
@@ -431,17 +430,17 @@ export class NodeAdapter implements HTTPAdapter {
     // Every member read once, here, where a getter that throws rejects this send. Read
     // later, from an emitter or `AbortSignal` callback, the same throw would be an
     // uncaught exception and the send would never settle. See `snapshotAdapterRequest`.
-    // On a carrier, as the other adapters read theirs: a getter that throws is the
-    // caller's, refused as a non-retryable `adapter_error` rather than retried as a
-    // network failure. The method is converted after, by the rule every adapter shares.
+    // The fields every adapter reads, by the rules they share (see
+    // `readAdapterRequestFields`), and this adapter's own on a carrier as those are.
+    const fields = readAdapterRequestFields(adapterRequest);
     let snapshot: AdapterRequest;
     try {
-      snapshot = snapshotAdapterRequest(adapterRequest);
+      snapshot = snapshotAdapterRequest(adapterRequest, fields);
     } catch (error) {
       throw nonRetryableAdapterErrorFrom(error);
     }
-    snapshot.method = readAdapterMethod(snapshot.method);
-    const request = withoutBodilessContentLength(snapshot);
+    dropBodilessContentLength(snapshot);
+    const request = snapshot;
 
     // This adapter frames every body itself with a `Content-Length`. A caller's
     // `Transfer-Encoding` went out beside it - both on one message, which RFC 9112 6.1
@@ -480,19 +479,10 @@ export class NodeAdapter implements HTTPAdapter {
 
     // Guarded once, at the boundary, so every call site below is covered - including the
     // ones handed to `streamResponseBody`, `writeRequestBodyChunked` and
-    // `serializeMultipartFormData`. Progress reporting is advisory and must not be able to
-    // change whether a request succeeded; a throwing callback used to propagate out and be
-    // classified as a transport failure. See `guardProgressCallback`.
-    const guardedUploadProgress = guardProgressCallback(
-      request.onUploadProgress,
-      'onUploadProgress',
-    );
-    const guardedDownloadProgress = guardProgressCallback(
-      request.onDownloadProgress,
-      'onDownloadProgress',
-    );
-    // The most a buffered body may hold, decoded; `Infinity` for none.
-    const maxResponseBytes = readMaxResponseBytes(request);
+    // `serializeMultipartFormData`. See `readAdapterRequestFields`.
+    // `maxResponseBytes`: the most a buffered body may hold, decoded.
+    const { guardedUploadProgress, guardedDownloadProgress, maxResponseBytes } =
+      fields;
     // Read once per request, as the rest of the config is: see `decompress`.
     const isDecompressing = this._config.decompress !== false;
 
@@ -2353,7 +2343,7 @@ export class NodeAdapter implements HTTPAdapter {
           );
         } else if (request.body === undefined || request.body === null) {
           // No body — fire 100% upload immediately and end the request. (A caller's
-          // `Content-Length` was taken off the request; see `withoutBodilessContentLength`.)
+          // `Content-Length` was taken off the request; see `dropBodilessContentLength`.)
           reportUploadProgress({ loaded: 0, total: 0, progress: 1 });
           req.end();
         } else {
@@ -3173,31 +3163,20 @@ function ignoreWritableError(): void {
  * The request without a caller's `Content-Length` when it has no body, as the bodied
  * paths replace it: sent with no body after it, the server waited for bytes that never
  * came, and on a pooled keep-alive socket took them from the next request. Taken off the
- * request itself, so the effective headers reported to observers do not put it back.
+ * request itself - its headers are this adapter's own copy, so in place - so the effective
+ * headers reported to observers do not put it back.
  */
-function withoutBodilessContentLength(request: AdapterRequest): AdapterRequest {
-  if (request.body !== undefined && request.body !== null) {
-    return request;
+function dropBodilessContentLength(request: AdapterRequest): void {
+  if (request.body === undefined || request.body === null) {
+    deleteHeader(request.headers, 'content-length');
   }
-
-  const names = Object.keys(request.headers);
-  if (!names.some((name) => lowerCaseHeaderName(name) === 'content-length')) {
-    return request;
-  }
-
-  const headers: Record<string, string | string[]> = {};
-  for (const name of names) {
-    if (lowerCaseHeaderName(name) !== 'content-length') {
-      defineEntry(headers, name, request.headers[name]);
-    }
-  }
-
-  return { ...request, headers };
 }
 
 /**
- * Read every member of an {@link AdapterRequest} once, into a plain object this adapter
- * owns.
+ * Every member of an {@link AdapterRequest} read once, into a plain object this adapter
+ * owns: the members every adapter reads, from `fields` (see `readAdapterRequestFields`,
+ * where any new rule for them belongs, so it reaches every adapter), and the three only
+ * this one reads - `streamResponse`, `attemptNumber`, `requestID`.
  *
  * `send()` is public, and the request it is handed may be any object: its members can be
  * getters. Most of them are consulted again long after `send()` has returned - the URL
@@ -3205,43 +3184,26 @@ function withoutBodilessContentLength(request: AdapterRequest): AdapterRequest {
  * the headers from the abort listener - and those run as emitter or `AbortSignal`
  * callbacks, where a throw is an uncaught exception rather than a rejection, and the
  * request never settles. Read here, inside `send()`'s own promise, a member that throws
- * fails this send instead. `headers` is copied for the same reason - each value converted
- * to a string (an array copied, its elements converted), an unset value dropped: its
- * entries are read again each time the effective request headers are snapshotted, so a
- * `toString` that throws must throw now, and an array the caller changes after `send()`
- * must not change what is reported as sent. Names are kept as given, since Node sends
- * them so and a server may read their case; the effective request headers lowercase
- * them when they are reported.
+ * fails this send instead.
  *
  * `streamResponse` is called on the caller's request rather than on this copy, so a
  * factory that is a method reading `this` - a class-instance request - sees the object it
  * belongs to. Only the member read is moved up front; the receiver is not changed.
  */
-function snapshotAdapterRequest(request: AdapterRequest): AdapterRequest {
-  const {
-    requestURL,
-    method,
-    headers,
-    body,
-    signal,
-    onUploadProgress,
-    onDownloadProgress,
-    streamResponse,
-    attemptNumber,
-    requestID,
-    initialURL,
-    maxResponseBytes,
-  } = request;
+function snapshotAdapterRequest(
+  request: AdapterRequest,
+  fields: AdapterRequestFields,
+): AdapterRequest {
+  const { streamResponse, attemptNumber, requestID } = request;
 
   return {
-    requestURL,
-    // As given: converted once by the caller (see `send`), as the request line takes it.
-    method,
-    headers: copyRequestHeaders(headers),
-    body,
-    signal,
-    onUploadProgress,
-    onDownloadProgress,
+    requestURL: fields.requestURL,
+    method: fields.method,
+    headers: fields.headers,
+    body: fields.body,
+    signal: fields.signal,
+    onUploadProgress: fields.guardedUploadProgress,
+    onDownloadProgress: fields.guardedDownloadProgress,
     streamResponse:
       typeof streamResponse === 'function'
         ? (info, context) =>
@@ -3249,8 +3211,8 @@ function snapshotAdapterRequest(request: AdapterRequest): AdapterRequest {
         : streamResponse,
     attemptNumber,
     requestID,
-    initialURL,
-    maxResponseBytes,
+    initialURL: fields.initialURL,
+    maxResponseBytes: fields.maxResponseBytes,
   };
 }
 

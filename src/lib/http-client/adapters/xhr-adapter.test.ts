@@ -698,6 +698,64 @@ describe('XHRAdapter', () => {
     expect(refused?.message).toContain('must be a plain object');
   });
 
+  test('PR review round 17: upload progress of unknown length reports the bytes sent as its total', async () => {
+    const uploads: Array<{ loaded: number; total: number; progress: number }> =
+      [];
+    const body = new FormData();
+    body.append('field', 'value');
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/form',
+      method: 'POST',
+      headers: {},
+      body,
+      onUploadProgress: (event) => {
+        uploads.push({
+          loaded: event.loaded,
+          total: event.total,
+          progress: event.progress,
+        });
+      },
+    });
+
+    lastXHR.simulateUploadProgress(5000, 0);
+    expect(uploads.at(-1)).toEqual({ loaded: 5000, total: 5000, progress: -1 });
+
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    await promise;
+  });
+
+  test('PR review round 17: a polyfill reporting a computable length of 0 gets progress -1, not NaN', async () => {
+    const uploads: Array<{ loaded: number; total: number; progress: number }> =
+      [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/form',
+      method: 'POST',
+      headers: {},
+      body: 'hello',
+      onUploadProgress: (event) => {
+        uploads.push({
+          loaded: event.loaded,
+          total: event.total,
+          progress: event.progress,
+        });
+      },
+    });
+
+    lastXHR.upload.dispatch('progress', {
+      loaded: 3,
+      total: 0,
+      lengthComputable: true,
+    });
+    expect(uploads.at(-1)).toEqual({ loaded: 3, total: 3, progress: -1 });
+
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    await promise;
+  });
+
   test('PR review round 15: a missing method is refused rather than sent as "undefined"', async () => {
     const outcome = await new XHRAdapter()
       .send({

@@ -1,7 +1,6 @@
 import {
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
-  readAdapterMethod,
 } from '../internal/adapter-error';
 import { readAdapterRequestFields } from '../internal/request-fields';
 import { defineEntry } from '../../internal/define-entry';
@@ -18,7 +17,6 @@ import {
   hasResponseBody,
   isAnsweredBodyOverLimit,
   makeResponseTooLargeError,
-  readMaxResponseBytes,
 } from '../internal/response-limit';
 import qs from 'qs';
 import { sleep } from '../../sleep';
@@ -280,7 +278,8 @@ export class MockAdapter implements HTTPAdapter {
   }
 
   public async send(request: AdapterRequest): Promise<AdapterResponse> {
-    const fields = readAdapterRequestFields(request);
+    // Read before the route runs, so a limit refused as unusable refuses the request
+    // without running it.
     const {
       guardedUploadProgress,
       guardedDownloadProgress,
@@ -288,11 +287,9 @@ export class MockAdapter implements HTTPAdapter {
       headers,
       body,
       signal,
-    } = fields;
-    const method = readAdapterMethod(fields.givenMethod);
-    // Read before the route runs, so a limit refused as unusable refuses the request
-    // without running it.
-    const maxResponseBytes = readMaxResponseBytes(request);
+      method,
+      maxResponseBytes,
+    } = readAdapterRequestFields(request);
     // Names lowercased, as a Node server receives them, so a request driven straight at
     // the adapter with `Content-Type` is read like one the client sent.
     const materializedHeaders = lowercaseHeaderNames(
