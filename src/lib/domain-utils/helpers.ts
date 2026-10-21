@@ -490,13 +490,18 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
     return canonicalIPAddress;
   }
 
-  // Apply NFC normalization for Unicode domains
   // Neither lowercased nor NFC-normalized first: TR46 maps, then normalizes, as the URL
   // parser does. JavaScript's `toLowerCase` turns a word-final `Σ` into the final sigma
   // `ς` (`ΑΣ-b.com`), and NFC before mapping reorders a combining mark that maps to a
   // letter (U+0345 is `ι`) - either way an entry matched a different domain from the
   // one a browser sends for it.
   const normalized = trimmed;
+
+  // The same guard a wildcard pattern's labels get, so an exact entry and its wildcard
+  // agree on a label too long to be worth normalizing.
+  if (normalized.split('.').some((label) => isLabelTooLongToNormalize(label))) {
+    return '';
+  }
 
   try {
     // Use TR46/IDNA processing for robust Unicode domain handling that mirrors browser behavior

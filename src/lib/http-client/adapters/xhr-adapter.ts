@@ -595,7 +595,7 @@ function parseXHRResponseHeaders(
     }
 
     // Lowercase to normalize across servers (header names are case-insensitive)
-    const key = line.slice(0, colonIndex).trim().toLowerCase();
+    const key = lowerCaseHeaderName(line.slice(0, colonIndex).trim());
     const value = line.slice(colonIndex + 1).trim();
 
     if (!key) {

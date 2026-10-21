@@ -466,6 +466,21 @@ describe('XHRAdapter', () => {
     expect(builder.error?.code).toBe('cancelled');
   });
 
+  test('round 140 review 2: response header names are lowercased in ASCII only', async () => {
+    const adapter = new XHRAdapter();
+    const promise = adapter.send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+    });
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.getAllResponseHeadersResult = 'x-key: a\r\nX-\u212Aey: b\r\n';
+    lastXHR.simulateLoad();
+    const response = await promise;
+    expect(response.headers['x-key']).toBe('a');
+  });
+
   test('returns status and body on successful load', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({

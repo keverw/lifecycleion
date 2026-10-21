@@ -159,6 +159,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   private isReading = false;
   private isDestroyed = false;
   private didFailDecoding = false;
+  private didLastDecoderClose = false;
   /** Raw bytes that arrived before the decoders were attached: the first chunk. */
   private rawBytes = 0;
   private readonly held: Array<{ event: string; args: unknown[] }> = [];
@@ -226,7 +227,11 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
         // only, not `destroyed`: `destroy(error)` sets that at once and emits the error
         // and `'close'` a tick later, so delivering `close` on it settled the reader
         // before the tagged decoding error, as a plain closed stream.
-        if (this.didDecodeEnd || last === undefined || last.closed === true) {
+        if (
+          this.didDecodeEnd ||
+          last === undefined ||
+          this.didLastDecoderClose
+        ) {
           this.deliver('close');
         } else {
           last.once('close', () => this.deliver('close'));
@@ -261,7 +266,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     const held = this.heldError();
     if (held !== undefined) {
       queueMicrotask(() => {
-        if (this.failureListeners.has(listener)) {
+        if (!this.isDestroyed && this.failureListeners.has(listener)) {
           this.notifyFailure(listener, held);
         }
       });
@@ -399,6 +404,12 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     }
 
     const last = this.decoders.at(-1) as Decoder;
+    // Tracked here rather than read off `closed`, which not every runtime's decoder sets:
+    // the raw response's `'close'` that comes after it would otherwise wait for a
+    // `'close'` already emitted.
+    last.once('close', () => {
+      this.didLastDecoderClose = true;
+    });
     last.on('end', () => {
       if (this.didFailDecoding) {
         return;
@@ -480,8 +491,16 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       return;
     }
 
+    // Decoding failures only, as `onFailure` promises: a raw response error the body
+    // forwards reaches a stream setup through the response's own `'error'` already.
     const failure: unknown = args[0];
-    if (event === 'error' && failure instanceof Error) {
+    if (
+      event === 'error' &&
+      failure instanceof Error &&
+      (failure as unknown as Record<PropertyKey, unknown>)[
+        RESPONSE_DECODE_ERROR_KEY
+      ] === true
+    ) {
       for (const listener of [...this.failureListeners]) {
         this.notifyFailure(listener, failure);
       }

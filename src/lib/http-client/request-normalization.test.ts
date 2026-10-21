@@ -7340,3 +7340,21 @@ test('round 140 review: onFailure replays a failure held before it subscribed', 
   await new Promise((resolve) => setTimeout(resolve, 0));
   expect(told).toHaveLength(1);
 });
+
+test('round 140 review 2: exact and wildcard entries agree on an over-long label; onFailure hears decoding failures only', async () => {
+  const label = `a${'­'.repeat(1100)}b`;
+  expect(normalizeDomain(`${label}.example.com`)).toBe('');
+  expect(validateConfigEntry(`*.${label}.example.com`, 'domain').valid).toBe(
+    false,
+  );
+
+  const res = stubResponse();
+  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const told: Error[] = [];
+  source.onFailure?.((error) => told.push(error));
+  source.on('error', () => undefined);
+  source.on('data', () => undefined);
+  (res as unknown as PassThrough).emit('error', new Error('socket reset'));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(told).toEqual([]);
+});
