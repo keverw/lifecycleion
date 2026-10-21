@@ -7205,30 +7205,29 @@ test('round 137: maxRedirects must be a whole number; a request path must be a s
   }
 });
 
-test('round 138: a decomposed Unicode label is measured composed; a bodiless Expect request goes out; a hostile path value is described', async () => {
+test('round 138: a decomposed Unicode label is measured composed; an Expect header is refused even without a body; a hostile path value is described', async () => {
   const label = 'é'.repeat(35); // 70 code units, 35 once composed
   expect(normalizeDomain(`${label}.example.com`)).not.toBe('');
   expect(validateConfigEntry(`*.${label}.example.com`, 'domain').valid).toBe(
     true,
   );
 
-  let expectHeader: string | undefined;
-  const server = http.createServer((req, res) => {
-    expectHeader = req.headers.expect;
-    res.end('ok');
-  });
-  await new Promise<void>((resolve) => server.listen(0, resolve));
+  // Refused bodiless too (round 139): Node sent it chunked rather than with no length.
+  let refusal: unknown;
   try {
-    const response = await new NodeAdapter().send({
-      requestURL: `http://127.0.0.1:${(server.address() as AddressInfo).port}/`,
+    await new NodeAdapter().send({
+      requestURL: 'http://127.0.0.1:1/',
       method: 'GET',
       headers: { expect: '100-continue' },
     });
-    expect(response.status).toBe(200);
-    expect(expectHeader).toBe('100-continue');
-  } finally {
-    server.close();
+  } catch (error) {
+    refusal = error;
   }
+  expect(refusal).toBeInstanceOf(TypeError);
+
+  // A label TR46 shortens (soft hyphens map to nothing) is no longer refused before it.
+  const softened = `example${'\u00ad'.repeat(60)}`;
+  expect(matchesDomainList('x.example.com', [`*.${softened}.com`])).toBe(true);
 
   const client = new HTTPClient({
     adapter: new MockAdapter(),

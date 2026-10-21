@@ -4964,11 +4964,6 @@ function describeValue(value: unknown): string {
       : typeof value;
 }
 
-/**
- * Whether a body a custom adapter handed over is past `maxResponseBytes`: bytes as given,
- * a string as its UTF-8 encoding - never fewer bytes than UTF-16 units, at most three per
- * unit, so encoded only when its length alone cannot tell. Anything else has no size.
- */
 /** A non-string request path, for the refusal: `instanceof` guarded, as the value is the caller's. */
 function describeRequestPath(value: unknown): string {
   if (value === null) {
@@ -4986,6 +4981,11 @@ function describeRequestPath(value: unknown): string {
   return typeof value;
 }
 
+/**
+ * Whether a body a custom adapter handed over is past `maxResponseBytes`: bytes as given,
+ * a string as its UTF-8 encoding - never fewer bytes than UTF-16 units, at most three per
+ * unit, so encoded only when its length alone cannot tell. Anything else has no size.
+ */
 function isAnsweredBodyOverLimit(body: unknown, maxBytes: number): boolean {
   if (ArrayBuffer.isView(body) || body instanceof ArrayBuffer) {
     return body.byteLength > maxBytes;

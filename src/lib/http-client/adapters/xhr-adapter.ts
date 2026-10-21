@@ -1,3 +1,4 @@
+import { lowerCaseHeaderName } from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
 import { XHR_BROWSER_TIMEOUT_FLAG } from '../consts';
 import {
@@ -105,7 +106,7 @@ export class XHRAdapter implements HTTPAdapter {
           // Except `cookie`, joined with `; ` as the other adapters join it: where XHR
           // runs outside a browser (React Native, a test shim) it is sent, and `, `
           // read as one cookie.
-          if (Array.isArray(value) && key.toLowerCase() === 'cookie') {
+          if (Array.isArray(value) && lowerCaseHeaderName(key) === 'cookie') {
             xhr.setRequestHeader(key, value.join('; '));
           } else if (Array.isArray(value)) {
             for (const v of value) {

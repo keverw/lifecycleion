@@ -1,6 +1,7 @@
 import { getDomain, getSubdomain, getPublicSuffix } from 'tldts';
 import {
   isAllWildcards,
+  isLabelTooLongToNormalize,
   hasPartialLabelWildcard,
   checkDNSLength,
   normalizeDomain,
@@ -682,9 +683,7 @@ export function validateConfigEntry(
         continue;
       }
 
-      // Counted composed, as `normalizeWildcardPattern` counts it: a label typed
-      // decomposed is the same label.
-      if (lbl.normalize('NFC').length > 63) {
+      if (isLabelTooLongToNormalize(lbl)) {
         return false;
       }
 
@@ -1316,9 +1315,7 @@ function isCredentialsSafeWildcardOriginPattern(pattern: string): boolean {
         continue;
       }
 
-      // Counted composed, as `normalizeWildcardPattern` counts it: a label typed
-      // decomposed is the same label.
-      if (lbl.normalize('NFC').length > 63) {
+      if (isLabelTooLongToNormalize(lbl)) {
         return false;
       }
 

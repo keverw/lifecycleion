@@ -560,6 +560,17 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
  * and punycode only non-wildcard labels. Also trims and removes
  * a trailing dot if present.
  */
+/**
+ * A cheap guard before TR46 runs on a label: only a label far past any that could
+ * normalize to 63 characters is refused here. The real limit is checked on the ASCII
+ * result - a raw count was wrong both ways round, since a label typed decomposed (NFD)
+ * is longer than it normalizes to, and TR46 drops characters such as a soft hyphen
+ * altogether, so an exact entry was accepted where its wildcard was refused.
+ */
+export function isLabelTooLongToNormalize(label: string): boolean {
+  return label.length > 1024;
+}
+
 export function normalizeWildcardPattern(pattern: string): string {
   // Not NFC-normalized first: each label goes through TR46, which normalizes after
   // mapping, as the URL parser does (see `normalizeHostText`).
@@ -604,9 +615,7 @@ export function normalizeWildcardPattern(pattern: string): string {
       continue;
     }
 
-    // Pre-punycode check for obviously invalid labels - counted composed, as a label typed
-    // decomposed (macOS can) is the same label: its exact entry is accepted.
-    if (lbl.normalize('NFC').length > 63) {
+    if (isLabelTooLongToNormalize(lbl)) {
       return ''; // sentinel for invalid pattern
     }
 

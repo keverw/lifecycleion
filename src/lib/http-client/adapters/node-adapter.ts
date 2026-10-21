@@ -444,15 +444,16 @@ export class NodeAdapter implements HTTPAdapter {
     // adapter reads responses - such a request never settled, or settled as a timeout
     // standing in for the `101` the server sent.
     //
-    // Nor `Expect` on a request with a body: Node sends the headers at once for one, so
-    // the `Content-Length` the adapter sets afterwards threw - a string body as an
+    // Nor `Expect`: Node sends the headers at once for one, so the `Content-Length` the
+    // adapter sets afterwards threw on a request with a body (a string body as an
     // `adapter_error`, a `FormData` one as a transport failure, retried and failing the
-    // same each time. A bodiless request sets no header after, and still goes out.
-    const hasBody = request.body !== undefined && request.body !== null;
+    // same each time), and a bodiless one went out chunked rather than with no length -
+    // and RFC 9110 has no `100-continue` on a request without content anyway.
     for (const name of Object.keys(request.headers)) {
-      const lowerName = lowerCaseHeaderName(name);
-      const refusalMessage = REFUSED_REQUEST_HEADERS.get(lowerName);
-      if (refusalMessage !== undefined && (hasBody || lowerName !== 'expect')) {
+      const refusalMessage = REFUSED_REQUEST_HEADERS.get(
+        lowerCaseHeaderName(name),
+      );
+      if (refusalMessage !== undefined) {
         const refusal = new TypeError(refusalMessage);
         markNonRetryableAdapterError(refusal);
         throw refusal;
@@ -3140,13 +3141,13 @@ function withoutBodilessContentLength(request: AdapterRequest): AdapterRequest {
   }
 
   const names = Object.keys(request.headers);
-  if (!names.some((name) => name.toLowerCase() === 'content-length')) {
+  if (!names.some((name) => lowerCaseHeaderName(name) === 'content-length')) {
     return request;
   }
 
   const headers: Record<string, string | string[]> = {};
   for (const name of names) {
-    if (name.toLowerCase() !== 'content-length') {
+    if (lowerCaseHeaderName(name) !== 'content-length') {
       defineEntry(headers, name, request.headers[name]);
     }
   }
@@ -3341,6 +3342,22 @@ function assertCRLParses(
   lastParsedCRLTexts.set(owner, text);
 }
 
+/** Request headers `NodeAdapter` refuses before dispatch, by name, with why. */
+const REFUSED_REQUEST_HEADERS: ReadonlyMap<string, string> = new Map([
+  [
+    'transfer-encoding',
+    'NodeAdapter frames request bodies itself; a Transfer-Encoding request header is not supported',
+  ],
+  [
+    'upgrade',
+    'NodeAdapter does not switch protocols; an Upgrade request header is not supported',
+  ],
+  [
+    'expect',
+    'NodeAdapter does not wait for 100 Continue; an Expect request header is not supported',
+  ],
+]);
+
 /**
  * One `crl` value — or one element of an array of them.
  *
@@ -3355,22 +3372,6 @@ function assertCRLParses(
  * PEM goes through the same splitting and validation as a string; a Buffer
  * holding DER is refused, since Node's `tls` reads PEM CRLs only.
  */
-/** Request headers `NodeAdapter` refuses before dispatch, by name, with why. */
-const REFUSED_REQUEST_HEADERS: ReadonlyMap<string, string> = new Map([
-  [
-    'transfer-encoding',
-    'NodeAdapter frames request bodies itself; a Transfer-Encoding request header is not supported',
-  ],
-  [
-    'upgrade',
-    'NodeAdapter does not switch protocols; an Upgrade request header is not supported',
-  ],
-  [
-    'expect',
-    'NodeAdapter does not wait for 100 Continue; an Expect request header on a request with a body is not supported',
-  ],
-]);
-
 function normalizeCRLEntry(
   entry: string | ArrayBufferView,
 ): string | Buffer | string[] {
