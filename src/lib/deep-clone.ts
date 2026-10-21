@@ -10,6 +10,7 @@
  */
 
 import { defineEntry } from './internal/define-entry';
+import { arrayBufferKindOf } from './internal/binary-view';
 
 /**
  * Deep clone an object or value
@@ -67,45 +68,11 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
     return cloned as T;
   }
 
-  // Handle typed arrays
-  if (ArrayBuffer.isView(obj) && !(obj instanceof DataView)) {
-    const typedArray = obj as unknown as
-      | Int8Array
-      | Uint8Array
-      | Uint8ClampedArray
-      | Int16Array
-      | Uint16Array
-      | Int32Array
-      | Uint32Array
-      | Float32Array
-      | Float64Array
-      | BigInt64Array
-      | BigUint64Array;
-    // The shared `%TypedArray%.prototype.slice`, not the array's own: `Buffer`
-    // overrides `slice` to return a view on the same memory, so a cloned `Buffer` was
-    // the original under another name.
-    const cloned = (
-      Object.getPrototypeOf(Uint8Array.prototype) as {
-        slice: (this: typeof typedArray) => typeof typedArray;
-      }
-    ).slice.call(typedArray);
-    return remember(seen, obj, cloned);
-  }
-
-  // A `DataView` over a copy of its bytes, and an `ArrayBuffer` copied: both fell through
-  // to the plain-object branch and came back as `{}`.
-  if (obj instanceof DataView) {
-    return remember(
-      seen,
-      obj,
-      new DataView(
-        obj.buffer.slice(obj.byteOffset, obj.byteOffset + obj.byteLength),
-      ),
-    );
-  }
-
-  if (obj instanceof ArrayBuffer) {
-    return remember(seen, obj, obj.slice(0));
+  // A typed array or `DataView`: a copy of the bytes it covers, so a small view of a
+  // large buffer - a `subarray` of a file read whole - does not copy the buffer behind it.
+  // Two views of one buffer, or a view and its buffer, do not share memory in the clone.
+  if (ArrayBuffer.isView(obj)) {
+    return remember(seen, obj, cloneView(obj));
   }
 
   // Handle Array
@@ -117,6 +84,12 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
     }
 
     return cloned as T;
+  }
+
+  // An `ArrayBuffer` or `SharedArrayBuffer`: copied whole into a new one of its kind.
+  const bufferKind = bufferKindOf(obj);
+  if (bufferKind !== undefined) {
+    return remember(seen, obj, copyBuffer(obj, bufferKind));
   }
 
   // Handle plain objects
@@ -148,4 +121,218 @@ function remember<T>(
 ): T {
   seen.set(original, cloned);
   return cloned as T;
+}
+
+type BufferKind = 'ArrayBuffer' | 'SharedArrayBuffer';
+
+interface BufferConstructorLike {
+  new (byteLength: number, options?: { maxByteLength: number }): ArrayBuffer;
+  readonly prototype: object;
+}
+
+interface ViewConstructorLike {
+  new (buffer: ArrayBuffer, byteOffset: number, length: number): object;
+  readonly prototype: object;
+}
+
+const TYPED_ARRAY_PROTOTYPE = Object.getPrototypeOf(
+  Uint8Array.prototype,
+) as object;
+
+/** This realm's `SharedArrayBuffer`, where the runtime has one. */
+const SHARED_ARRAY_BUFFER = globalConstructor('SharedArrayBuffer');
+
+/**
+ * Whether `value` is a buffer, and which kind, told by its internal slot through the
+ * intrinsic getters - which throw for anything else without running a `Proxy`'s traps or
+ * a getter of the value's. Asked only of what may be one: an object whose prototype
+ * chain holds this realm's `ArrayBuffer` or `SharedArrayBuffer` (an object that merely
+ * inherits from one is not one, and is cloned as a plain object), or an object from
+ * another realm (a `vm` context, an iframe). So this realm's plain objects and class
+ * instances, and null-prototype dictionaries, never pay for the check.
+ */
+function bufferKindOf(value: object): BufferKind | undefined {
+  if (
+    value instanceof ArrayBuffer ||
+    (SHARED_ARRAY_BUFFER !== undefined && value instanceof SHARED_ARRAY_BUFFER)
+  ) {
+    return arrayBufferKindOf(value);
+  }
+
+  if (value instanceof Object || Object.getPrototypeOf(value) === null) {
+    return undefined;
+  }
+
+  return arrayBufferKindOf(value);
+}
+
+/**
+ * A buffer copied whole into a new one of its kind - resizable or growable as it is.
+ * A `SharedArrayBuffer`'s copy is a new one, its memory not shared with the original.
+ */
+function copyBuffer(buffer: object, kind: BufferKind): object {
+  const Kind = bufferConstructor(kind);
+  const read = (key: string): unknown =>
+    Reflect.get(Kind.prototype, key, buffer);
+  const byteLength = read('byteLength') as number;
+  const maxByteLength = read('maxByteLength');
+  const isResizable =
+    read(kind === 'ArrayBuffer' ? 'resizable' : 'growable') === true &&
+    typeof maxByteLength === 'number';
+
+  return keepSubclass(
+    buffer,
+    copyBytes(
+      buffer,
+      Kind,
+      0,
+      byteLength,
+      isResizable ? maxByteLength : undefined,
+    ),
+    Kind,
+    kind,
+  );
+}
+
+/**
+ * `byteLength` bytes of `buffer` from `byteOffset`, copied into a new buffer built by
+ * `Kind` - byte for byte rather than by `slice`, which builds through the species
+ * constructor and so runs a subclass's. Read through a `Uint8Array`, which throws for a
+ * detached buffer: a failure, rather than a clone that silently holds nothing.
+ */
+function copyBytes(
+  buffer: object,
+  Kind: BufferConstructorLike,
+  byteOffset: number,
+  byteLength: number,
+  maxByteLength?: number,
+): ArrayBuffer {
+  const copy =
+    maxByteLength === undefined
+      ? new Kind(byteLength)
+      : new Kind(byteLength, { maxByteLength });
+
+  new Uint8Array(copy).set(
+    new Uint8Array(buffer as ArrayBuffer, byteOffset, byteLength),
+  );
+
+  return copy;
+}
+
+/**
+ * A typed array or `DataView` over a copy of the bytes it covers, of its own type - a
+ * `Buffer` stays a `Buffer`. The copy is a fixed-length buffer of the view's buffer's
+ * kind, even under a view of a resizable one. Read through the intrinsic getters, which
+ * answer for a view from any realm.
+ */
+function cloneView(view: ArrayBufferView): object {
+  const name = typedArrayName(view);
+  const read = (key: string): unknown =>
+    Reflect.get(
+      name === undefined ? DataView.prototype : TYPED_ARRAY_PROTOTYPE,
+      key,
+      view,
+    );
+  const buffer = read('buffer') as object;
+  const View = (name === undefined
+    ? DataView
+    : globalConstructor(name)) as unknown as ViewConstructorLike | undefined;
+  if (View === undefined) {
+    throw new TypeError(
+      `deepClone cannot clone a ${name ?? 'view'}: this runtime has no such constructor`,
+    );
+  }
+
+  const copy = copyBytes(
+    buffer,
+    bufferConstructor(arrayBufferKindOf(buffer) ?? 'ArrayBuffer'),
+    read('byteOffset') as number,
+    read('byteLength') as number,
+  );
+
+  return keepSubclass(
+    view,
+    new View(
+      copy,
+      0,
+      read(name === undefined ? 'byteLength' : 'length') as number,
+    ),
+    View,
+    name ?? 'DataView',
+  );
+}
+
+/**
+ * This realm's constructor for a buffer kind. A shared buffer is only told as one where
+ * this realm has `SharedArrayBuffer` (its intrinsic getter is the check); a view over one
+ * from another realm, where this one has none, is copied into an `ArrayBuffer`.
+ */
+function bufferConstructor(kind: BufferKind): BufferConstructorLike {
+  return (kind === 'SharedArrayBuffer'
+    ? (SHARED_ARRAY_BUFFER ?? ArrayBuffer)
+    : ArrayBuffer) as unknown as BufferConstructorLike;
+}
+
+/**
+ * The typed array's kind (`Uint8Array` for a `Buffer`), read by the intrinsic getter,
+ * which reads it from any realm's typed array; `undefined` for a `DataView`.
+ */
+function typedArrayName(view: ArrayBufferView): string | undefined {
+  const name: unknown = Reflect.get(
+    TYPED_ARRAY_PROTOTYPE,
+    Symbol.toStringTag,
+    view,
+  );
+
+  return typeof name === 'string' ? name : undefined;
+}
+
+/**
+ * `copy`, given the original's prototype when that is a subclass's (a `Buffer`, a class
+ * of the caller's), without running the subclass's constructor. The base type's own
+ * prototype - this realm's, or another realm's `Uint8Array.prototype` - leaves the copy
+ * as this realm's own, as a plain object from another realm is cloned. Told by the
+ * prototype's own constructor and its name, not by `instanceof`, which a `Buffer` fails
+ * where the globals are another realm's (a jsdom test environment).
+ */
+function keepSubclass<C extends object>(
+  original: object,
+  copy: C,
+  Base: { readonly prototype: object },
+  baseName: string,
+): C {
+  const prototype = Object.getPrototypeOf(original) as object | null;
+  if (
+    prototype === null ||
+    prototype === Base.prototype ||
+    isBasePrototype(prototype, baseName)
+  ) {
+    return copy;
+  }
+
+  Object.setPrototypeOf(copy, prototype);
+
+  return copy;
+}
+
+/** Whether `prototype` is some realm's own prototype of the built-in type `name`. */
+function isBasePrototype(prototype: object, name: string): boolean {
+  const constructor: unknown = Object.getOwnPropertyDescriptor(
+    prototype,
+    'constructor',
+  )?.value;
+
+  return (
+    typeof constructor === 'function' &&
+    Object.getOwnPropertyDescriptor(constructor, 'prototype')?.value ===
+      prototype &&
+    Object.getOwnPropertyDescriptor(constructor, 'name')?.value === name
+  );
+}
+
+/** A constructor this realm defines under `name`, if it does. */
+function globalConstructor(name: string): (new () => object) | undefined {
+  const value: unknown = Reflect.get(globalThis, name);
+
+  return typeof value === 'function' ? (value as new () => object) : undefined;
 }

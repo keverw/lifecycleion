@@ -135,10 +135,26 @@ function callByteLengthGetter(
  * that forty megabytes and two bytes should not read the same.
  */
 export function isArrayBufferLike(value: object): boolean {
-  return (
-    callByteLengthGetter(ARRAY_BUFFER_BYTE_LENGTH, value) !== null ||
-    callByteLengthGetter(SHARED_ARRAY_BUFFER_BYTE_LENGTH, value) !== null
-  );
+  return arrayBufferKindOf(value) !== undefined;
+}
+
+/**
+ * Which kind of buffer `value` is - `ArrayBuffer` or `SharedArrayBuffer` - told by its
+ * internal slot through the intrinsic getters, so from any realm; `undefined` for
+ * anything else. A detached `ArrayBuffer` is still one (its `byteLength` reads `0`).
+ */
+export function arrayBufferKindOf(
+  value: object,
+): 'ArrayBuffer' | 'SharedArrayBuffer' | undefined {
+  if (callByteLengthGetter(ARRAY_BUFFER_BYTE_LENGTH, value) !== null) {
+    return 'ArrayBuffer';
+  }
+
+  if (callByteLengthGetter(SHARED_ARRAY_BUFFER_BYTE_LENGTH, value) !== null) {
+    return 'SharedArrayBuffer';
+  }
+
+  return undefined;
 }
 
 /**
