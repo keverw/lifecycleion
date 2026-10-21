@@ -114,6 +114,8 @@ import type { CookieJar } from './cookie-jar';
 import { isErrorValue, toError as normalizeError } from '../to-error';
 import { readUnknownMember as readObjectMember } from '../internal/read-member';
 import { makeResponseTooLargeError } from './internal/response-limit';
+import { readBinaryByteLength } from '../internal/binary-view';
+import { utf8ByteLength } from './internal/progress';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import {
   adoptPromise,
@@ -4983,23 +4985,23 @@ function describeRequestPath(value: unknown): string {
 }
 
 /**
- * Whether a body a custom adapter handed over is past `maxResponseBytes`: bytes as given,
- * a string as its UTF-8 encoding - never fewer bytes than UTF-16 units, at most three per
- * unit, so encoded only when its length alone cannot tell. Anything else has no size.
+ * Whether a body a custom adapter handed over is past `maxResponseBytes`: bytes as their
+ * internal slot measures them - a view or buffer of any kind, from any realm, not the
+ * size the value reports - and a string as its UTF-8 length, counted only when its
+ * UTF-16 length alone cannot tell (never fewer bytes than units, at most three per
+ * unit). Anything else has no size.
  */
 function isAnsweredBodyOverLimit(body: unknown, maxBytes: number): boolean {
-  if (ArrayBuffer.isView(body) || body instanceof ArrayBuffer) {
-    return body.byteLength > maxBytes;
+  if (typeof body === 'object' && body !== null) {
+    const byteLength = readBinaryByteLength(body);
+    return byteLength !== null && byteLength > maxBytes;
   }
 
   if (typeof body !== 'string' || body.length * 3 <= maxBytes) {
     return false;
   }
 
-  return (
-    body.length > maxBytes ||
-    new TextEncoder().encode(body).byteLength > maxBytes
-  );
+  return body.length > maxBytes || utf8ByteLength(body) > maxBytes;
 }
 
 /**

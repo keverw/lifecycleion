@@ -130,6 +130,12 @@ export class HTTPRequestBuilder<T = unknown> {
 
   public params(params: Record<string, unknown>): this {
     this._assertNotSent('params');
+    // A nullish argument clears them, as it always did - `.params(options.query)` with
+    // no query set.
+    if (isNullish(params)) {
+      this._params = undefined;
+      return this;
+    }
     // A plain object, as for headers: a `URLSearchParams` or `Map` keeps its entries off
     // its own properties, so it was sent as no query at all, and a string as `0=a&1=b`.
     if (!isPlainRecord(params)) {

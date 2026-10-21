@@ -12,6 +12,7 @@ import { normalizeDomain } from '../domain-utils/domain-utils';
 import {
   compileWildcardPattern,
   isIPAddress,
+  toAsciiDots,
   matchesCompiledWildcard,
   type CompiledWildcardPattern,
 } from '../domain-utils/helpers';
@@ -1108,12 +1109,21 @@ const ANY_HOST: HostPattern = { kind: 'any' };
 const NO_HOST: HostPattern = { kind: 'never' };
 
 /**
+ * Whether a `hosts` pattern is `*` alone: trimmed, and with one trailing dot dropped -
+ * `*.` is `*` written as a fully qualified name, and so is `*．` or `*。`, with the
+ * Unicode dots the domain matcher reads as `.`.
+ */
+export function isGlobalHostPattern(pattern: string): boolean {
+  return toAsciiDots(pattern.trim()).replace(/\.$/, '') === '*';
+}
+
+/**
  * A `hosts` pattern read once - done when a filter is registered, rather than on every
  * request it is checked for: normalizing parses with the URL parser and runs IDNA, and a
  * wildcard's checks look its tail up in the Public Suffix List.
  */
 export function readHostPattern(pattern: string): HostPattern {
-  if (pattern.trim().replace(/\.$/, '') === '*') {
+  if (isGlobalHostPattern(pattern)) {
     return ANY_HOST;
   }
 
@@ -1123,7 +1133,6 @@ export function readHostPattern(pattern: string): HostPattern {
       return NO_HOST;
     }
 
-    // `*` written another way - `*．`, with a fullwidth dot - means what `*.` means.
     return compiled.kind === 'global'
       ? ANY_HOST
       : { kind: 'wildcard', compiled };

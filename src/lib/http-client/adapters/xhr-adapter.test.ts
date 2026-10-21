@@ -374,6 +374,20 @@ describe('XHRAdapter', () => {
     expect(lastXHR.requestHeaders['cookie']).toEqual(['a=1; b=2']);
   });
 
+  test('PR review round 2: a Cookie given under two spellings is set once, joined with "; "', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: { Cookie: 'a=1', cookie: ['b=2', 'c=3'] },
+    });
+
+    expect(lastXHR.requestHeaders['cookie']).toEqual(['a=1; b=2; c=3']);
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    await promise;
+  });
+
   test('round 136: an abort once the headers are in carries the real status', async () => {
     const controller = new AbortController();
     const adapter = new XHRAdapter();

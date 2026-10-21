@@ -106,12 +106,17 @@ export class XHRAdapter implements HTTPAdapter {
         // the browser allows scripts to set. Cookie is a forbidden header name
         // and is silently dropped by the browser regardless; the browser manages
         // cookies on its own.
+        //
+        // Except `cookie`, joined with `; ` as the other adapters join it - its values
+        // and every spelling of its name, set once under the first: where XHR runs
+        // outside a browser (React Native, a test shim) it is sent, and `, ` read as one
+        // cookie.
+        let cookieName: string | undefined;
+        const cookieParts: string[] = [];
         for (const [key, value] of Object.entries(request.headers)) {
-          // Except `cookie`, joined with `; ` as the other adapters join it: where XHR
-          // runs outside a browser (React Native, a test shim) it is sent, and `, `
-          // read as one cookie.
-          if (Array.isArray(value) && lowerCaseHeaderName(key) === 'cookie') {
-            xhr.setRequestHeader(key, value.join('; '));
+          if (lowerCaseHeaderName(key) === 'cookie') {
+            cookieName ??= key;
+            cookieParts.push(Array.isArray(value) ? value.join('; ') : value);
           } else if (Array.isArray(value)) {
             for (const v of value) {
               xhr.setRequestHeader(key, v);
@@ -119,6 +124,9 @@ export class XHRAdapter implements HTTPAdapter {
           } else {
             xhr.setRequestHeader(key, value);
           }
+        }
+        if (cookieName !== undefined) {
+          xhr.setRequestHeader(cookieName, cookieParts.join('; '));
         }
       } catch (error) {
         refuse(error);
@@ -244,10 +252,12 @@ export class XHRAdapter implements HTTPAdapter {
         if (!didFireUpload100) {
           // The body's own size where the browser reported none - `0` for an empty
           // string, as FetchAdapter reports it - not a stand-in `1`.
-          const knownBytes = knownBodyByteLength(requestBody) ?? 0;
-          const finalLoaded = uploadedBytes > 0 ? uploadedBytes : knownBytes;
+          // Measured only when the browser reported nothing.
+          const knownBytes = (): number =>
+            knownBodyByteLength(requestBody) ?? 0;
+          const finalLoaded = uploadedBytes > 0 ? uploadedBytes : knownBytes();
           const finalTotal =
-            uploadTotalBytes > 0 ? uploadTotalBytes : knownBytes;
+            uploadTotalBytes > 0 ? uploadTotalBytes : knownBytes();
           guardedUploadProgress?.({
             loaded: finalLoaded,
             total: finalTotal,

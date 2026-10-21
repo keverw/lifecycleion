@@ -1,6 +1,10 @@
 import { isNullish } from '../../internal/is-nullish';
 import { isRealmRootPrototype } from './plain-record';
-import { normalizeFilterMethods, readHostPattern } from '../utils';
+import {
+  isGlobalHostPattern,
+  normalizeFilterMethods,
+  readHostPattern,
+} from '../utils';
 import { validateConfigEntry } from '../../domain-utils/domain-utils';
 import { isIPAddress, normalizeDomain } from '../../domain-utils/helpers';
 
@@ -82,7 +86,7 @@ function describeUnmatchableHostPattern(entry: string): string | undefined {
       : undefined;
   }
   // `*.` is `*` written as a fully qualified name, which the matcher reads the same way.
-  if (entry.replace(/\.$/, '') === '*') {
+  if (isGlobalHostPattern(entry)) {
     return undefined;
   }
   const result = validateConfigEntry(entry, 'domain', {

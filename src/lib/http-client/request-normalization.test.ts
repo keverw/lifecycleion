@@ -9,6 +9,7 @@ import {
   buildURL,
   extractFetchHeaders,
   matchesFilter,
+  matchesHostPattern,
   readHostPattern,
   mergeHeaders,
   parseContentType,
@@ -26,7 +27,7 @@ import {
   isBrowserRestrictedHeader,
   materializeRequestHeaders,
 } from './internal/header-utils';
-import { knownBodyByteLength } from './internal/progress';
+import { knownBodyByteLength, utf8ByteLength } from './internal/progress';
 import { createResponseBodySource } from './internal/response-decoding';
 import { sleep } from '../sleep';
 import {
@@ -7788,5 +7789,89 @@ test('a host filter registered on a client matches what the unregistered matcher
     }
 
     expect([filter, seen]).toEqual([filter, expected]);
+  }
+});
+
+test('PR review round 2: binary bodies from a custom adapter are measured by their slot for maxResponseBytes', async () => {
+  class Understated extends Uint8Array {
+    public override get byteLength(): number {
+      return 5;
+    }
+  }
+  const bodies: unknown[] = [
+    new SharedArrayBuffer(100),
+    vm.runInNewContext('new ArrayBuffer(100)'),
+    new Understated(100),
+  ];
+  for (const body of bodies) {
+    const client = new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: () =>
+          Promise.resolve({
+            status: 200,
+            headers: { 'content-type': 'application/octet-stream' },
+            body: body as Uint8Array,
+          }),
+      },
+      baseURL: 'http://api.test',
+      maxResponseBytes: 10,
+    });
+    const builder = client.get('/x');
+    await builder.send();
+    expect(builder.error?.code).toBe('response_too_large');
+  }
+});
+
+test('PR review round 2: `*` written with a Unicode dot matches every host, as `*.` does', async () => {
+  for (const pattern of ['*\uFF0E', '*\u3002', ' *\uFF61 ']) {
+    expect(readHostPattern(pattern).kind).toBe('any');
+    expect(matchesHostPattern('api.example.com', pattern)).toBe(true);
+  }
+
+  const adapter = new MockAdapter();
+  adapter.routes.get('/', () => ({ status: 200 }));
+  const client = new HTTPClient({ adapter });
+  const seen: string[] = [];
+  client.addResponseObserver(
+    (_response, request) => {
+      seen.push(request.requestURL);
+    },
+    { hosts: ['*\uFF0E'] },
+  );
+  await client.get('https://api.example.com/').send();
+  expect(seen).toEqual(['https://api.example.com/']);
+});
+
+test('PR review round 2: .params(undefined) clears the params, as before', async () => {
+  const adapter = new MockAdapter();
+  const queries: unknown[] = [];
+  adapter.routes.get('/x', (request) => {
+    queries.push(request.query);
+    return { status: 200 };
+  });
+  const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
+  await client
+    .get('/x')
+    .params({ a: '1' })
+    .params(undefined as unknown as Record<string, unknown>)
+    .send();
+  expect(queries).toEqual([{}]);
+});
+
+test('PR review round 2: a string body is measured as UTF-8 without being encoded', () => {
+  for (const text of [
+    '',
+    'ascii',
+    'é€',
+    '😀',
+    'a\uD800b',
+    '\uDC00',
+    'x'.repeat(1000) + '€',
+  ]) {
+    expect([text, utf8ByteLength(text)]).toEqual([
+      text,
+      new TextEncoder().encode(text).byteLength,
+    ]);
   }
 });
