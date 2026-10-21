@@ -1,4 +1,5 @@
 import { toASCII, toUnicode } from 'tr46';
+import { getPublicSuffix } from 'tldts';
 
 // Defense-in-depth: cap label processing to avoid pathological patterns
 export const MAX_LABELS = 32;
@@ -662,4 +663,109 @@ export function normalizeWildcardPattern(pattern: string): string {
   }
 
   return normalizedLabels.join('.');
+}
+
+/**
+ * Whether a wildcard pattern's fixed tail is one no wildcard may sit over: a pseudo-TLD,
+ * a public suffix, or a tail under a Public Suffix List wildcard rule (`*.kawasaki.jp`,
+ * `*.sch.uk`), where every label directly beneath it is itself a public suffix - so
+ * `*.kawasaki.jp` matched the suffix `foo.kawasaki.jp` and the apex `city.kawasaki.jp`.
+ * Told by asking for the suffix of a made-up label under the tail.
+ */
+export function isSuffixLikeTail(tail: string): boolean {
+  if (INTERNAL_PSEUDO_TLDS.has(tail)) {
+    return true;
+  }
+
+  const ps = getPublicSuffix(tail);
+  if (ps && ps === tail) {
+    return true;
+  }
+
+  const probe = `lifecycleion-tail-probe.${tail}`;
+  return getPublicSuffix(probe) === probe;
+}
+
+/**
+ * A wildcard pattern read once - normalized, its checks that do not depend on the host
+ * done - for {@link matchesCompiledWildcard} to match any number of hosts against. The
+ * pattern half of `matchesWildcardDomain`, which is the two together.
+ */
+export interface CompiledWildcardPattern {
+  readonly pattern: string;
+  /** For a `**.` pattern, the normalized name it sits on, which it never matches. */
+  readonly apex: string | undefined;
+}
+
+/**
+ * `pattern` compiled for {@link matchesCompiledWildcard}, or `undefined` for one that
+ * matches no host: not a wildcard, all wildcards (`*.*`), or with no concrete tail, or a
+ * tail that is an IP address, a public suffix or a pseudo-TLD (`*.com`, `**.co.uk`).
+ */
+export function compileWildcardPattern(
+  pattern: string,
+): CompiledWildcardPattern | undefined {
+  // Normalize pattern preserving wildcard labels and trailing dot handling
+  const normalizedPattern = normalizeWildcardPattern(pattern);
+  if (!normalizedPattern || !normalizedPattern.includes('*')) {
+    return undefined;
+  }
+
+  // Allow single "*" as global wildcard - matches both domains and IP addresses
+  if (normalizedPattern === '*') {
+    return { pattern: '*', apex: undefined };
+  }
+
+  // Reject other all-wildcards patterns (e.g., "*.*", "**.*")
+  if (isAllWildcards(normalizedPattern)) {
+    return undefined;
+  }
+
+  // PSL/IP tail guard: ensure the fixed tail is neither a PSL, a pseudo-TLD, nor an IP.
+  // This prevents patterns like "*.com" or "**.co.uk" from matching
+  const { fixedTail } = extractFixedTailAfterLastWildcard(
+    normalizedPattern.split('.'),
+  );
+  if (fixedTail.length === 0) {
+    return undefined; // require a concrete tail
+  }
+
+  const tail = fixedTail.join('.');
+  if (isIPAddress(tail) || isSuffixLikeTail(tail)) {
+    return undefined; // no wildcarding around IPs or suffix-like tails
+  }
+
+  return {
+    pattern: normalizedPattern,
+    // "**." requires at least one label before the remainder, so a domain that
+    // exactly equals the remainder can never match (e.g., "**.example.com" ≠ "example.com").
+    apex: normalizedPattern.startsWith('**.')
+      ? normalizeDomain(normalizedPattern.slice(3))
+      : undefined,
+  };
+}
+
+/** Whether a host, already normalized by `normalizeDomain`, matches a compiled pattern. */
+export function matchesCompiledWildcard(
+  normalizedDomain: string,
+  compiled: CompiledWildcardPattern,
+): boolean {
+  if (normalizedDomain === '') {
+    return false; // invalid domain cannot match
+  }
+
+  if (compiled.pattern === '*') {
+    return true;
+  }
+
+  // Do not wildcard-match IP addresses with non-global patterns; only exact IP matches are supported elsewhere
+  if (isIPAddress(normalizedDomain)) {
+    return false;
+  }
+
+  if (compiled.apex !== undefined && normalizedDomain === compiled.apex) {
+    return false;
+  }
+
+  return matchesMultiLabelPattern(normalizedDomain, compiled.pattern);
 }

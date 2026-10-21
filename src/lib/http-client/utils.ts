@@ -8,10 +8,12 @@ import {
   lowerCaseHeaderName,
   presentHeaderValue,
 } from './internal/header-utils';
+import { normalizeDomain } from '../domain-utils/domain-utils';
 import {
-  matchesWildcardDomain,
-  normalizeDomain,
-} from '../domain-utils/domain-utils';
+  compileWildcardPattern,
+  matchesCompiledWildcard,
+  type CompiledWildcardPattern,
+} from '../domain-utils/helpers';
 import type {
   ContentType,
   RequestPhaseName,
@@ -1087,26 +1089,35 @@ export function matchesHostPattern(hostname: string, pattern: string): boolean {
 }
 
 /**
- * A `hosts` list's exact patterns normalized, index for index (`''` for a wildcard, which
- * is never compared): done once when a filter is registered, rather than on every request
- * it is checked for - `normalizeDomain` parses with the URL parser and runs IDNA.
+ * One `hosts` pattern read once: an exact name normalized, or a wildcard compiled (`null`
+ * for one that matches no host).
  */
-export function normalizeHostPatterns(hosts: readonly string[]): string[] {
+export type NormalizedHostPattern = string | CompiledWildcardPattern | null;
+
+/**
+ * A `hosts` list's patterns read once, index for index: done when a filter is registered,
+ * rather than on every request it is checked for - normalizing parses with the URL parser
+ * and runs IDNA, and a wildcard's checks look its tail up in the Public Suffix List.
+ */
+export function normalizeHostPatterns(
+  hosts: readonly string[],
+): NormalizedHostPattern[] {
   return hosts.map((pattern) =>
-    pattern.includes('*') ? '' : normalizeDomain(pattern),
+    pattern.includes('*')
+      ? (compileWildcardPattern(pattern) ?? null)
+      : normalizeDomain(pattern),
   );
 }
 
 /**
- * The one place a host is routed to the wildcard or exact matcher. Normalized forms are
- * read only for an exact pattern: a registered filter's pattern was normalized when it
- * was added (`undefined` normalizes it here), and the hostname comes lazily, so a filter
- * check normalizes it once.
+ * The one place a host is routed to the wildcard or exact matcher. A registered filter's
+ * pattern was read when it was added (`undefined` reads it here), and the hostname comes
+ * lazily, so a filter check normalizes it once, for every pattern that needs it.
  */
 function matchesHost(
   hostname: string,
   pattern: string,
-  normalizedPattern: string | undefined,
+  normalizedPattern: NormalizedHostPattern | undefined,
   normalizedHostname: () => string,
 ): boolean {
   // `*` alone matches any host a request URL can carry, as documented - including one the
@@ -1117,12 +1128,26 @@ function matchesHost(
   }
 
   if (pattern.includes('*')) {
-    return matchesWildcardDomain(hostname, pattern);
+    // Compiled here only for a filter not registered through a client.
+    const compiled =
+      normalizedPattern === undefined
+        ? (compileWildcardPattern(pattern) ?? null)
+        : normalizedPattern;
+
+    return (
+      typeof compiled === 'object' &&
+      compiled !== null &&
+      matchesCompiledWildcard(normalizedHostname(), compiled)
+    );
   }
 
   const host = normalizedHostname();
   return (
-    host !== '' && host === (normalizedPattern ?? normalizeDomain(pattern))
+    host !== '' &&
+    host ===
+      (typeof normalizedPattern === 'string'
+        ? normalizedPattern
+        : normalizeDomain(pattern))
   );
 }
 
@@ -1222,7 +1247,7 @@ export function matchesFilter(
     bodyContainsKeys?: string[];
     hosts?: string[];
     /** `hosts` normalized by {@link normalizeHostPatterns}, when it was registered. */
-    normalizedHosts?: readonly string[];
+    normalizedHosts?: readonly NormalizedHostPattern[];
     schemes?: ('http' | 'https')[];
     phases?: RequestPhaseName[];
     contentTypes?: ContentType[];

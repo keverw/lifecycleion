@@ -10,10 +10,12 @@ import {
   isIPv6,
   toAsciiDots,
   canonicalizeBracketedIPv6Content,
-  matchesMultiLabelPattern,
   extractFixedTailAfterLastWildcard,
   isIPAddress,
   normalizeWildcardPattern,
+  compileWildcardPattern,
+  matchesCompiledWildcard,
+  isSuffixLikeTail,
   INTERNAL_PSEUDO_TLDS,
   INVALID_DOMAIN_CHARS,
   MAX_LABELS,
@@ -318,61 +320,12 @@ export function matchesWildcardDomain(
     return false; // invalid domain cannot match
   }
 
-  // Normalize pattern preserving wildcard labels and trailing dot handling
-  const normalizedPattern = normalizeWildcardPattern(pattern);
-  if (!normalizedPattern) {
-    return false; // invalid pattern
-  }
+  const compiled = compileWildcardPattern(pattern);
 
-  // Check if pattern contains wildcards
-  if (!normalizedPattern.includes('*')) {
-    return false;
-  }
-
-  // Allow single "*" as global wildcard - matches both domains and IP addresses
-  if (normalizedPattern === '*') {
-    return true;
-  }
-
-  // Do not wildcard-match IP addresses with non-global patterns; only exact IP matches are supported elsewhere
-  if (isIPAddress(normalizedDomain)) {
-    return false;
-  }
-
-  // Reject other all-wildcards patterns (e.g., "*.*", "**.*")
-  if (isAllWildcards(normalizedPattern)) {
-    return false;
-  }
-
-  // PSL/IP tail guard: ensure the fixed tail is neither a PSL, a pseudo-TLD, nor an IP.
-  // This prevents patterns like "*.com" or "**.co.uk" from matching
-
-  const labels = normalizedPattern.split('.');
-  const { fixedTail: fixedTailLabels } =
-    extractFixedTailAfterLastWildcard(labels);
-  if (fixedTailLabels.length === 0) {
-    return false; // require a concrete tail
-  }
-
-  const tail = fixedTailLabels.join('.');
-
-  if (isIPAddress(tail)) {
-    return false; // no wildcarding around IPs
-  }
-
-  if (isSuffixLikeTail(tail)) {
-    return false; // no wildcarding around suffix-like tails
-  }
-
-  // "**." requires at least one label before the remainder, so a domain that
-  // exactly equals the remainder can never match (e.g., "**.example.com" ≠ "example.com").
-  if (normalizedPattern.startsWith('**.')) {
-    if (normalizedDomain === normalizeDomain(normalizedPattern.slice(3))) {
-      return false;
-    }
-  }
-
-  return matchesMultiLabelPattern(normalizedDomain, normalizedPattern);
+  return (
+    compiled !== undefined &&
+    matchesCompiledWildcard(normalizedDomain, compiled)
+  );
 }
 
 /**
@@ -1229,27 +1182,6 @@ function parseExactOriginForMatching(entry: string): {
       !isSpecialScheme(url.protocol.toLowerCase()) &&
       !url.hostname.startsWith('['),
   };
-}
-
-/**
- * Whether a wildcard pattern's fixed tail is one no wildcard may sit over: a pseudo-TLD,
- * a public suffix, or a tail under a Public Suffix List wildcard rule (`*.kawasaki.jp`,
- * `*.sch.uk`), where every label directly beneath it is itself a public suffix - so
- * `*.kawasaki.jp` matched the suffix `foo.kawasaki.jp` and the apex `city.kawasaki.jp`.
- * Told by asking for the suffix of a made-up label under the tail.
- */
-function isSuffixLikeTail(tail: string): boolean {
-  if (INTERNAL_PSEUDO_TLDS.has(tail)) {
-    return true;
-  }
-
-  const ps = getPublicSuffix(tail);
-  if (ps && ps === tail) {
-    return true;
-  }
-
-  const probe = `lifecycleion-tail-probe.${tail}`;
-  return getPublicSuffix(probe) === probe;
 }
 
 /**

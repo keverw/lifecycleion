@@ -9,6 +9,7 @@ import {
   buildURL,
   extractFetchHeaders,
   matchesFilter,
+  normalizeHostPatterns,
   mergeHeaders,
   parseContentType,
   stripCrossOriginURLCredentials,
@@ -7672,4 +7673,54 @@ test('round 140 review 11: a paused gzip body cut short mid-body delivers its cl
   (res as unknown as PassThrough).destroy();
   await new Promise((resolve) => setTimeout(resolve, 20));
   expect(events).toEqual(['aborted', 'close']);
+});
+
+test('a registered host filter reads each pattern once and answers as the unregistered matcher does', () => {
+  const patterns = [
+    '*.example.com',
+    '**.example.com',
+    '*.*.example.com',
+    '*.com',
+    '**.co.uk',
+    '*.*',
+    '*.127.0.0.1',
+    'api.example.com',
+    'BÜCHER.example',
+    '*.bücher.example',
+    '*',
+    '*.',
+  ];
+  const hosts = [
+    'api.example.com',
+    'a.b.example.com',
+    'example.com',
+    'example.co.uk',
+    'x.example.co.uk',
+    '127.0.0.1',
+    'xn--bcher-kva.example',
+    'api.xn--bcher-kva.example',
+    'other.test',
+    // Unreadable to the normalizer: only `*` alone matches it.
+    '-edge.example.com',
+  ];
+  for (const pattern of patterns) {
+    const normalizedHosts = normalizeHostPatterns([pattern]);
+    for (const host of hosts) {
+      const context = { requestURL: `https://${host}/` };
+      expect([
+        pattern,
+        host,
+        matchesFilter(
+          { hosts: [pattern], normalizedHosts },
+          context,
+          'final',
+          'response',
+        ),
+      ]).toEqual([
+        pattern,
+        host,
+        matchesFilter({ hosts: [pattern] }, context, 'final', 'response'),
+      ]);
+    }
+  }
 });
