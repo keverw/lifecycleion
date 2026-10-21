@@ -404,7 +404,15 @@ async function readResponseBody(
     chunks.push(value);
   }
 
-  const bytes = new Uint8Array(loadedBytes);
+  return concatChunks(chunks, loadedBytes);
+}
+
+/** `chunks` joined into one array of `byteLength` bytes. */
+function concatChunks(
+  chunks: readonly Uint8Array[],
+  byteLength: number,
+): Uint8Array {
+  const bytes = new Uint8Array(byteLength);
   let offset = 0;
 
   for (const chunk of chunks) {
@@ -439,15 +447,7 @@ async function readIterableBody(
     chunks.push(chunk);
   }
 
-  const bytes = new Uint8Array(loadedBytes);
-  let offset = 0;
-
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-
-  return bytes;
+  return concatChunks(chunks, loadedBytes);
 }
 
 /**

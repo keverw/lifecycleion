@@ -510,8 +510,14 @@ export function matchesDomainList(
   }
 
   for (const allowed of cleaned) {
+    // Against the domain normalized once above, as `matchesWildcardDomain` would read it,
+    // rather than normalized again for every wildcard entry.
     if (allowed.includes('*')) {
-      if (matchesWildcardDomain(domain, allowed)) {
+      const compiled = compileWildcardPattern(allowed);
+      if (
+        compiled !== undefined &&
+        matchesCompiledWildcard(normalizedDomain, compiled)
+      ) {
         return true;
       }
       continue;

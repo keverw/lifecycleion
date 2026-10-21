@@ -115,7 +115,10 @@ import type { CookieJar } from './cookie-jar';
 import { isErrorValue, toError as normalizeError } from '../to-error';
 import { readUnknownMember as readObjectMember } from '../internal/read-member';
 import { makeResponseTooLargeError } from './internal/response-limit';
-import { readBinaryByteLength } from '../internal/binary-view';
+import {
+  presentsAsBinary,
+  readBinaryByteLength,
+} from '../internal/binary-view';
 import { utf8ByteLength } from './internal/utf8-length';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
 import {
@@ -4142,10 +4145,13 @@ export class BaseHTTPClient {
     // `TypeError` here, failing a `200` it had delivered whole.
     // Measured by its slot, not the size it reports: a subclass that says `0` for a body
     // of bytes was delivered as none.
+    // An empty string is none too, as an empty array is.
     const answeredBody: Uint8Array | null | undefined = adapterResponse.body;
+    const answered: unknown = answeredBody;
     const rawBody =
       answeredBody === null ||
       answeredBody === undefined ||
+      answered === '' ||
       (typeof answeredBody === 'object' &&
         readBinaryByteLength(answeredBody) === 0)
         ? null
@@ -4998,7 +5004,7 @@ function isAnsweredBodyOverLimit(body: unknown, maxBytes: number): boolean {
   if (typeof body === 'object' && body !== null) {
     const byteLength = readBinaryByteLength(body);
     return byteLength === null
-      ? Number.isFinite(maxBytes) && looksBinary(body)
+      ? Number.isFinite(maxBytes) && presentsAsBinary(body)
       : byteLength > maxBytes;
   }
 
@@ -5007,23 +5013,6 @@ function isAnsweredBodyOverLimit(body: unknown, maxBytes: number): boolean {
   }
 
   return body.length > maxBytes || utf8ByteLength(body) > maxBytes;
-}
-
-/**
- * Whether `value` presents as bytes by its prototype - a typed array or buffer, or a
- * `Proxy` over one - which the size check cannot measure. Guarded: a hostile prototype
- * chain answers no.
- */
-function looksBinary(value: object): boolean {
-  try {
-    return (
-      value instanceof Object.getPrototypeOf(Uint8Array) ||
-      value instanceof ArrayBuffer ||
-      value instanceof DataView
-    );
-  } catch {
-    return false;
-  }
 }
 
 /**

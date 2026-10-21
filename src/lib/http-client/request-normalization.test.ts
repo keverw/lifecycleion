@@ -8020,3 +8020,33 @@ test("PR review round 7: a cookie seeded hostOnly is replaced by the server's ho
 
   expect(jar.getCookieHeaderString('https://example.com/')).toBe('s=2');
 });
+
+test('PR review round 8: an unmeasurable body presenting as bytes from any realm is refused; an empty string is no body', async () => {
+  const custom = (body: unknown, contentType = 'application/octet-stream') =>
+    new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: () =>
+          Promise.resolve({
+            status: 200,
+            headers: { 'content-type': contentType },
+            body: body as Uint8Array,
+          }),
+      },
+      baseURL: 'http://api.test',
+      maxResponseBytes: 10,
+    });
+
+  for (const body of [
+    new Proxy(new SharedArrayBuffer(1000), {}),
+    new Proxy(vm.runInNewContext('new Uint8Array(1000)') as object, {}),
+  ]) {
+    const builder = custom(body).get('/x');
+    await builder.send();
+    expect(builder.error?.code).toBe('response_too_large');
+  }
+
+  const empty = await custom('', 'application/json').get('/x').send();
+  expect(empty.body).toBeNull();
+  expect(empty.isParseError).toBe(false);
+});

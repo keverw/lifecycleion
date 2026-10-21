@@ -158,6 +158,46 @@ export function arrayBufferKindOf(
 }
 
 /**
+ * Whether `value` presents as bytes by its prototype chain - a typed array, `DataView` or
+ * buffer, from any realm, or a `Proxy` over one - read off each prototype's own data
+ * (a typed array prototype's `BYTES_PER_ELEMENT`, a `DataView`'s or buffer's
+ * `Symbol.toStringTag`) rather than by `instanceof`, which only knows this realm. For a
+ * value {@link readBinaryByteLength} cannot measure, to tell bytes it must refuse from a
+ * value that is not bytes at all. A prototype chain that throws answers no.
+ */
+export function presentsAsBinary(value: object): boolean {
+  try {
+    for (
+      let prototype = Object.getPrototypeOf(value) as object | null;
+      prototype !== null;
+      prototype = Object.getPrototypeOf(prototype) as object | null
+    ) {
+      if (
+        Object.getOwnPropertyDescriptor(prototype, 'BYTES_PER_ELEMENT') !==
+        undefined
+      ) {
+        return true;
+      }
+      const tag: unknown = Object.getOwnPropertyDescriptor(
+        prototype,
+        Symbol.toStringTag,
+      )?.value;
+      if (
+        tag === 'ArrayBuffer' ||
+        tag === 'SharedArrayBuffer' ||
+        tag === 'DataView'
+      ) {
+        return true;
+      }
+    }
+  } catch {
+    // A hostile chain: not bytes as far as can be told.
+  }
+
+  return false;
+}
+
+/**
  * How many bytes a view actually holds, or `null` when that cannot be established.
  *
  * Measured through the intrinsic getters above rather than by reading the property, and
