@@ -1170,22 +1170,20 @@ class CheckedHost {
 }
 
 /**
- * The last request URL checked and its host, kept for the next check: every host-scoped
- * interceptor and observer of a request checks the same URL, in turn, and parsing it and
- * normalizing its host - the URL parser and IDNA - is the same answer each time. One
- * entry, so it holds nothing past the next request.
+ * The last hostname checked, kept for the next check: every host-scoped interceptor and
+ * observer of a request checks the same one, in turn, and normalizing it - the URL parser
+ * and IDNA - is the same answer each time. The hostname alone, not the request URL, so
+ * no query token or userinfo stays in module state after its request; one entry, so it
+ * holds nothing past the next request.
  */
-let lastChecked: { url: string; host: CheckedHost } | undefined;
+let lastCheckedHost: CheckedHost | undefined;
 
-function checkedHostFor(requestURL: string): CheckedHost {
-  if (lastChecked?.url !== requestURL) {
-    lastChecked = {
-      url: requestURL,
-      host: new CheckedHost(extractHostname(requestURL)),
-    };
+function checkedHostFor(hostname: string): CheckedHost {
+  if (lastCheckedHost?.hostname !== hostname) {
+    lastCheckedHost = new CheckedHost(hostname);
   }
 
-  return lastChecked.host;
+  return lastCheckedHost;
 }
 
 /** The one place a host is matched against a read pattern, exact or wildcard. */
@@ -1406,7 +1404,7 @@ export function matchesFilter(
   // request whose URL could not be read (`''`) matches no host or scheme rather than
   // skipping the filter, so a host-scoped observer does not hear about other hosts.
   if (filter.hosts && context.requestURL !== undefined) {
-    const host = checkedHostFor(context.requestURL);
+    const host = checkedHostFor(extractHostname(context.requestURL));
     const { hosts, hostPatterns } = filter;
 
     if (

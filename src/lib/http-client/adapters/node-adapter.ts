@@ -2783,8 +2783,10 @@ async function streamResponseBody(
     // it fails only with a destroyed-stream error that hides the real one. Claimed, so the
     // late-error absorber `settle` attaches - in the turn a sync factory returned it, so
     // before that error's `nextTick` emit - absorbs it without reporting it again.
+    // Truthy, as the end-of-stream read of the same field takes it: a sink that reports
+    // `errored: false` is a healthy one.
     const erroredAtStart: unknown = readObjectMember(writable, 'errored');
-    if (erroredAtStart !== null && erroredAtStart !== undefined) {
+    if (erroredAtStart) {
       claimWritableError(erroredAtStart);
       settle({
         code: 'stream_write_error',

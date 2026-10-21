@@ -4140,11 +4140,14 @@ export class BaseHTTPClient {
     // bodiless `204`-style answer) failing to parse. axios, got and ky read it as empty too.
     // Nullish, not just `null`: a custom adapter that leaves `body` out answered with a
     // `TypeError` here, failing a `200` it had delivered whole.
+    // Measured by its slot, not the size it reports: a subclass that says `0` for a body
+    // of bytes was delivered as none.
     const answeredBody: Uint8Array | null | undefined = adapterResponse.body;
     const rawBody =
       answeredBody === null ||
       answeredBody === undefined ||
-      answeredBody.byteLength === 0
+      (typeof answeredBody === 'object' &&
+        readBinaryByteLength(answeredBody) === 0)
         ? null
         : answeredBody;
     let body: unknown = rawBody;
@@ -4981,13 +4984,14 @@ function describeRequestPath(value: unknown): string {
  * internal slot measures them - a view or buffer of any kind, from any realm, not the
  * size the value reports - and a string as its UTF-8 length, counted only when its
  * UTF-16 length alone cannot tell (never fewer bytes than units, at most three per
- * unit). Anything else - a value no intrinsic getter measures is not binary - has no
- * size here.
+ * unit). An object no intrinsic getter can measure - a `Proxy` over bytes - is taken
+ * as over it, failing closed as `readBinaryByteLength` asks: delivered, it failed later
+ * as a generic error anyway. Anything else has no size.
  */
 function isAnsweredBodyOverLimit(body: unknown, maxBytes: number): boolean {
   if (typeof body === 'object' && body !== null) {
     const byteLength = readBinaryByteLength(body);
-    return byteLength !== null && byteLength > maxBytes;
+    return byteLength === null || byteLength > maxBytes;
   }
 
   if (typeof body !== 'string' || body.length * 3 <= maxBytes) {

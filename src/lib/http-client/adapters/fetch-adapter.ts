@@ -511,20 +511,20 @@ function materializeFetchHeaders(
   headers: Record<string, string | string[]>,
 ): HeadersInit {
   const entries = Object.entries(headers);
-  // A `Headers` whenever a value repeats - as an array, or as a `Cookie` given under two
-  // spellings - so a cookie is joined with `; ` however the other headers happen to be
-  // given; the runtime's own join would be `, `, which reads as one cookie.
-  const cookieSpellings = entries.filter(
-    ([key]) => lowerCaseHeaderName(key) === 'cookie',
-  ).length;
+  // The `Cookie` field built by NodeAdapter's rule on either path (see `joinCookieHeader`),
+  // so whether it is sent, and how, does not turn on how the other headers are given.
+  const cookie = joinCookieHeader(entries);
 
-  if (
-    cookieSpellings < 2 &&
-    !entries.some(([, value]) => Array.isArray(value))
-  ) {
+  // A `Headers` whenever a value repeats as an array.
+  if (!entries.some(([, value]) => Array.isArray(value))) {
     const record: Record<string, string> = {};
     for (const [key, value] of entries) {
-      defineEntry(record, key, value as string);
+      if (lowerCaseHeaderName(key) !== 'cookie') {
+        defineEntry(record, key, value as string);
+      }
+    }
+    if (cookie !== undefined) {
+      defineEntry(record, cookie.name, cookie.value);
     }
     return record;
   }
@@ -545,7 +545,6 @@ function materializeFetchHeaders(
   }
 
   // As NodeAdapter sends it: `append` would join with `, `, which reads as one cookie.
-  const cookie = joinCookieHeader(entries);
   if (cookie !== undefined) {
     materialized.set(cookie.name, cookie.value);
   }

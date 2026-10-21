@@ -123,15 +123,18 @@ describe('FetchAdapter', () => {
   });
 
   test('a Cookie given under two spellings is joined with "; " whether or not another header is an array', async () => {
-    // Read off the adapter's own `Headers`: handed a record, the runtime would join the
-    // two spellings itself - with `, ` in Node and browsers (Bun happens to use `; `).
+    // Read off what the adapter hands over, as one field: two spellings left for the
+    // runtime to join would be joined with `, ` in Node and browsers (Bun uses `; `).
     const sent: string[] = [];
     (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {
-      sent.push(
-        init?.headers instanceof Headers
-          ? (init.headers.get('cookie') ?? '')
-          : 'not joined by the adapter',
-      );
+      const given = init?.headers;
+      const fields =
+        given instanceof Headers
+          ? [given.get('cookie')]
+          : Object.entries(given ?? {})
+              .filter(([name]) => name.toLowerCase() === 'cookie')
+              .map(([, value]) => value as string);
+      sent.push(fields.length === 1 ? (fields[0] ?? '') : 'not joined');
       return Promise.resolve(new Response('ok', { status: 200 }));
     };
 
@@ -195,6 +198,22 @@ describe('FetchAdapter', () => {
       // `Headers` trims each value, as fetch sends every header.
       expect([headers, sent]).toEqual([headers, expected?.trim() ?? null]);
     }
+  });
+
+  test('PR review round 6: an unset cookie is not sent as the text "undefined"', async () => {
+    let init: RequestInit | undefined;
+    (globalThis as any).fetch = (_url: unknown, given?: RequestInit) => {
+      init = given;
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers: { cookie: undefined } as unknown as Record<string, string>,
+    });
+
+    expect(new Headers(init?.headers).get('cookie')).toBeNull();
   });
 
   test('withholds URL userinfo on a cross-origin hop', async () => {

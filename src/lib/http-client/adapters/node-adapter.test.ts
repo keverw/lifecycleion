@@ -3589,6 +3589,49 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test('a sink reporting errored: false streams as a healthy one', async () => {
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '1',
+    });
+    const writable = new EventEmitter() as unknown as WritableLike;
+    writable.write = () => true;
+    writable.end = (callback?: (err?: Error | null) => void) => {
+      setImmediate(() => callback?.());
+    };
+    writable.destroy = () => writable;
+    Object.defineProperty(writable, 'errored', { value: false });
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          queueMicrotask(() => {
+            res.emit('data', Buffer.from('a'));
+            res.emit('end');
+          });
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+
+    try {
+      const response = await new NodeAdapter().send({
+        requestURL: 'http://example.test/data',
+        method: 'GET',
+        headers: {},
+        streamResponse: () => writable,
+      });
+
+      expect(response.status).toBe(200);
+      expect(response.isStreamError).toBeFalsy();
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
   test('the pending-error listener is absorbed and then released', async () => {
     // Two halves of the same guarantee. A writable torn down by a failed `end` emits its
     // `error` after the request has settled and its listeners are gone, so an absorber is

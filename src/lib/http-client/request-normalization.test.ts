@@ -7907,3 +7907,44 @@ test('PR review round 4: a params value is read once, so the override check and 
   );
   expect(reads).toBe(1);
 });
+
+test('PR review round 6: a body no getter can measure fails closed; one reporting 0 bytes is still delivered', async () => {
+  const proxied = new Proxy(new Uint8Array(1000), {});
+  const adapter = new MockAdapter();
+  adapter.routes.get('/proxied', () => ({ status: 200, body: proxied }));
+  const mocked = await adapter.send({
+    requestURL: 'http://api.test/proxied',
+    method: 'GET',
+    headers: {},
+    maxResponseBytes: 10,
+  });
+  expect(mocked.streamErrorCode).toBe('response_too_large');
+
+  const custom = (body: unknown) =>
+    new HTTPClient({
+      adapter: {
+        getType: () => 'mock',
+        send: () =>
+          Promise.resolve({
+            status: 200,
+            headers: { 'content-type': 'application/octet-stream' },
+            body: body as Uint8Array,
+          }),
+      },
+      baseURL: 'http://api.test',
+      maxResponseBytes: 10,
+    });
+  const refused = custom(proxied).get('/x');
+  await refused.send();
+  expect(refused.error?.code).toBe('response_too_large');
+
+  class SaysEmpty extends Uint8Array {
+    public override get byteLength(): number {
+      return 0;
+    }
+  }
+  const delivered = await custom(new SaysEmpty([1, 2, 3]))
+    .get('/x')
+    .send();
+  expect(delivered.body).not.toBeNull();
+});
