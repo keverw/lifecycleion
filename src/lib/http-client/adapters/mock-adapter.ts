@@ -3,6 +3,7 @@ import {
   nonRetryableAdapterErrorFrom,
 } from '../internal/adapter-error';
 import { defineEntry } from '../../internal/define-entry';
+import { readBinaryByteLength } from '../../internal/binary-view';
 import { observeRejection } from '../../internal/promise-reactions';
 import Router from 'find-my-way';
 import type { HTTPMethod as RouterHTTPMethod } from 'find-my-way';
@@ -583,11 +584,13 @@ export class MockAdapter implements HTTPAdapter {
     // A body past `maxResponseBytes` fails as the real adapters fail it: a stream error
     // that keeps the status and headers, the body dropped. A simulated stream error
     // already loses the body, so it stands as the route asked.
+    // Measured by its internal slot, not a `length` the route's body reports.
     const maxResponseBytes = readMaxResponseBytes(request);
+    const intendedByteLength =
+      intendedBody === null ? 0 : (readBinaryByteLength(intendedBody) ?? 0);
     const isResponseTooLarge =
       simulatedStreamErrorCode === undefined &&
-      intendedBody !== null &&
-      intendedBody.length > maxResponseBytes;
+      intendedByteLength > maxResponseBytes;
     const streamErrorCode: AdapterResponse['streamErrorCode'] =
       isResponseTooLarge ? 'response_too_large' : simulatedStreamErrorCode;
 
@@ -662,8 +665,8 @@ export class MockAdapter implements HTTPAdapter {
     // signal a completed download for a body that never arrived.
     if (streamErrorCode === undefined) {
       guardedDownloadProgress?.({
-        loaded: responseBody?.length ?? 0,
-        total: responseBody?.length ?? 0,
+        loaded: responseBody === null ? 0 : intendedByteLength,
+        total: responseBody === null ? 0 : intendedByteLength,
         progress: 1,
       });
     }

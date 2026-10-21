@@ -128,7 +128,7 @@ export class HTTPRequestBuilder<T = unknown> {
     return this;
   }
 
-  public params(params: Record<string, unknown>): this {
+  public params(params: Record<string, unknown> | null | undefined): this {
     this._assertNotSent('params');
     // A nullish argument clears them, as it always did - `.params(options.query)` with
     // no query set.

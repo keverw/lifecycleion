@@ -1,6 +1,7 @@
 import { parse } from 'tldts';
 import { toASCII } from 'tr46';
 import { checkDNSLength, toAsciiDots } from '../domain-utils/helpers';
+import { describeValue } from '../internal/describe-value';
 import { PublicSuffixResolver } from './public-suffix';
 import type { PublicSuffixOverrides } from './public-suffix';
 import { normalizeAdapterResponseHeaders } from './utils';
@@ -700,13 +701,13 @@ export class CookieJar {
     const [host, scope] = args as unknown[];
     if (typeof host !== 'string' || host.trim() === '') {
       throw new TypeError(
-        `CookieJar.clear() host must be a non-empty string (got ${describeArgument(host)})`,
+        `CookieJar.clear() host must be a non-empty string (got ${describeValue(host)})`,
       );
     }
 
     if (scope !== 'hostname' && scope !== 'domain') {
       throw new TypeError(
-        `CookieJar.clear() scope must be 'hostname' or 'domain' (got ${describeArgument(scope)})`,
+        `CookieJar.clear() scope must be 'hostname' or 'domain' (got ${describeValue(scope)})`,
       );
     }
 
@@ -1824,15 +1825,6 @@ export class CookieJar {
       );
     }
   }
-}
-
-/** A value for an error message: a string as written, anything else by its type. */
-function describeArgument(value: unknown): string {
-  return value === null
-    ? 'null'
-    : typeof value === 'string'
-      ? `'${value}'`
-      : typeof value;
 }
 
 /** `text` without leading and trailing spaces and tabs, the only whitespace RFC 6265bis trims. */

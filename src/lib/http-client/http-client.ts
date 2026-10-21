@@ -1,5 +1,6 @@
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
+import { describeValue } from '../internal/describe-value';
 import {
   assertOptionalHeaderRecord,
   isPlainRecord,
@@ -4956,15 +4957,6 @@ function assertLabelArgument(label: unknown, method: string): void {
       `HTTPClient.${method}() requires a non-empty, non-whitespace label.`,
     );
   }
-}
-
-/** A value for an error message: a string as written, anything else by its type. */
-function describeValue(value: unknown): string {
-  return value === null
-    ? 'null'
-    : typeof value === 'string'
-      ? `'${value}'`
-      : typeof value;
 }
 
 /** A non-string request path, for the refusal: `instanceof` guarded, as the value is the caller's. */

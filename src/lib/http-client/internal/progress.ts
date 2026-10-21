@@ -1,5 +1,6 @@
 import type { AdapterProgressEvent } from '../types';
 import { safeHandleCallback } from '../../safe-handle-callback';
+import { readBinaryByteLength } from '../../internal/binary-view';
 
 /**
  * Wrap a caller's progress callback so a throw from it cannot be mistaken for a transport
@@ -96,14 +97,21 @@ export function knownBodyByteLength(body: unknown): number | undefined {
     return utf8ByteLength(body);
   }
 
+  if (typeof body !== 'object') {
+    return undefined;
+  }
+
+  // Bytes by their internal slot, as the response limit measures them: a buffer of any
+  // kind, from any realm, at its real size rather than the one it reports.
+  const byteLength = readBinaryByteLength(body);
+  if (byteLength !== null) {
+    return byteLength;
+  }
+
   // Guarded: the body is the caller's, and a Proxy whose `getPrototypeOf` throws made
-  // these `instanceof` checks throw from inside an XHR event listener - an uncaught
+  // this `instanceof` check throw from inside an XHR event listener - an uncaught
   // exception on the global channel rather than a size that cannot be known.
   try {
-    if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) {
-      return body.byteLength;
-    }
-
     if (typeof Blob !== 'undefined' && body instanceof Blob) {
       return body.size;
     }

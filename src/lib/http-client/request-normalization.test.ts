@@ -7851,11 +7851,7 @@ test('PR review round 2: .params(undefined) clears the params, as before', async
     return { status: 200 };
   });
   const client = new HTTPClient({ adapter, baseURL: 'http://api.test' });
-  await client
-    .get('/x')
-    .params({ a: '1' })
-    .params(undefined as unknown as Record<string, unknown>)
-    .send();
+  await client.get('/x').params({ a: '1' }).params(undefined).send();
   expect(queries).toEqual([{}]);
 });
 
@@ -7874,4 +7870,38 @@ test('PR review round 2: a string body is measured as UTF-8 without being encode
       new TextEncoder().encode(text).byteLength,
     ]);
   }
+});
+
+test('PR review round 3: a binary request body is measured by its slot for upload progress', () => {
+  class Understated extends Uint8Array {
+    public override get byteLength(): number {
+      return 1;
+    }
+  }
+
+  expect(knownBodyByteLength(new SharedArrayBuffer(3))).toBe(3);
+  expect(knownBodyByteLength(new Understated(4))).toBe(4);
+  expect(knownBodyByteLength(vm.runInNewContext('new Uint8Array(5)'))).toBe(5);
+});
+
+test('PR review round 3: MockAdapter holds a route body to maxResponseBytes by its real size', async () => {
+  class Understated extends Uint8Array {
+    public override get length(): number {
+      return 0;
+    }
+  }
+  const adapter = new MockAdapter();
+  adapter.routes.get('/big', () => ({
+    status: 200,
+    body: new Understated(100),
+  }));
+
+  const response = await adapter.send({
+    requestURL: 'http://api.test/big',
+    method: 'GET',
+    headers: {},
+    maxResponseBytes: 10,
+  });
+
+  expect(response.streamErrorCode).toBe('response_too_large');
 });

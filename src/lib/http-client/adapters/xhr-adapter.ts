@@ -252,12 +252,14 @@ export class XHRAdapter implements HTTPAdapter {
         if (!didFireUpload100) {
           // The body's own size where the browser reported none - `0` for an empty
           // string, as FetchAdapter reports it - not a stand-in `1`.
-          // Measured only when the browser reported nothing.
-          const knownBytes = (): number =>
-            knownBodyByteLength(requestBody) ?? 0;
-          const finalLoaded = uploadedBytes > 0 ? uploadedBytes : knownBytes();
+          // Measured once, and only when the browser reported nothing.
+          const knownBytes =
+            uploadedBytes > 0 && uploadTotalBytes > 0
+              ? 0
+              : (knownBodyByteLength(requestBody) ?? 0);
+          const finalLoaded = uploadedBytes > 0 ? uploadedBytes : knownBytes;
           const finalTotal =
-            uploadTotalBytes > 0 ? uploadTotalBytes : knownBytes();
+            uploadTotalBytes > 0 ? uploadTotalBytes : knownBytes;
           guardedUploadProgress?.({
             loaded: finalLoaded,
             total: finalTotal,
