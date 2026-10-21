@@ -10,7 +10,7 @@
  */
 
 import { defineEntry } from './internal/define-entry';
-import { arrayBufferKindOf } from './internal/binary-view';
+import { arrayBufferKindOf, hasBufferTagInChain } from './internal/binary-view';
 
 /**
  * Deep clone an object or value
@@ -169,34 +169,10 @@ function bufferKindOf(value: object): BufferKind | undefined {
 }
 
 /**
- * Whether a prototype in `value`'s chain carries a buffer's own `Symbol.toStringTag` -
- * another realm's `ArrayBuffer.prototype` or `SharedArrayBuffer.prototype`, which define
- * it as a plain value. Read off the prototypes, not the value, so a `Proxy`'s `get` trap
- * is not run, and a non-buffer from another realm - its plain objects - is passed over
- * without the throwing slot check.
- */
-function hasBufferTagInChain(value: object): boolean {
-  for (
-    let prototype = Object.getPrototypeOf(value) as object | null;
-    prototype !== null;
-    prototype = Object.getPrototypeOf(prototype) as object | null
-  ) {
-    const tag: unknown = Object.getOwnPropertyDescriptor(
-      prototype,
-      Symbol.toStringTag,
-    )?.value;
-    if (tag === 'ArrayBuffer' || tag === 'SharedArrayBuffer') {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-/**
  * A buffer copied whole into a new one of its kind - resizable or growable as it is.
  * A `SharedArrayBuffer`'s copy is a new one, its memory not shared with the original. A
- * subclass is copied by `slice`, through its own constructor (see {@link isSubclass}).
+ * subclass is copied by `slice`, through its own constructor (see {@link isSubclass}),
+ * which gives a fixed-length buffer whatever the original's.
  */
 function copyBuffer(buffer: object, kind: BufferKind): object {
   const Kind = bufferConstructor(kind);
@@ -227,9 +203,10 @@ function copyBuffer(buffer: object, kind: BufferKind): object {
 
 /**
  * `byteLength` bytes of `buffer` from `byteOffset`, copied into a new buffer built by
- * `Kind` - byte for byte rather than by `slice`, which builds through the species
- * constructor and so runs a subclass's. Read through a `Uint8Array`, which throws for a
- * detached buffer: a failure, rather than a clone that silently holds nothing.
+ * `Kind` - this realm's own buffer type, so a built-in buffer or view from another realm
+ * is cloned as this realm's, resizable when asked. Read through a `Uint8Array`, which
+ * throws for a detached buffer: a failure, rather than a clone that silently holds
+ * nothing.
  */
 function copyBytes(
   buffer: object,

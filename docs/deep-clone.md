@@ -51,18 +51,18 @@ cloned !== obj; // true (distinct object)
 
 ## Supported Types
 
-| Type                               | Behavior                                                                                                       |
-| ---------------------------------- | -------------------------------------------------------------------------------------------------------------- |
-| Primitives                         | Returned as-is (`number`, `string`, `boolean`, `null`, `undefined`)                                            |
-| Plain objects                      | Recursively cloned (own enumerable properties)                                                                 |
-| Arrays                             | Recursively cloned                                                                                             |
-| `Date`                             | New `Date` instance with same time value                                                                       |
-| `RegExp`                           | New `RegExp` with same source, flags, and `lastIndex`                                                          |
-| `Map`                              | New `Map` with deep-cloned keys and values                                                                     |
-| `Set`                              | New `Set` with deep-cloned values                                                                              |
-| `ArrayBuffer`, `SharedArrayBuffer` | Copied whole into a new one of the same kind; resizable or growable as the original                            |
-| Typed arrays, `DataView`           | A copy of the bytes the view covers, in a new buffer of the same kind, same type (a `Buffer` stays a `Buffer`) |
-| Functions                          | Returned by reference (not cloned)                                                                             |
+| Type                               | Behavior                                                                                                                |
+| ---------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| Primitives                         | Returned as-is (`number`, `string`, `boolean`, `null`, `undefined`)                                                     |
+| Plain objects                      | Recursively cloned (own enumerable properties)                                                                          |
+| Arrays                             | Recursively cloned                                                                                                      |
+| `Date`                             | New `Date` instance with same time value                                                                                |
+| `RegExp`                           | New `RegExp` with same source, flags, and `lastIndex`                                                                   |
+| `Map`                              | New `Map` with deep-cloned keys and values                                                                              |
+| `Set`                              | New `Set` with deep-cloned values                                                                                       |
+| `ArrayBuffer`, `SharedArrayBuffer` | Copied whole into a new one of the same kind; resizable or growable as the original (a subclass's copy is fixed-length) |
+| Typed arrays, `DataView`           | A copy of the bytes the view covers, in a new buffer of the same kind, same type (a `Buffer` stays a `Buffer`)          |
+| Functions                          | Returned by reference (not cloned)                                                                                      |
 
 ## Notes
 

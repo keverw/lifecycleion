@@ -166,27 +166,37 @@ export function arrayBufferKindOf(
  * value that is not bytes at all. A prototype chain that throws answers no.
  */
 export function presentsAsBinary(value: object): boolean {
+  return someInPrototypeChain(
+    value,
+    (prototype) =>
+      Object.getOwnPropertyDescriptor(prototype, 'BYTES_PER_ELEMENT') !==
+        undefined || isBinaryTag(ownToStringTag(prototype), true),
+  );
+}
+
+/**
+ * Whether `value`'s prototype chain holds a buffer's own prototype - an `ArrayBuffer` or
+ * `SharedArrayBuffer`, from any realm - told by its `Symbol.toStringTag`, read off the
+ * prototypes so a `Proxy`'s `get` trap is not run. A chain that throws answers no.
+ */
+export function hasBufferTagInChain(value: object): boolean {
+  return someInPrototypeChain(value, (prototype) =>
+    isBinaryTag(ownToStringTag(prototype), false),
+  );
+}
+
+/** Whether `matches` holds for some prototype in `value`'s chain; `false` if it throws. */
+function someInPrototypeChain(
+  value: object,
+  matches: (prototype: object) => boolean,
+): boolean {
   try {
     for (
       let prototype = Object.getPrototypeOf(value) as object | null;
       prototype !== null;
       prototype = Object.getPrototypeOf(prototype) as object | null
     ) {
-      if (
-        Object.getOwnPropertyDescriptor(prototype, 'BYTES_PER_ELEMENT') !==
-        undefined
-      ) {
-        return true;
-      }
-      const tag: unknown = Object.getOwnPropertyDescriptor(
-        prototype,
-        Symbol.toStringTag,
-      )?.value;
-      if (
-        tag === 'ArrayBuffer' ||
-        tag === 'SharedArrayBuffer' ||
-        tag === 'DataView'
-      ) {
+      if (matches(prototype)) {
         return true;
       }
     }
@@ -195,6 +205,20 @@ export function presentsAsBinary(value: object): boolean {
   }
 
   return false;
+}
+
+/** A prototype's own `Symbol.toStringTag`, as a plain value; getters are not run. */
+function ownToStringTag(prototype: object): unknown {
+  return Object.getOwnPropertyDescriptor(prototype, Symbol.toStringTag)?.value;
+}
+
+/** A buffer's tag, or - with `isViewIncluded` - a `DataView`'s. */
+function isBinaryTag(tag: unknown, isViewIncluded: boolean): boolean {
+  return (
+    tag === 'ArrayBuffer' ||
+    tag === 'SharedArrayBuffer' ||
+    (isViewIncluded && tag === 'DataView')
+  );
 }
 
 /**

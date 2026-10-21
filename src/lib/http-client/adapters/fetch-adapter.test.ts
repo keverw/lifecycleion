@@ -216,6 +216,26 @@ describe('FetchAdapter', () => {
     expect(new Headers(init?.headers).get('cookie')).toBeNull();
   });
 
+  test('PR review round 9: a 205 has no body, so no size refusal is read off it', async () => {
+    (globalThis as any).fetch = () =>
+      Promise.resolve(
+        new Response(null, {
+          status: 205,
+          headers: { 'content-length': '1000' },
+        }),
+      );
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/reset',
+      method: 'POST',
+      headers: {},
+      maxResponseBytes: 10,
+    });
+
+    expect(response.status).toBe(205);
+    expect(response.streamErrorCode).toBeUndefined();
+  });
+
   test('withholds URL userinfo on a cross-origin hop', async () => {
     let capturedURL = '';
 

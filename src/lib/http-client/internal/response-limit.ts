@@ -25,15 +25,17 @@ export function readMaxResponseBytes(request: AdapterRequest): number {
 
 /**
  * Whether a response to `method` with `status` carries a body at all. A `HEAD` answer, a
- * `204` / `304` and an informational status have none, whatever their `Content-Length`
- * says - a `HEAD` reports the length its `GET` would have - so a size refusal must not be
- * read off them, and there is nothing to decode.
+ * `204` / `205` / `304` and an informational status have none, whatever their
+ * `Content-Length` says - a `HEAD` reports the length its `GET` would have - so a size
+ * refusal must not be read off them, and there is nothing to decode. `205` with them, as
+ * RFC 9110 forbids it content and the Fetch standard lists it a null-body status.
  */
 export function hasResponseBody(method: string, status: number): boolean {
   return (
     method.toUpperCase() !== 'HEAD' &&
     status >= 200 &&
     status !== 204 &&
+    status !== 205 &&
     status !== 304
   );
 }

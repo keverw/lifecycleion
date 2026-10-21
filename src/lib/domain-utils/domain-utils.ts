@@ -472,6 +472,34 @@ export function matchesWildcardOrigin(
 }
 
 /**
+ * Wildcard patterns compiled for {@link matchesDomainList}, which is called on every
+ * request with the same list: compiling runs IDNA on each label and looks the tail up in
+ * the Public Suffix List. Cleared whole when full, so a list of ever-new patterns does not
+ * grow it without bound.
+ */
+const compiledWildcardPatterns = new Map<
+  string,
+  ReturnType<typeof compileWildcardPattern>
+>();
+const MAX_COMPILED_WILDCARD_PATTERNS = 512;
+
+function compiledWildcardPattern(
+  pattern: string,
+): ReturnType<typeof compileWildcardPattern> {
+  if (compiledWildcardPatterns.has(pattern)) {
+    return compiledWildcardPatterns.get(pattern);
+  }
+
+  const compiled = compileWildcardPattern(pattern);
+  if (compiledWildcardPatterns.size >= MAX_COMPILED_WILDCARD_PATTERNS) {
+    compiledWildcardPatterns.clear();
+  }
+  compiledWildcardPatterns.set(pattern, compiled);
+
+  return compiled;
+}
+
+/**
  * Check if a domain matches any pattern in a list
  * Supports exact matches, wildcards, and normalization
  *
@@ -513,7 +541,7 @@ export function matchesDomainList(
     // Against the domain normalized once above, as `matchesWildcardDomain` would read it,
     // rather than normalized again for every wildcard entry.
     if (allowed.includes('*')) {
-      const compiled = compileWildcardPattern(allowed);
+      const compiled = compiledWildcardPattern(allowed);
       if (
         compiled !== undefined &&
         matchesCompiledWildcard(normalizedDomain, compiled)
