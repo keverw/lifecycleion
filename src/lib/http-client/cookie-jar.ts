@@ -29,9 +29,10 @@ export interface Cookie {
   value: string;
   domain?: string;
   /**
-   * True when the cookie must not match subdomains: a Set-Cookie with no `Domain=`, an
-   * empty `Domain=` / `Domain=.`, or a `Domain=` naming a public suffix that is the
-   * request host itself (`Domain=localhost` from `http://localhost/`).
+   * True when the cookie must not match subdomains: a Set-Cookie with no `Domain=`, a last
+   * `Domain=` that is empty or `.` (even after a valid one: the last wins, as Chrome and
+   * Firefox read it), or a `Domain=` naming a public suffix that is the request host
+   * itself (`Domain=localhost` from `http://localhost/`).
    */
   hostOnly?: boolean;
   path?: string;
@@ -1032,6 +1033,10 @@ export class CookieJar {
 
         switch (attrName) {
           case 'domain': {
+            // The last one wins, an empty one included: `Domain=example.com; Domain=` is
+            // host-only, as Chrome and Firefox store it. RFC 6265bis §5.6.3 would ignore
+            // the empty one and keep the cookie on every subdomain; the narrower reading
+            // is kept on purpose.
             // One leading dot dropped, as RFC 6265 §5.2.3 drops it; a second is kept, so
             // `Domain=..example.com` names no host and its cookie is ignored (see
             // `storeParsed`), as browsers ignore it, rather than becoming `example.com`.

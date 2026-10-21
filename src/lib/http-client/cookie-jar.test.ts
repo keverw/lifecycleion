@@ -1799,6 +1799,22 @@ describe('CookieJar', () => {
       expect(cookie?.domain).toBe('example.com');
     });
 
+    test('a last empty Domain= or Domain=. makes the cookie host-only, as browsers store it', () => {
+      jar.parseSetCookieHeader(
+        'a=1; Domain=example.com; Domain=; Path=/',
+        'https://www.example.com',
+      );
+      jar.parseSetCookieHeader(
+        'b=2; Domain=example.com; Domain=.; Path=/',
+        'https://www.example.com',
+      );
+
+      expect(jar.getCookieFor('a', 'https://api.example.com')).toBeUndefined();
+      expect(jar.getCookieFor('a', 'https://www.example.com')?.value).toBe('1');
+      expect(jar.getCookieFor('b', 'https://api.example.com')).toBeUndefined();
+      expect(jar.getCookieFor('b', 'https://www.example.com')?.value).toBe('2');
+    });
+
     test('empty Domain= or Domain=. is host-only and does not match subdomains', () => {
       jar.parseSetCookieHeader(
         'a=1; Domain=; Path=/',

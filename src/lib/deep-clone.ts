@@ -34,7 +34,7 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
 
   // Handle Date
   if (obj instanceof Date) {
-    return new Date(obj) as T;
+    return remember(seen, obj, new Date(obj));
   }
 
   // Handle RegExp
@@ -42,13 +42,12 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
     const flags = obj.flags;
     const cloned = new RegExp(obj.source, flags);
     cloned.lastIndex = obj.lastIndex;
-    return cloned as T;
+    return remember(seen, obj, cloned);
   }
 
   // Handle Map
   if (obj instanceof Map) {
-    const cloned = new Map();
-    seen.set(obj as object, cloned);
+    const cloned = remember<Map<unknown, unknown>>(seen, obj, new Map());
 
     for (const [key, value] of obj) {
       cloned.set(cloneInternal(key, seen), cloneInternal(value, seen));
@@ -59,8 +58,7 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
 
   // Handle Set
   if (obj instanceof Set) {
-    const cloned = new Set();
-    seen.set(obj as object, cloned);
+    const cloned = remember<Set<unknown>>(seen, obj, new Set());
 
     for (const value of obj) {
       cloned.add(cloneInternal(value, seen));
@@ -91,25 +89,28 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
         slice: (this: typeof typedArray) => typeof typedArray;
       }
     ).slice.call(typedArray);
-    return cloned as T;
+    return remember(seen, obj, cloned);
   }
 
   // A `DataView` over a copy of its bytes, and an `ArrayBuffer` copied: both fell through
   // to the plain-object branch and came back as `{}`.
   if (obj instanceof DataView) {
-    return new DataView(
-      obj.buffer.slice(obj.byteOffset, obj.byteOffset + obj.byteLength),
-    ) as T;
+    return remember(
+      seen,
+      obj,
+      new DataView(
+        obj.buffer.slice(obj.byteOffset, obj.byteOffset + obj.byteLength),
+      ),
+    );
   }
 
   if (obj instanceof ArrayBuffer) {
-    return obj.slice(0) as T;
+    return remember(seen, obj, obj.slice(0));
   }
 
   // Handle Array
   if (Array.isArray(obj)) {
-    const cloned: unknown[] = [];
-    seen.set(obj as object, cloned);
+    const cloned = remember<unknown[]>(seen, obj, []);
 
     for (const item of obj) {
       cloned.push(cloneInternal(item, seen));
@@ -119,8 +120,7 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
   }
 
   // Handle plain objects
-  const cloned: Record<string, unknown> = {};
-  seen.set(obj, cloned);
+  const cloned = remember<Record<string, unknown>>(seen, obj, {});
 
   for (const key in obj) {
     if (Object.prototype.hasOwnProperty.call(obj, key)) {
@@ -134,5 +134,18 @@ function cloneInternal<T>(obj: T, seen: WeakMap<object, unknown>): T {
     }
   }
 
+  return cloned as T;
+}
+
+/**
+ * `cloned`, registered as `original`'s clone, so a value reached twice is cloned once and
+ * both references keep pointing at one copy, as they pointed at one original.
+ */
+function remember<T>(
+  seen: WeakMap<object, unknown>,
+  original: object,
+  cloned: unknown,
+): T {
+  seen.set(original, cloned);
   return cloned as T;
 }

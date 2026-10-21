@@ -241,6 +241,60 @@ describe('deepClone', () => {
       expect(cloned).toEqual(original);
       expect(cloned).not.toBe(original);
     });
+
+    test('a value reached twice is cloned once, for buffers, views, dates and regexes', () => {
+      const raw = new ArrayBuffer(4);
+      const bytes = new Uint8Array([1, 2]);
+      const view = new DataView(new ArrayBuffer(2));
+      const when = new Date(0);
+      const pattern = /a/g;
+      const cloned = deepClone({
+        raw: [raw, raw],
+        bytes: [bytes, bytes],
+        view: [view, view],
+        when: [when, when],
+        pattern: [pattern, pattern],
+      });
+
+      for (const [first, second] of Object.values(cloned)) {
+        expect(first).toBe(second);
+      }
+      expect(cloned.raw[0]).not.toBe(raw);
+      expect(cloned.bytes[0]).not.toBe(bytes);
+    });
+
+    test('a Buffer is copied as a Buffer, its memory its own', () => {
+      const original = Buffer.from('hello');
+      const cloned = deepClone(original);
+
+      expect(Buffer.isBuffer(cloned)).toBe(true);
+      expect(cloned.toString()).toBe('hello');
+      cloned[0] = 0;
+      expect(original.toString()).toBe('hello');
+    });
+
+    test('a strict Proxy that throws on unknown keys still clones', () => {
+      const strict = new Proxy(
+        { a: 1 },
+        {
+          get(target, key) {
+            if (!(key in target)) {
+              throw new Error(`unknown key ${String(key)}`);
+            }
+            return Reflect.get(target, key) as unknown;
+          },
+        },
+      );
+
+      expect(deepClone({ strict })).toEqual({ strict: { a: 1 } });
+    });
+
+    test('a detached ArrayBuffer throws rather than cloning to {}', () => {
+      const original = new ArrayBuffer(4);
+      structuredClone(original, { transfer: [original] });
+
+      expect(() => deepClone(original)).toThrow();
+    });
   });
 
   describe('circular references', () => {

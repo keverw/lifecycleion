@@ -832,6 +832,12 @@ export class NodeAdapter implements HTTPAdapter {
               headers: Record<string, string | string[]>;
 
               /**
+               * Whether the factory has been called. Not until a microtask after the setup
+               * begins, and an abort before that is the response's, not the factory's.
+               */
+              didCallFactory: boolean;
+
+              /**
                * Settle a socket failure that lands during the setup.
                *
                * The one window where "the response side always settles on its own" is not
@@ -1570,6 +1576,7 @@ export class NodeAdapter implements HTTPAdapter {
                   abort: abortStream,
                   status,
                   headers,
+                  didCallFactory: false,
                   isResponseComplete: () => res.complete,
                   failOnSocketError: (error: Error): void => {
                     setup.failOnSocketError = undefined;
@@ -1617,6 +1624,7 @@ export class NodeAdapter implements HTTPAdapter {
                 if (streamAbort.signal.aborted) {
                   return;
                 }
+                setup.didCallFactory = true;
                 const returned = request.streamResponse(
                   {
                     status: 200,
@@ -2168,8 +2176,17 @@ export class NodeAdapter implements HTTPAdapter {
               return;
             }
 
-            if (activeBufferedResponse) {
-              const { status, headers } = activeBufferedResponse;
+            // An answer whose body is buffering, or whose stream setup has not called
+            // its factory yet: an abort of the response either way - not a failure of a
+            // factory that never ran.
+            const unreadAnswer =
+              activeBufferedResponse ??
+              (pendingStreamSetup?.didCallFactory === false
+                ? pendingStreamSetup
+                : undefined);
+            if (unreadAnswer !== undefined) {
+              const { status, headers } = unreadAnswer;
+              const isBuffering = unreadAnswer === activeBufferedResponse;
               activeBufferedResponse = undefined;
               destroyRequestQuietly(req);
               failRequest(
@@ -2178,6 +2195,9 @@ export class NodeAdapter implements HTTPAdapter {
                   request.headers,
                   status,
                   headers,
+                  isBuffering
+                    ? undefined
+                    : 'Request aborted before the streamResponse factory was called',
                 ),
               );
               return;
@@ -2761,7 +2781,8 @@ async function streamResponseBody(
     // A sink that failed before a byte was handed to it - one its factory destroyed with
     // an error - settles with that error at once, the response never resumed: written to,
     // it fails only with a destroyed-stream error that hides the real one. Claimed, so the
-    // absorber that covered its early `'error'` does not report it again.
+    // late-error absorber `settle` attaches - in the turn a sync factory returned it, so
+    // before that error's `nextTick` emit - absorbs it without reporting it again.
     const erroredAtStart: unknown = readObjectMember(writable, 'errored');
     if (erroredAtStart !== null && erroredAtStart !== undefined) {
       claimWritableError(erroredAtStart);
@@ -3921,8 +3942,9 @@ function makeResponseStreamAbortError(
   fallbackHeaders: Record<string, string | string[]>,
   status: number,
   headers: Record<string, string | string[]>,
+  message = 'Request aborted during response streaming',
 ): Error {
-  const error = new Error('Request aborted during response streaming');
+  const error = new Error(message);
   error.name = 'AbortError';
 
   // Hidden, as `markStreamFactoryError`'s tags are: the request's headers carry its

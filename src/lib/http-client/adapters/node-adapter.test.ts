@@ -2980,6 +2980,68 @@ describe('NodeAdapter.send() — unit branches without server', () => {
     }
   });
 
+  test("an abort before the factory is called is the response's, and the factory is not called", async () => {
+    const req = new MockClientRequest();
+    const res = new MockIncomingMessage(200, {
+      'content-type': 'application/octet-stream',
+      'content-length': '10',
+    });
+    const controller = new AbortController();
+    const baseline = {
+      error: res.listenerCount('error'),
+      aborted: res.listenerCount('aborted'),
+      close: res.listenerCount('close'),
+    };
+    const requestSpy = spyOn(http, 'request').mockImplementation(
+      (_options, callback) => {
+        const cb = callback as
+          ((res: http.IncomingMessage) => void) | undefined;
+        queueMicrotask(() => {
+          cb?.(res as unknown as http.IncomingMessage);
+          // In the microtask the factory is called a turn after.
+          controller.abort();
+        });
+        return req as unknown as http.ClientRequest;
+      },
+    );
+    let factoryCalls = 0;
+
+    try {
+      const outcome = await new NodeAdapter()
+        .send({
+          requestURL: 'http://example.test/data',
+          method: 'GET',
+          headers: {},
+          signal: controller.signal,
+          streamResponse: () => {
+            factoryCalls++;
+            return null;
+          },
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<string, unknown> & Error,
+        );
+      await new Promise<void>((done) => {
+        setImmediate(done);
+      });
+
+      expect(factoryCalls).toBe(0);
+      expect(outcome?.name).toBe('AbortError');
+      expect(outcome?.[RESPONSE_STREAM_ABORT_FLAG]).toBe(true);
+      expect(outcome?.[STREAM_FACTORY_ERROR_FLAG]).toBeUndefined();
+      // The setup's listeners are gone; the one `'close'` left is the response's own,
+      // which every request keeps.
+      expect({
+        error: res.listenerCount('error'),
+        aborted: res.listenerCount('aborted'),
+        close: res.listenerCount('close'),
+      }).toEqual({ ...baseline, close: baseline.close + 1 });
+    } finally {
+      requestSpy.mockRestore();
+    }
+  });
+
   test('aborted streamed responses settle as stream_response_error', async () => {
     const req = new MockClientRequest();
     const res = new MockIncomingMessage(200, {

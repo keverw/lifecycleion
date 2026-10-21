@@ -82,6 +82,11 @@ export class FetchAdapter implements HTTPAdapter {
     // setup that polyfills only `fetch` has none. The URL is tested with `new URL` in a
     // try of its own: `URL.canParse` is missing from older browsers and early Node 18,
     // and a check that throws there must not fail every request.
+    //
+    // The headers it is built with are kept for `fetch` below, so they are materialized
+    // once; where it is not built, `fetch` materializes them inside its own `try`.
+    let fetchHeaders: HeadersInit | undefined;
+
     let isAbsoluteURL = false;
     try {
       new URL(dispatchedURL);
@@ -93,9 +98,10 @@ export class FetchAdapter implements HTTPAdapter {
     if (isAbsoluteURL && typeof Request === 'function') {
       let builtMethod: string;
       try {
+        fetchHeaders = materializeFetchHeaders(headers);
         builtMethod = new Request(dispatchedURL, {
           method,
-          headers: materializeFetchHeaders(headers),
+          headers: fetchHeaders,
           redirect: 'manual',
         }).method;
       } catch (error) {
@@ -120,7 +126,7 @@ export class FetchAdapter implements HTTPAdapter {
     try {
       response = await fetch(dispatchedURL, {
         method,
-        headers: materializeFetchHeaders(headers),
+        headers: fetchHeaders ?? materializeFetchHeaders(headers),
         body: body as BodyInit | null,
         signal: signal ?? null,
         redirect: 'manual',
@@ -493,25 +499,27 @@ function asError(value: unknown): Error | undefined {
   return isErrorValue(value) ? value : undefined;
 }
 
+/**
+ * The request headers as `fetch` takes them, each value read once: a fresh record, or a
+ * `Headers` when a value repeats. Never the caller's own object, which the build check
+ * and `fetch` would each read again - a getter could answer one and send the other.
+ */
 function materializeFetchHeaders(
   headers: Record<string, string | string[]>,
 ): HeadersInit {
-  let shouldUseHeadersObject = false;
+  const entries = Object.entries(headers);
 
-  for (const value of Object.values(headers)) {
-    if (Array.isArray(value)) {
-      shouldUseHeadersObject = true;
-      break;
+  if (!entries.some(([, value]) => Array.isArray(value))) {
+    const record: Record<string, string> = {};
+    for (const [key, value] of entries) {
+      defineEntry(record, key, value as string);
     }
-  }
-
-  if (!shouldUseHeadersObject) {
-    return headers as Record<string, string>;
+    return record;
   }
 
   const materialized = new Headers();
 
-  for (const [key, value] of Object.entries(headers)) {
+  for (const [key, value] of entries) {
     if (lowerCaseHeaderName(key) === 'cookie') {
       // Joined with `; ` onto any earlier spelling's (`Cookie` then `cookie`), as
       // `materializeRequestHeaders` joins them: `set` replaced it, and `append` would

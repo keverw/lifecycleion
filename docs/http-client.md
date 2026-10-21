@@ -844,7 +844,7 @@ A `CookieJar` provides cookie storage with Public Suffix List domain matching, p
 
 A response cookie's lifetime is capped at 400 days, as browsers cap it (RFC 6265bis): a longer `Max-Age` or a later `Expires` is read as 400 days from now. `Expires` is read with RFC 6265's cookie-date algorithm, in UTC whatever zone is written, and a value that is not a cookie-date (`Expires=0`) is ignored, leaving a session cookie. A cookie whose name and value together pass 4096 bytes is ignored. A cookie a header cannot carry - a name or value with a character above U+00FF - is refused by `setCookie()` and `fromJSON()`. The jar does not limit how many cookies it holds; call `clearExpiredCookies()` on a long-lived jar. A replaced cookie keeps its place in the `Cookie` header, as browsers keep it; a jar restored with `fromJSON` orders cookies of equal path length by `createdAt` instead, so that place is not kept across a save.
 
-Cookie domains are canonicalized through IDNA to lowercase ASCII: for example, `domain: 'münchen.de'` given to `setCookie()` or restored through `fromJSON()` matches the request host `xn--mnchen-3ya.de`, and so does a request to `https://münchen.de/`. The same normalization applies to hosts passed to `clear()`. A `Set-Cookie` header's `Domain` is ASCII or the cookie is ignored, as RFC 6265bis has it - whether the header came off the wire (where its bytes are read as latin1) or as a string passed to `processResponseHeaders()` / `parseSetCookieHeader()`; servers send the `xn--` form. The last `SameSite` attribute wins, an unrecognized value reading as the default. A `Domain` with two leading dots (`..example.com`) names no host, and its cookie is ignored. A `SameSite=None` cookie without `Secure` is ignored, as browsers ignore it. Invalid domain scopes are rejected. A trailing dot is dropped, so `example.com.` and `example.com` are the same host to the jar, as they are to the client's credential scope.
+Cookie domains are canonicalized through IDNA to lowercase ASCII: for example, `domain: 'münchen.de'` given to `setCookie()` or restored through `fromJSON()` matches the request host `xn--mnchen-3ya.de`, and so does a request to `https://münchen.de/`. The same normalization applies to hosts passed to `clear()`. A `Set-Cookie` header's `Domain` is ASCII or the cookie is ignored, as RFC 6265bis has it - whether the header came off the wire (where its bytes are read as latin1) or as a string passed to `processResponseHeaders()` / `parseSetCookieHeader()`; servers send the `xn--` form. The last `SameSite` attribute wins, an unrecognized value reading as the default. The last `Domain` attribute wins too, an empty one included: `Domain=example.com; Domain=` is host-only, as Chrome and Firefox store it (RFC 6265bis would ignore the empty one and widen the cookie to every subdomain). A `Domain` with two leading dots (`..example.com`) names no host, and its cookie is ignored. A `SameSite=None` cookie without `Secure` is ignored, as browsers ignore it. Invalid domain scopes are rejected. A trailing dot is dropped, so `example.com.` and `example.com` are the same host to the jar, as they are to the client's credential scope.
 
 Fetch uses `Headers.getSetCookie()` to preserve individual response cookie lines.
 On legacy implementations without it, the fallback accepts a single unambiguous
@@ -1766,13 +1766,15 @@ returns, with this listener attached first. An error that writable emits anyway,
 `createWriteStream()` into a missing directory failing to open, is reported through the
 host error reporter, because the request it belonged to has already answered.
 
-A writable the factory returns already failed (destroyed with an error, by a sync factory
-or an `async` one) settles the request as a `stream_write_error` with that error as its
-cause. The factory is called from a microtask, so the adapter's listener is on the
-writable before that error is emitted - as long as the factory returns it without waiting
-on I/O or a timer after failing it. A stream emits that error a tick after `destroy()`,
-and while an `async` factory waits on real I/O the stream is not the adapter's yet: give a
-stream you fail before such an `await` an `'error'` listener of your own.
+A Node stream the factory returns already failed (destroyed with an error, by a sync
+factory or an `async` one) settles the request as a `stream_write_error` with that error
+as its cause. A Node stream emits that error a tick after `destroy()`; the factory is
+called from a microtask, so in Node and Bun the adapter's listener is on the stream
+first, and a sync factory's stream also gets the late-error listener above the moment it
+is returned. Not covered: a stream an `async` factory fails and then awaits I/O or a
+timer before returning, which emits while the stream is not the adapter's yet, and a
+hand-written `WritableLike` that emits `'error'` from inside `destroy()` itself. Give
+either an `'error'` listener of your own.
 
 That destroy is one of three: the adapter also destroys the writable when the request is
 cancelled or times out mid-stream, and when the stream fails mid-body. A sink handed to

@@ -97,6 +97,30 @@ describe('FetchAdapter', () => {
     expect(capturedInit?.redirect).toBe('manual');
   });
 
+  test('each header value is read once, so the build check and fetch see the same one', async () => {
+    let capturedInit: RequestInit | undefined;
+    (globalThis as any).fetch = (_url: unknown, init?: RequestInit) => {
+      capturedInit = init;
+      return Promise.resolve(new Response('ok', { status: 200 }));
+    };
+    let reads = 0;
+    const headers = {
+      get authorization() {
+        reads++;
+        return reads === 1 ? 'Bearer checked' : 'Bearer swapped';
+      },
+    } as unknown as Record<string, string>;
+
+    await new FetchAdapter().send({
+      requestURL: 'https://local.test/users',
+      method: 'GET',
+      headers,
+    });
+
+    expect(reads).toBe(1);
+    expect(capturedInit?.headers).toEqual({ authorization: 'Bearer checked' });
+  });
+
   test('withholds URL userinfo on a cross-origin hop', async () => {
     let capturedURL = '';
 
