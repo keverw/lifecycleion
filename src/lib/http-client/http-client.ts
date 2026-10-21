@@ -2855,12 +2855,19 @@ export class BaseHTTPClient {
         // reading at the limit, but a custom adapter may hand over a body of any size, and
         // the limit is the client's promise, not only theirs.
         const answeredBody: unknown = adapterResponse.body;
+        // A bodiless answer (a `HEAD`, a `204`) has no body, as no adapter hands one
+        // over: a custom adapter's stray one there is dropped rather than delivered -
+        // and decoded - past the limit.
         if (
+          adapterResponse.isStreamed !== true &&
+          answeredBody !== null &&
+          answeredBody !== undefined &&
+          !hasResponseBody(sentRequest.method, adapterResponse.status)
+        ) {
+          adapterResponse.body = null;
+        } else if (
           adapterResponse.isStreamError !== true &&
           adapterResponse.isStreamed !== true &&
-          // A bodiless answer (a `HEAD`, a `204`) is not held to it, as no adapter
-          // holds one: a custom adapter's stray body there is not the answer's.
-          hasResponseBody(sentRequest.method, adapterResponse.status) &&
           // A plain `ArrayBuffer` or a string too: outside the type, but `_buildResponse`
           // delivers either, so they are bodies the limit must see.
           isAnsweredBodyOverLimit(answeredBody, maxResponseBytes)

@@ -483,28 +483,49 @@ const compiledWildcardPatterns = new Map<
 >();
 const MAX_COMPILED_WILDCARD_PATTERNS = 512;
 
+/** A scheme and `://`: an origin, which a domain list refuses. */
+const ORIGIN_LIKE = /^[a-z][a-z0-9+\-.]*:\/\//i;
+
+/** Exact entries normalized for {@link matchesDomainList}, cached as patterns are. */
+const normalizedExactEntries = new Map<string, string>();
+
 function compiledWildcardPattern(
   pattern: string,
 ): ReturnType<typeof compileWildcardPattern> {
-  // Least recently used out first: a hit moves to the end, the oldest goes when full, so
-  // a list longer than the cache still keeps its most used entries.
-  if (compiledWildcardPatterns.has(pattern)) {
-    const cached = compiledWildcardPatterns.get(pattern);
-    compiledWildcardPatterns.delete(pattern);
-    compiledWildcardPatterns.set(pattern, cached);
+  return cachedEntry(compiledWildcardPatterns, pattern, compileWildcardPattern);
+}
+
+function normalizedExactEntry(entry: string): string {
+  return cachedEntry(normalizedExactEntries, entry, normalizeDomain);
+}
+
+/**
+ * `compute(key)`, kept in `cache`. Least recently used out first: a hit moves to the end,
+ * the oldest goes when full, so a list longer than the cache still keeps its most used
+ * entries.
+ */
+function cachedEntry<T>(
+  cache: Map<string, T>,
+  key: string,
+  compute: (key: string) => T,
+): T {
+  if (cache.has(key)) {
+    const cached = cache.get(key) as T;
+    cache.delete(key);
+    cache.set(key, cached);
     return cached;
   }
 
-  const compiled = compileWildcardPattern(pattern);
-  if (compiledWildcardPatterns.size >= MAX_COMPILED_WILDCARD_PATTERNS) {
-    const oldest = compiledWildcardPatterns.keys().next();
+  const value = compute(key);
+  if (cache.size >= MAX_COMPILED_WILDCARD_PATTERNS) {
+    const oldest = cache.keys().next();
     if (oldest.done !== true) {
-      compiledWildcardPatterns.delete(oldest.value);
+      cache.delete(oldest.value);
     }
   }
-  compiledWildcardPatterns.set(pattern, compiled);
+  cache.set(key, value);
 
-  return compiled;
+  return value;
 }
 
 /**
@@ -536,7 +557,6 @@ export function matchesDomainList(
     .filter((s) => s.length > 0);
 
   // Validate: throw if any origin-style patterns are present
-  const ORIGIN_LIKE = /^[a-z][a-z0-9+\-.]*:\/\//i;
   const originLike = cleaned.filter((s) => ORIGIN_LIKE.test(s));
 
   if (originLike.length > 0) {
@@ -563,7 +583,7 @@ export function matchesDomainList(
       continue;
     }
 
-    const normalizedAllowed = normalizeDomain(allowed);
+    const normalizedAllowed = normalizedExactEntry(allowed);
     if (
       isAllowedExactHostname(normalizedAllowed) &&
       normalizedDomain === normalizedAllowed

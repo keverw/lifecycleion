@@ -8112,3 +8112,23 @@ test('PR review round 12: a cookie domain whose leading dot only mapping exposes
     }),
   ).toBe(false);
 });
+
+test("PR review round 13: a bodiless answer's stray body is dropped, not delivered past the limit", async () => {
+  const client = new HTTPClient({
+    adapter: {
+      getType: () => 'mock',
+      send: () =>
+        Promise.resolve({
+          status: 204,
+          headers: { 'content-type': 'application/json' },
+          body: new TextEncoder().encode('{"big":true}'),
+        }),
+    },
+    baseURL: 'http://api.test',
+    maxResponseBytes: 4,
+  });
+
+  const response = await client.get('/x').send();
+  expect(response.isFailed).toBe(false);
+  expect(response.body).toBeNull();
+});

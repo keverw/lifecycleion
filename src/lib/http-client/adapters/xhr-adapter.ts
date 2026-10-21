@@ -396,13 +396,7 @@ export class XHRAdapter implements HTTPAdapter {
           // though the client will treat the result as redirect_disabled, so
           // emit terminal progress before returning the synthetic redirect
           // response.
-          if (!didUploadComplete && !didFireUpload100) {
-            guardedUploadProgress?.({
-              loaded: uploadedBytes,
-              total: uploadTotalBytes,
-              progress: 1,
-            });
-          }
+          finishUploadProgress();
 
           if (!didFireDownload100) {
             guardedDownloadProgress?.({

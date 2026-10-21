@@ -3242,7 +3242,9 @@ function snapshotAdapterRequest(request: AdapterRequest): AdapterRequest {
 
   return {
     requestURL,
-    method,
+    // Converted once, as the request line takes it: a non-string method passed the
+    // CONNECT check through `String` and threw at the body checks.
+    method: typeof method === 'string' ? method : String(method),
     headers: copyRequestHeaders(headers),
     body,
     signal,

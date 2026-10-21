@@ -523,6 +523,27 @@ describe('XHRAdapter', () => {
     expect(uploads.at(-1)).toEqual({ loaded: 5, progress: 1 });
   });
 
+  test("PR review round 13: a browser-followed redirect reports the body's own upload size", async () => {
+    const uploads: Array<{ loaded: number; progress: number }> = [];
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/start',
+      method: 'POST',
+      headers: {},
+      body: 'hello',
+      onUploadProgress: (event) => {
+        uploads.push({ loaded: event.loaded, progress: event.progress });
+      },
+    });
+
+    lastXHR.status = 200;
+    lastXHR.responseURL = 'https://api.test/elsewhere';
+    lastXHR.response = textBody('ok');
+    lastXHR.simulateLoad();
+    await promise;
+
+    expect(uploads.at(-1)).toEqual({ loaded: 5, progress: 1 });
+  });
+
   test('round 136: an abort once the headers are in carries the real status', async () => {
     const controller = new AbortController();
     const adapter = new XHRAdapter();
