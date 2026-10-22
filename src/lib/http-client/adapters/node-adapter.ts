@@ -1,10 +1,14 @@
 import {
   defineHiddenTags,
+  makeAbortError,
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
 } from '../internal/adapter-error';
 import { concatChunks } from '../internal/concat-chunks';
-import { readAdapterRequestFields } from '../internal/request-fields';
+import {
+  isSignalAbortedQuietly,
+  readAdapterRequestFields,
+} from '../internal/request-fields';
 import type { AdapterRequestFields } from '../internal/request-fields';
 import { adoptResult, UnreadableReturn } from '../../internal/adopt-promise';
 import { observeRejection } from '../../internal/promise-reactions';
@@ -1199,7 +1203,7 @@ export class NodeAdapter implements HTTPAdapter {
          * `reportWriteErrorAfterResponse` - still runs.
          */
         const readIsAborted = (): boolean =>
-          readObjectMember(request.signal, 'aborted') === true;
+          isSignalAbortedQuietly(request.signal);
 
         const observeTaskFailure = (
           task: Promise<void>,
@@ -1724,10 +1728,9 @@ export class NodeAdapter implements HTTPAdapter {
 
                 abortStream();
                 tearDownAfterResponse();
-                const abortErr = new Error(
+                const abortErr = makeAbortError(
                   'Request cancelled by streamResponse factory',
                 );
-                abortErr.name = 'AbortError';
                 Object.assign(abortErr, {
                   [STREAM_FACTORY_CANCEL_KEY]: cancelReason ?? true,
                 });
@@ -2008,8 +2011,7 @@ export class NodeAdapter implements HTTPAdapter {
           // guarded: this runs as an emitter listener, where a throw is an uncaught
           // exception and the request never settles. See `readIsAborted`.
           if (readIsAborted()) {
-            const abortErr = new Error('Request aborted');
-            abortErr.name = 'AbortError';
+            const abortErr = makeAbortError();
             failRequest(abortErr);
             return;
           }
@@ -2133,8 +2135,7 @@ export class NodeAdapter implements HTTPAdapter {
           if (request.signal.aborted) {
             // Signal already aborted before we even started (e.g., pre-cancelled builder)
             destroyRequestQuietly(req);
-            const abortErr = new Error('Request aborted');
-            abortErr.name = 'AbortError';
+            const abortErr = makeAbortError();
             failRequest(abortErr);
             return;
           }
@@ -2205,10 +2206,9 @@ export class NodeAdapter implements HTTPAdapter {
             if (pendingStreamSetup) {
               const { status, headers } = pendingStreamSetup;
               destroyRequestQuietly(req);
-              const abortErr = new Error(
+              const abortErr = makeAbortError(
                 'Request aborted during streamResponse setup',
               );
-              abortErr.name = 'AbortError';
               failRequest(
                 markStreamFactoryError(abortErr, req, request.headers, {
                   status,
@@ -2219,8 +2219,7 @@ export class NodeAdapter implements HTTPAdapter {
             }
 
             destroyRequestQuietly(req);
-            const abortErr = new Error('Request aborted');
-            abortErr.name = 'AbortError';
+            const abortErr = makeAbortError();
             failRequest(abortErr);
           };
 
@@ -2247,9 +2246,7 @@ export class NodeAdapter implements HTTPAdapter {
           if (readIsAborted()) {
             destroyRequestQuietly(req);
 
-            const abortErr = new Error('Request aborted');
-
-            abortErr.name = 'AbortError';
+            const abortErr = makeAbortError();
             failRequest(abortErr);
 
             return;
@@ -3281,6 +3278,16 @@ function normalizeCRL(
   /** The adapter the parse is cached for. */
   owner: object,
 ): string | Buffer | Array<string | Buffer> {
+  // A string, the usual refreshed value, read per request: when it is the text that last
+  // normalized and parsed, its result is reused, rather than running the PEM split over
+  // the whole list on every HTTPS request. Strings only: an array or buffer is the
+  // caller's to change in place, so one kept by identity could keep a revoked
+  // certificate's list current - those are compared by their text instead.
+  const last = lastParsedCRLs.get(owner);
+  if (typeof crl === 'string' && last?.input === crl) {
+    return last.normalized;
+  }
+
   const normalized = Array.isArray(crl)
     ? crl.flatMap((entry) => normalizeCRLEntry(entry))
     : normalizeCRLEntry(crl);
@@ -3296,16 +3303,44 @@ function normalizeCRL(
     );
   }
 
-  assertCRLParses(normalized, owner);
+  // Kept one way per kind, so the list is held once more, not twice: a string by itself
+  // (the caller's text, already in hand), anything else by its joined text.
+  if (typeof crl === 'string') {
+    assertCRLParses(normalized);
+    lastParsedCRLs.set(owner, { input: crl, normalized });
+  } else {
+    const text = crlText(normalized);
+    if (text !== last?.text) {
+      assertCRLParses(normalized);
+    }
+    lastParsedCRLs.set(owner, { text, normalized });
+  }
 
   return normalized;
 }
 
 /**
- * The text of the last `crl` set that parsed, per adapter, so a value read per request is
- * parsed once - and two adapters with different CRLs do not evict each other's.
+ * The last `crl` that normalized and parsed, per adapter - a string by itself, anything
+ * else by its joined text - so a value read per request is parsed once, and two adapters
+ * with different CRLs do not evict each other's.
  */
-const lastParsedCRLTexts = new WeakMap<object, string>();
+const lastParsedCRLs = new WeakMap<
+  object,
+  {
+    input?: string;
+    text?: string;
+    normalized: string | Buffer | Array<string | Buffer>;
+  }
+>();
+
+/** A normalized CRL set as one text, to tell whether it changed. */
+function crlText(crl: string | Buffer | Array<string | Buffer>): string {
+  return (Array.isArray(crl) ? crl : [crl])
+    .map((entry) =>
+      typeof entry === 'string' ? entry : entry.toString('latin1'),
+    )
+    .join('\n');
+}
 
 /**
  * Parse the normalized set the way the TLS context will, so a value the framing check
@@ -3313,20 +3348,7 @@ const lastParsedCRLTexts = new WeakMap<object, string>();
  * corrupted base64 inside intact armour - is refused here rather than failing every HTTPS
  * request when the context is built, retried as a network error.
  */
-function assertCRLParses(
-  crl: string | Buffer | Array<string | Buffer>,
-  owner: object,
-): void {
-  const text = (Array.isArray(crl) ? crl : [crl])
-    .map((entry) =>
-      typeof entry === 'string' ? entry : entry.toString('latin1'),
-    )
-    .join('\n');
-
-  if (text === lastParsedCRLTexts.get(owner)) {
-    return;
-  }
-
+function assertCRLParses(crl: string | Buffer | Array<string | Buffer>): void {
   try {
     tls.createSecureContext({ crl });
   } catch (error) {
@@ -3339,8 +3361,6 @@ function assertCRLParses(
       ),
     );
   }
-
-  lastParsedCRLTexts.set(owner, text);
 }
 
 /** Request headers `NodeAdapter` refuses before dispatch, by name, with why. */
@@ -3900,8 +3920,7 @@ function makeResponseStreamAbortError(
   headers: Record<string, string | string[]>,
   message = 'Request aborted during response streaming',
 ): Error {
-  const error = new Error(message);
-  error.name = 'AbortError';
+  const error = makeAbortError(message);
 
   // Hidden, as `markStreamFactoryError`'s tags are: the request's headers carry its
   // credentials, and a serialized error must not.

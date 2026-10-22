@@ -163,11 +163,14 @@ export function joinCookieHeader(
  */
 export function materializeRequestHeaders(
   headers: Record<string, string | string[]>,
+  /** Name every header in lowercase, as a Node server receives it (MockAdapter). */
+  options: { isLowercasingNames?: boolean } = {},
 ): Record<string, string> {
   const result: Record<string, string> = {};
   // Names that differ only in case are one header, joined under the first spelling, as
   // `fetch`'s `Headers` joins them: Node's `http` lowercases names and kept only the last.
   const spellings = new Map<string, string>();
+  const isLowercasingNames = options.isLowercasingNames === true;
 
   for (const [key, value] of Object.entries(headers)) {
     const present = presentHeaderValue(value);
@@ -181,8 +184,9 @@ export function materializeRequestHeaders(
     const spelling = spellings.get(lower);
 
     if (spelling === undefined) {
-      spellings.set(lower, key);
-      defineEntry(result, key, joined);
+      const name = isLowercasingNames ? lower : key;
+      spellings.set(lower, name);
+      defineEntry(result, name, joined);
     } else {
       defineEntry(result, spelling, `${result[spelling]}${separator}${joined}`);
     }

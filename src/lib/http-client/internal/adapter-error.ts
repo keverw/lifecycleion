@@ -87,6 +87,17 @@ export function readAdapterMethod(method: unknown): string {
 }
 
 /**
+ * An `AbortError` for an adapter to reject with: a plain `Error` named `AbortError`, which
+ * is how the client knows one - by name, not by class - so it needs no `DOMException`.
+ */
+export function makeAbortError(message = 'Request aborted'): Error {
+  const error = new Error(message);
+  error.name = 'AbortError';
+
+  return error;
+}
+
+/**
  * Tag a terminal adapter configuration failure so `HTTPClient` reports it as a
  * non-retryable `adapter_error` rather than retrying it as a network error.
  */

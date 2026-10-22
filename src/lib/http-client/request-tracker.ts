@@ -1,4 +1,4 @@
-import { readUnknownMember } from '../internal/read-member';
+import { isSignalAbortedQuietly } from './internal/request-fields';
 import type { CancelResult, RequestState } from './types';
 
 export interface TrackedRequest {
@@ -217,6 +217,6 @@ export function isEntryPastCancel(entry: TrackedRequest): boolean {
     entry.state === 'failed' ||
     entry.state === 'cancelled' ||
     entry.abortController.signal.aborted ||
-    readUnknownMember(entry.callerSignal, 'aborted') === true
+    isSignalAbortedQuietly(entry.callerSignal)
   );
 }

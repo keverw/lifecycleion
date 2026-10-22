@@ -1,5 +1,5 @@
+import { isSignalAbortedQuietly } from './internal/request-fields';
 import { isNullish } from '../internal/is-nullish';
-import { readUnknownMember } from '../internal/read-member';
 import { generateID } from '../id-helpers';
 import { validateMaxResponseBytes, validateRequestTimeoutMS } from './consts';
 import { snapshotRetryPolicyOptions } from './internal/retry-policy-options';
@@ -409,10 +409,7 @@ export class HTTPRequestBuilder<T = unknown> {
     // applied the moment it can be. Only the first is held; a later one finds it.
     // A caller signal that has aborted already ends the request as cancelled once setup
     // is done, so there is nothing left for this call to cancel.
-    if (
-      this._setupCancel ||
-      readUnknownMember(this._signal, 'aborted') === true
-    ) {
+    if (this._setupCancel || isSignalAbortedQuietly(this._signal)) {
       return 'already_cancelled';
     }
     this._setupCancel = { reason };

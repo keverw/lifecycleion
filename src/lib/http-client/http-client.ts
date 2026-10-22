@@ -1,3 +1,4 @@
+import { isSignalAbortedQuietly } from './internal/request-fields';
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
 import { describeValue } from '../internal/describe-value';
@@ -48,7 +49,8 @@ import {
   parseContentType,
   resolveAbsoluteURL,
   resolveAbsoluteURLForRuntime,
-  resolveDetectedRedirectURL,
+  derivedRedirectFields,
+  type AdapterRedirectFields,
   scalarHeader,
   serializeBody,
   stripURLCredentials,
@@ -162,13 +164,8 @@ const ADAPTER_RESPONSE_FIELDS = [
   'errorCause',
 ] as const satisfies readonly (keyof AdapterResponse)[];
 
-type RedirectFields = Pick<
-  AdapterResponse,
-  'wasRedirectDetected' | 'detectedRedirectURL'
->;
-
 /** Status and headers of an answer whose reading then failed. */
-interface AnsweredResponse extends RedirectFields {
+interface AnsweredResponse extends AdapterRedirectFields {
   status: number;
   headers: Record<string, string | string[]>;
 }
@@ -178,36 +175,14 @@ interface AnsweredResponse extends RedirectFields {
  * them - as for any healthy response, and every built-in adapter resolves them - whether
  * the response was then read, could not be decoded, or failed in the cookie jar.
  */
-function adapterRedirectFields(adapterFields: RedirectFields): RedirectFields {
+function adapterRedirectFields(
+  adapterFields: AdapterRedirectFields,
+): AdapterRedirectFields {
   const { wasRedirectDetected, detectedRedirectURL } = adapterFields;
 
   return {
     wasRedirectDetected: wasRedirectDetected ?? false,
     ...(detectedRedirectURL !== undefined ? { detectedRedirectURL } : {}),
-  };
-}
-
-/**
- * The redirect fields of a response the client rebuilds with no resolved response to
- * ask - a stream error the adapter threw with the status and headers tagged on it -
- * derived from the status and `Location`, so a truncated `3xx` still reports where it
- * pointed.
- */
-function derivedRedirectFields(
-  requestURL: string,
-  status: number,
-  headers: Record<string, string | string[]>,
-): RedirectFields {
-  const detectedRedirectURL = resolveDetectedRedirectURL(
-    requestURL,
-    status,
-    headers,
-  );
-
-  return {
-    wasRedirectDetected:
-      detectedRedirectURL !== undefined || REDIRECT_STATUS_CODES.has(status),
-    ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
   };
 }
 
@@ -676,7 +651,7 @@ export class BaseHTTPClient {
     // Short-circuit already-aborted external signals so we do not run
     // interceptors, tracking, retries, or adapter dispatch at all.
     // Read guarded: an `aborted` getter that throws is not aborted.
-    if (readObjectMember(options.signal, 'aborted') === true) {
+    if (isSignalAbortedQuietly(options.signal)) {
       callbacks.setAttemptCount(0);
       callbacks.setNextRetryDelayMS(null);
       callbacks.setNextRetryAt(null);
@@ -2696,7 +2671,7 @@ export class BaseHTTPClient {
       let answeredStatus = 0;
       let answeredHeaders: Record<string, string | string[]> = {};
       // The adapter's own redirect fields, once its response has been copied.
-      let answeredRedirectFields: RedirectFields | undefined;
+      let answeredRedirectFields: AdapterRedirectFields | undefined;
 
       // Dispatch counts as activity, so the settle wait's stall clock starts from the
       // moment this attempt's upload could have begun rather than from a report on some
@@ -3993,7 +3968,7 @@ export class BaseHTTPClient {
 
     const wasRedirectFollowed =
       redirectHistory.length - (undispatchedRedirect?.isRecorded ? 1 : 0) > 0;
-    const redirectFields: RedirectFields =
+    const redirectFields: AdapterRedirectFields =
       undispatchedRedirect !== undefined
         ? {
             wasRedirectDetected: true,

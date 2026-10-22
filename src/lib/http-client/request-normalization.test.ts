@@ -8985,3 +8985,213 @@ test("PR review round 20: a refusal from another adapter a mock route calls is t
   expect(handled).toBe(1);
   expect(response.status).toBe(502);
 });
+
+test("PR review round 21: a mock route's Headers, Map headers or Map cookies are refused, not dropped", async () => {
+  const answers = [
+    { status: 200, headers: new Headers({ 'set-cookie': 'a=1' }) },
+    { status: 200, headers: new Map([['x-a', '1']]) },
+    { status: 200, cookies: new Map([['a', '1']]) },
+  ];
+
+  for (const answer of answers) {
+    const mock = new MockAdapter();
+    mock.routes.get('/x', () => answer as unknown as { status: number });
+    const outcome = await mock
+      .send({ requestURL: 'http://api.test/x', method: 'GET', headers: {} })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect(String(outcome?.message)).toContain('must be a plain object');
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+  }
+});
+
+test("PR review round 21: MockAdapter refuses a signal whose addEventListener throws as non-retryable, in a route's wait and in a delay", async () => {
+  const signal = {
+    aborted: false,
+    addEventListener() {
+      throw new Error('addEventListener refused');
+    },
+    removeEventListener() {},
+  } as unknown as AbortSignal;
+  let handlerErrors = 0;
+  const mock = new MockAdapter({
+    onHandlerError: () => {
+      handlerErrors++;
+      return { status: 500 };
+    },
+  });
+  mock.routes.get('/wait', () => ({ status: 200 }));
+
+  const waited = await mock
+    .send({
+      requestURL: 'http://api.test/wait',
+      method: 'GET',
+      headers: {},
+      signal,
+    })
+    .then(
+      () => undefined,
+      (error: unknown) => error as Record<PropertyKey, unknown>,
+    );
+  expect(handlerErrors).toBe(0);
+  expect(waited?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+
+  const delayed = new MockAdapter();
+  let attaches = 0;
+  const delaySignal = {
+    aborted: false,
+    // The route's wait attaches first; only the delay's attach, the second, is refused.
+    addEventListener() {
+      attaches++;
+      if (attaches > 1) {
+        throw new Error('addEventListener refused');
+      }
+    },
+    removeEventListener() {},
+  } as unknown as AbortSignal;
+  delayed.routes.get('/slow', () => ({ status: 200, delay: 5 }));
+  const slept = await delayed
+    .send({
+      requestURL: 'http://api.test/slow',
+      method: 'GET',
+      headers: {},
+      signal: delaySignal,
+    })
+    .then(
+      () => undefined,
+      (error: unknown) => error as Record<PropertyKey, unknown>,
+    );
+  expect(slept?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+});
+
+test('PR review round 21: FetchAdapter checks a relative request against the page location before sending', async () => {
+  const originalFetch = globalThis.fetch;
+  const didHaveLocation = Object.hasOwn(globalThis, 'location');
+  const originalLocation: unknown = (globalThis as { location?: unknown })
+    .location;
+  let fetched = 0;
+  (globalThis as { fetch: unknown }).fetch = () => {
+    fetched++;
+    return Promise.reject(new TypeError('fetch refused the header'));
+  };
+  Object.defineProperty(globalThis, 'location', {
+    value: { href: 'https://page.test/app/' },
+    configurable: true,
+    writable: true,
+  });
+
+  try {
+    const outcome = await new FetchAdapter()
+      .send({
+        requestURL: '/api/x',
+        method: 'GET',
+        headers: { 'x-bad': 'line\nbreak' },
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(fetched).toBe(0);
+  } finally {
+    globalThis.fetch = originalFetch;
+    if (didHaveLocation) {
+      Object.defineProperty(globalThis, 'location', {
+        value: originalLocation,
+        configurable: true,
+        writable: true,
+      });
+    } else {
+      delete (globalThis as { location?: unknown }).location;
+    }
+  }
+});
+
+test("PR review round 21: a mock route's cookies and headers are checked as read, once", async () => {
+  let cookieReads = 0;
+  let headerReads = 0;
+  const answers = [
+    {
+      status: 200,
+      get cookies(): unknown {
+        return cookieReads++ === 0 ? {} : new Map([['a', '1']]);
+      },
+    },
+    {
+      status: 200,
+      get headers(): unknown {
+        return headerReads++ === 0 ? {} : new Headers({ 'set-cookie': 'a=1' });
+      },
+    },
+  ];
+
+  for (const answer of answers) {
+    const mock = new MockAdapter();
+    mock.routes.get('/x', () => answer as unknown as { status: number });
+    const outcome = await mock
+      .send({ requestURL: 'http://api.test/x', method: 'GET', headers: {} })
+      .then(
+        (response) => response as unknown as Record<PropertyKey, unknown>,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    // Read once and passed as checked: an empty record, so no refusal and no cookie.
+    expect(outcome.status).toBe(200);
+  }
+
+  expect(cookieReads).toBe(1);
+  expect(headerReads).toBe(1);
+});
+
+test("PR review round 21: FetchAdapter resolves a relative request against the document's base URL", async () => {
+  const originalFetch = globalThis.fetch;
+  const OriginalRequest = globalThis.Request;
+  const saved = {
+    location: Object.getOwnPropertyDescriptor(globalThis, 'location'),
+    document: Object.getOwnPropertyDescriptor(globalThis, 'document'),
+  };
+  const probed: string[] = [];
+  (globalThis as { fetch: unknown }).fetch = () =>
+    Promise.resolve(new Response('ok', { status: 200 }));
+  (globalThis as { Request: unknown }).Request = class extends OriginalRequest {
+    constructor(input: RequestInfo | URL, init?: RequestInit) {
+      probed.push(typeof input === 'string' ? input : 'non-string input');
+      super(input, init);
+    }
+  };
+  Object.defineProperty(globalThis, 'location', {
+    value: { href: 'https://page.test/' },
+    configurable: true,
+    writable: true,
+  });
+  // As a `<base href>` sets it: `fetch` resolves against this, not the location.
+  Object.defineProperty(globalThis, 'document', {
+    value: { baseURI: 'https://api.test/v2/' },
+    configurable: true,
+    writable: true,
+  });
+
+  try {
+    await new FetchAdapter().send({
+      requestURL: 'users',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(probed).toEqual(['https://api.test/v2/users']);
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.Request = OriginalRequest;
+    for (const [name, descriptor] of Object.entries(saved)) {
+      if (descriptor === undefined) {
+        delete (globalThis as Record<string, unknown>)[name];
+      } else {
+        Object.defineProperty(globalThis, name, descriptor);
+      }
+    }
+  }
+});

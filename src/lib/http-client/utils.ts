@@ -1,4 +1,4 @@
-import { HTTP_METHODS } from './consts';
+import { HTTP_METHODS, REDIRECT_STATUS_CODES } from './consts';
 import qs from 'qs';
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
@@ -23,6 +23,7 @@ import type {
   AdapterType,
   HTTPMethod,
   RequestHeadersInput,
+  AdapterResponse,
 } from './types';
 
 export { lowerCaseHeaderName } from './internal/header-utils';
@@ -983,6 +984,36 @@ export function resolveDetectedRedirectURL(
   } catch {
     return location;
   }
+}
+
+/** The redirect fields of an answer: whether it was a redirect, and where it pointed. */
+export type AdapterRedirectFields = Pick<
+  AdapterResponse,
+  'wasRedirectDetected' | 'detectedRedirectURL'
+>;
+
+/**
+ * The redirect fields of an answer, derived from its status and `Location` - for an
+ * adapter reporting one, and for the client rebuilding one from a stream error the
+ * adapter threw with the status and headers tagged on it - so a truncated `3xx` still
+ * reports where it pointed.
+ */
+export function derivedRedirectFields(
+  requestURL: string,
+  status: number,
+  headers: Record<string, string | string[]>,
+): AdapterRedirectFields {
+  const detectedRedirectURL = resolveDetectedRedirectURL(
+    requestURL,
+    status,
+    headers,
+  );
+
+  return {
+    wasRedirectDetected:
+      detectedRedirectURL !== undefined || REDIRECT_STATUS_CODES.has(status),
+    ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
+  };
 }
 
 export function assertValidBaseURL(

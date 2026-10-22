@@ -1,4 +1,10 @@
 import {
+  assertOptionalHeaderRecord,
+  isPlainRecord,
+} from '../internal/plain-record';
+import { describeValue } from '../../internal/describe-value';
+import {
+  makeAbortError,
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
 } from '../internal/adapter-error';
@@ -295,9 +301,9 @@ export class MockAdapter implements HTTPAdapter {
     } = readAdapterRequestFields(request);
     // Names lowercased, as a Node server receives them, so a request driven straight at
     // the adapter with `Content-Type` is read like one the client sent.
-    const materializedHeaders = lowercaseHeaderNames(
-      materializeRequestHeaders(headers),
-    );
+    const materializedHeaders = materializeRequestHeaders(headers, {
+      isLowercasingNames: true,
+    });
     // Headers every real server receives and the client does not set itself: `host`,
     // and a FormData body's multipart `content-type` (the boundary is the mock's own).
     if (!Object.hasOwn(materializedHeaders, 'host')) {
@@ -611,19 +617,35 @@ export class MockAdapter implements HTTPAdapter {
     const responseBody = streamErrorCode !== undefined ? null : intendedBody;
 
     // --- 7. Build response headers ---
-    const responseHeaders: AdapterResponse['headers'] = {
-      ...(mockResponse.headers ?? {}),
-    };
+    // A plain object, as every other header record: a `Headers` or `Map` spread to `{}`,
+    // and then passed every check downstream with every header - `set-cookie` too - lost.
+    // Read once: the value copied is the value checked.
+    const responseHeaders: AdapterResponse['headers'] = asRouteMistake(() => {
+      const headers: unknown = mockResponse.headers;
+      assertOptionalHeaderRecord(headers, 'MockAdapter route response headers');
+      return { ...(headers as AdapterResponse['headers'] | undefined) };
+    });
 
     // Merge cookies shorthand into set-cookie headers.
     // Entries from `cookies` are APPENDED after any existing `headers['set-cookie']`
     // entries — they are not overwritten. If both set the same cookie name, the
     // shorthand entry wins because it appears last (last Set-Cookie header for a
     // given name takes precedence in browsers and CookieJar).
-    if (mockResponse.cookies) {
-      const setCookieEntries = asRouteMistake(() =>
-        cookiesToSetCookieHeaders(mockResponse.cookies ?? {}),
-      );
+    // Read once, as the headers are: the value used is the value checked.
+    const routeCookies: unknown = mockResponse.cookies;
+    if (routeCookies) {
+      const setCookieEntries = asRouteMistake(() => {
+        // A plain object, as the headers are: a `Map` read through `Object.entries` set
+        // no cookies at all.
+        if (!isPlainRecord(routeCookies)) {
+          throw new TypeError(
+            `MockAdapter route cookies must be a plain object of cookie names to values (got ${Array.isArray(routeCookies) ? 'an array' : describeValue(routeCookies)})`,
+          );
+        }
+        return cookiesToSetCookieHeaders(
+          routeCookies as Parameters<typeof cookiesToSetCookieHeaders>[0],
+        );
+      });
 
       if (setCookieEntries.length > 0) {
         const existing = responseHeaders['set-cookie'];
@@ -1056,30 +1078,7 @@ function isInternalAbortError(error: unknown): error is InternalMockAbortError {
 }
 
 function throwAbortError(): never {
-  const err = new Error('The operation was aborted.');
-  err.name = 'AbortError';
-  throw err;
-}
-
-function lowercaseHeaderNames(
-  headers: Record<string, string>,
-): Record<string, string> {
-  const result: Record<string, string> = {};
-  for (const [key, value] of Object.entries(headers)) {
-    // ASCII only, as `materializeRequestHeaders` grouped them: `toLowerCase` folded a
-    // Kelvin-sign name into a real one.
-    const lower = lowerCaseHeaderName(key);
-    // Own entries only: `constructor` and `__proto__` are headers here, not members.
-    const existing = Object.hasOwn(result, lower) ? result[lower] : undefined;
-    defineEntry(
-      result,
-      lower,
-      existing === undefined
-        ? value
-        : `${existing}${lower === 'cookie' ? '; ' : ', '}${value}`,
-    );
-  }
-  return result;
+  throw makeAbortError('The operation was aborted.');
 }
 
 function awaitAbortable<T>(
@@ -1134,7 +1133,15 @@ function awaitAbortable<T>(
       () => undefined,
     );
 
-    signal.addEventListener('abort', onAbort, { once: true });
+    // The caller's signal: a throw is this wait's refusal of it, as an unreadable
+    // `aborted` is below - not the route's failure, for `onHandlerError` or a 500.
+    try {
+      signal.addEventListener('abort', onAbort, { once: true });
+    } catch (error) {
+      const refusal = nonRetryableAdapterErrorFrom(error);
+      waitRefusals.add(refusal);
+      throw refusal;
+    }
 
     // A handler can abort synchronously before returning its promise. Observe
     // that promise before ending the wait so its rejection is still consumed.
@@ -1186,9 +1193,10 @@ function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
     try {
       signal.addEventListener('abort', onAbort, { once: true });
     } catch (error) {
-      // The executor rejects with this; the timer has nothing left to end.
+      // The executor rejects with this - the caller's signal refused, non-retryable,
+      // as its unreadable `aborted` is - and the timer has nothing left to end.
       clearTimeout(id);
-      throw error;
+      throw nonRetryableAdapterErrorFrom(error);
     }
   });
 }

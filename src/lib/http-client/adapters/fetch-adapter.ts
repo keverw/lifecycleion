@@ -17,7 +17,7 @@ import {
 } from '../internal/adapter-error';
 import {
   extractFetchHeaders,
-  resolveDetectedRedirectURL,
+  derivedRedirectFields,
   stripCrossOriginURLCredentials,
 } from '../utils';
 import { knownBodyByteLength, uploadCompleteEvent } from '../internal/progress';
@@ -27,7 +27,6 @@ import {
   makeResponseTooLargeError,
   parseContentLength,
 } from '../internal/response-limit';
-import { REDIRECT_STATUS_CODES } from '../consts';
 import type {
   HTTPAdapter,
   AdapterRequest,
@@ -80,29 +79,24 @@ export class FetchAdapter implements HTTPAdapter {
     // `adapter_error` it is, rather than as a network error retried to no end. Built
     // without the body or signal, which `fetch` below takes, so nothing is consumed.
     //
-    // Only where it can be: an absolute URL (a relative one resolves against a browser's
-    // document, which `fetch` decides itself), and a runtime with `Request` - a test
-    // setup that polyfills only `fetch` has none. The URL is tested with `new URL` in a
-    // try of its own: `URL.canParse` is missing from older browsers and early Node 18,
-    // and a check that throws there must not fail every request.
+    // Only where it can be: a URL that resolves (see `resolveProbeURL`), and a runtime
+    // with `Request` - a test setup that polyfills only `fetch` has none.
     //
     // The headers it is built with are kept for `fetch` below, so they are materialized
     // once; where it is not built, `fetch` materializes them inside its own `try`.
     let fetchHeaders: HeadersInit | undefined;
 
-    let isAbsoluteURL = false;
-    try {
-      new URL(dispatchedURL);
-      isAbsoluteURL = true;
-    } catch {
-      // Relative: `fetch` resolves it, or refuses it, as it always did.
-    }
+    // A relative URL is checked too, resolved as `fetch` resolves it: unchecked, a header
+    // value or method `fetch` refuses came back as its `TypeError`, retried as a network
+    // failure to no end. Only where there is a base to resolve against; elsewhere `fetch`
+    // resolves it, or refuses it, as it always did.
+    const probeURL = resolveProbeURL(dispatchedURL);
 
-    if (isAbsoluteURL && typeof Request === 'function') {
+    if (probeURL !== undefined && typeof Request === 'function') {
       let builtMethod: string;
       try {
         fetchHeaders = materializeFetchHeaders(headers);
-        builtMethod = new Request(dispatchedURL, {
+        builtMethod = new Request(probeURL, {
           method,
           headers: fetchHeaders,
           redirect: 'manual',
@@ -243,18 +237,13 @@ export class FetchAdapter implements HTTPAdapter {
       // Redirect detection is reported the same way as on the success path: the
       // headers arrived, so a 3xx here still knows where it was pointing, and a
       // truncated body must not lose the target an intact one would report.
-      const detectedRedirectURL = resolveDetectedRedirectURL(
-        dispatchedURL,
-        response.status,
-        responseHeadersForBody,
-      );
-
       return {
         status: response.status,
-        wasRedirectDetected:
-          detectedRedirectURL !== undefined ||
-          REDIRECT_STATUS_CODES.has(response.status),
-        ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
+        ...derivedRedirectFields(
+          dispatchedURL,
+          response.status,
+          responseHeadersForBody,
+        ),
         headers: responseHeadersForBody,
         body: null,
         isStreamError: true,
@@ -270,18 +259,13 @@ export class FetchAdapter implements HTTPAdapter {
     // failed in transit does just above: the server answered, and what failed is taking
     // delivery. No terminal progress, for the reason a failed read reports none.
     if (rawBody === RESPONSE_TOO_LARGE) {
-      const detectedRedirectURL = resolveDetectedRedirectURL(
-        dispatchedURL,
-        response.status,
-        responseHeadersForBody,
-      );
-
       return {
         status: response.status,
-        wasRedirectDetected:
-          detectedRedirectURL !== undefined ||
-          REDIRECT_STATUS_CODES.has(response.status),
-        ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
+        ...derivedRedirectFields(
+          dispatchedURL,
+          response.status,
+          responseHeadersForBody,
+        ),
         headers: responseHeadersForBody,
         body: null,
         isStreamError: true,
@@ -296,24 +280,48 @@ export class FetchAdapter implements HTTPAdapter {
       progress: 1,
     });
 
-    const responseHeaders = responseHeadersForBody;
-    const detectedRedirectURL = resolveDetectedRedirectURL(
-      dispatchedURL,
-      response.status,
-      responseHeaders,
-    );
-
     return {
       status: response.status,
       // Server/runtime manual redirects reach this path as real 3xx responses.
       // Browser opaque redirects returned above never reach this branch.
-      wasRedirectDetected:
-        detectedRedirectURL !== undefined ||
-        REDIRECT_STATUS_CODES.has(response.status),
-      ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
-      headers: responseHeaders,
+      ...derivedRedirectFields(
+        dispatchedURL,
+        response.status,
+        responseHeadersForBody,
+      ),
+      headers: responseHeadersForBody,
       body: rawBody,
     };
+  }
+}
+
+/**
+ * The URL to check a request against before it is sent: `url` itself when absolute, or
+ * resolved as `fetch` resolves it - against the document's base URL in a window (which a
+ * `<base href>` sets), the global `location` in a worker; `undefined` when it is relative
+ * and there is no base. Tested with `new URL` in a `try`: `URL.canParse` is missing from
+ * older browsers and early Node 18, and a check that throws there must not fail every
+ * request.
+ */
+function resolveProbeURL(url: string): string | undefined {
+  try {
+    return new URL(url).href;
+  } catch {
+    // Relative: resolved below, where there is a base.
+  }
+
+  try {
+    const documentBase = readUnknownMember(
+      readUnknownMember(globalThis, 'document'),
+      'baseURI',
+    );
+    const base =
+      typeof documentBase === 'string'
+        ? documentBase
+        : readUnknownMember(readUnknownMember(globalThis, 'location'), 'href');
+    return typeof base === 'string' ? new URL(url, base).href : undefined;
+  } catch {
+    return undefined;
   }
 }
 

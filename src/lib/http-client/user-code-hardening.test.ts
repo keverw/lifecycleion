@@ -596,7 +596,9 @@ describe('MockAdapter with a signal that refuses listeners', () => {
       );
     await sleep(20);
 
-    expect(outcome).toBe(500);
+    // The signal refused, as the adapter's own non-retryable refusal of it - not taken
+    // for the route's failure - and the route's rejection still observed.
+    expect(outcome).toBe('addEventListener refused');
     expect(escaped).toEqual([]);
   });
 
