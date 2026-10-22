@@ -381,7 +381,7 @@ export class MockAdapter implements HTTPAdapter {
     // Matched uppercased, as a real server sees it: Node's `http` sends any method it
     // knows uppercase, so `lock` arrives as `LOCK`. The router's own method type is a
     // fixed list; a method it does not know finds no route, as an unregistered path does.
-    const routeMethod = method.toUpperCase();
+    const routeMethod = asciiUppercase(method);
     const match = this.router.find(routeMethod as RouterHTTPMethod, path);
     // Copied into a plain object: the router's own is a null-prototype `NullObject`,
     // which a route echoing `req.params` as its body had refused as an unsupported type.
@@ -793,7 +793,7 @@ function buildRoutes(
     head: (path, handler) => on('HEAD', path, handler),
     options: (path, handler) => on('OPTIONS', path, handler),
     on: (method, path, handler) =>
-      on(method.toUpperCase() as Router.HTTPMethod, path, handler),
+      on(asciiUppercase(method) as Router.HTTPMethod, path, handler),
     clear: () => router.reset(),
   };
 }
@@ -1035,6 +1035,14 @@ function parseRequestBody(
  * The route's answer with each field read once, into a plain object: only the fields it
  * has, so an absent one stays absent.
  */
+/**
+ * `method` uppercased ASCII only, as Node's `http` matches the methods it knows: Unicode
+ * `toUpperCase` folded `poſt` (U+017F) into `POST`, routing it to the POST handler.
+ */
+function asciiUppercase(method: string): string {
+  return method.replace(/[a-z]/g, (letter) => letter.toUpperCase());
+}
+
 function snapshotMockResponse(response: MockResponse): MockResponse {
   const snapshot = { status: response.status } as MockResponse;
   const fields = [

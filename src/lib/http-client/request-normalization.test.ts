@@ -20,6 +20,7 @@ import {
   ADAPTER_ERROR_CARRIER_KEY,
   DEFAULT_MAX_RESPONSE_BYTES,
   NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
+  RESPONSE_DECODE_ERROR_KEY,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_ABORT_HEADERS_KEY,
   STREAM_ABORT_STATUS_KEY,
@@ -9350,4 +9351,79 @@ test("PR review round 24: a mock route's transportError status is checked as the
     expect(String(outcome?.message)).toContain('transportError status');
     expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
   }
+});
+
+test("PR review round 25: a decode failure after the body reached the caller's stream is not retried", async () => {
+  let sends = 0;
+  const builder = new HTTPClient({
+    baseURL: 'http://api.test',
+    retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+    adapter: {
+      getType: () => 'node',
+      send: (request: AdapterRequest) => {
+        sends++;
+        // The body handed to the caller's stream, then its decoding failed.
+        void request.streamResponse?.(
+          { status: 200, headers: {}, url: request.requestURL } as never,
+          {} as never,
+        );
+        const cause = new Error('incorrect header check');
+        Object.defineProperty(cause, RESPONSE_DECODE_ERROR_KEY, {
+          value: true,
+        });
+        return Promise.resolve({
+          status: 503,
+          headers: {},
+          body: null,
+          isStreamError: true,
+          streamErrorCode: 'stream_response_error',
+          errorCause: cause,
+        });
+      },
+    },
+  })
+    .get('/x')
+    .streamResponse(() => new PassThrough());
+  const response = await builder.send();
+
+  expect(response.isStreamError).toBe(true);
+  expect(sends).toBe(1);
+});
+
+test('PR review round 25: MockAdapter uppercases a method ASCII only', async () => {
+  const mock = new MockAdapter();
+  mock.routes.post('/x', () => ({ status: 201 }));
+
+  const response = await mock.send({
+    requestURL: 'http://api.test/x',
+    method: 'po\u017Ft',
+    headers: {},
+  });
+
+  expect(response.status).toBe(404);
+});
+
+test('PR review round 25: a CRL buffer changed in place is read again, not reused', async () => {
+  const crl = Buffer.from(getRevocationFixtures().crlEmpty);
+  const adapter = new NodeAdapter({ crl });
+
+  // Read and parsed: nothing listens on port 1, so a transport failure.
+  const first = await adapter.send({
+    requestURL: 'https://127.0.0.1:1/',
+    method: 'GET',
+    headers: {},
+  });
+  expect(first.isTransportError).toBe(true);
+
+  // The same buffer, its bytes replaced: refused, not served from the last parse.
+  crl.fill(0x41);
+  const second = await adapter
+    .send({ requestURL: 'https://127.0.0.1:1/', method: 'GET', headers: {} })
+    .then(
+      () => undefined,
+      (error: unknown) => error as Record<PropertyKey, unknown>,
+    );
+
+  expect(String(second?.message)).toContain('crl');
+  expect(second?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
 });

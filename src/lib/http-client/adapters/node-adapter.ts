@@ -1288,11 +1288,8 @@ export class NodeAdapter implements HTTPAdapter {
         // it and whatever throws before they run. The condition mirrors the write branches
         // at the end of this executor; the `else` there is the genuinely bodiless request,
         // which has no upload to report and correctly carries no field.
-        if (
-          request.body instanceof FormData ||
-          typeof request.body === 'string' ||
-          request.body instanceof Uint8Array
-        ) {
+        const classifiedBody = classifyRequestBody(request.body);
+        if (classifiedBody !== undefined) {
           openBodyOutcome();
         }
 
@@ -2313,12 +2310,13 @@ export class NodeAdapter implements HTTPAdapter {
           observeTaskFailure(writeTask, onBodyWriteFailure);
         };
 
-        // Write request body
-        if (request.body instanceof FormData) {
+        // Write request body - by the classification that opened its outcome above, so a
+        // body written here always has one.
+        if (classifiedBody?.kind === 'form') {
           // FormData → multipart/form-data with exact Content-Length so upload
           // progress is length-computable (not chunked-transfer guesswork).
           const boundary = generateMultipartBoundary();
-          const form = request.body;
+          const form = classifiedBody.body;
 
           runBodyWrite(() =>
             serializeMultipartFormData(
@@ -2331,16 +2329,14 @@ export class NodeAdapter implements HTTPAdapter {
               },
             ),
           );
-        } else if (
-          typeof request.body === 'string' ||
-          request.body instanceof Uint8Array
-        ) {
+        } else if (classifiedBody?.kind === 'bytes') {
           // String or Uint8Array body — write in chunks so upload progress fires
           // at meaningful granularity rather than one giant 100% event at the end.
+          const body = classifiedBody.body;
           const bytes =
-            typeof request.body === 'string'
-              ? Buffer.from(request.body, 'utf8')
-              : Buffer.from(request.body);
+            typeof body === 'string'
+              ? Buffer.from(body, 'utf8')
+              : Buffer.from(body);
 
           req.setHeader('Content-Length', bytes.length.toString());
 
@@ -3179,6 +3175,27 @@ function dropBodilessContentLength(request: AdapterRequest): void {
 }
 
 /**
+ * The kind of request body this adapter writes: multipart for a `FormData`, bytes for a
+ * string or `Uint8Array`, and `undefined` for none. Read once, by both the branch that
+ * opens the upload's outcome and the one that writes it, so a body is never written
+ * without one.
+ */
+function classifyRequestBody(
+  body: unknown,
+):
+  | { kind: 'form'; body: FormData }
+  | { kind: 'bytes'; body: string | Uint8Array }
+  | undefined {
+  if (body instanceof FormData) {
+    return { kind: 'form', body };
+  }
+
+  return typeof body === 'string' || body instanceof Uint8Array
+    ? { kind: 'bytes', body }
+    : undefined;
+}
+
+/**
  * Every member of an {@link AdapterRequest} read once, into a plain object this adapter
  * owns: the members every adapter reads, from `fields` (see `readAdapterRequestFields`,
  * where any new rule for them belongs, so it reaches every adapter), and the three only
@@ -3288,13 +3305,13 @@ function normalizeCRL(
   /** The adapter the parse is cached for. */
   owner: object,
 ): string | Buffer | Array<string | Buffer> {
-  // A string, the usual refreshed value, read per request: when it is the text that last
-  // normalized and parsed, its result is reused, rather than running the PEM split over
-  // the whole list on every HTTPS request. Strings only: an array or buffer is the
-  // caller's to change in place, so one kept by identity could keep a revoked
-  // certificate's list current - those are compared by their text instead.
+  // Read per request: when the value holds exactly what last normalized and parsed, its
+  // result is reused, rather than running the PEM split over the whole list on every
+  // HTTPS request - a string by its text, a buffer by its bytes, compared against a copy
+  // of what was given. Never by identity: an array or buffer is the caller's to change in
+  // place, and one kept by identity could keep a revoked certificate's list current.
   const last = lastParsedCRLs.get(owner);
-  if (typeof crl === 'string' && last?.input === crl) {
+  if (last !== undefined && isSameCRLInput(last.input, crl)) {
     return last.normalized;
   }
 
@@ -3313,44 +3330,82 @@ function normalizeCRL(
     );
   }
 
-  // Kept one way per kind, so the list is held once more, not twice: a string by itself
-  // (the caller's text, already in hand), anything else by its joined text.
-  if (typeof crl === 'string') {
-    assertCRLParses(normalized);
-    lastParsedCRLs.set(owner, { input: crl, normalized });
-  } else {
-    const text = crlText(normalized);
-    if (text !== last?.text) {
-      assertCRLParses(normalized);
-    }
-    lastParsedCRLs.set(owner, { text, normalized });
-  }
+  assertCRLParses(normalized);
+  lastParsedCRLs.set(owner, { input: copyCRLInput(crl), normalized });
 
   return normalized;
 }
 
+/** A `crl` value as given, copied: a string as is, a buffer's bytes into one of its own. */
+type CRLInputCopy = string | Buffer | Array<string | Buffer>;
+
+function copyCRLInput(
+  crl: string | ArrayBufferView | Array<string | ArrayBufferView>,
+): CRLInputCopy {
+  const copyEntry = (entry: string | ArrayBufferView): string | Buffer =>
+    typeof entry === 'string'
+      ? entry
+      : Buffer.from(
+          new Uint8Array(entry.buffer, entry.byteOffset, entry.byteLength),
+        );
+
+  return Array.isArray(crl) ? crl.map(copyEntry) : copyEntry(crl);
+}
+
 /**
- * The last `crl` that normalized and parsed, per adapter - a string by itself, anything
- * else by its joined text - so a value read per request is parsed once, and two adapters
- * with different CRLs do not evict each other's.
+ * Whether `crl` holds exactly what `last` copied: the same text, the same bytes, entry by
+ * entry. A value that cannot be read so (a detached buffer) is not the same, and is
+ * normalized afresh - which refuses it.
+ */
+function isSameCRLInput(
+  last: CRLInputCopy,
+  crl: string | ArrayBufferView | Array<string | ArrayBufferView>,
+): boolean {
+  const isSameEntry = (
+    copied: string | Buffer | undefined,
+    entry: string | ArrayBufferView | undefined,
+  ): boolean => {
+    if (typeof copied === 'string' || typeof entry === 'string') {
+      return copied === entry;
+    }
+
+    if (copied === undefined || entry === undefined) {
+      return false;
+    }
+
+    try {
+      return copied.equals(
+        new Uint8Array(entry.buffer, entry.byteOffset, entry.byteLength),
+      );
+    } catch {
+      return false;
+    }
+  };
+
+  if (Array.isArray(last) || Array.isArray(crl)) {
+    return (
+      Array.isArray(last) &&
+      Array.isArray(crl) &&
+      last.length === crl.length &&
+      last.every((copied, index) => isSameEntry(copied, crl[index]))
+    );
+  }
+
+  return isSameEntry(last, crl);
+}
+
+/**
+ * The last `crl` that normalized and parsed, per adapter - a copy of the value as given,
+ * with its result - so a value read per request is normalized and parsed once, and two
+ * adapters with different CRLs do not evict each other's.
  */
 const lastParsedCRLs = new WeakMap<
   object,
   {
-    input?: string;
-    text?: string;
+    input: CRLInputCopy;
     normalized: string | Buffer | Array<string | Buffer>;
   }
 >();
-
-/** A normalized CRL set as one text, to tell whether it changed. */
-function crlText(crl: string | Buffer | Array<string | Buffer>): string {
-  return (Array.isArray(crl) ? crl : [crl])
-    .map((entry) =>
-      typeof entry === 'string' ? entry : entry.toString('latin1'),
-    )
-    .join('\n');
-}
 
 /**
  * Parse the normalized set the way the TLS context will, so a value the framing check

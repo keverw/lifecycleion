@@ -2676,6 +2676,11 @@ export class BaseHTTPClient {
         // an adapter answering with a native promise carrying its own `constructor` and
         // a no-op `then` would hang the request, its rejection unhandled. See
         // `adoptPromise()`.
+        // Whether this attempt handed its body to the caller's stream: a stream error after
+        // that is no whole answer - part of the body is in the caller's sink - whatever
+        // the adapter reports, so it is never retried or followed as a failed decode.
+        let didCallStreamFactory = false;
+        const streamResponse = options.streamResponse;
         const adapterPromise = adoptPromise(
           this._adapter.send({
             requestURL: sentRequest.requestURL,
@@ -2686,7 +2691,18 @@ export class BaseHTTPClient {
             // Forward the builder's streaming factory to each adapter attempt.
             // NodeAdapter invokes it only for a 200 response, letting the caller
             // create attempt-local writable state when a retry happens.
-            streamResponse: options.streamResponse,
+            // Called on the receiver the adapter calls it on, so a factory reading `this`
+            // reads what it always did.
+            streamResponse:
+              typeof streamResponse === 'function'
+                ? function (
+                    this: unknown,
+                    ...args: Parameters<typeof streamResponse>
+                  ) {
+                    didCallStreamFactory = true;
+                    return Reflect.apply(streamResponse, this, args);
+                  }
+                : streamResponse,
             // attemptNumber and requestID are passed so NodeAdapter can populate
             // StreamResponseInfo without the adapter needing to track attempt state
             // itself.
@@ -2814,6 +2830,9 @@ export class BaseHTTPClient {
         }
         answeredStatus = candidateStatus;
         answeredRedirectFields = adapterResponse;
+        if (didCallStreamFactory && adapterResponse.isStreamError === true) {
+          adapterResponse.isStreamed = true;
+        }
         adapterResponse.headers = normalizeAdapterResponseHeaders(headers);
         answeredHeaders = adapterResponse.headers;
 
