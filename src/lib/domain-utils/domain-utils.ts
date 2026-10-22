@@ -637,10 +637,20 @@ function isSameList(
   source: readonly string[],
   list: readonly string[],
 ): boolean {
-  return (
-    source.length === list.length &&
-    source.every((entry, index) => entry === list[index])
-  );
+  if (source.length !== list.length) {
+    return false;
+  }
+
+  // Every index, holes included: `every` skips a hole, so a hole the caller filled in
+  // read as unchanged, and the new entry was never checked.
+  // eslint-disable-next-line unicorn/no-for-loop -- an indexed loop is the point
+  for (let index = 0; index < source.length; index++) {
+    if (source[index] !== list[index]) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 /**

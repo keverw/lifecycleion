@@ -1473,6 +1473,8 @@ No configuration options. Adapter-level behavior is controlled through `HTTPClie
 - `followRedirects` must not be `true`
 - `HTTPClient` throws if `XMLHttpRequest` is not available (e.g. Node.js without a shim)
 
+A synchronous throw from `xhr.send()` fails the request once, as a non-retryable `adapter_error`. An asynchronous `send()` throws only an `InvalidStateError` or for a body it cannot convert, and both fail the same way on every attempt; network failures arrive as `error` events and follow the retry rules. An `XMLHttpRequest` shim that throws a network failure from `send()` instead is not retried.
+
 Because browsers follow redirects silently, XHR cannot intercept them mid-flight. Instead, after the request completes, the adapter compares `xhr.responseURL` to the original URL to detect whether a redirect occurred. If one is detected the response carries `wasRedirectDetected: true` and an `HTTPClientError` with code `redirect_disabled`.
 
 ### MockAdapter (Testing)

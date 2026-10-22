@@ -79,6 +79,24 @@ export function isSignalAborted(
   }
 }
 
+/**
+ * Whether the caller's `signal` has aborted, for a failure path that is already
+ * reporting something: a getter that throws reads as "not aborted", as NodeAdapter reads
+ * it, so the failure in hand - a transport error, a body that broke after the status
+ * arrived - is reported rather than replaced. Read the signal with
+ * {@link isSignalAborted} before anything is dispatched, so a signal that cannot be read
+ * at all is refused there.
+ */
+export function isSignalAbortedQuietly(
+  signal: AbortSignal | undefined | null,
+): boolean {
+  try {
+    return isSignalAborted(signal);
+  } catch {
+    return false;
+  }
+}
+
 export type AdapterRequestFields = ReturnType<typeof readAdapterRequestFields>;
 
 /**

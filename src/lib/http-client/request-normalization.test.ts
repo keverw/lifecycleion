@@ -8869,3 +8869,119 @@ test('PR review round 19: a sparse domain list skips its holes', () => {
   expect(matchesDomainList('b.example', list)).toBe(true);
   expect(matchesDomainList('c.example', list)).toBe(false);
 });
+
+function signalReadableOnce(): AbortSignal {
+  let reads = 0;
+  return {
+    get aborted(): boolean {
+      reads++;
+      if (reads > 1) {
+        throw new Error('aborted unreadable');
+      }
+      return false;
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  } as unknown as AbortSignal;
+}
+
+test("PR review round 20: FetchAdapter keeps a broken body's real status when the signal turns unreadable", async () => {
+  const originalFetch = globalThis.fetch;
+  (globalThis as { fetch: unknown }).fetch = () =>
+    Promise.resolve(
+      new Response(
+        new ReadableStream({
+          pull(controller) {
+            controller.error(new Error('body broke'));
+          },
+        }),
+        { status: 200, headers: { 'content-type': 'text/plain' } },
+      ),
+    );
+
+  try {
+    const response = await new FetchAdapter().send({
+      requestURL: 'https://local.test/x',
+      method: 'GET',
+      headers: {},
+      signal: signalReadableOnce(),
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.isStreamError).toBe(true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('PR review round 20: FetchAdapter keeps a transport failure when the signal turns unreadable', async () => {
+  const originalFetch = globalThis.fetch;
+  (globalThis as { fetch: unknown }).fetch = () =>
+    Promise.reject(new TypeError('fetch failed'));
+
+  try {
+    const outcome = await new FetchAdapter()
+      .send({
+        requestURL: 'https://local.test/x',
+        method: 'GET',
+        headers: {},
+        signal: signalReadableOnce(),
+      })
+      .then(
+        (response) => response as unknown as Record<PropertyKey, unknown>,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect(outcome[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBeUndefined();
+    expect(String(outcome.message ?? outcome.errorCause)).not.toContain(
+      'aborted unreadable',
+    );
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('PR review round 20: filling a hole in a kept domain list is seen', () => {
+  // eslint-disable-next-line no-sparse-arrays -- the hole is the point
+  const list: string[] = ['a.example', , 'b.example'] as string[];
+  expect(matchesDomainList('c.example', list)).toBe(false);
+
+  list[1] = 'c.example';
+  expect(matchesDomainList('c.example', list)).toBe(true);
+});
+
+test("PR review round 20: a refusal from another adapter a mock route calls is the route's failure", async () => {
+  let handled = 0;
+  const mock = new MockAdapter({
+    onHandlerError: () => {
+      handled++;
+      return { status: 502 };
+    },
+  });
+  const inner = new MockAdapter();
+  mock.routes.get('/x', async () => {
+    // A carrier: the inner adapter's refusal of a header value whose `toString` throws.
+    await inner.send({
+      requestURL: 'http://inner.test/y',
+      method: 'GET',
+      headers: {
+        'x-token': {
+          toString() {
+            throw new Error('unconvertible');
+          },
+        },
+      } as unknown as Record<string, string>,
+    });
+    return { status: 200 };
+  });
+
+  const response = await mock.send({
+    requestURL: 'http://api.test/x',
+    method: 'GET',
+    headers: {},
+    signal: new AbortController().signal,
+  });
+
+  expect(handled).toBe(1);
+  expect(response.status).toBe(502);
+});

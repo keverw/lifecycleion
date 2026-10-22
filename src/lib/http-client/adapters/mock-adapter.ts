@@ -1,6 +1,5 @@
 import {
   markNonRetryableAdapterError,
-  isAdapterErrorCarrier,
   nonRetryableAdapterErrorFrom,
 } from '../internal/adapter-error';
 import {
@@ -427,7 +426,9 @@ export class MockAdapter implements HTTPAdapter {
 
         // The wait's own refusal - a signal whose `aborted` throws, read while the route
         // ran - is this adapter's, not something the route threw: it goes out as it is.
-        if (isAdapterErrorCarrier(handlerError)) {
+        // Known by identity, so a refusal from another adapter the route called is still
+        // the route's failure, for `onHandlerError` or the 500.
+        if (isWaitRefusal(handlerError)) {
           throw handlerError;
         }
 
@@ -449,7 +450,7 @@ export class MockAdapter implements HTTPAdapter {
               throwAbortError();
             }
 
-            if (isAdapterErrorCarrier(error)) {
+            if (isWaitRefusal(error)) {
               throw error;
             }
 
@@ -1034,6 +1035,17 @@ class InternalMockAbortError extends Error {
   }
 }
 
+/** The refusals {@link awaitAbortable} raised itself, reading the caller's signal. */
+const waitRefusals = new WeakSet<Error>();
+
+function isWaitRefusal(error: unknown): boolean {
+  return (
+    typeof error === 'object' &&
+    error !== null &&
+    waitRefusals.has(error as Error)
+  );
+}
+
 function isInternalAbortError(error: unknown): error is InternalMockAbortError {
   try {
     return error instanceof InternalMockAbortError;
@@ -1134,6 +1146,7 @@ function awaitAbortable<T>(
       // The executor rejects with this, and nothing will settle the wait again, so the
       // listener just attached is removed rather than left on the signal for good.
       detach();
+      waitRefusals.add(error as Error);
       throw error;
     }
 
