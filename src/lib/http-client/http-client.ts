@@ -5102,13 +5102,14 @@ function isHeaderScalar(value: unknown): boolean {
 function snapshotHeaderRecord(
   value: unknown,
 ): Record<string, string | string[]> | undefined {
-  // A plain record only: a `Headers` or `Map` keeps its entries off its own properties,
-  // and read as one it was every header - `Set-Cookie` too - silently gone.
-  if (!isPlainRecord(value)) {
-    return undefined;
-  }
-
   try {
+    // A plain record only: a `Headers` or `Map` keeps its entries off its own
+    // properties, and read as one it was every header - `Set-Cookie` too - silently
+    // gone. Inside the `try`: a revoked `Proxy` throws from the prototype read itself.
+    if (!isPlainRecord(value)) {
+      return undefined;
+    }
+
     const snapshot: Record<string, string | string[]> = {};
 
     for (const [name, headerValue] of Object.entries(value)) {

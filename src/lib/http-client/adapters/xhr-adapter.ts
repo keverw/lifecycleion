@@ -1,5 +1,3 @@
-import { readUnknownMember as readObjectMember } from '../../internal/read-member';
-import { toError } from '../../to-error';
 import {
   joinCookieHeader,
   lowerCaseHeaderName,
@@ -11,7 +9,10 @@ import {
   markResponseStreamAbort,
   nonRetryableAdapterErrorFrom,
 } from '../internal/adapter-error';
-import { readAdapterRequestFields } from '../internal/request-fields';
+import {
+  isSignalAborted,
+  readAdapterRequestFields,
+} from '../internal/request-fields';
 import {
   makeResponseTooLargeError,
   hasResponseBody,
@@ -143,13 +144,8 @@ export class XHRAdapter implements HTTPAdapter {
       /** Takes the abort listener off the signal; set once it is on. */
       let removeAbortListener = (): void => {};
       if (signal) {
-        try {
-          if (signal.aborted) {
-            reject(new DOMException('Request aborted', 'AbortError'));
-            return;
-          }
-        } catch (error) {
-          refuse(error);
+        if (isSignalAborted(signal)) {
+          reject(new DOMException('Request aborted', 'AbortError'));
           return;
         }
 
@@ -519,35 +515,22 @@ export class XHRAdapter implements HTTPAdapter {
       // signal while the XHR is opened but not sent, where `xhr.abort()` does nothing and
       // fires no event - so the request would go out regardless, its one-shot listener spent.
       //
-      // And the send itself, guarded. Never sent, the request fires no `loadend` to take
-      // the abort listener off the signal, so that is done here. The body, or an
-      // `InvalidStateError`, fails the same way on every attempt, so it is refused as
-      // non-retryable; any other throw (a shim's network failure) is left to the
-      // client's retry rules, as an asynchronous `error` event would be.
-      let preparedBody: ReturnType<typeof prepareBody>;
+      // And the send itself, guarded. An asynchronous `send()` throws only an
+      // `InvalidStateError` or a body it cannot convert (a `toString` that throws, a
+      // detached buffer) - network failures arrive as events - and either fails the same
+      // way on every attempt, so it is refused as non-retryable. Never sent, the request
+      // fires no `loadend` to take the abort listener off the signal, so that is done here.
       try {
-        if (signal?.aborted) {
+        if (isSignalAborted(signal)) {
           removeAbortListener();
           reject(new DOMException('Request aborted', 'AbortError'));
           return;
         }
 
-        preparedBody = prepareBody(requestBody);
+        xhr.send(prepareBody(requestBody));
       } catch (error) {
         removeAbortListener();
         refuse(error);
-        return;
-      }
-
-      try {
-        xhr.send(preparedBody);
-      } catch (error) {
-        removeAbortListener();
-        if (readObjectMember(error, 'name') === 'InvalidStateError') {
-          refuse(error);
-        } else {
-          reject(toError(error));
-        }
       }
     });
   }

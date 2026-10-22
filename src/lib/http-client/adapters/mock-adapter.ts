@@ -1,8 +1,12 @@
 import {
   markNonRetryableAdapterError,
+  isAdapterErrorCarrier,
   nonRetryableAdapterErrorFrom,
 } from '../internal/adapter-error';
-import { readAdapterRequestFields } from '../internal/request-fields';
+import {
+  isSignalAborted,
+  readAdapterRequestFields,
+} from '../internal/request-fields';
 import { defineEntry } from '../../internal/define-entry';
 import { readBinaryByteLength } from '../../internal/binary-view';
 import { observeRejection } from '../../internal/promise-reactions';
@@ -317,7 +321,7 @@ export class MockAdapter implements HTTPAdapter {
 
     // --- 1. Pre-flight abort check ---
     // Throw immediately if the signal was already cancelled before we even start.
-    if (signal?.aborted) {
+    if (isSignalAborted(signal)) {
       throwAbortError();
     }
 
@@ -327,7 +331,7 @@ export class MockAdapter implements HTTPAdapter {
 
     // Again, as the real adapters do: a cancel from that callback ends the request before
     // the route handler runs, as it would before a real request was sent.
-    if (signal?.aborted) {
+    if (isSignalAborted(signal)) {
       throwAbortError();
     }
 
@@ -421,6 +425,12 @@ export class MockAdapter implements HTTPAdapter {
           throwAbortError();
         }
 
+        // The wait's own refusal - a signal whose `aborted` throws, read while the route
+        // ran - is this adapter's, not something the route threw: it goes out as it is.
+        if (isAdapterErrorCarrier(handlerError)) {
+          throw handlerError;
+        }
+
         const onHandlerError = this.config.onHandlerError;
         if (onHandlerError) {
           responseSource = 'onHandlerError';
@@ -437,6 +447,10 @@ export class MockAdapter implements HTTPAdapter {
           } catch (error) {
             if (isInternalAbortError(error)) {
               throwAbortError();
+            }
+
+            if (isAdapterErrorCarrier(error)) {
+              throw error;
             }
 
             // Said, not swallowed. The 500 is the right recovery - it mirrors what a real
@@ -511,7 +525,7 @@ export class MockAdapter implements HTTPAdapter {
 
     // --- 6. Post-delay abort check ---
     // Catches cancellation when there was no delay (or delay was 0).
-    if (signal?.aborted) {
+    if (isSignalAborted(signal)) {
       throwAbortError();
     }
 
@@ -1115,7 +1129,7 @@ function awaitAbortable<T>(
     let isAborted: boolean;
 
     try {
-      isAborted = signal.aborted;
+      isAborted = isSignalAborted(signal);
     } catch (error) {
       // The executor rejects with this, and nothing will settle the wait again, so the
       // listener just attached is removed rather than left on the signal for good.
@@ -1135,7 +1149,7 @@ function awaitAbortable<T>(
  * both the timer and the abort listener to avoid leaks.
  */
 function sleepAbortable(ms: number, signal: AbortSignal): Promise<void> {
-  if (signal.aborted) {
+  if (isSignalAborted(signal)) {
     throw new InternalMockAbortError();
   }
 

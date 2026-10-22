@@ -8161,15 +8161,8 @@ test.each(['aborted', 'addEventListener', 'setHeader'] as const)(
       }
       // On a carrier, with the caller's own error as its cause.
       expect((caught as Error).cause).toBe(failure);
-      if (failureAt === 'aborted') {
-        // Refused by the shared field reader, which reads `aborted` before any request
-        // is allocated: there is nothing to destroy.
-        expect(requestSpy).not.toHaveBeenCalled();
-        expect(destroys).toBe(0);
-      } else {
-        expect(request.destroyed).toBe(true);
-        expect(destroys).toBe(1);
-      }
+      expect(request.destroyed).toBe(true);
+      expect(destroys).toBe(1);
     } finally {
       requestSpy.mockRestore();
     }

@@ -17,6 +17,7 @@ import {
 } from './utils';
 import { deepClone } from '../deep-clone';
 import {
+  ADAPTER_ERROR_CARRIER_KEY,
   DEFAULT_MAX_RESPONSE_BYTES,
   NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   RESPONSE_STREAM_ABORT_FLAG,
@@ -8654,4 +8655,217 @@ test('PR review round 18: publicSuffixes given as a list names the array', () =>
         publicSuffixes: ['corp.internal'] as unknown as { add: string[] },
       }),
   ).toThrow('(got an array)');
+});
+
+test('PR review round 19: an unreadable effectiveRequestHeaders record is absent, not an adapter_error', async () => {
+  const { proxy, revoke } = Proxy.revocable({}, {});
+  revoke();
+  const builder = new HTTPClient({
+    baseURL: 'http://api.test',
+    adapter: {
+      getType: () => 'mock',
+      send: () =>
+        Promise.resolve({
+          status: 200,
+          headers: {},
+          body: null,
+          effectiveRequestHeaders: proxy,
+        }),
+    },
+  }).get('/x');
+  const response = await builder.send();
+
+  expect(response.status).toBe(200);
+  expect(response.isFailed).toBe(false);
+  expect(builder.error).toBeNull();
+});
+
+test('PR review round 19: MockAdapter refuses a signal whose aborted throws on a later read as non-retryable', async () => {
+  let reads = 0;
+  const signal = {
+    get aborted(): boolean {
+      reads++;
+      if (reads > 1) {
+        throw new Error('aborted unreadable');
+      }
+      return false;
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  } as unknown as AbortSignal;
+  const mock = new MockAdapter();
+  mock.routes.get('/x', () => ({ status: 200 }));
+
+  const outcome = await mock
+    .send({
+      requestURL: 'http://api.test/x',
+      method: 'GET',
+      headers: {},
+      signal,
+    })
+    .then(
+      () => undefined,
+      (error: unknown) => error as Record<PropertyKey, unknown>,
+    );
+
+  expect(reads).toBeGreaterThan(1);
+  expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+});
+
+test('PR review round 19: a domain list kept by the caller stops matching an entry they removed', () => {
+  const list = ['*.a.example', 'exact.example'];
+  expect(matchesDomainList('x.a.example', list)).toBe(true);
+  expect(matchesDomainList('exact.example', list)).toBe(true);
+
+  list[0] = '*.b.example';
+  list.pop();
+  expect(matchesDomainList('x.a.example', list)).toBe(false);
+  expect(matchesDomainList('exact.example', list)).toBe(false);
+  expect(matchesDomainList('x.b.example', list)).toBe(true);
+
+  list.push('https://origin.example');
+  expect(() => matchesDomainList('x.b.example', list)).toThrow(
+    'origin-style patterns are not allowed',
+  );
+});
+
+test('PR review round 19: MockAdapter refuses a signal whose aborted throws while the route runs, not as a route error', async () => {
+  let reads = 0;
+  const signal = {
+    get aborted(): boolean {
+      reads++;
+      // The two pre-flight checks read it; the wait on the route is next.
+      if (reads > 2) {
+        throw new Error('aborted unreadable');
+      }
+      return false;
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  } as unknown as AbortSignal;
+  let handlerErrors = 0;
+  const mock = new MockAdapter({
+    onHandlerError: () => {
+      handlerErrors++;
+      return { status: 500 };
+    },
+  });
+  mock.routes.get('/x', async () => {
+    await sleep(1);
+    return { status: 200 };
+  });
+
+  const outcome = await mock
+    .send({
+      requestURL: 'http://api.test/x',
+      method: 'GET',
+      headers: {},
+      signal,
+    })
+    .then(
+      () => undefined,
+      (error: unknown) => error as Record<PropertyKey, unknown>,
+    );
+
+  expect(reads).toBeGreaterThan(2);
+  expect(handlerErrors).toBe(0);
+  expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+});
+
+test("PR review round 19: a caller's error carrying the carrier key is still wrapped and flagged", async () => {
+  const mock = new MockAdapter();
+  mock.routes.get('/x', () => ({ status: 200 }));
+  const spoofed = Object.assign(new DOMException('x', 'AbortError'), {
+    [ADAPTER_ERROR_CARRIER_KEY]: true,
+  });
+  const headers = {
+    'x-token': {
+      toString() {
+        throw spoofed;
+      },
+    },
+  } as unknown as Record<string, string>;
+
+  const outcome = await mock
+    .send({ requestURL: 'http://api.test/x', method: 'GET', headers })
+    .then(
+      () => undefined,
+      (error: unknown) => error as Record<PropertyKey, unknown>,
+    );
+
+  expect(outcome).not.toBe(spoofed);
+  expect(outcome?.name).not.toBe('AbortError');
+  expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+});
+
+test('PR review round 19: FetchAdapter refuses a signal whose aborted throws before anything is dispatched', async () => {
+  const originalFetch = globalThis.fetch;
+  let fetched = 0;
+  (globalThis as { fetch: unknown }).fetch = () => {
+    fetched++;
+    return Promise.resolve(new Response('ok', { status: 200 }));
+  };
+  const signal = {
+    get aborted(): boolean {
+      throw new Error('aborted unreadable');
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  } as unknown as AbortSignal;
+
+  try {
+    const outcome = await new FetchAdapter()
+      .send({
+        requestURL: 'https://local.test/x',
+        method: 'POST',
+        headers: {},
+        body: 'x',
+        signal,
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(fetched).toBe(0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test('PR review round 19: a polyfill signal reporting a truthy aborted stops MockAdapter before the route', async () => {
+  const mock = new MockAdapter();
+  let ran = 0;
+  mock.routes.get('/x', () => {
+    ran++;
+    return { status: 200 };
+  });
+  const signal = {
+    aborted: 1,
+    addEventListener() {},
+    removeEventListener() {},
+  } as unknown as AbortSignal;
+
+  const outcome = await mock
+    .send({
+      requestURL: 'http://api.test/x',
+      method: 'GET',
+      headers: {},
+      signal,
+    })
+    .then(
+      () => undefined,
+      (error: unknown) => error as Error,
+    );
+
+  expect(outcome?.name).toBe('AbortError');
+  expect(ran).toBe(0);
+});
+
+test('PR review round 19: a sparse domain list skips its holes', () => {
+  const list: string[] = ['a.example'];
+  list[2] = 'b.example';
+  expect(matchesDomainList('b.example', list)).toBe(true);
+  expect(matchesDomainList('c.example', list)).toBe(false);
 });

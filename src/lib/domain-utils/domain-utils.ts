@@ -534,6 +534,115 @@ function cachedEntry<T>(
   return value;
 }
 
+/** A domain-list entry as {@link matchesDomainList} reads it, compiled once. */
+type CompiledDomainEntry =
+  | {
+      kind: 'wildcard';
+      compiled: ReturnType<typeof compileWildcardPattern>;
+    }
+  | { kind: 'exact'; normalized: string };
+
+/**
+ * A list's entries, cleaned and validated, each compiled the first time a match reaches
+ * it - so a scan that matches early compiles no further, as before the list was kept.
+ */
+interface CompiledDomainList {
+  /** The entries the list held, to check it against next time. */
+  source: readonly string[];
+  /** Trimmed, with the empty ones dropped. */
+  cleaned: readonly string[];
+  /** Compiled as reached; `undefined` until then. */
+  entries: (CompiledDomainEntry | undefined)[];
+  isCached: boolean;
+}
+
+/**
+ * Each list's compiled entries, kept against the list itself: a service checks the same
+ * array on every request, and lists that each fit the shared caches above could still
+ * evict each other there, two 300-entry lists used in turn recompiling every pattern on
+ * every call. Kept with a copy of the entries the list held, and used only while it still
+ * holds exactly those - an array is the caller's to change, and an entry they removed
+ * must stop matching. A list built anew for each call misses here and falls back to the
+ * shared caches.
+ */
+const compiledDomainLists = new WeakMap<
+  readonly string[],
+  CompiledDomainList
+>();
+
+function compiledDomainList(
+  allowedDomains: readonly string[],
+): CompiledDomainList {
+  const kept = compiledDomainLists.get(allowedDomains);
+  if (kept !== undefined && isSameList(kept.source, allowedDomains)) {
+    return kept;
+  }
+
+  // Each entry read once, into the copy the list is checked against next time. `slice`,
+  // not a spread: a sparse list's holes stay holes, which the `map` below skips, rather
+  // than becoming `undefined` entries that throw.
+  const source = allowedDomains.slice();
+
+  // Trim and filter out empty entries first
+  const cleaned = source.map((s) => s.trim()).filter((s) => s.length > 0);
+
+  // Validate: throw if any origin-style patterns are present
+  const originLike = cleaned.filter((s) => ORIGIN_LIKE.test(s));
+
+  if (originLike.length > 0) {
+    throw new Error(
+      `matchesDomainList: origin-style patterns are not allowed in domain lists: ${originLike.join(', ')}`,
+    );
+  }
+
+  const list: CompiledDomainList = {
+    source,
+    cleaned,
+    entries: [],
+    // A list that fits the shared caches is cached there too; see `cachedEntry`.
+    isCached: cleaned.length <= MAX_COMPILED_WILDCARD_PATTERNS,
+  };
+  compiledDomainLists.set(allowedDomains, list);
+
+  return list;
+}
+
+/** Entry `index` of `list`, compiled the first time it is reached. */
+function compiledDomainEntry(
+  list: CompiledDomainList,
+  index: number,
+): CompiledDomainEntry {
+  const kept = list.entries[index];
+  if (kept !== undefined) {
+    return kept;
+  }
+
+  const allowed = list.cleaned[index];
+  const entry: CompiledDomainEntry = allowed.includes('*')
+    ? {
+        kind: 'wildcard',
+        compiled: compiledWildcardPattern(allowed, list.isCached),
+      }
+    : {
+        kind: 'exact',
+        normalized: normalizedExactEntry(allowed, list.isCached),
+      };
+  list.entries[index] = entry;
+
+  return entry;
+}
+
+/** Whether `list` still holds exactly the entries of `source`, in order. */
+function isSameList(
+  source: readonly string[],
+  list: readonly string[],
+): boolean {
+  return (
+    source.length === list.length &&
+    source.every((entry, index) => entry === list[index])
+  );
+}
+
 /**
  * Check if a domain matches any pattern in a list
  * Supports exact matches, wildcards, and normalization
@@ -557,46 +666,31 @@ export function matchesDomainList(
     return false;
   }
 
-  // Trim and filter out empty entries first
-  const cleaned = allowedDomains
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
-
-  // Validate: throw if any origin-style patterns are present
-  const originLike = cleaned.filter((s) => ORIGIN_LIKE.test(s));
-
-  if (originLike.length > 0) {
-    throw new Error(
-      `matchesDomainList: origin-style patterns are not allowed in domain lists: ${originLike.join(', ')}`,
-    );
-  }
-
   // Asked once, for every wildcard entry, and only if one is reached.
   let isIP: boolean | undefined;
-  // A list that fits the cache is cached; see `cachedEntry`.
-  const isCached = cleaned.length <= MAX_COMPILED_WILDCARD_PATTERNS;
 
-  for (const allowed of cleaned) {
+  const list = compiledDomainList(allowedDomains);
+
+  for (let index = 0; index < list.cleaned.length; index++) {
+    const entry = compiledDomainEntry(list, index);
     // Against the domain normalized once above, as `matchesWildcardDomain` would read it,
     // rather than normalized again for every wildcard entry.
-    if (allowed.includes('*')) {
-      const compiled = compiledWildcardPattern(allowed, isCached);
+    if (entry.kind === 'wildcard') {
       isIP ??= isIPAddress(normalizedDomain);
       if (
-        compiled !== undefined &&
-        matchesCompiledWildcard(normalizedDomain, compiled, isIP)
+        entry.compiled !== undefined &&
+        matchesCompiledWildcard(normalizedDomain, entry.compiled, isIP)
       ) {
         return true;
       }
       continue;
     }
 
-    const normalizedAllowed = normalizedExactEntry(allowed, isCached);
     // The cheap comparison first: at most one entry can be equal, and only that one
     // needs the IP and public-suffix checks.
     if (
-      normalizedDomain === normalizedAllowed &&
-      isAllowedExactHostname(normalizedAllowed)
+      normalizedDomain === entry.normalized &&
+      isAllowedExactHostname(entry.normalized)
     ) {
       return true;
     }

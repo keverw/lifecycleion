@@ -512,9 +512,8 @@ describe('NodeAdapter.send() reads the request once', () => {
     const signal = {
       get aborted(): boolean {
         reads++;
-        // The shared field reader reads it once, and the setup check once; the transport
-        // `'error'` handler is next.
-        if (reads > 2) {
+        // The setup check reads it once; the transport `'error'` handler is next.
+        if (reads > 1) {
           throw refusal;
         }
         return false;
@@ -534,7 +533,7 @@ describe('NodeAdapter.send() reads the request once', () => {
     });
     await sleep(20);
 
-    expect(reads).toBeGreaterThan(2);
+    expect(reads).toBeGreaterThan(1);
     expect(response.status).toBe(0);
     expect(response.isTransportError).toBe(true);
     expect(response.errorCause).not.toBe(refusal);

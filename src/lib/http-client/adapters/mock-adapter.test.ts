@@ -1,5 +1,6 @@
 import { describe, expect, test, beforeEach } from 'bun:test';
 import { MockAdapter } from './mock-adapter';
+import { NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG } from '../consts';
 import type { MockAdapterConfig, MockFormData } from './mock-adapter';
 import { HTTPClient } from '../http-client';
 import { CookieJar } from '../cookie-jar';
@@ -1140,12 +1141,17 @@ describe('MockAdapter.send() — low-level contract', () => {
       },
     } as unknown as AbortSignal;
 
-    // The failed wait is reported as the handler's failure, so the adapter's default 500.
-    const res = await adapter.send(
-      makeAdapterRequest({ requestURL: '/item', signal }),
-    );
+    // The failed read is the adapter's refusal of the caller's signal - non-retryable,
+    // with the read's error as its cause - not a failure of the handler's.
+    const outcome = await adapter
+      .send(makeAdapterRequest({ requestURL: '/item', signal }))
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
 
-    expect(res.status).toBe(500);
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(outcome?.cause).toBe(readFailure);
     expect(listeners.size).toBe(0);
 
     releaseHandler();

@@ -44,7 +44,7 @@ export function readAdapterRequestFields(request: AdapterRequest) {
       initialURL: request.initialURL,
       headers: copyRequestHeaders(request.headers),
       body: request.body,
-      signal: readSignal(request.signal),
+      signal: request.signal,
     };
   } catch (error) {
     throw nonRetryableAdapterErrorFrom(error);
@@ -59,16 +59,24 @@ export function readAdapterRequestFields(request: AdapterRequest) {
 }
 
 /**
- * The request's signal, its `aborted` read once here, inside the carrier: one whose
- * getter throws is refused with the other fields rather than escaping raw - and retried
- * as a network failure - from the first check an adapter makes of it.
+ * Whether the caller's `signal` has aborted, read as every adapter reads it: a getter
+ * that throws is the caller's, refused as a non-retryable `adapter_error` rather than
+ * escaping raw - and retried as a network failure - from whichever check reads it.
  */
-function readSignal(signal: AbortSignal | undefined): AbortSignal | undefined {
-  if (signal !== undefined && signal !== null) {
-    void signal.aborted;
+export function isSignalAborted(
+  signal: AbortSignal | undefined | null,
+): boolean {
+  if (signal === undefined || signal === null) {
+    return false;
   }
 
-  return signal;
+  try {
+    // Truthy, as the checks it replaced read it: a polyfill's `aborted` need not be a
+    // boolean.
+    return Boolean(signal.aborted);
+  } catch (error) {
+    throw nonRetryableAdapterErrorFrom(error);
+  }
 }
 
 export type AdapterRequestFields = ReturnType<typeof readAdapterRequestFields>;

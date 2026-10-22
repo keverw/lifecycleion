@@ -827,15 +827,21 @@ describe('XHRAdapter', () => {
       expect(added).toBe(1);
       expect(removed).toBe(1);
 
-      // Any other throw is left to the client's retry rules, the listener still removed.
-      FakeXHR.prototype.send = () => {
-        throw new DOMException('offline', 'NetworkError');
+      // A body the XHR cannot convert - a `toString` that throws - fails the same way.
+      FakeXHR.prototype.send = (body?: XMLHttpRequestBodyInit | null) => {
+        // eslint-disable-next-line @typescript-eslint/no-base-to-string -- converted as a real XHR converts it
+        String(body);
       };
-      const transient = await new XHRAdapter()
+      const unconvertible = await new XHRAdapter()
         .send({
           requestURL: 'https://api.test/x',
-          method: 'GET',
+          method: 'POST',
           headers: {},
+          body: {
+            toString() {
+              throw new Error('body unconvertible');
+            },
+          } as unknown as string,
           signal: signal as unknown as AbortSignal,
         })
         .then(
@@ -843,10 +849,7 @@ describe('XHRAdapter', () => {
           (error: unknown) => error as Record<PropertyKey, unknown>,
         );
 
-      expect(transient?.name).toBe('NetworkError');
-      expect(
-        transient?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG],
-      ).toBeUndefined();
+      expect(unconvertible?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
       expect(removed).toBe(2);
     } finally {
       FakeXHR.prototype.send = originalSend;

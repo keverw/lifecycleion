@@ -5,7 +5,10 @@ import {
 } from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
 import { concatChunks } from '../internal/concat-chunks';
-import { readAdapterRequestFields } from '../internal/request-fields';
+import {
+  isSignalAborted,
+  readAdapterRequestFields,
+} from '../internal/request-fields';
 import {
   markResponseStreamAbort,
   markNonRetryableAdapterError,
@@ -120,6 +123,12 @@ export class FetchAdapter implements HTTPAdapter {
       }
     }
 
+    // Read through the guarded accessor before anything is dispatched, as the other
+    // adapters read it: `fetch` reads the signal's internal state, not the getter, so a
+    // signal whose `aborted` throws went out unrefused. An aborted one is `fetch`'s to
+    // reject, with its reason.
+    isSignalAborted(signal);
+
     let response: Response;
 
     try {
@@ -134,7 +143,7 @@ export class FetchAdapter implements HTTPAdapter {
       // Re-throw AbortErrors and any error thrown when the signal is already
       // aborted. When abort(string) is called, fetch rejects with the string
       // itself (not an AbortError), so checking signal.aborted covers that case.
-      if (isAbortError(error) || signal?.aborted) {
+      if (isAbortError(error) || isSignalAborted(signal)) {
         throw error; // preserve cancellation / timeout classification
       }
 
@@ -214,7 +223,7 @@ export class FetchAdapter implements HTTPAdapter {
       // out with the error, the way NodeAdapter tags its aborts, and the client
       // sorts it: cancel stays cancelled, a post-header timeout becomes a
       // terminal stream error with the real status.
-      if (isAbortError(error) || signal?.aborted) {
+      if (isAbortError(error) || isSignalAborted(signal)) {
         throw markResponseStreamAbort(
           error,
           response.status,

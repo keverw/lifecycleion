@@ -16,6 +16,13 @@ import { readUnknownMember as readObjectMember } from '../../internal/read-membe
  * adapter's `send()` was read as non-retryable, and it showed up in `serializeError`.
  */
 export function nonRetryableAdapterErrorFrom(error: unknown): Error {
+  // Already one: a refusal raised inside a step that is itself read on a carrier goes
+  // out as it is, not wrapped twice. Known by identity, not by its key: the key is a
+  // registry symbol any caller can put on their own error to skip the wrapping.
+  if (isAdapterErrorCarrier(error)) {
+    return error;
+  }
+
   const message = readObjectMember(error, 'message');
   const carrier = new Error(
     typeof message === 'string' && message.length > 0
@@ -35,8 +42,19 @@ export function nonRetryableAdapterErrorFrom(error: unknown): Error {
 
   Object.defineProperty(carrier, ADAPTER_ERROR_CARRIER_KEY, { value: true });
   markNonRetryableAdapterError(carrier);
+  carriers.add(carrier);
 
   return carrier;
+}
+
+/** Every carrier {@link nonRetryableAdapterErrorFrom} has made, by identity. */
+const carriers = new WeakSet<Error>();
+
+/** Whether `error` is a carrier {@link nonRetryableAdapterErrorFrom} made. */
+export function isAdapterErrorCarrier(error: unknown): error is Error {
+  return (
+    typeof error === 'object' && error !== null && carriers.has(error as Error)
+  );
 }
 
 /**
