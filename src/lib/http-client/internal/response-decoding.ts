@@ -167,7 +167,6 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   private readonly heldWhilePaused: Array<{ event: string; args: unknown[] }> =
     [];
   /** Raw bytes that arrived before the decoders were attached: the first chunk. */
-  private rawBytes = 0;
   private readonly held: Array<{ event: string; args: unknown[] }> = [];
   /** One record per `onFailure` call: active until unsubscribed, told at most once. */
   private readonly failureSubscriptions = new Set<FailureSubscription>();
@@ -252,13 +251,8 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
       this.deliver('close');
     });
 
-    // Every raw byte, the first chunk's included: read against what the first decoder
-    // consumed, to tell trailing bytes (see `attachDecoders`).
-    res.on('data', (chunk: Buffer) => {
-      if (this.decoders.length === 0) {
-        this.rawBytes += chunk.length;
-      }
-    });
+    // The first chunk builds the decoders, which count every raw byte from it on, to
+    // tell trailing bytes (see `attachDecoders`).
     res.once('data', (first: Buffer) => {
       this.attachDecoders(first);
     });
@@ -356,17 +350,11 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     );
 
     for (const decoder of this.decoders) {
+      // Delivered - or held for a reader not yet attached - and the decoding and the
+      // response's socket let go, once: stacked decoders (`gzip, br`) can each fail.
+      // Not `destroy`, which would drop the held error.
       decoder.on('error', (error: Error) => {
-        // Delivered - or held for a reader not yet attached - and the decoding and the
-        // response's socket let go. Not `destroy`, which would drop the held error.
-        this.deliver('error', markDecodeError(error));
-        this.destroyDecoders();
-
-        try {
-          this.res.destroy();
-        } catch {
-          // Already gone; the error above is what is reported.
-        }
+        this.failDecoding(error);
       });
     }
 
@@ -389,7 +377,7 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     // cleanly on one, handing over what they decoded, where gunzip, brotli and inflate
     // fail. The frame boundaries are walked over the bytes each zstd stage is fed.
     const fedBytes = this.decoders.map(() => 0);
-    fedBytes[0] = this.rawBytes;
+    fedBytes[0] = first.length;
     const zstdFrames = this.decodeOrder.map((coding) =>
       coding === 'zstd' ? new ZstdFrameWalker() : undefined,
     );
@@ -463,8 +451,9 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
   }
 
   /**
-   * A body its decoder ended on without failing - bytes after its compressed stream, a
-   * zstd frame cut short: a stream error, the decoding and response let go.
+   * A decoding failure - a decoder's own error, or a body it ended on without failing
+   * (bytes after its compressed stream, a zstd frame cut short): a stream error, told
+   * once, the decoding and response let go.
    */
   private failDecoding(error: Error): void {
     if (this.didFailDecoding) {

@@ -361,3 +361,10 @@ export const REDIRECT_STATUS_CODES: ReadonlySet<number> = new Set([
   // 308 Permanent Redirect
   308,
 ]);
+
+/**
+ * The longest lifetime a cookie is given, in seconds: 400 days, RFC 6265bis §5.5's cap on
+ * both `Max-Age` and `Expires`, as browsers apply it. Shared by `CookieJar`, which caps
+ * what it stores, and `MockAdapter`, which caps the `Max-Age` it writes.
+ */
+export const MAX_COOKIE_LIFETIME_SECONDS = 400 * 24 * 60 * 60;

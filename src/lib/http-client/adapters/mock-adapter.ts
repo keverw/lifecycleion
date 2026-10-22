@@ -33,7 +33,7 @@ import {
   adoptPromise,
   type PromiseResultBox,
 } from '../../internal/adopt-promise';
-import { REDIRECT_STATUS_CODES } from '../consts';
+import { REDIRECT_STATUS_CODES, MAX_COOKIE_LIFETIME_SECONDS } from '../consts';
 import {
   isPlainJSONBodyObject,
   normalizeAdapterResponseHeaders,
@@ -255,9 +255,6 @@ export interface MockAdapterRoutes {
   /** Remove all registered routes. */
   clear(): void;
 }
-
-/** The longest cookie lifetime a `Max-Age` is written with: 400 days (RFC 6265bis). */
-const MAX_COOKIE_AGE_SECONDS = 400 * 24 * 60 * 60;
 
 // find-my-way requires a handler function; the actual MockRouteHandler lives in store.
 const noop: Router.Handler<Router.HTTPVersion.V1> = () => {};
@@ -491,6 +488,12 @@ export class MockAdapter implements HTTPAdapter {
       markNonRetryableAdapterError(error);
       throw error;
     }
+
+    // Every field read once, here, into the answer every check and use below reads: a
+    // getter that returned `200` to the status check and `0` to the response passed one
+    // and sent another. A getter that throws keeps the ordinary adapter-error behavior
+    // caller code read here always had, as the CRL's does.
+    mockResponse = snapshotMockResponse(mockResponse);
 
     // --- 5. Delay ---
     // Simulates network latency. Per-response delay takes priority over the
@@ -911,7 +914,7 @@ function serializeMockCookieOptions(
           // rather than `Max-Age=0`, which deletes it; toward zero otherwise.
           Math.min(
             maxAge > 0 ? Math.ceil(maxAge) : Math.trunc(maxAge),
-            MAX_COOKIE_AGE_SECONDS,
+            MAX_COOKIE_LIFETIME_SECONDS,
           ),
         )
       : maxAge,
@@ -1009,6 +1012,32 @@ function parseRequestBody(
 
   // Plain strings with non-JSON content types are already in the desired form.
   return body;
+}
+
+/**
+ * The route's answer with each field read once, into a plain object: only the fields it
+ * has, so an absent one stays absent.
+ */
+function snapshotMockResponse(response: MockResponse): MockResponse {
+  const snapshot = { status: response.status } as MockResponse;
+  const fields = [
+    'body',
+    'headers',
+    'contentType',
+    'delay',
+    'cookies',
+    'streamError',
+    'transportError',
+  ] as const;
+
+  for (const field of fields) {
+    const value: unknown = response[field];
+    if (value !== undefined) {
+      defineEntry(snapshot as unknown as Record<string, unknown>, field, value);
+    }
+  }
+
+  return snapshot;
 }
 
 function serializeResponseBody(response: MockResponse): Uint8Array | null {

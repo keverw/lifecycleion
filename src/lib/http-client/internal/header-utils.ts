@@ -157,6 +157,37 @@ export function joinCookieHeader(
 }
 
 /**
+ * A request's headers as the `(name, value)` pairs a browser transport is handed one at a
+ * time - `fetch`'s `Headers`, XHR's `setRequestHeader` - with every `Cookie` spelling and
+ * item joined into one pair, last, by NodeAdapter's rule (see {@link joinCookieHeader}):
+ * appended separately they were joined with `, `, which reads as one cookie. An array
+ * value's items are a pair each.
+ */
+export function requestHeaderPairs(
+  headers: Record<string, string | string[]>,
+): Array<[string, string]> {
+  const entries = Object.entries(headers);
+  const pairs: Array<[string, string]> = [];
+
+  for (const [key, value] of entries) {
+    if (lowerCaseHeaderName(key) === 'cookie') {
+      continue;
+    }
+
+    for (const item of Array.isArray(value) ? value : [value]) {
+      pairs.push([key, item]);
+    }
+  }
+
+  const cookie = joinCookieHeader(entries);
+  if (cookie !== undefined) {
+    pairs.push([cookie.name, cookie.value]);
+  }
+
+  return pairs;
+}
+
+/**
  * Join repeated request header values into the single field each transport sends:
  * `; ` for `Cookie` (the RFC 6265 cookie-pair delimiter), `, ` for everything else.
  * Shared by NodeAdapter and MockAdapter, so it stays free of Node-only imports.

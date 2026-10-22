@@ -4578,9 +4578,11 @@ export class BaseHTTPClient {
     const abort = (signal: AbortSignal) =>
       controller.abort(readObjectMember(signal, 'reason'));
 
-    if (a.aborted) {
+    // By the rule `send()` reads the caller's signal with: exactly `true`, and a getter
+    // that throws as not aborted (see `isSignalAbortedQuietly`).
+    if (isSignalAbortedQuietly(a)) {
       abort(a);
-    } else if (b.aborted) {
+    } else if (isSignalAbortedQuietly(b)) {
       abort(b);
     } else {
       const onAbortA = () => abort(a);

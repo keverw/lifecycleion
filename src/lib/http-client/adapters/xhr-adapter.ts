@@ -1,5 +1,5 @@
 import {
-  joinCookieHeader,
+  requestHeaderPairs,
   lowerCaseHeaderName,
 } from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
@@ -111,21 +111,8 @@ export class XHRAdapter implements HTTPAdapter {
         // Except `cookie`, set once as NodeAdapter sends it - every spelling and item
         // joined with `; `: where XHR runs outside a browser (React Native, a test shim)
         // it is sent, and `, ` read as one cookie.
-        const headerEntries = Object.entries(headers);
-        for (const [key, value] of headerEntries) {
-          if (lowerCaseHeaderName(key) === 'cookie') {
-            continue;
-          } else if (Array.isArray(value)) {
-            for (const v of value) {
-              xhr.setRequestHeader(key, v);
-            }
-          } else {
-            xhr.setRequestHeader(key, value);
-          }
-        }
-        const cookie = joinCookieHeader(headerEntries);
-        if (cookie !== undefined) {
-          xhr.setRequestHeader(cookie.name, cookie.value);
+        for (const [name, value] of requestHeaderPairs(headers)) {
+          xhr.setRequestHeader(name, value);
         }
       } catch (error) {
         refuse(error);

@@ -1,8 +1,4 @@
-import {
-  deleteHeader,
-  joinCookieHeader,
-  lowerCaseHeaderName,
-} from '../internal/header-utils';
+import { deleteHeader, requestHeaderPairs } from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
 import { concatChunks } from '../internal/concat-chunks';
 import {
@@ -517,43 +513,23 @@ function asError(value: unknown): Error | undefined {
 function materializeFetchHeaders(
   headers: Record<string, string | string[]>,
 ): HeadersInit {
-  const entries = Object.entries(headers);
-  // The `Cookie` field built by NodeAdapter's rule on either path (see `joinCookieHeader`),
-  // so whether it is sent, and how, does not turn on how the other headers are given.
-  const cookie = joinCookieHeader(entries);
+  // The `Cookie` field built by NodeAdapter's rule on either path (see
+  // `requestHeaderPairs`), so whether it is sent, and how, does not turn on how the other
+  // headers are given.
+  const pairs = requestHeaderPairs(headers);
 
-  // A `Headers` whenever a value repeats as an array.
-  if (!entries.some(([, value]) => Array.isArray(value))) {
+  // A `Headers` whenever a value repeats as an array; a record otherwise.
+  if (!Object.values(headers).some((value) => Array.isArray(value))) {
     const record: Record<string, string> = {};
-    for (const [key, value] of entries) {
-      if (lowerCaseHeaderName(key) !== 'cookie') {
-        defineEntry(record, key, value as string);
-      }
-    }
-    if (cookie !== undefined) {
-      defineEntry(record, cookie.name, cookie.value);
+    for (const [name, value] of pairs) {
+      defineEntry(record, name, value);
     }
     return record;
   }
 
   const materialized = new Headers();
-
-  for (const [key, value] of entries) {
-    if (lowerCaseHeaderName(key) === 'cookie') {
-      // Joined below, every spelling at once.
-      continue;
-    } else if (Array.isArray(value)) {
-      for (const item of value) {
-        materialized.append(key, item);
-      }
-    } else {
-      materialized.append(key, value);
-    }
-  }
-
-  // As NodeAdapter sends it: `append` would join with `, `, which reads as one cookie.
-  if (cookie !== undefined) {
-    materialized.set(cookie.name, cookie.value);
+  for (const [name, value] of pairs) {
+    materialized.append(name, value);
   }
 
   return materialized;

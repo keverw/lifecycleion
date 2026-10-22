@@ -1,3 +1,4 @@
+import { MAX_COOKIE_LIFETIME_SECONDS } from './consts';
 import { parse } from 'tldts';
 import { toASCII } from 'tr46';
 import { checkDNSLength, toAsciiDots } from '../domain-utils/helpers';
@@ -112,12 +113,6 @@ function isHeaderSafeCookieText(text: string, extra: string): boolean {
 
 /** RFC 6265 §5.2.2 delta-seconds: an optional `-`, then digits only. */
 const MAX_AGE_PATTERN = /^-?\d+$/;
-
-/**
- * The longest lifetime a `Set-Cookie` is given, in seconds: 400 days, RFC 6265bis §5.5's
- * cap on both `Max-Age` and `Expires`, as browsers apply it.
- */
-const MAX_COOKIE_LIFETIME_SECONDS = 400 * 24 * 60 * 60;
 
 /** RFC 6265bis §5.6: a cookie whose name and value together pass this is ignored. */
 const MAX_COOKIE_NAME_VALUE_BYTES = 4096;

@@ -6,6 +6,7 @@ import {
 } from '../internal/adapter-error';
 import { concatChunks } from '../internal/concat-chunks';
 import {
+  isSignalAborted,
   isSignalAbortedQuietly,
   readAdapterRequestFields,
 } from '../internal/request-fields';
@@ -489,7 +490,14 @@ export class NodeAdapter implements HTTPAdapter {
     // Read once per request, as the rest of the config is: see `decompress`.
     const isDecompressing = this._config.decompress !== false;
 
-    const parsedURL = new URL(request.requestURL);
+    // On a carrier, as the scheme refusal below and `urlToHttpOptions` are: a malformed
+    // URL fails the same way on every attempt.
+    let parsedURL: URL;
+    try {
+      parsedURL = new URL(request.requestURL);
+    } catch (error) {
+      throw nonRetryableAdapterErrorFrom(error);
+    }
 
     // Refused, not sent: any other scheme went out as plaintext HTTP - a `wss://` URL to
     // port 80, its userinfo as Basic auth. `HTTPClient` checks this first; a caller
@@ -2132,7 +2140,9 @@ export class NodeAdapter implements HTTPAdapter {
         // leaves the promise unsettled. Promise resolution is idempotent, so any
         // subsequent error event is a safe no-op.
         if (request.signal) {
-          if (request.signal.aborted) {
+          // By the rule every reader of the caller's signal shares: exactly `true`, and a
+          // getter that throws refused on a carrier (see `isSignalAborted`).
+          if (isSignalAborted(request.signal)) {
             // Signal already aborted before we even started (e.g., pre-cancelled builder)
             destroyRequestQuietly(req);
             const abortErr = makeAbortError();

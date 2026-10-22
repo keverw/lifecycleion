@@ -9207,3 +9207,86 @@ test("PR review round 21: FetchAdapter resolves a relative request against the d
     }
   }
 });
+
+test("PR review round 23: NodeAdapter's pre-dispatch check counts a signal as aborted only when exactly true", async () => {
+  const signal = {
+    aborted: 'false',
+    addEventListener() {},
+    removeEventListener() {},
+  } as unknown as AbortSignal;
+
+  // Nothing listens on port 1: a transport failure, not an abort nobody made.
+  const response = await new NodeAdapter().send({
+    requestURL: 'http://127.0.0.1:1/x',
+    method: 'GET',
+    headers: {},
+    signal,
+  });
+
+  expect(response.isTransportError).toBe(true);
+});
+
+test('PR review round 23: the AbortSignal.any fallback reads a caller signal by the shared rule', async () => {
+  // eslint-disable-next-line @typescript-eslint/unbound-method -- put back as it was, below
+  const originalAny = AbortSignal.any;
+  (AbortSignal as { any?: unknown }).any = undefined;
+  let sends = 0;
+
+  try {
+    const response = await new HTTPClient({
+      baseURL: 'http://api.test',
+      adapter: {
+        getType: () => 'mock',
+        send: () => {
+          sends++;
+          return Promise.resolve({ status: 200, headers: {}, body: null });
+        },
+      },
+    })
+      .get('/x')
+      .signal({
+        aborted: 'false',
+        reason: undefined,
+        addEventListener() {},
+        removeEventListener() {},
+        [Symbol.toStringTag]: 'AbortSignal',
+      } as unknown as AbortSignal)
+      .send();
+
+    expect(response.isCancelled).toBe(false);
+    expect(sends).toBe(1);
+  } finally {
+    AbortSignal.any = originalAny;
+  }
+});
+
+test("PR review round 23: MockAdapter reads a route's status once", async () => {
+  let reads = 0;
+  const mock = new MockAdapter();
+  mock.routes.get('/x', () => ({
+    get status(): number {
+      reads++;
+      return reads === 1 ? 200 : 0;
+    },
+  }));
+
+  const response = await mock.send({
+    requestURL: 'http://api.test/x',
+    method: 'GET',
+    headers: {},
+  });
+
+  expect(response.status).toBe(200);
+  expect(reads).toBe(1);
+});
+
+test('PR review round 23: NodeAdapter refuses a malformed URL as non-retryable', async () => {
+  const outcome = await new NodeAdapter()
+    .send({ requestURL: 'not a url', method: 'GET', headers: {} })
+    .then(
+      () => undefined,
+      (error: unknown) => error as Record<PropertyKey, unknown>,
+    );
+
+  expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+});
