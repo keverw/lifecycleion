@@ -132,6 +132,24 @@ import {
 
 type RemoveFn = () => void;
 
+/** The response fields `_buildResponse` sets per branch; the rest are shared. */
+type ResponseFields<T> = Pick<
+  HTTPResponse<T>,
+  | 'status'
+  | 'headers'
+  | 'body'
+  | 'contentType'
+  | 'isJSON'
+  | 'isText'
+  | 'isCancelled'
+  | 'isTimeout'
+  | 'isNetworkError'
+  | 'isFailed'
+  | 'isParseError'
+  | 'isStreamed'
+  | 'isStreamError'
+>;
+
 /** The refusals of a method the adapter cannot send (see `_assertRequestIsSupported`). */
 const methodRefusals = new WeakSet<Error>();
 
@@ -3995,71 +4013,66 @@ export class BaseHTTPClient {
     // them and maintaining a separate identity registry just to undo that work.
     const settled = requestBodySettled ?? adapterResponse?.requestBodySettled;
 
+    // Every branch below reports the same keys in the same order: `respond` appends
+    // the fields they all share, and each branch starts from `bodyless` - spread
+    // first, so an override keeps its key's place - setting only what differs.
+    const respond = (fields: ResponseFields<T>): HTTPResponse<T> => ({
+      ...fields,
+      initialURL,
+      requestURL,
+      wasRedirectDetected,
+      wasRedirectFollowed,
+      detectedRedirectURL,
+      redirectHistory,
+      requestID,
+      adapterType,
+      // Absent only when there was no body writer - and genuinely absent:
+      // `requestBodySettled: settled` with `settled` undefined put an own property
+      // on a bodiless `GET`, so `'requestBodySettled' in response` said an outcome
+      // had been reported where the docs say absence means none was.
+      ...(settled ? { requestBodySettled: settled } : {}),
+    });
+    const bodyless: Omit<ResponseFields<T>, 'status' | 'headers'> = {
+      body: null as unknown as T,
+      contentType: 'binary',
+      isJSON: false,
+      isText: false,
+      isCancelled: false,
+      isTimeout: false,
+      isNetworkError: false,
+      isFailed: true,
+      isParseError: false,
+      isStreamed: false,
+      isStreamError: false,
+    };
+
     if (!adapterResponse) {
-      return {
+      // No adapter response means the attempt threw, so the upload's promise arrives
+      // separately rather than on a response object. Omitting it here reported the
+      // documented *success* value - `await undefined` is `undefined` - for a
+      // cancelled or timed-out upload, which is the one case where a caller most
+      // needs the real answer.
+      return respond({
         status: answeredResponse?.status ?? 0,
         headers: answeredResponse?.headers ?? {},
-        body: null as unknown as T,
-        contentType: 'binary',
-        isJSON: false,
-        isText: false,
+        ...bodyless,
         isCancelled: wasCancelled,
         isTimeout: wasTimeout,
         isNetworkError:
           isNetworkErrorOverride ?? (!wasCancelled && !wasTimeout),
-        isFailed: true,
-        isParseError: false,
-        isStreamed: false,
-        isStreamError: false,
-        initialURL,
-        requestURL,
-        wasRedirectDetected,
-        wasRedirectFollowed,
-        detectedRedirectURL,
-        redirectHistory,
-        requestID,
-        adapterType,
-        // No adapter response means the attempt threw, so the promise arrives
-        // separately rather than on a response object. Omitting it here reported
-        // the documented *success* value - `await undefined` is `undefined` - for
-        // a cancelled or timed-out upload, which is the one case where a caller
-        // most needs the real answer. Absent only when there was no body writer -
-        // and genuinely absent, on every branch below too: `requestBodySettled:
-        // settled` with `settled` undefined put an own property on a bodiless `GET`,
-        // so `'requestBodySettled' in response` said an outcome had been reported
-        // where the docs say absence means none was.
-        ...(settled ? { requestBodySettled: settled } : {}),
-      };
+      });
     }
 
     if (
       (adapterResponse.isTransportError || adapterResponse.status === 0) &&
       !adapterResponse.isStreamError
     ) {
-      return {
+      return respond({
         status: adapterResponse.status,
         headers: adapterResponse.headers,
-        body: null as unknown as T,
-        contentType: 'binary',
-        isJSON: false,
-        isText: false,
-        isCancelled: false,
-        isTimeout: false,
+        ...bodyless,
         isNetworkError: isNetworkErrorOverride ?? true,
-        isFailed: true,
-        isParseError: false,
-        isStreamed: false,
-        isStreamError: false,
-        initialURL,
-        requestURL,
-        wasRedirectDetected,
-        wasRedirectFollowed,
-        detectedRedirectURL,
-        redirectHistory,
-        requestID,
-        adapterType,
-        ...(settled ? { requestBodySettled: settled } : {}),
-      };
+      });
     }
 
     // Response-body failure after headers: the server returned a real HTTP
@@ -4069,30 +4082,13 @@ export class BaseHTTPClient {
     // delivered to the caller's sink. Callers should treat isStreamError /
     // builder.error as authoritative for success, not the preserved status.
     if (adapterResponse.isStreamError) {
-      return {
+      return respond({
         status: adapterResponse.status,
         headers: adapterResponse.headers,
-        body: null as unknown as T,
-        contentType: 'binary',
-        isJSON: false,
-        isText: false,
-        isCancelled: false,
+        ...bodyless,
         isTimeout: wasTimeout,
-        isNetworkError: false,
-        isFailed: true,
-        isParseError: false,
-        isStreamed: false,
         isStreamError: true,
-        initialURL,
-        requestURL,
-        wasRedirectDetected,
-        wasRedirectFollowed,
-        detectedRedirectURL,
-        redirectHistory,
-        requestID,
-        adapterType,
-        ...(settled ? { requestBodySettled: settled } : {}),
-      };
+      });
     }
 
     // Successful stream: body was piped to the caller's writable. Nothing to
@@ -4101,30 +4097,13 @@ export class BaseHTTPClient {
     // how the response body was materialized for callers, and streamed bodies
     // are never decoded into text/JSON at this layer.
     if (adapterResponse.isStreamed) {
-      return {
+      return respond({
         status: adapterResponse.status,
         headers: adapterResponse.headers,
-        body: null as unknown as T,
-        contentType: 'binary',
-        isJSON: false,
-        isText: false,
-        isCancelled: false,
-        isTimeout: false,
-        isNetworkError: false,
+        ...bodyless,
         isFailed: false,
-        isParseError: false,
         isStreamed: true,
-        isStreamError: false,
-        initialURL,
-        requestURL,
-        wasRedirectDetected,
-        wasRedirectFollowed,
-        detectedRedirectURL,
-        redirectHistory,
-        requestID,
-        adapterType,
-        ...(settled ? { requestBodySettled: settled } : {}),
-      };
+      });
     }
 
     const contentTypeHeader = scalarHeader(
@@ -4180,30 +4159,17 @@ export class BaseHTTPClient {
       body = decodedTextBody;
     }
 
-    return {
+    return respond({
       status: adapterResponse.status,
       headers: adapterResponse.headers,
+      ...bodyless,
       body: body as T,
       contentType,
       isJSON,
       isText,
-      isCancelled: false,
-      isTimeout: false,
-      isNetworkError: false,
       isFailed: false,
       isParseError,
-      isStreamed: false,
-      isStreamError: false,
-      initialURL,
-      requestURL,
-      wasRedirectDetected,
-      wasRedirectFollowed,
-      detectedRedirectURL,
-      redirectHistory,
-      requestID,
-      adapterType,
-      ...(settled ? { requestBodySettled: settled } : {}),
-    };
+    });
   }
 
   /**
