@@ -71,9 +71,10 @@ export function isSignalAborted(
   }
 
   try {
-    // Truthy, as the checks it replaced read it: a polyfill's `aborted` need not be a
-    // boolean.
-    return Boolean(signal.aborted);
+    // Exactly `true`, as the standard types it: a boolean. A broken polyfill's `1` or
+    // `'false'` is not taken for an abort - a `'false'` read as truthy cancelled a
+    // request that never was.
+    return signal.aborted === true;
   } catch (error) {
     throw nonRetryableAdapterErrorFrom(error);
   }

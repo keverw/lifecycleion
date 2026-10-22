@@ -8834,33 +8834,45 @@ test('PR review round 19: FetchAdapter refuses a signal whose aborted throws bef
   }
 });
 
-test('PR review round 19: a polyfill signal reporting a truthy aborted stops MockAdapter before the route', async () => {
+test("PR review round 22: a signal's aborted counts only when it is exactly true", async () => {
   const mock = new MockAdapter();
   let ran = 0;
   mock.routes.get('/x', () => {
     ran++;
     return { status: 200 };
   });
-  const signal = {
-    aborted: 1,
-    addEventListener() {},
-    removeEventListener() {},
-  } as unknown as AbortSignal;
 
+  for (const aborted of [1, 'false', 'true', {}]) {
+    const signal = {
+      aborted,
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as AbortSignal;
+    const response = await mock.send({
+      requestURL: 'http://api.test/x',
+      method: 'GET',
+      headers: {},
+      signal,
+    });
+    expect(response.status).toBe(200);
+  }
+  expect(ran).toBe(4);
+
+  const aborted = new AbortController();
+  aborted.abort();
   const outcome = await mock
     .send({
       requestURL: 'http://api.test/x',
       method: 'GET',
       headers: {},
-      signal,
+      signal: aborted.signal,
     })
     .then(
       () => undefined,
       (error: unknown) => error as Error,
     );
-
   expect(outcome?.name).toBe('AbortError');
-  expect(ran).toBe(0);
+  expect(ran).toBe(4);
 });
 
 test('PR review round 19: a sparse domain list skips its holes', () => {
