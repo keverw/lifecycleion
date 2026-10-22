@@ -402,17 +402,24 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
         const consumed: unknown = (decoder as { bytesWritten?: unknown })
           .bytesWritten;
 
+        const frames = zstdFrames[index];
         if (typeof consumed === 'number' && consumed < (fedBytes[index] ?? 0)) {
-          // A second zstd frame is no junk: valid zstd (RFC 8878 allows several), which
+          // Left unread after the one data frame, skippable frames (RFC 8878 metadata,
+          // which Node's decoder stops short of and Bun's reads) carry no content: the
+          // body is whole. A second data frame is no junk either - valid zstd - but one
           // Node's decoder leaves unread when it arrives in the same write as the first.
+          if (frames?.dataFrameCount === 1 && frames.isWellFormedToEnd) {
+            return;
+          }
+
           this.failDecoding(
-            (zstdFrames[index]?.frameCount ?? 0) > 1
+            (frames?.dataFrameCount ?? 0) > 1
               ? new Error(
                   "Response body holds more than one zstd frame, and this runtime's zstd decoder reads only the first",
                 )
               : trailingBytesError(),
           );
-        } else if (zstdFrames[index]?.isAtFrameEnd === false) {
+        } else if (frames?.isAtFrameEnd === false) {
           this.failDecoding(
             new Error('Response body ends before its compressed stream does'),
           );
@@ -602,9 +609,9 @@ function createDecoder(
     case 'gzip':
       return zlib.createGunzip({ flush: zlib.constants.Z_SYNC_FLUSH });
     case 'deflate':
-      // An inner coding's first bytes are not known yet: told apart on its own first
-      // chunk.
-      if (firstChunk === undefined) {
+      // An inner coding's first bytes are not known yet, nor two of an outer one whose
+      // first chunk holds one: told apart once the decoder has two.
+      if (firstChunk === undefined || firstChunk.length < 2) {
         return new SniffingInflate();
       }
 
@@ -648,6 +655,8 @@ class SniffingInflate extends Transform {
   private inner: zlib.Inflate | zlib.InflateRaw | undefined;
   /** Bytes handed to the inner inflater, read against what it consumed. */
   private fedBytes = 0;
+  /** A lone first byte, held until a second tells zlib from raw deflate (`isZlibHeader`). */
+  private pendingHead: Buffer | undefined;
 
   public override _transform(
     chunk: Buffer,
@@ -655,33 +664,36 @@ class SniffingInflate extends Transform {
     callback: TransformCallback,
   ): void {
     if (this.inner === undefined) {
-      const inner = isZlibHeader(chunk)
-        ? zlib.createInflate({ flush: zlib.constants.Z_SYNC_FLUSH })
-        : zlib.createInflateRaw({ flush: zlib.constants.Z_SYNC_FLUSH });
+      const head =
+        this.pendingHead === undefined
+          ? chunk
+          : Buffer.concat([this.pendingHead, chunk]);
 
-      inner.on('data', (decoded: Buffer) => {
-        if (!this.push(decoded)) {
-          inner.pause();
-        }
-      });
-      inner.on('error', (error: Error) => {
-        this.destroy(error);
-      });
-      this.inner = inner;
+      if (head.length < 2) {
+        this.pendingHead = head;
+        callback();
+        return;
+      }
+
+      this.pendingHead = undefined;
+      this.startInner(head);
+      chunk = head;
     }
 
+    const inner = this.inner as zlib.Inflate | zlib.InflateRaw;
+
     // Input after the deflate stream has ended: trailing bytes.
-    if (this.inner.readableEnded) {
+    if (inner.readableEnded) {
       callback(trailingBytesError());
       return;
     }
 
     this.fedBytes += chunk.length;
 
-    if (this.inner.write(chunk)) {
+    if (inner.write(chunk)) {
       callback();
     } else {
-      this.inner.once('drain', () => {
+      inner.once('drain', () => {
         callback();
       });
     }
@@ -693,6 +705,16 @@ class SniffingInflate extends Transform {
   }
 
   public override _flush(callback: TransformCallback): void {
+    // A body of one byte: read by that byte alone - no deflate stream is one byte long, so
+    // either inflater refuses it.
+    if (this.inner === undefined && this.pendingHead !== undefined) {
+      const head = this.pendingHead;
+      this.pendingHead = undefined;
+      const inner = this.startInner(head);
+      this.fedBytes += head.length;
+      inner.write(head);
+    }
+
     if (this.inner === undefined) {
       callback();
       return;
@@ -721,6 +743,24 @@ class SniffingInflate extends Transform {
     callback(error);
   }
 
+  /** The inner inflater, zlib or raw by the first bytes it will be given. */
+  private startInner(head: Buffer): zlib.Inflate | zlib.InflateRaw {
+    const inner = isZlibHeader(head)
+      ? zlib.createInflate({ flush: zlib.constants.Z_SYNC_FLUSH })
+      : zlib.createInflateRaw({ flush: zlib.constants.Z_SYNC_FLUSH });
+
+    inner.on('data', (decoded: Buffer) => {
+      if (!this.push(decoded)) {
+        inner.pause();
+      }
+    });
+    inner.on('error', (error: Error) => {
+      this.destroy(error);
+    });
+    this.inner = inner;
+
+    return inner;
+  }
   /** Whether the inner inflater stopped short of what it was given. */
   private hasLeftover(): boolean {
     return (this.inner?.bytesWritten ?? 0) < this.fedBytes;
@@ -734,8 +774,8 @@ class SniffingInflate extends Transform {
  * over. A malformed header is left to the decoder, which fails on it.
  */
 class ZstdFrameWalker {
-  /** Frames read whole: Zstandard frames and skippable ones alike, both valid (RFC 8878). */
-  public frameCount = 0;
+  /** Zstandard frames read whole - data frames, not skippable ones (RFC 8878). */
+  public dataFrameCount = 0;
   private skipBytes = 0;
   private readonly fieldBytes: number[] = [];
   private fieldLength = 4;
@@ -750,6 +790,14 @@ class ZstdFrameWalker {
     this.onField = (field) => {
       this.readMagic(field);
     };
+  }
+
+  /**
+   * Whether the bytes so far are whole, well-formed frames: what a decoder that stopped
+   * after the one data frame left unread is then skippable frames, which carry no content.
+   */
+  public get isWellFormedToEnd(): boolean {
+    return !this.isMalformed && this.isAtFrameEnd;
   }
 
   /** Whether the bytes so far end on a frame boundary, after at least one frame. */
@@ -807,7 +855,6 @@ class ZstdFrameWalker {
       this.expect(4, (size) => {
         this.skipBytes = readLittleEndian(size);
         this.hasFrame = true;
-        this.frameCount++;
         this.expectMagic();
       });
     } else {
@@ -843,7 +890,7 @@ class ZstdFrameWalker {
 
     if ((header & 0x01) !== 0) {
       this.hasFrame = true;
-      this.frameCount++;
+      this.dataFrameCount++;
       this.skipBytes += this.hasChecksum ? 4 : 0;
       this.expectMagic();
     } else {

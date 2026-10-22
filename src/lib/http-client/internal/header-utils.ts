@@ -202,16 +202,27 @@ export function materializeRequestHeaders(
   // `fetch`'s `Headers` joins them: Node's `http` lowercases names and kept only the last.
   const spellings = new Map<string, string>();
   const isLowercasingNames = options.isLowercasingNames === true;
+  const entries = Object.entries(headers);
+  // `Cookie` by the one rule every adapter joins it with (see `joinCookieHeader`), put in
+  // where its first set spelling stands.
+  const cookie = joinCookieHeader(entries);
 
-  for (const [key, value] of Object.entries(headers)) {
+  for (const [key, value] of entries) {
+    const lower = lowerCaseHeaderName(key);
+
+    if (lower === 'cookie') {
+      if (cookie !== undefined && key === cookie.name) {
+        defineEntry(result, isLowercasingNames ? lower : key, cookie.value);
+      }
+      continue;
+    }
+
     const present = presentHeaderValue(value);
     if (present === undefined) {
       continue;
     }
 
-    const lower = lowerCaseHeaderName(key);
-    const separator = lower === 'cookie' ? '; ' : ', ';
-    const joined = Array.isArray(present) ? present.join(separator) : present;
+    const joined = Array.isArray(present) ? present.join(', ') : present;
     const spelling = spellings.get(lower);
 
     if (spelling === undefined) {
@@ -219,7 +230,7 @@ export function materializeRequestHeaders(
       spellings.set(lower, name);
       defineEntry(result, name, joined);
     } else {
-      defineEntry(result, spelling, `${result[spelling]}${separator}${joined}`);
+      defineEntry(result, spelling, `${result[spelling]}, ${joined}`);
     }
   }
 

@@ -1,5 +1,6 @@
 import {
   ADAPTER_ERROR_CARRIER_KEY,
+  HTTP_METHODS,
   NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_ABORT_HEADERS_KEY,
@@ -67,7 +68,7 @@ export function isAdapterErrorCarrier(error: unknown): error is Error {
  */
 export function readAdapterMethod(method: unknown): string {
   if (typeof method === 'string') {
-    return method;
+    return normalizeStandardMethod(method);
   }
 
   if (method === undefined || method === null) {
@@ -78,12 +79,28 @@ export function readAdapterMethod(method: unknown): string {
     throw refusal;
   }
 
+  let text: string;
   try {
     // eslint-disable-next-line @typescript-eslint/no-base-to-string -- a caller's value, converted as the transport converts it
-    return String(method);
+    text = String(method);
   } catch (error) {
     throw nonRetryableAdapterErrorFrom(error);
   }
+
+  return normalizeStandardMethod(text);
+}
+
+const STANDARD_METHODS: ReadonlySet<string> = new Set(HTTP_METHODS);
+
+/**
+ * A standard method (`patch`) in its uppercase form, as `HTTPClient` sends it, so every
+ * adapter driven directly sends it alike: `fetch` uppercases only six of them, and sent
+ * `patch` as written where NodeAdapter's `http` sent `PATCH`. ASCII only, so `poſt` is
+ * not `POST`. Any other method is kept as written, as RFC 9110 has it case-sensitive.
+ */
+function normalizeStandardMethod(method: string): string {
+  const uppercased = method.replace(/[a-z]/g, (letter) => letter.toUpperCase());
+  return STANDARD_METHODS.has(uppercased) ? uppercased : method;
 }
 
 /**

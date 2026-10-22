@@ -385,10 +385,10 @@ async function readResponseBody(
         Symbol.asyncIterator
       ] === 'function'
     ) {
-      return await readIterableBody(
-        body as AsyncIterable<Uint8Array | string>,
-        maxResponseBytes,
-      );
+      const iterable = body as AsyncIterable<Uint8Array | string>;
+      return await readBodyWithin(iterable, maxResponseBytes, () => {
+        cancelBodyQuietly(iterable);
+      });
     }
 
     const buffer = await response.arrayBuffer();
@@ -397,53 +397,55 @@ async function readResponseBody(
   }
 
   const reader = (body as ReadableStream<Uint8Array>).getReader();
-  const chunks: Uint8Array[] = [];
-  let loadedBytes = 0;
 
+  // Cancelled, not awaited: the cancel settles once the stream has let go, and the
+  // answer here does not depend on when that is.
+  return await readBodyWithin(readerChunks(reader), maxResponseBytes, () => {
+    reader.cancel().catch(() => {
+      // The body is being discarded; a stream that fails to cancel has nothing to add.
+    });
+  });
+}
+
+/** A web stream reader's chunks, as an async iterable. */
+async function* readerChunks(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+): AsyncGenerator<Uint8Array> {
   while (true) {
     const { done: isDone, value } = await reader.read();
 
     if (isDone) {
-      break;
+      return;
     }
 
-    loadedBytes += value.byteLength;
-
-    // Counted before the chunk is kept, so a body over the limit is never held whole.
-    // Cancelled, not awaited: the cancel settles once the stream has let go, and the
-    // answer here does not depend on when that is.
-    if (loadedBytes > maxResponseBytes) {
-      reader.cancel().catch(() => {
-        // The body is being discarded; a stream that fails to cancel has nothing to add.
-      });
-      return RESPONSE_TOO_LARGE;
-    }
-
-    chunks.push(value);
+    yield value;
   }
-
-  return concatChunks(chunks, loadedBytes);
 }
 
 /**
- * A polyfilled `fetch`'s async-iterable body (a Node `Readable`) read a chunk at a time,
- * counted as it comes and released the moment it passes the limit.
+ * A body read a chunk at a time - a web stream's, through its reader, or a polyfilled
+ * `fetch`'s async-iterable Node `Readable` - counted as it comes, and let go through
+ * `cancel` the moment it passes the limit: counted before the chunk is kept, so a body
+ * over the limit is never held whole.
  */
-async function readIterableBody(
-  body: AsyncIterable<Uint8Array | string>,
+async function readBodyWithin(
+  source: AsyncIterable<Uint8Array | string>,
   maxResponseBytes: number,
+  cancel: () => void,
 ): Promise<Uint8Array | typeof RESPONSE_TOO_LARGE> {
   const chunks: Uint8Array[] = [];
   let loadedBytes = 0;
+  let encoder: TextEncoder | undefined;
 
-  const encoder = new TextEncoder();
-
-  for await (const value of body) {
-    const chunk = typeof value === 'string' ? encoder.encode(value) : value;
+  for await (const value of source) {
+    const chunk =
+      typeof value === 'string'
+        ? (encoder ??= new TextEncoder()).encode(value)
+        : value;
     loadedBytes += chunk.byteLength;
 
     if (loadedBytes > maxResponseBytes) {
-      cancelBodyQuietly(body);
+      cancel();
       return RESPONSE_TOO_LARGE;
     }
 

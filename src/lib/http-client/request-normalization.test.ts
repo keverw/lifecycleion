@@ -9427,3 +9427,118 @@ test('PR review round 25: a CRL buffer changed in place is read again, not reuse
   expect(String(second?.message)).toContain('crl');
   expect(second?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
 });
+
+async function withRawServer(
+  handler: (res: http.ServerResponse) => void | Promise<void>,
+  run: (baseURL: string) => Promise<void>,
+): Promise<void> {
+  const server = http.createServer((_req, res) => {
+    void handler(res);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const { port } = server.address() as AddressInfo;
+    await run(`http://127.0.0.1:${port}`);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+test('PR review round 26: a zstd body with a trailing skippable frame is whole', async () => {
+  const data = (
+    zlib as unknown as { zstdCompressSync: (input: Buffer) => Buffer }
+  ).zstdCompressSync(Buffer.from('hello world'));
+  // A skippable frame (RFC 8878): magic 0x184D2A50, a 4-byte size, then that many bytes.
+  const skippable = Buffer.concat([
+    Buffer.from([0x50, 0x2a, 0x4d, 0x18, 3, 0, 0, 0]),
+    Buffer.from('abc'),
+  ]);
+
+  await withRawServer(
+    (res) => {
+      res.writeHead(200, {
+        'content-type': 'text/plain',
+        'content-encoding': 'zstd',
+      });
+      res.end(Buffer.concat([data, skippable]));
+    },
+    async (baseURL) => {
+      const response = await new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL,
+      })
+        .get('/x')
+        .send();
+
+      expect(response.isStreamError).toBe(false);
+      expect(response.body).toBe('hello world');
+    },
+  );
+});
+
+test('PR review round 26: a raw deflate body whose first chunk is one byte is still read as raw', async () => {
+  const raw = Buffer.from([
+    0x08,
+    5,
+    0,
+    0xfa,
+    0xff,
+    ...Buffer.from('hello'),
+    0x01,
+    0,
+    0,
+    0xff,
+    0xff,
+  ]);
+
+  await withRawServer(
+    async (res) => {
+      res.writeHead(200, {
+        'content-type': 'text/plain',
+        'content-encoding': 'deflate',
+      });
+      res.flushHeaders();
+      res.write(raw.subarray(0, 1));
+      await sleep(30);
+      res.end(raw.subarray(1));
+    },
+    async (baseURL) => {
+      const response = await new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL,
+      })
+        .get('/x')
+        .send();
+
+      expect(response.isStreamError).toBe(false);
+      expect(response.body).toBe('hello');
+    },
+  );
+});
+
+test('PR review round 26: FetchAdapter sends a standard method uppercase, as every adapter does', async () => {
+  const originalFetch = globalThis.fetch;
+  const sent: Array<string | undefined> = [];
+  (globalThis as { fetch: unknown }).fetch = (
+    _url: unknown,
+    init?: RequestInit,
+  ) => {
+    sent.push(init?.method);
+    return Promise.resolve(new Response('ok', { status: 200 }));
+  };
+
+  try {
+    for (const method of ['patch', 'purge']) {
+      await new FetchAdapter().send({
+        requestURL: 'https://local.test/x',
+        method,
+        headers: {},
+      });
+    }
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  // A standard method uppercased; any other kept as written (RFC 9110).
+  expect(sent).toEqual(['PATCH', 'purge']);
+});
