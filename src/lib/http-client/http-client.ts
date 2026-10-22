@@ -785,8 +785,9 @@ export class BaseHTTPClient {
 
       /**
        * The upload's outcome from the latest hop that had a body. Set inside the redirect
-       * loop below; declared here so the `catch` around the whole of `send()` can carry it
-       * too, which is the one terminal path that could not see it.
+       * loop below, and attached to the response where `finalResponse` is taken - or, for
+       * a throw out of the loop, in the `catch` around it - rather than by each terminal
+       * branch. Declared here so both can see it.
        */
       let uploadOutcome: Promise<Error | undefined> | undefined;
 
@@ -1100,12 +1101,13 @@ export class BaseHTTPClient {
            * This attempt's upload outcome, wherever it ended up.
            *
            * Two sources because there are two shapes: an attempt that *threw* carries it
-           * on the result, and one that resolved carries it on the adapter response. The
-           * terminal redirect branches below build their `HTTPResponse` with
+           * on the result, and one that resolved carries it on the adapter response. Read
+           * here rather than off the response the request ends with: most terminal
+           * redirect branches below build their `HTTPResponse` with
            * `adapterResponse: null` - a redirect the caller disabled, a loop, an
-           * interceptor that threw, a cancel between hops - so they cannot read the
-           * response's own field and dropped it. An early `3xx` mid-upload is exactly the
-           * shape where it is not empty.
+           * interceptor that threw, a cancel between hops - so that response has no field
+           * of its own to read. An early `3xx` mid-upload is exactly the shape where it is
+           * not empty.
            */
           //
           // Carried across hops, not recomputed per hop. A followed `301`/`302`/`303`
@@ -1167,9 +1169,6 @@ export class BaseHTTPClient {
                   ).detectedRedirectURL,
                 headers: {},
                 body: null,
-                // Carried onto the rebuilt response: the real one is discarded here, and
-                // with it the upload outcome the adapter had already attached.
-                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               },
               requestID,
               // Provably false: a cancel settles with no adapter response, and
@@ -1229,11 +1228,6 @@ export class BaseHTTPClient {
                 initialURL: initialRequestURL,
                 requestURL: attemptResult.sentRequest.requestURL,
                 redirectHistory,
-                // The one terminal branch that built from the hop's own response and
-                // passed nothing: after `POST` -> `302` -> `GET` -> `302` with no
-                // `Location`, the last hop is bodiless and had nothing to adopt, so the
-                // upload from hop one read as having gone out in full.
-                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
               response = built.response;
 
@@ -1265,9 +1259,6 @@ export class BaseHTTPClient {
                     ).detectedRedirectURL,
                   headers: {},
                   body: null,
-                  ...(uploadOutcome
-                    ? { requestBodySettled: uploadOutcome }
-                    : {}),
                 },
                 requestID,
                 wasCancelled: false,
@@ -1370,7 +1361,6 @@ export class BaseHTTPClient {
                   url: detectedTargetURL,
                   isRecorded: false,
                 },
-                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
               cancelReason = getSignalCancelReason(cancelSignal);
 
@@ -1394,15 +1384,7 @@ export class BaseHTTPClient {
             });
 
             if (redirectResponse.unreadableBody) {
-              // Terminal, so it reports the latest bodied hop's upload outcome, as the
-              // other terminal branches do; the observer build above reads only this
-              // hop's own.
-              response = uploadOutcome
-                ? {
-                    ...redirectResponse.response,
-                    requestBodySettled: uploadOutcome,
-                  }
-                : redirectResponse.response;
+              response = redirectResponse.response;
               errorCode = 'adapter_error';
               adapterCause = redirectResponse.unreadableBody;
 
@@ -1431,7 +1413,6 @@ export class BaseHTTPClient {
                   url: detectedTargetURL,
                   isRecorded: false,
                 },
-                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
               cancelReason = getSignalCancelReason(cancelSignal);
 
@@ -1517,7 +1498,6 @@ export class BaseHTTPClient {
                   isRecorded: true,
                 },
                 isNetworkErrorOverride: false,
-                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
               errorCode = 'request_setup_error';
               adapterCause = normalizeError(error);
@@ -1601,7 +1581,6 @@ export class BaseHTTPClient {
                   isRecorded: true,
                 },
                 isNetworkErrorOverride: false,
-                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
 
               errorCode = 'interceptor_error';
@@ -1651,7 +1630,6 @@ export class BaseHTTPClient {
                   url: detectedTargetURL,
                   isRecorded: true,
                 },
-                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
 
               break;
@@ -1681,7 +1659,6 @@ export class BaseHTTPClient {
                   isRecorded: true,
                 },
                 isNetworkErrorOverride: false,
-                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
 
               errorCode = 'request_setup_error';
@@ -1734,7 +1711,6 @@ export class BaseHTTPClient {
                   isRecorded: true,
                 },
                 isNetworkErrorOverride: false,
-                ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
               });
               errorCode = 'request_setup_error';
               adapterCause = normalizeError(error);
@@ -1814,9 +1790,6 @@ export class BaseHTTPClient {
                     url: detectedTargetURL,
                     isRecorded: true,
                   },
-                  ...(uploadOutcome
-                    ? { requestBodySettled: uploadOutcome }
-                    : {}),
                 });
 
                 break;
@@ -1849,11 +1822,6 @@ export class BaseHTTPClient {
                   },
                 }
               : {}),
-            // From the attempt result when it threw - the shape that leaves
-            // `adapterResponse` null - and otherwise straight off the response,
-            // which the branches above reach with `adapterResponse: null` and so
-            // cannot read for themselves.
-            ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
             ...(attemptResult.answeredResponse
               ? { answeredResponse: attemptResult.answeredResponse }
               : {}),
@@ -1878,23 +1846,24 @@ export class BaseHTTPClient {
         // As the initial phase's interceptor failure: a cancel made before it ends the
         // request cancelled.
         const isCancelled = cancelSignal.aborted;
-        response = this._buildResponse<T>({
-          adapterResponse: null,
-          requestID,
-          wasCancelled: isCancelled,
-          wasTimeout: false,
-          adapterType: this._adapter.getType(),
-          initialURL: initialRequestURL,
-          requestURL:
-            currentInterceptedRequest?.requestURL ?? initialRequestURL,
-          redirectHistory,
-          isNetworkErrorOverride: false,
-          // The one terminal path that dropped it: a throw *between* hops - a hostile
-          // header read on a redirect, say - lands here after a hop that had a body, and
-          // `await response.requestBodySettled` then answered the documented success value
-          // for an upload that may have been cut short.
-          ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
-        });
+        // The one exit that settles the request without reaching `finalResponse` below,
+        // so it attaches the upload outcome itself: a throw *between* hops - a hostile
+        // header read on a redirect, say - lands here after a hop that had a body.
+        response = withRequestBodySettled(
+          this._buildResponse<T>({
+            adapterResponse: null,
+            requestID,
+            wasCancelled: isCancelled,
+            wasTimeout: false,
+            adapterType: this._adapter.getType(),
+            initialURL: initialRequestURL,
+            requestURL:
+              currentInterceptedRequest?.requestURL ?? initialRequestURL,
+            redirectHistory,
+            isNetworkErrorOverride: false,
+          }),
+          uploadOutcome,
+        );
 
         const normalizedError = isCancelled
           ? this._makeError(
@@ -1966,7 +1935,6 @@ export class BaseHTTPClient {
               response.wasRedirectDetected
               ? { wasRedirectDetected: true }
               : {}),
-          ...(uploadOutcome ? { requestBodySettled: uploadOutcome } : {}),
         });
         // Whatever the answer was - a success, or a failure such as a final 500 - the
         // cancel is what ends the request, so the answer's own error goes with it.
@@ -1983,6 +1951,10 @@ export class BaseHTTPClient {
       // observers ran inside the redirect loop for each redirect response. Network and
       // retryable HTTP failures may have been retried before we get here; interceptor
       // throw/cancel never retries and reaches this block immediately.
+      //
+      // The upload outcome goes on here, once, for every terminal branch above: see
+      // `withRequestBodySettled`.
+      response = withRequestBodySettled(response, uploadOutcome);
       const finalResponse = response;
       // Set before the final observers run, with the state and error: an observer reading
       // the builder saw a settled state and a `null` response.
@@ -5165,6 +5137,28 @@ function getRequestBodySettled(
   // adopted onto a promise this client owns, and a rejection becomes the failure it
   // reports, because `HTTPResponse.requestBodySettled` is documented never to reject.
   return adoptRequestBodySettled(settled);
+}
+
+/**
+ * The response `send()` settles with, carrying the upload outcome of the latest hop that
+ * had a body.
+ *
+ * Applied where the request ends rather than by each terminal branch of the redirect
+ * loop, so no branch can leave it off: those branches mostly build with
+ * `adapterResponse: null`, and after a followed `POST` -> `302` -> `GET` the last hop has
+ * no writer and nothing of its own to report, so a response missing it answers
+ * `undefined` - the documented "the body went out" value - for an upload that may have
+ * been cut short. The outcome replaces whatever the response was built with, as the
+ * caller's word comes first in `_buildResponse`; with none, the response is returned as
+ * it is, so a request with no body writer still has no `requestBodySettled` property.
+ */
+function withRequestBodySettled<T>(
+  response: HTTPResponse<T>,
+  uploadOutcome: Promise<Error | undefined> | undefined,
+): HTTPResponse<T> {
+  return uploadOutcome
+    ? { ...response, requestBodySettled: uploadOutcome }
+    : response;
 }
 
 /**
