@@ -9290,3 +9290,64 @@ test('PR review round 23: NodeAdapter refuses a malformed URL as non-retryable',
 
   expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
 });
+
+test('PR review round 24: a raw deflate body opening on a stored block with padding bits set is read as raw', async () => {
+  // A non-final stored block whose padding bits make its first byte 0x08 - a zlib
+  // method nibble - but whose first two bytes fail the zlib header check, then an empty
+  // final block.
+  const raw = Buffer.from([
+    0x08,
+    5,
+    0,
+    0xfa,
+    0xff,
+    ...Buffer.from('hello'),
+    0x01,
+    0,
+    0,
+    0xff,
+    0xff,
+  ]);
+  const server = http.createServer((_req, res) => {
+    res.writeHead(200, {
+      'content-type': 'text/plain',
+      'content-encoding': 'deflate',
+    });
+    res.end(raw);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+
+  try {
+    const { port } = server.address() as AddressInfo;
+    const response = await new HTTPClient({
+      adapter: new NodeAdapter(),
+      baseURL: `http://127.0.0.1:${port}`,
+    })
+      .get('/x')
+      .send();
+
+    expect(response.isStreamError).toBe(false);
+    expect(response.body).toBe('hello');
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+});
+
+test("PR review round 24: a mock route's transportError status is checked as the route's mistake", async () => {
+  for (const status of ['x', 1.5, -1, 1000]) {
+    const mock = new MockAdapter();
+    mock.routes.get('/x', () => ({
+      status: 200,
+      transportError: { status: status as number },
+    }));
+    const outcome = await mock
+      .send({ requestURL: 'http://api.test/x', method: 'GET', headers: {} })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect(String(outcome?.message)).toContain('transportError status');
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+  }
+});

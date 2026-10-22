@@ -545,6 +545,23 @@ export class MockAdapter implements HTTPAdapter {
     if (mockResponse.transportError) {
       const options: MockTransportErrorOptions =
         mockResponse.transportError === true ? {} : mockResponse.transportError;
+      // Held to the rule the client holds an adapter's status to - an integer from 0 to
+      // 999 - here, as the route's mistake: unchecked, it was refused later as the
+      // adapter's.
+      asRouteMistake(() => {
+        const status: unknown = options.status;
+        if (
+          status !== undefined &&
+          (typeof status !== 'number' ||
+            !Number.isInteger(status) ||
+            status < 0 ||
+            status > 999)
+        ) {
+          throw new TypeError(
+            `MockAdapter route returned transportError status ${typeof status === 'number' ? String(status) : typeof status}; it is an integer from 0 to 999`,
+          );
+        }
+      });
 
       return {
         status: options.status ?? 0,

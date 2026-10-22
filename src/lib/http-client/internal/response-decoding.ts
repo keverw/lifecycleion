@@ -344,8 +344,8 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     this.decoders = this.decodeOrder.map((coding, index) =>
       createDecoder(
         coding,
-        // Sniffed only for the outermost coding, the one whose first byte this is.
-        index === 0 ? first[0] : undefined,
+        // Sniffed only for the outermost coding, the one whose first bytes these are.
+        index === 0 ? first : undefined,
       ),
     );
 
@@ -596,19 +596,19 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
 
 function createDecoder(
   coding: ContentCoding,
-  firstByte: number | undefined,
+  firstChunk: Buffer | undefined,
 ): Decoder {
   switch (coding) {
     case 'gzip':
       return zlib.createGunzip({ flush: zlib.constants.Z_SYNC_FLUSH });
     case 'deflate':
-      // A zlib stream's first byte has a low nibble of 8; anything else is raw deflate.
-      // An inner coding's first byte is not known yet: told apart on its own first chunk.
-      if (firstByte === undefined) {
+      // An inner coding's first bytes are not known yet: told apart on its own first
+      // chunk.
+      if (firstChunk === undefined) {
         return new SniffingInflate();
       }
 
-      return firstByte % 16 === 8
+      return isZlibHeader(firstChunk)
         ? zlib.createInflate({ flush: zlib.constants.Z_SYNC_FLUSH })
         : zlib.createInflateRaw({ flush: zlib.constants.Z_SYNC_FLUSH });
     case 'br':
@@ -618,6 +618,23 @@ function createDecoder(
     case 'zstd':
       return (createZstdDecompress as () => Decoder)();
   }
+}
+
+/**
+ * Whether a `deflate` body starts with a zlib header (RFC 1950) rather than raw deflate:
+ * compression method 8 in the low nibble of the first byte, and - where the second byte
+ * is in this chunk - a header check that makes the first two bytes a multiple of 31, as
+ * browsers read it. The nibble alone took raw deflate opening on a stored block with set
+ * padding bits (`0x08`, `0x18`) for zlib, and failed a valid body on its header check.
+ */
+function isZlibHeader(bytes: Buffer): boolean {
+  const first = bytes[0];
+  if (first === undefined || first % 16 !== 8) {
+    return false;
+  }
+
+  const second = bytes[1];
+  return second === undefined || ((first << 8) | second) % 31 === 0;
 }
 
 /**
@@ -638,10 +655,9 @@ class SniffingInflate extends Transform {
     callback: TransformCallback,
   ): void {
     if (this.inner === undefined) {
-      const inner =
-        (chunk[0] ?? 0) % 16 === 8
-          ? zlib.createInflate({ flush: zlib.constants.Z_SYNC_FLUSH })
-          : zlib.createInflateRaw({ flush: zlib.constants.Z_SYNC_FLUSH });
+      const inner = isZlibHeader(chunk)
+        ? zlib.createInflate({ flush: zlib.constants.Z_SYNC_FLUSH })
+        : zlib.createInflateRaw({ flush: zlib.constants.Z_SYNC_FLUSH });
 
       inner.on('data', (decoded: Buffer) => {
         if (!this.push(decoded)) {
