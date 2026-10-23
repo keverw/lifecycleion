@@ -9542,3 +9542,34 @@ test('PR review round 26: FetchAdapter sends a standard method uppercase, as eve
   // A standard method uppercased; any other kept as written (RFC 9110).
   expect(sent).toEqual(['PATCH', 'purge']);
 });
+
+test('PR review round 27: a zstd body of two frames in one write decodes whole', async () => {
+  const compress = (
+    zlib as unknown as { zstdCompressSync: (input: Buffer) => Buffer }
+  ).zstdCompressSync;
+  const body = Buffer.concat([
+    compress(Buffer.from('hello ')),
+    compress(Buffer.from('world')),
+  ]);
+
+  await withRawServer(
+    (res) => {
+      res.writeHead(200, {
+        'content-type': 'text/plain',
+        'content-encoding': 'zstd',
+      });
+      res.end(body);
+    },
+    async (baseURL) => {
+      const response = await new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL,
+      })
+        .get('/x')
+        .send();
+
+      expect(response.isStreamError).toBe(false);
+      expect(response.body).toBe('hello world');
+    },
+  );
+});

@@ -7031,6 +7031,54 @@ describe('NodeAdapter — crl option (normalization)', () => {
     return captured;
   };
 
+  test('PR review round 27: a cached CRL is never answered with a buffer the caller has since reused', async () => {
+    const captured: unknown[] = [];
+    const spy = spyOn(https, 'request').mockImplementation(((
+      options: https.RequestOptions,
+    ) => {
+      captured.push(options.crl);
+      const req = new EventEmitter();
+      const stub = req as unknown as Record<string, unknown>;
+      stub.setHeader = () => {};
+      stub.getHeaders = () => ({});
+      stub.destroy = () => {};
+      stub.end = () => {
+        queueMicrotask(() =>
+          req.emit(
+            'error',
+            Object.assign(new Error('captured'), { code: 'ECONNRESET' }),
+          ),
+        );
+      };
+      return req as unknown as http.ClientRequest;
+    }) as unknown as typeof https.request);
+
+    try {
+      const first = Buffer.from(fixtures.crlRevoked);
+      const config: NodeAdapterConfig = { crl: first };
+      const adapter = new NodeAdapter(config);
+      const request = {
+        requestURL: 'https://crl.test/api',
+        method: 'GET' as const,
+        headers: {},
+      };
+      await adapter.send(request);
+
+      // The same bytes in a new buffer, and the old one reused for something else.
+      const second = Buffer.from(first);
+      config.crl = second;
+      first.fill(0x41);
+      await adapter.send(request);
+
+      expect(captured.at(-1)).toBe(second);
+      expect((captured.at(-1) as Buffer).toString('latin1')).toBe(
+        fixtures.crlRevoked,
+      );
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   const countCRLs = (value: unknown): number => {
     const blocks = (text: unknown) =>
       typeof text === 'string'

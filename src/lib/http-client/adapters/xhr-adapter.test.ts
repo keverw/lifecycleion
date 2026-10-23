@@ -97,6 +97,16 @@ class FakeXHR {
     return this.getAllResponseHeadersResult;
   }
 
+  public getResponseHeader(name: string): string | null {
+    for (const line of this.getAllResponseHeadersResult.split('\r\n')) {
+      const colon = line.indexOf(':');
+      if (colon > 0 && line.slice(0, colon).trim().toLowerCase() === name) {
+        return line.slice(colon + 1).trim();
+      }
+    }
+    return null;
+  }
+
   // ---------------------------------------------------------------------------
   // Simulation helpers — called by tests to drive event flow
   // ---------------------------------------------------------------------------
@@ -854,6 +864,28 @@ describe('XHRAdapter', () => {
     } finally {
       FakeXHR.prototype.send = originalSend;
     }
+  });
+
+  test('PR review round 27: a compressed body is not refused by its encoded bytes on the way in', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/x',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 1000,
+    });
+
+    // An incompressible body is a little larger gzipped than decoded.
+    lastXHR.readyState = 3;
+    lastXHR.status = 200;
+    lastXHR.getAllResponseHeadersResult =
+      'content-type: text/plain\r\ncontent-encoding: gzip\r\n';
+    lastXHR.simulateDownloadProgress(1020, 0);
+    lastXHR.response = new TextEncoder().encode('x'.repeat(990)).buffer;
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.isStreamError).toBeUndefined();
+    expect(response.status).toBe(200);
   });
 
   test('PR review round 15: a missing method is refused rather than sent as "undefined"', async () => {

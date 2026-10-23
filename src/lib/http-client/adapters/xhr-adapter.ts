@@ -326,13 +326,15 @@ export class XHRAdapter implements HTTPAdapter {
 
       xhr.addEventListener('progress', (event) => {
         // Stopped as soon as the download passes the limit, rather than once the whole
-        // body has been buffered. `loaded` counts the bytes as they arrived - encoded,
-        // where the response was compressed - so `load` checks the decoded body too.
+        // body has been buffered. `loaded` counts the bytes as they arrived, so only for a
+        // body that arrives as it is decoded: a compressed one's encoded bytes say
+        // nothing of the limit, which counts decoded ones - an incompressible body is a
+        // little larger encoded - and `load` checks its decoded size instead.
         if (didExceedMaxResponseBytes) {
           return;
         }
 
-        if (event.loaded > maxResponseBytes) {
+        if (event.loaded > maxResponseBytes && !isContentEncoded(xhr)) {
           refuseTooLargeBody();
           return;
         }
@@ -526,6 +528,27 @@ export class XHRAdapter implements HTTPAdapter {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Whether the response names a content coding other than `identity`, so the bytes the
+ * browser counts arriving are not the body's decoded ones. A header the browser does not
+ * expose (cross-origin, unlisted in `Access-Control-Expose-Headers`) reads as none.
+ */
+function isContentEncoded(xhr: XMLHttpRequest): boolean {
+  let encoding: string | null;
+  try {
+    encoding = xhr.getResponseHeader('content-encoding');
+  } catch {
+    return false;
+  }
+
+  return (
+    encoding !== null &&
+    encoding
+      .split(',')
+      .some((token) => !['', 'identity'].includes(token.trim().toLowerCase()))
+  );
+}
 
 /**
  * An XHR progress event's `progress` and `total`, for upload and download alike. A length

@@ -1,3 +1,4 @@
+import { asciiUppercase } from '../internal/http-method';
 import {
   assertOptionalHeaderRecord,
   isPlainRecord,
@@ -1035,14 +1036,6 @@ function parseRequestBody(
  * The route's answer with each field read once, into a plain object: only the fields it
  * has, so an absent one stays absent.
  */
-/**
- * `method` uppercased ASCII only, as Node's `http` matches the methods it knows: Unicode
- * `toUpperCase` folded `poſt` (U+017F) into `POST`, routing it to the POST handler.
- */
-function asciiUppercase(method: string): string {
-  return method.replace(/[a-z]/g, (letter) => letter.toUpperCase());
-}
-
 function snapshotMockResponse(response: MockResponse): MockResponse {
   const snapshot = { status: response.status } as MockResponse;
   const fields = [

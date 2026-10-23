@@ -3312,7 +3312,11 @@ function normalizeCRL(
   // place, and one kept by identity could keep a revoked certificate's list current.
   const last = lastParsedCRLs.get(owner);
   if (last !== undefined && isSameCRLInput(last.input, crl)) {
-    return last.normalized;
+    // A buffer that normalized to itself is passed on as itself again - the one now
+    // given, which holds the same bytes - rather than as the copy kept here.
+    return last.isPassedThrough && Buffer.isBuffer(crl) && crl.byteOffset === 0
+      ? crl
+      : last.normalized;
   }
 
   const normalized = Array.isArray(crl)
@@ -3331,9 +3335,25 @@ function normalizeCRL(
   }
 
   assertCRLParses(normalized);
-  lastParsedCRLs.set(owner, { input: copyCRLInput(crl), normalized });
+  // Kept as a copy this adapter owns, not the caller's: a single-block buffer normalizes
+  // to the caller's own, which goes out as it is now, and a later value with the same
+  // bytes in another buffer was answered with that one - which its owner may since have
+  // reused for something else.
+  const owned = Array.isArray(normalized)
+    ? normalized.map(ownCRLEntry)
+    : ownCRLEntry(normalized);
+  lastParsedCRLs.set(owner, {
+    input: copyCRLInput(crl),
+    normalized: owned,
+    isPassedThrough: normalized === crl,
+  });
 
   return normalized;
+}
+
+/** A normalized CRL entry this adapter owns: a string as is, a buffer copied. */
+function ownCRLEntry(entry: string | Buffer): string | Buffer {
+  return typeof entry === 'string' ? entry : Buffer.from(entry);
 }
 
 /** A `crl` value as given, copied: a string as is, a buffer's bytes into one of its own. */
@@ -3404,6 +3424,8 @@ const lastParsedCRLs = new WeakMap<
   {
     input: CRLInputCopy;
     normalized: string | Buffer | Array<string | Buffer>;
+    /** Whether the value normalized to itself: a single-block buffer, passed on as is. */
+    isPassedThrough: boolean;
   }
 >();
 

@@ -16,6 +16,13 @@ import { isNullish } from '../internal/is-nullish';
 // hosts like `-edge.example.com` set cookies the jar otherwise discarded.
 const HOSTNAME_PATTERN = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
 
+/** A request host prepared for matching against many cookie domains. */
+interface PreparedHost {
+  host: string;
+  canonicalIP: string | null;
+  normalized?: string;
+}
+
 interface ParsedCookie {
   name: string;
   value: string;
@@ -559,6 +566,18 @@ export class CookieJar {
 
     const now = Date.now();
     const result: Array<{ cookie: Cookie; creationTime: number }> = [];
+    // The request host read once, not once per cookie: normalizing it runs IDNA and a URL
+    // parse. Likewise each stored domain's public-suffix answer.
+    const requestHost = this.prepareHost(hostname);
+    const publicSuffixAnswers = new Map<string, boolean>();
+    const isPublicSuffix = (domain: string): boolean => {
+      let isSuffix = publicSuffixAnswers.get(domain);
+      if (isSuffix === undefined) {
+        isSuffix = this.isPublicSuffix(domain);
+        publicSuffixAnswers.set(domain, isSuffix);
+      }
+      return isSuffix;
+    };
     // A parent domain can live above a nested private suffix. Include its
     // bucket while retaining the ordinary domain/host-only checks below.
     const candidateBuckets = new Set<string>();
@@ -591,15 +610,15 @@ export class CookieJar {
         if (
           !cookie.hostOnly &&
           cookie.domain &&
-          this.isPublicSuffix(cookie.domain) &&
-          !this.hostOnlyDomainMatches(hostname, cookie.domain)
+          isPublicSuffix(cookie.domain) &&
+          !this.hostOnlyDomainMatches(requestHost, cookie.domain)
         ) {
           continue;
         }
 
         const isDomainMatch = cookie.hostOnly
-          ? this.hostOnlyDomainMatches(hostname, cookie.domain ?? '')
-          : this.domainMatches(hostname, cookie.domain ?? '');
+          ? this.hostOnlyDomainMatches(requestHost, cookie.domain ?? '')
+          : this.domainMatches(requestHost, cookie.domain ?? '');
 
         if (!isDomainMatch) {
           continue;
@@ -1759,12 +1778,32 @@ export class CookieJar {
     }
   }
 
-  private domainMatches(requestHost: string, cookieDomain: string): boolean {
+  /**
+   * A host to match many cookie domains against, its IP literal and normalized form read
+   * once (the normalized form only when first asked for).
+   */
+  private prepareHost(host: string): PreparedHost {
+    return { host, canonicalIP: this.tryCanonicalIPLiteral(host) };
+  }
+
+  private normalizedPreparedHost(prepared: PreparedHost): string {
+    prepared.normalized ??= this.normalizeStoredDomain(prepared.host);
+    return prepared.normalized;
+  }
+
+  private domainMatches(
+    requestHostInput: string | PreparedHost,
+    cookieDomain: string,
+  ): boolean {
     if (!cookieDomain) {
       return true;
     }
 
-    const canonicalRequestHost = this.tryCanonicalIPLiteral(requestHost);
+    const requestHost =
+      typeof requestHostInput === 'string'
+        ? this.prepareHost(requestHostInput)
+        : requestHostInput;
+    const canonicalRequestHost = requestHost.canonicalIP;
     const canonicalCookieDomain = this.tryCanonicalIPLiteral(cookieDomain);
 
     if (canonicalRequestHost !== null && canonicalCookieDomain !== null) {
@@ -1777,7 +1816,7 @@ export class CookieJar {
       return false;
     }
 
-    const req = this.normalizeStoredDomain(requestHost);
+    const req = this.normalizedPreparedHost(requestHost);
     const cook = this.normalizeStoredDomain(cookieDomain);
 
     if (req === cook) {
@@ -1793,10 +1832,14 @@ export class CookieJar {
   }
 
   private hostOnlyDomainMatches(
-    requestHost: string,
+    requestHostInput: string | PreparedHost,
     cookieDomain: string,
   ): boolean {
-    const canonicalRequestHost = this.tryCanonicalIPLiteral(requestHost);
+    const requestHost =
+      typeof requestHostInput === 'string'
+        ? this.prepareHost(requestHostInput)
+        : requestHostInput;
+    const canonicalRequestHost = requestHost.canonicalIP;
     const canonicalCookieDomain = this.tryCanonicalIPLiteral(cookieDomain);
 
     if (canonicalRequestHost !== null && canonicalCookieDomain !== null) {
@@ -1804,7 +1847,7 @@ export class CookieJar {
     }
 
     return (
-      this.normalizeStoredDomain(requestHost) ===
+      this.normalizedPreparedHost(requestHost) ===
       this.normalizeStoredDomain(cookieDomain)
     );
   }

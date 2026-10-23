@@ -404,21 +404,15 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
 
         const frames = zstdFrames[index];
         if (typeof consumed === 'number' && consumed < (fedBytes[index] ?? 0)) {
-          // Left unread after the one data frame, skippable frames (RFC 8878 metadata,
-          // which Node's decoder stops short of and Bun's reads) carry no content: the
-          // body is whole. A second data frame is no junk either - valid zstd - but one
-          // Node's decoder leaves unread when it arrives in the same write as the first.
+          // Left unread after the one data frame, skippable frames (RFC 8878 metadata)
+          // carry no content: the body is whole. Each frame reaches the decoder in a write
+          // of its own (see `FramedZstdDecompress`), so a second data frame is read, not
+          // left; anything else left is trailing bytes.
           if (frames?.dataFrameCount === 1 && frames.isWellFormedToEnd) {
             return;
           }
 
-          this.failDecoding(
-            (frames?.dataFrameCount ?? 0) > 1
-              ? new Error(
-                  "Response body holds more than one zstd frame, and this runtime's zstd decoder reads only the first",
-                )
-              : trailingBytesError(),
-          );
+          this.failDecoding(trailingBytesError());
         } else if (frames?.isAtFrameEnd === false) {
           this.failDecoding(
             new Error('Response body ends before its compressed stream does'),
@@ -623,7 +617,7 @@ function createDecoder(
         flush: zlib.constants.BROTLI_OPERATION_FLUSH,
       });
     case 'zstd':
-      return (createZstdDecompress as () => Decoder)();
+      return new FramedZstdDecompress();
   }
 }
 
@@ -761,9 +755,103 @@ class SniffingInflate extends Transform {
 
     return inner;
   }
+
   /** Whether the inner inflater stopped short of what it was given. */
   private hasLeftover(): boolean {
     return (this.inner?.bytesWritten ?? 0) < this.fedBytes;
+  }
+}
+
+/**
+ * A zstd decoder handed one frame per write. Node's decoder reads only the first frame of
+ * a write that holds several and leaves the rest unread, where it reads each frame of its
+ * own write - so a body of several frames (valid zstd, RFC 8878) decoded or failed by how
+ * the network split it. Split at the frame boundaries `ZstdFrameWalker` follows, it
+ * decodes whole however it arrives, on Node and Bun alike. Backpressure is passed
+ * through, as `SniffingInflate` passes it.
+ */
+class FramedZstdDecompress extends Transform {
+  private readonly inner: Decoder = (createZstdDecompress as () => Decoder)();
+  private readonly frames = new ZstdFrameWalker();
+  private didInnerEnd = false;
+
+  constructor() {
+    super();
+
+    this.inner.once('end', () => {
+      this.didInnerEnd = true;
+    });
+
+    this.inner.on('data', (decoded: Buffer) => {
+      if (!this.push(decoded)) {
+        this.inner.pause();
+      }
+    });
+    this.inner.on('error', (error: Error) => {
+      this.destroy(error);
+    });
+  }
+
+  /** What the inner decoder consumed, read against what it was fed (see `attachDecoders`). */
+  public get bytesWritten(): unknown {
+    return (this.inner as { bytesWritten?: unknown }).bytesWritten;
+  }
+
+  public override _transform(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: TransformCallback,
+  ): void {
+    const pieces: Buffer[] = [];
+    let start = 0;
+    for (const end of this.frames.feed(chunk)) {
+      pieces.push(chunk.subarray(start, end));
+      start = end;
+    }
+    if (start < chunk.length) {
+      pieces.push(chunk.subarray(start));
+    }
+
+    const writeNext = (): void => {
+      const piece = pieces.shift();
+      if (piece === undefined) {
+        callback();
+        return;
+      }
+
+      if (this.inner.write(piece)) {
+        writeNext();
+      } else {
+        this.inner.once('drain', writeNext);
+      }
+    };
+
+    writeNext();
+  }
+
+  public override _read(size: number): void {
+    this.inner.resume();
+    super._read(size);
+  }
+
+  public override _flush(callback: TransformCallback): void {
+    if (this.didInnerEnd) {
+      callback();
+      return;
+    }
+
+    this.inner.once('end', () => {
+      callback();
+    });
+    this.inner.end();
+  }
+
+  public override _destroy(
+    error: Error | null,
+    callback: (error?: Error | null) => void,
+  ): void {
+    this.inner.destroy();
+    callback(error);
   }
 }
 
@@ -783,6 +871,8 @@ class ZstdFrameWalker {
   private hasFrame = false;
   private hasChecksum = false;
   private isMalformed = false;
+  /** Set when a frame's last field is read: it ends once the bytes it still skips are. */
+  private isFrameEnding = false;
   /** What the next field, once `fieldLength` bytes of it are in, is read as. */
   private onField: (field: number[]) => void;
 
@@ -811,14 +901,26 @@ class ZstdFrameWalker {
     );
   }
 
-  public feed(chunk: Uint8Array): void {
+  /**
+   * Follow `chunk`, answering the offsets within it at which a frame ended - just past
+   * its last byte - so a caller can hand each frame over on its own.
+   */
+  public feed(chunk: Uint8Array): number[] {
+    const frameEnds: number[] = [];
     let offset = 0;
+    const noteFrameEnd = (): void => {
+      if (this.isFrameEnding && this.skipBytes === 0) {
+        this.isFrameEnding = false;
+        frameEnds.push(offset);
+      }
+    };
 
     while (offset < chunk.length && !this.isMalformed) {
       if (this.skipBytes > 0) {
         const skipped = Math.min(this.skipBytes, chunk.length - offset);
         this.skipBytes -= skipped;
         offset += skipped;
+        noteFrameEnd();
         continue;
       }
 
@@ -827,8 +929,11 @@ class ZstdFrameWalker {
 
       if (this.fieldBytes.length === this.fieldLength) {
         this.onField(this.fieldBytes.splice(0));
+        noteFrameEnd();
       }
     }
+
+    return frameEnds;
   }
 
   private expect(length: number, onField: (field: number[]) => void): void {
@@ -855,6 +960,7 @@ class ZstdFrameWalker {
       this.expect(4, (size) => {
         this.skipBytes = readLittleEndian(size);
         this.hasFrame = true;
+        this.isFrameEnding = true;
         this.expectMagic();
       });
     } else {
@@ -892,6 +998,7 @@ class ZstdFrameWalker {
       this.hasFrame = true;
       this.dataFrameCount++;
       this.skipBytes += this.hasChecksum ? 4 : 0;
+      this.isFrameEnding = true;
       this.expectMagic();
     } else {
       this.expect(3, (next) => {

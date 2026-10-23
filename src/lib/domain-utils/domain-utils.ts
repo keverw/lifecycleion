@@ -320,7 +320,9 @@ export function matchesWildcardDomain(
     return false; // invalid domain cannot match
   }
 
-  const compiled = compileWildcardPattern(pattern);
+  // From the shared cache: a fixed allowlist checked on every request compiled each
+  // pattern - IDNA per label, a Public Suffix List lookup - every time.
+  const compiled = compiledWildcardPattern(pattern, true);
 
   return (
     compiled !== undefined &&

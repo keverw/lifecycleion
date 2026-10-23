@@ -1,6 +1,6 @@
+import { normalizeStandardMethod } from './http-method';
 import {
   ADAPTER_ERROR_CARRIER_KEY,
-  HTTP_METHODS,
   NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_ABORT_HEADERS_KEY,
@@ -88,19 +88,6 @@ export function readAdapterMethod(method: unknown): string {
   }
 
   return normalizeStandardMethod(text);
-}
-
-const STANDARD_METHODS: ReadonlySet<string> = new Set(HTTP_METHODS);
-
-/**
- * A standard method (`patch`) in its uppercase form, as `HTTPClient` sends it, so every
- * adapter driven directly sends it alike: `fetch` uppercases only six of them, and sent
- * `patch` as written where NodeAdapter's `http` sent `PATCH`. ASCII only, so `poſt` is
- * not `POST`. Any other method is kept as written, as RFC 9110 has it case-sensitive.
- */
-function normalizeStandardMethod(method: string): string {
-  const uppercased = method.replace(/[a-z]/g, (letter) => letter.toUpperCase());
-  return STANDARD_METHODS.has(uppercased) ? uppercased : method;
 }
 
 /**
