@@ -205,6 +205,28 @@ function adapterRedirectFields(
   };
 }
 
+/**
+ * The answer a request ends with at a redirect it does not follow (`redirect_disabled`,
+ * `redirect_loop`): a synthetic status-0 response, so the redirect is still reported -
+ * `wasRedirectDetected`, and `detectedRedirectURL` resolved from `Location` when the
+ * adapter did not say (the field is optional for a custom adapter).
+ */
+function unfollowedRedirectAnswer(
+  redirect: AdapterResponse,
+  requestURL: string,
+): AdapterResponse {
+  return {
+    status: 0,
+    wasRedirectDetected: true,
+    detectedRedirectURL:
+      redirect.detectedRedirectURL ??
+      derivedRedirectFields(requestURL, redirect.status, redirect.headers)
+        .detectedRedirectURL,
+    headers: {},
+    body: null,
+  };
+}
+
 interface InternalClientState {
   tracker?: RequestTracker;
   parentClient?: BaseHTTPClient | null;
@@ -1156,21 +1178,10 @@ export class BaseHTTPClient {
               // Pass a synthetic status-0 response so wasRedirectDetected is
               // preserved — null would lose the flag since _buildResponse
               // computes it as `adapterResponse?.wasRedirectDetected ?? false`.
-              adapterResponse: {
-                status: 0,
-                wasRedirectDetected: true,
-                // Resolved from `Location` when the adapter did not say: the field is
-                // optional for a custom adapter, and the client has the header.
-                detectedRedirectURL:
-                  adapterResponse.detectedRedirectURL ??
-                  derivedRedirectFields(
-                    attemptResult.sentRequest.requestURL,
-                    adapterResponse.status,
-                    adapterResponse.headers,
-                  ).detectedRedirectURL,
-                headers: {},
-                body: null,
-              },
+              adapterResponse: unfollowedRedirectAnswer(
+                adapterResponse,
+                attemptResult.sentRequest.requestURL,
+              ),
               requestID,
               // Provably false: a cancel settles with no adapter response, and
               // this branch is guarded on having one.
@@ -1248,19 +1259,10 @@ export class BaseHTTPClient {
                 // A synthetic status-0 response, as for `redirect_disabled`, so the
                 // redirect this client did not follow is still reported: its
                 // `wasRedirectDetected` and `detectedRedirectURL`.
-                adapterResponse: {
-                  status: 0,
-                  wasRedirectDetected: true,
-                  detectedRedirectURL:
-                    adapterResponse.detectedRedirectURL ??
-                    derivedRedirectFields(
-                      attemptResult.sentRequest.requestURL,
-                      adapterResponse.status,
-                      adapterResponse.headers,
-                    ).detectedRedirectURL,
-                  headers: {},
-                  body: null,
-                },
+                adapterResponse: unfollowedRedirectAnswer(
+                  adapterResponse,
+                  attemptResult.sentRequest.requestURL,
+                ),
                 requestID,
                 wasCancelled: false,
                 wasTimeout: false,

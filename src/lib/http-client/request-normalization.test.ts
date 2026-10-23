@@ -9620,3 +9620,65 @@ test('PR review round 29: a kept origin list the caller changes is read afresh',
   expect(matchesOriginList('https://x.a.example', list)).toBe(false);
   expect(matchesOriginList('https://x.b.example', list)).toBe(true);
 });
+
+test('PR review round 30: a raw deflate body whose first byte has a window nibble over 7 is read as raw', async () => {
+  // A stored block whose padding bits make its first byte 0x88 - method 8, window 8 -
+  // and whose first two bytes are a multiple of 31: no zlib header, since a zlib window
+  // is at most 7.
+  const raw = Buffer.from([
+    0x88,
+    28,
+    0,
+    0xe3,
+    0xff,
+    ...Buffer.from('x'.repeat(28)),
+    0x01,
+    0,
+    0,
+    0xff,
+    0xff,
+  ]);
+
+  await withRawServer(
+    (res) => {
+      res.writeHead(200, {
+        'content-type': 'text/plain',
+        'content-encoding': 'deflate',
+      });
+      res.end(raw);
+    },
+    async (baseURL) => {
+      const response = await new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL,
+      })
+        .get('/x')
+        .send();
+
+      expect(response.isStreamError).toBe(false);
+      expect(response.body).toBe('x'.repeat(28));
+    },
+  );
+});
+
+test('PR review round 30: NodeAdapter hands over an empty body as empty bytes, as the other adapters do', async () => {
+  await withRawServer(
+    (res) => {
+      res.writeHead(200, {
+        'content-type': 'application/octet-stream',
+        'content-length': '0',
+      });
+      res.end();
+    },
+    async (baseURL) => {
+      const response = await new NodeAdapter().send({
+        requestURL: `${baseURL}/x`,
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(response.body).toBeInstanceOf(Uint8Array);
+      expect((response.body as Uint8Array).byteLength).toBe(0);
+    },
+  );
+});

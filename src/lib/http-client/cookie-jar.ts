@@ -1120,18 +1120,17 @@ export class CookieJar {
           case 'expires': {
             const date = parseCookieDate(attrValue);
             if (date) {
-              // Capped as `Max-Age` is, at 400 days from now.
-              const latest = Date.now() + MAX_COOKIE_LIFETIME_SECONDS * 1000;
-              cookie.expires =
-                date.getTime() > latest ? new Date(latest) : date;
+              // Capped where it is stored (see `capLifetime`), as every cookie is.
+              cookie.expires = date;
             }
             break;
           }
           case 'max-age': {
             // RFC 6265 §5.2.2 — an optional `-` then digits, and nothing else; otherwise
             // the attribute is ignored. `parseInt` read a prefix, so `Max-Age=60abc` was
-            // a minute and `Max-Age=1e9` was one second. Capped at RFC 6265bis's 400 days,
-            // as browsers cap it.
+            // a minute and `Max-Age=1e9` was one second. Bounded here only so it is a
+            // finite number: a run of digits too long for one reads as `Infinity`, which
+            // `setCookie` refuses. The lifetime cap itself is `capLifetime`'s.
             if (MAX_AGE_PATTERN.test(attrValue)) {
               cookie.maxAge = Math.min(
                 parseInt(attrValue, 10),

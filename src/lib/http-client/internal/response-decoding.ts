@@ -414,6 +414,15 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
           }
 
           this.failDecoding(trailingBytesError());
+        } else if (frames?.isUnfollowable === true) {
+          // A decoder that ended cleanly on framing the walker could not follow (a legacy
+          // frame, header bits it misreads) may have ended on a frame cut short, which
+          // these decoders end cleanly on: the body cannot be vouched for whole.
+          this.failDecoding(
+            new Error(
+              'Response body holds zstd framing this client cannot follow, so it cannot tell whether the body is whole',
+            ),
+          );
         } else if (frames?.isAtFrameEnd === false) {
           this.failDecoding(
             new Error('Response body ends before its compressed stream does'),
@@ -624,14 +633,16 @@ function createDecoder(
 
 /**
  * Whether a `deflate` body starts with a zlib header (RFC 1950) rather than raw deflate:
- * compression method 8 in the low nibble of the first byte, and - where the second byte
- * is in this chunk - a header check that makes the first two bytes a multiple of 31, as
- * browsers read it. The nibble alone took raw deflate opening on a stored block with set
+ * compression method 8 in the low nibble of the first byte, a window size of at most 7 in
+ * its high nibble, and - where the second byte is in this chunk - a header check that
+ * makes the first two bytes a multiple of 31, as browsers read it. The nibble alone took raw deflate opening on a stored block with set
  * padding bits (`0x08`, `0x18`) for zlib, and failed a valid body on its header check.
  */
 function isZlibHeader(bytes: Buffer): boolean {
   const first = bytes[0];
-  if (first === undefined || first % 16 !== 8) {
+  // Method 8 in the low nibble, and a window (CINFO, the high nibble) of at most 7: a
+  // stored raw block whose padding bits make its first byte `0x88` is no zlib header.
+  if (first === undefined || first % 16 !== 8 || first >> 4 > 7) {
     return false;
   }
 
@@ -898,17 +909,25 @@ class ZstdFrameWalker {
    * after the one data frame left unread is then skippable frames, which carry no content.
    */
   public get isWellFormedToEnd(): boolean {
-    return !this.isMalformed && this.isAtFrameEnd;
+    return this.isAtFrameEnd;
   }
 
-  /** Whether the bytes so far end on a frame boundary, after at least one frame. */
+  /** Whether the walker met framing it cannot follow (see `readMagic`). */
+  public get isUnfollowable(): boolean {
+    return this.isMalformed;
+  }
+
+  /**
+   * Whether the bytes so far end on a frame boundary, after at least one frame - never
+   * for framing the walker could not follow, which it cannot vouch for.
+   */
   public get isAtFrameEnd(): boolean {
     return (
-      this.isMalformed ||
-      (this.hasFrame &&
-        this.isAwaitingMagic &&
-        this.skipBytes === 0 &&
-        this.fieldBytes.length === 0)
+      !this.isMalformed &&
+      this.hasFrame &&
+      this.isAwaitingMagic &&
+      this.skipBytes === 0 &&
+      this.fieldBytes.length === 0
     );
   }
 

@@ -120,6 +120,15 @@ export function isIPAddress(str: string): boolean {
 }
 
 /**
+ * Whether `label` is what WHATWG's host parser reads as a number - decimal digits, or
+ * `0x` and hex digits - so a host whose last label it is must be an IPv4 address. Shared
+ * by the IPv4 reader and the wildcard-tail guard, so the two read alike.
+ */
+export function endsInANumber(label: string): boolean {
+  return /^(?:\d+|0x[0-9a-f]*)$/i.test(label);
+}
+
+/**
  * How the URL parser reads `host` as an IPv4 address, asked of the parser itself:
  * `undefined` when it does not take the host for one, `{ address }` when it does, and
  * `{}` when it takes it for one and refuses it - such a host is no URL's host at all.
@@ -146,6 +155,19 @@ export function readURLParserIPv4(
     return undefined;
   }
 
+  // Plain ASCII - letters, digits, hyphens and dots - the parser maps only by lowercasing,
+  // so its last label is read here, and a name that does not end in a number (most) is
+  // no address without a URL parse.
+  if (/^[A-Za-z0-9.-]+$/.test(text)) {
+    const plainLabels = text.split('.');
+    if (plainLabels.length > 1 && plainLabels.at(-1) === '') {
+      plainLabels.pop();
+    }
+    if (!endsInANumber(plainLabels.at(-1) ?? '')) {
+      return undefined;
+    }
+  }
+
   let mapped: string;
   try {
     mapped = new URL(`http://${text}.a/`).hostname;
@@ -161,7 +183,7 @@ export function readURLParserIPv4(
   }
   const lastLabel = labels.at(-1) ?? '';
 
-  if (!/^(?:\d+|0x[0-9a-f]*)$/i.test(lastLabel)) {
+  if (!endsInANumber(lastLabel)) {
     return undefined;
   }
 
@@ -584,9 +606,11 @@ function normalizeHostText(domain: string, isWholeHost: boolean): string {
     }
     // On the Unicode form of each label: an IDN label starting or ending with a hyphen
     // (`-ñ`) is `xn----rga` once encoded, which hides the hyphen from a check on `ascii`.
-    const unicodeLabels = toUnicode(ascii, {
-      useSTD3ASCIIRules: false,
-    }).domain.split('.');
+    // Decoded only where there is something to decode: a label without `xn--` is its
+    // own Unicode form.
+    const unicodeLabels = ascii.includes('xn--')
+      ? toUnicode(ascii, { useSTD3ASCIIRules: false }).domain.split('.')
+      : ascii.split('.');
     if (
       unicodeLabels.some(
         (label) => label.startsWith('-') || label.endsWith('-'),
@@ -721,7 +745,7 @@ export function isUnmatchableWildcardTail(
 
   return (
     isIPAddress(tail) ||
-    /^(?:\d+|0x[0-9a-f]*)$/i.test(fixedTail.at(-1) ?? '') ||
+    endsInANumber(fixedTail.at(-1) ?? '') ||
     isSuffixLikeTail(tail)
   );
 }
