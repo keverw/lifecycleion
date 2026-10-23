@@ -3,6 +3,7 @@
  * {@link AdapterRequest.maxResponseBytes}.
  */
 
+import { asciiUppercase } from './http-method';
 import {
   markNonRetryableAdapterError,
   nonRetryableAdapterErrorFrom,
@@ -63,7 +64,7 @@ export function readMaxResponseBytes(request: AdapterRequest): number {
  */
 export function hasResponseBody(method: string, status: number): boolean {
   return (
-    method.toUpperCase() !== 'HEAD' &&
+    asciiUppercase(method) !== 'HEAD' &&
     status >= 200 &&
     status !== 204 &&
     status !== 205 &&

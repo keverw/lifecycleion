@@ -490,7 +490,7 @@ describe('XHRAdapter', () => {
     });
 
     lastXHR.status = 200;
-    lastXHR.simulateDownloadProgress(100, 100);
+    lastXHR.simulateDownloadProgress(5000, 5000);
     const response = await promise;
 
     expect(response.streamErrorCode).toBe('response_too_large');
@@ -523,7 +523,7 @@ describe('XHRAdapter', () => {
 
     lastXHR.status = 200;
     lastXHR.getAllResponseHeadersResult = 'x-kept: yes\r\n';
-    lastXHR.simulateDownloadProgress(100, 100);
+    lastXHR.simulateDownloadProgress(5000, 5000);
     const response = await promise;
 
     expect(response.streamErrorCode).toBe('response_too_large');
@@ -906,6 +906,28 @@ describe('XHRAdapter', () => {
 
     expect(response.streamErrorCode).toBe('response_too_large');
     expect(lastXHR.abortCalled).toBe(true);
+  });
+
+  test('PR review round 29: a body whose coding is hidden is not refused by its encoded bytes', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://other.test/x',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 1000,
+    });
+
+    // Cross-origin, `Content-Encoding` not exposed: a few bytes over encoded, within
+    // the limit decoded.
+    lastXHR.readyState = 3;
+    lastXHR.status = 200;
+    lastXHR.getAllResponseHeadersResult = 'content-type: text/plain\r\n';
+    lastXHR.simulateDownloadProgress(1020, 0);
+    lastXHR.response = new TextEncoder().encode('x'.repeat(1000)).buffer;
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.isStreamError).toBeUndefined();
+    expect(response.status).toBe(200);
   });
 
   test('PR review round 15: a missing method is refused rather than sent as "undefined"', async () => {
@@ -2133,9 +2155,10 @@ describe('XHRAdapter - maxResponseBytes', () => {
     };
 
     xhr.simulateDownloadProgress(60, 0);
-    xhr.simulateDownloadProgress(160, 0);
+    // Past the limit and the slack a coding may add (see `maxEncodedResponseBytes`).
+    xhr.simulateDownloadProgress(2000, 0);
     // A late event after the abort changes nothing.
-    xhr.simulateDownloadProgress(260, 0);
+    xhr.simulateDownloadProgress(3000, 0);
 
     const response = await promise;
 

@@ -398,7 +398,10 @@ export class CookieJar {
     ) {
       return false;
     }
-    const createdAt = input.createdAt ?? Date.now();
+    // Never in the future: the lifetime cap (and `Max-Age`) count from it, so a persisted
+    // jar claiming a creation five years on held a cookie past the cap.
+    const now = Date.now();
+    const createdAt = Math.min(input.createdAt ?? now, now);
     const bucket = this.getOrCreateBucket(this.apexFor(normalizedDomain));
 
     const stored: Cookie = {

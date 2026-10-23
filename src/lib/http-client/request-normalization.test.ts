@@ -9593,3 +9593,30 @@ test("PR review round 28: setCookie caps a lifetime at 400 days from the cookie'
   expect(stored.maxAge).toBe(cap);
   expect(stored.expires?.getTime()).toBe(createdAt + cap * 1000);
 });
+
+test("PR review round 29: a cookie's creation is never taken from the future", () => {
+  const jar = new CookieJar();
+  const now = Date.now();
+  const fiveYears = 5 * 365 * 24 * 60 * 60 * 1000;
+  jar.setCookie({
+    name: 'a',
+    value: '1',
+    domain: 'example.com',
+    createdAt: now + fiveYears,
+    expires: new Date(now + fiveYears + 10 * 24 * 60 * 60 * 1000),
+  });
+
+  const [stored] = jar.getAllCookies();
+  const capMS = 400 * 24 * 60 * 60 * 1000;
+  expect(stored.createdAt).toBeLessThanOrEqual(Date.now());
+  expect(stored.expires?.getTime()).toBeLessThanOrEqual(Date.now() + capMS);
+});
+
+test('PR review round 29: a kept origin list the caller changes is read afresh', () => {
+  const list = ['https://*.a.example'];
+  expect(matchesOriginList('https://x.a.example', list)).toBe(true);
+
+  list[0] = 'https://*.b.example';
+  expect(matchesOriginList('https://x.a.example', list)).toBe(false);
+  expect(matchesOriginList('https://x.b.example', list)).toBe(true);
+});

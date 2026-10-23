@@ -1,3 +1,4 @@
+import { asciiUppercase } from './internal/http-method';
 import { isSignalAbortedQuietly } from './internal/request-fields';
 import { defineEntry } from '../internal/define-entry';
 import { isNullish } from '../internal/is-nullish';
@@ -2877,8 +2878,7 @@ export class BaseHTTPClient {
           adapterResponse.isTransportError !== true &&
           REDIRECT_STATUS_CODES.has(adapterResponse.status) &&
           scalarHeader(adapterResponse.headers, 'location') &&
-          (isBodyDecodeFailure(adapterResponse) ||
-            adapterResponse.streamErrorCode === 'response_too_large')
+          isStatusOnlyStreamError(adapterResponse)
         ) {
           adapterResponse.body = null;
           delete adapterResponse.isStreamError;
@@ -4655,8 +4655,8 @@ export class BaseHTTPClient {
         (adapterType === 'xhr' && this._isBrowserRuntime)) &&
       request.body !== undefined &&
       request.body !== null &&
-      (request.method.toUpperCase() === 'GET' ||
-        request.method.toUpperCase() === 'HEAD')
+      (asciiUppercase(request.method) === 'GET' ||
+        asciiUppercase(request.method) === 'HEAD')
     ) {
       throw methodRefusal(
         adapterType === 'fetch'
@@ -4953,11 +4953,14 @@ function describeRequestPath(value: unknown): string {
  * maintenance page asks for a retry as one with a small page does.
  */
 function isStatusOnlyStreamError(response: AdapterResponse): boolean {
+  // A streamed body was already handed to the caller's stream, so it is no whole answer.
+  if (response.isStreamError !== true || response.isStreamed === true) {
+    return false;
+  }
+
   return (
-    isBodyDecodeFailure(response) ||
-    (response.isStreamError === true &&
-      response.isStreamed !== true &&
-      response.streamErrorCode === 'response_too_large')
+    response.streamErrorCode === 'response_too_large' ||
+    isBodyDecodeFailure(response)
   );
 }
 
@@ -4967,12 +4970,9 @@ function isStatusOnlyStreamError(response: AdapterResponse): boolean {
  * adapter reported.
  */
 function isBodyDecodeFailure(response: AdapterResponse): boolean {
-  // A streamed body was already handed to the caller's stream, so it is no whole answer.
-  if (
-    response.isStreamError !== true ||
-    response.isStreamed === true ||
-    response.streamErrorCode !== 'stream_response_error'
-  ) {
+  // The guard that it is a stream error none of which reached the caller is
+  // `isStatusOnlyStreamError`'s, the one caller that must hold it.
+  if (response.streamErrorCode !== 'stream_response_error') {
     return false;
   }
 

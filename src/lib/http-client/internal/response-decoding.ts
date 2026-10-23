@@ -400,14 +400,15 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
         const frames =
           decoder instanceof FramedZstdDecompress ? decoder.frames : undefined;
         if (typeof consumed === 'number' && consumed < (fedBytes[index] ?? 0)) {
-          // Left unread after the data frames, skippable frames (RFC 8878 metadata)
-          // carry no content: the body is whole. Each frame reaches the decoder in a write
-          // of its own (see `FramedZstdDecompress`), so a data frame is read, not left;
-          // anything else left is trailing bytes.
+          // Left unread after every data frame was read, skippable frames (RFC 8878
+          // metadata) carry no content: the body is whole. Only then - a data frame left
+          // unread would be a body silently cut short; anything else left is trailing
+          // bytes.
           if (
             frames !== undefined &&
             frames.dataFrameCount >= 1 &&
-            frames.isWellFormedToEnd
+            frames.isWellFormedToEnd &&
+            consumed >= frames.lastDataFrameEnd
           ) {
             return;
           }
@@ -865,6 +866,11 @@ class FramedZstdDecompress extends Transform {
 class ZstdFrameWalker {
   /** Zstandard frames read whole - data frames, not skippable ones (RFC 8878). */
   public dataFrameCount = 0;
+  /**
+   * The byte, counted over everything fed, just past the last data frame read whole: a
+   * decoder that consumed at least this much has decoded every data frame.
+   */
+  public lastDataFrameEnd = 0;
   private skipBytes = 0;
   private readonly fieldBytes: number[] = [];
   private fieldLength = 4;
@@ -874,6 +880,10 @@ class ZstdFrameWalker {
   private isMalformed = false;
   /** Set when a frame's last field is read: it ends once the bytes it still skips are. */
   private isFrameEnding = false;
+  /** Whether the frame ending is a data frame, not a skippable one. */
+  private isDataFrameEnding = false;
+  /** Bytes fed before the chunk being read. */
+  private bytesFed = 0;
   /** What the next field, once `fieldLength` bytes of it are in, is read as. */
   private onField: (field: number[]) => void;
 
@@ -913,6 +923,9 @@ class ZstdFrameWalker {
       if (this.isFrameEnding && this.skipBytes === 0) {
         this.isFrameEnding = false;
         frameEnds.push(offset);
+        if (this.isDataFrameEnding) {
+          this.lastDataFrameEnd = this.bytesFed + offset;
+        }
       }
     };
 
@@ -934,6 +947,7 @@ class ZstdFrameWalker {
       }
     }
 
+    this.bytesFed += chunk.length;
     return frameEnds;
   }
 
@@ -962,6 +976,7 @@ class ZstdFrameWalker {
         this.skipBytes = readLittleEndian(size);
         this.hasFrame = true;
         this.isFrameEnding = true;
+        this.isDataFrameEnding = false;
         this.expectMagic();
       });
     } else {
@@ -1000,6 +1015,7 @@ class ZstdFrameWalker {
       this.dataFrameCount++;
       this.skipBytes += this.hasChecksum ? 4 : 0;
       this.isFrameEnding = true;
+      this.isDataFrameEnding = true;
       this.expectMagic();
     } else {
       this.expect(3, (next) => {

@@ -280,6 +280,7 @@ export class XHRAdapter implements HTTPAdapter {
       // Set when this adapter aborted the XHR itself over a body past `maxResponseBytes`,
       // so the `abort` event that follows is not reported as a cancel.
       let didExceedMaxResponseBytes = false;
+      const midDownloadLimit = maxEncodedResponseBytes(maxResponseBytes);
 
       // Fallback: upload.load didn't fire (no request body, or the browser skipped the
       // event). Callers always see a 100% upload event, unless upload.progress already
@@ -326,21 +327,17 @@ export class XHRAdapter implements HTTPAdapter {
 
       xhr.addEventListener('progress', (event) => {
         // Stopped as soon as the download passes the limit, rather than once the whole
-        // body has been buffered. `loaded` counts the bytes as they arrived: the decoded
-        // ones for a body sent without a content coding. A compressed body's encoded
-        // bytes run a little past its decoded size only when it is incompressible -
-        // framing, a few bytes a block - so it is stopped once they pass the limit by
-        // more than that, and `load` checks its decoded size exactly.
+        // body has been buffered. `loaded` counts the bytes as they arrived - encoded,
+        // for a compressed body, which run a little past its decoded size only when it is
+        // incompressible: framing, a few bytes a block. Whether one was compressed cannot
+        // always be read (a cross-origin response hides `Content-Encoding`), so every body
+        // is stopped once its bytes pass the limit by more than that, and `load` checks
+        // the decoded size exactly.
         if (didExceedMaxResponseBytes) {
           return;
         }
 
-        if (
-          event.loaded >
-          (isContentEncoded(xhr)
-            ? maxEncodedResponseBytes(maxResponseBytes)
-            : maxResponseBytes)
-        ) {
+        if (event.loaded > midDownloadLimit) {
           refuseTooLargeBody();
           return;
         }
@@ -543,27 +540,6 @@ export class XHRAdapter implements HTTPAdapter {
  */
 function maxEncodedResponseBytes(maxResponseBytes: number): number {
   return maxResponseBytes + Math.ceil(maxResponseBytes / 1000) + 1024;
-}
-
-/**
- * Whether the response names a content coding other than `identity`, so the bytes the
- * browser counts arriving are not the body's decoded ones. A header the browser does not
- * expose (cross-origin, unlisted in `Access-Control-Expose-Headers`) reads as none.
- */
-function isContentEncoded(xhr: XMLHttpRequest): boolean {
-  let encoding: string | null;
-  try {
-    encoding = xhr.getResponseHeader('content-encoding');
-  } catch {
-    return false;
-  }
-
-  return (
-    encoding !== null &&
-    encoding
-      .split(',')
-      .some((token) => !['', 'identity'].includes(token.trim().toLowerCase()))
-  );
 }
 
 /**

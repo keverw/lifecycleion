@@ -1,3 +1,4 @@
+import { asciiUppercase } from '../internal/http-method';
 import { deleteHeader, requestHeaderPairs } from '../internal/header-utils';
 import { defineEntry } from '../../internal/define-entry';
 import { concatChunks } from '../internal/concat-chunks';
@@ -105,7 +106,7 @@ export class FetchAdapter implements HTTPAdapter {
       // A runtime that rewrites the method - Bun's fetch reads one it does not know as
       // `GET` - would send a different request than the caller's, and report its answer
       // as a success: a state-changing custom verb landing on a GET handler. Refused.
-      if (builtMethod.toUpperCase() !== method.toUpperCase()) {
+      if (asciiUppercase(builtMethod) !== asciiUppercase(method)) {
         const refusal = new Error(
           `[FetchAdapter] This runtime's fetch would send the ${method} request as ${builtMethod}. Use NodeAdapter for it.`,
         );

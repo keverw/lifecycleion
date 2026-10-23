@@ -326,7 +326,7 @@ export function matchesWildcardDomain(
 function matchesWildcardDomainIn(
   domain: string,
   pattern: string,
-  isCached: boolean,
+  isCached: PatternCache,
 ): boolean {
   const normalizedDomain = normalizeDomain(domain);
 
@@ -376,7 +376,7 @@ export function matchesWildcardOrigin(
 function matchesWildcardOriginIn(
   origin: string,
   pattern: string,
-  isCached: boolean,
+  isCached: PatternCache,
 ): boolean {
   // Read as the parser reads its text, as `normalizeOrigin` reads it; see `toOriginText`.
   const originText = toOriginText(origin);
@@ -518,11 +518,28 @@ const ORIGIN_LIKE = /^[a-z][a-z0-9+\-.]*:\/\//i;
 /** Exact entries normalized for {@link matchesDomainList}, cached as patterns are. */
 const normalizedExactEntries = new Map<string, string>();
 
+/**
+ * Where a wildcard pattern's compiled form is kept: the shared cache (`true`), nowhere
+ * (`false`, for a list longer than it - see `cachedEntry`), or a list's own map (see
+ * `originListPatterns`).
+ */
+type PatternCache =
+  boolean | Map<string, ReturnType<typeof compileWildcardPattern>>;
+
 function compiledWildcardPattern(
   pattern: string,
-  isCached: boolean,
+  cache: PatternCache,
 ): ReturnType<typeof compileWildcardPattern> {
-  return isCached
+  if (cache instanceof Map) {
+    if (cache.has(pattern)) {
+      return cache.get(pattern);
+    }
+    const compiled = compileWildcardPattern(pattern);
+    cache.set(pattern, compiled);
+    return compiled;
+  }
+
+  return cache
     ? cachedEntry(compiledWildcardPatterns, pattern, compileWildcardPattern)
     : compileWildcardPattern(pattern);
 }
@@ -659,6 +676,36 @@ function compiledDomainEntry(
   list.entries[index] = entry;
 
   return entry;
+}
+
+/**
+ * Each origin list's compiled wildcard patterns, kept against the list itself, as
+ * `compiledDomainLists` keeps a domain list's: checked against a copy of its entries on
+ * every call, so a list the caller changes starts afresh.
+ */
+const originListPatternMaps = new WeakMap<
+  readonly string[],
+  {
+    source: readonly string[];
+    patterns: Map<string, ReturnType<typeof compileWildcardPattern>>;
+  }
+>();
+
+function originListPatterns(
+  allowedOrigins: readonly string[],
+): Map<string, ReturnType<typeof compileWildcardPattern>> {
+  const kept = originListPatternMaps.get(allowedOrigins);
+  if (kept !== undefined && isSameList(kept.source, allowedOrigins)) {
+    return kept.patterns;
+  }
+
+  const patterns = new Map<string, ReturnType<typeof compileWildcardPattern>>();
+  originListPatternMaps.set(allowedOrigins, {
+    source: allowedOrigins.slice(),
+    patterns,
+  });
+
+  return patterns;
 }
 
 /** Whether `list` still holds exactly the entries of `source`, in order. */
@@ -1495,8 +1542,9 @@ export function matchesOriginList(
     return false;
   }
 
-  // A list longer than the shared pattern cache is not cached there: see `cachedEntry`.
-  const isCached = cleaned.length <= MAX_COMPILED_WILDCARD_PATTERNS;
+  // The list's own compiled patterns: two lists that each fit the shared cache, used
+  // in turn, evicted each other there on every call (see `originListPatterns`).
+  const isCached = originListPatterns(allowedOrigins);
 
   return cleaned.some((allowed) => {
     // Global wildcard: single "*" matches any origin - delegate to matchesWildcardOrigin for proper validation
@@ -1570,8 +1618,8 @@ export function matchesCORSCredentialsList(
   const cleaned = allowedOrigins.map((s) => s.trim()).filter(Boolean);
 
   const allowWildcard = !!options.allowWildcardSubdomains;
-  // A list longer than the shared pattern cache is not cached there: see `cachedEntry`.
-  const isCached = cleaned.length <= MAX_COMPILED_WILDCARD_PATTERNS;
+  // The list's own compiled patterns (see `originListPatterns`).
+  const isCached = originListPatterns(allowedOrigins);
 
   for (const allowed of cleaned) {
     // Optional wildcard support for credentials lists (subdomain patterns only)

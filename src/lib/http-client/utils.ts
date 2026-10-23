@@ -1,4 +1,7 @@
-import { normalizeStandardMethod } from './internal/http-method';
+import {
+  asciiUppercase,
+  normalizeStandardMethod,
+} from './internal/http-method';
 import { REDIRECT_STATUS_CODES } from './consts';
 import qs from 'qs';
 import { defineEntry } from '../internal/define-entry';
@@ -452,7 +455,7 @@ export function describeInvalidHTTPMethod(
   }
   // CONNECT asks for a tunnel rather than a response, which no adapter here handles:
   // NodeAdapter would wait on it until the attempt timed out, or forever.
-  if (candidate.toUpperCase() === 'CONNECT') {
+  if (asciiUppercase(candidate) === 'CONNECT') {
     return 'is CONNECT, which opens a tunnel and is not supported';
   }
   return undefined;

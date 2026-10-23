@@ -1,3 +1,4 @@
+import { asciiUppercase } from '../internal/http-method';
 import {
   defineHiddenTags,
   makeAbortError,
@@ -473,7 +474,7 @@ export class NodeAdapter implements HTTPAdapter {
       }
     }
 
-    if (request.method.toUpperCase() === 'CONNECT') {
+    if (asciiUppercase(request.method) === 'CONNECT') {
       const refusal = new TypeError(
         'NodeAdapter does not open tunnels; a CONNECT request is not supported',
       );
