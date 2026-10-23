@@ -138,7 +138,10 @@ export function createResponseBodySource(
  *   stream error, not a success that silently lost the rest. `Z_SYNC_FLUSH` only makes
  *   what is decoded arrive promptly.
  * - `data` / `end` come from the last decoder, and only start flowing once a `data`
- *   listener is added, as a paused `IncomingMessage` waits for its reader.
+ *   listener is added (or `resume()` drains it), as a paused `IncomingMessage` waits for
+ *   its reader. The raw response is read ahead into the decoders from its first byte -
+ *   it is what builds them - but only as far as their buffers hold, then backpressure
+ *   stops it.
  * - `aborted` comes from the response. `close` does too when the response closed short;
  *   when all of it arrived, `close` waits for the decoding to finish.
  * - `error` is the response's or a decoder's - a corrupt body fails as a stream error, and
@@ -179,16 +182,8 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     super();
 
     this.on('newListener', (event: string) => {
-      if (event === 'data' && !this.isReading) {
-        this.isReading = true;
-        this.startForwardingData();
-        // After the reader's other listeners: they are attached in the same turn as its
-        // `data` one, and the held events are for them.
-        queueMicrotask(() => {
-          for (const { event: held, args } of this.held.splice(0)) {
-            this.deliver(held, ...args);
-          }
-        });
+      if (event === 'data') {
+        this.beginReading();
       }
     });
 
@@ -303,6 +298,10 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
 
   public resume(): this {
     this.isPaused = false;
+    // A resume with no reader drains the body, as it drains a raw `IncomingMessage`:
+    // the data goes to no one and `end` is heard. Held for a reader, it was dropped and
+    // `end` held for good.
+    this.beginReading();
     this.decoders.at(-1)?.resume();
 
     // Released a tick on, as a raw `IncomingMessage` emits its `'end'` after `resume()`
@@ -407,14 +406,14 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
           if (
             frames !== undefined &&
             frames.dataFrameCount >= 1 &&
-            frames.isWellFormedToEnd &&
+            frames.isAtFrameEnd &&
             consumed >= frames.lastDataFrameEnd
           ) {
             return;
           }
 
           this.failDecoding(trailingBytesError());
-        } else if (frames?.isUnfollowable === true) {
+        } else if (frames?.isMalformed === true) {
           // A decoder that ended cleanly on framing the walker could not follow (a legacy
           // frame, header bits it misreads) may have ended on a frame cut short, which
           // these decoders end cleanly on: the body cannot be vouched for whole.
@@ -480,6 +479,26 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     } catch {
       // Already gone; the error above is what is reported.
     }
+  }
+
+  /**
+   * Start delivering: forward the decoded data, and the events held for a reader. Once -
+   * on a `data` listener, or a `resume()`, whichever is first.
+   */
+  private beginReading(): void {
+    if (this.isReading) {
+      return;
+    }
+
+    this.isReading = true;
+    this.startForwardingData();
+    // After the reader's other listeners: they are attached in the same turn as its
+    // `data` one, and the held events are for them.
+    queueMicrotask(() => {
+      for (const { event: held, args } of this.held.splice(0)) {
+        this.deliver(held, ...args);
+      }
+    });
   }
 
   private startForwardingData(): void {
@@ -882,13 +901,14 @@ class ZstdFrameWalker {
    * decoder that consumed at least this much has decoded every data frame.
    */
   public lastDataFrameEnd = 0;
+  /** Whether the walker met framing it cannot follow (see `readMagic`). */
+  public isMalformed = false;
   private skipBytes = 0;
   private readonly fieldBytes: number[] = [];
   private fieldLength = 4;
   private isAwaitingMagic = true;
   private hasFrame = false;
   private hasChecksum = false;
-  private isMalformed = false;
   /** Set when a frame's last field is read: it ends once the bytes it still skips are. */
   private isFrameEnding = false;
   /** Whether the frame ending is a data frame, not a skippable one. */
@@ -902,19 +922,6 @@ class ZstdFrameWalker {
     this.onField = (field) => {
       this.readMagic(field);
     };
-  }
-
-  /**
-   * Whether the bytes so far are whole, well-formed frames: what a decoder that stopped
-   * after the one data frame left unread is then skippable frames, which carry no content.
-   */
-  public get isWellFormedToEnd(): boolean {
-    return this.isAtFrameEnd;
-  }
-
-  /** Whether the walker met framing it cannot follow (see `readMagic`). */
-  public get isUnfollowable(): boolean {
-    return this.isMalformed;
   }
 
   /**

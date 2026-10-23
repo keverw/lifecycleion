@@ -9682,3 +9682,39 @@ test('PR review round 30: NodeAdapter hands over an empty body as empty bytes, a
     },
   );
 });
+
+test('PR review round 31: a decoded body resumed with no reader drains, as a raw response does', async () => {
+  const res = new PassThrough() as unknown as http.IncomingMessage;
+  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  let didEnd = false;
+  source.on('end', () => {
+    didEnd = true;
+  });
+
+  // No `data` listener: the body is drained, and its `end` heard.
+  source.resume();
+  (res as unknown as PassThrough).end(zlib.gzipSync(Buffer.from('hello')));
+  await sleep(50);
+
+  expect(didEnd).toBe(true);
+});
+
+test('PR review round 31: NodeAdapter hands over no body for an answer that has none', async () => {
+  await withRawServer(
+    (res) => {
+      res.writeHead(204);
+      res.end();
+    },
+    async (baseURL) => {
+      for (const method of ['GET', 'HEAD'] as const) {
+        const response = await new NodeAdapter().send({
+          requestURL: `${baseURL}/x`,
+          method,
+          headers: {},
+        });
+
+        expect(response.body).toBeNull();
+      }
+    },
+  );
+});

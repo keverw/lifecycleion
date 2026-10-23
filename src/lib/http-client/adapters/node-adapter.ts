@@ -1926,8 +1926,11 @@ export class NodeAdapter implements HTTPAdapter {
                 // Copied once, into a fresh array: `Buffer.concat` and a copy of its
                 // result held the body twice over.
                 // Empty bytes for a body that arrived empty, as FetchAdapter and
-                // XHRAdapter hand one over; `null` only for an answer with no body.
-                body: concatChunks(chunks, loadedBytes),
+                // XHRAdapter hand one over; `null` for an answer with no body (`HEAD`,
+                // `204`, `205`, `304`), as they hand that over.
+                body: hasResponseBody(request.method, status)
+                  ? concatChunks(chunks, loadedBytes)
+                  : null,
               });
             });
 
