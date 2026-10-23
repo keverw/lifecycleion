@@ -3313,7 +3313,10 @@ function normalizeCRL(
   const last = lastParsedCRLs.get(owner);
   if (last !== undefined && isSameCRLInput(last.input, crl)) {
     // A buffer that normalized to itself is passed on as itself again - the one now
-    // given, which holds the same bytes - rather than as the copy kept here.
+    // given, which holds the same bytes - rather than as the copy kept here. Only when it
+    // starts at the start of its memory, as normalizing it would have required: one at
+    // an offset (a `subarray`) is copied there, since Bun's `tls` reads a view from the
+    // start of its memory - and the copy kept here is that copy.
     return last.isPassedThrough && Buffer.isBuffer(crl) && crl.byteOffset === 0
       ? crl
       : last.normalized;
@@ -3339,14 +3342,16 @@ function normalizeCRL(
   // to the caller's own, which goes out as it is now, and a later value with the same
   // bytes in another buffer was answered with that one - which its owner may since have
   // reused for something else.
-  const owned = Array.isArray(normalized)
-    ? normalized.map(ownCRLEntry)
-    : ownCRLEntry(normalized);
-  lastParsedCRLs.set(owner, {
-    input: copyCRLInput(crl),
-    normalized: owned,
-    isPassedThrough: normalized === crl,
-  });
+  // One copy, not two: a value that normalized to itself keeps its input copy as its
+  // normalized form too.
+  const input = copyCRLInput(crl);
+  const isPassedThrough = normalized === crl;
+  const owned = isPassedThrough
+    ? (input as string | Buffer)
+    : Array.isArray(normalized)
+      ? normalized.map(ownCRLEntry)
+      : ownCRLEntry(normalized);
+  lastParsedCRLs.set(owner, { input, normalized: owned, isPassedThrough });
 
   return normalized;
 }

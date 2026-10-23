@@ -888,6 +888,26 @@ describe('XHRAdapter', () => {
     expect(response.status).toBe(200);
   });
 
+  test('PR review round 28: a compressed body well past the limit is still refused mid-download', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/x',
+      method: 'GET',
+      headers: {},
+      maxResponseBytes: 1000,
+    });
+
+    lastXHR.readyState = 3;
+    lastXHR.status = 200;
+    lastXHR.getAllResponseHeadersResult =
+      'content-type: text/plain\r\ncontent-encoding: gzip\r\n';
+    // Far past what a coding adds to incompressible data: refused now, not at `load`.
+    lastXHR.simulateDownloadProgress(50_000, 0);
+    const response = await promise;
+
+    expect(response.streamErrorCode).toBe('response_too_large');
+    expect(lastXHR.abortCalled).toBe(true);
+  });
+
   test('PR review round 15: a missing method is refused rather than sent as "undefined"', async () => {
     const outcome = await new XHRAdapter()
       .send({

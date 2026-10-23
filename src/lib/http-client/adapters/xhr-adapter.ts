@@ -326,15 +326,21 @@ export class XHRAdapter implements HTTPAdapter {
 
       xhr.addEventListener('progress', (event) => {
         // Stopped as soon as the download passes the limit, rather than once the whole
-        // body has been buffered. `loaded` counts the bytes as they arrived, so only for a
-        // body that arrives as it is decoded: a compressed one's encoded bytes say
-        // nothing of the limit, which counts decoded ones - an incompressible body is a
-        // little larger encoded - and `load` checks its decoded size instead.
+        // body has been buffered. `loaded` counts the bytes as they arrived: the decoded
+        // ones for a body sent without a content coding. A compressed body's encoded
+        // bytes run a little past its decoded size only when it is incompressible -
+        // framing, a few bytes a block - so it is stopped once they pass the limit by
+        // more than that, and `load` checks its decoded size exactly.
         if (didExceedMaxResponseBytes) {
           return;
         }
 
-        if (event.loaded > maxResponseBytes && !isContentEncoded(xhr)) {
+        if (
+          event.loaded >
+          (isContentEncoded(xhr)
+            ? maxEncodedResponseBytes(maxResponseBytes)
+            : maxResponseBytes)
+        ) {
           refuseTooLargeBody();
           return;
         }
@@ -528,6 +534,16 @@ export class XHRAdapter implements HTTPAdapter {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * The most encoded bytes a body within `maxResponseBytes` decoded can arrive as: the
+ * limit, plus what a coding adds to incompressible input - gzip's and deflate's stored
+ * blocks 5 bytes in 65,535, brotli's and zstd's less, a header and trailer - with room
+ * to spare: a tenth of a percent, and a kilobyte.
+ */
+function maxEncodedResponseBytes(maxResponseBytes: number): number {
+  return maxResponseBytes + Math.ceil(maxResponseBytes / 1000) + 1024;
+}
 
 /**
  * Whether the response names a content coding other than `identity`, so the bytes the

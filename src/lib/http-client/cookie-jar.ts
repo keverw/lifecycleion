@@ -16,6 +16,31 @@ import { isNullish } from '../internal/is-nullish';
 // hosts like `-edge.example.com` set cookies the jar otherwise discarded.
 const HOSTNAME_PATTERN = /^[a-zA-Z0-9_-]+(\.[a-zA-Z0-9_-]+)*$/;
 
+/**
+ * `maxAge` and `expires` held to {@link MAX_COOKIE_LIFETIME_SECONDS} from `createdAt`:
+ * only the fields over it, so one within it, or absent, is left as given.
+ */
+function capLifetime(
+  cookie: Pick<Cookie, 'maxAge' | 'expires'>,
+  createdAt: number,
+): Partial<Pick<Cookie, 'maxAge' | 'expires'>> {
+  const capped: Partial<Pick<Cookie, 'maxAge' | 'expires'>> = {};
+
+  if (
+    typeof cookie.maxAge === 'number' &&
+    cookie.maxAge > MAX_COOKIE_LIFETIME_SECONDS
+  ) {
+    capped.maxAge = MAX_COOKIE_LIFETIME_SECONDS;
+  }
+
+  const latest = createdAt + MAX_COOKIE_LIFETIME_SECONDS * 1000;
+  if (cookie.expires instanceof Date && cookie.expires.getTime() > latest) {
+    capped.expires = new Date(latest);
+  }
+
+  return capped;
+}
+
 /** A request host prepared for matching against many cookie domains. */
 interface PreparedHost {
   host: string;
@@ -381,6 +406,10 @@ export class CookieJar {
       createdAt,
       domain: normalizedDomain,
       path,
+      // Capped as a `Set-Cookie` is (RFC 6265bis's 400 days), from the cookie's own
+      // creation: a jar restored through `fromJSON` from before the cap kept a 10-year
+      // lifetime.
+      ...capLifetime(input, createdAt),
     };
 
     const key = this.cookieKey(

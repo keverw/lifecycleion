@@ -5378,7 +5378,7 @@ describe('maxResponseBytes', () => {
   ] as const;
 
   for (const [name, makeAdapter] of adapters) {
-    test(`${name}: a buffered body over the limit fails as response_too_large, keeping its status, and is not retried`, async () => {
+    test(`${name}: a buffered body over the limit fails as response_too_large, keeping its status, retried as its status asks`, async () => {
       hits.delete('/big-503');
       const client = new HTTPClient({
         adapter: makeAdapter(),
@@ -5402,8 +5402,9 @@ describe('maxResponseBytes', () => {
       expect(builder.error?.cause?.message).toContain(
         'Response body exceeds maxResponseBytes (100); raise maxResponseBytes',
       );
-      expect(builder.error?.isRetriesExhausted).toBe(false);
-      expect(hits.get('/big-503')).toBe(1);
+      // A `503` asks for a retry, and none of its oversized body reached the caller.
+      expect(builder.error?.isRetriesExhausted).toBe(true);
+      expect(hits.get('/big-503')).toBe(3);
     });
 
     test(`${name}: a body within the limit is delivered`, async () => {
@@ -9572,4 +9573,23 @@ test('PR review round 27: a zstd body of two frames in one write decodes whole',
       expect(response.body).toBe('hello world');
     },
   );
+});
+
+test("PR review round 28: setCookie caps a lifetime at 400 days from the cookie's creation", () => {
+  const jar = new CookieJar();
+  const createdAt = Date.now();
+  const tenYears = 10 * 365 * 24 * 60 * 60;
+  jar.setCookie({
+    name: 'a',
+    value: '1',
+    domain: 'example.com',
+    createdAt,
+    maxAge: tenYears,
+    expires: new Date(createdAt + tenYears * 1000),
+  });
+
+  const [stored] = jar.getAllCookies();
+  const cap = 400 * 24 * 60 * 60;
+  expect(stored.maxAge).toBe(cap);
+  expect(stored.expires?.getTime()).toBe(createdAt + cap * 1000);
 });

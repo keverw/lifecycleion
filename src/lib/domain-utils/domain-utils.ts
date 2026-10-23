@@ -314,6 +314,20 @@ export function matchesWildcardDomain(
   domain: string,
   pattern: string,
 ): boolean {
+  return matchesWildcardDomainIn(domain, pattern, true);
+}
+
+/**
+ * {@link matchesWildcardDomain}, its pattern compiled through the shared cache when
+ * `isCached` - false for a pattern from a list longer than the cache, which scanned in
+ * order would evict, entry by entry, the one the next scan needs first (see
+ * `cachedEntry`).
+ */
+function matchesWildcardDomainIn(
+  domain: string,
+  pattern: string,
+  isCached: boolean,
+): boolean {
   const normalizedDomain = normalizeDomain(domain);
 
   if (normalizedDomain === '') {
@@ -322,7 +336,7 @@ export function matchesWildcardDomain(
 
   // From the shared cache: a fixed allowlist checked on every request compiled each
   // pattern - IDNA per label, a Public Suffix List lookup - every time.
-  const compiled = compiledWildcardPattern(pattern, true);
+  const compiled = compiledWildcardPattern(pattern, isCached);
 
   return (
     compiled !== undefined &&
@@ -354,6 +368,15 @@ export function matchesWildcardDomain(
 export function matchesWildcardOrigin(
   origin: string,
   pattern: string,
+): boolean {
+  return matchesWildcardOriginIn(origin, pattern, true);
+}
+
+/** {@link matchesWildcardOrigin}, its pattern cached as `isCached` says (see above). */
+function matchesWildcardOriginIn(
+  origin: string,
+  pattern: string,
+  isCached: boolean,
 ): boolean {
   // Read as the parser reads its text, as `normalizeOrigin` reads it; see `toOriginText`.
   const originText = toOriginText(origin);
@@ -456,7 +479,7 @@ export function matchesWildcardOrigin(
     }
 
     // Check domain pattern using direct domain matching
-    return matchesWildcardDomain(normalizedHostname, domainPattern);
+    return matchesWildcardDomainIn(normalizedHostname, domainPattern, isCached);
   }
 
   // Handle domain wildcard patterns (including multi-label patterns)
@@ -467,7 +490,11 @@ export function matchesWildcardOrigin(
       return false;
     }
 
-    return matchesWildcardDomain(normalizedHostname, normalizedPattern);
+    return matchesWildcardDomainIn(
+      normalizedHostname,
+      normalizedPattern,
+      isCached,
+    );
   }
 
   return false;
@@ -1468,17 +1495,20 @@ export function matchesOriginList(
     return false;
   }
 
+  // A list longer than the shared pattern cache is not cached there: see `cachedEntry`.
+  const isCached = cleaned.length <= MAX_COMPILED_WILDCARD_PATTERNS;
+
   return cleaned.some((allowed) => {
     // Global wildcard: single "*" matches any origin - delegate to matchesWildcardOrigin for proper validation
     if (allowed === '*') {
-      return matchesWildcardOrigin(origin, '*');
+      return matchesWildcardOriginIn(origin, '*', isCached);
     }
 
     if (allowed.includes('*')) {
       // Avoid double-normalizing/parsing; wildcard matcher handles parsing + normalization itself
       // We pass the raw origin/pattern here (vs normalized in the non-wildcard path) because
       // the wildcard matcher needs to parse the origin as a URL for protocol/host extraction
-      return matchesWildcardOrigin(origin, allowed);
+      return matchesWildcardOriginIn(origin, allowed, isCached);
     }
 
     if (allowed === 'null') {
@@ -1540,13 +1570,15 @@ export function matchesCORSCredentialsList(
   const cleaned = allowedOrigins.map((s) => s.trim()).filter(Boolean);
 
   const allowWildcard = !!options.allowWildcardSubdomains;
+  // A list longer than the shared pattern cache is not cached there: see `cachedEntry`.
+  const isCached = cleaned.length <= MAX_COMPILED_WILDCARD_PATTERNS;
 
   for (const allowed of cleaned) {
     // Optional wildcard support for credentials lists (subdomain patterns only)
     if (allowWildcard && allowed.includes('*')) {
       if (
         isCredentialsSafeWildcardOriginPattern(allowed) &&
-        matchesWildcardOrigin(origin, allowed)
+        matchesWildcardOriginIn(origin, allowed, isCached)
       ) {
         return true;
       }

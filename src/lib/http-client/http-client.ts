@@ -2994,7 +2994,7 @@ export class BaseHTTPClient {
             ? adapterResponse.isRetryable === false
               ? ('adapter_veto' as const)
               : adapterResponse.isStreamError &&
-                  !isBodyDecodeFailure(adapterResponse)
+                  !isStatusOnlyStreamError(adapterResponse)
                 ? ('stream_error' as const)
                 : !isMethodReplayable
                   ? ('non_idempotent_method' as const)
@@ -3002,14 +3002,15 @@ export class BaseHTTPClient {
             : undefined;
 
         // Check if should retry based on status code.
-        // Stream failures are terminal even when status is retryable (e.g. 0). Except a
-        // body that only failed to decode: the server's answer arrived whole, and its
-        // status asks for a retry as it would with a readable body.
+        // Stream failures are terminal even when status is retryable (e.g. 0). Except
+        // where only the body failed and none of it reached the caller - see
+        // `isStatusOnlyStreamError` - so its status asks for a retry as it would with a
+        // readable body.
         if (
           policy &&
           adapterResponse.isRetryable !== false &&
           (!adapterResponse.isStreamError ||
-            isBodyDecodeFailure(adapterResponse)) &&
+            isStatusOnlyStreamError(adapterResponse)) &&
           isMethodReplayable &&
           RETRYABLE_STATUS_CODES.has(adapterResponse.status) &&
           !cancelSignal.aborted
@@ -4943,6 +4944,21 @@ function describeRequestPath(value: unknown): string {
   }
 
   return typeof value;
+}
+
+/**
+ * Whether a stream-error response failed only in its body, none of which reached the
+ * caller, so its status is the whole answer: a body that failed to decode, or one past
+ * `maxResponseBytes` that the adapter stopped reading - a `503` with an oversized
+ * maintenance page asks for a retry as one with a small page does.
+ */
+function isStatusOnlyStreamError(response: AdapterResponse): boolean {
+  return (
+    isBodyDecodeFailure(response) ||
+    (response.isStreamError === true &&
+      response.isStreamed !== true &&
+      response.streamErrorCode === 'response_too_large')
+  );
 }
 
 /**

@@ -375,22 +375,17 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
     //
     // A cut-off zstd frame, followed the same way: Node's and Bun's zstd decoders end
     // cleanly on one, handing over what they decoded, where gunzip, brotli and inflate
-    // fail. The frame boundaries are walked over the bytes each zstd stage is fed.
+    // fail. Read off the frame walker each zstd stage already follows its input with
+    // (see `FramedZstdDecompress`).
     const fedBytes = this.decoders.map(() => 0);
     fedBytes[0] = first.length;
-    const zstdFrames = this.decodeOrder.map((coding) =>
-      coding === 'zstd' ? new ZstdFrameWalker() : undefined,
-    );
-    zstdFrames[0]?.feed(first);
     this.res.on('data', (chunk: Buffer) => {
       fedBytes[0] = (fedBytes[0] ?? 0) + chunk.length;
-      zstdFrames[0]?.feed(chunk);
     });
     for (const [index, decoder] of this.decoders.entries()) {
       if (index + 1 < fedBytes.length) {
         decoder.on('data', (chunk: Buffer) => {
           fedBytes[index + 1] = (fedBytes[index + 1] ?? 0) + chunk.length;
-          zstdFrames[index + 1]?.feed(chunk);
         });
       }
 
@@ -402,13 +397,18 @@ class DecodedResponseBody extends EventEmitter implements ResponseBodySource {
         const consumed: unknown = (decoder as { bytesWritten?: unknown })
           .bytesWritten;
 
-        const frames = zstdFrames[index];
+        const frames =
+          decoder instanceof FramedZstdDecompress ? decoder.frames : undefined;
         if (typeof consumed === 'number' && consumed < (fedBytes[index] ?? 0)) {
-          // Left unread after the one data frame, skippable frames (RFC 8878 metadata)
+          // Left unread after the data frames, skippable frames (RFC 8878 metadata)
           // carry no content: the body is whole. Each frame reaches the decoder in a write
-          // of its own (see `FramedZstdDecompress`), so a second data frame is read, not
-          // left; anything else left is trailing bytes.
-          if (frames?.dataFrameCount === 1 && frames.isWellFormedToEnd) {
+          // of its own (see `FramedZstdDecompress`), so a data frame is read, not left;
+          // anything else left is trailing bytes.
+          if (
+            frames !== undefined &&
+            frames.dataFrameCount >= 1 &&
+            frames.isWellFormedToEnd
+          ) {
             return;
           }
 
@@ -771,8 +771,9 @@ class SniffingInflate extends Transform {
  * through, as `SniffingInflate` passes it.
  */
 class FramedZstdDecompress extends Transform {
+  /** The frame walker that follows every byte this stage is fed. */
+  public readonly frames = new ZstdFrameWalker();
   private readonly inner: Decoder = (createZstdDecompress as () => Decoder)();
-  private readonly frames = new ZstdFrameWalker();
   private didInnerEnd = false;
 
   constructor() {
