@@ -1134,7 +1134,7 @@ export class CookieJar {
             if (MAX_AGE_PATTERN.test(attrValue)) {
               cookie.maxAge = Math.min(
                 parseInt(attrValue, 10),
-                MAX_COOKIE_LIFETIME_SECONDS,
+                Number.MAX_SAFE_INTEGER,
               );
             }
             break;

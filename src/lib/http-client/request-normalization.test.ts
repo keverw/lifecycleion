@@ -7305,7 +7305,7 @@ function stubResponse(): http.IncomingMessage {
 
 test('round 140 review: a throwing failure listener stays contained; a body torn down by one holds nothing', async () => {
   const res = stubResponse();
-  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const { source } = createResponseBodySource(res, 'gzip');
   let didTearDown = false;
   source.onFailure?.(() => {
     throw new Error('listener failed');
@@ -7332,8 +7332,6 @@ test('round 140 review: onFailure replays a failure held before it subscribed', 
   const res = stubResponse();
   const { source } = createResponseBodySource(
     res,
-    'GET',
-    200,
     Array.from({ length: 6 }, () => 'gzip').join(','),
   );
   const told: Error[] = [];
@@ -7350,7 +7348,7 @@ test('round 140 review 2: exact and wildcard entries agree on an over-long label
   );
 
   const res = stubResponse();
-  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const { source } = createResponseBodySource(res, 'gzip');
   const told: Error[] = [];
   source.onFailure?.((error) => told.push(error));
   source.on('error', () => undefined);
@@ -7362,7 +7360,7 @@ test('round 140 review 2: exact and wildcard entries agree on an over-long label
 
 test('round 140 review 3: a raw error held before onFailure subscribes is not replayed to it', async () => {
   const res = stubResponse();
-  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const { source } = createResponseBodySource(res, 'gzip');
   // No reader: the raw error is held.
   (res as unknown as PassThrough).emit('error', new Error('socket reset'));
   const told: Error[] = [];
@@ -7373,7 +7371,7 @@ test('round 140 review 3: a raw error held before onFailure subscribes is not re
 
 test('round 140 review 3: a decoding failure after the raw end reaches the reader before close', async () => {
   const res = stubResponse();
-  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const { source } = createResponseBodySource(res, 'gzip');
   const events: string[] = [];
   source.on('error', () => events.push('error'));
   source.on('close', () => events.push('close'));
@@ -7391,8 +7389,6 @@ test('round 140 review 4: a held decoding failure is told once per subscription,
   const res = stubResponse();
   const { source } = createResponseBodySource(
     res,
-    'GET',
-    200,
     Array.from({ length: 6 }, () => 'gzip').join(','),
   );
   const told: Error[] = [];
@@ -7419,7 +7415,7 @@ test('round 140 review 6: a throwing failure listener is reported on the live an
   try {
     // Live: a corrupt body found failing after subscribing.
     const live = stubResponse();
-    const liveBody = createResponseBodySource(live, 'GET', 200, 'gzip').source;
+    const liveBody = createResponseBodySource(live, 'gzip').source;
     liveBody.onFailure?.(() => {
       throw new Error('live listener failed');
     });
@@ -7431,8 +7427,6 @@ test('round 140 review 6: a throwing failure listener is reported on the live an
     const replay = stubResponse();
     const replayBody = createResponseBodySource(
       replay,
-      'GET',
-      200,
       Array.from({ length: 6 }, () => 'gzip').join(','),
     ).source;
     replayBody.onFailure?.(() => {
@@ -7448,8 +7442,6 @@ test('round 140 review 6: a throwing failure listener is reported on the live an
   const res = stubResponse();
   const body = createResponseBodySource(
     res,
-    'GET',
-    200,
     Array.from({ length: 6 }, () => 'gzip').join(','),
   ).source;
   const told: Error[] = [];
@@ -7482,7 +7474,7 @@ test('round 140 review 7: an oversized wildcard pattern or bracketed host is ref
 
 test('round 140 review 8: a pause asked before the first byte holds the decoded body', async () => {
   const res = stubResponse();
-  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const { source } = createResponseBodySource(res, 'gzip');
   const chunks: Buffer[] = [];
   source.pause();
   source.on('data', (chunk: Buffer) => chunks.push(chunk));
@@ -7509,7 +7501,7 @@ test('round 140 review 8: a pause asked before the first byte holds the decoded 
 
 test('round 140 review 9: an empty body paused before it ends holds its end until resumed', async () => {
   const res = stubResponse();
-  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const { source } = createResponseBodySource(res, 'gzip');
   const events: string[] = [];
   source.pause();
   source.on('data', () => events.push('data'));
@@ -7529,7 +7521,7 @@ test('round 140 review 9: an empty body paused before it ends holds its end unti
 
 test('round 140 review 9: an error after a held end does not overtake it', async () => {
   const res = stubResponse();
-  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const { source } = createResponseBodySource(res, 'gzip');
   const events: string[] = [];
   source.pause();
   source.on('data', () => undefined);
@@ -7577,7 +7569,7 @@ test('round 140 review 9: the length guard reads Unicode dots as dots on every p
 
 test('round 140 review 10: a paused body cut short delivers its close without a resume', async () => {
   const res = stubResponse();
-  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const { source } = createResponseBodySource(res, 'gzip');
   const events: string[] = [];
   source.pause();
   source.on('data', () => undefined);
@@ -7589,7 +7581,7 @@ test('round 140 review 10: a paused body cut short delivers its close without a 
 
 test('round 140 review 10: an error held behind a paused end is read by heldError, and let go on destroy', async () => {
   const res = stubResponse();
-  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const { source } = createResponseBodySource(res, 'gzip');
   source.pause();
   source.on('data', () => undefined);
   source.on('error', () => undefined);
@@ -7624,7 +7616,7 @@ test('round 140 review 10: a registered host filter matches by its normalized pa
 
 test('round 140 review 10: an error held before a reader attaches is not overtaken by a paused end', async () => {
   const res = stubResponse();
-  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const { source } = createResponseBodySource(res, 'gzip');
   const events: string[] = [];
   (res as unknown as PassThrough).emit('error', new Error('socket reset'));
   source.pause();
@@ -7642,7 +7634,7 @@ test('round 140 review 10: an error held before a reader attaches is not overtak
 
 test('round 140 review 10: a body paused again before the release holds its end again', async () => {
   const res = stubResponse();
-  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const { source } = createResponseBodySource(res, 'gzip');
   const events: string[] = [];
   source.pause();
   source.on('data', () => undefined);
@@ -7660,7 +7652,7 @@ test('round 140 review 10: a body paused again before the release holds its end 
 
 test('round 140 review 11: a paused gzip body cut short mid-body delivers its close without a resume', async () => {
   const res = stubResponse();
-  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const { source } = createResponseBodySource(res, 'gzip');
   const events: string[] = [];
   source.on('data', () => undefined);
   source.on('aborted', () => events.push('aborted'));
@@ -9685,7 +9677,7 @@ test('PR review round 30: NodeAdapter hands over an empty body as empty bytes, a
 
 test('PR review round 31: a decoded body resumed with no reader drains, as a raw response does', async () => {
   const res = new PassThrough() as unknown as http.IncomingMessage;
-  const { source } = createResponseBodySource(res, 'GET', 200, 'gzip');
+  const { source } = createResponseBodySource(res, 'gzip');
   let didEnd = false;
   source.on('end', () => {
     didEnd = true;
@@ -9717,4 +9709,50 @@ test('PR review round 31: NodeAdapter hands over no body for an answer that has 
       }
     },
   );
+});
+
+test('PR review round 32: junk or a bad gzip trailer in a later chunk is a stream error', async () => {
+  const junk = Buffer.alloc(1000, 'j');
+  const stackedBody = zlib.gzipSync(zlib.brotliCompressSync('hello'));
+  // The gzip CRC corrupted, in a chunk sent after the inner brotli stream has ended.
+  stackedBody[stackedBody.length - 8] ^= 0xff;
+  const bodies: Record<string, [string, Buffer, Buffer]> = {
+    br: ['br', zlib.brotliCompressSync('hello'), junk],
+    deflate: ['deflate', zlib.deflateSync('hello'), junk],
+    raw: ['deflate', zlib.deflateRawSync('hello'), junk],
+    stacked: [
+      'br, gzip',
+      stackedBody.subarray(0, stackedBody.length - 8),
+      stackedBody.subarray(stackedBody.length - 8),
+    ],
+  };
+  const server = http.createServer((req, res) => {
+    const [encoding, first, later] = bodies[(req.url ?? '/').slice(1)] ?? [
+      'identity',
+      Buffer.from('x'),
+      Buffer.alloc(0),
+    ];
+    res.writeHead(200, {
+      'content-type': 'text/plain',
+      'content-encoding': encoding,
+    });
+    res.write(first);
+    setTimeout(() => {
+      res.end(later);
+    }, 50);
+  });
+  await new Promise<void>((resolve) => server.listen(0, resolve));
+  const baseURL = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  try {
+    const client = new HTTPClient({ adapter: new NodeAdapter(), baseURL });
+    for (const kind of Object.keys(bodies)) {
+      const response = await client.get(`/${kind}`).send();
+      expect({ kind, isStreamError: response.isStreamError }).toEqual({
+        kind,
+        isStreamError: true,
+      });
+    }
+  } finally {
+    server.close();
+  }
 });

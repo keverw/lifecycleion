@@ -18,7 +18,6 @@ import { Transform, type TransformCallback } from 'node:stream';
 import * as zlib from 'node:zlib';
 import { RESPONSE_DECODE_ERROR_KEY } from '../consts';
 import { reportCallbackError } from '../../safe-handle-callback';
-import { hasResponseBody } from './response-limit';
 
 /** The encodings NodeAdapter asks for and decodes, as `fetch` asks for them. */
 export const ACCEPTED_CONTENT_ENCODINGS = 'gzip, deflate, br';
@@ -71,19 +70,18 @@ const createZstdDecompress = (
 /**
  * The body source for `res`: the response itself, or - when it carries a body encoded with
  * codings this adapter decodes - a decoded view of it, with `release` to let go of the
- * decoding on a teardown. A `HEAD` answer, a `204` / `205` / `304` and an informational
- * status have no body to decode (see `hasResponseBody`), and an unknown coding hands the body over as it came. A stacked
- * coding (`gzip, br`, or a repeated `Content-Encoding` Node joined) is decoded in reverse
- * order, as `fetch` decodes it; `identity` is skipped.
+ * decoding on a teardown. `contentEncoding` is `undefined` for a body not to decode - an
+ * answer with none (see `hasResponseBody`), or one asked for as sent - and an unknown
+ * coding hands the body over as it came. A stacked coding (`gzip, br`, or a repeated
+ * `Content-Encoding` Node joined) is decoded in reverse order, as `fetch` decodes it;
+ * `identity` is skipped.
  */
 export function createResponseBodySource(
   res: http.IncomingMessage,
-  method: string,
-  status: number,
   contentEncoding: string | string[] | undefined,
 ): { source: ResponseBodySource; isDecoded: boolean; release: () => void } {
   const raw = { source: res, isDecoded: false, release: () => undefined };
-  if (!hasResponseBody(method, status) || contentEncoding === undefined) {
+  if (contentEncoding === undefined) {
     return raw;
   }
 
@@ -670,14 +668,94 @@ function isZlibHeader(bytes: Buffer): boolean {
 }
 
 /**
+ * A decoder that hands its input to an inner one and passes the inner one's output on: for
+ * a decoder that must look at its input before or while the inner one reads it. The
+ * inner decoder's backpressure is passed through - it is paused while this stream's
+ * reader is, so a stacked bomb is no more eager than a plain one - its error destroys this
+ * stream, and this stream ends once the inner one has.
+ */
+abstract class InnerDecoderTransform<
+  Inner extends Decoder = Decoder,
+> extends Transform {
+  protected inner: Inner | undefined;
+  private didInnerEnd = false;
+
+  /** Whether the inner decoder has ended - for a body read whole, or one it stopped short of. */
+  protected get hasInnerEnded(): boolean {
+    return this.didInnerEnd;
+  }
+
+  public override _read(size: number): void {
+    this.inner?.resume();
+    super._read(size);
+  }
+
+  public override _destroy(
+    error: Error | null,
+    callback: (error?: Error | null) => void,
+  ): void {
+    this.inner?.destroy();
+    callback(error);
+  }
+
+  /** Make `inner` the decoder this stream feeds and reads from. */
+  protected attachInner(inner: Inner): Inner {
+    inner.once('end', () => {
+      this.didInnerEnd = true;
+    });
+    inner.on('data', (decoded: Buffer) => {
+      if (!this.push(decoded)) {
+        inner.pause();
+      }
+    });
+    inner.on('error', (error: Error) => {
+      this.destroy(error);
+    });
+    this.inner = inner;
+
+    return inner;
+  }
+
+  /** Hand `pieces` to the inner decoder, each as its own write, then call back. */
+  protected writeInner(pieces: Buffer[], callback: TransformCallback): void {
+    const inner = this.inner as Inner;
+    const writeNext = (): void => {
+      const piece = pieces.shift();
+      if (piece === undefined) {
+        callback();
+        return;
+      }
+
+      if (inner.write(piece)) {
+        writeNext();
+      } else {
+        inner.once('drain', writeNext);
+      }
+    };
+
+    writeNext();
+  }
+
+  /** End the inner decoder, if there is one, and call back once it has ended. */
+  protected endInner(callback: () => void): void {
+    if (this.inner === undefined || this.didInnerEnd) {
+      callback();
+      return;
+    }
+
+    this.inner.once('end', callback);
+    this.inner.end();
+  }
+}
+
+/**
  * A `deflate` decoder that tells zlib-wrapped from raw deflate by the first byte it is
  * given, as undici's inflate stage does - for a `deflate` stacked inside another coding,
- * whose bytes only exist once the outer one is decoded. Backpressure is passed through:
- * the inner inflater is paused while this stream's reader is, so a stacked bomb is no
- * more eager than a plain one.
+ * whose bytes only exist once the outer one is decoded.
  */
-class SniffingInflate extends Transform {
-  private inner: zlib.Inflate | zlib.InflateRaw | undefined;
+class SniffingInflate extends InnerDecoderTransform<
+  zlib.Inflate | zlib.InflateRaw
+> {
   /** Bytes handed to the inner inflater, read against what it consumed. */
   private fedBytes = 0;
   /** A lone first byte, held until a second tells zlib from raw deflate (`isZlibHeader`). */
@@ -705,28 +783,14 @@ class SniffingInflate extends Transform {
       chunk = head;
     }
 
-    const inner = this.inner as zlib.Inflate | zlib.InflateRaw;
-
     // Input after the deflate stream has ended: trailing bytes.
-    if (inner.readableEnded) {
+    if (this.hasInnerEnded) {
       callback(trailingBytesError());
       return;
     }
 
     this.fedBytes += chunk.length;
-
-    if (inner.write(chunk)) {
-      callback();
-    } else {
-      inner.once('drain', () => {
-        callback();
-      });
-    }
-  }
-
-  public override _read(size: number): void {
-    this.inner?.resume();
-    super._read(size);
+    this.writeInner([chunk], callback);
   }
 
   public override _flush(callback: TransformCallback): void {
@@ -740,51 +804,21 @@ class SniffingInflate extends Transform {
       inner.write(head);
     }
 
-    if (this.inner === undefined) {
-      callback();
-      return;
-    }
-
     // Trailing bytes, told by count as the other decoders are: the inner inflater ends
     // when its deflate stream does and drops the rest, and whether that happened before or
     // after this flush is down to when it got to the last chunk.
-    if (this.inner.readableEnded) {
-      callback(this.hasLeftover() ? trailingBytesError() : undefined);
-      return;
-    }
-
-    const inner = this.inner;
-    inner.once('end', () => {
+    this.endInner(() => {
       callback(this.hasLeftover() ? trailingBytesError() : undefined);
     });
-    inner.end();
-  }
-
-  public override _destroy(
-    error: Error | null,
-    callback: (error?: Error | null) => void,
-  ): void {
-    this.inner?.destroy();
-    callback(error);
   }
 
   /** The inner inflater, zlib or raw by the first bytes it will be given. */
   private startInner(head: Buffer): zlib.Inflate | zlib.InflateRaw {
-    const inner = isZlibHeader(head)
-      ? zlib.createInflate({ flush: zlib.constants.Z_SYNC_FLUSH })
-      : zlib.createInflateRaw({ flush: zlib.constants.Z_SYNC_FLUSH });
-
-    inner.on('data', (decoded: Buffer) => {
-      if (!this.push(decoded)) {
-        inner.pause();
-      }
-    });
-    inner.on('error', (error: Error) => {
-      this.destroy(error);
-    });
-    this.inner = inner;
-
-    return inner;
+    return this.attachInner(
+      isZlibHeader(head)
+        ? zlib.createInflate({ flush: zlib.constants.Z_SYNC_FLUSH })
+        : zlib.createInflateRaw({ flush: zlib.constants.Z_SYNC_FLUSH }),
+    );
   }
 
   /** Whether the inner inflater stopped short of what it was given. */
@@ -798,35 +832,20 @@ class SniffingInflate extends Transform {
  * a write that holds several and leaves the rest unread, where it reads each frame of its
  * own write - so a body of several frames (valid zstd, RFC 8878) decoded or failed by how
  * the network split it. Split at the frame boundaries `ZstdFrameWalker` follows, it
- * decodes whole however it arrives, on Node and Bun alike. Backpressure is passed
- * through, as `SniffingInflate` passes it.
+ * decodes whole however it arrives, on Node and Bun alike.
  */
-class FramedZstdDecompress extends Transform {
+class FramedZstdDecompress extends InnerDecoderTransform {
   /** The frame walker that follows every byte this stage is fed. */
   public readonly frames = new ZstdFrameWalker();
-  private readonly inner: Decoder = (createZstdDecompress as () => Decoder)();
-  private didInnerEnd = false;
 
   constructor() {
     super();
-
-    this.inner.once('end', () => {
-      this.didInnerEnd = true;
-    });
-
-    this.inner.on('data', (decoded: Buffer) => {
-      if (!this.push(decoded)) {
-        this.inner.pause();
-      }
-    });
-    this.inner.on('error', (error: Error) => {
-      this.destroy(error);
-    });
+    this.attachInner((createZstdDecompress as () => Decoder)());
   }
 
   /** What the inner decoder consumed, read against what it was fed (see `attachDecoders`). */
   public get bytesWritten(): unknown {
-    return (this.inner as { bytesWritten?: unknown }).bytesWritten;
+    return (this.inner as { bytesWritten?: unknown } | undefined)?.bytesWritten;
   }
 
   public override _transform(
@@ -844,46 +863,13 @@ class FramedZstdDecompress extends Transform {
       pieces.push(chunk.subarray(start));
     }
 
-    const writeNext = (): void => {
-      const piece = pieces.shift();
-      if (piece === undefined) {
-        callback();
-        return;
-      }
-
-      if (this.inner.write(piece)) {
-        writeNext();
-      } else {
-        this.inner.once('drain', writeNext);
-      }
-    };
-
-    writeNext();
-  }
-
-  public override _read(size: number): void {
-    this.inner.resume();
-    super._read(size);
+    this.writeInner(pieces, callback);
   }
 
   public override _flush(callback: TransformCallback): void {
-    if (this.didInnerEnd) {
-      callback();
-      return;
-    }
-
-    this.inner.once('end', () => {
+    this.endInner(() => {
       callback();
     });
-    this.inner.end();
-  }
-
-  public override _destroy(
-    error: Error | null,
-    callback: (error?: Error | null) => void,
-  ): void {
-    this.inner.destroy();
-    callback(error);
   }
 }
 

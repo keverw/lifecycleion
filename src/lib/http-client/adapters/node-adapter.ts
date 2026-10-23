@@ -1482,6 +1482,9 @@ export class NodeAdapter implements HTTPAdapter {
           const responseTask = (async () => {
             const status = res.statusCode ?? 0;
             const headers = normalizeResponseHeaders(res.headers);
+            // A `HEAD` answer, a `204` / `205` / `304` and an informational status carry
+            // no body: none to decode, measure or hand over.
+            const hasBody = hasResponseBody(request.method, status);
             // The body as `fetch` would hand it over: decoded when the server compressed
             // it. Headers are reported as received, `Content-Encoding` included, as
             // `fetch` reports them.
@@ -1491,10 +1494,10 @@ export class NodeAdapter implements HTTPAdapter {
               release,
             } = createResponseBodySource(
               res,
-              request.method,
-              status,
               // With `decompress: false`, no coding is decoded: the body as it arrived.
-              isDecompressing ? headers['content-encoding'] : undefined,
+              isDecompressing && hasBody
+                ? headers['content-encoding']
+                : undefined,
             );
             releaseResponseBody = release;
 
@@ -1837,7 +1840,7 @@ export class NodeAdapter implements HTTPAdapter {
             const declaredLength = declaredBodyLength(headers, isDecoded);
 
             if (
-              hasResponseBody(request.method, status) &&
+              hasBody &&
               declaredLength !== undefined &&
               declaredLength > maxResponseBytes
             ) {
@@ -1928,9 +1931,7 @@ export class NodeAdapter implements HTTPAdapter {
                 // Empty bytes for a body that arrived empty, as FetchAdapter and
                 // XHRAdapter hand one over; `null` for an answer with no body (`HEAD`,
                 // `204`, `205`, `304`), as they hand that over.
-                body: hasResponseBody(request.method, status)
-                  ? concatChunks(chunks, loadedBytes)
-                  : null,
+                body: hasBody ? concatChunks(chunks, loadedBytes) : null,
               });
             });
 

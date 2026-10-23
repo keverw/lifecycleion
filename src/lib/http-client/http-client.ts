@@ -160,6 +160,25 @@ function methodRefusal(message: string): Error {
   return error;
 }
 
+/** The headers carried across a cross-origin redirect (see `_sanitizeRedirectRequest`). */
+const CROSS_ORIGIN_SAFE_HEADERS: ReadonlySet<string> = new Set([
+  'accept',
+  // Not a credential, and with NodeAdapter's `decompress: false` the caller's own is what
+  // asks for the encoding to save as sent; the adapter's own is never carried.
+  'accept-encoding',
+  'accept-language',
+  'content-encoding',
+  'content-language',
+  'content-type',
+  'user-agent',
+  'range',
+  'if-range',
+  'if-match',
+  'if-none-match',
+  'if-modified-since',
+  'if-unmodified-since',
+]);
+
 /** The `adapter_error` message when the caller's cookie jar threw on a response. */
 const COOKIE_JAR_FAILURE_MESSAGE =
   'Cookie jar failed to process response headers';
@@ -2064,28 +2083,10 @@ export class BaseHTTPClient {
       // `range` and the conditional headers are kept as well: they say which part or
       // version of the resource is wanted, not who is asking, and a resumed download sent
       // to a CDN without its `range` gets the whole body back.
-      const safelisted = new Set([
-        'accept',
-        // Not a credential, and with NodeAdapter's `decompress: false` the caller's own is
-        // what asks for the encoding to save as sent; the adapter's own is never carried.
-        'accept-encoding',
-        'accept-language',
-        'content-encoding',
-        'content-language',
-        'content-type',
-        'user-agent',
-        'range',
-        'if-range',
-        'if-match',
-        'if-none-match',
-        'if-modified-since',
-        'if-unmodified-since',
-      ]);
-
       for (const [key, value] of Object.entries(request.headers)) {
         const lower = lowerCaseHeaderName(key);
 
-        if (safelisted.has(lower)) {
+        if (CROSS_ORIGIN_SAFE_HEADERS.has(lower)) {
           safeHeaders[lower] = value;
         }
       }
