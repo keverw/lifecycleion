@@ -973,20 +973,27 @@ function extractFormData(fd: FormData): MockFormData {
     // `__proto__` file would become the record's prototype.
     if (typeof value === 'string') {
       defineEntry(fields, key, value);
-      defineEntry(allFields, key, [
-        ...(Object.hasOwn(allFields, key) ? allFields[key] : []),
-        value,
-      ]);
+      appendEntry(allFields, key, value);
     } else {
       defineEntry(files, key, value);
-      defineEntry(allFiles, key, [
-        ...(Object.hasOwn(allFiles, key) ? allFiles[key] : []),
-        value,
-      ]);
+      appendEntry(allFiles, key, value);
     }
   }
 
   return { fields, files, allFields, allFiles };
+}
+
+/** Add `value` to the list under `key`, made once per key and defined as `defineEntry` defines it. */
+function appendEntry<T>(
+  record: Record<string, T[]>,
+  key: string,
+  value: T,
+): void {
+  if (Object.hasOwn(record, key)) {
+    record[key].push(value);
+  } else {
+    defineEntry(record, key, [value]);
+  }
 }
 
 function parseRequestBody(

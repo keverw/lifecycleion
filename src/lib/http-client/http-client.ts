@@ -39,6 +39,7 @@ import {
   buildURL,
   extractHostname,
   isBrowserEnvironment,
+  isCrossOrigin,
   mergeObservedHeaders,
   mergeHeaders,
   normalizeMergedHeaderValue,
@@ -1324,10 +1325,7 @@ export class BaseHTTPClient {
             // `_sanitizeRedirectRequest` had already been handed to the caller's observers
             // and written into the redirect history. See `stripURLCredentials`.
             if (
-              this._isCrossOriginRedirect(
-                attemptResult.sentRequest.requestURL,
-                redirectURL,
-              )
+              isCrossOrigin(attemptResult.sentRequest.requestURL, redirectURL)
             ) {
               redirectURL = stripURLCredentials(redirectURL);
             }
@@ -2043,10 +2041,7 @@ export class BaseHTTPClient {
     },
   ): ResolvedRequest {
     const { fromURL, cookieJar } = params;
-    const isCrossOrigin = this._isCrossOriginRedirect(
-      fromURL,
-      request.requestURL,
-    );
+    const isCrossOriginHop = isCrossOrigin(fromURL, request.requestURL);
 
     // Credentials in the target URL itself, stripped on the same rule `Authorization` is.
     //
@@ -2062,13 +2057,13 @@ export class BaseHTTPClient {
     //
     // Same-origin userinfo is left alone: it is the origin the caller addressed, which is
     // also the one that may already have been carrying it.
-    const requestURL = isCrossOrigin
+    const requestURL = isCrossOriginHop
       ? stripURLCredentials(request.requestURL)
       : request.requestURL;
 
     let headers: Record<string, string | string[]>;
 
-    if (isCrossOrigin) {
+    if (isCrossOriginHop) {
       const safeHeaders: Record<string, string | string[]> = {};
       // Cross-origin safety: strip every header outside a short allow-list when the
       // redirect crosses origins (scheme + host + port). Stricter than fetch, which
@@ -2131,7 +2126,7 @@ export class BaseHTTPClient {
       } else {
         delete headers.cookie;
       }
-    } else if (isCrossOrigin) {
+    } else if (isCrossOriginHop) {
       // Without a jar, never let a caller-supplied Cookie header survive a
       // cross-origin redirect or redirect-interceptor rewrite.
       delete headers.cookie;
@@ -2142,16 +2137,6 @@ export class BaseHTTPClient {
       requestURL,
       headers,
     };
-  }
-
-  private _isCrossOriginRedirect(fromURL: string, toURL: string): boolean {
-    try {
-      const from = new URL(fromURL);
-      const to = new URL(toURL);
-      return from.origin !== to.origin;
-    } catch {
-      return true;
-    }
   }
 
   /**
@@ -2693,7 +2678,7 @@ export class BaseHTTPClient {
             body: sentRequest.body ?? null,
             signal: attemptSignal,
             // Forward the builder's streaming factory to each adapter attempt.
-            // NodeAdapter invokes it only for a 200 response, letting the caller
+            // NodeAdapter invokes it only for a 200 response with a body, letting the caller
             // create attempt-local writable state when a retry happens.
             // Called on the receiver the adapter calls it on, so a factory reading `this`
             // reads what it always did.

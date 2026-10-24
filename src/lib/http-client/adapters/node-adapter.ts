@@ -60,7 +60,11 @@ import {
   lowerCaseHeaderName,
   materializeRequestHeaders,
 } from '../internal/header-utils';
-import { mergeObservedHeaders, resolveDetectedRedirectURL } from '../utils';
+import {
+  isCrossOrigin,
+  mergeObservedHeaders,
+  resolveDetectedRedirectURL,
+} from '../utils';
 import { defineEntry } from '../../internal/define-entry';
 // Shared error normalization preserves Error instances and wraps other thrown values.
 // Non-Error values receive a "Non-error value thrown: <description>" message, with the
@@ -1503,12 +1507,14 @@ export class NodeAdapter implements HTTPAdapter {
 
             // --- Response streaming (NodeAdapter-only feature) ---
             //
-            // Only offered on HTTP 200 responses. All other statuses bypass the
-            // factory and return a normal buffered response. This prevents:
+            // Only offered on HTTP 200 responses that carry a body - a `HEAD` answer
+            // has none, and a factory called for it opened (or truncated) a sink for
+            // nothing. All others bypass the factory and return a normal buffered
+            // response. This prevents:
             //   1. Accidentally streaming error bodies (you'd lose the error detail)
             //   2. The mistake of buffering a large 200 into memory when you forgot
             //      to check the status — factory null = cancel, not buffer
-            if (request.streamResponse && status === 200) {
+            if (request.streamResponse && status === 200 && hasBody) {
               // Per-attempt abort controller for the stream context signal. This is
               // separate from the top-level request signal so we can fire it on local
               // write failures (disk full, etc.) without aborting the request itself —
@@ -2462,15 +2468,7 @@ function isCrossOriginRedirectHop(
   initialURL: string | undefined,
   requestURL: URL,
 ): boolean {
-  if (initialURL === undefined) {
-    return false;
-  }
-
-  try {
-    return new URL(initialURL).origin !== requestURL.origin;
-  } catch {
-    return true;
-  }
+  return initialURL !== undefined && isCrossOrigin(initialURL, requestURL);
 }
 
 // ---------------------------------------------------------------------------

@@ -359,7 +359,8 @@ export interface StreamResponseCancel {
 }
 
 /**
- * Factory called by NodeAdapter after response headers arrive on a 200.
+ * Factory called by NodeAdapter after response headers arrive on a 200 with a body (not
+ * a `HEAD` answer).
  * Return a WritableLike to pipe the body into it, null to cancel, or
  * `{ cancel: true, reason?: string }` to cancel with an optional reason string
  * surfaced on HTTPClientError.cancelReason.

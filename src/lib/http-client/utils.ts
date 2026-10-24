@@ -222,6 +222,22 @@ export function resolveAbsoluteURL(url: string, baseURL?: string): string {
 }
 
 /**
+ * Whether `toURL` is on a different origin (scheme, host and port) from `fromURL` - the
+ * rule a redirect hop's credentials, socket path and client certificate follow. A URL
+ * that does not parse counts as cross-origin: nothing is carried on a doubt.
+ */
+export function isCrossOrigin(fromURL: string, toURL: string | URL): boolean {
+  try {
+    return (
+      new URL(fromURL).origin !==
+      (typeof toURL === 'string' ? new URL(toURL) : toURL).origin
+    );
+  } catch {
+    return true;
+  }
+}
+
+/**
  * The same URL with any `user:pass@` userinfo removed.
  *
  * Userinfo in a URL is `Authorization: Basic` by another name: `NodeAdapter` copies it

@@ -9756,3 +9756,31 @@ test('PR review round 32: junk or a bad gzip trailer in a later chunk is a strea
     server.close();
   }
 });
+
+test('PR review round 33: a HEAD answered 200 does not call the streamResponse factory', async () => {
+  await withRawServer(
+    (res) => {
+      res.writeHead(200, { 'content-length': '5' });
+      res.end();
+    },
+    async (baseURL) => {
+      let factoryCalls = 0;
+      const response = await new HTTPClient({
+        adapter: new NodeAdapter(),
+        baseURL,
+      })
+        .head('/x')
+        .streamResponse(() => {
+          factoryCalls++;
+          return null;
+        })
+        .send();
+
+      expect(factoryCalls).toBe(0);
+      expect(response.status).toBe(200);
+      expect(response.isStreamed).toBe(false);
+      expect(response.isCancelled).toBe(false);
+      expect(response.body).toBeNull();
+    },
+  );
+});
