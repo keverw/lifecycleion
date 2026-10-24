@@ -360,6 +360,11 @@ export function stripCrossOriginURLCredentials(
  * Browser-aware absolute URL resolution used by HTTPClient before interceptors
  * and adapter dispatch. Starts with normal baseURL resolution, then falls back
  * to the current page/worker location when running in a browser-like runtime.
+ *
+ * That fallback resolves as `fetch` and XHR do, against the base URL as it stands:
+ * `api/start` on `https://app.test/dir/page` is `https://app.test/dir/api/start`. The
+ * trailing `/` {@link resolveAbsoluteURL} adds is for a configured `baseURL`, a prefix
+ * the path is appended to; a page's URL names a document, not a directory.
  */
 export function resolveAbsoluteURLForRuntime(
   url: string,
@@ -382,7 +387,11 @@ export function resolveAbsoluteURLForRuntime(
     return resolved;
   }
 
-  return resolveAbsoluteURL(resolved, browserBase);
+  try {
+    return new URL(resolved, browserBase).href;
+  } catch {
+    return resolved;
+  }
 }
 
 function getBrowserResolutionBase(): string | undefined {
@@ -773,8 +782,12 @@ function hasXMLHttpRequestGlobal(): boolean {
   );
 }
 
-/** The first of a `Location` that fetch joined from repeated headers, or the value whole. */
-function firstJoinedLocation(value: string): string {
+/**
+ * The first of a `Location` that fetch or XHR joined from repeated headers, or the value
+ * whole. Split only where what follows the `, ` starts as a URL target does - a path or
+ * `scheme://`: a single value with a raw space (`/files/Smith, John.pdf`) is kept whole.
+ */
+export function firstJoinedLocation(value: string): string {
   const separator = value.search(/, (?:\/|[a-z][a-z\d+.-]*:\/\/)/i);
 
   return separator === -1 ? value : value.slice(0, separator);
@@ -800,6 +813,11 @@ export function extractFetchHeaders(
       // when what follows the `, ` starts as a URL target does - a path or `scheme://`: a
       // single value with a raw space (`/files/Smith, John.pdf`) is kept whole and
       // percent-encoded when followed, as NodeAdapter and browsers follow it.
+      //
+      // Every other header is kept as fetch joined it, single-value ones included, as
+      // `fetch` itself exposes it: a `Content-Type` cannot be split at a comma safely - a
+      // quoted parameter may hold one - and the client's readers take the joined form (the
+      // first media type of a `Content-Type`, a `Content-Length` only when its values agree).
       defineEntry(
         result,
         lower,
@@ -1002,33 +1020,6 @@ export function detectedRedirectTarget(
   }
 }
 
-/**
- * Resolves a redirect target from response headers when the adapter can
- * observe a redirect response but the client may not follow it itself. See
- * {@link detectedRedirectTarget}.
- */
-export function resolveDetectedRedirectURL(
-  requestURL: string,
-  status: number,
-  headers: Record<string, string | string[]>,
-  baseURL?: string,
-): string | undefined {
-  if (!REDIRECT_STATUS_CODES.has(status)) {
-    return undefined;
-  }
-
-  const location = scalarHeader(headers, 'location');
-
-  if (!location) {
-    return undefined;
-  }
-
-  return detectedRedirectTarget(
-    location,
-    resolveAbsoluteURL(requestURL, baseURL),
-  );
-}
-
 /** The redirect fields of an answer: whether it was a redirect, and where it pointed. */
 export type AdapterRedirectFields = Pick<
   AdapterResponse,
@@ -1046,14 +1037,17 @@ export function derivedRedirectFields(
   status: number,
   headers: Record<string, string | string[]>,
 ): AdapterRedirectFields {
-  const detectedRedirectURL = resolveDetectedRedirectURL(
-    requestURL,
-    status,
-    headers,
-  );
+  if (!REDIRECT_STATUS_CODES.has(status)) {
+    return { wasRedirectDetected: false };
+  }
+
+  const location = scalarHeader(headers, 'location');
+  const detectedRedirectURL = location
+    ? detectedRedirectTarget(location, requestURL)
+    : undefined;
 
   return {
-    wasRedirectDetected: REDIRECT_STATUS_CODES.has(status),
+    wasRedirectDetected: true,
     ...(detectedRedirectURL ? { detectedRedirectURL } : {}),
   };
 }

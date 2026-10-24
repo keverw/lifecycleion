@@ -1252,3 +1252,32 @@ test('round 129: a File named "" is sent as filename="", one with no name as blo
   expect(body).toContain('name="unnamed"; filename="blob"');
   expect(calculateMultipartFormDataSize(fd, boundary)).toBe(getBody().length);
 });
+
+test('PR review round 36: a field appended mid-upload is refused before any of its bytes go out', async () => {
+  const fd = new FormData();
+  fd.append('first', 'one');
+  const { req, getBody } = makeCapture();
+  const boundary = generateMultipartBoundary();
+  const write = req.write.bind(req);
+  let didAppend = false;
+  req.write = (data, callback) => {
+    if (!didAppend) {
+      didAppend = true;
+      fd.append('late', 'two');
+    }
+
+    return write(data, callback);
+  };
+
+  let failure: unknown;
+  try {
+    await serializeMultipartFormData(fd, req, boundary);
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).toContain('more than its Content-Length');
+  // Only the first part's own delimiter: none of the appended part reached the wire.
+  expect(getBody().toString().split(`--${boundary}\r\n`).length - 1).toBe(1);
+});

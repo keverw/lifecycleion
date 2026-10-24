@@ -26,6 +26,7 @@ import type {
 } from '../types';
 import {
   derivedRedirectFields,
+  firstJoinedLocation,
   resolveAbsoluteURLForRuntime,
   stripURLCredentials,
   stripCrossOriginURLCredentials,
@@ -68,6 +69,14 @@ export class XHRAdapter implements HTTPAdapter {
     const dispatchedURL = stripCrossOriginURLCredentials(
       requestURL,
       initialURL,
+    );
+    // What a `Location` resolves against: the dispatched URL as the browser resolves it,
+    // so a relative one (this adapter driven directly) still reports where an unfollowed
+    // redirect pointed, as `didBrowserFollowRedirect` compares it.
+    const answeredURL = resolveAbsoluteURLForRuntime(
+      dispatchedURL,
+      undefined,
+      true,
     );
 
     return await new Promise((resolve, reject) => {
@@ -315,7 +324,7 @@ export class XHRAdapter implements HTTPAdapter {
         } else {
           resolve({
             status,
-            ...derivedRedirectFields(dispatchedURL, status, headers),
+            ...derivedRedirectFields(answeredURL, status, headers),
             headers,
             body: null,
             isStreamError: true,
@@ -420,7 +429,7 @@ export class XHRAdapter implements HTTPAdapter {
         if (body !== null && body.length > maxResponseBytes) {
           resolve({
             status,
-            ...derivedRedirectFields(dispatchedURL, status, responseHeaders),
+            ...derivedRedirectFields(answeredURL, status, responseHeaders),
             headers: responseHeaders,
             body: null,
             isStreamError: true,
@@ -445,7 +454,7 @@ export class XHRAdapter implements HTTPAdapter {
         // a real 3xx.
         resolve({
           status,
-          ...derivedRedirectFields(dispatchedURL, status, responseHeaders),
+          ...derivedRedirectFields(answeredURL, status, responseHeaders),
           headers: responseHeaders,
           body,
         });
@@ -636,7 +645,10 @@ function prepareBody(
  * into a single comma-joined line for most headers, but emits each `Set-Cookie`
  * value as its own line (per spec) to avoid ambiguity with the comma in cookie
  * values. Those are collected here as `string[]` to match the
- * `AdapterResponse.headers` contract.
+ * `AdapterResponse.headers` contract. Any other header given on more than one
+ * line - by an XHR outside a browser - is joined with `, ` as a browser joins
+ * it, so both forms read the same, and a repeated `Location` keeps its first
+ * value, as FetchAdapter keeps the first of one fetch joined.
  *
  * Note: browsers unconditionally block `Set-Cookie` and `Set-Cookie2` from
  * `getAllResponseHeaders()` per the XHR spec, so the `set-cookie` array
@@ -687,10 +699,25 @@ function parseXHRResponseHeaders(
         result['set-cookie'] = [existing, value];
       }
     } else {
+      const existing = Object.hasOwn(result, key) ? result[key] : undefined;
+
       // Defined, not assigned, as every other adapter does: a `__proto__` header
       // would otherwise hit the prototype setter and vanish.
-      defineEntry(result, key, value);
+      defineEntry(
+        result,
+        key,
+        existing === undefined ? value : `${existing as string}, ${value}`,
+      );
     }
+  }
+
+  // A repeated `Location` keeps its first value, rather than standing as the one mangled
+  // URL `a,%20b` that an XHR outside a browser would follow and `detectedRedirectURL`
+  // would report. See `firstJoinedLocation`.
+  const location = result['location'];
+
+  if (typeof location === 'string') {
+    result['location'] = firstJoinedLocation(location);
   }
 
   return result;

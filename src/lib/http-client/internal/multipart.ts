@@ -206,17 +206,33 @@ export async function serializeMultipartFormData(
   req.setHeader('Content-Length', totalSize.toString());
 
   let uploadedBytes = 0;
+  const closingDelimiter = `--${boundary}--\r\n`;
+  // What the parts may take: the closing delimiter is always written last, so a part
+  // that reaches into its bytes is already more than was counted.
+  const closingBytes = Buffer.byteLength(closingDelimiter);
+  const partsBudget = totalSize - closingBytes;
+  // Refused writes name the bytes held for the closing delimiter too: a part refused for
+  // reaching into them names a total that is still within `Content-Length`.
+  const overrunMessage = (written: number, refused: number): string =>
+    `Request body source produced more than its Content-Length of ${String(totalSize)}: ${String(written)} bytes written and a further ${String(refused)} refused, with ${String(closingBytes)} kept for the closing delimiter`;
 
-  const write = (data: string | Buffer | Uint8Array): Promise<void> =>
+  const write = (
+    data: string | Buffer | Uint8Array,
+    budget = partsBudget,
+  ): Promise<void> =>
     new Promise<void>((resolve, reject) => {
       // Refused before it is written: bytes past the `Content-Length` already on the wire
       // would be read by the server as the start of another message. Reached when the
       // FormData grew after the sizing pass - a field appended mid-upload - as the
-      // `File` check below is for a file that grew.
-      if (uploadedBytes + Buffer.byteLength(data) > totalSize) {
+      // `File` check below is for a file that grew. Held to the parts' share of it, not
+      // the whole: a new part's `--boundary` line fits in the bytes kept for the closing
+      // delimiter, and would otherwise go out before its headers were refused.
+      if (uploadedBytes + Buffer.byteLength(data) > budget) {
         reject(
           sourceMismatch(
-            `Request body source produced more than its Content-Length of ${String(totalSize)}: ${String(uploadedBytes)} bytes written and a further ${String(Buffer.byteLength(data))} refused`,
+            budget === partsBudget
+              ? overrunMessage(uploadedBytes, Buffer.byteLength(data))
+              : `Request body source produced more than its Content-Length of ${String(totalSize)}: ${String(uploadedBytes)} bytes written and a further ${String(Buffer.byteLength(data))} refused`,
           ),
         );
 
@@ -438,7 +454,7 @@ export async function serializeMultipartFormData(
             // need no undoing - which is why only this side needs the early exit.
             if (
               partBytes + chunk.byteLength > partSize ||
-              uploadedBytes + chunk.byteLength > totalSize
+              uploadedBytes + chunk.byteLength > partsBudget
             ) {
               await cancelReaderQuietly(reader);
 
@@ -449,7 +465,7 @@ export async function serializeMultipartFormData(
               // a write that did not happen. The post-write check below says
               // `uploadedBytes` for the same reason.
               throw sourceMismatch(
-                `Request body source produced more than its Content-Length of ${String(totalSize)}: ${String(uploadedBytes)} bytes written and a further ${String(chunk.byteLength)} refused`,
+                overrunMessage(uploadedBytes, chunk.byteLength),
               );
             }
 
@@ -495,7 +511,7 @@ export async function serializeMultipartFormData(
   }
 
   // Closing delimiter that tells the server there are no more parts.
-  await write(`--${boundary}--\r\n`);
+  await write(closingDelimiter, totalSize);
 
   // Bytes, not just `req.destroyed`, matching what `writeRequestBodyChunked` checks.
   // `Content-Length` is computed in the sizing pass from each `Blob.size`, but this pass

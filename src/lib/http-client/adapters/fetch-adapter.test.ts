@@ -260,6 +260,26 @@ describe('FetchAdapter', () => {
     expect(response.detectedRedirectURL).toBe('https://evil.test/next');
   });
 
+  test('PR review round 36: a redirect of a relative request URL reports its target', async () => {
+    (globalThis as any).document = { baseURI: 'https://app.test/dir/page' };
+    (globalThis as any).fetch = () =>
+      Promise.resolve(
+        new Response(null, {
+          status: 302,
+          headers: { location: 'next' },
+        }),
+      );
+
+    const response = await new FetchAdapter().send({
+      requestURL: 'api/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.wasRedirectDetected).toBe(true);
+    expect(response.detectedRedirectURL).toBe('https://app.test/dir/api/next');
+  });
+
   test('keeps URL userinfo when the initial and request origins match', async () => {
     let capturedURL = '';
 

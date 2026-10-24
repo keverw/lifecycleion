@@ -88,6 +88,10 @@ export class FetchAdapter implements HTTPAdapter {
     // failure to no end. Only where there is a base to resolve against; elsewhere `fetch`
     // resolves it, or refuses it, as it always did.
     const probeURL = resolveProbeURL(dispatchedURL);
+    // What a `Location` resolves against: the URL as `fetch` resolved it, so a relative
+    // one (this adapter driven directly under a global `location`) still reports where
+    // a redirect pointed.
+    const answeredURL = probeURL ?? dispatchedURL;
 
     if (probeURL !== undefined && typeof Request === 'function') {
       let builtMethod: string;
@@ -237,7 +241,7 @@ export class FetchAdapter implements HTTPAdapter {
       return {
         status: response.status,
         ...derivedRedirectFields(
-          dispatchedURL,
+          answeredURL,
           response.status,
           responseHeadersForBody,
         ),
@@ -259,7 +263,7 @@ export class FetchAdapter implements HTTPAdapter {
       return {
         status: response.status,
         ...derivedRedirectFields(
-          dispatchedURL,
+          answeredURL,
           response.status,
           responseHeadersForBody,
         ),
@@ -282,7 +286,7 @@ export class FetchAdapter implements HTTPAdapter {
       // Server/runtime manual redirects reach this path as real 3xx responses.
       // Browser opaque redirects returned above never reach this branch.
       ...derivedRedirectFields(
-        dispatchedURL,
+        answeredURL,
         response.status,
         responseHeadersForBody,
       ),

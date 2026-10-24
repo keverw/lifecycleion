@@ -972,6 +972,107 @@ describe('XHRAdapter', () => {
     }
   });
 
+  test('PR review round 36: a repeated Location keeps its first value, joined or on lines of its own', async () => {
+    for (const rawHeaders of [
+      'location: /a, /b\r\n',
+      'location: /a\r\nLocation: /b\r\n',
+    ]) {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://api.test/start',
+        method: 'GET',
+        headers: {},
+      });
+
+      lastXHR.status = 302;
+      lastXHR.responseURL = 'https://api.test/start';
+      lastXHR.getAllResponseHeadersResult = rawHeaders;
+      lastXHR.response = textBody('');
+      lastXHR.simulateLoad();
+      const response = await promise;
+
+      expect(response.headers.location).toBe('/a');
+      expect(response.detectedRedirectURL).toBe('https://api.test/a');
+    }
+  });
+
+  test('PR review round 36: a header on lines of its own is joined, as a browser joins it', async () => {
+    const promise = new XHRAdapter().send({
+      requestURL: 'https://api.test/data',
+      method: 'GET',
+      headers: {},
+    });
+
+    lastXHR.status = 200;
+    lastXHR.response = textBody('ok');
+    lastXHR.getAllResponseHeadersResult = 'x-multi: a\r\nX-Multi: b\r\n';
+    lastXHR.simulateLoad();
+    const response = await promise;
+
+    expect(response.headers['x-multi']).toBe('a, b');
+  });
+
+  test('PR review round 36: an unfollowed redirect of a relative request URL reports its target', async () => {
+    const originalDocument = (globalThis as Record<string, unknown>).document;
+    (globalThis as Record<string, unknown>).document = {
+      baseURI: 'https://app.test/dir/page',
+    };
+
+    try {
+      const promise = new XHRAdapter().send({
+        requestURL: '/api/start',
+        method: 'GET',
+        headers: {},
+      });
+
+      lastXHR.status = 302;
+      lastXHR.responseURL = 'https://app.test/api/start';
+      lastXHR.getAllResponseHeadersResult = 'location: next\r\n';
+      lastXHR.response = textBody('');
+      lastXHR.simulateLoad();
+      const response = await promise;
+
+      expect(response.wasRedirectDetected).toBe(true);
+      expect(response.detectedRedirectURL).toBe('https://app.test/api/next');
+    } finally {
+      if (originalDocument === undefined) {
+        delete (globalThis as Record<string, unknown>).document;
+      } else {
+        (globalThis as Record<string, unknown>).document = originalDocument;
+      }
+    }
+  });
+
+  test('PR review round 36: a path-relative request URL is not taken for a followed redirect', async () => {
+    const originalDocument = (globalThis as Record<string, unknown>).document;
+    (globalThis as Record<string, unknown>).document = {
+      baseURI: 'https://app.test/dir/page',
+    };
+
+    try {
+      const promise = new XHRAdapter().send({
+        requestURL: 'api/start',
+        method: 'GET',
+        headers: {},
+      });
+
+      // Where the browser sent it: resolved against the page as a document, not a directory.
+      lastXHR.status = 200;
+      lastXHR.responseURL = 'https://app.test/dir/api/start';
+      lastXHR.response = textBody('ok');
+      lastXHR.simulateLoad();
+      const response = await promise;
+
+      expect(response.status).toBe(200);
+      expect(response.wasRedirectDetected).toBe(false);
+    } finally {
+      if (originalDocument === undefined) {
+        delete (globalThis as Record<string, unknown>).document;
+      } else {
+        (globalThis as Record<string, unknown>).document = originalDocument;
+      }
+    }
+  });
+
   test('PR review round 15: a missing method is refused rather than sent as "undefined"', async () => {
     const outcome = await new XHRAdapter()
       .send({

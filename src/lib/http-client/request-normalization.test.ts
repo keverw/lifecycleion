@@ -10011,3 +10011,49 @@ test('PR review round 35: a late cancel at a Location that does not resolve coun
     });
   }
 });
+
+test('PR review round 36: in a browser, a path still relative after baseURL resolves against the page as fetch does', async () => {
+  const originalFetch = globalThis.fetch;
+  const saved = {
+    window: Object.getOwnPropertyDescriptor(globalThis, 'window'),
+    document: Object.getOwnPropertyDescriptor(globalThis, 'document'),
+  };
+  const sentURLs: string[] = [];
+  (globalThis as { fetch: unknown }).fetch = (url: string) => {
+    sentURLs.push(url);
+    return Promise.resolve(new Response('ok', { status: 200 }));
+  };
+  Object.defineProperty(globalThis, 'window', {
+    value: {},
+    configurable: true,
+    writable: true,
+  });
+  // A page URL names a document, not a directory: `fetch('v1/users')` from it requests
+  // `/dir/v1/users`.
+  Object.defineProperty(globalThis, 'document', {
+    value: { baseURI: 'https://app.test/dir/page' },
+    configurable: true,
+    writable: true,
+  });
+
+  try {
+    await new HTTPClient().get('v1/users').send();
+    await new HTTPClient({ baseURL: 'api' }).get('/users').send();
+    await new HTTPClient({ baseURL: '/api' }).get('users').send();
+
+    expect(sentURLs).toEqual([
+      'https://app.test/dir/v1/users',
+      'https://app.test/dir/api/users',
+      'https://app.test/api/users',
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    for (const [name, descriptor] of Object.entries(saved)) {
+      if (descriptor === undefined) {
+        delete (globalThis as Record<string, unknown>)[name];
+      } else {
+        Object.defineProperty(globalThis, name, descriptor);
+      }
+    }
+  }
+});

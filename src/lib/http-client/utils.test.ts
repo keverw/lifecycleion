@@ -3,6 +3,7 @@ import { CookieJar } from './cookie-jar';
 import {
   assertSupportedAdapterRuntimeAndConfig,
   buildURL,
+  derivedRedirectFields,
   extractFetchHeaders,
   extractHostname,
   isBrowserEnvironment,
@@ -13,7 +14,6 @@ import {
   normalizeAdapterResponseHeaders,
   normalizeHeaders,
   parseContentType,
-  resolveDetectedRedirectURL,
   resolveAbsoluteURL,
   resolveAbsoluteURLForRuntime,
   scalarHeader,
@@ -214,6 +214,26 @@ describe('resolveAbsoluteURLForRuntime', () => {
     expect(resolveAbsoluteURLForRuntime('/api/users', undefined, true)).toBe(
       'https://worker.test/api/users',
     );
+  });
+
+  test('PR review round 36: resolves a path-relative URL against the page as a document, as fetch does', () => {
+    (globalThis as Record<string, unknown>).window = {};
+    (globalThis as Record<string, unknown>).document = {
+      baseURI: 'https://app.test/dir/page',
+    };
+
+    expect(resolveAbsoluteURLForRuntime('api/start', undefined, true)).toBe(
+      'https://app.test/dir/api/start',
+    );
+    // A path the client has already joined to a relative baseURL (`buildURL`) resolves
+    // against the page the same way.
+    expect(resolveAbsoluteURLForRuntime('api/users', undefined, true)).toBe(
+      'https://app.test/dir/api/users',
+    );
+    // An absolute baseURL keeps its directory rule, ahead of the page.
+    expect(
+      resolveAbsoluteURLForRuntime('users', 'https://x.test/api', true),
+    ).toBe('https://x.test/api/users');
   });
 
   test('leaves relative paths unresolved on non-browser runtimes', () => {
@@ -875,55 +895,58 @@ describe('scalarHeader', () => {
   });
 });
 
-describe('resolveDetectedRedirectURL', () => {
+describe('derivedRedirectFields', () => {
   test('resolves an absolute location header', () => {
     expect(
-      resolveDetectedRedirectURL('https://example.com/start', 301, {
+      derivedRedirectFields('https://example.com/start', 301, {
         location: 'https://other.test/next',
       }),
-    ).toBe('https://other.test/next');
+    ).toEqual({
+      wasRedirectDetected: true,
+      detectedRedirectURL: 'https://other.test/next',
+    });
   });
 
   test('resolves a relative location header against the request URL', () => {
     expect(
-      resolveDetectedRedirectURL('https://example.com/start', 302, {
+      derivedRedirectFields('https://example.com/start', 302, {
         location: '/next',
-      }),
+      }).detectedRedirectURL,
     ).toBe('https://example.com/next');
   });
 
-  test('returns undefined for non-redirect statuses', () => {
+  test('reports no redirect for non-redirect statuses', () => {
     expect(
-      resolveDetectedRedirectURL('https://example.com/start', 200, {
+      derivedRedirectFields('https://example.com/start', 200, {
         location: '/next',
       }),
-    ).toBeUndefined();
+    ).toEqual({ wasRedirectDetected: false });
   });
 
-  test('returns undefined when location is missing', () => {
-    expect(
-      resolveDetectedRedirectURL('https://example.com/start', 301, {}),
-    ).toBeUndefined();
+  test('reports a redirect with no target when location is missing', () => {
+    expect(derivedRedirectFields('https://example.com/start', 301, {})).toEqual(
+      { wasRedirectDetected: true },
+    );
   });
 
   test('reports no target when the location cannot be resolved', () => {
     expect(
-      resolveDetectedRedirectURL('https://example.com/start', 301, {
+      derivedRedirectFields('https://example.com/start', 301, {
         location: 'http://[bad',
       }),
-    ).toBeUndefined();
+    ).toEqual({ wasRedirectDetected: true });
     expect(
-      resolveDetectedRedirectURL('not a url', 301, {
+      derivedRedirectFields('not a url', 301, {
         location: '%%%bad%%%',
       }),
-    ).toBeUndefined();
+    ).toEqual({ wasRedirectDetected: true });
   });
 
   test('resolves an absolute location when the request URL does not parse', () => {
     expect(
-      resolveDetectedRedirectURL('not a url', 301, {
+      derivedRedirectFields('not a url', 301, {
         location: 'https://ok.test/next',
-      }),
+      }).detectedRedirectURL,
     ).toBe('https://ok.test/next');
   });
 });
