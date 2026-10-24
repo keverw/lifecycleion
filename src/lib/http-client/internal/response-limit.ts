@@ -9,7 +9,8 @@ import {
   nonRetryableAdapterErrorFrom,
 } from './adapter-error';
 import { describeValue } from '../../internal/describe-value';
-import type { AdapterRequest } from '../types';
+import type { AdapterRequest, AdapterResponse } from '../types';
+import { derivedRedirectFields } from '../utils';
 import {
   presentsAsBinary,
   readBinaryByteLength,
@@ -85,6 +86,29 @@ export function makeResponseTooLargeError(
   return new Error(
     `Response body exceeds maxResponseBytes (${String(limit)}); raise maxResponseBytes${canStream ? ' or use streamResponse' : ''}`,
   );
+}
+
+/**
+ * The answer a browser adapter gives for a body past `maxResponseBytes`: a stream error
+ * with the real status and headers - the server answered, and what failed is taking
+ * delivery - and the redirect fields that status and `Location` carry, resolved against
+ * `answeredURL`, so a refused `3xx` still reports where it pointed.
+ */
+export function tooLargeAnswer(
+  answeredURL: string,
+  status: number,
+  headers: Record<string, string | string[]>,
+  maxResponseBytes: number,
+): AdapterResponse {
+  return {
+    status,
+    ...derivedRedirectFields(answeredURL, status, headers),
+    headers,
+    body: null,
+    isStreamError: true,
+    streamErrorCode: 'response_too_large',
+    errorCause: makeResponseTooLargeError(maxResponseBytes, false),
+  };
 }
 
 /**

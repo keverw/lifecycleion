@@ -279,20 +279,33 @@ describe('XHRAdapter', () => {
   });
 
   test('withholds userinfo from a protocol-relative cross-origin URL', async () => {
-    const promise = new XHRAdapter().send({
-      requestURL: '//user:hunter2@evil.test/collect',
-      initialURL: 'https://api.example.test/start',
-      method: 'GET',
-      headers: {},
-    });
+    const originalDocument = (globalThis as Record<string, unknown>).document;
+    (globalThis as Record<string, unknown>).document = {
+      baseURI: 'https://api.example.test/start',
+    };
 
-    lastXHR.status = 204;
-    lastXHR.responseURL = 'https://evil.test/collect';
-    lastXHR.simulateLoad();
-    const response = await promise;
+    try {
+      const promise = new XHRAdapter().send({
+        requestURL: '//user:hunter2@evil.test/collect',
+        initialURL: 'https://api.example.test/start',
+        method: 'GET',
+        headers: {},
+      });
 
-    expect(lastXHR.openArgs?.url).toBe('//evil.test/collect');
-    expect(response.wasRedirectDetected).toBe(false);
+      lastXHR.status = 204;
+      lastXHR.responseURL = 'https://evil.test/collect';
+      lastXHR.simulateLoad();
+      const response = await promise;
+
+      expect(lastXHR.openArgs?.url).toBe('https://evil.test/collect');
+      expect(response.wasRedirectDetected).toBe(false);
+    } finally {
+      if (originalDocument === undefined) {
+        delete (globalThis as Record<string, unknown>).document;
+      } else {
+        (globalThis as Record<string, unknown>).document = originalDocument;
+      }
+    }
   });
 
   test('sets responseType to arraybuffer', async () => {
@@ -2115,43 +2128,29 @@ describe('XHRAdapter', () => {
     }
   });
 
-  test('falls back to string comparison when the URLs cannot be parsed', async () => {
+  test('PR review round 40: a responseURL that does not parse is taken for a redirect, with no detectedRedirectURL', async () => {
     const adapter = new XHRAdapter();
     const promise = adapter.send({
-      // Not parseable as a URL, so redirect detection cannot normalize either
-      // side and compares the raw strings instead.
-      requestURL: 'not a url at all',
+      requestURL: 'https://api.test/data',
       method: 'GET',
       headers: {},
     });
 
     lastXHR.status = 200;
     lastXHR.response = textBody('ok');
+    // An absolute URL is what was opened, and a value that does not parse cannot name it.
     lastXHR.responseURL = 'not a url at all';
     lastXHR.simulateLoad();
 
     const response = await promise;
 
-    expect(response.wasRedirectDetected).toBe(false);
-    expect(response.status).toBe(200);
-  });
-
-  test('detects a redirect by string comparison when URLs cannot be parsed', async () => {
-    const adapter = new XHRAdapter();
-    const promise = adapter.send({
-      requestURL: 'not a url at all',
-      method: 'GET',
+    expect(response).toEqual({
+      status: 0,
+      wasRedirectDetected: true,
       headers: {},
+      body: null,
     });
-
-    lastXHR.status = 200;
-    lastXHR.response = textBody('ok');
-    lastXHR.responseURL = 'a different unparseable value';
-    lastXHR.simulateLoad();
-
-    const response = await promise;
-
-    expect(response.wasRedirectDetected).toBe(true);
+    expect(Object.hasOwn(response, 'detectedRedirectURL')).toBe(false);
   });
 
   test('returns empty headers object when getAllResponseHeaders returns empty string', async () => {
@@ -2170,28 +2169,6 @@ describe('XHRAdapter', () => {
     const response = await promise;
 
     expect(response.headers).toEqual({});
-  });
-
-  test('PR review round 39: a path-relative request URL with no page to resolve it is not taken for a redirect', async () => {
-    // No `document` or `location`: the URL stays relative, and the XHR resolves it itself.
-    expect((globalThis as Record<string, unknown>).document).toBeUndefined();
-    expect((globalThis as Record<string, unknown>).location).toBeUndefined();
-
-    const promise = new XHRAdapter().send({
-      requestURL: 'api/x',
-      method: 'GET',
-      headers: {},
-    });
-
-    lastXHR.status = 200;
-    lastXHR.responseURL = 'http://h.test/dir/api/x';
-    lastXHR.response = textBody('ok');
-    lastXHR.simulateLoad();
-    const response = await promise;
-
-    expect(response.status).toBe(200);
-    expect(response.wasRedirectDetected).toBe(false);
-    expect(new TextDecoder().decode(response.body as Uint8Array)).toBe('ok');
   });
 
   test('PR review round 39: an XHR with no upload sends without per-chunk upload progress', async () => {
@@ -2274,67 +2251,6 @@ describe('XHRAdapter', () => {
     expect(FakeXHR.instances[0]?.sentBody).toBeNull();
   });
 
-  test('PR review round 39: a root- or protocol-relative request URL with no page to resolve it still detects a followed redirect', async () => {
-    expect((globalThis as Record<string, unknown>).document).toBeUndefined();
-    expect((globalThis as Record<string, unknown>).location).toBeUndefined();
-
-    for (const requestURL of ['/start', '//h.test/start']) {
-      const promise = new XHRAdapter().send({
-        requestURL,
-        method: 'GET',
-        headers: {},
-      });
-
-      lastXHR.status = 200;
-      lastXHR.responseURL = 'https://h.test/login';
-      lastXHR.response = textBody('login page');
-      lastXHR.simulateLoad();
-      const response = await promise;
-
-      expect(response.status).toBe(0);
-      expect(response.wasRedirectDetected).toBe(true);
-      expect(response.detectedRedirectURL).toBe('https://h.test/login');
-    }
-  });
-
-  test('PR review round 39: a root-relative request URL answered where it was sent is not taken for a redirect', async () => {
-    const promise = new XHRAdapter().send({
-      requestURL: '/start',
-      method: 'GET',
-      headers: {},
-    });
-
-    lastXHR.status = 200;
-    lastXHR.responseURL = 'https://h.test/start';
-    lastXHR.response = textBody('ok');
-    lastXHR.simulateLoad();
-    const response = await promise;
-
-    expect(response.status).toBe(200);
-    expect(response.wasRedirectDetected).toBe(false);
-  });
-
-  test('PR review round 39: a relative request URL is compared as written when responseURL does not parse', async () => {
-    for (const [responseURL, isRedirect] of [
-      ['api/x', false],
-      ['api/elsewhere', true],
-    ] as const) {
-      const promise = new XHRAdapter().send({
-        requestURL: 'api/x',
-        method: 'GET',
-        headers: {},
-      });
-
-      lastXHR.status = 200;
-      lastXHR.responseURL = responseURL;
-      lastXHR.response = textBody('ok');
-      lastXHR.simulateLoad();
-      const response = await promise;
-
-      expect(response.wasRedirectDetected).toBe(isRedirect);
-    }
-  });
-
   test('PR review round 39: an XHR whose upload addEventListener throws is refused as non-retryable and takes its abort listener off the signal', async () => {
     let added = 0;
     let removed = 0;
@@ -2382,6 +2298,134 @@ describe('XHRAdapter', () => {
     expect(added).toBe(1);
     expect(removed).toBe(1);
     expect(FakeXHR.instances[0]?.sentBody).toBeNull();
+  });
+
+  test('PR review round 40: a relative request URL with no base to resolve it against is refused as non-retryable', async () => {
+    // No `document` or `location`: nothing to resolve the URL against.
+    expect((globalThis as Record<string, unknown>).document).toBeUndefined();
+    expect((globalThis as Record<string, unknown>).location).toBeUndefined();
+
+    for (const requestURL of [
+      '/start',
+      '//h.test/start',
+      'api/x',
+      'not a url',
+      'http://[::1',
+    ]) {
+      FakeXHR.instances = [];
+
+      const outcome = await new XHRAdapter()
+        .send({ requestURL, method: 'GET', headers: {} })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome).toBeInstanceOf(Error);
+      expect((outcome as unknown as Error).name).toBe('TypeError');
+      expect((outcome as unknown as Error).message).toBe(
+        'XHRAdapter request URL could not be resolved to an absolute URL (no document or location base, or not a valid URL)',
+      );
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      // Neither opened nor sent.
+      expect(FakeXHR.instances[0]?.openArgs ?? null).toBeNull();
+      expect(FakeXHR.instances[0]?.sentBody ?? null).toBeNull();
+    }
+  });
+
+  test('PR review round 40: userinfo is withheld from a protocol-relative URL that resolves to another origin', async () => {
+    const originalDocument = (globalThis as Record<string, unknown>).document;
+    // An `http:` page: `//u:p@api.test/x` is `http://api.test/x`, not the `https:` origin
+    // the request started on.
+    (globalThis as Record<string, unknown>).document = {
+      baseURI: 'http://api.test/page',
+    };
+
+    try {
+      const promise = new XHRAdapter().send({
+        requestURL: '//u:p@api.test/x',
+        initialURL: 'https://api.test/start',
+        method: 'GET',
+        headers: {},
+      });
+
+      lastXHR.status = 204;
+      lastXHR.responseURL = 'http://api.test/x';
+      lastXHR.simulateLoad();
+      const response = await promise;
+
+      expect(lastXHR.openArgs?.url).toBe('http://api.test/x');
+      expect(response.wasRedirectDetected).toBe(false);
+    } finally {
+      if (originalDocument === undefined) {
+        delete (globalThis as Record<string, unknown>).document;
+      } else {
+        (globalThis as Record<string, unknown>).document = originalDocument;
+      }
+    }
+  });
+
+  test('PR review round 40: same-origin userinfo is kept once resolved against the page', async () => {
+    const originalDocument = (globalThis as Record<string, unknown>).document;
+    (globalThis as Record<string, unknown>).document = {
+      baseURI: 'https://api.test/page',
+    };
+
+    try {
+      const promise = new XHRAdapter().send({
+        requestURL: '//u:p@api.test/x',
+        initialURL: 'https://api.test/start',
+        method: 'GET',
+        headers: {},
+      });
+
+      lastXHR.status = 204;
+      lastXHR.responseURL = 'https://api.test/x';
+      lastXHR.simulateLoad();
+      const response = await promise;
+
+      expect(lastXHR.openArgs?.url).toBe('https://u:p@api.test/x');
+      expect(response.wasRedirectDetected).toBe(false);
+    } finally {
+      if (originalDocument === undefined) {
+        delete (globalThis as Record<string, unknown>).document;
+      } else {
+        (globalThis as Record<string, unknown>).document = originalDocument;
+      }
+    }
+  });
+
+  test('PR review round 40: a root-relative request URL redirected to another host is detected', async () => {
+    const originalDocument = (globalThis as Record<string, unknown>).document;
+    (globalThis as Record<string, unknown>).document = {
+      baseURI: 'https://app.test/dir/page',
+    };
+
+    try {
+      const promise = new XHRAdapter().send({
+        requestURL: '/x',
+        method: 'GET',
+        headers: {},
+      });
+
+      // Same path and scheme, another host: only the host was redirected.
+      lastXHR.status = 200;
+      lastXHR.responseURL = 'https://other.test/x';
+      lastXHR.response = textBody('elsewhere');
+      lastXHR.simulateLoad();
+      const response = await promise;
+
+      expect(lastXHR.openArgs?.url).toBe('https://app.test/x');
+      expect(response.status).toBe(0);
+      expect(response.wasRedirectDetected).toBe(true);
+      expect(response.detectedRedirectURL).toBe('https://other.test/x');
+    } finally {
+      if (originalDocument === undefined) {
+        delete (globalThis as Record<string, unknown>).document;
+      } else {
+        (globalThis as Record<string, unknown>).document = originalDocument;
+      }
+    }
   });
 });
 

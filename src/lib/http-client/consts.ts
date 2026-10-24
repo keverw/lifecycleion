@@ -180,6 +180,12 @@ export const DEFAULT_REQUEST_ATTEMPT_HEADER = 'x-local-client-request-attempt';
 
 export const DEFAULT_USER_AGENT = 'lifecycleion-http-client';
 
+/**
+ * The base a path-only request URL is read against for MockAdapter: by the client, when
+ * no `baseURL` is configured, and by the adapter itself when driven directly with one.
+ */
+export const MOCK_ADAPTER_DEFAULT_BASE_URL = 'http://localhost';
+
 export const NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG =
   '_lifecycleion_non_retryable_http_client_callback_error';
 

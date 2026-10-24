@@ -34,7 +34,10 @@ import {
   adoptPromise,
   type PromiseResultBox,
 } from '../../internal/adopt-promise';
-import { MAX_COOKIE_LIFETIME_SECONDS } from '../consts';
+import {
+  MAX_COOKIE_LIFETIME_SECONDS,
+  MOCK_ADAPTER_DEFAULT_BASE_URL,
+} from '../consts';
 import {
   derivedRedirectFields,
   isPlainJSONBodyObject,
@@ -726,7 +729,7 @@ export class MockAdapter implements HTTPAdapter {
     return {
       status: mockResponse.status,
       ...derivedRedirectFields(
-        requestURL,
+        redirectBaseURL(requestURL),
         mockResponse.status,
         normalizedResponseHeaders,
       ),
@@ -748,6 +751,28 @@ export class MockAdapter implements HTTPAdapter {
 }
 
 // --- Helpers ---
+
+/**
+ * The URL a redirect's `Location` resolves against: the request URL, or - for a
+ * path-only one driven straight at the adapter, which has no origin of its own - that
+ * URL read against {@link MOCK_ADAPTER_DEFAULT_BASE_URL}, as the client reads a mock
+ * request with no `baseURL`. So `/start` answered with `Location: /next` reports
+ * `http://localhost/next`, as it does through the client.
+ */
+function redirectBaseURL(requestURL: string): string {
+  try {
+    new URL(requestURL);
+    return requestURL;
+  } catch {
+    // Path-only: read against the mock's default base below.
+  }
+
+  try {
+    return new URL(requestURL, MOCK_ADAPTER_DEFAULT_BASE_URL).href;
+  } catch {
+    return requestURL;
+  }
+}
 
 /**
  * Normalizes `MockResponse.streamError` to a `streamErrorCode`, or `undefined`

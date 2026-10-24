@@ -70,9 +70,16 @@ export async function writeRequestBodyChunked(
   }
 }
 
-function writeChunkWithBackpressure(
+/**
+ * Writes one chunk into `req` and resolves once the writable has accepted it - its write
+ * callback has run and, for a write that asked for one, its `'drain'` has arrived -
+ * calling `onAccepted` just before. Rejects when the stream errors, or closes with the
+ * chunk not yet accepted. Shared by `writeRequestBodyChunked` and
+ * `serializeMultipartFormData`, which count a chunk's bytes in `onAccepted`.
+ */
+export function writeChunkWithBackpressure(
   req: RequestBodyWritable,
-  chunk: Buffer,
+  chunk: string | Buffer | Uint8Array,
   onAccepted?: () => void,
 ): Promise<void> {
   return new Promise<void>((resolve, reject) => {
@@ -143,8 +150,7 @@ function writeChunkWithBackpressure(
       chunk,
       (error: Error | null | undefined): void => {
         if (error) {
-          // Guarded on the way in as well as marked on the way out, the same pair
-          // `serializeMultipartFormData`'s write callback keeps. This callback can fire
+          // Guarded on the way in as well as marked on the way out. This callback can fire
           // *after* `onClose` or `onError` already settled - a chunk under backpressure
           // whose socket dies delivers `'close'` first and the pending `ECONNRESET`
           // second - and running on regardless meant a second `cleanup()` and a second

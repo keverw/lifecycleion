@@ -23,7 +23,7 @@ import { knownBodyByteLength, uploadCompleteEvent } from '../internal/progress';
 import { isTLSCertificateError } from '../internal/tls-error-utils';
 import {
   hasResponseBody,
-  makeResponseTooLargeError,
+  tooLargeAnswer,
   parseContentLength,
 } from '../internal/response-limit';
 import type {
@@ -58,8 +58,17 @@ export class FetchAdapter implements HTTPAdapter {
       requestURL,
       initialURL,
     } = readAdapterRequestFields(request);
+    // A relative URL is resolved as `fetch` resolves it, where there is a base to resolve
+    // it against (see `resolveBrowserRequestURL`); elsewhere `fetch` resolves it, or
+    // refuses it, as it always did.
+    const resolvedURL = resolveBrowserRequestURL(requestURL);
+    // Credentials are withheld from the resolved URL, not the one written: `//u:p@host/x`
+    // on an `http:` page is an `http:` URL, another origin than an `https:` initial URL.
+    // The URL sent, checked below, and what a `Location` resolves against, so a relative
+    // one (this adapter driven directly under a global `location`) still reports where a
+    // redirect pointed.
     const dispatchedURL = stripCrossOriginURLCredentials(
-      requestURL,
+      resolvedURL ?? requestURL,
       initialURL,
     );
     // A caller's `Content-Length` is left to `fetch`, which frames the body itself:
@@ -83,15 +92,12 @@ export class FetchAdapter implements HTTPAdapter {
     // once; where it is not built, `fetch` materializes them inside its own `try`.
     let fetchHeaders: HeadersInit | undefined;
 
-    // A relative URL is checked too, resolved as `fetch` resolves it: unchecked, a header
-    // value or method `fetch` refuses came back as its `TypeError`, retried as a network
-    // failure to no end. Only where there is a base to resolve against; elsewhere `fetch`
-    // resolves it, or refuses it, as it always did.
+    // A relative URL is checked too, once resolved: unchecked, a header value or method
+    // `fetch` refuses came back as its `TypeError`, retried as a network failure to no end.
+    // Gated on the URL dispatched, not on `resolvedURL`: with no base, a network-path form
+    // carrying credentials cross-origin to `initialURL` (`\\u:p@host/x`) is stripped into
+    // an absolute URL that `fetch` sends, and is checked as one.
     const probeURL = resolveBrowserRequestURL(dispatchedURL);
-    // What a `Location` resolves against: the URL as `fetch` resolved it, so a relative
-    // one (this adapter driven directly under a global `location`) still reports where
-    // a redirect pointed.
-    const answeredURL = probeURL ?? dispatchedURL;
 
     if (probeURL !== undefined && typeof Request === 'function') {
       let builtMethod: string;
@@ -241,7 +247,7 @@ export class FetchAdapter implements HTTPAdapter {
       return {
         status: response.status,
         ...derivedRedirectFields(
-          answeredURL,
+          dispatchedURL,
           response.status,
           responseHeadersForBody,
         ),
@@ -260,19 +266,12 @@ export class FetchAdapter implements HTTPAdapter {
     // failed in transit does just above: the server answered, and what failed is taking
     // delivery. No terminal progress, for the reason a failed read reports none.
     if (rawBody === RESPONSE_TOO_LARGE) {
-      return {
-        status: response.status,
-        ...derivedRedirectFields(
-          answeredURL,
-          response.status,
-          responseHeadersForBody,
-        ),
-        headers: responseHeadersForBody,
-        body: null,
-        isStreamError: true,
-        streamErrorCode: 'response_too_large',
-        errorCause: makeResponseTooLargeError(maxResponseBytes, false),
-      };
+      return tooLargeAnswer(
+        dispatchedURL,
+        response.status,
+        responseHeadersForBody,
+        maxResponseBytes,
+      );
     }
 
     guardedDownloadProgress?.({
@@ -286,7 +285,7 @@ export class FetchAdapter implements HTTPAdapter {
       // Server/runtime manual redirects reach this path as real 3xx responses.
       // Browser opaque redirects returned above never reach this branch.
       ...derivedRedirectFields(
-        answeredURL,
+        dispatchedURL,
         response.status,
         responseHeadersForBody,
       ),

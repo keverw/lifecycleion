@@ -12,6 +12,7 @@ import { serializeError } from '../../serialize-error';
 import { HTTPClient } from '../http-client';
 import { startTestServer, type TestServer } from '../test-helpers/test-server';
 import {
+  NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG,
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_ABORT_HEADERS_KEY,
 } from '../consts';
@@ -314,6 +315,99 @@ describe('FetchAdapter', () => {
     });
 
     expect(capturedURL).toBe('//evil.test/collect');
+  });
+
+  test('PR review round 40: userinfo is withheld from a protocol-relative URL that resolves to another origin', async () => {
+    let capturedURL = '';
+    // An `http:` page: `//u:p@api.test/x` is `http://api.test/x`, not the `https:` origin
+    // the request started on.
+    (globalThis as any).document = { baseURI: 'http://api.test/page' };
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    const originalRequest = globalThis.Request;
+    const probedURLs: string[] = [];
+    globalThis.Request = class extends originalRequest {
+      constructor(input: RequestInfo | URL, init?: RequestInit) {
+        super(input, init);
+        probedURLs.push(this.url);
+      }
+    };
+
+    try {
+      const response = await new FetchAdapter().send({
+        requestURL: '//u:p@api.test/x',
+        initialURL: 'https://api.test/start',
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(response.status).toBe(204);
+      expect(capturedURL).toBe('http://api.test/x');
+      // Checked before it was sent, as the URL that was sent.
+      expect(probedURLs).toEqual(['http://api.test/x']);
+    } finally {
+      globalThis.Request = originalRequest;
+    }
+  });
+
+  test('PR review round 40: same-origin userinfo is kept once resolved against the page', async () => {
+    let capturedURL = '';
+    (globalThis as any).document = { baseURI: 'https://api.test/page' };
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    // Bun's `Request` takes a URL with credentials; Node's refuses one, which is not what
+    // this test is about.
+    const originalRequest = globalThis.Request;
+    delete (globalThis as { Request?: unknown }).Request;
+
+    try {
+      const response = await new FetchAdapter().send({
+        requestURL: '//u:p@api.test/x',
+        initialURL: 'https://api.test/start',
+        method: 'GET',
+        headers: {},
+      });
+
+      expect(response.status).toBe(204);
+      expect(capturedURL).toBe('https://u:p@api.test/x');
+    } finally {
+      globalThis.Request = originalRequest;
+    }
+  });
+
+  test('PR review round 40: a network-path URL stripped into an absolute one with no base is checked before it is sent', async () => {
+    // No `document` or `location`: nothing resolves the URL against a page, yet the
+    // cross-origin credentials are stripped into an absolute `https://evil.test/x`.
+    expect((globalThis as any).document).toBeUndefined();
+    expect((globalThis as any).location).toBeUndefined();
+
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    const outcome = await new FetchAdapter()
+      .send({
+        requestURL: '\\\\u:p@evil.test/x',
+        initialURL: 'https://api.test/',
+        method: 'GET',
+        headers: { 'x-a': 'a\u0000b' },
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect(outcome).toBeInstanceOf(Error);
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(calls).toBe(0);
   });
 
   test('materializes repeated request headers with Headers.append', async () => {

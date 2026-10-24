@@ -42,6 +42,7 @@
 import { markNonRetryableAdapterError } from './adapter-error';
 import type { AdapterProgressEvent } from '../types';
 import type { RequestBodyWritable } from './request-body-writable';
+import { writeChunkWithBackpressure } from './request-body-writer';
 
 /**
  * Escape a field name or filename for its quoted Content-Disposition parameter, as the
@@ -220,129 +221,16 @@ export async function serializeMultipartFormData(
   // the closing delimiter, which always fits - every part's write was held to
   // `partsBudget`, so at least `closingBytes` remain.
   const writeToRequest = (data: string | Buffer | Uint8Array): Promise<void> =>
-    new Promise<void>((resolve, reject) => {
-      let hasWriteReturned = false;
-      let isWriteCallbackDone = false;
-      let isDrainDone = true;
-      // The same guard `writeRequestBodyChunked` keeps, and for the same reason. Every
-      // path here settles the one promise, and a settled promise ignores a second call -
-      // but `maybeResolve` does more than resolve: it advances `uploadedBytes` and fires
-      // `onProgress`. Now that `onClose` *rejects*, the two can both run. Under
-      // backpressure a `'drain'` may arrive before the write callback, so `cleanup` has not
-      // run and the listeners are still attached; `req` then emits `'close'` and the upload
-      // rejects; the write callback lands afterwards and `maybeResolve` fires an
-      // upload-progress event for a request already reported as a transport error, having
-      // counted bytes the stream never accepted.
-      let isSettled = false;
+    // Bytes counted, and progress reported, only once the writable has accepted them: a
+    // write the stream closed or errored under is rejected uncounted.
+    writeChunkWithBackpressure(req, data, () => {
+      uploadedBytes += Buffer.byteLength(data);
 
-      const cleanup = (): void => {
-        req.off('drain', onDrain);
-        req.off('close', onClose);
-        req.off('error', onError);
-      };
-
-      const maybeResolve = (): void => {
-        if (isSettled || !isWriteCallbackDone || !isDrainDone) {
-          return;
-        }
-
-        isSettled = true;
-        cleanup();
-        uploadedBytes += Buffer.byteLength(data);
-
-        onProgress?.({
-          loaded: uploadedBytes,
-          total: totalSize,
-          progress: uploadedBytes / totalSize,
-        });
-        resolve();
-      };
-
-      const onDrain = (): void => {
-        isDrainDone = true;
-        maybeResolve();
-      };
-
-      const onClose = (): void => {
-        if (isSettled) {
-          return;
-        }
-
-        isSettled = true;
-        cleanup();
-
-        // Rejects, for the reason `writeRequestBodyChunked`'s does: a stream that closes
-        // mid-write has not accepted what it was given, and resolving reported a part as
-        // written when it was not. Worse here than there, because the body is assembled
-        // across many writes - a close partway through leaves the multipart payload
-        // without its closing `--boundary--` delimiter, and the server is handed a body it
-        // will read as truncated while this side called it a success.
-        reject(
-          new Error('Request stream closed before the body was fully written'),
-        );
-      };
-
-      const onError = (error: Error): void => {
-        if (isSettled) {
-          return;
-        }
-
-        isSettled = true;
-        cleanup();
-        reject(error);
-      };
-
-      const canContinue = req.write(data, (error: Error | null | undefined) => {
-        if (error) {
-          if (isSettled) {
-            return;
-          }
-
-          isSettled = true;
-          cleanup();
-          reject(error);
-          return;
-        }
-
-        isWriteCallbackDone = true;
-        if (hasWriteReturned) {
-          maybeResolve();
-        }
+      onProgress?.({
+        loaded: uploadedBytes,
+        total: totalSize,
+        progress: uploadedBytes / totalSize,
       });
-      hasWriteReturned = true;
-
-      // Armed whether or not the write was backpressured. A chunk the buffer took without
-      // asking for a drain still has a callback that only Node will call, and a socket that dies
-      // while it sits there never calls it: with the listeners attached only under backpressure,
-      // nothing rejected and nothing resolved, so the writer's promise stayed pending for good.
-      // That is the promise `requestBodySettled` hands the caller - an early-ack `200` whose
-      // connection then dropped left an `await` on it hanging forever - and the adapter's own
-      // upload-stall watchdog could not help: it destroys the request, which is precisely the
-      // event nothing was listening for.
-      //
-      // `'drain'` stays conditional: only a backpressured write has one coming.
-      //
-      // `!isSettled` throughout. The write callback can run synchronously with an error - a
-      // `ClientRequest` already destroyed answers that way - settling the write and running
-      // `cleanup()` before any listener exists. Attaching listeners afterwards armed nothing that
-      // could take them off again: the `req.destroyed` guard calls `onClose`, which returns on
-      // `isSettled`, so they stayed on `req` for the life of the request - once per chunk, which
-      // is the `MaxListenersExceededWarning` path.
-      if (!isSettled) {
-        if (!canContinue) {
-          isDrainDone = false;
-          req.once('drain', onDrain);
-        }
-
-        req.once('close', onClose);
-        req.once('error', onError);
-
-        if (req.destroyed) {
-          onClose();
-        }
-      }
-
-      maybeResolve();
     });
 
   // Every part's write: refused before it is written, since bytes past the

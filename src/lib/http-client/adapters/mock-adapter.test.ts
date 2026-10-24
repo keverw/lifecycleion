@@ -1216,6 +1216,28 @@ describe('MockAdapter.send() — low-level contract', () => {
     expect(res.detectedRedirectURL).toBeUndefined();
   });
 
+  test('PR review round 40: a path-only request URL resolves a relative Location against the mock default base', async () => {
+    adapter.routes.get('/start', () => ({
+      status: 302,
+      headers: { Location: '/next' },
+    }));
+    adapter.routes.get('/dir/start', () => ({
+      status: 302,
+      headers: { Location: 'next' },
+    }));
+
+    const rootRelative = await adapter.send(
+      makeAdapterRequest({ requestURL: '/start' }),
+    );
+    expect(rootRelative.wasRedirectDetected).toBe(true);
+    expect(rootRelative.detectedRedirectURL).toBe('http://localhost/next');
+
+    const pathRelative = await adapter.send(
+      makeAdapterRequest({ requestURL: '/dir/start' }),
+    );
+    expect(pathRelative.detectedRedirectURL).toBe('http://localhost/dir/next');
+  });
+
   test('async handler rejection propagates through awaitAbortable when signal is present', async () => {
     adapter.routes.get('/fail', () => {
       throw new Error('handler boom');

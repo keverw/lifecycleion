@@ -13,10 +13,7 @@ import {
   isSignalAborted,
   readAdapterRequestFields,
 } from '../internal/request-fields';
-import {
-  makeResponseTooLargeError,
-  hasResponseBody,
-} from '../internal/response-limit';
+import { tooLargeAnswer, hasResponseBody } from '../internal/response-limit';
 import { isArrayBufferLike } from '../../internal/binary-view';
 import type {
   HTTPAdapter,
@@ -66,25 +63,22 @@ export class XHRAdapter implements HTTPAdapter {
       requestURL,
       initialURL,
     } = readAdapterRequestFields(request);
-    const dispatchedURL = stripCrossOriginURLCredentials(
-      requestURL,
-      initialURL,
-    );
-    // What a `Location` resolves against, and what `didBrowserFollowRedirect` compares
-    // `responseURL` with: the dispatched URL as the browser resolves it, so a relative one
-    // (this adapter driven directly) still reports where an unfollowed redirect pointed.
+    // Resolved once, as the browser resolves it - against the document's base URL, or the
+    // worker's `location` - and that one absolute URL is what is opened, what
+    // `didBrowserFollowRedirect` compares `responseURL` with, and what a `Location`
+    // resolves against. `undefined` for a relative URL with no base to resolve it against
+    // (this adapter driven directly outside a browser), or one that is not a URL: refused
+    // below.
+    //
+    // Credentials are withheld from the resolved URL, not the one written: `//u:p@host/x`
+    // on an `http:` page is an `http:` URL, another origin than an `https:` initial URL.
+    const resolvedURL = resolveBrowserRequestURL(requestURL);
     const answeredURL =
-      resolveBrowserRequestURL(dispatchedURL) ?? dispatchedURL;
+      resolvedURL === undefined
+        ? undefined
+        : stripCrossOriginURLCredentials(resolvedURL, initialURL);
 
     return await new Promise((resolve, reject) => {
-      const xhr = new XMLHttpRequest();
-      /** A redirect the browser followed before an abort, read before `abort()` resets it. */
-      let followedRedirectBeforeAbort: string | undefined;
-      /** The answer an abort landed on, read before `abort()` resets it. */
-      let answeredBeforeAbort:
-        | { status: number; headers: Record<string, string | string[]> }
-        | undefined;
-
       // Refused the same way on every attempt - a method or header value `open` or
       // `setRequestHeader` will not take - so failed once as non-retryable, as the other
       // adapters fail a request their transport refuses to build.
@@ -93,10 +87,31 @@ export class XHRAdapter implements HTTPAdapter {
         reject(nonRetryableAdapterErrorFrom(error));
       };
 
+      // Refused as NodeAdapter refuses a URL it cannot parse: whether an answer came from
+      // where the request was sent cannot be told without an absolute URL to compare
+      // `responseURL` with, and the same URL fails the same way on every attempt. The
+      // client always sends an absolute one.
+      if (answeredURL === undefined) {
+        refuse(
+          new TypeError(
+            'XHRAdapter request URL could not be resolved to an absolute URL (no document or location base, or not a valid URL)',
+          ),
+        );
+        return;
+      }
+
+      const xhr = new XMLHttpRequest();
+      /** A redirect the browser followed before an abort, read before `abort()` resets it. */
+      let followedRedirectBeforeAbort: string | undefined;
+      /** The answer an abort landed on, read before `abort()` resets it. */
+      let answeredBeforeAbort:
+        | { status: number; headers: Record<string, string | string[]> }
+        | undefined;
+
       try {
         // responseType 'arraybuffer' gives us a raw ArrayBuffer on load,
         // consistent with how FetchAdapter and NodeAdapter deliver body bytes.
-        xhr.open(method, dispatchedURL);
+        xhr.open(method, answeredURL);
         xhr.responseType = 'arraybuffer';
 
         // Timeout is managed by the client via the abort signal — the client's
@@ -331,15 +346,9 @@ export class XHRAdapter implements HTTPAdapter {
         if (responseURL && didBrowserFollowRedirect(responseURL, answeredURL)) {
           resolve(browserRedirectResponse(responseURL));
         } else {
-          resolve({
-            status,
-            ...derivedRedirectFields(answeredURL, status, headers),
-            headers,
-            body: null,
-            isStreamError: true,
-            streamErrorCode: 'response_too_large',
-            errorCause: makeResponseTooLargeError(maxResponseBytes, false),
-          });
+          resolve(
+            tooLargeAnswer(answeredURL, status, headers, maxResponseBytes),
+          );
         }
 
         xhr.abort();
@@ -433,15 +442,14 @@ export class XHRAdapter implements HTTPAdapter {
         // compressed response is counted encoded there - and a browser need not report
         // progress at all, so the whole body is checked once more here.
         if (body !== null && body.length > maxResponseBytes) {
-          resolve({
-            status,
-            ...derivedRedirectFields(answeredURL, status, responseHeaders),
-            headers: responseHeaders,
-            body: null,
-            isStreamError: true,
-            streamErrorCode: 'response_too_large',
-            errorCause: makeResponseTooLargeError(maxResponseBytes, false),
-          });
+          resolve(
+            tooLargeAnswer(
+              answeredURL,
+              status,
+              responseHeaders,
+              maxResponseBytes,
+            ),
+          );
           return;
         }
 
@@ -586,16 +594,25 @@ function readProgressEvent(event: {
 
 /**
  * The response for a redirect the browser followed on its own: `status: 0` with the
- * final URL, which the client reports as `redirect_disabled`.
+ * final URL, which the client reports as `redirect_disabled`. A `responseURL` that does
+ * not parse reports no `detectedRedirectURL`, as a `Location` that does not resolve
+ * reports none, rather than the raw string handed on as though it were a URL.
  */
 function browserRedirectResponse(responseURL: string): AdapterResponse {
+  let isURL = true;
+  try {
+    new URL(responseURL);
+  } catch {
+    isURL = false;
+  }
+
   return {
     status: 0,
     wasRedirectDetected: true,
     // XHR exposes the post-redirect final URL via responseURL. Browser
     // fetch opaque redirects do not, so this is intentionally
     // adapter-specific and surfaced separately from requestURL.
-    detectedRedirectURL: responseURL,
+    ...(isURL ? { detectedRedirectURL: responseURL } : {}),
     headers: {},
     body: null,
   };
@@ -717,14 +734,8 @@ function parseXHRResponseHeaders(
  * - relies on URL normalization for equivalent forms
  *   (default ports, dot segments, encoding normalization, etc.)
  *
- * `answeredURL` is the dispatched URL as the browser resolved it (`send`'s own). One still
- * relative - no page to resolve it against, an XHR with a base of its own - is read
- * against `responseURL` only when it starts with `/`: a root-relative `/x` or a
- * protocol-relative `//h/x` names the same URL against any base on the request's origin,
- * which an unredirected `responseURL` is. A path-relative `api/x` (or `../x`, `?q`) does
- * not - against `responseURL` it resolves one directory too deep, and a plain `200` would
- * be reported as a redirect - so it is taken as answered where it was sent, and a redirect
- * such a runtime hid goes unreported.
+ * `answeredURL` is the absolute URL `send` opened. A `responseURL` that does not parse
+ * cannot name it, so it is taken as a redirect.
  */
 function didBrowserFollowRedirect(
   responseURL: string,
@@ -735,28 +746,12 @@ function didBrowserFollowRedirect(
   try {
     normalizedResponse = new URL(responseURL);
   } catch {
-    // Fallback for non-URL inputs: compared as written.
-    return responseURL !== answeredURL;
+    return true;
   }
 
   normalizedResponse.hash = '';
 
-  let normalizedRequest: URL;
-
-  try {
-    normalizedRequest = new URL(answeredURL);
-  } catch {
-    if (!answeredURL.startsWith('/')) {
-      return false;
-    }
-
-    try {
-      normalizedRequest = new URL(answeredURL, normalizedResponse);
-    } catch {
-      return false;
-    }
-  }
-
+  const normalizedRequest = new URL(answeredURL);
   normalizedRequest.hash = '';
 
   return (

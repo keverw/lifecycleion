@@ -68,6 +68,7 @@ import {
   DEFAULT_REQUEST_ID_HEADER,
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_USER_AGENT,
+  MOCK_ADAPTER_DEFAULT_BASE_URL,
   BROWSER_FORBIDDEN_METHOD_OVERRIDE_VALUES,
   NON_RETRYABLE_HTTP_CLIENT_CALLBACK_ERROR_FLAG,
   EFFECTIVE_REQUEST_HEADERS_KEY,
@@ -658,7 +659,7 @@ export class BaseHTTPClient {
       this._config.baseURL ??
       (this._adapter.getType() === 'mock'
         ? !/^[a-z][a-z0-9+\-.]*:/i.test(path)
-          ? 'http://localhost'
+          ? MOCK_ADAPTER_DEFAULT_BASE_URL
           : undefined
         : undefined);
 
