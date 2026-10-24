@@ -1083,8 +1083,9 @@ export interface InterceptedRequest {
   requestURL: string;
   method: HTTPMethod;
   /**
-   * An earlier interceptor's result is passed on as it returned it, so a header it
-   * removed with `undefined` reaches the next one as such.
+   * A header set to `undefined` or `null` is removed. An earlier interceptor's result
+   * reaches the next one as the client's copy of it, so a header it removed is absent
+   * there, and every name is lowercase.
    */
   headers: RequestHeadersInput;
   body?: unknown;

@@ -1,4 +1,11 @@
-import { matchesFilter } from './utils';
+import {
+  describeInvalidHTTPMethod,
+  matchesFilter,
+  matchesFilterPhase,
+  mergeHeaders,
+} from './utils';
+import { normalizeStandardMethod } from './internal/http-method';
+import { isPlainRecord } from './internal/plain-record';
 import { adoptPromise } from '../internal/adopt-promise';
 import {
   CallbackRegistry,
@@ -38,8 +45,8 @@ export class RequestInterceptorManager extends CallbackRegistry<
   public snapshot(): InterceptorChain {
     const interceptors = this.currentRegistrations();
 
-    return (request, phase, context, isCancelled) =>
-      runInterceptors(interceptors, request, phase, context, isCancelled);
+    return (request, phase, context, options) =>
+      runInterceptors(interceptors, request, phase, context, options ?? {});
   }
 }
 
@@ -47,9 +54,23 @@ export type InterceptorChain = (
   request: InterceptedRequest,
   phase: InterceptorPhase,
   context: RequestInterceptorContext,
-  /** Whether the request was cancelled, after which no further interceptor runs. */
-  isCancelled?: () => boolean,
+  options?: InterceptorChainOptions,
 ) => Promise<InterceptedRequest | InterceptorCancel>;
+
+export interface InterceptorChainOptions {
+  /** Whether the request was cancelled, after which no further interceptor runs. */
+  isCancelled?: () => boolean;
+  /**
+   * Whether `request` may be an interceptor's result - a parent client's chain's - rather
+   * than one the client built, so it is copied before an interceptor here reads it.
+   */
+  isInterceptorResult?: boolean;
+  /**
+   * Handed the interceptor result whose copy failed, before the failure is thrown, so the
+   * phase reports from it as it does when its own copy of the chain's result fails.
+   */
+  onCopyFailure?: (request: InterceptedRequest) => void;
+}
 
 async function runInterceptors(
   interceptors: ReadonlyArray<
@@ -58,15 +79,46 @@ async function runInterceptors(
   request: InterceptedRequest,
   phase: InterceptorPhase,
   context: RequestInterceptorContext,
-  isCancelled?: () => boolean,
+  {
+    isCancelled,
+    isInterceptorResult = false,
+    onCopyFailure,
+  }: InterceptorChainOptions,
 ): Promise<InterceptedRequest | InterceptorCancel> {
   let current = request;
+  /** Whether `current` is an interceptor's result, not yet copied. */
+  let isCurrentUncopied = isInterceptorResult;
 
   for (const { fn, filter } of interceptors) {
     // A cancel made by an earlier interceptor, or while it ran, ends the chain: the request
     // is not dispatched, so the rest - a token refresh, say - has nothing to prepare.
     if (isCancelled?.()) {
       return current;
+    }
+
+    // Asked first, as it reads only the filter: an interceptor this phase never reaches
+    // (one registered for `retry` alone, in the initial phase) reads no request, so it
+    // takes no copy - and cannot change how a result that fails to copy is reported.
+    if (!matchesFilterPhase(filter?.phases, phase.type)) {
+      continue;
+    }
+
+    // An earlier interceptor's result, copied before this one's filter and function read
+    // it, as the chain's own result is copied once it ends (see
+    // `snapshotInterceptedRequest`). Uncopied, the two read it apart: a `requestURL`
+    // getter that answered a trusted host to a filter and another to the interceptor it
+    // guards handed a token interceptor's credentials to the other host. Copied only once
+    // an interceptor is reached that will read it, so a result no later interceptor reads
+    // is left for the phase to copy. A copy that fails here hands the phase that result,
+    // so the failure is reported from it either way.
+    if (isCurrentUncopied) {
+      try {
+        current = snapshotInterceptedRequest(current);
+      } catch (error) {
+        onCopyFailure?.(current);
+        throw error;
+      }
+      isCurrentUncopied = false;
     }
 
     if (
@@ -124,10 +176,104 @@ async function runInterceptors(
     }
 
     current = result as InterceptedRequest;
+    isCurrentUncopied = true;
   }
 
   return current;
 }
+
+/**
+ * Read a request an interceptor returned once, into a plain object the client owns: in the
+ * chain, before the next interceptor reads it (see `runInterceptors`), and the chain's
+ * result in each phase once the chain ends.
+ *
+ * An interceptor's result is caller code: any member can be a getter, and the header
+ * record a `Proxy` or an object whose entries are getters. Everything after it validates
+ * a field and then uses it - the next interceptor's filter and then the interceptor; once
+ * the chain is done, the URL is checked as http(s), then read again for the cookie jar
+ * and again for the adapter; the headers are checked against the browser-restricted
+ * list, then merged for dispatch - and each of those reads could answer differently. A
+ * `requestURL` getter that answered `https://api.example/x` to the check and
+ * `https://evil.example/` afterwards attached `api.example`'s cookies to a request sent
+ * to `evil.example`. Taken here, once, every later check and use sees the same values.
+ *
+ * Header values are normalized here as `mergeHeaders` normalizes them for dispatch - a
+ * single value converted to a string, an array's elements each converted, and a
+ * one-element array collapsed to its string - so a value whose `toString` answers
+ * differently on each call is checked and sent as one string. Names are lowercased, and
+ * an unset value removes the header whatever its capitalization. A standard method is
+ * uppercased (see `normalizeStandardMethod`), so a `post` is the `POST` the retry and
+ * redirect rules check for; any other method is kept as given.
+ * Throws on a `requestURL` that is not a string, a `method` that is not a method name
+ * (see `describeInvalidHTTPMethod`), or `headers` that is not a plain object (an array, a
+ * `Headers` or a `Map` is refused), and on any read or conversion that throws; each phase
+ * reports that as the interceptor's failure.
+ */
+export function snapshotInterceptedRequest(
+  request: InterceptedRequest,
+): ResolvedRequest {
+  const { requestURL, method, headers, body } = request;
+
+  if (typeof requestURL !== 'string') {
+    throw new TypeError(
+      `[HTTPClient] Interceptor returned a request whose requestURL is not a string (got ${requestURL === null ? 'null' : typeof requestURL}).`,
+    );
+  }
+
+  const methodProblem = describeInvalidHTTPMethod(method);
+
+  if (methodProblem !== undefined) {
+    throw new TypeError(
+      `[HTTPClient] Interceptor returned a request whose method ${methodProblem}.`,
+    );
+  }
+
+  const normalizedMethod = normalizeStandardMethod(method);
+
+  const candidateHeaders: unknown = headers;
+
+  // A plain record only (see `isPlainRecord`): a `Headers` or `Map` would have every
+  // header it carries silently dropped, and an array's indices taken for names.
+  if (!isPlainRecord(candidateHeaders)) {
+    const got =
+      candidateHeaders === null
+        ? 'null'
+        : Array.isArray(candidateHeaders)
+          ? 'an array'
+          : typeof candidateHeaders !== 'object'
+            ? typeof candidateHeaders
+            : 'an object with a non-Object prototype, such as Headers or Map';
+    throw new TypeError(
+      `[HTTPClient] Interceptor returned a request whose headers is not a plain object (got ${got}).`,
+    );
+  }
+
+  // Read as every other phase's headers are: names lowercased, and an unset value
+  // removing the header, whatever its capitalization -
+  // `{ ...request.headers, Authorization: undefined }` drops `authorization` rather
+  // than sending it.
+  const headersSnapshot = mergeHeaders(
+    candidateHeaders as Record<string, string | string[]>,
+  );
+
+  return {
+    requestURL,
+    method: normalizedMethod,
+    headers: headersSnapshot,
+    body,
+  };
+}
+
+/**
+ * A request as the client holds it once its headers are normalized - names lowercased,
+ * values strings or arrays, unset ones removed: what `snapshotInterceptedRequest` returns
+ * and what the attempt loop sends. Typed apart from {@link InterceptedRequest}, whose
+ * headers may still carry an interceptor's `undefined`, so a step that only copies
+ * headers can rely on that without normalizing them again.
+ */
+export type ResolvedRequest = Omit<InterceptedRequest, 'headers'> & {
+  headers: Record<string, string | string[]>;
+};
 
 /**
  * The cancels a chain has returned. Each is the chain's own object rather than the

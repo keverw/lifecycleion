@@ -543,7 +543,7 @@ client.addRequestInterceptor((req) => {
 interface InterceptedRequest {
   requestURL: string; // Absolute before dispatch
   method: HTTPMethod;
-  headers: RequestHeadersInput; // A null/undefined value is a header an earlier interceptor removed
+  headers: RequestHeadersInput; // Return a null/undefined value to remove a header
   body?: unknown; // Pre-serialization
 }
 ```
@@ -560,11 +560,17 @@ client.addRequestInterceptor((request) => {
 });
 ```
 
-**After the interceptor chain finishes, its returned request is copied once.** While
-the chain runs, later interceptor filters may read `method`, `requestURL`, and `body`
-from earlier interceptor results, including when those filters do not match. When
-the chain finishes, the client copies `requestURL`, `method`, `headers` and `body` into a
-request object of its own. A standard method (`GET`, `HEAD`, `POST`, `PUT`, `DELETE`,
+**Each interceptor's returned request is copied once.** The client copies its
+`requestURL`, `method`, `headers` and `body` into a new plain object of its own, and that
+copy is what the next interceptor that runs in the phase reads - its filter and the
+interceptor itself - and, once the chain finishes, what the request is checked and sent
+with. The next interceptor therefore receives the copy, not the object the earlier one
+returned: other properties are dropped, header names are lowercase, header values are
+strings or arrays of strings (as described below), a header removed with `null` or
+`undefined` is absent, and changing an object an earlier interceptor kept a reference to
+does not change the request. A result that is not a valid request fails as an
+`interceptor_error` where it is copied, even when a later interceptor would have
+replaced it, and is reported from that result whatever is registered after it. A standard method (`GET`, `HEAD`, `POST`, `PUT`, `DELETE`,
 `OPTIONS`, `PATCH`, `TRACE`) is uppercased whatever its case, so a `post` is treated as `POST` by
 the retry and redirect rules; any other method is case-sensitive and passed to the
 adapter as given, as `request()` passes it too. What goes on the wire depends on the
@@ -580,10 +586,10 @@ body (an XHR outside a browser - React Native, a shim - may send it, and is let 
 interceptors' result). Header entries are copied at that
 point: a single value is converted to a string, an array stays an array with each
 element converted to a string, and a one-element array becomes that element's string.
-Every later check and use (URL validation, the browser-restricted header check,
-cookie-jar lookup, dispatch) reads that copy. A getter on
+Every later check and use (the next interceptor's filter, URL validation, the
+browser-restricted header check, cookie-jar lookup, dispatch) reads that copy. A getter on
 the returned object, on the header record or on one of its entries is therefore consulted
-exactly once by that final copy when it succeeds, and a URL that passed validation is the URL the
+exactly once, by that copy, when it succeeds, and a URL that passed validation is the URL the
 request is sent to. If copying fails, the best-effort snapshot for error observers may
 read those values again. Any failure while taking that copy is an `interceptor_error`:
 a `requestURL` or `method` that is not a string, `headers` that is not a plain object
@@ -1192,7 +1198,7 @@ client.clientID; // ULID string - unique per HTTPClient or sub-client instance
 client.adapterType; // AdapterType: 'fetch' | 'xhr' | 'node' | 'mock'
 ```
 
-`clientID` matches the `clientID` field on tracked request entries. `adapterType` lets you inspect the active adapter without sending a request, which is useful in shared utilities that need to behave differently per runtime. It is the adapter's `getType()`, read once when the client (or sub-client) is built: the config is checked against that value and every request uses it, so a custom adapter's `getType()` is not consulted again.
+`clientID` matches the `clientID` field on tracked request entries. `adapterType` lets you inspect the active adapter without sending a request, which is useful in shared utilities that need to behave differently per runtime. It is the adapter's `getType()`, read once when the client (or sub-client) is built: the config is checked against that value and every request uses it, so a custom adapter's `getType()` is not consulted again. A `getType()` that returns anything other than `'fetch'`, `'xhr'`, `'node'` or `'mock'` makes the constructor throw a `TypeError`: the adapter and runtime checks are keyed on the type, so a custom adapter returns the one whose rules it follows.
 
 ## Request Tracking
 
@@ -1277,9 +1283,9 @@ const client = new HTTPClient({ adapter: new FetchAdapter() });
 
 No configuration options. Adapter-level behavior is controlled through `HTTPClientConfig`.
 
-The adapter resolves a relative request URL as `fetch` does - against the document's base URL, or the worker's `location` - and sends only an absolute `http:` or `https:` URL. URL userinfo is withheld from that resolved URL when it is cross-origin to the initial URL. A relative initial URL is resolved against the same base first; one that cannot be resolved is treated as cross-origin. The client always sends an absolute `http:` or `https:` URL. Driven directly with a URL of any other scheme (`file:`, `data:`, `blob:`, ...), or with a relative request URL where there is nothing to resolve it against (no document or `location`, as outside a browser), the adapter refuses it before calling `fetch` with a non-retryable `TypeError` (an `adapter_error` through the client), as NodeAdapter refuses a URL it cannot send.
+The adapter resolves a relative request URL as `fetch` does - against the document's base URL, or the worker's `location` - and sends only an absolute `http:` or `https:` URL. URL userinfo is withheld from that resolved URL when it is cross-origin to the initial URL. Only an initial URL that starts with `/` - root-relative (`/start`) or protocol-relative (`//host/start`) - is resolved against the same base first. Any other relative initial URL is treated as cross-origin, as one that cannot be resolved is: `''`, `#top`, `?q` and `start` name no origin of their own, and other spellings a browser reads as root- or protocol-relative (`\\host/start`, a leading space or tab) are not resolved either. The client always sends an absolute `http:` or `https:` URL. Driven directly with a URL of any other scheme (`file:`, `data:`, `blob:`, ...), or with a relative request URL where there is nothing to resolve it against (no document or `location`, as outside a browser), the adapter refuses it before calling `fetch` with a non-retryable `TypeError` (an `adapter_error` through the client), as NodeAdapter refuses a URL it cannot send.
 
-**Upload visibility.** The adapter returns the HTTP status and reads the response body as usual. Fetch does not expose separate upload progress or completion, so `onUploadProgress` fires `0` at dispatch and `1` when response headers arrive. The adapter does not set `requestBodySettled`. This matters for servers that respond before an upload finishes: a retry or, on server runtimes, a followed redirect may overlap the earlier upload. See [Uploads That Outlive the Response](#uploads-that-outlive-the-response) for the Node and browser distinctions.
+**Upload visibility.** The adapter returns the HTTP status and reads the response body as usual. Fetch does not expose separate upload progress or completion, so `onUploadProgress` fires `0` at dispatch and `1` when response headers arrive. A request the adapter refuses before calling `fetch` fires neither. The adapter does not set `requestBodySettled`. This matters for servers that respond before an upload finishes: a retry or, on server runtimes, a followed redirect may overlap the earlier upload. See [Uploads That Outlive the Response](#uploads-that-outlive-the-response) for the Node and browser distinctions.
 
 **Browser constraints (enforced at client construction):**
 
@@ -1405,7 +1411,8 @@ connection. A target requiring the withheld client certificate can fail TLS or r
 the request. This does not guarantee one particular HTTP status. Address that origin
 directly, or explicitly select it in an initial- or retry-phase interceptor (a redirect-phase rewrite does not), if it should receive the configured
 identity. For direct adapter calls, omitting `initialURL` applies the configured identity, while
-an unparseable `initialURL` is treated as cross-origin.
+an unparseable `initialURL` is treated as cross-origin, and one that is not a string
+is refused as a non-retryable `adapter_error`.
 
 **The socket you configured stays with the origin you addressed, too.** `socketPath` is your chosen endpoint, and often a privileged one. `/var/run/docker.sock` is the usual example. A redirect to a different origin is sent over TCP to the host the `Location` actually names, not over your socket with only the request line and `Host` header changed. Otherwise a remote server's `Location` would become a request you never made against that socket. Same-origin redirects keep the socket, and the adapter driven directly (no `initialURL`) uses it as configured.
 
@@ -1478,7 +1485,7 @@ No configuration options. Adapter-level behavior is controlled through `HTTPClie
 
 A synchronous throw from `xhr.send()` fails the request once, as a non-retryable `adapter_error`. An asynchronous `send()` throws only an `InvalidStateError` or for a body it cannot convert, and both fail the same way on every attempt; network failures arrive as `error` events and follow the retry rules. An `XMLHttpRequest` shim that throws a network failure from `send()` instead is not retried. An `XMLHttpRequest` with no `upload` (as some shims have) sends without per-chunk upload progress: `onUploadProgress` fires `0` at dispatch and `1` only once an answer arrives (a response, including one refused as too large or a redirect the browser followed), not on a network error, a timeout or an abort. One whose `upload` throws when read or listened on fails the request once, as a non-retryable `adapter_error`.
 
-The adapter resolves the request URL to an absolute URL once, as the browser does - a relative one against the document's base URL, or the worker's `location` - and opens the XHR with that URL. It resolves it with `new URL`, as FetchAdapter does, so the query is encoded as UTF-8: on a page in a legacy encoding, a raw non-ASCII query is sent as UTF-8 rather than in the page's encoding. URL userinfo is withheld from that resolved URL when it is cross-origin to the initial URL, so `//user:pass@api.test/x` on an `http:` page, for a request that started on `https://api.test/`, is opened without its credentials. A relative initial URL is resolved against the same base first; one that cannot be resolved is treated as cross-origin. The client always sends an absolute `http:` or `https:` URL. Driven directly with a URL of any other scheme (`file:`, `data:`, `blob:`, ...), or with a relative request URL where there is nothing to resolve it against (no document or `location`, as outside a browser), the adapter refuses it before opening the XHR with a non-retryable `TypeError`, as NodeAdapter refuses a URL it cannot send.
+The adapter resolves the request URL to an absolute URL once, as the browser does - a relative one against the document's base URL, or the worker's `location` - and opens the XHR with that URL. It resolves it with `new URL`, as FetchAdapter does, so the query is encoded as UTF-8: on a page in a legacy encoding, a raw non-ASCII query is sent as UTF-8 rather than in the page's encoding. URL userinfo is withheld from that resolved URL when it is cross-origin to the initial URL, so `//user:pass@api.test/x` on an `http:` page, for a request that started on `https://api.test/`, is opened without its credentials. Only an initial URL that starts with `/` - root-relative (`/start`) or protocol-relative (`//host/start`) - is resolved against the same base first. Any other relative initial URL is treated as cross-origin, as one that cannot be resolved is: `''`, `#top`, `?q` and `start` name no origin of their own, and other spellings a browser reads as root- or protocol-relative (`\\host/start`, a leading space or tab) are not resolved either. The client always sends an absolute `http:` or `https:` URL. Driven directly with a URL of any other scheme (`file:`, `data:`, `blob:`, ...), or with a relative request URL where there is nothing to resolve it against (no document or `location`, as outside a browser), the adapter refuses it before opening the XHR with a non-retryable `TypeError`, as NodeAdapter refuses a URL it cannot send.
 
 Because browsers follow redirects silently, XHR cannot intercept them mid-flight. Instead, after the request completes, the adapter compares `xhr.responseURL` to the absolute URL it opened to detect whether a redirect occurred. If one is detected the response carries `wasRedirectDetected: true` and an `HTTPClientError` with code `redirect_disabled`. A `3xx` the XHR hands over without following - in a browser, one with no `Location`; outside one, an `XMLHttpRequest` that does not follow redirects - reports `wasRedirectDetected` from its status, and `detectedRedirectURL` where its `Location` resolves against that absolute URL, as FetchAdapter and NodeAdapter report a real `3xx`.
 

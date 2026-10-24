@@ -25,6 +25,7 @@ import {
   derivedRedirectFields,
   isAbsoluteWebURL,
   keepFirstJoinedLocation,
+  resolveBrowserInitialURL,
   resolveBrowserRequestURL,
   stripURLCredentials,
   stripCrossOriginURLCredentials,
@@ -73,18 +74,16 @@ export class XHRAdapter implements HTTPAdapter {
     //
     // Credentials are withheld from the resolved URL, not the one written: `//u:p@host/x`
     // on an `http:` page is an `http:` URL, another origin than an `https:` initial URL.
-    // The initial URL is resolved the same way, so a relative one names the page's origin
-    // rather than failing closed and withholding same-origin credentials; one that does not
-    // resolve still fails closed.
+    // A root- or protocol-relative initial URL is resolved the same way, so `/start` names
+    // the page's origin; any other relative one, or one that does not resolve, fails
+    // closed (see `resolveBrowserInitialURL`).
     const resolvedURL = resolveBrowserRequestURL(requestURL);
     const answeredURL =
       resolvedURL === undefined
         ? undefined
         : stripCrossOriginURLCredentials(
             resolvedURL,
-            initialURL === undefined
-              ? undefined
-              : (resolveBrowserRequestURL(initialURL) ?? initialURL),
+            resolveBrowserInitialURL(initialURL),
           );
 
     return await new Promise((resolve, reject) => {
@@ -242,11 +241,6 @@ export class XHRAdapter implements HTTPAdapter {
       }
 
       // --- Upload progress ---
-
-      // Fire initial 0% upload progress before any bytes leave the browser,
-      // mirroring the FetchAdapter pattern so callers see a consistent first
-      // event regardless of adapter.
-      guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
 
       // Real per-chunk upload progress — the main advantage over FetchAdapter,
       // which has no streaming upload and can only fire 0% then 100%.
@@ -552,6 +546,12 @@ export class XHRAdapter implements HTTPAdapter {
               ),
         );
       });
+
+      // Fire initial 0% upload progress before any bytes leave the browser, mirroring the
+      // FetchAdapter pattern so callers see a consistent first event regardless of
+      // adapter. Here, once every refusal above has passed, so a request refused before
+      // it is sent reports no upload start.
+      guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
 
       // Checked again here: a cancel from the 0% upload progress callback above aborts the
       // signal while the XHR is opened but not sent, where `xhr.abort()` does nothing and

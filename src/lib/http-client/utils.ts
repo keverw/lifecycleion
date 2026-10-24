@@ -434,6 +434,40 @@ export function resolveBrowserRequestURL(url: string): string | undefined {
 }
 
 /**
+ * A browser adapter's `initialURL`, for {@link stripCrossOriginURLCredentials} to compare
+ * the request with. Absent stays absent; an absolute one is taken as it parses.
+ *
+ * Only one whose first character is `/` - root-relative (`/start`) or protocol-relative
+ * (`//api.test/start`) - is resolved against the page, as its request URL is (see
+ * {@link resolveBrowserRequestURL}): it names an origin of its own - the page's, or the one
+ * written - so same-origin credentials are not withheld for want of a parse. Every other
+ * relative one is handed back as written and the comparison fails closed: `''`, `#top`,
+ * `?q`, `.` and `start` name no origin, only the page itself, and resolved they took the
+ * page for the request's origin and kept the userinfo of a request to it with nothing to
+ * show it belonged there. Other spellings a browser also reads as root- or
+ * protocol-relative - `\\app.test/x`, a leading space or tab - fail closed too, withholding
+ * same-origin credentials rather than guessing. So does a `/` one with no page to resolve
+ * it against.
+ */
+export function resolveBrowserInitialURL(
+  initialURL: string | undefined,
+): string | undefined {
+  if (initialURL === undefined) {
+    return undefined;
+  }
+
+  try {
+    return new URL(initialURL).href;
+  } catch {
+    // Relative: resolved below only when it names an origin.
+  }
+
+  return initialURL.startsWith('/')
+    ? (resolveBrowserRequestURL(initialURL) ?? initialURL)
+    : initialURL;
+}
+
+/**
  * The base a browser resolves a relative request URL against, as `fetch` and XHR do: the
  * document's base URL in a window (which a `<base href>` sets), else the page's or the
  * worker's `location`. `undefined` where there is none. The one lookup both browser
@@ -1451,6 +1485,18 @@ function matchesContentTypePattern(
 }
 
 /**
+ * Whether a filter's `phases` reach `phaseType`: no list, or an empty one, reaches every
+ * phase. The part of {@link matchesFilter} that reads only the filter, never the request,
+ * so the interceptor chain can ask it before it copies the request the rest reads.
+ */
+export function matchesFilterPhase(
+  phases: readonly RequestPhaseName[] | undefined,
+  phaseType: RequestPhaseName,
+): boolean {
+  return !phases || phases.length === 0 || phases.includes(phaseType);
+}
+
+/**
  * Tests whether a request context matches an interceptor/observer filter.
  *
  * Each filter field is optional — omitting it skips that check entirely.
@@ -1516,11 +1562,7 @@ export function matchesFilter(
           method: requestContext.method ?? '',
         }
       : requestContext;
-  if (
-    filter.phases &&
-    filter.phases.length > 0 &&
-    !filter.phases.includes(phaseType)
-  ) {
+  if (!matchesFilterPhase(filter.phases, phaseType)) {
     return false;
   }
 

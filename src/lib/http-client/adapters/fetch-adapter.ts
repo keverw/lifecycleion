@@ -17,6 +17,7 @@ import {
   extractFetchHeaders,
   derivedRedirectFields,
   isAbsoluteWebURL,
+  resolveBrowserInitialURL,
   resolveBrowserRequestURL,
   stripCrossOriginURLCredentials,
 } from '../utils';
@@ -66,18 +67,16 @@ export class FetchAdapter implements HTTPAdapter {
     const resolvedURL = resolveBrowserRequestURL(requestURL);
     // Credentials are withheld from the resolved URL, not the one written: `//u:p@host/x`
     // on an `http:` page is an `http:` URL, another origin than an `https:` initial URL.
-    // The initial URL is resolved the same way, so a relative one names the page's origin
-    // rather than failing closed and withholding same-origin credentials; one that does not
-    // resolve still fails closed. The URL sent, checked below, and what a `Location`
+    // A root- or protocol-relative initial URL is resolved the same way, so `/start` names
+    // the page's origin; any other relative one, or one that does not resolve, fails
+    // closed (see `resolveBrowserInitialURL`). The URL sent, checked below, and what a `Location`
     // resolves against.
     const dispatchedURL =
       resolvedURL === undefined
         ? undefined
         : stripCrossOriginURLCredentials(
             resolvedURL,
-            initialURL === undefined
-              ? undefined
-              : (resolveBrowserRequestURL(initialURL) ?? initialURL),
+            resolveBrowserInitialURL(initialURL),
           );
 
     // Refused as NodeAdapter refuses it, as the non-retryable `adapter_error` it is: the
@@ -106,9 +105,6 @@ export class FetchAdapter implements HTTPAdapter {
     // body, waited for bytes that never came until the attempt timed out - on every retry.
     // Taken off the adapter's own copy, in place.
     deleteHeader(headers, 'content-length');
-
-    // Fire 0% upload progress
-    guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
 
     // Checked before it is sent, so a request fetch refuses to build - Node's fetch refuses
     // a URL carrying credentials, on every attempt - fails once as the non-retryable
@@ -155,6 +151,11 @@ export class FetchAdapter implements HTTPAdapter {
     // signal whose `aborted` throws went out unrefused. An aborted one is `fetch`'s to
     // reject, with its reason. The failure paths below read it quietly.
     const wasAbortedAtDispatch = isSignalAborted(signal);
+
+    // Fire 0% upload progress - once every refusal above has passed, so a request refused
+    // before anything is sent reports no upload start. One that cancels here aborts the
+    // signal `fetch` is handed, which rejects with it.
+    guardedUploadProgress?.({ loaded: 0, total: 0, progress: 0 });
 
     let response: Response;
 

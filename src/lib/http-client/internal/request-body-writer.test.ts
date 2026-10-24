@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { describe, expect, test } from 'bun:test';
 import {
   REQUEST_BODY_CHUNK_SIZE,
+  writeChunkWithBackpressure,
   writeRequestBodyChunked,
 } from './request-body-writer';
 import type { RequestBodyWritable } from './request-body-writable';
@@ -397,5 +398,36 @@ describe('writeRequestBodyChunked', () => {
     await writePromise;
 
     expect(writeOrder).toEqual([0, 1]);
+  });
+});
+
+describe('writeChunkWithBackpressure', () => {
+  test('PR review round 42: an onAccepted that throws rejects the write rather than leaving it pending', async () => {
+    // Settled and with its listeners off before `onAccepted` ran, a throw from it left the
+    // promise pending for good - and, from `'drain'`, escaped out of the emit.
+    const req = new EventEmitter() as EventEmitter &
+      RequestBodyWritable & { destroyed: boolean };
+    req.destroyed = false;
+    req.setHeader = () => {};
+    // Accepted at once, and backpressured: the chunk settles on `'drain'`.
+    req.write = (_data, callback) => {
+      callback?.(null);
+      return false;
+    };
+
+    const failure = new Error('progress counter failed');
+    const writePromise = writeChunkWithBackpressure(req, 'chunk', () => {
+      throw failure;
+    });
+    const outcome = writePromise.then(
+      () => 'resolved',
+      (error: unknown) => error,
+    );
+
+    expect(() => req.emit('drain')).not.toThrow();
+    expect(await outcome).toBe(failure);
+    expect(req.listenerCount('close')).toBe(0);
+    expect(req.listenerCount('error')).toBe(0);
+    expect(req.listenerCount('drain')).toBe(0);
   });
 });

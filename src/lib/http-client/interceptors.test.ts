@@ -482,3 +482,78 @@ describe('isInterceptorCancel', () => {
     expect(nullResult).toEqual({ cancel: true });
   });
 });
+
+describe('interceptor results passed down the chain', () => {
+  test('PR review round 42: a host-filtered interceptor and its filter read the same URL', async () => {
+    // A `requestURL` getter that answers the trusted host to its first read and another
+    // host after: read apart, the filter matched `trusted.test` and the interceptor it
+    // guards attached its token to a request for `evil.test`.
+    const mgr = new RequestInterceptorManager();
+    let reads = 0;
+    mgr.add((request) => ({
+      method: request.method,
+      headers: request.headers,
+      body: request.body,
+      get requestURL() {
+        return reads++ === 0 ? 'https://trusted.test/x' : 'https://evil.test/x';
+      },
+    }));
+
+    const seenByTokenInterceptor: string[] = [];
+    mgr.add(
+      (request) => {
+        seenByTokenInterceptor.push(request.requestURL);
+        return {
+          ...request,
+          headers: { ...request.headers, authorization: 'Bearer token' },
+        };
+      },
+      { hosts: ['trusted.test'] },
+    );
+
+    const result = await mgr.snapshot()(
+      makeRequest(),
+      { type: 'initial' },
+      makeContext(),
+    );
+
+    expect(isInterceptorCancel(result)).toBe(false);
+    const request = result as InterceptedRequest;
+    expect(reads).toBe(1);
+    expect(seenByTokenInterceptor).toEqual(['https://trusted.test/x']);
+    expect(request.requestURL).toBe('https://trusted.test/x');
+    expect(request.headers).toEqual({ authorization: 'Bearer token' });
+  });
+});
+
+describe('the copy the next interceptor sees', () => {
+  test('PR review round 42: header names reach the next interceptor lowercase, values as strings', async () => {
+    const mgr = new RequestInterceptorManager();
+    mgr.add((request) => ({
+      ...request,
+      method: 'post' as InterceptedRequest['method'],
+      headers: {
+        ...request.headers,
+        Authorization: 'Bearer token',
+        'X-Trace': ['abc'],
+        'X-Removed': undefined,
+      },
+      extra: 'dropped',
+    }));
+
+    let seen: InterceptedRequest | undefined;
+    mgr.add((request) => {
+      seen = request;
+      return request;
+    });
+
+    await mgr.snapshot()(makeRequest(), { type: 'initial' }, makeContext());
+
+    expect(seen).toEqual({
+      requestURL: 'https://example.com/api',
+      method: 'POST',
+      headers: { authorization: 'Bearer token', 'x-trace': 'abc' },
+      body: undefined,
+    });
+  });
+});

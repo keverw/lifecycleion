@@ -555,23 +555,29 @@ export class MockAdapter implements HTTPAdapter {
       //
       // Each field read once, as the answer's own are (see `snapshotMockResponse`): a
       // `status` getter that answered `495` to the check and `1000` to the response
-      // passed one and sent another.
-      const status = asRouteMistake(() => {
-        const value: unknown = options.status;
-        if (
-          value !== undefined &&
-          (typeof value !== 'number' ||
-            !Number.isInteger(value) ||
-            value < 0 ||
-            value > 999)
-        ) {
-          throw new TypeError(
-            `MockAdapter route returned transportError status ${typeof value === 'number' ? String(value) : typeof value}; it is an integer from 0 to 999`,
-          );
-        }
-        return value;
-      });
-      const { isRetryable, wasDefinitelyNotSent, message } = options;
+      // passed one and sent another. All read as the route's mistake: a getter that throws
+      // on any of them is refused once, not retried as the adapter's own failure.
+      const { status, isRetryable, wasDefinitelyNotSent, message } =
+        asRouteMistake(() => {
+          const value: unknown = options.status;
+          if (
+            value !== undefined &&
+            (typeof value !== 'number' ||
+              !Number.isInteger(value) ||
+              value < 0 ||
+              value > 999)
+          ) {
+            throw new TypeError(
+              `MockAdapter route returned transportError status ${typeof value === 'number' ? String(value) : typeof value}; it is an integer from 0 to 999`,
+            );
+          }
+          return {
+            status: value,
+            isRetryable: options.isRetryable,
+            wasDefinitelyNotSent: options.wasDefinitelyNotSent,
+            message: options.message,
+          };
+        });
 
       return {
         status: status ?? 0,

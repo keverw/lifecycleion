@@ -41,6 +41,16 @@ export function readAdapterRequestFields(request: AdapterRequest) {
         `Adapter request requestURL must be a string (got ${describeValue(requestURL)})`,
       );
     }
+    const initialURL: unknown = request.initialURL;
+    // Absent, or a string, as the type has it. Anything else - a `null`, a number - was
+    // resolved by the browser adapters as a relative reference against the page, and so
+    // taken for the page's own origin: a request URL there kept the userinfo a
+    // cross-origin hop withholds.
+    if (initialURL !== undefined && typeof initialURL !== 'string') {
+      throw new TypeError(
+        `Adapter request initialURL must be a string (got ${describeValue(initialURL)})`,
+      );
+    }
     fields = {
       guardedUploadProgress: guardProgressCallback(
         request.onUploadProgress,
@@ -51,7 +61,7 @@ export function readAdapterRequestFields(request: AdapterRequest) {
         'onDownloadProgress',
       ),
       requestURL,
-      initialURL: request.initialURL,
+      initialURL,
       headers: copyRequestHeaders(request.headers),
       body: request.body,
       signal: request.signal,

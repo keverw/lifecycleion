@@ -1,6 +1,6 @@
 import { isNullish } from '../internal/is-nullish';
 import { assertDurationMS, clampTimerDelayMS } from '../internal/timer-limits';
-import type { HTTPMethod } from './types';
+import type { AdapterType, HTTPMethod } from './types';
 
 /**
  * HTTP responses that are plausibly transient and worth retrying when a retry
@@ -279,6 +279,18 @@ export const STREAM_ABORT_HEADERS_KEY = Symbol.for(
  * than an unexpected abort (non-retryable cancel).
  */
 export const XHR_BROWSER_TIMEOUT_FLAG = '_lifecycleion_xhr_browser_timeout';
+
+/**
+ * Every {@link AdapterType}. A client refuses an adapter whose `getType()` answers anything
+ * else: each adapter and runtime check is keyed on the type, so an unknown one passed
+ * every one of them.
+ */
+export const ADAPTER_TYPES: ReadonlySet<AdapterType> = new Set<AdapterType>([
+  'fetch',
+  'xhr',
+  'node',
+  'mock',
+]);
 
 /** The standard methods: sent uppercase whatever case they are given in. */
 export const HTTP_METHODS: ReadonlyArray<HTTPMethod> = [

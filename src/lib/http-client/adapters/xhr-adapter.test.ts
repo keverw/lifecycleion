@@ -2500,6 +2500,82 @@ describe('XHRAdapter', () => {
       }
     }
   });
+
+  test('PR review round 42: an initial URL that names no origin fails closed rather than naming the page', async () => {
+    // Resolved against the page, `''`, `#top`, `?q` or `start` is the page itself: the
+    // request URL's userinfo was kept with nothing to show it belonged to that origin. A
+    // root- or protocol-relative one names an origin, and is resolved.
+    const originalDocument = (globalThis as Record<string, unknown>).document;
+    const openedURL = async (
+      initialURL: string,
+    ): Promise<string | undefined> => {
+      const promise = new XHRAdapter().send({
+        requestURL: 'https://u:p@app.test/x',
+        initialURL,
+        method: 'GET',
+        headers: {},
+      });
+      lastXHR.status = 204;
+      lastXHR.responseURL = 'https://app.test/x';
+      lastXHR.simulateLoad();
+      await promise;
+      return lastXHR.openArgs?.url;
+    };
+
+    try {
+      (globalThis as Record<string, unknown>).document = {
+        baseURI: 'https://app.test/page',
+      };
+
+      for (const initialURL of ['', ' \t\n', '#top', '?q', '.', 'start']) {
+        expect(await openedURL(initialURL)).toBe('https://app.test/x');
+      }
+
+      for (const initialURL of ['/start', '//app.test/start']) {
+        expect(await openedURL(initialURL)).toBe('https://u:p@app.test/x');
+      }
+    } finally {
+      if (originalDocument === undefined) {
+        delete (globalThis as Record<string, unknown>).document;
+      } else {
+        (globalThis as Record<string, unknown>).document = originalDocument;
+      }
+    }
+  });
+
+  test('PR review round 42: a request refused before it is sent reports no upload start', async () => {
+    (globalThis as Record<string, unknown>).XMLHttpRequest = class extends (
+      FakeXHR
+    ) {
+      constructor() {
+        super();
+        Object.defineProperty(this, 'upload', {
+          get() {
+            throw new Error('upload getter failed');
+          },
+        });
+      }
+    };
+
+    const events: unknown[] = [];
+    const outcome = await new XHRAdapter()
+      .send({
+        requestURL: 'https://api.test/x',
+        method: 'POST',
+        headers: {},
+        body: 'hello',
+        onUploadProgress: (event) => events.push(event),
+      })
+      .then(
+        () => undefined,
+        (error: unknown) => error as Record<PropertyKey, unknown>,
+      );
+
+    expect((outcome as unknown as Error).message).toBe('upload getter failed');
+    expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    expect(FakeXHR.instances[0]?.sentBody).toBeNull();
+    expect(events).toEqual([]);
+  });
 });
 
 describe('XHRAdapter - round 58', () => {

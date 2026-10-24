@@ -16,6 +16,7 @@ import {
   RESPONSE_STREAM_ABORT_FLAG,
   STREAM_ABORT_HEADERS_KEY,
 } from '../consts';
+import type { AdapterRequest } from '../types';
 
 let server: TestServer;
 const decoder = new TextDecoder();
@@ -520,6 +521,95 @@ describe('FetchAdapter', () => {
     } finally {
       globalThis.Request = originalRequest;
     }
+  });
+
+  test('PR review round 42: an initial URL that names no origin fails closed rather than naming the page', async () => {
+    // Resolved against the page, `''`, `#top`, `?q` or `start` is the page itself: the
+    // request URL's userinfo was kept with nothing to show it belonged to that origin. A
+    // root- or protocol-relative one names an origin, and is resolved.
+    let capturedURL = '';
+    (globalThis as any).fetch = (url: string) => {
+      capturedURL = url;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    // Bun's `Request` takes a URL with credentials; Node's refuses one, which is not what
+    // this test is about.
+    const originalRequest = globalThis.Request;
+    delete (globalThis as { Request?: unknown }).Request;
+    const previousDocument = (globalThis as any).document;
+
+    const sentURL = async (initialURL: string): Promise<string> => {
+      await new FetchAdapter().send({
+        requestURL: 'https://u:p@app.test/x',
+        initialURL,
+        method: 'GET',
+        headers: {},
+      });
+      return capturedURL;
+    };
+
+    try {
+      (globalThis as any).document = { baseURI: 'https://app.test/page' };
+
+      for (const initialURL of ['', ' \t\n', '#top', '?q', '.', 'start']) {
+        expect(await sentURL(initialURL)).toBe('https://app.test/x');
+      }
+
+      for (const initialURL of ['/start', '//app.test/start']) {
+        expect(await sentURL(initialURL)).toBe('https://u:p@app.test/x');
+      }
+    } finally {
+      if (previousDocument === undefined) {
+        delete (globalThis as any).document;
+      } else {
+        (globalThis as any).document = previousDocument;
+      }
+      globalThis.Request = originalRequest;
+    }
+  });
+
+  test('PR review round 42: a request refused before it is sent reports no upload start', async () => {
+    let calls = 0;
+    (globalThis as any).fetch = () => {
+      calls++;
+      return Promise.resolve(new Response(null, { status: 204 }));
+    };
+
+    const refusals: Array<Partial<AdapterRequest>> = [
+      // Refused by the `Request` probe: a header name `fetch` will not take.
+      { headers: { 'bad name': 'x' } },
+      // Refused as its signal is read.
+      {
+        signal: {
+          get aborted(): boolean {
+            throw new Error('aborted getter failed');
+          },
+        } as unknown as AbortSignal,
+      },
+    ];
+
+    for (const refusal of refusals) {
+      const events: unknown[] = [];
+      const outcome = await new FetchAdapter()
+        .send({
+          requestURL: 'https://api.test/upload',
+          method: 'POST',
+          headers: {},
+          body: 'hello',
+          onUploadProgress: (event) => events.push(event),
+          ...refusal,
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+      expect(events).toEqual([]);
+    }
+
+    expect(calls).toBe(0);
   });
 
   test('materializes repeated request headers with Headers.append', async () => {

@@ -31,7 +31,12 @@ import {
 } from './request-tracker';
 import type { RequestInfo, TrackedRequest } from './request-tracker';
 import { HTTPRequestBuilder } from './http-request-builder';
-import { RequestInterceptorManager, isInterceptorCancel } from './interceptors';
+import {
+  RequestInterceptorManager,
+  isInterceptorCancel,
+  snapshotInterceptedRequest,
+} from './interceptors';
+import type { ResolvedRequest } from './interceptors';
 import {
   ResponseObserverManager,
   ErrorObserverManager,
@@ -65,6 +70,7 @@ import {
 import {
   resolveRequestTimeoutMS,
   resolveMaxResponseBytes,
+  ADAPTER_TYPES,
   DEFAULT_REQUEST_ID_HEADER,
   DEFAULT_REQUEST_ATTEMPT_HEADER,
   DEFAULT_USER_AGENT,
@@ -318,7 +324,17 @@ export class BaseHTTPClient {
 
     this._clientID = generateID('ulid');
     this._adapter = snapshot.adapter ?? new FetchAdapter();
-    this._adapterType = this._adapter.getType();
+    const adapterType: unknown = this._adapter.getType();
+    // One of the four, as the type has it: every adapter and runtime check below and per
+    // request is keyed on it, so a custom adapter answering anything else - `'custom'`,
+    // `undefined` - was checked as none of them. Named by its type only: the answer is
+    // the caller's.
+    if (!ADAPTER_TYPES.has(adapterType as AdapterType)) {
+      throw new TypeError(
+        `HTTPClient adapter getType() must return 'fetch', 'xhr', 'node' or 'mock' (got ${adapterType === null ? 'null' : typeof adapterType})`,
+      );
+    }
+    this._adapterType = adapterType as AdapterType;
     this._isBrowserRuntime = isBrowserEnvironment();
     assertSupportedAdapterRuntimeAndConfig(
       snapshot,
@@ -932,6 +948,9 @@ export class BaseHTTPClient {
               attemptNumber: 1,
             },
             () => cancelSignal.aborted,
+            (failed) => {
+              initialRequestCandidate = failed;
+            },
           );
 
           // Taken for the rest of the phase through `snapshotInterceptedRequest`. A
@@ -1586,6 +1605,9 @@ export class BaseHTTPClient {
                   attemptNumber: lastAttemptNumber + 1,
                 },
                 () => cancelSignal.aborted,
+                (failed) => {
+                  failedRedirectRequest = failed;
+                },
               );
               if (isInterceptorCancel(redirectRunResult)) {
                 redirectIntercept = redirectRunResult;
@@ -2557,6 +2579,9 @@ export class BaseHTTPClient {
             retryPhase,
             { initialURL, redirectHistory, requestID, attemptNumber },
             () => cancelSignal.aborted,
+            (failed) => {
+              failedRetryRequest = failed;
+            },
           );
 
           // Snapshotted as the initial phase in `_execute` does, and skipped on the
@@ -4326,6 +4351,11 @@ export class BaseHTTPClient {
     context: RequestInterceptorContext,
     /** Whether the request was cancelled, after which no further interceptor runs. */
     isCancelled: () => boolean,
+    /**
+     * Handed an interceptor's result that could not be copied for the next interceptor,
+     * so the phase reports from it as from a chain result its own copy fails on.
+     */
+    onCopyFailure: (request: InterceptedRequest) => void,
   ): Promise<
     | { result: R; isIntercepted: false }
     | { result: InterceptedRequest | InterceptorCancel; isIntercepted: true }
@@ -4341,7 +4371,12 @@ export class BaseHTTPClient {
       return { result: request, isIntercepted: false };
     }
 
-    const parentChain = parentManager?.snapshot();
+    // None for a parent with nothing registered: its chain would hand back the request
+    // unread, and the flag below would have a sub-client copy it for nothing.
+    const parentChain =
+      parentManager === undefined || parentManager.isEmpty
+        ? undefined
+        : parentManager.snapshot();
     const ownChain = this._requestInterceptors.snapshot();
     let current: InterceptedRequest | InterceptorCancel = request;
     // The interceptors' own copy of the history, as each response has its own: an
@@ -4352,7 +4387,10 @@ export class BaseHTTPClient {
     };
 
     if (parentChain) {
-      current = await parentChain(request, phase, chainContext, isCancelled);
+      current = await parentChain(request, phase, chainContext, {
+        isCancelled,
+        onCopyFailure,
+      });
 
       if (isInterceptorCancel(current) || isCancelled()) {
         return { result: current, isIntercepted: true };
@@ -4360,7 +4398,16 @@ export class BaseHTTPClient {
     }
 
     return {
-      result: await ownChain(current, phase, chainContext, isCancelled),
+      // The parent's result is copied before an interceptor here reads it whenever the
+      // parent has interceptors, whether or not one ran: one that redefined `requestURL`
+      // on the request it was handed and returned that same object handed back the
+      // request itself, which identity cannot tell from one no interceptor touched. A
+      // request the client built copies to an equal one, so copying it is harmless.
+      result: await ownChain(current, phase, chainContext, {
+        isCancelled,
+        isInterceptorResult: parentChain !== undefined,
+        onCopyFailure,
+      }),
       isIntercepted: true,
     };
   }
@@ -4802,96 +4849,6 @@ function readStringMember(
 
   return typeof value === 'string' ? value : fallback;
 }
-
-/**
- * Read a request an interceptor chain returned once, into a plain object this client owns.
- *
- * The chain's result is caller code: any member can be a getter, and the header record a
- * `Proxy` or an object whose entries are getters. Everything after the chain validates a
- * field and then uses it - the URL is checked as http(s), then read again for the cookie
- * jar and again for the adapter; the headers are checked against the browser-restricted
- * list, then merged for dispatch - and each of those reads could answer differently. A
- * `requestURL` getter that answered `https://api.example/x` to the check and
- * `https://evil.example/` afterwards attached `api.example`'s cookies to a request sent
- * to `evil.example`. Taken here, once, every later check and use sees the same values.
- *
- * Header values are normalized here as `mergeHeaders` normalizes them for dispatch - a
- * single value converted to a string, an array's elements each converted, and a
- * one-element array collapsed to its string - so a value whose `toString` answers
- * differently on each call is checked and sent as one string. Names are lowercased, and
- * an unset value removes the header whatever its capitalization. A standard method is
- * uppercased (see `normalizeStandardMethod`), so a `post` is the `POST` the retry and
- * redirect rules check for; any other method is kept as given.
- * Throws on a `requestURL` that is not a string, a `method` that is not a method name
- * (see `describeInvalidHTTPMethod`), or `headers` that is not a plain object (an array, a
- * `Headers` or a `Map` is refused), and on any read or conversion that throws; each phase
- * reports that as the interceptor's failure.
- */
-function snapshotInterceptedRequest(
-  request: InterceptedRequest,
-): ResolvedRequest {
-  const { requestURL, method, headers, body } = request;
-
-  if (typeof requestURL !== 'string') {
-    throw new TypeError(
-      `[HTTPClient] Interceptor returned a request whose requestURL is not a string (got ${requestURL === null ? 'null' : typeof requestURL}).`,
-    );
-  }
-
-  const methodProblem = describeInvalidHTTPMethod(method);
-
-  if (methodProblem !== undefined) {
-    throw new TypeError(
-      `[HTTPClient] Interceptor returned a request whose method ${methodProblem}.`,
-    );
-  }
-
-  const normalizedMethod = normalizeStandardMethod(method);
-
-  const candidateHeaders: unknown = headers;
-
-  // A plain record only (see `isPlainRecord`): a `Headers` or `Map` would have every
-  // header it carries silently dropped, and an array's indices taken for names.
-  if (!isPlainRecord(candidateHeaders)) {
-    const got =
-      candidateHeaders === null
-        ? 'null'
-        : Array.isArray(candidateHeaders)
-          ? 'an array'
-          : typeof candidateHeaders !== 'object'
-            ? typeof candidateHeaders
-            : 'an object with a non-Object prototype, such as Headers or Map';
-    throw new TypeError(
-      `[HTTPClient] Interceptor returned a request whose headers is not a plain object (got ${got}).`,
-    );
-  }
-
-  // Read as every other phase's headers are: names lowercased, and an unset value
-  // removing the header, whatever its capitalization -
-  // `{ ...request.headers, Authorization: undefined }` drops `authorization` rather
-  // than sending it.
-  const headersSnapshot = mergeHeaders(
-    candidateHeaders as Record<string, string | string[]>,
-  );
-
-  return {
-    requestURL,
-    method: normalizedMethod,
-    headers: headersSnapshot,
-    body,
-  };
-}
-
-/**
- * A request as the client holds it once its headers are normalized - names lowercased,
- * values strings or arrays, unset ones removed: what `snapshotInterceptedRequest` returns
- * and what the attempt loop sends. Typed apart from {@link InterceptedRequest}, whose
- * headers may still carry an interceptor's `undefined`, so a step that only copies
- * headers can rely on that without normalizing them again.
- */
-type ResolvedRequest = Omit<InterceptedRequest, 'headers'> & {
-  headers: Record<string, string | string[]>;
-};
 
 /**
  * Read every documented {@link HTTPClientConfig} field once, through its original

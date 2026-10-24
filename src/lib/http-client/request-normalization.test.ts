@@ -5,6 +5,7 @@ import * as zlib from 'node:zlib';
 import { PassThrough, Writable } from 'node:stream';
 import type { AddressInfo } from 'node:net';
 import { HTTPClient } from './http-client';
+import type { HTTPSubClient } from './http-client';
 import {
   buildURL,
   derivedRedirectFields,
@@ -65,6 +66,8 @@ import type {
   AdapterType,
   HTTPAdapter,
   HTTPMethod,
+  InterceptedRequest,
+  InterceptorPhaseName,
 } from './types';
 
 /** A cookie jar whose storing of a response fails. */
@@ -10307,3 +10310,315 @@ test('PR review round 41: the adapter type is read once, as the config was check
   expect(first.adapterType).toBe('node');
   expect(second.adapterType).toBe('node');
 });
+
+test('PR review round 42: an initialURL that is not a string is refused as non-retryable by every adapter', async () => {
+  // `null` resolved against the page as a relative reference, and was taken for the
+  // page's own origin by the browser adapters.
+  for (const adapter of [
+    new FetchAdapter(),
+    new XHRAdapter(),
+    new NodeAdapter(),
+    new MockAdapter(),
+  ]) {
+    for (const initialURL of [null, 42]) {
+      const outcome = await adapter
+        .send({
+          requestURL: 'https://u:p@a.test/x',
+          initialURL: initialURL as unknown as string,
+          method: 'GET',
+          headers: {},
+        })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect((outcome as unknown as Error).message).toBe(
+        `Adapter request initialURL must be a string (got ${initialURL === null ? 'null' : 'number'})`,
+      );
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    }
+  }
+});
+
+test('PR review round 42: an adapter whose getType() is not an adapter type is refused when the client is built', () => {
+  for (const [type, got] of [
+    ['custom', 'string'],
+    [undefined, 'undefined'],
+    [null, 'null'],
+    [1, 'number'],
+  ] as const) {
+    const adapter = {
+      getType: () => type as unknown as AdapterType,
+      send: () => Promise.resolve({ status: 200, headers: {}, body: null }),
+    } satisfies HTTPAdapter;
+
+    expect(() => new HTTPClient({ adapter })).toThrow(
+      new TypeError(
+        `HTTPClient adapter getType() must return 'fetch', 'xhr', 'node' or 'mock' (got ${got})`,
+      ),
+    );
+  }
+});
+
+test("PR review round 42: a sub-client's host-filtered interceptor reads its parent's result as one copy", async () => {
+  // The parent's last result reaches the sub-client's chain as returned: a `requestURL`
+  // getter that answered the trusted host to the filter and another to the interceptor
+  // sent the sub-client's token to the other host.
+  const seen: Array<{ url: string; authorization: unknown }> = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      seen.push({
+        url: request.requestURL,
+        authorization: request.headers['authorization'],
+      });
+      return Promise.resolve({ status: 204, headers: {}, body: null });
+    },
+  };
+  const parent = new HTTPClient({ adapter, baseURL: 'https://trusted.test' });
+  let reads = 0;
+  parent.addRequestInterceptor((request) => ({
+    method: request.method,
+    headers: request.headers,
+    body: request.body,
+    get requestURL() {
+      return reads++ === 0 ? 'https://trusted.test/x' : 'https://evil.test/x';
+    },
+  }));
+  const child = parent.createSubClient();
+  child.addRequestInterceptor(
+    (request) => ({
+      ...request,
+      headers: { ...request.headers, authorization: 'Bearer token' },
+    }),
+    { hosts: ['trusted.test'] },
+  );
+
+  await child.get('/x').send();
+
+  expect(reads).toBe(1);
+  expect(seen).toEqual([
+    { url: 'https://trusted.test/x', authorization: 'Bearer token' },
+  ]);
+});
+
+test('PR review round 42: an interceptor result that cannot be copied is reported the same whatever is registered after it', async () => {
+  // A result the next interceptor's copy failed on was reported from the request the
+  // phase built, not from the result - so a later interceptor, even one this phase never
+  // runs, changed what `requestURL` the failure carried.
+  const reported = async (
+    register: (client: HTTPClient) => void,
+  ): Promise<Record<string, unknown>> => {
+    const adapter: HTTPAdapter = {
+      getType: () => 'node',
+      send: () => Promise.resolve({ status: 204, headers: {}, body: null }),
+    };
+    const client = new HTTPClient({ adapter, baseURL: 'https://a.test' });
+    let observedURL: string | undefined;
+    client.addErrorObserver((_error, request) => {
+      observedURL = request.requestURL;
+    });
+    client.addRequestInterceptor(
+      () =>
+        ({
+          requestURL: 'https://a.test/bad',
+          method: 'GET',
+          headers: 'not a record',
+        }) as unknown as InterceptedRequest,
+    );
+    register(client);
+    const builder = client.get('/start');
+    const response = await builder.send();
+
+    return {
+      code: builder.error?.code,
+      responseURL: response.requestURL,
+      errorURL: builder.error?.requestURL,
+      observedURL,
+    };
+  };
+
+  const alone = await reported(() => {});
+  expect(alone).toEqual({
+    code: 'interceptor_error',
+    responseURL: 'https://a.test/bad',
+    errorURL: 'https://a.test/bad',
+    observedURL: 'https://a.test/bad',
+  });
+
+  // One this phase never runs, and one it does.
+  expect(
+    await reported((client) => {
+      client.addRequestInterceptor((request) => request, {
+        phases: ['retry'],
+      });
+    }),
+  ).toEqual(alone);
+  expect(
+    await reported((client) => {
+      client.addRequestInterceptor((request) => request);
+    }),
+  ).toEqual(alone);
+});
+
+test('PR review round 42: a malformed interceptor result fails even when a later interceptor would replace it', async () => {
+  // Each result is copied before the next interceptor reads it, so a result that is not
+  // a request is refused there: the later interceptor never runs.
+  let laterCalls = 0;
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: () => Promise.resolve({ status: 204, headers: {}, body: null }),
+  };
+  const client = new HTTPClient({ adapter, baseURL: 'https://a.test' });
+  client.addRequestInterceptor(
+    () =>
+      ({
+        requestURL: 'https://a.test/bad',
+        method: 'GET',
+        headers: new Map(),
+      }) as unknown as InterceptedRequest,
+  );
+  client.addRequestInterceptor(() => {
+    laterCalls++;
+    return { requestURL: 'https://a.test/ok', method: 'GET', headers: {} };
+  });
+
+  const builder = client.get('/start');
+  const response = await builder.send();
+
+  expect(builder.error?.code).toBe('interceptor_error');
+  expect(response.requestURL).toBe('https://a.test/bad');
+  expect(laterCalls).toBe(0);
+});
+
+test("PR review round 42: a parent interceptor that redefines the request it was handed and returns it is copied before a sub-client's interceptor reads it", async () => {
+  // Returned as the very object the parent's chain was handed, it could not be told
+  // from a request no interceptor touched: the sub-client's `hosts` filter read the
+  // trusted host and its token interceptor the other one.
+  const sent: Array<[string, unknown]> = [];
+  const adapter: HTTPAdapter = {
+    getType: () => 'node',
+    send: (request) => {
+      sent.push([request.requestURL, request.headers['authorization']]);
+      return Promise.resolve({ status: 204, headers: {}, body: null });
+    },
+  };
+  const parent = new HTTPClient({ adapter, baseURL: 'https://trusted.test' });
+  let reads = 0;
+  parent.addRequestInterceptor((request) => {
+    Object.defineProperty(request, 'requestURL', {
+      configurable: true,
+      enumerable: true,
+      get() {
+        return reads++ === 0 ? 'https://trusted.test/x' : 'https://evil.test/x';
+      },
+    });
+    return request;
+  });
+  const child = parent.createSubClient();
+  const seenByTokenInterceptor: string[] = [];
+  child.addRequestInterceptor(
+    (request) => {
+      seenByTokenInterceptor.push(request.requestURL);
+      return {
+        ...request,
+        headers: { ...request.headers, authorization: 'Bearer token' },
+      };
+    },
+    { hosts: ['trusted.test'] },
+  );
+
+  await child.get('/x').send();
+
+  expect(reads).toBe(1);
+  expect(seenByTokenInterceptor).toEqual(['https://trusted.test/x']);
+  expect(sent).toEqual([['https://trusted.test/x', 'Bearer token']]);
+});
+
+for (const phaseName of ['retry', 'redirect'] as const) {
+  test(`PR review round 42: an interceptor result that cannot be copied is reported the same in the ${phaseName} phase whatever is registered after it`, async () => {
+    // As in the initial phase: the copy the next interceptor - or a sub-client's chain -
+    // takes hands the failed result to the phase, which reports from it as it does when
+    // its own copy fails.
+    const reported = async (
+      register: (client: HTTPSubClient) => void,
+      isOnSubClient = false,
+    ): Promise<Record<string, unknown>> => {
+      let calls = 0;
+      const adapter: HTTPAdapter = {
+        getType: () => 'node',
+        send: () => {
+          calls++;
+          const answer: AdapterResponse =
+            calls > 1
+              ? { status: 204, headers: {}, body: null }
+              : phaseName === 'retry'
+                ? { status: 503, headers: {}, body: null }
+                : { status: 302, headers: { location: '/next' }, body: null };
+          return Promise.resolve(answer);
+        },
+      };
+      const root = new HTTPClient({
+        adapter,
+        baseURL: 'https://a.test',
+        followRedirects: true,
+        retryPolicy: { strategy: 'fixed', maxRetryAttempts: 1, delayMS: 0 },
+      });
+      const client = isOnSubClient ? root.createSubClient() : root;
+      let observedURL: string | undefined;
+      client.addErrorObserver((_error, request) => {
+        observedURL = request.requestURL;
+      });
+      // The bad interceptor on the parent, for the sub-client: its result reaches the
+      // sub-client's chain uncopied.
+      (isOnSubClient ? root : client).addRequestInterceptor(
+        () =>
+          ({
+            requestURL: 'https://a.test/bad',
+            method: 'GET',
+            headers: 'not a record',
+          }) as unknown as InterceptedRequest,
+        { phases: [phaseName] },
+      );
+      register(client);
+      const builder = client.get('/start');
+      const response = await builder.send();
+
+      return {
+        code: builder.error?.code,
+        responseURL: response.requestURL,
+        errorURL: builder.error?.requestURL,
+        observedURL,
+      };
+    };
+
+    const alone = await reported(() => {});
+    expect(alone).toEqual({
+      code: 'interceptor_error',
+      responseURL: 'https://a.test/bad',
+      errorURL: 'https://a.test/bad',
+      observedURL: 'https://a.test/bad',
+    });
+
+    const passThrough = (
+      client: HTTPSubClient,
+      phases: InterceptorPhaseName[],
+    ) =>
+      client.addRequestInterceptor((request) => request, {
+        phases,
+      });
+    const otherPhase = phaseName === 'retry' ? 'redirect' : 'retry';
+
+    expect(
+      await reported((client) => passThrough(client, [phaseName])),
+    ).toEqual(alone);
+    expect(
+      await reported((client) => passThrough(client, [otherPhase])),
+    ).toEqual(alone);
+    expect(await reported(() => {}, true)).toEqual(alone);
+    expect(
+      await reported((client) => passThrough(client, [phaseName]), true),
+    ).toEqual(alone);
+  });
+}

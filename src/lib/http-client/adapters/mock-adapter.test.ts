@@ -1994,6 +1994,37 @@ describe('MockAdapter transportError', () => {
       wasDefinitelyNotSent: 1,
     });
   });
+
+  test('PR review round 42: a transportError field whose getter throws is refused as the route mistake', async () => {
+    // Only `status` was read as the route's mistake: a throwing `isRetryable`,
+    // `wasDefinitelyNotSent` or `message` escaped as a retryable adapter failure.
+    for (const field of [
+      'status',
+      'isRetryable',
+      'wasDefinitelyNotSent',
+      'message',
+    ]) {
+      const adapter = new MockAdapter();
+      const failure = new Error(`${field} getter failed`);
+      const transportError = {};
+      Object.defineProperty(transportError, field, {
+        get() {
+          throw failure;
+        },
+      });
+      adapter.routes.get('/tls', () => ({ status: 200, transportError }));
+
+      const outcome = await adapter
+        .send({ requestURL: 'http://api.test/tls', method: 'GET', headers: {} })
+        .then(
+          () => undefined,
+          (error: unknown) => error as Record<PropertyKey, unknown>,
+        );
+
+      expect(outcome?.cause).toBe(failure);
+      expect(outcome?.[NON_RETRYABLE_HTTP_ADAPTER_ERROR_FLAG]).toBe(true);
+    }
+  });
 });
 
 describe('retrySuppressedReason', () => {

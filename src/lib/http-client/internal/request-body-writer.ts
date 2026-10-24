@@ -74,8 +74,9 @@ export async function writeRequestBodyChunked(
  * Writes one chunk into `req` and resolves once the writable has accepted it - its write
  * callback has run and, for a write that asked for one, its `'drain'` has arrived -
  * calling `onAccepted` just before. Rejects when the stream errors, or closes with the
- * chunk not yet accepted. Shared by `writeRequestBodyChunked` and
- * `serializeMultipartFormData`, which count a chunk's bytes in `onAccepted`.
+ * chunk not yet accepted, and with what `onAccepted` throws. Shared by
+ * `writeRequestBodyChunked` and `serializeMultipartFormData`, which count a chunk's
+ * bytes in `onAccepted`.
  */
 export function writeChunkWithBackpressure(
   req: RequestBodyWritable,
@@ -101,7 +102,19 @@ export function writeChunkWithBackpressure(
 
       isSettled = true;
       cleanup();
-      onAccepted?.();
+
+      // Rejected with what it threw: settled and with its listeners off, a throw left the
+      // promise pending for good - and, from the write callback or `'drain'`, escaped as
+      // an uncaught exception.
+      try {
+        onAccepted?.();
+      } catch (error) {
+        // As thrown: the caller's own value, not one this writer made.
+        // eslint-disable-next-line @typescript-eslint/prefer-promise-reject-errors
+        reject(error);
+        return;
+      }
+
       resolve();
     };
 
