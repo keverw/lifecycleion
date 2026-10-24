@@ -1,5 +1,6 @@
 import { asciiUppercase } from '../internal/http-method';
 import { isHTTPToken } from '../internal/http-token';
+import { isHeaderSafeCookieText } from '../internal/cookie-text';
 import {
   assertOptionalHeaderRecord,
   isPlainRecord,
@@ -261,7 +262,13 @@ export interface MockAdapterRoutes {
   clear(): void;
 }
 
-// find-my-way requires a handler function; the actual MockRouteHandler lives in store.
+// find-my-way requires a handler function; the actual MockRouteHandler lives in store,
+// beside the pattern it was registered under.
+interface MockRouteEntry {
+  handler: MockRouteHandler;
+  pattern: string;
+}
+
 const noop: Router.Handler<Router.HTTPVersion.V1> = () => {};
 
 export class MockAdapter implements HTTPAdapter {
@@ -416,11 +423,15 @@ export class MockAdapter implements HTTPAdapter {
     let mockResponse: MockResponse;
     // Which callback produced `mockResponse`, so a missing one names the right culprit.
     let responseSource: 'route' | 'onHandlerError' = 'route';
+    // The pattern the route was registered under, never the request's own path: the
+    // path can carry a secret (`/password-reset/<token>`) the pattern only names.
+    let routePattern = '';
 
     if (match === null) {
       mockResponse = { status: 404, body: { message: 'Not Found' } };
     } else {
-      const handler = match.store as MockRouteHandler;
+      const { handler, pattern } = match.store as MockRouteEntry;
+      routePattern = pattern;
 
       try {
         // Match real network semantics more closely: once the caller aborts,
@@ -488,7 +499,7 @@ export class MockAdapter implements HTTPAdapter {
     // route, and its side effects, again.
     if (typeof mockResponse !== 'object' || mockResponse === null) {
       const error = new TypeError(
-        `MockAdapter ${responseSource} for ${method} ${path} returned no MockResponse (got ${mockResponse === null ? 'null' : typeof mockResponse})`,
+        `MockAdapter ${responseSource} for ${routeMethod} ${routePattern} returned no MockResponse (got ${mockResponse === null ? 'null' : typeof mockResponse})`,
       );
       markNonRetryableAdapterError(error);
       throw error;
@@ -805,7 +816,8 @@ function buildRoutes(
     handler: MockRouteHandler,
   ): void {
     try {
-      router.on(method, path, noop, handler);
+      const entry: MockRouteEntry = { handler, pattern: path };
+      router.on(method, path, noop, entry);
     } catch (error) {
       if (isDuplicateRouteRegistrationError(error)) {
         throw duplicateRouteRegistrationError(method, path, error);
@@ -884,54 +896,120 @@ function parseCookieHeader(
 function cookiesToSetCookieHeaders(
   cookies: Record<string, string | MockCookieOptions | null>,
 ): string[] {
-  return Object.entries(cookies).map(([name, value], index) => {
+  return Object.entries(cookies).map(([name, entry], index) => {
     // A `;` or `=` in a name, or a `;` in a value or attribute, would rewrite the line -
     // `abc; Domain=other.test` sets a Domain the route never asked for. A route mistake.
     // A name refused is named by its position: it may itself be the text pasted wrong.
     assertCookieText(name, `name at position ${String(index)}`, true);
-    if (typeof value === 'string') {
-      assertCookieText(value, `"${name}" value`);
-    } else if (value !== null) {
-      assertCookieText(String(value.value), `"${name}" value`);
-      for (const attribute of ['path', 'domain'] as const) {
-        const text = value[attribute];
-        if (text !== undefined) {
-          assertCookieText(text, `"${name}" ${attribute}`);
-        }
-      }
-      // The two typed attributes, held to their types: a string in either was written
-      // into the line as it was.
-      const sameSite: unknown = value.sameSite;
-      if (
-        sameSite !== undefined &&
-        sameSite !== 'Strict' &&
-        sameSite !== 'Lax' &&
-        sameSite !== 'None'
-      ) {
-        throw new TypeError(
-          `MockAdapter cookie "${name}" sameSite must be 'Strict', 'Lax' or 'None'`,
-        );
-      }
-      const maxAge: unknown = value.maxAge;
-      if (maxAge !== undefined && typeof maxAge !== 'number') {
-        throw new TypeError(
-          `MockAdapter cookie "${name}" maxAge must be a number`,
-        );
-      }
-    }
-    // null pairs with the string shorthand above: both use Path=/.
+    // null pairs with the string shorthand below: both use Path=/.
     // Scoped deletes need explicit path/domain so the cookie identity matches.
-    if (value === null) {
+    if (entry === null) {
       return `${name}=; Path=/; Max-Age=0`;
     }
 
     // string → session cookie: no expiry, defaults to Path=/.
-    if (typeof value === 'string') {
-      return `${name}=${value}; Path=/`;
+    if (typeof entry === 'string') {
+      assertCookieText(entry, `"${name}" value`);
+      return `${name}=${entry}; Path=/`;
     }
 
-    return serializeMockCookieOptions(name, value);
+    return serializeMockCookieOptions(
+      name,
+      readMockCookieOptions(name, entry, index),
+    );
   });
+}
+
+/**
+ * A route's `MockCookieOptions`, every field read once and held to its type - the copy
+ * checked is the copy written. A field of the wrong type is a route mistake, not a value
+ * to coerce: a `value` of `undefined` was written as `undefined`, and `httpOnly: 'false'`
+ * set HttpOnly. It is named by the cookie's position, as a refused name is; text of the
+ * right type that cannot be written, by the cookie's (already vetted) name.
+ */
+function readMockCookieOptions(
+  name: string,
+  entry: unknown,
+  index: number,
+): MockCookieOptions {
+  const position = `at position ${String(index)}`;
+  if (typeof entry !== 'object' || entry === null) {
+    throw new TypeError(
+      `MockAdapter cookie ${position} must be a string, null or a MockCookieOptions object (got ${describeValue(entry)})`,
+    );
+  }
+
+  const options = entry as Record<keyof MockCookieOptions, unknown>;
+  const value = options.value;
+  const path = options.path;
+  const domain = options.domain;
+  const maxAge = options.maxAge;
+  const httpOnly = options.httpOnly;
+  const secure = options.secure;
+  const sameSite = options.sameSite;
+
+  if (typeof value !== 'string') {
+    throw new TypeError(
+      `MockAdapter cookie ${position} value must be a string (got ${describeValue(value)})`,
+    );
+  }
+  assertCookieText(value, `"${name}" value`);
+  for (const [attribute, text] of [
+    ['path', path],
+    ['domain', domain],
+  ] as const) {
+    if (text === undefined) {
+      continue;
+    }
+    if (typeof text !== 'string') {
+      throw new TypeError(
+        `MockAdapter cookie ${position} ${attribute} must be a string (got ${describeValue(text)})`,
+      );
+    }
+    assertCookieText(text, `"${name}" ${attribute}`);
+  }
+  // The typed attributes, held to their types: a string in `sameSite` or `maxAge` was
+  // written into the line as it was, and either flag was read by truthiness.
+  if (
+    sameSite !== undefined &&
+    sameSite !== 'Strict' &&
+    sameSite !== 'Lax' &&
+    sameSite !== 'None'
+  ) {
+    throw new TypeError(
+      `MockAdapter cookie ${position} sameSite must be 'Strict', 'Lax' or 'None'`,
+    );
+  }
+  if (maxAge !== undefined && typeof maxAge !== 'number') {
+    throw new TypeError(
+      `MockAdapter cookie ${position} maxAge must be a number (got ${describeValue(maxAge)})`,
+    );
+  }
+  // `NaN` would print as `Max-Age=NaN`, which the jar ignores, leaving a session cookie
+  // the route never asked for.
+  if (typeof maxAge === 'number' && Number.isNaN(maxAge)) {
+    throw new TypeError(`MockAdapter cookie ${position} maxAge is NaN`);
+  }
+  for (const [flag, isSet] of [
+    ['httpOnly', httpOnly],
+    ['secure', secure],
+  ] as const) {
+    if (isSet !== undefined && typeof isSet !== 'boolean') {
+      throw new TypeError(
+        `MockAdapter cookie ${position} ${flag} must be a boolean (got ${describeValue(isSet)})`,
+      );
+    }
+  }
+
+  return {
+    value,
+    path: path as string | undefined,
+    domain: domain as string | undefined,
+    maxAge,
+    httpOnly: httpOnly as boolean | undefined,
+    secure: secure as boolean | undefined,
+    sameSite,
+  };
 }
 
 function serializeMockCookieOptions(
@@ -947,12 +1025,8 @@ function serializeMockCookieOptions(
   // is read: a fraction, or a number too large to print as digits, would make the
   // cookie jar ignore the attribute, so `0.01` would never expire, `-0.5` would not
   // delete the cookie, and `Infinity` would leave a session cookie.
+  // `NaN` is refused by `readMockCookieOptions`.
   const maxAge = cookie.maxAge;
-  // A route mistake, not a cookie: `NaN` would print as `Max-Age=NaN`, which the jar
-  // ignores, leaving a session cookie the route never asked for.
-  if (typeof maxAge === 'number' && Number.isNaN(maxAge)) {
-    throw new TypeError(`MockAdapter cookie "${name}" maxAge is NaN`);
-  }
   appendCookieAttribute(
     parts,
     'Max-Age',
@@ -1299,18 +1373,18 @@ function asRouteMistake<R>(step: () => R): R {
 }
 
 /**
- * Throw when `text` would change a `Set-Cookie` line's framing, is not an RFC 9110 token
- * where `shouldBeToken` (a cookie name, RFC 6265), or holds a character above U+00FF, which
- * a real server's `setHeader` refuses and the jar drops.
+ * Throw when `text` is not an RFC 9110 token where `shouldBeToken` (a cookie name,
+ * RFC 6265), or otherwise fails the jar's own rule for cookie text: a `;` or control
+ * character that would change a `Set-Cookie` line's framing, or a character above U+00FF,
+ * which a real server's `setHeader` refuses and the jar drops. A tab passes, as it does
+ * in a raw `set-cookie` the jar reads.
  */
 function assertCookieText(
   text: string,
   part: string,
   shouldBeToken = false,
 ): void {
-  // eslint-disable-next-line no-control-regex -- control characters are what is refused
-  const isUnsafe = /[;\u0000-\u001f\u007f\u0100-\uffff]/.test(text);
-  if (isUnsafe || (shouldBeToken && !isHTTPToken(text))) {
+  if (shouldBeToken ? !isHTTPToken(text) : !isHeaderSafeCookieText(text, '')) {
     throw new TypeError(
       `MockAdapter cookie ${part} cannot be written into a Set-Cookie line`,
     );

@@ -8,6 +8,7 @@ import type { PublicSuffixOverrides } from './public-suffix';
 import { assertHeaderRecord } from './internal/plain-record';
 import { lowerCaseHeaderName } from './internal/header-utils';
 import { isNullish } from '../internal/is-nullish';
+import { isHeaderSafeCookieText } from './internal/cookie-text';
 
 // Matches bare hostnames like 'localhost', 'myapp', 'my-app' that tldts
 // won't assign a registered domain to but are still valid cookie domains.
@@ -41,7 +42,10 @@ function capLifetime(
   return capped;
 }
 
-/** A request host prepared for matching against many cookie domains. */
+/**
+ * A request host, or a stored cookie domain, prepared for matching against many of the
+ * other: its IP literal read once, and its normalized form once, when first asked for.
+ */
 interface PreparedHost {
   host: string;
   canonicalIP: string | null;
@@ -104,43 +108,11 @@ export interface CookieJarJSON {
 interface StoredCookieScope {
   name: string;
   domain: string;
+  /** `domain` prepared for matching, so a send does not read it again per cookie. */
+  preparedDomain: PreparedHost;
   path: string;
   hostOnly?: boolean;
   secure?: boolean;
-}
-
-/**
- * Whether every character of `text` can be written into a `Cookie` header as part of
- * one cookie-pair: no control character other than a tab (a CR LF is a header injection,
- * a DEL is refused by the header parser on the other side; a tab is header-safe, and
- * RFC 6265bis keeps a cookie that carries one), no `;` (the pair delimiter), and none
- * of `extra`.
- *
- * Deliberately looser than RFC 6265's cookie-octet grammar, which also forbids space,
- * comma, double quote and backslash in a value. Servers send all four - a JSON blob, a
- * quoted value, a comma-separated list - and browsers store and return them, so
- * refusing them would drop real cookies from `parseSetCookieHeader`. What is refused
- * here is exactly what would change the *framing* of the header: another pair, or
- * another line.
- */
-function isHeaderSafeCookieText(text: string, extra: string): boolean {
-  for (const char of text) {
-    const code = char.charCodeAt(0);
-
-    // Above U+00FF is refused too: no header can carry it, so a stored cookie holding
-    // one failed every request to its host, and took the host's other cookies with it.
-    if (
-      (code <= 0x1f && code !== 0x09) ||
-      code === 0x7f ||
-      code > 0xff ||
-      char === ';' ||
-      extra.includes(char)
-    ) {
-      return false;
-    }
-  }
-
-  return true;
 }
 
 /** RFC 6265 §5.2.2 delta-seconds: an optional `-`, then digits only. */
@@ -443,6 +415,7 @@ export class CookieJar {
     const scope: StoredCookieScope = {
       name: stored.name,
       domain: normalizedDomain,
+      preparedDomain: this.prepareHost(normalizedDomain),
       path,
     };
 
@@ -640,14 +613,14 @@ export class CookieJar {
           !scope.hostOnly &&
           scope.domain &&
           isPublicSuffix(scope.domain) &&
-          !this.hostOnlyDomainMatches(requestHost, scope.domain)
+          !this.hostOnlyDomainMatches(requestHost, scope.preparedDomain)
         ) {
           continue;
         }
 
         const isDomainMatch = scope.hostOnly
-          ? this.hostOnlyDomainMatches(requestHost, scope.domain)
-          : this.domainMatches(requestHost, scope.domain);
+          ? this.hostOnlyDomainMatches(requestHost, scope.preparedDomain)
+          : this.domainMatches(requestHost, scope.preparedDomain);
 
         if (!isDomainMatch) {
           continue;
@@ -1491,6 +1464,9 @@ export class CookieJar {
     path: string,
   ): boolean {
     const now = Date.now();
+    // Read once, not once per stored cookie in each direction: normalizing it runs IDNA
+    // and a URL parse.
+    const preparedDomain = this.prepareHost(domain);
     // Matching scopes can cross bucket boundaries at nested public suffixes,
     // in either direction (a wider insecure cookie can shadow a narrow secure one).
     for (const bucket of this.buckets.values()) {
@@ -1506,8 +1482,8 @@ export class CookieJar {
         }
 
         const isDomainMatch =
-          this.domainMatches(domain, scope.domain) ||
-          this.domainMatches(scope.domain, domain);
+          this.domainMatches(preparedDomain, scope.preparedDomain) ||
+          this.domainMatches(scope.preparedDomain, preparedDomain);
 
         if (
           isDomainMatch &&
@@ -1839,9 +1815,14 @@ export class CookieJar {
 
   private domainMatches(
     requestHostInput: string | PreparedHost,
-    cookieDomain: string,
+    cookieDomainInput: string | PreparedHost,
   ): boolean {
-    if (!cookieDomain) {
+    const cookieDomain =
+      typeof cookieDomainInput === 'string'
+        ? this.prepareHost(cookieDomainInput)
+        : cookieDomainInput;
+
+    if (!cookieDomain.host) {
       return true;
     }
 
@@ -1850,7 +1831,7 @@ export class CookieJar {
         ? this.prepareHost(requestHostInput)
         : requestHostInput;
     const canonicalRequestHost = requestHost.canonicalIP;
-    const canonicalCookieDomain = this.tryCanonicalIPLiteral(cookieDomain);
+    const canonicalCookieDomain = cookieDomain.canonicalIP;
 
     if (canonicalRequestHost !== null && canonicalCookieDomain !== null) {
       return canonicalRequestHost === canonicalCookieDomain;
@@ -1863,7 +1844,7 @@ export class CookieJar {
     }
 
     const req = this.normalizedPreparedHost(requestHost);
-    const cook = this.normalizeStoredDomain(cookieDomain);
+    const cook = this.normalizedPreparedHost(cookieDomain);
 
     if (req === cook) {
       return true;
@@ -1879,14 +1860,18 @@ export class CookieJar {
 
   private hostOnlyDomainMatches(
     requestHostInput: string | PreparedHost,
-    cookieDomain: string,
+    cookieDomainInput: string | PreparedHost,
   ): boolean {
     const requestHost =
       typeof requestHostInput === 'string'
         ? this.prepareHost(requestHostInput)
         : requestHostInput;
+    const cookieDomain =
+      typeof cookieDomainInput === 'string'
+        ? this.prepareHost(cookieDomainInput)
+        : cookieDomainInput;
     const canonicalRequestHost = requestHost.canonicalIP;
-    const canonicalCookieDomain = this.tryCanonicalIPLiteral(cookieDomain);
+    const canonicalCookieDomain = cookieDomain.canonicalIP;
 
     if (canonicalRequestHost !== null && canonicalCookieDomain !== null) {
       return canonicalRequestHost === canonicalCookieDomain;
@@ -1894,7 +1879,7 @@ export class CookieJar {
 
     return (
       this.normalizedPreparedHost(requestHost) ===
-      this.normalizeStoredDomain(cookieDomain)
+      this.normalizedPreparedHost(cookieDomain)
     );
   }
 

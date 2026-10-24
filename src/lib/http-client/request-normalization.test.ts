@@ -55,7 +55,11 @@ import {
   normalizeDomain,
 } from '../domain-utils/helpers';
 import { MockAdapter } from './adapters/mock-adapter';
-import type { MockRequest } from './adapters/mock-adapter';
+import type {
+  MockCookieOptions,
+  MockRequest,
+  MockResponse,
+} from './adapters/mock-adapter';
 import { NodeAdapter } from './adapters/node-adapter';
 import { getRevocationFixtures } from './test-helpers/https-test-server';
 import { FetchAdapter } from './adapters/fetch-adapter';
@@ -10924,4 +10928,225 @@ test('PR review round 43: a MockAdapter route cookie name that cannot be written
   expect(builder.error?.cause?.message).toBe(
     'MockAdapter cookie name at position 1 cannot be written into a Set-Cookie line',
   );
+});
+
+test('PR review round 45: a MockAdapter route that returns nothing is named by its registered pattern, not the request path', async () => {
+  const adapter = new MockAdapter();
+  adapter.routes.get(
+    '/password-reset/:token',
+    () => undefined as unknown as MockResponse,
+  );
+  const builder = new HTTPClient({
+    adapter,
+    baseURL: 'http://mock.test',
+  }).get('/password-reset/abc123secret');
+  await builder.send();
+
+  const message = builder.error?.cause?.message ?? '';
+  expect(message).toBe(
+    'MockAdapter route for GET /password-reset/:token returned no MockResponse (got undefined)',
+  );
+  expect(message).not.toContain('abc123secret');
+});
+
+test('PR review round 45: a MockAdapter cookie option whose value is not a string is refused by position, not written', async () => {
+  const cases: Array<[unknown, string]> = [
+    [undefined, 'undefined'],
+    [{ nested: true }, 'object'],
+    [7, 'number'],
+  ];
+
+  for (const [value, type] of cases) {
+    const adapter = new MockAdapter();
+    let calls = 0;
+    adapter.routes.get('/login', () => {
+      calls++;
+      return {
+        status: 200,
+        cookies: {
+          theme: 'dark',
+          session: { value } as unknown as MockCookieOptions,
+        },
+      };
+    });
+    const builder = new HTTPClient({
+      adapter,
+      baseURL: 'http://mock.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    }).get('/login');
+    await builder.send();
+
+    expect(builder.error?.cause?.message).toBe(
+      `MockAdapter cookie at position 1 value must be a string (got ${type})`,
+    );
+    // A route mistake: not retried, so the route ran once.
+    expect(calls).toBe(1);
+  }
+});
+
+test('PR review round 45: a MockAdapter cookie value with a tab is set, as a raw set-cookie with one is', async () => {
+  const jar = new CookieJar();
+  const adapter = new MockAdapter();
+  adapter.routes.get('/shorthand', () => ({
+    status: 200,
+    cookies: { a: 'x\ty', b: { value: 'p\tq' } },
+  }));
+  adapter.routes.get('/raw', () => ({
+    status: 200,
+    headers: { 'set-cookie': ['c=x\ty'] },
+  }));
+  const client = new HTTPClient({
+    adapter,
+    baseURL: 'http://mock.test',
+    cookieJar: jar,
+  });
+
+  const shorthand = client.get('/shorthand');
+  await shorthand.send();
+  await client.get('/raw').send();
+
+  expect(shorthand.error).toBeNull();
+  expect(jar.getCookieHeaderString('http://mock.test/')).toBe(
+    'a=x\ty; b=p\tq; c=x\ty',
+  );
+});
+
+test('PR review round 45: an onHandlerError that returns nothing is named by the route pattern, not the request path', async () => {
+  const adapter = new MockAdapter({
+    onHandlerError: () => undefined as unknown as MockResponse,
+  });
+  adapter.routes.get('/invite/:code', () => {
+    throw new Error('route failed');
+  });
+  const builder = new HTTPClient({
+    adapter,
+    baseURL: 'http://mock.test',
+  }).get('/invite/s3cr3t-code');
+  await builder.send();
+
+  const message = builder.error?.cause?.message ?? '';
+  expect(message).toBe(
+    'MockAdapter onHandlerError for GET /invite/:code returned no MockResponse (got undefined)',
+  );
+  expect(message).not.toContain('s3cr3t-code');
+});
+
+test('PR review round 45: a MockAdapter cookie field of the wrong type is refused by position and type, not coerced', async () => {
+  const cases: Array<[unknown, string]> = [
+    [
+      42,
+      'MockAdapter cookie at position 1 must be a string, null or a MockCookieOptions object (got number)',
+    ],
+    [
+      { value: 42 },
+      'MockAdapter cookie at position 1 value must be a string (got number)',
+    ],
+    [
+      { value: 'v', path: null },
+      'MockAdapter cookie at position 1 path must be a string (got null)',
+    ],
+    [
+      { value: 'v', domain: 7 },
+      'MockAdapter cookie at position 1 domain must be a string (got number)',
+    ],
+    [
+      { value: 'v', httpOnly: 'false' },
+      'MockAdapter cookie at position 1 httpOnly must be a boolean (got string)',
+    ],
+    [
+      { value: 'v', secure: 1 },
+      'MockAdapter cookie at position 1 secure must be a boolean (got number)',
+    ],
+    [
+      { value: 'v', sameSite: 'lax' },
+      "MockAdapter cookie at position 1 sameSite must be 'Strict', 'Lax' or 'None'",
+    ],
+    [
+      { value: 'v', maxAge: '60' },
+      'MockAdapter cookie at position 1 maxAge must be a number (got string)',
+    ],
+    [
+      { value: 'v', maxAge: Number.NaN },
+      'MockAdapter cookie at position 1 maxAge is NaN',
+    ],
+  ];
+
+  for (const [entry, expected] of cases) {
+    const adapter = new MockAdapter();
+    let calls = 0;
+    adapter.routes.get('/login', () => {
+      calls++;
+      return {
+        status: 200,
+        cookies: {
+          theme: 'dark',
+          session: entry as MockCookieOptions,
+        },
+      };
+    });
+    const builder = new HTTPClient({
+      adapter,
+      baseURL: 'http://mock.test',
+      retryPolicy: { strategy: 'fixed', maxRetryAttempts: 2, delayMS: 1 },
+    }).get('/login');
+    await builder.send();
+
+    expect(builder.error?.cause?.message).toBe(expected);
+    expect(calls).toBe(1);
+  }
+
+  // A boolean flag, or none, is still accepted.
+  const adapter = new MockAdapter();
+  adapter.routes.get('/ok', () => ({
+    status: 200,
+    cookies: { s: { value: 'v', httpOnly: true, secure: false } },
+  }));
+  const ok = await new HTTPClient({ adapter, baseURL: 'http://mock.test' })
+    .get('/ok')
+    .send();
+  expect(ok.headers['set-cookie']).toEqual(['s=v; Path=/; HttpOnly']);
+});
+
+test('PR review round 45: each MockAdapter cookie option field is read once', async () => {
+  const reads = new Map<string, number>();
+  const options = {} as MockCookieOptions;
+  const answers: Record<string, unknown> = {
+    value: 'v',
+    path: '/p',
+    domain: 'mock.test',
+    maxAge: 60,
+    httpOnly: true,
+    secure: false,
+    sameSite: 'Lax',
+  };
+  for (const [field, answer] of Object.entries(answers)) {
+    Object.defineProperty(options, field, {
+      enumerable: true,
+      get: () => {
+        reads.set(field, (reads.get(field) ?? 0) + 1);
+        return answer;
+      },
+    });
+  }
+  const adapter = new MockAdapter();
+  adapter.routes.get('/c', () => ({ status: 200, cookies: { s: options } }));
+  const response = await new HTTPClient({
+    adapter,
+    baseURL: 'http://mock.test',
+  })
+    .get('/c')
+    .send();
+
+  expect(response.headers['set-cookie']).toEqual([
+    's=v; Path=/p; Max-Age=60; Domain=mock.test; HttpOnly; SameSite=Lax',
+  ]);
+  expect(Object.fromEntries(reads)).toEqual({
+    value: 1,
+    path: 1,
+    domain: 1,
+    maxAge: 1,
+    httpOnly: 1,
+    secure: 1,
+    sameSite: 1,
+  });
 });

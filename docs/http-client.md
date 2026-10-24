@@ -1595,6 +1595,8 @@ interface MockResponse {
 
 `cookies` entries are appended after any `headers['set-cookie']` entries. If the same cookie name appears in both, the `cookies` entry wins (last Set-Cookie header takes precedence).
 
+Each entry is held to the rule the cookie jar stores by: a name is an HTTP token, and a value, `path` or `domain` is a string with no `;`, no control character other than a tab, and no character above U+00FF (a tab in a value or `path` is written, as it is from a raw `set-cookie`). Nothing is coerced. The request fails with a non-retryable error - so the route is not run again - for an entry that is not a string, `null` or an object; a `MockCookieOptions` whose `value` is not a string; a `path` or `domain` present and not a string; a `sameSite` other than `'Strict'`, `'Lax'` or `'None'`; a `maxAge` that is not a number, or is `NaN`; and an `httpOnly` or `secure` present and not a boolean. Each of these names the cookie by its position in `cookies` (and the type it got), never its text; a name that is not a token is named by its position too.
+
 **Simulate multiple domains in tests:**
 
 ```typescript
