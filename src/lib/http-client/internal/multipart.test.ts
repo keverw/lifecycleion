@@ -1281,3 +1281,99 @@ test('PR review round 36: a field appended mid-upload is refused before any of i
   // Only the first part's own delimiter: none of the appended part reached the wire.
   expect(getBody().toString().split(`--${boundary}\r\n`).length - 1).toBe(1);
 });
+
+test('PR review round 37: a File that outgrows its measured size is refused naming that part', async () => {
+  // Claims two bytes; its stream yields six. Nothing else outgrew the body, so the message
+  // names the part's size, not the body's `Content-Length`.
+  const longFile = {
+    name: 'long.bin',
+    type: 'application/octet-stream',
+    size: 2,
+    stream: () =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array([1, 2, 3, 4, 5, 6]));
+          controller.close();
+        },
+      }),
+  };
+  const fd = {
+    entries: () => [['file', longFile]][Symbol.iterator](),
+  } as unknown as FormData;
+  const { req, getBody } = makeCapture();
+  const boundary = generateMultipartBoundary();
+
+  let failure: unknown;
+  try {
+    await serializeMultipartFormData(fd, req, boundary);
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).toContain(
+    'part expected 2 bytes, produced more - 0 written and a further 6 refused',
+  );
+  expect((failure as Error).message).not.toContain(
+    'more than its Content-Length',
+  );
+  expect(getBody().includes(Buffer.from([1, 2, 3]))).toBe(false);
+});
+
+test('PR review round 37: a chunk within its part but past the body total is refused before it is written', async () => {
+  let wasGrownPartCancelled = false;
+  // The grown part's stream stays open after its chunk, so only a cancel ends it.
+  const blobPart = (name: string, bytes: number[], isLeftOpen = false) => ({
+    name,
+    type: 'application/octet-stream',
+    size: bytes.length,
+    stream: () =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new Uint8Array(bytes));
+          if (!isLeftOpen) {
+            controller.close();
+          }
+        },
+        cancel() {
+          if (isLeftOpen) {
+            wasGrownPartCancelled = true;
+          }
+        },
+      }),
+  });
+  const parts: [string, unknown][] = [
+    ['first', blobPart('a', [1, 2])],
+    ['second', blobPart('b', [7, 7, 7, 7])],
+  ];
+  // Read live, as a FormData is: the second part is swapped for one whose filename is
+  // three bytes longer once the first part's bytes go out. Its headers still fit in the
+  // bytes its payload was measured at; its payload, the right size for its part, does not.
+  const fd = {
+    // An array's iterator reads each index as it reaches it.
+    entries: () => parts[Symbol.iterator](),
+  } as unknown as FormData;
+  const { req, getBody } = makeCapture();
+  const boundary = generateMultipartBoundary();
+  const write = req.write.bind(req);
+  req.write = (data, callback) => {
+    if (Buffer.from(data as Uint8Array).equals(Buffer.from([1, 2]))) {
+      parts[1] = ['second', blobPart('bbbb', [7, 7, 7, 7], true)];
+    }
+
+    return write(data, callback);
+  };
+
+  let failure: unknown;
+  try {
+    await serializeMultipartFormData(fd, req, boundary);
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(failure).toBeInstanceOf(Error);
+  expect((failure as Error).message).toContain('more than its Content-Length');
+  expect(getBody().toString()).toContain('filename="bbbb"');
+  expect(getBody().includes(Buffer.from([7]))).toBe(false);
+  expect(wasGrownPartCancelled).toBe(true);
+});

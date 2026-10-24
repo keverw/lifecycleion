@@ -190,7 +190,9 @@ export function buildURL(
 }
 
 /**
- * Best-effort absolute URL for logging, redirects, and hop metadata.
+ * Best-effort absolute URL for a request: the `baseURL` step of
+ * {@link resolveAbsoluteURLForRuntime}, which resolves every request URL before
+ * interceptors and dispatch.
  *
  * - If `url` parses as an absolute URL (has a scheme), returns normalized `href`.
  * - Otherwise, when `baseURL` is set, resolves `url` against it (path-relative,
@@ -282,6 +284,10 @@ export function stripURLCredentials(url: string): string {
  * driven directly. `initialURL` is the adapter-level trust boundary for that path. An
  * unparseable initial URL fails closed: it cannot prove that the credentials belong to
  * the target origin, so they are stripped.
+ *
+ * The same rule decides what a reported `detectedRedirectURL` may carry, with the URL
+ * that was answered as `initialURL`: see {@link detectedRedirectTarget}, and the client's
+ * reading of an adapter's own answer.
  */
 export function stripCrossOriginURLCredentials(
   requestURL: string,
@@ -334,7 +340,9 @@ export function stripCrossOriginURLCredentials(
       target = new URL(requestURL, initial);
     }
 
-    if (initial.origin === target.origin) {
+    // The client's cross-origin rule rather than comparing `origin`s: every opaque origin
+    // reads `'null'`, so `foo://a.test/` and `foo://u:p@b.test/x` would compare equal.
+    if (!isCrossOrigin(initialURL, target)) {
       return requestURL;
     }
 
@@ -394,45 +402,38 @@ export function resolveAbsoluteURLForRuntime(
   }
 }
 
-function getBrowserResolutionBase(): string | undefined {
-  if (
-    typeof document !== 'undefined' &&
-    typeof document.baseURI === 'string' &&
-    document.baseURI
-  ) {
-    return document.baseURI;
+/**
+ * The base a browser resolves a relative request URL against, as `fetch` and XHR do: the
+ * document's base URL in a window (which a `<base href>` sets), else the page's or the
+ * worker's `location`. `undefined` where there is none. The one lookup both browser
+ * adapters and the client resolve with, so all three agree on where a relative URL goes.
+ *
+ * Read through guarded accessors: a runtime whose `document` or `location` getter throws
+ * has no base, rather than failing every request.
+ */
+export function getBrowserResolutionBase(): string | undefined {
+  const documentBase = readUnknownMember(
+    readUnknownMember(globalThis, 'document'),
+    'baseURI',
+  );
+
+  if (typeof documentBase === 'string' && documentBase) {
+    return documentBase;
   }
 
-  if (
-    typeof window !== 'undefined' &&
-    window.location &&
-    typeof window.location.href === 'string' &&
-    window.location.href
-  ) {
-    return window.location.href;
-  }
+  for (const scope of [
+    readUnknownMember(globalThis, 'window'),
+    globalThis,
+    readUnknownMember(globalThis, 'self'),
+  ]) {
+    const href = readUnknownMember(
+      readUnknownMember(scope, 'location'),
+      'href',
+    );
 
-  const globalLocation = (globalThis as { location?: { href?: unknown } })
-    .location;
-
-  if (
-    globalLocation &&
-    typeof globalLocation.href === 'string' &&
-    globalLocation.href
-  ) {
-    return globalLocation.href;
-  }
-
-  const selfLocation = (
-    globalThis as { self?: { location?: { href?: unknown } } }
-  ).self?.location;
-
-  if (
-    selfLocation &&
-    typeof selfLocation.href === 'string' &&
-    selfLocation.href
-  ) {
-    return selfLocation.href;
+    if (typeof href === 'string' && href) {
+      return href;
+    }
   }
 
   return undefined;
@@ -794,6 +795,24 @@ export function firstJoinedLocation(value: string): string {
 }
 
 /**
+ * Keeps the first value of a repeated `Location` in a lowercased header record, in place,
+ * for an adapter whose transport joined the repeats as `a, b` (fetch, XHR). Its first
+ * value is kept, as Node's `res.headers` keeps it, rather than followed and reported as
+ * the one mangled URL `a,%20b`. See {@link firstJoinedLocation} for where it splits: a
+ * single value with a raw space (`/files/Smith, John.pdf`) is kept whole and
+ * percent-encoded when followed, as NodeAdapter and browsers follow it.
+ */
+export function keepFirstJoinedLocation(
+  headers: Record<string, string | string[]>,
+): void {
+  const location = headers['location'];
+
+  if (typeof location === 'string') {
+    headers['location'] = firstJoinedLocation(location);
+  }
+}
+
+/**
  * Converts a Headers object (from fetch) into AdapterResponse headers.
  * `set-cookie` is extracted as `string[]` via `getSetCookie()` — the Fetch API
  * would otherwise incorrectly comma-join multiple Set-Cookie values.
@@ -808,23 +827,16 @@ export function extractFetchHeaders(
     const lower = lowerCaseHeaderName(key);
 
     if (lower !== 'set-cookie') {
-      // A repeated `Location` arrives joined as `a, b`; its first value is kept, as Node's
-      // `res.headers` keeps it, rather than followed as the one mangled URL `a,%20b`. Only
-      // when what follows the `, ` starts as a URL target does - a path or `scheme://`: a
-      // single value with a raw space (`/files/Smith, John.pdf`) is kept whole and
-      // percent-encoded when followed, as NodeAdapter and browsers follow it.
-      //
-      // Every other header is kept as fetch joined it, single-value ones included, as
-      // `fetch` itself exposes it: a `Content-Type` cannot be split at a comma safely - a
-      // quoted parameter may hold one - and the client's readers take the joined form (the
-      // first media type of a `Content-Type`, a `Content-Length` only when its values agree).
-      defineEntry(
-        result,
-        lower,
-        lower === 'location' ? firstJoinedLocation(value) : value,
-      );
+      // Kept as fetch joined it, single-value headers included, as `fetch` itself exposes
+      // it: a `Content-Type` cannot be split at a comma safely - a quoted parameter may
+      // hold one - and the client's readers take the joined form (the first media type of
+      // a `Content-Type`, a `Content-Length` only when its values agree). Only a repeated
+      // `Location` is narrowed to its first value, below.
+      defineEntry(result, lower, value);
     }
   }
+
+  keepFirstJoinedLocation(result);
 
   // Use getSetCookie() when available (Bun, Node 18.14+, modern browsers)
   if (typeof headers.getSetCookie === 'function') {
@@ -995,12 +1007,15 @@ export function scalarHeader(
  * Where a redirect's `Location` points, as `detectedRedirectURL` reports it: resolved
  * against the URL that was answered, without that URL's userinfo. A relative `Location`
  * names no credentials, so the caller's own are not copied into a field that reports the
- * server's target; userinfo the server wrote into the `Location` itself is kept.
+ * server's target. Userinfo the server wrote into the `Location` itself is kept only on a
+ * target of the request's own origin ({@link stripCrossOriginURLCredentials}): on any
+ * other, the client's redirect loop strips it from the URL it follows, so it is not
+ * reported either.
  *
  * A `Location` that does not resolve to a URL reports no target at all, rather than the
  * raw string handed on as though it were one. An absolute one still resolves when the
  * request URL does not parse (an adapter driven directly with a relative one): it needs
- * no base.
+ * no base, and counts as cross-origin.
  */
 export function detectedRedirectTarget(
   location: string,
@@ -1013,11 +1028,14 @@ export function detectedRedirectTarget(
     // No base: only an absolute `Location` resolves.
   }
 
+  let target: string;
   try {
-    return new URL(location, base).href;
+    target = new URL(location, base).href;
   } catch {
     return undefined;
   }
+
+  return stripCrossOriginURLCredentials(target, requestURL);
 }
 
 /** The redirect fields of an answer: whether it was a redirect, and where it pointed. */

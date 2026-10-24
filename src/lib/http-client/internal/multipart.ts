@@ -216,29 +216,11 @@ export async function serializeMultipartFormData(
   const overrunMessage = (written: number, refused: number): string =>
     `Request body source produced more than its Content-Length of ${String(totalSize)}: ${String(written)} bytes written and a further ${String(refused)} refused, with ${String(closingBytes)} kept for the closing delimiter`;
 
-  const write = (
-    data: string | Buffer | Uint8Array,
-    budget = partsBudget,
-  ): Promise<void> =>
+  // The write itself, unchecked: through `write` below for every part, and directly for
+  // the closing delimiter, which always fits - every part's write was held to
+  // `partsBudget`, so at least `closingBytes` remain.
+  const writeToRequest = (data: string | Buffer | Uint8Array): Promise<void> =>
     new Promise<void>((resolve, reject) => {
-      // Refused before it is written: bytes past the `Content-Length` already on the wire
-      // would be read by the server as the start of another message. Reached when the
-      // FormData grew after the sizing pass - a field appended mid-upload - as the
-      // `File` check below is for a file that grew. Held to the parts' share of it, not
-      // the whole: a new part's `--boundary` line fits in the bytes kept for the closing
-      // delimiter, and would otherwise go out before its headers were refused.
-      if (uploadedBytes + Buffer.byteLength(data) > budget) {
-        reject(
-          sourceMismatch(
-            budget === partsBudget
-              ? overrunMessage(uploadedBytes, Buffer.byteLength(data))
-              : `Request body source produced more than its Content-Length of ${String(totalSize)}: ${String(uploadedBytes)} bytes written and a further ${String(Buffer.byteLength(data))} refused`,
-          ),
-        );
-
-        return;
-      }
-
       let hasWriteReturned = false;
       let isWriteCallbackDone = false;
       let isDrainDone = true;
@@ -363,6 +345,22 @@ export async function serializeMultipartFormData(
       maybeResolve();
     });
 
+  // Every part's write: refused before it is written, since bytes past the
+  // `Content-Length` already on the wire would be read by the server as the start of
+  // another message. Reached when the FormData changed after the sizing pass - a field
+  // appended mid-upload, a later part's headers grown longer - as the per-part check
+  // below is for a file that grew. Held to the parts' share of it, not the whole: a new
+  // part's `--boundary` line fits in the bytes kept for the closing delimiter, and would
+  // otherwise go out before its headers were refused.
+  const write = (data: string | Buffer | Uint8Array): Promise<void> =>
+    uploadedBytes + Buffer.byteLength(data) > partsBudget
+      ? Promise.reject(
+          sourceMismatch(
+            overrunMessage(uploadedBytes, Buffer.byteLength(data)),
+          ),
+        )
+      : writeToRequest(data);
+
   for (const [name, value] of formData.entries()) {
     const fieldName = formatFieldName(name);
 
@@ -445,27 +443,21 @@ export async function serializeMultipartFormData(
           }
 
           if (chunk) {
-            // Refused *before* the write, not counted after it. The check below this
-            // function catches the same overrun, but only once the whole body has been
-            // written: a `File` that grew after the sizing pass had its surplus already on
-            // the wire past a `Content-Length` the server reads as the start of the next
-            // request, and throwing afterwards could not take those bytes back. The
-            // shortfall check has no equivalent problem - bytes that were never written
-            // need no undoing - which is why only this side needs the early exit.
-            if (
-              partBytes + chunk.byteLength > partSize ||
-              uploadedBytes + chunk.byteLength > partsBudget
-            ) {
+            // Refused *before* the write, not counted after it: a `File` that grew after
+            // the sizing pass would otherwise have its surplus on the wire past a
+            // `Content-Length` the server reads as the start of the next request, and no
+            // later check could take those bytes back. Held to this part's own measured
+            // size, so the message names the part that outgrew it; `write` holds the
+            // chunk to `partsBudget` as well. The shortfall check below the loop has no
+            // equivalent problem - bytes that were never written need no undoing.
+            if (partBytes + chunk.byteLength > partSize) {
               await cancelReaderQuietly(reader);
 
               // What actually went on the wire, and the chunk that was refused, kept
-              // apart. Counting the refused chunk into the written total named ~64 KiB
-              // that never left this process - a `File` that grew ten bytes after the
-              // sizing pass reported tens of thousands - which sends a reader looking for
-              // a write that did not happen. The post-write check below says
-              // `uploadedBytes` for the same reason.
+              // apart: counting the refused chunk into the written total would name up to
+              // a whole chunk that never left this process.
               throw sourceMismatch(
-                overrunMessage(uploadedBytes, chunk.byteLength),
+                `Request body source did not match its Content-Length: part expected ${String(partSize)} bytes, produced more - ${String(partBytes)} written and a further ${String(chunk.byteLength)} refused`,
               );
             }
 
@@ -511,7 +503,7 @@ export async function serializeMultipartFormData(
   }
 
   // Closing delimiter that tells the server there are no more parts.
-  await write(closingDelimiter, totalSize);
+  await writeToRequest(closingDelimiter);
 
   // Bytes, not just `req.destroyed`, matching what `writeRequestBodyChunked` checks.
   // `Content-Length` is computed in the sizing pass from each `Blob.size`, but this pass
@@ -522,19 +514,13 @@ export async function serializeMultipartFormData(
   // Content-Length shortfall, so the server simply waits for bytes that never arrive and
   // the caller hangs until its own timeout rather than seeing the transport error it
   // should have.
+  //
+  // Only a shortfall reaches here. An overrun cannot: every part's write is refused
+  // before it would pass `partsBudget`, so the closing delimiter lands at most at
+  // `totalSize`.
   if (uploadedBytes < totalSize) {
     throw sourceMismatch(
       `Request body source produced fewer bytes than its Content-Length: ${String(uploadedBytes)} of ${String(totalSize)}`,
-    );
-  }
-
-  // The same mismatch from the other side, and it is not the same failure: a `Blob` that
-  // yields *more* than its `.size` overran a `Content-Length` already on the wire, so the
-  // server reads the tail as the start of another message. Worth its own text - the one
-  // above says the body stopped short, which points at exactly the wrong end of it.
-  if (uploadedBytes > totalSize) {
-    throw sourceMismatch(
-      `Request body wrote ${String(uploadedBytes)} bytes against a Content-Length of ${String(totalSize)}`,
     );
   }
 }

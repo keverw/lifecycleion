@@ -4374,9 +4374,14 @@ describe('HTTPClient — redirect', () => {
     expect(builder.error?.detectedRedirectURL).toBe('https://example.com/next');
   });
 
-  test.each(['https://other.test/next', 'https://user:pass@other.test/next'])(
-    'preserves an unfollowed absolute redirect target %s in the response and error',
-    async (target) => {
+  // Cross-origin, so the target's own userinfo is not reported: no more than the client
+  // would send if it followed the hop.
+  test.each([
+    ['https://other.test/next', 'https://other.test/next'],
+    ['https://user:pass@other.test/next', 'https://other.test/next'],
+  ])(
+    'reports an unfollowed absolute redirect target %s in the response and error as %s',
+    async (target, reported) => {
       const adapter: HTTPAdapter = {
         getType: () => 'node',
         send: (_request: AdapterRequest): Promise<AdapterResponse> =>
@@ -4398,8 +4403,8 @@ describe('HTTPClient — redirect', () => {
       const res = await builder.send();
 
       expect(res.requestURL).toBe('https://example.com/start');
-      expect(res.detectedRedirectURL).toBe(target);
-      expect(builder.error?.detectedRedirectURL).toBe(target);
+      expect(res.detectedRedirectURL).toBe(reported);
+      expect(builder.error?.detectedRedirectURL).toBe(reported);
     },
   );
 

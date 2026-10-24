@@ -26,7 +26,7 @@ import type {
 } from '../types';
 import {
   derivedRedirectFields,
-  firstJoinedLocation,
+  keepFirstJoinedLocation,
   resolveAbsoluteURLForRuntime,
   stripURLCredentials,
   stripCrossOriginURLCredentials,
@@ -70,9 +70,9 @@ export class XHRAdapter implements HTTPAdapter {
       requestURL,
       initialURL,
     );
-    // What a `Location` resolves against: the dispatched URL as the browser resolves it,
-    // so a relative one (this adapter driven directly) still reports where an unfollowed
-    // redirect pointed, as `didBrowserFollowRedirect` compares it.
+    // What a `Location` resolves against, and what `didBrowserFollowRedirect` compares
+    // `responseURL` with: the dispatched URL as the browser resolves it, so a relative one
+    // (this adapter driven directly) still reports where an unfollowed redirect pointed.
     const answeredURL = resolveAbsoluteURLForRuntime(
       dispatchedURL,
       undefined,
@@ -161,7 +161,7 @@ export class XHRAdapter implements HTTPAdapter {
           if (
             xhr.readyState >= 2 &&
             responseURL &&
-            didBrowserFollowRedirect(responseURL, dispatchedURL)
+            didBrowserFollowRedirect(responseURL, answeredURL)
           ) {
             followedRedirectBeforeAbort = responseURL;
           } else if (
@@ -316,10 +316,7 @@ export class XHRAdapter implements HTTPAdapter {
         const headers = parseXHRResponseHeaders(xhr.getAllResponseHeaders());
         finishUploadProgress();
 
-        if (
-          responseURL &&
-          didBrowserFollowRedirect(responseURL, dispatchedURL)
-        ) {
+        if (responseURL && didBrowserFollowRedirect(responseURL, answeredURL)) {
           resolve(browserRedirectResponse(responseURL));
         } else {
           resolve({
@@ -387,10 +384,7 @@ export class XHRAdapter implements HTTPAdapter {
         // Read once, before any progress callback: one that aborts the signal resets this
         // finished XHR, and `responseURL` with it.
         const responseURL = xhr.responseURL;
-        if (
-          responseURL &&
-          didBrowserFollowRedirect(responseURL, dispatchedURL)
-        ) {
+        if (responseURL && didBrowserFollowRedirect(responseURL, answeredURL)) {
           // The browser completed the transport and surfaced the final URL even
           // though the client will treat the result as redirect_disabled, so
           // emit terminal progress before returning the synthetic redirect
@@ -713,12 +707,8 @@ function parseXHRResponseHeaders(
 
   // A repeated `Location` keeps its first value, rather than standing as the one mangled
   // URL `a,%20b` that an XHR outside a browser would follow and `detectedRedirectURL`
-  // would report. See `firstJoinedLocation`.
-  const location = result['location'];
-
-  if (typeof location === 'string') {
-    result['location'] = firstJoinedLocation(location);
-  }
+  // would report.
+  keepFirstJoinedLocation(result);
 
   return result;
 }
@@ -728,19 +718,19 @@ function parseXHRResponseHeaders(
  * - strips userinfo (omitted by responseURL) and hash fragments (not sent over HTTP)
  * - relies on URL normalization for equivalent forms
  *   (default ports, dot segments, encoding normalization, etc.)
+ *
+ * `answeredURL` is the dispatched URL as the browser resolved it (`send`'s own); one still
+ * relative, with no page to resolve against, is read against `responseURL`.
  */
 function didBrowserFollowRedirect(
   responseURL: string,
-  requestURL: string,
+  answeredURL: string,
 ): boolean {
   try {
     const normalizedResponse = new URL(responseURL);
     normalizedResponse.hash = '';
 
-    const normalizedRequest = new URL(
-      resolveAbsoluteURLForRuntime(requestURL, undefined, true),
-      normalizedResponse.href,
-    );
+    const normalizedRequest = new URL(answeredURL, normalizedResponse.href);
     normalizedRequest.hash = '';
 
     return (
@@ -749,6 +739,6 @@ function didBrowserFollowRedirect(
     );
   } catch {
     // Fallback for non-URL inputs: preserve prior behavior.
-    return responseURL !== requestURL;
+    return responseURL !== answeredURL;
   }
 }

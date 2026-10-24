@@ -49,8 +49,8 @@ import {
   normalizeAdapterResponseHeaders,
   isAdapterHeaderValue,
   parseContentType,
-  resolveAbsoluteURL,
   resolveAbsoluteURLForRuntime,
+  stripCrossOriginURLCredentials,
   derivedRedirectFields,
   detectedRedirectTarget,
   type AdapterRedirectFields,
@@ -1107,10 +1107,10 @@ export class BaseHTTPClient {
         // initial request → 4,5 on first redirect hop → 6 on second hop).
         let lastAttemptNumber = 0;
         let currentHopInfo: RedirectHopInfo | undefined;
-        // The last followed redirect's target as the server wrote it, for a hop that then
-        // ends before it is dispatched: it is reported detected, not followed. Set for each
-        // hop that reaches resolving its `Location`, and `undefined` for one that does not
-        // resolve.
+        // The last followed redirect's target as `detectedRedirectURL` reports it (see
+        // `detectedRedirectTarget`), for a hop that then ends before it is dispatched: it
+        // is reported detected, not followed. Set for each hop that reaches resolving its
+        // `Location`, and `undefined` for one that does not resolve.
         let lastDetectedTargetURL: string | undefined;
 
         while (true) {
@@ -1303,6 +1303,11 @@ export class BaseHTTPClient {
               break;
             }
 
+            // Resolved against the URL this hop was sent to, which is always an absolute
+            // http(s) URL here: the initial, retry and redirect URLs are all refused before
+            // dispatch otherwise. A `Location` that does not resolve against it is kept as
+            // the raw string, recorded and handed to the interceptors below, and refused
+            // as unsupported unless one rewrites it.
             let redirectURL: string;
 
             try {
@@ -1314,15 +1319,13 @@ export class BaseHTTPClient {
               redirectURL = location;
             }
 
-            redirectURL = resolveAbsoluteURL(redirectURL, this._config.baseURL);
-
-            // The target as the server wrote it - its own userinfo included, not this
-            // request's - for `detectedRedirectURL` on the exits below that end before the
-            // hop goes out. `redirect_disabled` and `redirect_loop` do not use it: they
-            // report the adapter's own, or one resolved by this same rule where the
-            // adapter gave none (`unfollowedRedirectAnswer`). None for a `Location` that
-            // does not resolve, which is still recorded and handed to the interceptors
-            // below. Nothing is sent to it.
+            // The target for `detectedRedirectURL` on the exits below that end before the
+            // hop goes out: the server's, without this request's userinfo, and without the
+            // server's own on a cross-origin target, as `redirectURL` is stripped below.
+            // `redirect_disabled` and `redirect_loop` do not use it: they report the
+            // adapter's own, or one resolved by this same rule where the adapter gave none
+            // (`unfollowedRedirectAnswer`). None for a `Location` that does not resolve.
+            // Nothing is sent to it.
             const detectedTargetURL = detectedRedirectTarget(
               location,
               attemptResult.sentRequest.requestURL,
@@ -2829,6 +2832,19 @@ export class BaseHTTPClient {
           );
         }
         answeredStatus = candidateStatus;
+        // An adapter's own redirect target is held to the rule the built-in adapters
+        // resolve one by (`detectedRedirectTarget`): no userinfo on a target of another
+        // origin than the URL it answered. Anything but a string - a `URL` object from a
+        // plain-JS adapter - is dropped rather than handed on unchecked; the target is
+        // then derived from `Location`, as for an adapter that names none.
+        if (typeof adapterResponse.detectedRedirectURL === 'string') {
+          adapterResponse.detectedRedirectURL = stripCrossOriginURLCredentials(
+            adapterResponse.detectedRedirectURL,
+            sentRequest.requestURL,
+          );
+        } else if (adapterResponse.detectedRedirectURL !== undefined) {
+          delete adapterResponse.detectedRedirectURL;
+        }
         answeredRedirectFields = adapterResponse;
         if (didCallStreamFactory && adapterResponse.isStreamError === true) {
           adapterResponse.isStreamed = true;

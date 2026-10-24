@@ -15,6 +15,7 @@ import {
 import {
   extractFetchHeaders,
   derivedRedirectFields,
+  getBrowserResolutionBase,
   stripCrossOriginURLCredentials,
 } from '../utils';
 import { knownBodyByteLength, uploadCompleteEvent } from '../internal/progress';
@@ -298,11 +299,11 @@ export class FetchAdapter implements HTTPAdapter {
 
 /**
  * The URL to check a request against before it is sent: `url` itself when absolute, or
- * resolved as `fetch` resolves it - against the document's base URL in a window (which a
- * `<base href>` sets), the global `location` in a worker; `undefined` when it is relative
- * and there is no base. Tested with `new URL` in a `try`: `URL.canParse` is missing from
- * older browsers and early Node 18, and a check that throws there must not fail every
- * request.
+ * resolved as `fetch` resolves it, against {@link getBrowserResolutionBase} - the
+ * document's base URL in a window, the `location` in a worker; `undefined` when it is
+ * relative and there is no base. Tested with `new URL` in a `try`: `URL.canParse` is
+ * missing from older browsers and early Node 18, and a check that throws there must not
+ * fail every request.
  */
 function resolveProbeURL(url: string): string | undefined {
   try {
@@ -311,16 +312,14 @@ function resolveProbeURL(url: string): string | undefined {
     // Relative: resolved below, where there is a base.
   }
 
+  const base = getBrowserResolutionBase();
+
+  if (base === undefined) {
+    return undefined;
+  }
+
   try {
-    const documentBase = readUnknownMember(
-      readUnknownMember(globalThis, 'document'),
-      'baseURI',
-    );
-    const base =
-      typeof documentBase === 'string'
-        ? documentBase
-        : readUnknownMember(readUnknownMember(globalThis, 'location'), 'href');
-    return typeof base === 'string' ? new URL(url, base).href : undefined;
+    return new URL(url, base).href;
   } catch {
     return undefined;
   }

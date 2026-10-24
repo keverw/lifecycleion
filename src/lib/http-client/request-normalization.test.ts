@@ -7,6 +7,7 @@ import type { AddressInfo } from 'node:net';
 import { HTTPClient } from './http-client';
 import {
   buildURL,
+  derivedRedirectFields,
   extractFetchHeaders,
   isCrossOrigin,
   matchesFilter,
@@ -4923,9 +4924,8 @@ test('round 108: a shared factory error does not mix requests; cancel and timeou
   const refused = redirectClient.get('/start');
   await refused.send();
   expect(refused.error?.code).toBe('interceptor_error');
-  expect(refused.error?.detectedRedirectURL).toBe(
-    'https://admin:secret@other.test/y',
-  );
+  // Cross-origin from the request, so not the server's userinfo either: see round 37.
+  expect(refused.error?.detectedRedirectURL).toBe('https://other.test/y');
 });
 
 test("round 109: an adapter never flags the caller's own error in place", async () => {
@@ -10056,4 +10056,120 @@ test('PR review round 36: in a browser, a path still relative after baseURL reso
       }
     }
   }
+});
+
+test('PR review round 37: an opaque-origin hop does not keep URL userinfo', () => {
+  // Every non-special URL's origin reads `'null'`; two of them are not the same origin.
+  expect(
+    stripCrossOriginURLCredentials('foo://u:p@b.test/x', 'foo://a.test/'),
+  ).toBe('foo://b.test/x');
+  // The client's own origin still keeps its userinfo.
+  expect(
+    stripCrossOriginURLCredentials(
+      'https://u:p@a.test/x',
+      'https://a.test/start',
+    ),
+  ).toBe('https://u:p@a.test/x');
+});
+
+test('PR review round 37: detectedRedirectURL drops server-written userinfo on another origin', async () => {
+  // The shared helper, as an adapter reports it: cross-origin userinfo dropped, the
+  // request's own origin's kept, and a request URL that does not parse counts as
+  // cross-origin.
+  expect(
+    derivedRedirectFields('https://a.test/start', 302, {
+      location: 'https://evil:secret@other.test/',
+    }).detectedRedirectURL,
+  ).toBe('https://other.test/');
+  expect(
+    derivedRedirectFields('https://a.test/start', 302, {
+      location: 'https://u:p@a.test/next',
+    }).detectedRedirectURL,
+  ).toBe('https://u:p@a.test/next');
+  expect(
+    derivedRedirectFields('not a url', 302, {
+      location: 'https://evil:secret@other.test/',
+    }).detectedRedirectURL,
+  ).toBe('https://other.test/');
+
+  const adapter = new MockAdapter();
+  adapter.routes.get('/cross', () => ({
+    status: 302,
+    headers: { location: 'https://evil:secret@other.test/y' },
+  }));
+  adapter.routes.get('/same', () => ({
+    status: 302,
+    headers: { location: 'https://u:p@a.test/z' },
+  }));
+
+  // An undispatched exit from the client's own loop: a redirect-phase interceptor that
+  // refuses the hop.
+  const following = new HTTPClient({
+    adapter,
+    baseURL: 'https://a.test',
+    followRedirects: true,
+  });
+  following.addRequestInterceptor(
+    () => {
+      throw new Error('no hop');
+    },
+    { phases: ['redirect'] },
+  );
+  const cross = following.get('/cross');
+  const crossResponse = await cross.send();
+  expect(cross.error?.code).toBe('interceptor_error');
+  expect(crossResponse.detectedRedirectURL).toBe('https://other.test/y');
+  expect(cross.error?.detectedRedirectURL).toBe('https://other.test/y');
+  const same = following.get('/same');
+  await same.send();
+  expect(same.error?.detectedRedirectURL).toBe('https://u:p@a.test/z');
+
+  // The adapter's own report, on a redirect the client does not follow.
+  const disabled = new HTTPClient({
+    adapter,
+    baseURL: 'https://a.test',
+    followRedirects: false,
+  }).get('/cross');
+  await disabled.send();
+  expect(disabled.error?.code).toBe('redirect_disabled');
+  expect(disabled.error?.detectedRedirectURL).toBe('https://other.test/y');
+});
+
+test("PR review round 37: an adapter's own detectedRedirectURL drops userinfo on another origin", async () => {
+  const answering = (detectedRedirectURL: unknown): HTTPAdapter => ({
+    getType: () => 'node',
+    send: () =>
+      Promise.resolve({
+        status: 302,
+        // Not what is reported: the adapter's own target is.
+        headers: { location: 'https://ignored.test/' },
+        body: null,
+        wasRedirectDetected: true,
+        detectedRedirectURL: detectedRedirectURL as string,
+      }),
+  });
+  const send = async (detectedRedirectURL: unknown) => {
+    const builder = new HTTPClient({
+      adapter: answering(detectedRedirectURL),
+      baseURL: 'https://a.test',
+      followRedirects: false,
+    }).get('/start');
+    const response = await builder.send();
+    expect(builder.error?.code).toBe('redirect_disabled');
+    return [response.detectedRedirectURL, builder.error?.detectedRedirectURL];
+  };
+
+  expect(await send('https://a:b@other.test/')).toEqual([
+    'https://other.test/',
+    'https://other.test/',
+  ]);
+  expect(await send('https://a:b@a.test/next')).toEqual([
+    'https://a:b@a.test/next',
+    'https://a:b@a.test/next',
+  ]);
+  // Not a string: dropped, and the target derived from `Location` instead.
+  expect(await send(new URL('https://a:b@other.test/'))).toEqual([
+    'https://ignored.test/',
+    'https://ignored.test/',
+  ]);
 });

@@ -1580,3 +1580,36 @@ test('FetchAdapter refuses a method the runtime fetch would rewrite, rather than
   expect(calls).toBe(0);
   expect(builder.error?.code).toBe('adapter_error');
 });
+
+test('PR review round 37: an empty document.baseURI falls back to location, as the client resolves', async () => {
+  const locationDescriptor = Object.getOwnPropertyDescriptor(
+    globalThis,
+    'location',
+  );
+  (globalThis as any).document = { baseURI: '' };
+  Object.defineProperty(globalThis, 'location', {
+    value: { href: 'https://app.test/dir/page' },
+    configurable: true,
+    writable: true,
+  });
+  (globalThis as any).fetch = () =>
+    Promise.resolve(
+      new Response(null, { status: 302, headers: { location: 'next' } }),
+    );
+
+  try {
+    const response = await new FetchAdapter().send({
+      requestURL: 'api/start',
+      method: 'GET',
+      headers: {},
+    });
+
+    expect(response.detectedRedirectURL).toBe('https://app.test/dir/api/next');
+  } finally {
+    if (locationDescriptor === undefined) {
+      delete (globalThis as any).location;
+    } else {
+      Object.defineProperty(globalThis, 'location', locationDescriptor);
+    }
+  }
+});
